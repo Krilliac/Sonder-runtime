@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
 
+import datetime
 import hashlib
 import json
 import os
@@ -495,6 +496,27 @@ def verify_backup(backup_dir: str | os.PathLike) -> list[str]:
     return _verify_directory(Path(backup_dir).expanduser())
 
 
+def _parse_created_at(value: object) -> datetime.datetime | None:
+    """Return the manifest's creation instant in UTC, or ``None``.
+
+    Manifests written by :func:`create_backup` carry an ISO-8601 UTC stamp
+    with microseconds; older or hand-written manifests may omit the fraction.
+    Comparing the parsed instant (not the raw string) keeps mixed precision
+    in true chronological order, and a missing or unparseable stamp is
+    reported as ``None`` so callers can rank it as the oldest entry instead
+    of letting a string such as ``"unknown"`` sort above every real date.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.astimezone(datetime.timezone.utc)
+
+
 PRE_EPOCH2_PREFIX = "pre-epoch2-"
 _PRE_EPOCH2_NAME = re.compile(
     r"^pre-epoch2-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})(\.\d{1,6})?"
@@ -524,10 +546,12 @@ def _pre_epoch2_entry(child: Path) -> dict | None:
         )
     except OSError:
         return None
+    created_at = f"{day}T{hour}:{minute}:{second}.{micros}Z"
     return {
         "path": str(child),
         "backup_id": child.name,
-        "created_at_utc": f"{day}T{hour}:{minute}:{second}.{micros}Z",
+        "created_at_utc": created_at,
+        "created_at_valid": _parse_created_at(created_at) is not None,
         "application_version": "unknown",
         "files": files,
         "kind": "pre-epoch2",
@@ -541,23 +565,41 @@ def _protected_pre_epoch2(backups: list[dict], newest_verified: str | None) -> s
     before adoption until a verified standard backup supersedes it. Every such
     copy at least as new as the newest verified standard backup (or all of
     them, when no standard backup verifies) is therefore protected.
+
+    Instants are compared parsed, not as raw strings, so mixed precision or
+    offset stamps order chronologically. A newest verified backup without a
+    parseable ``created_at_utc`` cannot prove it supersedes anything, so it
+    protects every pre-epoch2 copy, as does a copy whose own stamp does not
+    parse.
     """
     cutoff = next(
-        (e["created_at_utc"] for e in backups if e["path"] == newest_verified),
+        (
+            _parse_created_at(e["created_at_utc"])
+            for e in backups if e["path"] == newest_verified
+        ),
         None,
     )
-    return {
-        e["path"] for e in backups
-        if e.get("kind") == "pre-epoch2"
-        and (cutoff is None or e["created_at_utc"] >= cutoff)
-    }
+    protected: set[str] = set()
+    for e in backups:
+        if e.get("kind") != "pre-epoch2":
+            continue
+        created = _parse_created_at(e["created_at_utc"])
+        if cutoff is None or created is None or created >= cutoff:
+            protected.add(e["path"])
+    return protected
 
 
 def list_backups(target: str | os.PathLike) -> list[dict]:
+    """Return published backups newest first.
+
+    Each entry reports ``created_at_valid``; entries whose manifest lacks a
+    parseable ``created_at_utc`` are listed after every dated backup, so
+    ``backups[0]`` is the newest dated backup whenever one exists.
+    """
     target_dir = Path(target).expanduser()
     if not target_dir.is_dir():
         return []
-    entries = []
+    ranked: list[tuple[tuple, dict]] = []
     for child in sorted(target_dir.iterdir()):
         if (
             child.name.startswith(".staging-")
@@ -568,7 +610,7 @@ def list_backups(target: str | os.PathLike) -> list[dict]:
         if child.name.startswith(PRE_EPOCH2_PREFIX):
             legacy = _pre_epoch2_entry(child)
             if legacy is not None:
-                entries.append(legacy)
+                ranked.append((_rank_key(legacy), legacy))
             continue
         manifest_path = child / "manifest.json"
         if (
@@ -588,37 +630,53 @@ def list_backups(target: str | os.PathLike) -> list[dict]:
         backup_id = manifest.get("backup_id")
         created_at = manifest.get("created_at_utc")
         application_version = manifest.get("application_version")
-        entries.append(
-            {
-                "path": str(child),
-                "backup_id": backup_id if isinstance(backup_id, str) else "unknown",
-                "created_at_utc": (
-                    created_at if isinstance(created_at, str) else "unknown"
-                ),
-                "application_version": (
-                    application_version
-                    if isinstance(application_version, str)
-                    else "unknown"
-                ),
-                "files": len(files) if isinstance(files, list) else 0,
-            }
-        )
-    entries.sort(key=lambda e: e["created_at_utc"], reverse=True)
-    return entries
+        created_instant = _parse_created_at(created_at)
+        entry = {
+            "path": str(child),
+            "backup_id": backup_id if isinstance(backup_id, str) else "unknown",
+            "created_at_utc": (
+                created_at if isinstance(created_at, str) else "unknown"
+            ),
+            "created_at_valid": created_instant is not None,
+            "application_version": (
+                application_version
+                if isinstance(application_version, str)
+                else "unknown"
+            ),
+            "files": len(files) if isinstance(files, list) else 0,
+        }
+        ranked.append((_rank_key(entry), entry))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return [entry for _key, entry in ranked]
+
+
+def _rank_key(entry: dict) -> tuple:
+    """Sort key (used with ``reverse=True``): dated entries of every kind by
+    parsed instant, then undated entries after all of them."""
+    created = _parse_created_at(entry["created_at_utc"])
+    if created is None:
+        return (0, 0.0, entry["path"])
+    return (1, created.timestamp(), entry["path"])
+
+
+def _newest_verified(backups: list[dict]) -> str | None:
+    """Return the path of the first entry of ``backups`` that verifies."""
+    for entry in backups:
+        if not verify_backup(entry["path"]):
+            return entry["path"]
+    return None
 
 
 def prune_backups(target: str | os.PathLike, *, keep: int) -> list[str]:
     """Remove oldest backups beyond ``keep``; never removes the newest
-    verified backup.  Tiered daily/weekly/monthly retention arrives with
+    verified backup.  Backups without a parseable ``created_at_utc`` rank
+    as the oldest, so they never take a keep slot from a dated backup.
+    Tiered daily/weekly/monthly retention arrives with
     the WP7 scheduler; this primitive is deliberately conservative."""
     if isinstance(keep, bool) or not isinstance(keep, int) or keep < 1:
         raise BackupError("retention must keep at least one backup")
     backups = list_backups(target)
-    verified_newest: str | None = None
-    for entry in backups:
-        if not verify_backup(entry["path"]):
-            verified_newest = entry["path"]
-            break
+    verified_newest = _newest_verified(backups)
     protected = _protected_pre_epoch2(backups, verified_newest)
     # Standard backups keep exactly the retention they had before pre-epoch2
     # copies were listed: their rank is computed among standard backups only,
@@ -656,21 +714,19 @@ def _tier_winners(
     backups: list[dict], daily: int, weekly: int, monthly: int
 ) -> set[str]:
     """Newest entry of each of the last ``daily`` days, ``weekly`` ISO weeks
-    and ``monthly`` months (``backups`` is newest first)."""
-    import datetime
-
+    and ``monthly`` months (``backups`` is newest first). An entry without a
+    parseable ``created_at_utc`` belongs to no window."""
     day_buckets: dict[str, str] = {}
     week_buckets: dict[str, str] = {}
     month_buckets: dict[str, str] = {}
-    for entry in backups:  # newest first
-        stamp = entry["created_at_utc"]
-        day = stamp[:10]
-        month = stamp[:7]
-        try:
-            iso = datetime.date.fromisoformat(day).isocalendar()
-            week = f"{iso.year}-W{iso.week:02d}"
-        except ValueError:
-            week = day
+    for entry in backups:  # newest first; undated entries come last
+        created = _parse_created_at(entry["created_at_utc"])
+        if created is None:
+            continue
+        day = created.date().isoformat()
+        month = day[:7]
+        iso = created.date().isocalendar()
+        week = f"{iso.year}-W{iso.week:02d}"
         day_buckets.setdefault(day, entry["path"])
         week_buckets.setdefault(week, entry["path"])
         month_buckets.setdefault(month, entry["path"])
@@ -692,6 +748,9 @@ def prune_backups_tiered(
     Keeps the newest backup of each of the last ``daily`` days, the newest
     of each of the last ``weekly`` ISO weeks, and the newest of each of the
     last ``monthly`` months.  The newest verified backup is always kept.
+    A backup whose manifest has no parseable ``created_at_utc`` belongs to
+    no retention window and is removed unless it is that newest verified
+    backup.
     """
     tiers = (daily, weekly, monthly)
     if any(
@@ -706,11 +765,7 @@ def prune_backups_tiered(
         return []
 
     keep: set[str] = set()
-    newest_verified: str | None = None
-    for entry in backups:
-        if not verify_backup(entry["path"]):
-            newest_verified = entry["path"]
-            break
+    newest_verified = _newest_verified(backups)
     if newest_verified:
         keep.add(newest_verified)
     keep.update(_protected_pre_epoch2(backups, newest_verified))

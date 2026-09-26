@@ -42,7 +42,9 @@ never prunes the last verified one.
 
 **Tiered retention (GFS):** keeps the newest of each of the last N days,
 weeks, and months (`[backup].retention_daily/weekly/monthly`), and always
-the newest verified backup.
+the newest verified backup. A backup whose manifest has no parseable
+`created_at_utc` (`created_at_valid: false` in `backup list --json`) is
+listed last and belongs to no retention window.
 
 ## Restore
 
@@ -76,6 +78,9 @@ section.
 `packaging/systemd/` ships timers: `sonder-backup.timer` (daily create +
 prune) and `sonder-restore-smoke.timer` (weekly restore-smoke on a
 disposable directory) — so backups are proven restorable, not just taken.
+The smoke targets the newest backup with a valid `created_at_utc`; if that
+backup no longer verifies, the smoke fails rather than silently picking an
+older one.
 
 ## Recovery scenarios
 

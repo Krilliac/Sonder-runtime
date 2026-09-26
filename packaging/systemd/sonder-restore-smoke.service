@@ -1,6 +1,9 @@
 # Weekly automated restore smoke test (SPEC-2 WP7).
-# Restores the newest backup into a disposable directory and verifies
-# integrity, foreign keys, and schema-ledger health.
+# Restores the newest dated backup into a disposable directory and verifies
+# integrity, foreign keys, and schema-ledger health. Entries whose manifest
+# has no parseable created_at_utc are skipped (`backup list` ranks them last
+# and reports created_at_valid=false). A newest backup that no longer
+# verifies fails the smoke on purpose: that is the regression to surface.
 
 [Unit]
 Description=Sonder backup restore smoke test
@@ -15,7 +18,7 @@ EnvironmentFile=/etc/sonder/sonder.env
 ExecStart=/bin/sh -c 'set -e; \
   latest=$(/opt/sonder/current/venv/bin/python -m sonder_runtime backup list \
     --config /etc/sonder/sonder.toml --json \
-    | /opt/sonder/current/venv/bin/python -c "import json,sys; b=json.load(sys.stdin)[\"backups\"]; print(b[0][\"path\"] if b else \"\")"); \
+    | /opt/sonder/current/venv/bin/python -c "import json,sys; b=json.load(sys.stdin)[\"backups\"]; d=[e for e in b if e.get(\"created_at_valid\")]; print(d[0][\"path\"] if d else \"\")"); \
   test -n "$latest"; \
   /opt/sonder/current/venv/bin/python -m sonder_runtime restore smoke "$latest"'
 UMask=0077

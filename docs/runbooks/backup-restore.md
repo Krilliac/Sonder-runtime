@@ -36,6 +36,13 @@ python -m sonder_runtime backup prune --keep 7
 
 Prune never removes the newest verified backup, regardless of `--keep`.
 
+`backup list` orders entries newest first by the parsed `created_at_utc`
+instant. An entry whose manifest has no parseable timestamp reports
+`"created_at_valid": false` and is listed after every dated backup,
+pre-epoch2 copies included, so both prune modes treat it as the oldest: it
+never takes a retention slot from a dated backup, and it is removed unless it
+is the newest verified backup.
+
 The raw safety copies that `migrate --adopt-epoch2` writes to
 `<state home>/backups/pre-epoch2-<UTC time>/` have no manifest, so they never
 verify as restorable backups. They are listed with `"kind": "pre-epoch2"` and

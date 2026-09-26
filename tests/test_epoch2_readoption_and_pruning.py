@@ -92,6 +92,7 @@ def test_pre_epoch2_copies_are_listed(tmp_path):
         "path": str(copy),
         "backup_id": copy.name,
         "created_at_utc": "2026-01-02T03:04:05.123456Z",
+        "created_at_valid": True,
         "application_version": "unknown",
         "files": 1,
         "kind": "pre-epoch2",

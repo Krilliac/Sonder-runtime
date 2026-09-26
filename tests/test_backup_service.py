@@ -387,6 +387,7 @@ def test_list_normalizes_malformed_sort_and_display_metadata(tmp_path):
         "path": str(candidate),
         "backup_id": "unknown",
         "created_at_utc": "unknown",
+        "created_at_valid": False,
         "application_version": "unknown",
         "files": 0,
     }]
