@@ -1482,8 +1482,12 @@ PostgreSQL 18.6+ primary and synchronous standby, now covers them:
   - With the `provenance_subject_error` check dropped from the PostgreSQL
     `_apply`, the subject test fails.
 - The workflow's `paths` filter now also covers the effect journal, the
-  worker bindings and the bootstrap composition, so changes to the stamp or
-  resume wiring trigger the live job.
+  worker bindings, the bootstrap composition, the subagent-dispatch verifier
+  that admits a resume, the conversational runner the end-to-end test
+  patches, and the journal host lease the composition takes. Changes to the
+  stamp or resume wiring in those modules trigger the live job. The filter
+  lists modules, not the full import closure, so a change elsewhere that
+  these tests reach still needs a `workflow_dispatch` run.
 
 Local run: the PGDG 18.6 server packages were unpacked (not installed) and the
 harness was run as an unprivileged user. Result: 28 passed, 0 skipped.

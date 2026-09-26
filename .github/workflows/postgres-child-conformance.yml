@@ -13,6 +13,9 @@ on:
       - sonder_runtime/adapters/persistence/durable_continuation.py
       - sonder_runtime/adapters/persistence/postgres*.py
       - sonder_runtime/adapters/subagents.py
+      - sonder_runtime/adapters/conversational_subagents.py
+      - sonder_runtime/adapters/execution/subagent_dispatch_verifier.py
+      - sonder_runtime/adapters/persistence/worker_effect_hosts.py
       - sonder_runtime/adapters/persistence/sqlite/effect_journal.py
       - sonder_runtime/application/execution/effect_journal.py
       - sonder_runtime/application/execution/worker_bindings.py
