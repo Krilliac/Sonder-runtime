@@ -167,6 +167,18 @@ def test_a_stale_digest_is_told_to_refresh_the_schema(
     assert [r["disposition"] for r in body["results"]] == ["refresh_schema"]
 
 
+def test_a_missing_digest_is_told_to_refresh_the_schema(
+    http_server, authorized, application, mode,
+):
+    _, stream_id = _schema_and_stream(http_server)
+    status, body = _request(
+        http_server, "/v1/client/reconnect", _reconnect(None, [(stream_id, 0)]),
+    )
+    assert status == 200
+    assert body["freshness"]["state"] == "stale"
+    assert [r["disposition"] for r in body["results"]] == ["refresh_schema"]
+
+
 def test_a_watermark_resumes_the_control_stream_in_bounded_batches(
     http_server, authorized, application, mode,
 ):
