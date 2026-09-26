@@ -1090,6 +1090,10 @@ def test_actual_pair_refuses_superseded_and_foreign_checkpoint_provenance(
     from sonder_runtime.application.subagents.checkpoint_provenance import (
         CheckpointResumeRefusal,
     )
+    from sonder_runtime.application.subagents.continuable import (
+        CheckpointProvenance,
+        checkpoint_state_digest,
+    )
     from sonder_runtime.application.subagents.durable_continuation import (
         DurableContinuationService,
     )
@@ -1130,6 +1134,29 @@ def test_actual_pair_refuses_superseded_and_foreign_checkpoint_provenance(
     assert _validate_resume(checkpoint, source, epoch=2).allowed
     assert _validate_resume(checkpoint, source, epoch=1).reason is (
         CheckpointResumeRefusal.STALE_OWNER_EPOCH
+    )
+
+    # A digest-valid stamp from the superseded epoch-1 owner that claims the
+    # newer owner's settled effect is stored and read back from PostgreSQL
+    # intact, and the resume is refused as superseded.
+    position = source.position(_PROVENANCE_RUN, _PROVENANCE_WORKER)
+    assert position.current_owner_epoch == 2 and position.settled_high_water == 2
+    superseded_id = repository.create(new_record()).request.child_id
+    superseded = CheckpointProvenance.stamp(
+        child_id=superseded_id, sequence=0,
+        state_digest=checkpoint_state_digest({"step": 2}), cursor="cursor-2",
+        journal_identity=position.journal_identity, run_id=_PROVENANCE_RUN,
+        worker_id=_PROVENANCE_WORKER, owner_epoch=1,
+        settled_position=position.settled_high_water,
+    )
+    repository.save_checkpoint(
+        ContinuableCheckpoint(superseded_id, 0, {"step": 2}, "cursor-2", superseded),
+        expected_sequence=-1,
+    )
+    stored = repository.get(superseded_id).checkpoint
+    assert stored.provenance == superseded
+    assert _validate_resume(stored, source, epoch=2).reason is (
+        CheckpointResumeRefusal.OWNER_SUPERSEDED
     )
 
     # A journal file with another identity cannot authorize the checkpoint.

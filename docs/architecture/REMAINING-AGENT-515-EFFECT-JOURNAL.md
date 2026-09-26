@@ -1452,7 +1452,13 @@ PostgreSQL 18.6+ primary and synchronous standby, now covers them:
 - `test_actual_pair_refuses_superseded_and_foreign_checkpoint_provenance`:
   a stale epoch is refused (`STALE_OWNER_EPOCH`). A journal with another
   identity is refused (`JOURNAL_IDENTITY_MISMATCH`). A newer owner's later
-  receipts do not invalidate the old settled prefix.
+  receipts do not invalidate the old settled prefix. A digest-valid stamp
+  from the superseded epoch-1 owner that claims the newer owner's settled
+  effect is saved to and read back from PostgreSQL unchanged, and the resume
+  is refused as `OWNER_SUPERSEDED`. The production stamp already refuses a
+  writer that is not the current owner, so this case is built with
+  `CheckpointProvenance.stamp` directly; it qualifies the read-back check,
+  not a path the stamp can produce.
 - `test_actual_pair_store_refuses_provenance_for_a_different_subject`: the
   live `save_checkpoint` refuses provenance stamped for other state, and a
   genuine stamp round-trips.
