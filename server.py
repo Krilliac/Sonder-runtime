@@ -6062,7 +6062,17 @@ def _approve_standalone_verification(prepared, context):
 
 def _agent_lane_context():
     from sonder_runtime.application.context import local_owner_context
+    from sonder_runtime.domain.common.errors import DependencyUnavailable
     application = _application()
+    if application.config is None:
+        # A graph this module composed lazily (bare loopback ``python
+        # server.py``) deliberately carries no typed configuration, so it has
+        # no configured workspace grants to scope a lane to. Refuse instead of
+        # inventing roots; the configured entrypoint binds a typed graph.
+        raise DependencyUnavailable(
+            "agent conversations require a configured runtime; "
+            "start the MCP server with python -m sonder_runtime mcp"
+        )
     context = local_owner_context(
         correlation_id="lane-" + os.urandom(16).hex(), source="mcp",
         workspace_roots=tuple(Path(root) for root in application.config.state.workspace_roots),

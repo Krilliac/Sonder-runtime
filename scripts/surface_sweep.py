@@ -33,7 +33,9 @@ Outcome classes, one per invocation:
     containment    the guarded primitives refused a path or root
     model          the call needed a model turn the environment cannot make
     dependency     a host program, extension or service the environment lacks
-    unavailable    the feature is off by configuration (web tools, cloud, ...)
+    unavailable    the feature is off by configuration (web tools, cloud, ...),
+                   including a typed ``DependencyUnavailable`` refusal raised
+                   before anything runs
     error          an ``ERROR:`` answer that is none of the above -- read it
     crash          an exception escaped the surface -- a defect
     timeout        the watchdog fired -- a defect or a missing bound
@@ -261,6 +263,25 @@ _UNAVAILABLE = re.compile(r"(disabled|are off|is off|not enabled|opt[- ]in|conse
                           r"read operation timed out|network is unreachable)", re.I)
 
 
+def _typed_unavailable(exception: BaseException) -> bool:
+    """Whether ``exception`` is, or was raised from, a typed
+    ``DependencyUnavailable`` refusal (an MCP adapter may wrap it).
+
+    Only that exact typed error qualifies: any other exception, whatever its
+    message says, is still a crash.
+    """
+    from sonder_runtime.domain.common.errors import DependencyUnavailable
+
+    seen = set()
+    current = exception
+    while current is not None and id(current) not in seen:
+        if isinstance(current, DependencyUnavailable):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def classify(text: str, *, exception: BaseException | None = None,
              is_error: bool | None = None) -> str:
     if isinstance(exception, SweepTimeout):
@@ -269,6 +290,8 @@ def classify(text: str, *, exception: BaseException | None = None,
         message = str(exception)
         if _GATE.search(message) or "refused" in message.lower() and "permission" in message.lower():
             return "gated"
+        if _typed_unavailable(exception):
+            return "unavailable"
         return "crash"
     body = str(text or "")
     head = body.lstrip()[:400]

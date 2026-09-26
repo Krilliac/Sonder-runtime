@@ -34,6 +34,13 @@ Both MCP surfaces (`python -m sonder_runtime mcp`, the default, and
   client to advertise `tasks`; until it does, `tasks` is not advertised back.
 - The native tool list is generated in
   [`runtime-reference.md`](../architecture/generated/runtime-reference.md#native-mcp-tools).
+- **`agent_lane` needs a configured runtime.** Registering the bare
+  loopback `python server.py` as the MCP server composes an application
+  graph with no typed configuration, so it has no configured workspace
+  grants to scope a lane to. There `agent_lane` refuses every action with a
+  typed `DependencyUnavailable` ("agent conversations require a configured
+  runtime") before the permission gate. Use `python -m sonder_runtime mcp`
+  for agent conversations.
 
 ## Code execution — `run_code` / `/run`
 

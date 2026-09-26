@@ -240,3 +240,25 @@ def test_an_unreadable_checkout_leaves_the_guard_silent(tmp_path):
     sweep = _load_sweep()
     assert sweep.checkout_state(str(tmp_path / "not-a-repo")) == {}
 
+
+
+def test_a_typed_unavailable_refusal_is_not_a_crash_but_other_exceptions_are():
+    # The legacy ``agent_lane`` tool on the graph ``server.py`` composes itself
+    # used to crash with AttributeError; it now raises a typed
+    # DependencyUnavailable, which FastMCP wraps. Only that typed refusal, not
+    # its wording, moves a raised exception out of the crash class.
+    from sonder_runtime.domain.common.errors import DependencyUnavailable
+
+    sweep = _load_sweep()
+    refusal = DependencyUnavailable("agent conversations require a configured runtime")
+    try:
+        try:
+            raise refusal
+        except DependencyUnavailable as exc:
+            raise RuntimeError("Error executing tool agent_lane: %s" % exc) from exc
+    except RuntimeError as wrapped:
+        assert sweep.classify("", exception=wrapped) == "unavailable"
+    assert sweep.classify("", exception=refusal) == "unavailable"
+    assert sweep.classify("", exception=AttributeError(
+        "'NoneType' object has no attribute 'state'")) == "crash"
+    assert sweep.classify("", exception=RuntimeError("feature not configured")) == "crash"
