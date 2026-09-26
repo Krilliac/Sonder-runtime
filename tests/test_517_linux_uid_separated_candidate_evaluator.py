@@ -16,6 +16,13 @@ import pytest
 
 AUTO_RUN = {"id": "auto-517", "mode": "auto-low-risk", "risk": "low",
             "approval_required": False}
+# The network boundary and no_new_privs the real supervisor confirms from
+# /proc before launch; a linux-uid report without them is not an attestation.
+LINUX_NETWORK = {"isolation": "netns", "netns_inode": 4026532262,
+                 "supervisor_netns_inode": 4026531833, "interfaces": ["lo"],
+                 "loopback_up": False}
+LINUX_JOB = {"integrity": "linux-uid", "uid": 210_000, "gid": 210_000,
+             "network": LINUX_NETWORK, "no_new_privs": True}
 
 
 def _no_launch(*_args, **_kwargs):
@@ -176,7 +183,7 @@ def test_selfmod_maps_real_non_root_refusal_to_code_125(monkeypatch, tmp_path):
 def test_selfmod_accepts_supervisor_built_linux_uid_attestation(monkeypatch, tmp_path):
     result, records, calls = _record(monkeypatch, tmp_path, linux_result={
         "exit_code": 0, "output": "ok", "passed": True,
-        "job": {"integrity": "linux-uid", "uid": 210_000, "gid": 210_000},
+        "job": dict(LINUX_JOB),
     })
     assert calls == ["linux"]
     assert result["passed"] is True and result["isolation"] == "linux-uid"
@@ -186,6 +193,14 @@ def test_selfmod_accepts_supervisor_built_linux_uid_attestation(monkeypatch, tmp
 @pytest.mark.parametrize("job", [
     None, {"integrity": "low"}, {"integrity": "LINUX-UID", "uid": 210_000},
     {"integrity": "linux-uid"}, {"integrity": "linux-uid", "uid": 0},
+    # A report without the confirmed network/no_new_privs boundary.
+    {**LINUX_JOB, "network": None},
+    {**LINUX_JOB, "no_new_privs": False},
+    {key: value for key, value in LINUX_JOB.items() if key != "no_new_privs"},
+    {**LINUX_JOB, "network": {**LINUX_NETWORK, "isolation": "host"}},
+    {**LINUX_JOB, "network": {**LINUX_NETWORK, "netns_inode": 4026531833}},
+    {**LINUX_JOB, "network": {**LINUX_NETWORK, "interfaces": ["eth0", "lo"]}},
+    {**LINUX_JOB, "network": {**LINUX_NETWORK, "loopback_up": True}},
 ])
 def test_selfmod_rejects_linux_supervisor_report_without_its_attestation(
     monkeypatch, tmp_path, job,
@@ -201,7 +216,7 @@ def test_selfmod_rejects_linux_supervisor_report_without_its_attestation(
 def test_windows_supervisor_cannot_claim_linux_uid(monkeypatch, tmp_path):
     result, records, calls = _record(monkeypatch, tmp_path, configured=False, low_result={
         "exit_code": 0, "output": "ok", "passed": True,
-        "job": {"integrity": "linux-uid", "uid": 210_000},
+        "job": dict(LINUX_JOB),
     })
     assert calls == ["low"]
     assert result["exit_code"] == 125 and records[0][-1] == "unverified"
@@ -210,7 +225,7 @@ def test_windows_supervisor_cannot_claim_linux_uid(monkeypatch, tmp_path):
 def test_linux_integrity_failure_is_not_a_pass(monkeypatch, tmp_path):
     result, records, _calls = _record(monkeypatch, tmp_path, linux_result={
         "exit_code": 2, "output": "protected truth changed", "passed": False,
-        "integrity_failed": True, "job": {"integrity": "linux-uid", "uid": 210_000},
+        "integrity_failed": True, "job": dict(LINUX_JOB),
     })
     assert result["exit_code"] == 125 and result["passed"] is False
     assert "evaluator integrity failed" in result["output"]
@@ -242,7 +257,7 @@ def test_host_grade_binds_to_a_linux_uid_probe(monkeypatch, tmp_path):
     monkeypatch.setenv(linux.CANDIDATE_UID_ENV, "210000")
     monkeypatch.setattr(linux, "run_isolated", lambda *_args, **_kwargs: {
         "exit_code": 0, "output": "candidate output", "passed": True,
-        "job": {"integrity": "linux-uid", "uid": 210_000, "gid": 210_000},
+        "job": dict(LINUX_JOB),
     })
     root = tmp_path / "repo"
     (root / "tests").mkdir(parents=True)

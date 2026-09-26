@@ -17,9 +17,17 @@ from sonder_runtime.application.selfmod.candidate_isolation import (
 )
 
 
+_NETWORK = {"isolation": "netns", "netns_inode": 4026532262,
+            "supervisor_netns_inode": 4026531833, "interfaces": ["lo"],
+            "loopback_up": False}
+# The boundary fields a hand-built linux-uid attestation must carry.
+_BOUNDARY = {"network_isolated": True, "no_new_privs": True}
+
+
 def _linux_result(**job):
     return {"exit_code": 0, "passed": True, "output": "ok",
-            "job": {"integrity": "linux-uid", "uid": 210_000, "gid": 210_000, **job}}
+            "job": {"integrity": "linux-uid", "uid": 210_000, "gid": 210_000,
+                    "network": dict(_NETWORK), "no_new_privs": True, **job}}
 
 
 def test_linux_uid_attestation_requires_distinct_unprivileged_uid():
@@ -27,6 +35,7 @@ def test_linux_uid_attestation_requires_distinct_unprivileged_uid():
         _linux_result(supervisor_uid=0), expected_kind="linux-uid", supervisor_uid=0,
     )
     assert typed.kind == "linux-uid" and typed.candidate_uid == 210_000 and typed.passed
+    assert typed.network_isolated is True and typed.no_new_privs is True
     for bad in ({"uid": 0}, {"uid": None}, {"uid": "210000"}, {"supervisor_uid": 5},
                 {"gid": 0}):
         with pytest.raises(IsolationAttestationError):
@@ -38,6 +47,36 @@ def test_linux_uid_attestation_requires_distinct_unprivileged_uid():
         IsolationAttestation.from_supervisor_result(
             _linux_result(), expected_kind="linux-uid", supervisor_uid=210_000,
         )
+
+
+@pytest.mark.parametrize("job", [
+    {"network": None},
+    {"network": {**_NETWORK, "isolation": "host"}},
+    {"network": {**_NETWORK, "netns_inode": _NETWORK["supervisor_netns_inode"]}},
+    {"network": {**_NETWORK, "netns_inode": "4026532262"}},
+    {"network": {**_NETWORK, "supervisor_netns_inode": 0}},
+    {"network": {**_NETWORK, "interfaces": ["eth0", "lo"]}},
+    {"network": {**_NETWORK, "loopback_up": True}},
+    {"network": {**_NETWORK, "loopback_up": None}},
+    {"no_new_privs": False},
+    {"no_new_privs": 1},
+    {"no_new_privs": None},
+])
+def test_linux_uid_attestation_requires_network_namespace_and_no_new_privs(job):
+    with pytest.raises(IsolationAttestationError):
+        IsolationAttestation.from_supervisor_result(
+            _linux_result(**job), expected_kind="linux-uid", supervisor_uid=0,
+        )
+
+
+def test_hand_built_linux_uid_attestation_requires_both_boundaries():
+    identity = {"supervisor_uid": 0, "candidate_uid": 210_000}
+    assert IsolationAttestation("linux-uid", 0, True, **identity, **_BOUNDARY).passed
+    for missing in ({"network_isolated": False, "no_new_privs": True},
+                    {"network_isolated": True, "no_new_privs": False},
+                    {"network_isolated": 1, "no_new_privs": True}):
+        with pytest.raises(IsolationAttestationError):
+            IsolationAttestation("linux-uid", 0, True, **identity, **missing)
 
 
 def test_neither_supervisor_can_vouch_for_the_other():
@@ -81,7 +120,7 @@ def test_gate_accepts_only_the_selected_supervisors_typed_attestation(
     attestation = None
     if kind == "linux-uid":
         attestation = IsolationAttestation("linux-uid", 0, True, supervisor_uid=0,
-                                           candidate_uid=210_000)
+                                           candidate_uid=210_000, **_BOUNDARY)
     elif kind == "low":
         attestation = IsolationAttestation("low", 0, True)
     probe = {"passed": True, "isolation": recorded, "attestation": attestation,
@@ -101,7 +140,8 @@ def test_nightly_parent_gate_accepts_linux_uid_probe_on_configured_linux(monkeyp
     def probe(run_id, kind, command, **kwargs):
         return {"passed": True, "output": "", "isolation": "linux-uid", "test_id": 3,
                 "attestation": IsolationAttestation(
-                    "linux-uid", 0, True, supervisor_uid=0, candidate_uid=210_000)}
+                    "linux-uid", 0, True, supervisor_uid=0, candidate_uid=210_000,
+                    **_BOUNDARY)}
 
     monkeypatch.setattr(nightly_selfmod, "_record_candidate_test", probe)
     monkeypatch.setattr(selfmod_host_grader, "grade", lambda *_a: (False, "graded"))

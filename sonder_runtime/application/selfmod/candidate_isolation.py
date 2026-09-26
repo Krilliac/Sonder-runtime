@@ -5,8 +5,10 @@ Two supervisors can run unattended selfmod candidate checks:
 * ``scripts/selfmod_low_integrity.py`` (Windows): a low-integrity token inside
   a Job object.  Its report carries ``integrity: "low"``.
 * ``scripts/selfmod_linux_isolation.py`` (Linux): a dedicated unprivileged
-  uid with ``no_new_privs`` and uid-scoped teardown.  Its report carries
-  ``integrity: "linux-uid"`` plus the candidate and supervisor uids.
+  uid with ``no_new_privs`` and uid-scoped teardown, inside a fresh network
+  namespace with no configured interface.  Its report carries
+  ``integrity: "linux-uid"``, the candidate and supervisor uids, the
+  ``network`` boundary it observed and ``no_new_privs: true``.
 
 Both reports are plain dictionaries built by the supervising process from
 the kernel's view of the candidate, never from candidate stdout.  This module
@@ -14,9 +16,10 @@ turns such a report into one immutable, validated value so every consumer
 (``selfmod._record_command``, the nightly parent-scored gate) applies the
 same rules instead of re-implementing string checks.
 
-The attestation says which OS boundary bounded the candidate's *writes*. It
-does not claim result independence: the candidate still produces the output
-the parent grades.  Independence is the separate oracle receipt in
+The attestation says which OS boundary bounded the candidate's *writes* and,
+for ``linux-uid``, its network reach and privilege gain. It does not claim
+result independence: the candidate still produces the output the parent
+grades.  Independence is the separate oracle receipt in
 ``independent_oracle.py`` (see REMAINING-SELFMOD-517-LINUX-ISOLATION.md).
 """
 
@@ -43,6 +46,22 @@ def _positive_int(value: object) -> int | None:
     return None
 
 
+# The only network boundary a ``linux-uid`` report may claim: the candidate
+# ran in a network namespace distinct from the supervisor's, holding only a
+# loopback interface that was left down.
+NETWORK_NAMESPACE = "netns"
+
+
+def _network_isolated(network: object) -> bool:
+    """True only for a supervisor-observed, interface-free network namespace."""
+    if not isinstance(network, Mapping) or network.get("isolation") != NETWORK_NAMESPACE:
+        return False
+    candidate = _positive_int(network.get("netns_inode"))
+    supervisor = _positive_int(network.get("supervisor_netns_inode"))
+    return (candidate is not None and supervisor is not None and candidate != supervisor
+            and network.get("interfaces") == ["lo"] and network.get("loopback_up") is False)
+
+
 @dataclass(frozen=True, slots=True)
 class IsolationAttestation:
     """A verified statement that one candidate check ran under an OS boundary.
@@ -61,6 +80,8 @@ class IsolationAttestation:
     timed_out: bool = False
     limit_hit: str | None = None
     integrity_failed: bool = False
+    network_isolated: bool = False
+    no_new_privs: bool = False
 
     def __post_init__(self) -> None:
         if self.kind not in ISOLATION_KINDS:
@@ -78,6 +99,10 @@ class IsolationAttestation:
                 raise IsolationAttestationError("candidate uid equals the supervisor uid")
             if self.candidate_gid is not None and _positive_int(self.candidate_gid) is None:
                 raise IsolationAttestationError("linux-uid attestation carries a privileged gid")
+            if self.network_isolated is not True:
+                raise IsolationAttestationError("linux-uid attestation lacks the network namespace boundary")
+            if self.no_new_privs is not True:
+                raise IsolationAttestationError("linux-uid attestation lacks no_new_privs")
 
     @classmethod
     def from_supervisor_result(
@@ -113,7 +138,16 @@ class IsolationAttestation:
         if integrity_failed and passed is not False:
             raise IsolationAttestationError("integrity failure reported as a pass")
         candidate_uid = candidate_gid = None
+        network_isolated = no_new_privs = False
         if expected_kind == LINUX_UID:
+            # Both boundaries are facts the supervisor verified on the
+            # candidate's parent before letting it launch; a report without
+            # them is not a linux-uid attestation at all.
+            if not _network_isolated(job.get("network")):
+                raise IsolationAttestationError("supervisor report lacks the network namespace boundary")
+            if job.get("no_new_privs") is not True:
+                raise IsolationAttestationError("supervisor report lacks no_new_privs")
+            network_isolated = no_new_privs = True
             candidate_uid = job.get("uid")
             candidate_gid = job.get("gid")
             reported_supervisor = job.get("supervisor_uid")
@@ -130,6 +164,8 @@ class IsolationAttestation:
             timed_out=bool(job.get("timed_out")),
             limit_hit=str(limit_hit) if limit_hit else None,
             integrity_failed=integrity_failed,
+            network_isolated=network_isolated,
+            no_new_privs=no_new_privs,
         )
 
     def as_record(self) -> dict[str, object]:
@@ -144,6 +180,8 @@ class IsolationAttestation:
             "timed_out": self.timed_out,
             "limit_hit": self.limit_hit,
             "integrity_failed": self.integrity_failed,
+            "network_isolated": self.network_isolated,
+            "no_new_privs": self.no_new_privs,
         }
 
 
@@ -173,5 +211,6 @@ __all__ = [
     "IsolationAttestationError",
     "LINUX_UID",
     "LOW_INTEGRITY",
+    "NETWORK_NAMESPACE",
     "accepted_probe_attestation",
 ]

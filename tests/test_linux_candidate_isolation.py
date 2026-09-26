@@ -464,3 +464,261 @@ def test_concurrent_supervisor_claim_on_same_uid_fails_closed(area):
     result = _run(_python("pass"), area)
     assert result["passed"] is True, result
     assert _no_candidate_processes()
+
+
+# --- network namespace and no_new_privs boundary -----------------------------
+
+
+def _host_ipv4_addresses() -> list[str]:
+    """Every IPv4 address configured on the host (loopback first)."""
+    import fcntl
+    import socket
+    import struct
+
+    found = []
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        for _index, name in socket.if_nameindex():
+            try:
+                # SIOCGIFADDR (linux/sockios.h): the interface's IPv4 address.
+                reply = fcntl.ioctl(probe.fileno(), 0x8915,
+                                    struct.pack("256s", name.encode()[:15]))
+            except OSError:
+                continue
+            found.append(socket.inet_ntoa(reply[20:24]))
+    return sorted(set(found), key=lambda address: not address.startswith("127."))
+
+
+def _host_listeners():
+    """Listening TCP sockets on 127.0.0.1, ::1 and every non-loopback address."""
+    import socket
+
+    listeners = []
+    for address in _host_ipv4_addresses() or ["127.0.0.1"]:
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.bind((address, 0))
+        listeners.append(server)
+    try:
+        server = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    except OSError:
+        server = None  # this kernel has no IPv6 at all
+    if server is not None:
+        try:
+            server.bind(("::1", 0))
+        except OSError:
+            server.close()
+        else:
+            listeners.append(server)
+    for server in listeners:
+        server.listen(8)
+    return listeners
+
+
+def test_candidate_runs_in_isolated_network_namespace_and_report_attests_it(area):
+    from sonder_runtime.application.selfmod.candidate_isolation import IsolationAttestation
+
+    source = (
+        "import os, socket\n"
+        "print('netns=%d' % os.stat('/proc/self/ns/net').st_ino)\n"
+        "print('ifaces=%r' % sorted(name for _i, name in socket.if_nameindex()))\n"
+        "status = open('/proc/self/status').read().splitlines()\n"
+        "print('nnp=' + [l for l in status if l.startswith('NoNewPrivs')][0].split()[1])\n"
+    )
+    result = _run(_python(source), area)
+
+    assert result["passed"] is True, result
+    host_netns = os.stat("/proc/self/ns/net").st_ino
+    network = result["job"]["network"]
+    assert network["isolation"] == "netns"
+    assert network["supervisor_netns_inode"] == host_netns
+    assert network["netns_inode"] != host_netns
+    assert network["interfaces"] == ["lo"] and network["loopback_up"] is False
+    assert result["job"]["no_new_privs"] is True
+    # The candidate's own view matches what the supervisor attested.
+    assert f"netns={network['netns_inode']}" in result["output"]
+    assert "ifaces=['lo']" in result["output"]
+    assert "nnp=1" in result["output"]
+    typed = result["attestation"]
+    assert isinstance(typed, IsolationAttestation)
+    assert typed.network_isolated is True and typed.no_new_privs is True
+    # The supervisor itself stayed in the host namespace.
+    assert os.stat("/proc/self/ns/net").st_ino == host_netns
+    assert _no_candidate_processes()
+
+
+def test_candidate_cannot_connect_to_host_listeners(area):
+    import socket
+
+    listeners = _host_listeners()
+    try:
+        targets = [server.getsockname()[:2] for server in listeners]
+        assert any(host == "127.0.0.1" for host, _port in targets), targets
+        # Control: every listener is reachable from the host, so a refusal
+        # below is the candidate's boundary, not a dead listener.
+        for server, (host, port) in zip(listeners, targets):
+            with socket.socket(server.family, socket.SOCK_STREAM) as client:
+                client.settimeout(5)
+                client.connect((host, port))
+            server.settimeout(5)
+            accepted, _peer = server.accept()
+            accepted.close()
+            server.setblocking(False)
+        source = (
+            "import socket\n"
+            f"targets = {targets!r}\n"
+            "reached = []\n"
+            "for host, port in targets:\n"
+            "    family = socket.AF_INET6 if ':' in host else socket.AF_INET\n"
+            "    with socket.socket(family, socket.SOCK_STREAM) as client:\n"
+            "        client.settimeout(3)\n"
+            "        try:\n"
+            "            client.connect((host, port))\n"
+            "        except OSError as exc:\n"
+            "            print('denied %s errno=%s' % (host, exc.errno))\n"
+            "        else:\n"
+            "            reached.append(host)\n"
+            "raise SystemExit(3 if reached else 0)\n"
+        )
+        result = _run(_python(source), area)
+
+        assert result["passed"] is True, result
+        for host, _port in targets:
+            assert f"denied {host} errno=" in result["output"], result["output"]
+        for server in listeners:
+            # No connection from the candidate ever reached a listener.
+            with pytest.raises(BlockingIOError):
+                server.accept()
+    finally:
+        for server in listeners:
+            server.close()
+    assert _no_candidate_processes()
+
+
+def test_candidate_cannot_resolve_names_or_egress(area):
+    source = (
+        "import errno, socket\n"
+        "unreachable = (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.EADDRNOTAVAIL,\n"
+        "               errno.EAFNOSUPPORT)\n"
+        "denied = 0\n"
+        "try:\n"
+        "    socket.getaddrinfo('example.com', 443, proto=socket.IPPROTO_TCP)\n"
+        "except socket.gaierror as exc:\n"
+        "    print('resolve denied', exc.errno)\n"
+        "    denied += 1\n"
+        "for family, target in ((socket.AF_INET, ('1.1.1.1', 443)),\n"
+        "                       (socket.AF_INET, ('8.8.8.8', 53)),\n"
+        "                       (socket.AF_INET6, ('2606:4700:4700::1111', 443))):\n"
+        "    try:\n"
+        "        # A kernel without IPv6 refuses the socket itself (EAFNOSUPPORT).\n"
+        "        with socket.socket(family, socket.SOCK_STREAM) as client:\n"
+        "            client.settimeout(3)\n"
+        "            client.connect(target)\n"
+        "    except OSError as exc:\n"
+        "        print('egress denied %s errno=%s' % (target[0], exc.errno))\n"
+        "        denied += exc.errno in unreachable\n"
+        "with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as datagram:\n"
+        "    try:\n"
+        "        datagram.sendto(bytes(12), ('8.8.8.8', 53))\n"
+        "    except OSError as exc:\n"
+        "        print('udp denied errno=%s' % exc.errno)\n"
+        "        denied += exc.errno in unreachable\n"
+        "raise SystemExit(0 if denied == 5 else 3)\n"
+    )
+    result = _run(_python(source), area)
+
+    assert result["passed"] is True, result
+    assert "resolve denied" in result["output"]
+    assert result["output"].count("egress denied") == 3
+    assert "udp denied" in result["output"]
+    assert _no_candidate_processes()
+
+
+def _setuid_id(area: Path) -> Path:
+    """A root-owned setuid copy of ``id`` that the candidate uid may execute."""
+    source = shutil.which("id")
+    assert source, "coreutils id is required for the setuid canary"
+    target = area / "bin" / "suid-id"
+    target.parent.mkdir(mode=0o755)
+    shutil.copyfile(source, target)
+    os.chown(target, 0, 0)
+    target.chmod(0o4755)
+    return target
+
+
+def test_setuid_binary_cannot_raise_privileges_under_no_new_privs(area):
+    import subprocess
+
+    binary = _setuid_id(area)
+
+    def as_candidate_without_no_new_privs():
+        os.setgroups([])
+        os.setresgid(CANDIDATE_UID, CANDIDATE_UID, CANDIDATE_UID)
+        os.setresuid(CANDIDATE_UID, CANDIDATE_UID, CANDIDATE_UID)
+
+    # Control: without no_new_privs the same uid gains euid 0 from this
+    # binary, so the mount honours setuid and the canary discriminates.
+    control = subprocess.run(
+        [str(binary), "-u"], cwd=area, capture_output=True, text=True, timeout=20,
+        check=False, preexec_fn=as_candidate_without_no_new_privs,
+    )
+    assert control.returncode == 0, control.stderr
+    assert control.stdout.strip() == "0", (
+        "setuid is not honoured where the canary binary lives, so the "
+        f"no_new_privs canary cannot discriminate here: {control.stdout!r}"
+    )
+
+    result = _run([str(binary), "-u"], area)
+
+    assert result["passed"] is True, result
+    assert result["output"].strip() == str(CANDIDATE_UID), result["output"]
+    assert result["job"]["no_new_privs"] is True
+    assert _no_candidate_processes()
+
+
+def test_supervisor_fails_closed_when_network_namespace_is_unavailable(area):
+    """Without CAP_SYS_ADMIN the namespace cannot be made; nothing launches."""
+    import ctypes
+    import subprocess
+
+    marker = area / "candidate-ran"
+    repo = Path(__file__).resolve().parents[1]
+    driver = (
+        "import sys\n"
+        "from scripts import selfmod_linux_isolation as linux\n"
+        f"command = [sys.executable, '-I', '-c', \"open({str(marker)!r}, 'w').write('ran')\"]\n"
+        "try:\n"
+        f"    linux.run_isolated(command, cwd={str(area)!r}, timeout=20,\n"
+        f"                       candidate_uid={CANDIDATE_UID}, candidate_gid={CANDIDATE_UID})\n"
+        "except linux.LinuxIsolationUnavailable as exc:\n"
+        "    print('refused:', exc)\n"
+        "    raise SystemExit(0)\n"
+        "raise SystemExit(3)\n"
+    )
+    libc = ctypes.CDLL(None, use_errno=True)
+
+    def drop_sys_admin():
+        # PR_CAPBSET_DROP (24) of CAP_SYS_ADMIN (21): the driver and its
+        # reaper stay root but can no longer create a network namespace.
+        if libc.prctl(24, 21, 0, 0, 0) != 0:
+            raise OSError(ctypes.get_errno(), "cannot drop CAP_SYS_ADMIN")
+
+    completed = subprocess.run(
+        [sys.executable, "-c", driver], cwd=repo, capture_output=True, text=True,
+        timeout=60, check=False, preexec_fn=drop_sys_admin,
+    )
+
+    assert completed.returncode == 0, (completed.stdout, completed.stderr)
+    assert "refused: candidate launch failed: network namespace unavailable" in completed.stdout
+    assert not marker.exists()
+    assert _no_candidate_processes()
+
+
+def test_boundary_sharing_the_supervisor_network_namespace_is_refused():
+    from scripts import selfmod_linux_isolation as linux
+
+    # This process is in the supervisor's own namespace: a reaper report of
+    # it (or of any inode other than the observed one) is never confirmed.
+    own = os.stat("/proc/self/ns/net").st_ino
+    for event in ({"netns_inode": own, "interfaces": ["lo"], "loopback_up": False},
+                  {"netns_inode": own + 1, "interfaces": ["lo"], "loopback_up": False}):
+        with pytest.raises(linux.LinuxIsolationUnavailable):
+            linux._confirm_boundary(os.getpid(), event)

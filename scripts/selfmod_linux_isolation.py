@@ -3,7 +3,8 @@
 This is the Linux counterpart of ``scripts/selfmod_low_integrity.py`` and
 returns the same result schema.  The supervisor stays root and owns the
 evaluator truth.  Candidate code runs as a distinct, dedicated, unprivileged
-uid/gid with no supplementary groups and ``no_new_privs``, in its own session,
+uid/gid with no supplementary groups and ``no_new_privs``, in its own session
+and a fresh network namespace that holds only a loopback interface left down,
 below per-process rlimits, with a scrubbed environment and a private
 HOME/TMPDIR.  Protected evaluator truth must not be writable by that uid: the
 supervisor proves this before launch (failing closed otherwise) and re-digests
@@ -11,9 +12,19 @@ it after the candidate is gone.
 
 Process topology::
 
-    supervisor (root, this process)
-      '-- reaper (root, ``--reaper``; child subreaper, dies with supervisor)
+    supervisor (root, this process, host network namespace)
+      '-- reaper (root, ``--reaper``; child subreaper, dies with supervisor;
+            |     own network namespace, ``no_new_privs``)
             '-- candidate (candidate uid, new session) and every descendant
+
+The reaper sets ``no_new_privs`` on itself and enters a new network namespace
+before it launches anything, reports that boundary, and then waits.  The
+supervisor confirms the boundary itself from ``/proc/<reaper>`` (a namespace
+inode distinct from its own, no interface but ``lo``, ``NoNewPrivs: 1``) and
+only then lets the reaper launch the candidate.  The candidate inherits both
+and cannot leave them: joining the host namespace needs ``CAP_SYS_ADMIN`` over
+it, and ``no_new_privs`` cannot be cleared.  If the namespace cannot be
+created the run fails closed; it never falls back to the host network.
 
 The reaper exists so that orphaned candidate descendants are reaped instead of
 lingering as zombies that count against the candidate uid's RLIMIT_NPROC.  The
@@ -27,9 +38,9 @@ What this boundary does NOT provide (see
 still produces the output the parent grades, so result independence comes
 from the evaluator-held oracle (``scripts/selfmod_oracle.py``), which uses
 this boundary and ``require_not_candidate_readable`` to keep held expected
-values from the candidate uid; network access is not isolated,
-confidentiality of world-readable files is not provided, and job memory is
-enforced by sampling rather than a cgroup.
+values from the candidate uid; confidentiality of world-readable files is not
+provided, job memory is enforced by sampling rather than a cgroup, and no
+seccomp filter narrows the kernel surface the candidate can reach.
 """
 
 from __future__ import annotations
@@ -41,6 +52,7 @@ import os
 import select
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -89,6 +101,17 @@ _REAPER_BUFFER_BYTES = 64 * 1024
 # (same uid) and would make each teardown kill the other's tree, so the
 # spare-uid check and the whole run happen under an exclusive claim.
 _CLAIM_DIR = Path("/run/sonder-selfmod-candidate")
+
+# The network boundary the supervisor attests (see
+# ``candidate_isolation.NETWORK_NAMESPACE``): a namespace distinct from the
+# supervisor's whose only interface is a loopback left down, so the candidate
+# has no route at all, not even to 127.0.0.1.
+NETWORK_ISOLATION = "netns"
+_ISOLATED_INTERFACES = ["lo"]
+_BOUNDARY_SECONDS = 10.0
+# ioctl(2) request and interface flag (linux/sockios.h, linux/if.h).
+_SIOCGIFFLAGS = 0x8913
+_IFF_UP = 0x1
 
 # prctl(2) options (linux/prctl.h); stable kernel ABI.
 _PR_SET_PDEATHSIG = 1
@@ -452,6 +475,8 @@ def _require_host() -> None:
         )
     if "NoNewPrivs" not in _proc_status(os.getpid()):
         raise LinuxIsolationUnavailable("kernel lacks no_new_privs or /proc is unavailable")
+    if not hasattr(os, "unshare") or not os.path.exists("/proc/self/ns/net"):
+        raise LinuxIsolationUnavailable("kernel or Python lacks network namespaces")
 
 
 def _require_spare_identity(uid: int, gid: int) -> None:
@@ -654,6 +679,7 @@ def _supervise(
     limits: dict[str, object], protected: Sequence[Path], before: dict[str, object],
 ) -> dict[str, object]:
     read_fd, write_fd = os.pipe()
+    go_read, go_write = os.pipe()
     reaper = None
     drain = None
     try:
@@ -662,17 +688,26 @@ def _supervise(
         # cwd) and user site-packages from shadowing this trusted file.
         reaper = subprocess.Popen(
             [sys.executable, "-I", str(Path(__file__).resolve()), "--reaper",
-             str(spec_path), str(write_fd), str(os.getpid())],
+             str(spec_path), str(write_fd), str(os.getpid()), str(go_read)],
             cwd=str(control), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, pass_fds=(write_fd,), start_new_session=True,
+            stderr=subprocess.STDOUT, pass_fds=(write_fd, go_read), start_new_session=True,
             env={"PATH": _DEFAULT_PATH},
         )
         os.close(write_fd)
         write_fd = -1
+        os.close(go_read)
+        go_read = -1
         assert reaper.stdout is not None
         drain = _Drain(reaper.stdout)
         events: list[dict[str, Any]] = []
         buffer = bytearray()
+        # Nothing runs as the candidate until the boundary is confirmed here.
+        # Any raise leaves ``go_write`` closed unwritten, and the reaper then
+        # exits without launching.
+        network = _confirm_boundary(reaper.pid, _await_boundary(read_fd, buffer, events, reaper))
+        os.write(go_write, b"1")
+        os.close(go_write)
+        go_write = -1
         open_pipe = True
         started = time.monotonic()
         deadline = started + seconds
@@ -729,6 +764,7 @@ def _supervise(
         job_report: dict[str, object] = {
             "integrity": ATTESTATION, "uid": uid, "gid": gid,
             "supervisor_uid": os.geteuid(), "limits": dict(limits),
+            "network": network, "no_new_privs": True,
             "exit": {"returncode": returncode, "signal": signal_number},
             "timed_out": timed_out, "limit_hit": limit_hit,
             "peak_process_memory_mb": peak_process_kib // 1024,
@@ -750,14 +786,90 @@ def _supervise(
         return {"exit_code": int(code), "output": output[-_OUTPUT_TAIL_BYTES:],
                 "passed": int(code) == 0, "job": job_report}
     finally:
-        if write_fd >= 0:
-            os.close(write_fd)
+        for fd in (write_fd, go_read, go_write):
+            if fd >= 0:
+                os.close(fd)
         os.close(read_fd)
         if reaper is not None and reaper.poll() is None:
             reaper.kill()
             reaper.wait(timeout=5)
         if drain is not None:
             drain.join(5)
+
+
+def _netns_inode(pid: int | str) -> int:
+    """The inode naming the network namespace of ``pid`` (``"self"`` allowed)."""
+    return os.stat(f"/proc/{pid}/ns/net").st_ino
+
+
+def _proc_interfaces(pid: int | str) -> list[str]:
+    """Interface names in the network namespace of ``pid``, from its /proc view."""
+    lines = Path(f"/proc/{pid}/net/dev").read_text(encoding="utf-8").splitlines()
+    # Two header lines, then ``name: counters`` per interface.
+    return sorted(line.split(":", 1)[0].strip() for line in lines[2:] if ":" in line)
+
+
+def _confirm_boundary(reaper_pid: int, event: dict[str, Any]) -> dict[str, object]:
+    """Confirm, from outside, the boundary the reaper says it entered.
+
+    The reaper (still root, nothing launched yet) reported its network
+    namespace.  This process re-reads the facts from ``/proc/<reaper>``
+    instead of trusting the report: the namespace inode must differ from the
+    supervisor's own and equal the reported one, the namespace may hold no
+    interface but ``lo``, and ``NoNewPrivs`` must be set.  The candidate
+    inherits all three from the reaper.  Any mismatch raises
+    ``LinuxIsolationUnavailable`` and the candidate is never launched.
+    """
+    try:
+        supervisor_netns = _netns_inode("self")
+        observed = _netns_inode(reaper_pid)
+        interfaces = _proc_interfaces(reaper_pid)
+    except OSError as exc:
+        raise LinuxIsolationUnavailable(
+            f"cannot observe the candidate network namespace: {type(exc).__name__}"
+        ) from exc
+    if observed == supervisor_netns:
+        raise LinuxIsolationUnavailable("candidate parent shares the supervisor network namespace")
+    if event.get("netns_inode") != observed:
+        raise LinuxIsolationUnavailable("reported network namespace does not match the observed one")
+    if interfaces != _ISOLATED_INTERFACES or event.get("interfaces") != _ISOLATED_INTERFACES:
+        raise LinuxIsolationUnavailable(f"candidate network namespace has interfaces {interfaces!r}")
+    if event.get("loopback_up") is not False:
+        raise LinuxIsolationUnavailable("candidate network namespace has loopback up")
+    if _proc_status(reaper_pid).get("NoNewPrivs") != "1":
+        raise LinuxIsolationUnavailable("candidate parent lacks no_new_privs")
+    return {
+        "isolation": NETWORK_ISOLATION, "netns_inode": observed,
+        "supervisor_netns_inode": supervisor_netns,
+        "interfaces": list(_ISOLATED_INTERFACES), "loopback_up": False,
+    }
+
+
+def _await_boundary(
+    read_fd: int, buffer: bytearray, events: list[dict[str, Any]],
+    reaper: subprocess.Popen,
+) -> dict[str, Any]:
+    """Wait (bounded) for the reaper's boundary report; raise on any failure."""
+
+    def reported() -> dict[str, Any] | None:
+        return next((e for e in events if e.get("event") in {"boundary", "launch_error"}), None)
+
+    deadline = time.monotonic() + _BOUNDARY_SECONDS
+    open_pipe = True
+    while open_pipe and reported() is None and time.monotonic() < deadline:
+        ready, _w, _x = select.select([read_fd], [], [], _SAMPLE_INTERVAL_SECONDS)
+        if ready:
+            open_pipe = _read_events(read_fd, buffer, events)
+    found = reported()
+    if found is None:
+        raise LinuxIsolationUnavailable("candidate boundary was not reported; nothing launched")
+    if found.get("event") == "launch_error":
+        raise LinuxIsolationUnavailable(
+            f"candidate launch failed: {str(found.get('error', ''))[:300]}"
+        )
+    if reaper.poll() is not None:
+        raise LinuxIsolationUnavailable("candidate parent exited before launch")
+    return found
 
 
 def _snapshot_after(protected: Sequence[Path], uid: int, gid: int) -> dict[str, object] | None:
@@ -782,7 +894,37 @@ def _set_limits(limits: dict[str, Any]) -> None:
         resource.setrlimit(kind, (value, value))
 
 
-def _reaper(spec_path: Path, event_fd: int, supervisor_pid: int) -> int:
+def _loopback_up() -> bool:
+    import fcntl
+    import struct
+
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        request = struct.pack("16sH22x", b"lo", 0)
+        reply = fcntl.ioctl(probe.fileno(), _SIOCGIFFLAGS, request)
+    return bool(struct.unpack("16sH22x", reply)[1] & _IFF_UP)
+
+
+def _enter_network_namespace() -> dict[str, object]:
+    """Move this (root, single-threaded) process into a fresh network namespace.
+
+    The namespace is left as the kernel creates it: only ``lo``, and ``lo``
+    down, so there is no route anywhere.  Raises ``OSError`` when the
+    namespace cannot be created or does not look like that.
+    """
+    host = _netns_inode("self")
+    os.unshare(os.CLONE_NEWNET)
+    inode = _netns_inode("self")
+    if inode == host:
+        raise OSError("network namespace did not change")
+    interfaces = sorted(name for _index, name in socket.if_nameindex())
+    if interfaces != _ISOLATED_INTERFACES:
+        raise OSError(f"new network namespace has interfaces {interfaces!r}")
+    if _loopback_up():
+        raise OSError("new network namespace has loopback up")
+    return {"netns_inode": inode, "interfaces": interfaces, "loopback_up": False}
+
+
+def _reaper(spec_path: Path, event_fd: int, supervisor_pid: int, go_fd: int) -> int:
     """Launch the candidate below the uid boundary and reap all descendants."""
     import ctypes
 
@@ -800,6 +942,23 @@ def _reaper(spec_path: Path, event_fd: int, supervisor_pid: int) -> int:
     if prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
         emit(event="launch_error", error="child subreaper unsupported")
         return 125
+    # The boundary every candidate descendant inherits, entered here while
+    # root and before anything is launched.  Failure is fatal; there is no
+    # fallback to the host network.
+    if prctl(_PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 or prctl(_PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 1:
+        emit(event="launch_error", error="no_new_privs unavailable")
+        return 125
+    try:
+        boundary = _enter_network_namespace()
+    except OSError as exc:
+        emit(event="launch_error", error=f"network namespace unavailable: {type(exc).__name__}: {exc}")
+        return 125
+    emit(event="boundary", **boundary)
+    with os.fdopen(go_fd, "rb", buffering=0) as go:
+        if go.read(1) != b"1":
+            # The supervisor did not confirm the boundary; launch nothing.
+            return 125
+    isolated_netns = int(boundary["netns_inode"])
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     uid, gid = int(spec["uid"]), int(spec["gid"])
     cwd = str(spec["cwd"])
@@ -812,6 +971,8 @@ def _reaper(spec_path: Path, event_fd: int, supervisor_pid: int) -> int:
         _set_limits(spec["limits"])
         if prctl(_PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 or prctl(_PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 1:
             raise OSError(ctypes.get_errno(), "no_new_privs unavailable")
+        if _netns_inode("self") != isolated_netns:
+            raise OSError("candidate is outside the confirmed network namespace")
         os.setgroups([])
         os.setresgid(gid, gid, gid)
         os.setresuid(uid, uid, uid)
@@ -863,11 +1024,12 @@ def _reaper(spec_path: Path, event_fd: int, supervisor_pid: int) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--reaper", nargs=3, metavar=("SPEC", "EVENT_FD", "SUPERVISOR_PID"))
+    parser.add_argument("--reaper", nargs=4,
+                        metavar=("SPEC", "EVENT_FD", "SUPERVISOR_PID", "GO_FD"))
     args = parser.parse_args(argv)
     if args.reaper:
-        spec, event_fd, supervisor_pid = args.reaper
-        return _reaper(Path(spec), int(event_fd), int(supervisor_pid))
+        spec, event_fd, supervisor_pid, go_fd = args.reaper
+        return _reaper(Path(spec), int(event_fd), int(supervisor_pid), int(go_fd))
     parser.error("--reaper is required")
     return 2
 
