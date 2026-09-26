@@ -1057,6 +1057,7 @@ def test_worker_enforces_deadline_without_controller_polling(tmp_path):
         cwd=tmp_path,
         deadline_seconds=1,
         max_descendants=4,
+        require_job_scope=os.name == "nt",
     ))
     process = provider._processes[job_id]
 
@@ -1141,21 +1142,33 @@ def test_provider_rehydrates_persisted_deadline_after_owner_restart(tmp_path):
         process_cleanup=cleanup,
         platform_name=os.name,
     )
-    deadline = time.monotonic() + 9
-    while (
-        (
-            reopened.poll(job_id).status is not JobStatus.CANCELLED
-            or process.poll() is None
-            or job_id in second._deadline_timers
-        )
-        and time.monotonic() < deadline
-    ):
-        time.sleep(.05)
+    expected = JobStatus.CANCELLATION_REQUESTED if os.name == "nt" else JobStatus.CANCELLED
+    try:
+        deadline = time.monotonic() + 9
+        while (
+            (reopened.poll(job_id).status is not expected or process.poll() is None)
+            and time.monotonic() < deadline
+        ):
+            time.sleep(.05)
 
-    assert reopened.poll(job_id).status is JobStatus.CANCELLED
-    assert "deadline" in reopened.poll(job_id).error
-    assert process.poll() is not None
-    assert job_id not in second._deadline_timers
+        assert reopened.poll(job_id).status is expected
+        assert "deadline" in reopened.poll(job_id).error
+        assert process.poll() is not None
+        if os.name == "nt":
+            # A raw taskkill return code cannot prove the tree empty. Repeat
+            # recovery after root exit: pending cleanup must not be discarded.
+            second._discard_deadline(job_id)
+            second._expire_deadline_owned(job_id)
+            assert reopened.poll(job_id).status is JobStatus.CANCELLATION_REQUESTED
+            assert job_id in second._deadline_timers
+        else:
+            assert job_id not in second._deadline_timers
+    finally:
+        first._discard_deadline(job_id)
+        second._discard_deadline(job_id)
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=3)
 
 
 def test_deadline_reaps_an_already_completed_process_instead_of_cancelling(tmp_path):

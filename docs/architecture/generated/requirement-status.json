@@ -1027,9 +1027,9 @@
     },
     {
       "checked": false,
-      "claim": "Graceful drain rejects invalid or non-finite deadlines. Process wait preserves an already recorded cancellation through cleanup instead of ordinary exit classification, retaining owned resources while cleanup is incomplete. A reaped POSIX root can complete cancellation only when its recorded root-owned group is observed absent without sending termination signals.",
+      "claim": "Graceful drain rejects invalid or non-finite deadlines. Process wait preserves an already recorded cancellation through cleanup instead of ordinary exit classification, retaining owned resources while cleanup is incomplete. A reaped POSIX root can complete cancellation only when its recorded root-owned group is observed absent without sending termination signals. Raw Windows taskkill success no longer asserts tree cleanup; native Job Object proof remains authoritative. Deadline retries preserve pending cancellation after root exit, including restored owners.",
       "requirement_id": "OPS-005",
-      "revision": 4,
+      "revision": 5,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "306f014c1643d824db16f30b04c5e02c66c2cb63e119893e5f22a82bb68743c3",
+    "ledger_sha256": "2819c0961d1974d9a314b97c66c944283d9d447ea439df0ed71dbb2b2a244f2b",
     "spec_sha256": "1d7da49c5910bcf0bd5099ef1858312a8491a0429a4df33895d8088942278e33"
   }
 }
