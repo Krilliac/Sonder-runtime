@@ -2,10 +2,8 @@
 
 Steps are small Python "debugger" shims launched through the production
 SubprocessJobProvider and SQLite job registry, so deadlines, cancellation,
-process-tree kill and output retention are the real ones. When lane A's
-``domain.debugging.templates`` is not importable (this lane before the
-merge), a minimal ``materialize`` double with the same contract is
-installed; the real module is always preferred.
+process-tree kill and output retention are the real ones, and so is the
+``domain.debugging.templates`` materialization the launcher binds with.
 """
 from __future__ import annotations
 
@@ -15,9 +13,8 @@ import stat
 import sys
 import textwrap
 import time
-import types
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -31,50 +28,6 @@ from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.debugging.ports import DebugPlan, DebugStep
 
 pytestmark = pytest.mark.integration
-
-
-def _install_templates_double() -> None:
-    """Lane A's ``ArgvTemplate``/``materialize`` contract, for a pre-merge tree only."""
-    import re
-
-    try:
-        import sonder_runtime.domain.debugging.templates  # noqa: F401
-        return
-    except ImportError:
-        pass
-    pattern = re.compile(r"\{(nonce|rundir|input|exe|sympath|imagepath|solibpath)\}")
-
-    @dataclass(frozen=True)
-    class ArgvTemplate:
-        engine: str
-        argv: tuple
-        display_argv: tuple
-        env: tuple
-        parser: str
-
-        def placeholders(self):
-            found = []
-            for item in self.argv + tuple(v for _, v in self.env):
-                for match in pattern.finditer(item):
-                    if match.group(1) not in found:
-                        found.append(match.group(1))
-            return tuple(found)
-
-    def materialize(template, bindings):
-        def sub(item):
-            return pattern.sub(lambda m: bindings[m.group(1)], item)
-        return tuple(sub(a) for a in template.argv), tuple((k, sub(v)) for k, v in template.env)
-
-    package = types.ModuleType("sonder_runtime.domain.debugging")
-    package.__path__ = []
-    module = types.ModuleType("sonder_runtime.domain.debugging.templates")
-    module.ArgvTemplate = ArgvTemplate
-    module.materialize = materialize
-    sys.modules.setdefault("sonder_runtime.domain.debugging", package)
-    sys.modules["sonder_runtime.domain.debugging.templates"] = module
-
-
-_install_templates_double()
 
 
 SHIM = textwrap.dedent('''

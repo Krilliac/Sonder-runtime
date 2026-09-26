@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import json
-import sys
-import types
 from types import SimpleNamespace
 
 import pytest
@@ -22,22 +20,16 @@ WIRE = {"object": "tool_inventory", "tools": [{"name": "gcc", "path": "~/bin/gcc
 
 @pytest.fixture
 def view_to_wire(monkeypatch):
-    """Lane A's serializer, or a stand-in while it is not merged here."""
+    """Record what reaches the host-tools serializer and answer a fixed wire."""
+    from sonder_runtime.domain.host_tools import model
+
     calls = []
 
     def fake(view):
         calls.append(view)
         return dict(WIRE, filtered_by=view.filtered_by)
 
-    try:
-        from sonder_runtime.domain.host_tools import model
-    except ImportError:
-        package = types.ModuleType("sonder_runtime.domain.host_tools")
-        package.__path__ = []
-        model = types.ModuleType("sonder_runtime.domain.host_tools.model")
-        monkeypatch.setitem(sys.modules, "sonder_runtime.domain.host_tools", package)
-        monkeypatch.setitem(sys.modules, "sonder_runtime.domain.host_tools.model", model)
-    monkeypatch.setattr(model, "view_to_wire", fake, raising=False)
+    monkeypatch.setattr(model, "view_to_wire", fake)
     return calls
 
 
