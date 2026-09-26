@@ -59,7 +59,8 @@ def test_gui_network_and_metadata_tools_are_never_executed():
 def test_brief_exclusions_are_single_sourced():
     excluded = {spec.name for spec in HOST_TOOL_SPECS if not spec.in_brief}
     assert excluded == set(BRIEF_EXCLUDED_NAMES)
-    assert {"ccache", "sccache", "xperf", "wpaexporter", "doxygen", "nssm", "clcache"} == excluded
+    assert {"ccache", "sccache", "xperf", "wpaexporter", "doxygen", "nssm", "clcache",
+            "sonder-infer"} == excluded
 
 
 def test_version_arguments_are_fixed_literals():

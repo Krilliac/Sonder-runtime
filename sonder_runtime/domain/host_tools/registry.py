@@ -214,6 +214,8 @@ HOST_TOOL_SPECS: tuple[ToolSpec, ...] = (
     _spec("erl", C.RUNTIME, None),
     _spec("elixir", C.RUNTIME, pattern=r"Elixir (\d+(?:\.\d+){1,3})"),
     _spec("go", C.RUNTIME, ("version",), pattern=r"go(\d+(?:\.\d+){1,3})"),
+    # Sonder Inference CLI; `version` is its fixed, non-interactive probe.
+    _spec("sonder-infer", C.RUNTIME, ("version",)),
     # -- containers / VMs ---------------------------------------------------
     _spec("docker", C.CONTAINER_VM),
     _spec("podman", C.CONTAINER_VM),

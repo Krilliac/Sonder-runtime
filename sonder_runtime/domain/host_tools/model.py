@@ -46,6 +46,7 @@ _VERSION_SCAN_CHARS = 2_000
 # set so the two can never drift.
 BRIEF_EXCLUDED_NAMES = frozenset({
     "ccache", "sccache", "xperf", "wpaexporter", "doxygen", "nssm", "clcache",
+    "sonder-infer",
 })
 
 
