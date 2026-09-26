@@ -76,15 +76,35 @@ def test_workbench_replays_attempts_sealed_before_attribution(tmp_path):
     assert replayed is not None
     assert trace.history("lane-1") == (legacy,)
 
-    # The next attempt is charged every uncharged lane turn, and its budget
-    # never expands past the legacy seal (model_calls=12).
+    # The legacy seal (model_calls=12) cannot hold the attributed request, so
+    # the run keeps charging attempts only: the next attempt is not billed the
+    # lane's lifetime turns and a successful attempt is not failed on budget.
     decision = observe_workbench_lane(
         trace, lane=_lane(tmp_path, attempt_id="attempt-2", used_steps=24, max_steps=32),
     )
     history = _reopen(tmp_path).history("lane-1")
-    assert history[-1].usage.model_calls == 24
+    assert [item.usage for item in history] == [StrategyUsage(attempts=1)] * 2
     assert _reopen(tmp_path).sealed_budget("lane-1").model_calls == 12
-    assert decision.action is StrategyAction.FAIL
+    assert decision.action is StrategyAction.PAUSE
+    assert decision.reason == "attempt_succeeded_await_completion_gate"
+
+
+def test_workbench_legacy_run_within_default_budget_charges_lane_total(tmp_path):
+    scratch = _trace(tmp_path, "scratch")
+    observe_workbench_lane(scratch, lane=_lane(tmp_path, used_steps=4))
+    legacy = replace(scratch.history("lane-1")[0], usage=StrategyUsage(attempts=1))
+    trace = _trace(tmp_path)
+    trace.record(legacy, budget=StrategyBudget(attempts=8),
+                 available_actions=(StrategyAction.INSPECT,), transport_replay_safe=False)
+
+    # A legacy seal that can hold the lane's whole step budget stays within
+    # it: the run total equals the lane counter, which max_steps bounds.
+    decision = observe_workbench_lane(
+        trace, lane=_lane(tmp_path, attempt_id="attempt-2", used_steps=7),
+    )
+    history = trace.history("lane-1")
+    assert [item.usage.model_calls for item in history] == [0, 7]
+    assert decision.action is StrategyAction.PAUSE
 
 
 def _run():
@@ -176,6 +196,20 @@ def test_autopilot_replays_attempts_sealed_before_attribution(tmp_path):
     assert observe_autopilot_task(trace, run=_run(), task=_task(host_receipt=receipt)) is not None
     assert trace.history("run-1") == (legacy,)
     assert trace.sealed_budget("run-1").tool_calls == 64
+
+    # Later attempts of the legacy run are charged attempts only, so the
+    # default tool and verifier budgets it was sealed with cannot exhaust.
+    wide = {"tools": [f"tool-{n}" for n in range(64)], "validation_attempted": True,
+            "validation_passed": True}
+    for number in range(2, 15):
+        decision = observe_autopilot_task(trace, run=_run(), task=_task(
+            id=f"task-{number:02d}", attempts=1, host_receipt=wide,
+        ))
+        assert decision.action is StrategyAction.PAUSE
+    history = trace.history("run-1")
+    assert len(history) == 14
+    assert all(item.usage == StrategyUsage(attempts=1) for item in history)
+    assert _metrics(history[-1].progress_after)["validation_passed"] == 1
 
 
 def test_autopilot_interrupted_retry_is_not_charged_the_previous_receipt(tmp_path):

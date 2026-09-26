@@ -52,6 +52,21 @@ def _within_sealed(trace, run_id: str, requested: StrategyBudget) -> StrategyBud
     })
 
 
+def _attributes_counters(trace, run_id: str, requested: StrategyBudget) -> bool:
+    """Whether a run's new attempts may be charged host counters.
+
+    A run sealed before counters were attributed carries the default budget,
+    which is narrower than the attributed request in the counted dimensions.
+    Its earlier attempts were charged nothing, so charging the next attempt
+    lifetime counters would bill it for work already observed and could
+    exhaust the narrowed legacy budget. Such a run keeps charging attempts
+    only; a run sealed under the attributed budget, or not sealed yet, is
+    charged its counters.
+    """
+    sealed = trace.sealed_budget(run_id)
+    return sealed is None or sealed.allows(requested)
+
+
 def _as_sealed(attempt: StrategyAttempt, history) -> StrategyAttempt:
     """Keep the charge and progress of an attempt that is already sealed.
 
@@ -209,6 +224,8 @@ def observe_workbench_lane(trace, *, lane: dict, memory_service=None):
     # run's total model_calls equals the durable lane counter. Turns from
     # attempts that were never observed (for example an interrupted attempt)
     # are charged to the next observed attempt rather than dropped.
+    step_budget = max(1, min(int(lane["max_steps"]), 64))
+    requested = StrategyBudget(attempts=step_budget, model_calls=step_budget)
     history = trace.history(run_id)
     prior = history
     for index, sealed in enumerate(history):
@@ -217,18 +234,19 @@ def observe_workbench_lane(trace, *, lane: dict, memory_service=None):
             break
     charged = sum(item.usage.model_calls for item in prior)
     used_steps = lane.get("used_steps")
-    model_calls = _counter(used_steps - charged) if type(used_steps) is int else 0
+    model_calls = (
+        _counter(used_steps - charged)
+        if type(used_steps) is int and _attributes_counters(trace, run_id, requested)
+        else 0
+    )
     attempt = _as_sealed(StrategyAttempt(
         run_id, attempt_id, signature,
         "uncertain" if uncertain else "succeeded" if status == "completed" else "failed",
         failure, before, after, StrategyUsage(attempts=1, model_calls=model_calls),
         model_route=str(lane.get("tier") or "")[:128],
     ), history)
-    step_budget = max(1, min(int(lane["max_steps"]), 64))
     decision = trace.record(
-        attempt, budget=_within_sealed(trace, run_id, StrategyBudget(
-            attempts=step_budget, model_calls=step_budget,
-        )),
+        attempt, budget=_within_sealed(trace, run_id, requested),
         available_actions=(StrategyAction.INSPECT, StrategyAction.REPAIR, StrategyAction.CRITIC),
         unresolved_effects=uncertain,
         policy_blocked=failure_class is FailureClass.PERMISSION_DENIED,
@@ -336,6 +354,15 @@ def observe_autopilot_task(trace, *, run: dict, task: dict, memory_service=None)
         ))
     before = ProgressVector(scope, tuple(before_metrics), complete=True)
     after = ProgressVector(scope, tuple(after_metrics), complete=status != "uncertain")
+    # Autopilot has no host tool or verifier budget of its own; these bounds
+    # are the per-attempt clamps times the attempt budget, so only the
+    # attempt dimension can exhaust the budget of a run charged counters.
+    requested = StrategyBudget(
+        attempts=50, model_calls=100, tool_calls=50 * _COUNTER_CLAMP,
+        verifier_calls=50, strategy_switches=50, replans=6,
+    )
+    if not _attributes_counters(trace, run_id, requested):
+        counted = {}
     tools = counted.get("tools")
     # The receipt lists the distinct host tools used, not every call, so
     # tool_calls is a lower bound on the task's calls. validation_attempted
@@ -364,14 +391,8 @@ def observe_autopilot_task(trace, *, run: dict, task: dict, memory_service=None)
         failure, before, after, usage, evidence,
         model_route=str(run.get("tier", ""))[:128],
     ), trace.history(run_id))
-    # Autopilot has no host tool or verifier budget of its own; these bounds
-    # are the per-attempt clamps times the attempt budget, so only the
-    # attempt dimension can exhaust an Autopilot strategy budget.
     decision = trace.record(
-        attempt, budget=_within_sealed(trace, run_id, StrategyBudget(
-            attempts=50, model_calls=100, tool_calls=50 * _COUNTER_CLAMP,
-            verifier_calls=50, strategy_switches=50, replans=6,
-        )),
+        attempt, budget=_within_sealed(trace, run_id, requested),
         available_actions=(StrategyAction.INSPECT, StrategyAction.REPLAN),
         unresolved_effects=status == "uncertain", transport_replay_safe=False,
     )
