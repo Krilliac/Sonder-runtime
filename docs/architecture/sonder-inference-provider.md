@@ -61,7 +61,9 @@ then the default. Invalid values (unknown tier keys, non-numeric timeouts,
 
 ## Consent
 
-- Loopback (`127.0.0.0/8`, `localhost`, `::1`) needs nothing.
+- Loopback (`127.0.0.1`, `localhost`, `::1`) needs nothing. Other loopback
+  aliases (`127.0.0.2`, ...) are refused with `InvalidInput` at configuration:
+  Inference's Host check (contract 2.3) would reject them with 403 anyway.
 - Any other host is refused with `Forbidden` before any byte is sent unless
   `SONDER_ALLOW_REMOTE_INFERENCE=1`, the URL is `https://`, an API key is set,
   and (for prompt-bearing calls) the `OperationContext` has `cloud_allowed`.
@@ -69,6 +71,27 @@ then the default. Invalid values (unknown tier keys, non-numeric timeouts,
   cloud, from sending prompts off-host through an env-only opt-in.
 - Health and identity probes apply the URL, TLS and key checks (they carry
   the key) but not the context flag (they carry no prompt).
+
+## Transport
+
+The gateway reuses the `OpenAICompatibleGateway` request path and error
+mapping, but injects its own GET and POST transports:
+
+- Environment and OS proxy settings are ignored (`ProxyHandler({})`, as for
+  Ollama). A loopback prompt therefore never leaves the host through a proxy,
+  and a stopped server shows up as "connection refused" (so the pre-send
+  classifier and the fallback work) rather than as a proxy's 502.
+- Redirects are never followed. A 3xx is returned (GET) or mapped to
+  `DependencyUnavailable` (POST); the `Authorization` header is never re-sent
+  to the `Location` host.
+- Each exchange (connect, headers and body) has one wall-clock budget: the
+  health probe's 2 s, or the send timeout capped by the operation deadline. A
+  watchdog shuts the socket down when the budget is spent, so a peer that
+  trickles bytes cannot stretch a per-read timeout into minutes.
+- Bodies are read with bounds (1 MiB for GET, 16 MiB for a chat completion,
+  16 KiB for an error document). A peer that does not speak HTTP (for
+  example an SSH banner on the port) is `DependencyUnavailable`, never a
+  crash and never "unreachable" for a send.
 
 ## Wire format
 
@@ -117,22 +140,32 @@ provider outage) is raised only when the request provably did not run:
 
 Everything else maps like the OpenAI-compatible gateway and is never
 "unreachable": 400/404/405/411/413/501 → `InvalidInput`; 401/403 →
-`Forbidden`; 429 and 503 `overloaded` → `CapacityExceeded`; 408, 500,
-503 `backend_unavailable` and connection resets → `DependencyUnavailable`;
-socket timeouts → `DeadlineExceeded`. Calls are single-attempt, and deadline
+`Forbidden` (401 `unauthorized` names `SONDER_INFERENCE_API_KEY`; 403
+`forbidden_host`/`forbidden_origin` names the base URL host instead, which a
+key cannot fix); 429 and 503 `overloaded` → `CapacityExceeded`; 3xx, 408,
+500, 503 `backend_unavailable`, malformed HTTP and connection resets →
+`DependencyUnavailable`; timeouts → `DeadlineExceeded`. Calls are single-attempt, and deadline
 and cancellation are checked before the health probe, before the send and
 after the response.
 
 Before each send the gateway consults cached health (`GET /v1/sonder/health`,
-timeout at most 2 s, reused for the TTL). The API major version must be 1,
-read from the health document and, when present, from the response body's
-`sonder.api_version` (the shared transport cannot read response headers). A
-mismatch raises plain `DependencyUnavailable` ("incompatible sonder-inference
-API"), which never triggers the fallback. Rejected credentials on health raise
-`Forbidden`.
+at most 2 s of wall-clock time, reused for the TTL). Concurrent callers that
+find the cache stale share one probe (single flight). The API major version
+must be 1, read from the health document's `api_version` (or, for an error
+document, its `sonder.api_version`) and, when present, from the response
+body's `sonder.api_version` (the shared transport cannot read response
+headers). Only a version that is present and differs is a mismatch; it raises
+plain `DependencyUnavailable` ("incompatible sonder-inference API"), which
+never triggers the fallback. A health answer of 503 `overloaded` is transient:
+it is reported as `degraded`, is never cached, and the request fails with
+`CapacityExceeded` (no fallback: the server is up). Rejected credentials or
+Host on health raise `Forbidden`.
 
-With Inference down and no fallback, the error names the base URL,
-`sonder-infer serve` and `SONDER_INFERENCE_FALLBACK`.
+With Inference down and no fallback, the error names the base URL and the
+short cause once, then `sonder-infer serve` and `SONDER_INFERENCE_FALLBACK`
+(which takes effect after a restart, because bindings are composed at
+startup). The health snapshot's `detail` holds only the short cause, for
+example `connection refused`.
 
 ## Fallback (fails closed)
 
@@ -146,10 +179,22 @@ Inference gateway in `PreSendFallbackGateway`:
   (`fallback_count`) and logged at WARNING with the correlation id.
 - Timeouts, 4xx, other 5xx, cancellation and capacity refusals propagate
   unchanged: no retry, no double execution.
-- Ollama keeps its own consent rules, so the fallback never reaches the cloud.
-- The fallback target is not a routable binding: `ProviderBindings.required_providers`
-  includes it (so it is constructed), `ProviderBindings.bound_providers` does
-  not, and tier dispatch only sees the wrapper.
+- The fallback call runs under a copy of the `OperationContext` with
+  `cloud_allowed=False` and `remote_ollama_allowed=False`. Ollama's own
+  consent gate therefore refuses a tier mapped to a hosted (`-cloud`) or
+  remote model with `Forbidden`, and the fallback never reaches the cloud,
+  whatever the original request allowed.
+- The WARNING states the primary's cause once. When the fallback itself
+  fails, the raised error keeps the fallback's class and code and appends
+  the primary's cause ("fallback to ollama after: ...").
+- The fallback target is not a routable binding.
+  `ProviderBindings.required_providers` and `bound_providers` both mean
+  "routable" and exclude it; `constructed_providers` adds fallback targets and
+  is what `build_model_gateway` constructs. Tier dispatch only sees the
+  wrapper, and bootstrap's strict local-alias gate
+  (`"ollama" in required_providers`) is unchanged by a fallback: a strict
+  local-alias request with a fallback-only Ollama fails with `InvalidInput`,
+  exactly as without the fallback.
 - `build_model_gateway(..., fallback_observer=...)` receives
   `(from_provider, to_provider, reason_code, context)` once per fallback,
   before the fallback send. This is the seam for a `route.changed` event,
@@ -186,15 +231,20 @@ These never generate.
 
 ## Doctor, preflight and discovery
 
-- `python -m sonder_runtime doctor` runs `sonder_inference` (skipped when no
-  binding uses it; ok when ready; warn for the mock backend or for an outage
-  that `SONDER_INFERENCE_FALLBACK=ollama` covers; fail when bound and
-  unreachable without a fallback, on an API version mismatch, or on invalid
-  bindings) and `sonder_inference_scope` (warn when bound: REPL, MCP,
+- `python -m sonder_runtime doctor` runs `sonder_inference`, whose verdict
+  follows `SonderInferenceGateway.readiness()`, i.e. what a request would
+  meet: skipped when no binding uses it; ok when ready; warn for the mock
+  backend, for a server at its connection limit, or for an outage (refused,
+  unresolvable, not ready, missing ready file, malformed answer) that
+  `SONDER_INFERENCE_FALLBACK=ollama` covers; fail for an outage without a
+  fallback and for anything no fallback can help (invalid `SONDER_INFERENCE_*`
+  values, a remote URL without consent, rejected credentials or Host, an API
+  version mismatch from health or from the ready file, invalid bindings) and `sonder_inference_scope` (warn when bound: REPL, MCP,
   autopilot and fleet generate through the legacy Ollama path regardless of
   bindings). `--skip-inference` removes both.
 - `serve`/`preflight` add a non-required `sonder_inference` check only; startup
-  never blocks on Inference.
+  never blocks on Inference, and a check that fails unexpectedly is reported
+  as a failed non-required check rather than raised.
 - `environment_probe` lists `sonder-infer` as a specialist tool and
   `toolchain_policy` allows the fixed argument `version` for it.
 
@@ -224,12 +274,6 @@ meaning for Inference-bound tiers.
 - open: whether Inference includes `sonder.api_version` in every JSON body
   (the critique's correction); the gateway checks it when present and relies
   on the health document otherwise.
-- open: the bootstrap composition root computes
-  `strict_alias_provider_available` from `required_providers`, which now
-  includes a fallback target; the dispatcher only sees bound providers, so a
-  strict-alias request with a fallback-only Ollama fails with `InvalidInput`
-  instead of reaching Ollama. Switching bootstrap to `bound_providers` belongs
-  to the bootstrap owner.
 - open: the `fallback_observer` seam is not wired by bootstrap on this
   branch; emitting `route.changed` from it belongs to the chat-telemetry lane.
 - open: SECURITY.md rows for the telemetry and ecosystem routes (contract

@@ -114,14 +114,15 @@ class ProviderBindings:
 
     @property
     def required_providers(self) -> frozenset[str]:
-        """Every provider composition must construct, fallback targets included.
+        """Providers a request can be routed to directly (bound providers).
 
-        Callers that need only the providers a request can be *routed* to
-        directly (for example the strict local-alias gate) use
-        :attr:`bound_providers`: a fallback target is reachable only through
-        its primary's pre-send fallback, never by binding.
+        This is the routing meaning other layers rely on (for example the
+        strict local-alias gate asks whether ``ollama`` is here).  A fallback
+        target is *not* routable: it is reachable only through its primary's
+        pre-send fallback, so it appears in :attr:`constructed_providers`
+        and never here.
         """
-        return frozenset((*self.bound_providers, *self.fallbacks.values()))
+        return self.bound_providers
 
     @property
     def bound_providers(self) -> frozenset[str]:
@@ -131,6 +132,11 @@ class ProviderBindings:
             *self.tier_providers.values(),
             self.embedding_provider,
         ))
+
+    @property
+    def constructed_providers(self) -> frozenset[str]:
+        """Every provider composition must build: bound plus fallback targets."""
+        return frozenset((*self.bound_providers, *self.fallbacks.values()))
 
     def status_projection(self) -> dict[str, object]:
         return {

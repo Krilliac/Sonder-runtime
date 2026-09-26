@@ -96,15 +96,19 @@ def test_inference_fallback_is_parsed_and_required_but_not_bound():
     })
     assert dict(bindings.fallbacks) == {"sonder_inference": "ollama"}
     assert bindings.required_providers == frozenset({"sonder_inference", "ollama"})
+    assert bindings.constructed_providers == frozenset({"sonder_inference", "ollama"})
     assert bindings.status_projection()["fallbacks"] == {"sonder_inference": "ollama"}
 
     only_inference = provider_bindings_from_env({
         "SONDER_MODEL_BACKEND": "sonder-inference",
         "SONDER_INFERENCE_FALLBACK": "ollama",
     })
-    # The fallback target is constructed, but it is not a routable binding.
+    # The fallback target is constructed, but it is not a routable binding:
+    # required_providers keeps its routing meaning (bootstrap's strict
+    # local-alias gate reads it), so it must not grow with the fallback.
     assert only_inference.bound_providers == frozenset({"sonder_inference"})
-    assert only_inference.required_providers == frozenset({"sonder_inference", "ollama"})
+    assert only_inference.required_providers == frozenset({"sonder_inference"})
+    assert only_inference.constructed_providers == frozenset({"sonder_inference", "ollama"})
 
 
 @pytest.mark.parametrize("value", ["", "none", "NONE"])

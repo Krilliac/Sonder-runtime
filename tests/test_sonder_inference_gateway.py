@@ -428,12 +428,25 @@ def test_remote_endpoint_with_full_consent_is_used():
     assert status["base_url"] == "https://gpu.example:11437"
 
 
-@pytest.mark.parametrize("url", ["http://127.0.0.1:1", "http://localhost:2", "http://[::1]:3",
-                                 "http://127.1.2.3:4"])
+@pytest.mark.parametrize("url", ["http://127.0.0.1:1", "http://localhost:2", "http://[::1]:3"])
 def test_loopback_needs_no_consent(url):
     fake = FakeInference()
     _gateway(fake, base_url=url).generate(ModelRequest(prompt="x", tier="fast"), _ctx())
     assert len(fake.posts) == 1
+
+
+@pytest.mark.parametrize("url", ["http://127.1.2.3:4", "http://127.0.0.2:11437"])
+def test_loopback_aliases_inference_would_refuse_are_configuration_errors(url):
+    # Inference's Host check (contract 2.3) accepts only 127.0.0.1, localhost
+    # and [::1]; any other loopback alias would pass consent and then fail
+    # every request with a misleading 403.
+    with pytest.raises(InvalidInput, match="127.0.0.1, localhost or \\[::1\\]"):
+        SonderInferenceConfig(base_url=url)
+
+
+def test_ipv6_loopback_spellings_normalize_to_one_host():
+    config = SonderInferenceConfig(base_url="http://[0:0:0:0:0:0:0:1]:11437")
+    assert config.base_url == "http://[::1]:11437" and config.loopback
 
 
 def test_bind_all_addresses_are_rewritten_to_loopback():
@@ -746,3 +759,360 @@ def test_api_key_is_a_redacted_secret_and_never_logged(monkeypatch, caplog):
                 ModelRequest(prompt="x", tier="fast"), _ctx(),
             )
     assert "sk-inference-secret-value" not in caplog.text
+
+
+# -- transport hardening: proxies, redirects, garbage, trickle, overload ----------
+
+
+def _serve_raw(handler_fn):
+    """Start a raw TCP listener; ``handler_fn(conn)`` answers each connection."""
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(16)
+    stop = threading.Event()
+
+    def loop():
+        listener.settimeout(0.1)
+        while not stop.is_set():
+            try:
+                conn, _ = listener.accept()
+            except (TimeoutError, OSError):
+                continue
+            threading.Thread(target=_answer, args=(conn,), daemon=True).start()
+
+    def _answer(conn):
+        try:
+            handler_fn(conn)
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    thread = threading.Thread(target=loop, daemon=True)
+    thread.start()
+
+    def close():
+        stop.set()
+        thread.join(2)
+        listener.close()
+
+    return listener.getsockname()[1], close
+
+
+def _read_request(conn) -> bytes:
+    conn.settimeout(2)
+    data = b""
+    while b"\r\n\r\n" not in data:
+        chunk = conn.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+    head, _, rest = data.partition(b"\r\n\r\n")
+    length = 0
+    for line in head.split(b"\r\n")[1:]:
+        name, _, value = line.partition(b":")
+        if name.strip().lower() == b"content-length":
+            length = int(value.strip())
+    while len(rest) < length:
+        chunk = conn.recv(4096)
+        if not chunk:
+            break
+        rest += chunk
+    return head + b"\r\n\r\n" + rest
+
+
+def _http_response(status, body: dict, extra=b"") -> bytes:
+    raw = json.dumps(body).encode()
+    return (b"HTTP/1.1 %d X\r\nContent-Type: application/json\r\nContent-Length: %d\r\n"
+            b"Connection: close\r\n%s\r\n" % (status, len(raw), extra)) + raw
+
+
+@pytest.fixture
+def recording_proxy(monkeypatch):
+    """A 'proxy' that records every request and answers as if it were Inference."""
+    seen = []
+
+    def handle(conn):
+        request = _read_request(conn)
+        seen.append(request)
+        body = _health() if b"/v1/sonder/health" in request.split(b"\r\n")[0] else _chat("via proxy")
+        conn.sendall(_http_response(200, body))
+
+    port, close = _serve_raw(handle)
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    for name in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"):
+        monkeypatch.setenv(name, "http://127.0.0.1:%d" % port)
+    yield seen
+    close()
+
+
+def _refused_port() -> int:
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    return port
+
+
+def test_environment_proxies_never_see_inference_traffic(recording_proxy, loopback_server):
+    # Down server: without the fix the proxy answered for it, leaking the
+    # prompt and key and hiding the outage from the pre-send classifier.
+    down = SonderInferenceGateway(SonderInferenceConfig(
+        base_url="http://127.0.0.1:%d" % _refused_port(), api_key="sk-secret-key",
+    ))
+    with pytest.raises(SonderInferenceUnreachable):
+        down.generate(ModelRequest(prompt="PRIVATE PROMPT", tier="fast"), _ctx())
+    # Live server: the request goes straight to it.
+    server, handler = loopback_server
+    handler.routes.update({
+        "/v1/sonder/health": (200, _health()),
+        "/v1/chat/completions": (200, _chat("direct")),
+    })
+    live = SonderInferenceGateway(SonderInferenceConfig(
+        base_url="http://127.0.0.1:%d" % server.server_address[1], api_key="sk-secret-key",
+    ))
+    assert live.generate(ModelRequest(prompt="PRIVATE PROMPT", tier="fast"), _ctx()).text == "direct"
+    assert recording_proxy == []
+
+
+def test_redirects_are_never_followed_and_never_carry_the_key(loopback_server):
+    stolen = []
+
+    def thief(conn):
+        stolen.append(_read_request(conn))
+        conn.sendall(_http_response(200, _health()))
+
+    thief_port, close = _serve_raw(thief)
+    try:
+        server, handler = loopback_server
+        target = "http://127.0.0.1:%d/steal" % thief_port
+
+        class Redirecting(handler):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", target)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            do_POST = do_GET
+
+        server.RequestHandlerClass = Redirecting
+        gateway = SonderInferenceGateway(SonderInferenceConfig(
+            base_url="http://127.0.0.1:%d" % server.server_address[1], api_key="sk-secret-key",
+        ))
+        snapshot = gateway.health(refresh=True)
+        assert snapshot.state == "unavailable" and "302" in snapshot.detail
+        post_only = SonderInferenceGateway(
+            SonderInferenceConfig(base_url="http://127.0.0.1:%d" % server.server_address[1],
+                                  api_key="sk-secret-key"),
+            get_transport=FakeInference().get,
+        )
+        with pytest.raises(DependencyUnavailable, match="HTTP 302") as info:
+            post_only.generate(ModelRequest(prompt="x", tier="fast"), _ctx())
+        assert not isinstance(info.value, SonderInferenceUnreachable)
+        assert stolen == []
+    finally:
+        close()
+
+
+def test_a_non_http_peer_is_a_reported_failure_not_a_crash():
+    def banner(conn):
+        # Consume the request first so the close is orderly (a close with
+        # unread input would RST the socket and turn this into a reset).
+        _read_request(conn)
+        conn.sendall(b"SSH-2.0-OpenSSH_9.6\r\n")
+
+    port, close = _serve_raw(banner)
+    try:
+        config = SonderInferenceConfig(base_url="http://127.0.0.1:%d" % port, health_ttl_seconds=0)
+        gateway = SonderInferenceGateway(config)
+        status = gateway.provider_status()["sonder_inference"]
+        assert status["state"] == "unavailable" and "malformed HTTP" in status["detail"]
+        assert gateway.capability_health().healthy is False
+        assert gateway.readiness().kind == "unreachable"
+        with pytest.raises(DependencyUnavailable):
+            gateway.generate(ModelRequest(prompt="x", tier="fast"), _ctx())
+        # The send itself (health scripted ready) is a dependency failure,
+        # never "unreachable": bytes reached the peer.
+        send_only = SonderInferenceGateway(config, get_transport=FakeInference().get)
+        with pytest.raises(DependencyUnavailable, match="malformed HTTP") as info:
+            send_only.generate(ModelRequest(prompt="x", tier="fast"), _ctx())
+        assert not isinstance(info.value, SonderInferenceUnreachable)
+    finally:
+        close()
+
+
+def test_health_probe_is_bounded_by_wall_clock_not_per_read():
+    import time as _time
+
+    def trickle(conn):
+        _read_request(conn)
+        for byte in _http_response(200, _health()):
+            conn.sendall(bytes([byte]))
+            _time.sleep(0.05)
+
+    port, close = _serve_raw(trickle)
+    try:
+        gateway = SonderInferenceGateway(SonderInferenceConfig(base_url="http://127.0.0.1:%d" % port))
+        started = _time.monotonic()
+        snapshot = gateway.health(timeout=0.5, refresh=True)
+        elapsed = _time.monotonic() - started
+        assert snapshot.state == "unavailable" and "timed out" in snapshot.detail
+        assert elapsed < 1.5, elapsed
+
+        # The send is bounded by the operation deadline the same way.
+        send_only = SonderInferenceGateway(
+            SonderInferenceConfig(base_url="http://127.0.0.1:%d" % port),
+            get_transport=FakeInference().get,
+        )
+        started = _time.monotonic()
+        with pytest.raises(DeadlineExceeded):
+            send_only.generate(ModelRequest(prompt="x", tier="fast"), _ctx(timeout=0.6))
+        assert _time.monotonic() - started < 1.6
+    finally:
+        close()
+
+
+OVERLOADED = {"error": {"message": "too many connections", "type": "service_unavailable",
+                        "code": "overloaded", "param": None}, "sonder": {"api_version": 1}}
+
+
+def test_overloaded_health_is_transient_capacity_not_an_api_mismatch():
+    clock = Clock()
+    fake = FakeInference(health=OVERLOADED, health_status=503)
+    gateway = _gateway(fake, clock=clock, health_ttl_seconds=5.0)
+    snapshot = gateway.health()
+    assert snapshot.state == "degraded" and snapshot.overloaded and not snapshot.api_mismatch
+    assert "incompatible" not in snapshot.detail
+    with pytest.raises(CapacityExceeded) as info:
+        gateway.generate(ModelRequest(prompt="x", tier="fast"), _ctx())
+    assert not isinstance(info.value, SonderInferenceUnreachable)
+    assert gateway.readiness().kind == "overloaded"
+    status = gateway.provider_status()["sonder_inference"]
+    assert status["state"] == "degraded" and status["healthy"] is False
+    # Load cleared: the very next call re-probes (overload is never cached).
+    fake.health, fake.health_status = _health(), 200
+    assert gateway.generate(ModelRequest(prompt="x", tier="fast"), _ctx()).text == "hello"
+    assert fake.posts
+
+
+def test_real_overloaded_body_is_not_cached_as_a_version_mismatch(loopback_server):
+    server, handler = loopback_server
+    handler.routes.update({
+        "/v1/sonder/health": (503, OVERLOADED),
+        "/v1/chat/completions": (200, _chat("after load")),
+    })
+    gateway = SonderInferenceGateway(SonderInferenceConfig(
+        base_url="http://127.0.0.1:%d" % server.server_address[1],
+    ))
+    with pytest.raises(CapacityExceeded):
+        gateway.generate(ModelRequest(prompt="x", tier="fast"), _ctx())
+    handler.routes["/v1/sonder/health"] = (200, _health())
+    assert gateway.generate(ModelRequest(prompt="x", tier="fast"), _ctx()).text == "after load"
+
+
+@pytest.mark.parametrize("document,mismatch", [
+    ({"error": {"code": "internal_error"}}, False),
+    ({"error": {"code": "x"}, "sonder": {"api_version": 2}}, True),
+    ({**_health(), "api_version": 2}, True),
+    ({"status": "ready"}, False),
+])
+def test_version_mismatch_needs_a_reported_version(document, mismatch):
+    fake = FakeInference(health=document, health_status=503 if "error" in document else 200)
+    snapshot = _gateway(fake).health()
+    assert snapshot.api_mismatch is mismatch
+    assert snapshot.state != "ready"
+
+
+def test_concurrent_stale_callers_share_one_health_probe():
+    import time as _time
+
+    fake = FakeInference()
+    real_get = fake.get
+
+    def slow_get(url, headers, timeout):
+        _time.sleep(0.2)
+        return real_get(url, headers, timeout)
+
+    gateway = SonderInferenceGateway(
+        SonderInferenceConfig(health_ttl_seconds=0), transport=fake.post, get_transport=slow_get,
+    )
+    barrier = threading.Barrier(8)
+    states = []
+
+    def worker():
+        barrier.wait()
+        states.append(gateway.health().state)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(5)
+    assert states == ["ready"] * 8
+    assert len(fake.gets) == 1
+
+
+@pytest.mark.parametrize("code,needle,absent", [
+    ("forbidden_host", "127.0.0.1, localhost or [::1]", "SONDER_INFERENCE_API_KEY"),
+    ("forbidden_origin", "Origin", "SONDER_INFERENCE_API_KEY"),
+    ("unauthorized", "SONDER_INFERENCE_API_KEY", "localhost or"),
+])
+def test_403_and_401_name_the_actual_problem(code, needle, absent):
+    status = 401 if code == "unauthorized" else 403
+    fake = FakeInference(chat=lambda url, *a: _http_error(url, status, code))
+    with pytest.raises(Forbidden) as info:
+        _gateway(fake).generate(ModelRequest(prompt="x", tier="fast"), _ctx())
+    assert needle in str(info.value) and absent not in str(info.value)
+    assert code in str(info.value)
+
+    health = FakeInference(health={"error": {"code": code, "message": "no"}}, health_status=status)
+    snapshot = _gateway(health).health()
+    assert code in snapshot.detail and needle in snapshot.detail
+    assert snapshot.host_rejected is (code != "unauthorized")
+    with pytest.raises(Forbidden, match=code):
+        _gateway(health).generate(ModelRequest(prompt="x", tier="fast"), _ctx())
+
+
+def test_down_server_message_is_stated_once():
+    gateway = SonderInferenceGateway(SonderInferenceConfig(
+        base_url="http://127.0.0.1:%d" % _refused_port(),
+    ))
+    with pytest.raises(SonderInferenceUnreachable) as info:
+        gateway.generate(ModelRequest(prompt="x", tier="fast"), _ctx())
+    message = str(info.value)
+    assert message.count("not reachable") == 1 and message.count("sonder-infer serve") == 1
+    assert "restart" in message
+    assert info.value.reason == "connection refused"
+    assert gateway.health().detail == "connection refused"
+    assert gateway.provider_status()["sonder_inference"]["detail"] == "connection refused"
+
+
+def test_inference_metrics_have_their_own_bounded_backend_label():
+    from sonder_runtime.adapters.inference.telemetry import from_openai_compatible
+    from sonder_runtime.platform.metrics import MetricsRegistry
+
+    class Recorder:
+        def __init__(self):
+            self.labels_seen = []
+
+        def labels(self, **labels):
+            self.labels_seen.append(labels["backend"])
+            return self
+
+        def observe(self, _value):
+            return None
+
+        inc = observe
+
+    registry = MetricsRegistry(enabled=False)
+    recorder = Recorder()
+    for name in ("model_backend_phase_duration_seconds", "model_token_throughput_per_second",
+                 "model_prompt_tokens", "model_load_states_total"):
+        setattr(registry, name, recorder)
+    registry.observe_inference("sonder_inference", from_openai_compatible(_chat()))
+    registry.observe_inference("unbounded-name", from_openai_compatible(_chat()))
+    assert recorder.labels_seen
+    assert set(recorder.labels_seen) == {"sonder_inference", "other"}

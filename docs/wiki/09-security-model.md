@@ -23,8 +23,10 @@ of the model — an uncensored or "abliterated" model changes what it will
   host is refused before a byte is sent unless `SONDER_ALLOW_REMOTE_INFERENCE=1`,
   the URL is `https://`, `SONDER_INFERENCE_API_KEY` is set (it is redacted
   from logs), and the operation context allows cloud. The optional
-  `SONDER_INFERENCE_FALLBACK=ollama` reaches only local Ollama under Ollama's
-  own consent rules, so it cannot widen where a prompt goes
+  `SONDER_INFERENCE_FALLBACK=ollama` reaches only local Ollama: the fallback
+  call runs with cloud and remote-Ollama consent withdrawn, so a tier mapped
+  to a hosted model is refused, and it cannot widen where a prompt goes.
+  Inference traffic ignores proxy settings and never follows redirects
   ([provider reference](../architecture/sonder-inference-provider.md)).
 - **`SONDER_ALLOW_PRIVATE_COT` takes a second, separate act.** It is the one
   consent gate an environment variable cannot open by itself:

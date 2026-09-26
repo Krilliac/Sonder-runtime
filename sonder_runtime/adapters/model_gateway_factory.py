@@ -66,12 +66,12 @@ def build_model_gateway(
     else:
         factories = dict(provider_factories)
 
-    missing = sorted(selected.required_providers - set(factories))
+    missing = sorted(selected.constructed_providers - set(factories))
     if missing:
         raise InvalidInput("missing provider factories: %s" % ", ".join(missing))
     constructed = {
         provider: factories[provider]()
-        for provider in sorted(selected.required_providers)
+        for provider in sorted(selected.constructed_providers)
     }
     gateways = {
         provider: constructed[provider]

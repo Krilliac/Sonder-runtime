@@ -177,8 +177,19 @@ def _check_sonder_inference() -> CheckResult | None:
 
     Startup never blocks on Inference: the server may legitimately start
     after the runtime, and a request that finds it down fails closed (or
-    falls back) at call time.  This only makes the state visible.
+    falls back) at call time.  This only makes the state visible, and it
+    never raises: any failure of the check itself is reported, not thrown.
     """
+    try:
+        return _sonder_inference_result()
+    except Exception as exc:  # noqa: BLE001 - preflight never blocks on Inference
+        return CheckResult(
+            "sonder_inference", False, False,
+            f"check failed: {type(exc).__name__}: {exc}"[:240],
+        )
+
+
+def _sonder_inference_result() -> CheckResult | None:
     from sonder_runtime.adapters.provider_bindings import provider_bindings_from_env
 
     try:
@@ -191,15 +202,16 @@ def _check_sonder_inference() -> CheckResult | None:
         SonderInferenceGateway,
     )
 
-    entry = SonderInferenceGateway().provider_status()["sonder_inference"]
-    where = entry.get("base_url") or "unconfigured endpoint"
-    ready = entry.get("state") == "ready"
-    detail = f"{where}: {entry.get('detail') or entry.get('state')}"
-    if ready and entry.get("synthetic") is True:
+    readiness = SonderInferenceGateway().readiness()
+    ready = readiness.kind == "ready"
+    detail = readiness.detail
+    if ready and readiness.synthetic:
         detail += " (MOCK backend: synthetic output)"
     fallback = bindings.fallbacks.get("sonder_inference")
-    if not ready and fallback:
+    if readiness.kind == "unreachable" and fallback:
         detail += f"; requests it never receives fall back to {fallback}"
+    elif readiness.kind == "misconfigured":
+        detail += "; every request fails until this is fixed"
     return CheckResult("sonder_inference", ready, False, detail)
 
 

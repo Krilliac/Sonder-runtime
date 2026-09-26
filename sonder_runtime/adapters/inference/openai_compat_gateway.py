@@ -21,6 +21,7 @@ Configuration (resolved lazily at call time, never at import/construction):
 """
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import socket
@@ -77,6 +78,13 @@ _DEFAULT_TIMEOUT = 300
 # only ever inspected for a machine-readable code, never stored or relayed.
 ERROR_BODY_LIMIT = 16_384
 GET_BODY_LIMIT = 1_048_576
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirect())
 
 # Hook shapes (all optional, all additive; see OpenAICompatibleGateway).
 ExtraHeaders = Callable[[OperationContext], Mapping[str, str]]
@@ -454,6 +462,16 @@ class OpenAICompatibleGateway:
             if classified is not None:
                 raise classified from exc
             raise DependencyUnavailable("cannot reach endpoint: %s" % reason) from exc
+        except http.client.HTTPException as exc:
+            # A peer that is not speaking HTTP (or cut the response short) is
+            # a dependency failure, never "unreachable": bytes were sent.
+            logger.warning(
+                f"OpenAI-compatible endpoint sent a malformed HTTP response: "
+                f"url={url!r}, error={type(exc).__name__}"
+            )
+            raise DependencyUnavailable(
+                "endpoint sent a malformed HTTP response (%s)" % type(exc).__name__
+            ) from exc
         except OSError as exc:
             classified = self._classified_connect_error(exc)
             if classified is not None:
@@ -501,6 +519,10 @@ class OpenAICompatibleGateway:
             if classified is not None:
                 raise classified from exc
             raise DependencyUnavailable("cannot reach endpoint: %s" % reason) from exc
+        except http.client.HTTPException as exc:
+            raise DependencyUnavailable(
+                "endpoint sent a malformed HTTP response (%s)" % type(exc).__name__
+            ) from exc
         except OSError as exc:
             classified = self._classified_connect_error(exc)
             if classified is not None:
@@ -510,15 +532,17 @@ class OpenAICompatibleGateway:
             raise DependencyUnavailable("endpoint returned an oversized or invalid body")
         try:
             value = json.loads(bytes(body).decode("utf-8")) if body else None
-        except (UnicodeDecodeError, ValueError):
+        except (UnicodeDecodeError, ValueError, RecursionError):
             value = None
         return int(status), value if isinstance(value, dict) else None
 
     @staticmethod
     def _default_get_transport(url: str, headers: dict, timeout: float) -> tuple[int, bytes]:
+        # Never follow a redirect: it would re-send the Authorization header
+        # to whatever host the Location names.  A 3xx is returned as-is.
         req = urllib.request.Request(url, headers=headers, method="GET")
         try:
-            with urllib.request.urlopen(req, timeout=timeout or _DEFAULT_TIMEOUT) as resp:
+            with _NO_REDIRECT_OPENER.open(req, timeout=timeout or _DEFAULT_TIMEOUT) as resp:
                 return int(resp.status), resp.read(GET_BODY_LIMIT + 1)
         except urllib.error.HTTPError as exc:
             try:

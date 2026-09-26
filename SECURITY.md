@@ -242,15 +242,22 @@ See [HTTP API & lifecycle](docs/wiki/05-http-api-and-lifecycle.md).
 
 A provider binding to `sonder-inference` sends prompts to a `sonder-infer
 serve` process over HTTP. A loopback base URL (`127.0.0.1`, `localhost`,
-`::1`; `0.0.0.0` and `::` are rewritten to loopback) needs no consent. Any
+`::1`; `0.0.0.0` and `::` are rewritten to loopback; other loopback aliases
+such as `127.0.0.2` are refused because Inference's Host check rejects them)
+needs no consent. Any
 other base URL is refused before a byte is sent unless all of these hold:
 `SONDER_ALLOW_REMOTE_INFERENCE=1`, an `https://` URL, a
 `SONDER_INFERENCE_API_KEY`, and an operation context that allows prompts to
 leave the machine. Status probes (health, identity) apply the same URL,
 TLS and key checks because they carry the key. The key is in the log redaction
-set, is never logged, and is sent only as `Authorization: Bearer`. `SONDER_INFERENCE_FALLBACK=ollama` sends a request
-to local Ollama only when Inference provably never received it, and Ollama's
-own consent rules still apply, so the fallback cannot widen where a prompt
+set, is never logged, and is sent only as `Authorization: Bearer`. Inference
+traffic ignores `HTTP(S)_PROXY`/`ALL_PROXY` and OS proxy settings, never
+follows a redirect (a 3xx is an error, so the key is never re-sent to another
+host), and bounds every exchange by one wall-clock budget. `SONDER_INFERENCE_FALLBACK=ollama` sends a request
+to local Ollama only when Inference provably never received it. The fallback
+call runs with cloud and remote-Ollama consent withdrawn, so Ollama's own
+consent gate refuses a hosted (`-cloud`) or remote target even when the
+original request allowed cloud; the fallback cannot widen where a prompt
 goes. See [the provider reference](docs/architecture/sonder-inference-provider.md).
 
 ## Supported versions

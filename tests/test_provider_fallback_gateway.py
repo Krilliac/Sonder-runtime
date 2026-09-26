@@ -270,3 +270,102 @@ def test_identity_bound_runtime_rejects_a_fallback_configuration(tmp_path):
             route_identity_for=lambda route: None,
             route_bindings={role: RoleBinding(role, "sonder_inference", "m")},
         )
+
+
+# -- the fallback never widens where a prompt goes -------------------------------
+
+
+def test_fallback_never_reaches_a_cloud_model_even_with_cloud_consent(monkeypatch):
+    from sonder_runtime.adapters.inference.ollama_gateway import OllamaGateway
+    from sonder_runtime.application.ports.model_target import ModelTarget
+    from sonder_runtime.domain.common.errors import Forbidden
+
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+    sent = []
+
+    def resolver(tier, _):
+        # Operator policy maps this tier to a hosted Ollama "-cloud" model.
+        return ModelTarget(model="gpt-oss:120b-cloud", cloud=True, tier_label="reasoning")
+
+    def factory(*args, **kwargs):
+        def generate(*a, **k):
+            sent.append((args, kwargs))
+            return {"message": {"role": "assistant", "content": "cloud"}, "done_reason": "stop"}
+        return generate
+
+    ollama = OllamaGateway(target_resolver=resolver, generate_factory=factory)
+    primary, posts = _primary(get_error=REFUSED)
+    gateway = PreSendFallbackGateway(primary, fallback=ollama)
+    with pytest.raises(Forbidden) as info:
+        gateway.generate(ModelRequest(prompt="PRIVATE", tier="reasoning"), _ctx(cloud_allowed=True))
+    assert sent == [] and posts == []
+    # The refusal also says why the fallback was attempted at all.
+    assert "connection refused" in str(info.value)
+
+
+def test_fallback_runs_under_a_local_only_context():
+    primary, _ = _primary(get_error=REFUSED)
+    seen = []
+
+    class Recording(FakeOllama):
+        def generate(self, request, context):
+            seen.append(context)
+            return super().generate(request, context)
+
+    gateway = PreSendFallbackGateway(primary, fallback=Recording())
+    context = _ctx(cloud_allowed=True, remote_ollama_allowed=True)
+    gateway.generate(ModelRequest(prompt="x", tier="fast"), context)
+    (narrowed,) = seen
+    assert narrowed.cloud_allowed is False and narrowed.remote_ollama_allowed is False
+    assert (narrowed.correlation_id, narrowed.deadline_monotonic, narrowed.cancellation) == (
+        context.correlation_id, context.deadline_monotonic, context.cancellation,
+    )
+
+
+def test_failed_fallback_reports_both_causes_and_keeps_the_error_class():
+    primary, _ = _primary(get_error=REFUSED)
+
+    class DownOllama(FakeOllama):
+        def generate(self, request, context):
+            raise DependencyUnavailable("Ollama unreachable at http://127.0.0.1:11434")
+
+    gateway = PreSendFallbackGateway(primary, fallback=DownOllama())
+    with pytest.raises(DependencyUnavailable) as info:
+        gateway.generate(ModelRequest(prompt="x", tier="fast"), _ctx())
+    message = str(info.value)
+    assert "Ollama unreachable" in message
+    assert "fallback to ollama after" in message and "connection refused" in message
+    assert not isinstance(info.value, SonderInferenceUnreachable)
+
+
+def test_fallback_warning_states_the_cause_once(caplog):
+    primary, _ = _primary(get_error=REFUSED)
+    gateway = PreSendFallbackGateway(primary, fallback=FakeOllama())
+    with caplog.at_level(logging.WARNING):
+        gateway.generate(ModelRequest(prompt="x", tier="fast"), _ctx())
+    (warning,) = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
+                  and "provider fallback" in r.getMessage()]
+    assert warning.count("not reachable") == 1
+    assert "set SONDER_INFERENCE_FALLBACK" not in warning
+
+
+@pytest.mark.parametrize("fallback", ["", "ollama"])
+def test_strict_local_alias_is_refused_with_or_without_the_fallback(fallback):
+    # Mirrors bootstrap/app.py: the strict-alias gate reads required_providers.
+    from sonder_runtime.application.chat.handle_chat import ChatCommand, ChatService
+
+    bindings = provider_bindings_from_env({
+        "SONDER_MODEL_BACKEND": "sonder-inference", "SONDER_INFERENCE_FALLBACK": fallback,
+    })
+    primary, posts = _primary()
+    ollama = FakeOllama()
+    gateway = build_model_gateway(
+        bindings, {"sonder_inference": lambda: primary, "ollama": lambda: ollama},
+    )
+    service = ChatService(
+        gateway, chat_default_tier=lambda: "sonder",
+        strict_alias_provider_available="ollama" in bindings.required_providers,
+    )
+    with pytest.raises(InvalidInput, match="strict chat alias"):
+        service.complete(ChatCommand(content="hi", tier="sonder"), _ctx())
+    assert posts == [] and ollama.calls == []

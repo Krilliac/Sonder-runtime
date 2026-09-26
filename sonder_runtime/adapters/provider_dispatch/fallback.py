@@ -8,11 +8,17 @@ else.  Timeouts, 4xx, other 5xx, cancellation and capacity refusals propagate
 unchanged, because the primary may have run the request and a second
 execution would double any effect and any metered cost.
 
-The fallback target keeps its own consent rules (the Ollama gateway never
-sends to the cloud), so this wrapper can never widen where a prompt goes.
+The fallback call runs under a *narrowed* OperationContext: cloud and
+remote-Ollama consent are withdrawn, so the fallback target's own consent
+gate refuses any hosted or remote model (for example a tier the operator
+mapped to an Ollama ``-cloud`` model).  A prompt meant for local Inference
+can therefore only ever reach local Ollama; this wrapper never widens where
+a prompt goes.  When the fallback itself fails, the raised error names both
+causes.
 """
 from __future__ import annotations
 
+import dataclasses
 import logging
 import threading
 from collections.abc import Callable, Mapping, Sequence
@@ -24,7 +30,7 @@ from ...application.ports.model_gateway import (
     ModelRequest,
     ModelResponse,
 )
-from ...domain.common.errors import Cancelled, DeadlineExceeded
+from ...domain.common.errors import Cancelled, DeadlineExceeded, SonderError
 from ..inference.sonder_inference_gateway import SonderInferenceUnreachable
 
 logger = logging.getLogger(__name__)
@@ -121,10 +127,11 @@ class PreSendFallbackGateway:
             with self._lock:
                 self._fallback_count += 1
                 count = self._fallback_count
+            primary_cause = getattr(exc, "summary", None) or str(exc)
             logger.warning(
                 "provider fallback %s -> %s (count=%d, correlation_id=%s): %s",
                 self._primary_id, self._fallback_id, count,
-                context.correlation_id, exc,
+                context.correlation_id, primary_cause,
             )
             if self._observer is not None:
                 try:
@@ -133,11 +140,33 @@ class PreSendFallbackGateway:
                     )
                 except Exception:  # noqa: BLE001 - telemetry never fails a turn
                     logger.exception("provider fallback observer failed")
-            return self._fallback.generate(request, context)
+            local_only = dataclasses.replace(
+                context, cloud_allowed=False, remote_ollama_allowed=False,
+            )
+            try:
+                return self._fallback.generate(request, local_only)
+            except SonderError as fallback_error:
+                combined = _with_primary_cause(
+                    fallback_error, self._fallback_id, primary_cause,
+                )
+                if combined is fallback_error:
+                    raise
+                raise combined from fallback_error
 
     def embed(self, texts: Sequence[str], context: OperationContext) -> Sequence[Embedding]:
         # Embeddings have their own binding; the fallback covers generation.
         return self._primary.embed(texts, context)
+
+
+def _with_primary_cause(error: SonderError, fallback_id: str, primary_cause: str) -> SonderError:
+    """Same error class and code, with the primary's reason appended."""
+    if type(error).__init__ is not Exception.__init__:
+        return error  # a custom constructor: keep the original untouched
+    combined = type(error)(
+        "%s (fallback to %s after: %s)" % (error, fallback_id, primary_cause)
+    )
+    combined.__dict__.update(error.__dict__)
+    return combined
 
 
 __all__ = ["FALLBACK_REASON_CODE", "FallbackObserver", "PreSendFallbackGateway"]

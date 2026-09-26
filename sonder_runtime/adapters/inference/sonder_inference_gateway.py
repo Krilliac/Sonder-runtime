@@ -21,6 +21,11 @@ taxonomy -- and adds what that generic peer cannot know:
   capture records it like every other provider outage.  Timeouts, 4xx, 500
   and 503 ``backend_unavailable`` are never "unreachable": the request may
   have run and must not be replayed elsewhere.
+* **Transport.** Requests go straight to the configured endpoint: HTTP(S)
+  proxy settings from the environment or the OS are ignored, redirects are
+  never followed (a 3xx is an error), and every exchange -- connect, headers
+  and body -- is bounded by one wall-clock budget rather than a per-socket
+  timeout, so a peer that trickles bytes cannot hold a probe or a turn open.
 * **Version.** The API major version must be 1, read from the health
   document and from the ``sonder.api_version`` body field when present (the
   shared transport cannot read response headers).
@@ -33,14 +38,20 @@ to bind ``SONDER_EMBEDDING_PROVIDER=ollama``.
 """
 from __future__ import annotations
 
+import functools
+import http.client
+import io
 import ipaddress
 import json
 import logging
 import os
 import re
 import socket
+import ssl
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -75,6 +86,8 @@ from ...platform.metrics import default_registry
 from ..model_request_admission import HostModelRequestAdmission
 from ..provider_bindings import PROVIDER_TIERS
 from .openai_compat_gateway import (
+    ERROR_BODY_LIMIT,
+    GET_BODY_LIMIT,
     OpenAICompatibleConfig,
     OpenAICompatibleGateway,
 )
@@ -93,6 +106,13 @@ DEFAULT_HEALTH_TTL_SECONDS = 5.0
 HEALTH_PROBE_TIMEOUT_SECONDS = 2.0
 READY_FILE_LIMIT = 65_536
 DETAIL_LIMIT = 240
+# A non-streaming chat completion is one JSON object; anything larger than
+# this is not a response this runtime will buffer.
+RESPONSE_BODY_LIMIT = 16 * 1024 * 1024
+_READ_CHUNK = 65_536
+# The only host names Inference's Host check accepts on a loopback bind
+# (contract 2.3); any other loopback alias would be refused with 403.
+ACCEPTED_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 
 ENV_BASE_URL = "SONDER_INFERENCE_BASE_URL"
 ENV_MODEL = "SONDER_INFERENCE_MODEL"
@@ -157,7 +177,200 @@ class SonderInferenceUnreachable(DependencyUnavailable):
     that is not ready, or HTTP 503 ``not_ready``.  It is the sole trigger for
     the fail-closed Ollama fallback, and keeps ``DEPENDENCY_UNAVAILABLE`` as
     its code so evidence capture treats it as an ordinary provider outage.
+
+    ``reason`` is the short cause ("connection refused") and ``summary`` the
+    one-line operator statement without remediation; ``str()`` is the full
+    message with the fix.
     """
+
+    def __init__(self, message: str, *, reason: str | None = None,
+                 summary: str | None = None) -> None:
+        super().__init__(message)
+        self.reason = reason or message
+        self.summary = summary or message
+
+
+# -- transport ---------------------------------------------------------------
+#
+# One exchange = one request and its bounded response.  The stdlib urllib
+# stack is kept (so HTTP errors keep the shape the shared gateway maps), but
+# built per exchange without ProxyHandler input from the environment, without
+# redirect following, and with a watchdog that shuts the socket down when the
+# exchange's wall-clock budget is spent.
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+class _ExchangeBudget:
+    """Shut down an exchange's sockets once its total budget is spent."""
+
+    def __init__(self, seconds: float) -> None:
+        self._lock = threading.Lock()
+        self._sockets: list[socket.socket] = []
+        self.expired = False
+        self._timer = threading.Timer(max(0.0, float(seconds)), self._expire)
+        self._timer.daemon = True
+
+    def __enter__(self) -> "_ExchangeBudget":
+        self._timer.start()
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self._timer.cancel()
+
+    def attach(self, sock: socket.socket) -> None:
+        with self._lock:
+            self._sockets.append(sock)
+            expired = self.expired
+        if expired:
+            _shutdown(sock)
+
+    def _expire(self) -> None:
+        with self._lock:
+            self.expired = True
+            sockets = list(self._sockets)
+        for sock in sockets:
+            _shutdown(sock)
+
+
+def _shutdown(sock: socket.socket) -> None:
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+
+
+class _BudgetedHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, *args, budget: _ExchangeBudget, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._budget = budget
+
+    def connect(self) -> None:
+        super().connect()
+        self._budget.attach(self.sock)
+
+
+class _BudgetedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, *args, budget: _ExchangeBudget, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._budget = budget
+
+    def connect(self) -> None:
+        super().connect()
+        self._budget.attach(self.sock)
+
+
+class _BudgetedHTTPHandler(urllib.request.HTTPHandler):
+    def __init__(self, budget: _ExchangeBudget) -> None:
+        super().__init__()
+        self._budget = budget
+
+    def http_open(self, req):
+        return self.do_open(
+            functools.partial(_BudgetedHTTPConnection, budget=self._budget), req,
+        )
+
+
+class _BudgetedHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, budget: _ExchangeBudget) -> None:
+        super().__init__(context=ssl.create_default_context())
+        self._budget = budget
+
+    def https_open(self, req):
+        return self.do_open(
+            functools.partial(_BudgetedHTTPSConnection, budget=self._budget), req,
+            context=self._context,
+        )
+
+
+def _read_bounded(stream, limit: int) -> bytes:
+    """Read at most ``limit + 1`` bytes so an oversize body is detectable."""
+    chunks: list[bytes] = []
+    total = 0
+    while total <= limit:
+        chunk = stream.read(min(_READ_CHUNK, limit + 1 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks)
+
+
+def _exchange(
+    method: str, url: str, headers: Mapping[str, str], data: bytes | None,
+    timeout: float, limit: int,
+) -> tuple[int, bytes, Mapping[str, str] | None]:
+    """Run one direct, non-redirected, wall-clock-bounded HTTP exchange.
+
+    Returns ``(status, body, None)`` for a 2xx response and
+    ``(status, error body, headers)`` otherwise.  Raises ``TimeoutError`` when
+    the budget is spent, ``DependencyUnavailable`` for a malformed or
+    oversized HTTP response, and the usual ``URLError``/``OSError`` for
+    transport failures before a response (refused, unresolvable, ...).
+    """
+    budget_seconds = float(timeout) if timeout else DEFAULT_TIMEOUT_SECONDS
+    request = urllib.request.Request(url, data=data, headers=dict(headers), method=method)
+    with _ExchangeBudget(budget_seconds) as budget:
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), _NoRedirect(),
+            _BudgetedHTTPHandler(budget), _BudgetedHTTPSHandler(budget),
+        )
+        try:
+            try:
+                with opener.open(request, timeout=budget_seconds) as response:
+                    status = int(response.status)
+                    body = _read_bounded(response, limit)
+                    error_headers = None
+            except urllib.error.HTTPError as exc:
+                status = int(exc.code)
+                try:
+                    body = _read_bounded(exc, ERROR_BODY_LIMIT)
+                finally:
+                    exc.close()
+                error_headers = dict(exc.headers or {})
+        except Exception as exc:
+            if budget.expired:
+                raise TimeoutError(
+                    "sonder-inference exchange exceeded its %.1fs budget" % budget_seconds
+                ) from exc
+            if isinstance(exc, http.client.HTTPException):
+                raise DependencyUnavailable(
+                    "sonder-inference sent a malformed HTTP response (%s)"
+                    % type(exc).__name__
+                ) from exc
+            raise
+        if budget.expired:
+            raise TimeoutError(
+                "sonder-inference exchange exceeded its %.1fs budget" % budget_seconds
+            )
+    if error_headers is None and len(body) > limit:
+        raise DependencyUnavailable("sonder-inference response exceeds %d bytes" % limit)
+    return status, body, error_headers
+
+
+def direct_get_transport(url: str, headers: dict, timeout: float) -> tuple[int, bytes]:
+    """GET seam: direct, non-redirected, bounded; non-2xx is returned."""
+    status, body, _headers = _exchange("GET", url, headers, None, timeout, GET_BODY_LIMIT)
+    return status, body
+
+
+def direct_post_transport(url: str, payload: dict, headers: dict, timeout) -> dict:
+    """POST seam: like :func:`direct_get_transport`, but non-2xx raises
+    ``HTTPError`` (carrying only the bounded error body) for the shared
+    gateway's error mapping."""
+    data = json.dumps(payload).encode("utf-8")
+    status, body, error_headers = _exchange(
+        "POST", url, headers, data, timeout, RESPONSE_BODY_LIMIT,
+    )
+    if error_headers is not None:
+        raise urllib.error.HTTPError(url, status, "HTTP %d" % status, error_headers, io.BytesIO(body))
+    try:
+        return json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+        raise DependencyUnavailable("sonder-inference returned a non-JSON response") from exc
 
 
 @dataclass(frozen=True)
@@ -221,6 +434,18 @@ def normalize_base_url(value: str) -> str:
             "without credentials, query or fragment"
         )
     host = _BIND_ADDRESS_REWRITES.get(host.lower(), host.lower())
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = None
+    if address is not None and address.is_loopback:
+        host = str(address)  # one spelling of ::1
+        if host not in ACCEPTED_LOOPBACK_HOSTS:
+            raise InvalidInput(
+                "sonder-inference base URL host %s is a loopback alias that "
+                "Sonder Inference's Host check refuses; use 127.0.0.1, "
+                "localhost or [::1]" % host
+            )
     netloc = "[%s]" % host if ":" in host else host
     if port is not None:
         netloc = "%s:%d" % (netloc, port)
@@ -277,9 +502,10 @@ def read_ready_file(path: str) -> str:
         with target.open("rb") as stream:
             data = stream.read(READY_FILE_LIMIT + 1)
     except FileNotFoundError as exc:
+        summary = "Sonder Inference ready file %s does not exist" % target
         raise SonderInferenceUnreachable(
-            "Sonder Inference ready file %s does not exist; start "
-            "`sonder-infer serve --ready-file %s`" % (target, target)
+            "%s; start `sonder-infer serve --ready-file %s`" % (summary, target),
+            reason="ready file does not exist", summary=summary,
         ) from exc
     except OSError as exc:
         raise InvalidInput("cannot read %s %s: %s" % (ENV_READY_FILE, target, exc)) from exc
@@ -378,8 +604,12 @@ def _error_fields(body: bytes) -> tuple[str, str]:
     """Return ``(code, message)`` from an Inference error document."""
     try:
         document = json.loads(body.decode("utf-8")) if body else None
-    except (UnicodeDecodeError, ValueError):
+    except (UnicodeDecodeError, ValueError, RecursionError):
         return "", ""
+    return _error_document_fields(document)
+
+
+def _error_document_fields(document: object) -> tuple[str, str]:
     error = document.get("error") if isinstance(document, dict) else None
     if not isinstance(error, dict):
         return "", ""
@@ -403,10 +633,31 @@ class HealthSnapshot:
     document: Mapping[str, object] | None = None
     api_mismatch: bool = False
     auth_rejected: bool = False
+    host_rejected: bool = False
+    overloaded: bool = False
 
     @property
     def api_version(self) -> object:
         return None if self.document is None else self.document.get("api_version")
+
+
+@dataclass(frozen=True)
+class Readiness:
+    """How a request would fare right now; see ``readiness()``."""
+
+    kind: str  # ready | unreachable | overloaded | misconfigured
+    detail: str
+    synthetic: bool = False
+
+
+def _reported_api_version(document: Mapping[str, object]) -> object:
+    """Top-level ``api_version``, else the error envelope's ``sonder`` field."""
+    api = document.get("api_version")
+    if api is None:
+        extension = document.get("sonder")
+        if isinstance(extension, dict):
+            api = extension.get("api_version")
+    return api
 
 
 @dataclass(frozen=True)
@@ -437,19 +688,20 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
     ) -> None:
         super().__init__(
             None,
-            transport=transport,
+            transport=transport or direct_post_transport,
             request_admission=request_admission,
             provider_label=PROVIDER_LABEL,
             extra_headers=correlation_headers,
             http_error_classifier=self._classify_http_error,
             connect_error_classifier=self._classify_connect_error,
-            get_transport=get_transport,
+            get_transport=get_transport or direct_get_transport,
         )
         self._settings_override = config
         self._env = env
         self._monotonic = monotonic
         self._wall_clock = wall_clock or (lambda: datetime.now(timezone.utc))
         self._lock = threading.Lock()
+        self._refresh_lock = threading.Lock()
         self._health_cache: HealthSnapshot | None = None
         self._identity_cache: dict[tuple[str, str], tuple[float, IdentityObservation]] = {}
         # Settings of the call in flight on this thread, so the transport's
@@ -496,12 +748,16 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         return settings.tier_models.get(request.tier or "", settings.model)
 
     @staticmethod
-    def _unreachable_message(settings: SonderInferenceConfig, detail: str) -> str:
-        return (
-            "Sonder Inference at %s is not reachable or not ready (%s); start it "
-            "with `sonder-infer serve`, or set %s=ollama to send requests it "
-            "never received to local Ollama"
-            % (settings.display_base_url, detail, ENV_FALLBACK)
+    def unreachable_error(settings: SonderInferenceConfig, reason: str) -> SonderInferenceUnreachable:
+        """Build the one operator message for "Inference did not get it"."""
+        summary = "Sonder Inference at %s is not reachable or not ready (%s)" % (
+            settings.display_base_url, _bounded(reason),
+        )
+        return SonderInferenceUnreachable(
+            "%s; start it with `sonder-infer serve`, or set %s=ollama and restart "
+            "the runtime to send requests it never received to local Ollama"
+            % (summary, ENV_FALLBACK),
+            reason=_bounded(reason), summary=summary,
         )
 
     # -- error classification (hooks of the shared transport) --------------
@@ -518,34 +774,50 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         if settings is None:
             return SonderInferenceUnreachable(
                 "Sonder Inference is not reachable (%s); start it with "
-                "`sonder-infer serve`" % detail
+                "`sonder-infer serve`" % detail, reason=detail,
             )
-        return SonderInferenceUnreachable(self._unreachable_message(settings, detail))
+        return self.unreachable_error(settings, detail)
+
+    @staticmethod
+    def _forbidden(status: int, code: str, message: str) -> Forbidden:
+        """403 forbidden_host/forbidden_origin is not a credentials problem."""
+        label = "HTTP %d%s" % (status, " %s" % code if code else "")
+        suffix = ": %s" % message if message else ""
+        if code in ("forbidden_host", "forbidden_origin"):
+            return Forbidden(
+                "sonder-inference refused the request's %s (%s); the base URL "
+                "host must be 127.0.0.1, localhost or [::1]%s"
+                % ("Host" if code == "forbidden_host" else "Origin", label, suffix)
+            )
+        return Forbidden(
+            "sonder-inference rejected the credentials (%s); check %s%s"
+            % (label, ENV_API_KEY, suffix)
+        )
 
     def _classify_http_error(self, status: int, body: bytes) -> SonderError | None:
         code, message = _error_fields(body)
         label = "HTTP %d%s" % (status, " %s" % code if code else "")
         suffix = ": %s" % message if message else ""
         if status == 503 and code == "not_ready":
-            self._mark_unavailable("server not ready (HTTP 503 not_ready)", state="degraded")
-            settings = getattr(self._call, "settings", None)
             detail = "HTTP 503 not_ready"
+            self._mark_unavailable(detail, state="degraded")
+            settings = getattr(self._call, "settings", None)
             if settings is None:
-                return SonderInferenceUnreachable("Sonder Inference is not ready (%s)" % detail)
-            return SonderInferenceUnreachable(self._unreachable_message(settings, detail))
+                return SonderInferenceUnreachable(
+                    "Sonder Inference is not ready (%s)" % detail, reason=detail,
+                )
+            return self.unreachable_error(settings, detail)
         if status == 503 and code == "overloaded":
             return CapacityExceeded("sonder-inference is at its connection limit (%s)" % label)
         if status in (401, 403):
-            return Forbidden(
-                "sonder-inference rejected the request (%s); check %s%s"
-                % (label, ENV_API_KEY, suffix)
-            )
+            return self._forbidden(status, code, message)
         if status == 429:
             return CapacityExceeded("sonder-inference scheduler rejected the request (%s)%s" % (label, suffix))
         if status in (400, 404, 405, 411, 413, 501):
             return InvalidInput("sonder-inference rejected the request (%s)%s" % (label, suffix))
-        # 408, 500, 503 backend_unavailable and anything unexpected: the
-        # request may have reached the backend, so it is never "unreachable".
+        # 3xx (never followed), 408, 500, 503 backend_unavailable and anything
+        # unexpected: the request may have reached the backend, so it is
+        # never "unreachable".
         return DependencyUnavailable("sonder-inference failed the request (%s)%s" % (label, suffix))
 
     # -- health ------------------------------------------------------------
@@ -560,22 +832,47 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                 checked_at=self._wall_clock(), checked_monotonic=self._monotonic(),
             )
 
+    def _fresh_cache(self, settings: SonderInferenceConfig, requested_at: float) -> HealthSnapshot | None:
+        with self._lock:
+            cached = self._health_cache
+        if cached is None or cached.base_url != settings.base_url:
+            return None
+        # A snapshot taken after this caller asked is fresh whatever the TTL:
+        # it is the single-flight probe another caller just finished.
+        if (cached.checked_monotonic > requested_at
+                or requested_at - cached.checked_monotonic < settings.health_ttl_seconds):
+            return cached
+        return None
+
     def health(
         self, *, settings: SonderInferenceConfig | None = None,
         timeout: float = HEALTH_PROBE_TIMEOUT_SECONDS, refresh: bool = False,
     ) -> HealthSnapshot:
-        """Return cached health, probing ``/v1/sonder/health`` when stale."""
+        """Return cached health, probing ``/v1/sonder/health`` when stale.
+
+        Probes are single-flight: concurrent callers that find the cache
+        stale wait for one probe instead of each opening a connection (which
+        would itself push a busy server over its connection limit).  An
+        ``overloaded`` answer is transient and is never cached.
+        """
         settings = settings or self.settings()
         check_endpoint_policy(settings)
-        now = self._monotonic()
-        with self._lock:
-            cached = self._health_cache
-        if (not refresh and cached is not None and cached.base_url == settings.base_url
-                and now - cached.checked_monotonic < settings.health_ttl_seconds):
-            return cached
-        snapshot = self._probe_health(settings, max(0.05, min(HEALTH_PROBE_TIMEOUT_SECONDS, timeout)))
-        with self._lock:
-            self._health_cache = snapshot
+        requested_at = self._monotonic()
+        if not refresh:
+            cached = self._fresh_cache(settings, requested_at)
+            if cached is not None:
+                return cached
+        with self._refresh_lock:
+            if not refresh:
+                cached = self._fresh_cache(settings, requested_at)
+                if cached is not None:
+                    return cached
+            snapshot = self._probe_health(
+                settings, max(0.05, min(HEALTH_PROBE_TIMEOUT_SECONDS, timeout)),
+            )
+            if not snapshot.overloaded:
+                with self._lock:
+                    self._health_cache = snapshot
         return snapshot
 
     def _probe_health(self, settings: SonderInferenceConfig, timeout: float) -> HealthSnapshot:
@@ -591,25 +888,49 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         try:
             status, document = self.get_json("/v1/sonder/health", timeout=timeout, cfg=cfg)
         except SonderInferenceUnreachable as exc:
-            return snapshot("unavailable", str(exc))
+            return snapshot("unavailable", exc.reason)
         except DeadlineExceeded:
             return snapshot("unavailable", "health probe timed out after %.1fs" % timeout)
-        except DependencyUnavailable as exc:
+        except SonderError as exc:
             return snapshot("unavailable", "health probe failed: %s" % exc)
+        except Exception as exc:  # noqa: BLE001 - a probe reports, it never crashes its caller
+            return snapshot("unavailable", "health probe failed: %s" % type(exc).__name__)
+        code, message = _error_document_fields(document)
         if status in (401, 403):
+            refused = self._forbidden(status, code, message)
+            host_problem = code in ("forbidden_host", "forbidden_origin")
             return snapshot(
-                "unavailable", "credentials rejected (HTTP %d); check %s" % (status, ENV_API_KEY),
-                auth_rejected=True,
+                "unavailable", str(refused).replace("sonder-inference ", "", 1),
+                host_rejected=host_problem, auth_rejected=not host_problem,
             )
         if document is None:
             return snapshot("unavailable", "health returned HTTP %d without a JSON document" % status)
-        api = document.get("api_version")
-        if api != API_VERSION:
+        api = _reported_api_version(document)
+        if api is not None and api != API_VERSION:
             return snapshot(
                 "unavailable",
                 "incompatible sonder-inference API version %r (this runtime speaks %d)"
                 % (api, API_VERSION),
                 document=document, api_mismatch=True,
+            )
+        if code == "overloaded":
+            return snapshot(
+                "degraded",
+                "server is at its connection limit (HTTP %d overloaded)" % status,
+                document=document, overloaded=True,
+            )
+        if code:
+            return snapshot(
+                "unavailable", "health returned HTTP %d %s%s"
+                % (status, code, ": %s" % message if message else ""),
+                document=document,
+            )
+        if api is None:
+            return snapshot(
+                "unavailable",
+                "health returned HTTP %d without an api_version; is this Sonder Inference?"
+                % status,
+                document=document,
             )
         reported = document.get("status")
         if status == 200 and reported == "ready":
@@ -629,20 +950,56 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         snap = self.health(settings=settings, timeout=timeout)
         if snap.api_mismatch:
             raise DependencyUnavailable(snap.detail)
-        if snap.auth_rejected:
+        if snap.auth_rejected or snap.host_rejected:
             raise Forbidden("sonder-inference %s" % snap.detail)
+        if snap.overloaded:
+            raise CapacityExceeded("sonder-inference %s; retry shortly" % snap.detail)
         if snap.state != "ready":
-            raise SonderInferenceUnreachable(self._unreachable_message(settings, snap.detail))
+            raise self.unreachable_error(settings, snap.detail)
         return snap
+
+    def readiness(self) -> Readiness:
+        """Classify the endpoint the way :meth:`generate` would treat it.
+
+        Never raises and never generates.  ``kind`` is ``ready``,
+        ``unreachable`` (a request would be refused before sending, so a
+        configured fallback would carry it), ``overloaded`` (transient; the
+        request fails with CapacityExceeded, no fallback) or ``misconfigured``
+        (configuration, consent, credentials, Host or API version: every
+        request fails and no fallback can help).
+        """
+        try:
+            settings = self.settings()
+        except SonderInferenceUnreachable as exc:
+            return Readiness("unreachable", exc.summary)
+        except Exception as exc:  # noqa: BLE001 - classification is total
+            return Readiness("misconfigured", "configuration error: %s" % _bounded(exc))
+        where = settings.display_base_url
+        try:
+            check_endpoint_policy(settings)
+            snap = self.health(settings=settings)
+        except Exception as exc:  # noqa: BLE001 - classification is total
+            # Consent refusals already name the endpoint.
+            return Readiness("misconfigured", _bounded(exc))
+        detail = "%s: %s" % (where, snap.detail)
+        if snap.api_mismatch or snap.auth_rejected or snap.host_rejected:
+            return Readiness("misconfigured", detail)
+        if snap.overloaded:
+            return Readiness("overloaded", detail)
+        if snap.state == "ready":
+            synthetic = (snap.document or {}).get("synthetic") is True
+            return Readiness("ready", detail, synthetic=synthetic)
+        return Readiness("unreachable", detail)
 
     def capability_health(self) -> CapabilityHealth:
         """Provider-reported health from the cached, bounded probe."""
         try:
             snap = self.health()
-        except SonderError as exc:
+        except Exception as exc:  # noqa: BLE001 - health reports, never raises
             return CapabilityHealth(
                 provider=PROVIDER_ID, capabilities=frozenset({Capability.GENERATION}),
-                healthy=False, checked_at=self._wall_clock(), detail=_bounded(exc),
+                healthy=False, checked_at=self._wall_clock(),
+                detail=_bounded(exc if isinstance(exc, SonderError) else type(exc).__name__),
             )
         return CapabilityHealth(
             provider=PROVIDER_ID,
@@ -726,8 +1083,11 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
             settings = self.settings()
             entry["base_url"] = settings.display_base_url
             snap = self.health(settings=settings)
-        except SonderError as exc:
-            entry["detail"] = _bounded(exc)
+        except SonderInferenceUnreachable as exc:
+            entry["detail"] = _bounded(exc.summary)
+            return {PROVIDER_ID: entry}
+        except Exception as exc:  # noqa: BLE001 - status reports, never raises
+            entry["detail"] = _bounded(exc if isinstance(exc, SonderError) else type(exc).__name__)
             return {PROVIDER_ID: entry}
         document = snap.document or {}
         models = document.get("models") if isinstance(document.get("models"), list) else []
@@ -751,8 +1111,10 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         if snap.state == "ready":
             try:
                 identity = self.backend_identity()
-            except SonderError as exc:
-                logger.info("sonder-inference identity unavailable: %s", _bounded(exc))
+            except Exception as exc:  # noqa: BLE001 - identity is optional display data
+                logger.info("sonder-inference identity unavailable: %s", _bounded(
+                    exc if isinstance(exc, SonderError) else type(exc).__name__,
+                ))
                 identity = None
             entry["identity"] = identity.to_dict() if identity is not None else None
         return {PROVIDER_ID: entry}
@@ -872,6 +1234,7 @@ __all__ = [
     "IdentityObservation",
     "PROVIDER_ID",
     "PROVIDER_LABEL",
+    "Readiness",
     "STATUS_KEYS",
     "SonderInferenceConfig",
     "SonderInferenceGateway",
@@ -880,6 +1243,8 @@ __all__ = [
     "check_endpoint_policy",
     "config_from_env",
     "correlation_headers",
+    "direct_get_transport",
+    "direct_post_transport",
     "is_loopback_url",
     "normalize_base_url",
     "read_ready_file",

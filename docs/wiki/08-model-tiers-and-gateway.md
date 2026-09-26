@@ -174,8 +174,11 @@ dispatcher makes exactly one provider call per request. The single exception
 is opt-in: `SONDER_INFERENCE_FALLBACK=ollama` wraps the Inference provider so
 that a request Inference provably never received (refused connection,
 unresolvable host, health not ready, HTTP 503 `not_ready`) is sent once to
-local Ollama, logged at WARNING and counted. Timeouts and server errors never
-fall back, because the request may already have run. Only ModelGateway
+local Ollama, logged at WARNING and counted. The fallback call never reaches
+a hosted or remote model, whatever the original request allowed. Timeouts and
+server errors never fall back, because the request may already have run, and
+neither do configuration, credential or API-version problems, which a
+fallback cannot fix. Only ModelGateway
 consumers (A2A chat, session summarize/title) follow provider bindings; see
 [the provider reference](../architecture/sonder-inference-provider.md) for
 which surfaces still use Ollama directly.

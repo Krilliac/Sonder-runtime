@@ -60,8 +60,10 @@ python -m sonder_runtime doctor
 |---|---|
 | `sonder_inference ok` | ready, API version 1 |
 | `sonder_inference warn ... MOCK backend` | synthetic output; not for real work |
-| `sonder_inference warn ... fall back to ollama` | down, fallback covers requests it never receives |
-| `sonder_inference fail` | down with no fallback, API version mismatch, or invalid bindings |
+| `sonder_inference warn ... fall back to ollama` | down or not ready, fallback covers requests it never receives |
+| `sonder_inference warn ... connection limit` | server up but at `--max-connections`; requests fail with `CapacityExceeded` until load drops |
+| `sonder_inference fail ... start sonder-infer serve` | down with no fallback |
+| `sonder_inference fail ... the fallback does not apply` | invalid `SONDER_INFERENCE_*` value, remote URL without consent, rejected key or Host, API version mismatch (health or ready file); fix the cause, a fallback cannot help |
 | `sonder_inference_scope warn` | always shown when bound: REPL, MCP, autopilot and fleet still generate through Ollama |
 
 `--skip-inference` omits both lines. `python -m sonder_runtime preflight`
@@ -71,10 +73,16 @@ start because Inference is down.
 ## Symptoms
 
 - Chat through a bound tier fails with `DependencyUnavailable: Sonder
-  Inference at http://127.0.0.1:11437 is not reachable or not ready (...);
-  start it with sonder-infer serve, or set SONDER_INFERENCE_FALLBACK=ollama`.
-- Runtime log WARNING `provider fallback sonder_inference -> ollama (count=N ...)`
-  when the fallback is configured.
+  Inference at http://127.0.0.1:11437 is not reachable or not ready
+  (connection refused); start it with sonder-infer serve, or set
+  SONDER_INFERENCE_FALLBACK=ollama and restart the runtime ...`.
+- Runtime log WARNING `provider fallback sonder_inference -> ollama (count=N ...):
+  Sonder Inference at ... is not reachable or not ready (connection refused)`
+  when the fallback is configured. If Ollama then fails too, the error names
+  both causes (`... (fallback to ollama after: ...)`); a tier mapped to a
+  hosted Ollama model is refused with `Forbidden` on the fallback path.
+- `CapacityExceeded: sonder-inference server is at its connection limit`
+  under load; it clears by itself.
 - `Forbidden: ... remote inference requires ...` for a non-loopback base URL.
 - `incompatible sonder-inference API version` after upgrading one side only.
 
@@ -93,7 +101,11 @@ env | grep -E '^SONDER_(MODEL_BACKEND|.*_PROVIDER|INFERENCE_|ALLOW_REMOTE_INFERE
   (default 5).
 - HTTP 401: the server has `--token-file`; set `SONDER_INFERENCE_API_KEY`.
 - HTTP 403 `forbidden_host`: the base URL names a host other than
-  `127.0.0.1`, `localhost` or `[::1]` on a loopback-bound server.
+  `127.0.0.1`, `localhost` or `[::1]` on a loopback-bound server. The runtime
+  refuses other loopback aliases such as `127.0.0.2` at configuration.
+- HTTP 503 `overloaded`: more concurrent connections than `--max-connections`.
+- Proxy variables (`HTTP_PROXY`, `ALL_PROXY`, ...) do not apply to Inference
+  traffic; `curl` honours them, so compare with `curl --noproxy '*'`.
 
 ## Recovery
 

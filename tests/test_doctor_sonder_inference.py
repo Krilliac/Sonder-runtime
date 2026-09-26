@@ -211,3 +211,139 @@ def test_preflight_never_blocks_serve_because_of_inference(monkeypatch):
     monkeypatch.delenv("SONDER_EMBEDDING_PROVIDER")
     report = preflight_adapter.run_preflight(object(), check_ollama=False)
     assert all(check.name != "sonder_inference" for check in report.checks)
+
+
+# -- verdicts follow what a request would meet ---------------------------------------
+
+
+FALLBACK = dict(BOUND, SONDER_INFERENCE_FALLBACK="ollama")
+
+
+@pytest.mark.parametrize("extra,needle", [
+    ({"SONDER_INFERENCE_BASE_URL": "http://gpu.example:11437"}, "not loopback"),
+    ({"SONDER_INFERENCE_TIMEOUT_SECONDS": "abc"}, "SONDER_INFERENCE_TIMEOUT_SECONDS"),
+    ({"SONDER_INFERENCE_TIER_MODELS": "sonder=x"}, "unknown tier"),
+    ({"SONDER_INFERENCE_BASE_URL": "http://127.0.0.2:11437"}, "loopback alias"),
+])
+def test_failures_no_fallback_can_help_fail_even_with_the_fallback(extra, needle):
+    env = dict(FALLBACK, **extra)
+    result = sonder_doctor._check_sonder_inference(env=env)
+    assert result["status"] == "fail", result
+    assert needle in result["detail"]
+    assert "fall back" not in result["detail"]
+    assert not result["detail"].startswith("unconfigured endpoint")
+
+
+def test_ready_file_api_mismatch_fails_even_with_the_fallback(tmp_path):
+    ready = tmp_path / "ready.json"
+    ready.write_text(json.dumps({"url": "http://127.0.0.1:18437", "api_version": 2}))
+    env = dict(FALLBACK, SONDER_INFERENCE_READY_FILE=str(ready))
+    result = sonder_doctor._check_sonder_inference(env=env)
+    assert result["status"] == "fail" and "api_version 2" in result["detail"]
+    assert "fall back" not in result["detail"]
+
+
+def test_missing_ready_file_is_unreachable_and_the_fallback_warns(tmp_path):
+    env = dict(FALLBACK, SONDER_INFERENCE_READY_FILE=str(tmp_path / "absent.json"))
+    result = sonder_doctor._check_sonder_inference(env=env)
+    assert result["status"] == "warn" and "fall back to ollama" in result["detail"]
+
+
+@pytest.mark.parametrize("health,status,needle", [
+    ({"error": {"code": "unauthorized", "message": "bad key"}}, 401, "SONDER_INFERENCE_API_KEY"),
+    ({"error": {"code": "forbidden_host", "message": "host"}}, 403, "127.0.0.1, localhost"),
+    (_health(api_version=2), 200, "incompatible"),
+])
+def test_credentials_host_and_api_problems_fail_even_with_the_fallback(health, status, needle):
+    result = sonder_doctor._check_sonder_inference(
+        env=FALLBACK, gateway=_gateway(health=health, status=status),
+    )
+    assert result["status"] == "fail" and needle in result["detail"]
+    assert "fall back" not in result["detail"]
+    assert "SONDER_INFERENCE_FALLBACK=ollama" not in result["detail"]
+
+
+def test_overloaded_server_is_a_transient_warning():
+    overloaded = {"error": {"code": "overloaded", "message": "busy"}, "sonder": {"api_version": 1}}
+    for env in (BOUND, FALLBACK):
+        result = sonder_doctor._check_sonder_inference(
+            env=env, gateway=_gateway(health=overloaded, status=503),
+        )
+        assert result["status"] == "warn" and "connection limit" in result["detail"]
+        assert "incompatible" not in result["detail"]
+
+
+def _garbage_listener():
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(8)
+    stop = threading.Event()
+
+    def loop():
+        listener.settimeout(0.1)
+        while not stop.is_set():
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                continue
+            try:
+                # Consume the request first so the close is orderly (unread
+                # input would RST the socket and turn this into a reset).
+                conn.settimeout(2)
+                data = b""
+                while b"\r\n\r\n" not in data:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                conn.sendall(b"SSH-2.0-OpenSSH_9.6\r\n")
+            except OSError:
+                pass
+            conn.close()
+
+    thread = threading.Thread(target=loop, daemon=True)
+    thread.start()
+
+    def close():
+        stop.set()
+        thread.join(2)
+        listener.close()
+
+    return listener.getsockname()[1], close
+
+
+def test_a_non_http_peer_never_crashes_preflight_or_doctor(monkeypatch):
+    port, close = _garbage_listener()
+    try:
+        for name, value in (
+            ("_check_state_directories", lambda config: []),
+            ("_check_disk_space", lambda config: CheckResult("disk_space", True, True, "ok")),
+            ("_check_schema_versions", lambda config: []),
+            ("_check_runtime_policy", lambda: CheckResult("runtime_policy", True, True, "ok")),
+        ):
+            monkeypatch.setattr(preflight_adapter, name, value)
+        for key, value in BOUND.items():
+            monkeypatch.setenv(key, value)
+        monkeypatch.setenv("SONDER_INFERENCE_BASE_URL", "http://127.0.0.1:%d" % port)
+        report = preflight_adapter.run_preflight(object(), check_ollama=False)
+        inference = next(check for check in report.checks if check.name == "sonder_inference")
+        assert inference.ok is False and inference.required is False
+        assert "malformed HTTP" in inference.detail
+        assert report.ok is True
+
+        result = sonder_doctor._check_sonder_inference(env=dict(
+            BOUND, SONDER_INFERENCE_BASE_URL="http://127.0.0.1:%d" % port,
+        ))
+        assert result["status"] == "fail" and "malformed HTTP" in result["detail"]
+    finally:
+        close()
+
+
+def test_preflight_reports_a_check_that_raises_instead_of_blocking(monkeypatch):
+    def explode():
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(preflight_adapter, "_sonder_inference_result", explode)
+    result = preflight_adapter._check_sonder_inference()
+    assert result.ok is False and result.required is False
+    assert "RuntimeError" in result.detail

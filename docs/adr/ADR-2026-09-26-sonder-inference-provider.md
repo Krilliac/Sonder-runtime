@@ -51,9 +51,13 @@ provably never executed it. The reference is
 
 ## Consequences
 
-- `ProviderBindings` gains `fallbacks` (only `sonder_inference -> ollama`) and
-  `bound_providers`; `required_providers` includes fallback targets, and
-  `status_projection()` reports `fallbacks`.
+- `ProviderBindings` gains `fallbacks` (only `sonder_inference -> ollama`),
+  `bound_providers` and `constructed_providers`. `required_providers` keeps
+  its routing meaning (bound providers only, so bootstrap's strict local-alias
+  gate is unchanged by a fallback); `constructed_providers` adds fallback
+  targets and is what the factory builds. `status_projection()` reports
+  `fallbacks`. This refines contract 3.7's "adds ollama to the required
+  providers": Ollama is constructed, not made routable.
 - `ProviderDispatchGateway` aggregates `provider_status()` and passes
   `capability_health()` through.
 - Doctor gains `sonder_inference` and `sonder_inference_scope`

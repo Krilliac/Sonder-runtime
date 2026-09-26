@@ -647,16 +647,20 @@ def _inference_binding(env=None):
 def _check_sonder_inference(*, env=None, gateway=None) -> dict:
     """Probe the Sonder Inference provider when any binding uses it.
 
-    Read-only: one cached, 2-second-bounded GET of ``/v1/sonder/health`` (and
-    ``/v1/sonder/identity`` when ready).  It never generates.
+    Read-only: one cached GET of ``/v1/sonder/health`` bounded to 2 seconds
+    of wall-clock time.  It never generates.  The verdict follows what a
+    request would meet right now (``SonderInferenceGateway.readiness``):
 
     * skipped -- no tier, default or embedding binding names sonder_inference;
     * ok      -- the server is ready and speaks API version 1;
-    * warn    -- the mock backend is served (synthetic output), or the server
-                 is unreachable but ``SONDER_INFERENCE_FALLBACK=ollama`` will
-                 carry requests it never received;
-    * fail    -- bound and unreachable without a fallback, an API version
-                 mismatch, or refused credentials.
+    * warn    -- the mock backend is served (synthetic output); the server is
+                 at its connection limit (transient); or it is unreachable or
+                 not ready and ``SONDER_INFERENCE_FALLBACK=ollama`` will carry
+                 the requests it never received;
+    * fail    -- unreachable without a fallback, or anything no fallback can
+                 help: invalid configuration, a remote endpoint without
+                 consent, rejected credentials or Host, or an API version
+                 mismatch (from health or from the ready file).
     """
     bindings, failure = _inference_binding(env)
     if failure is not None:
@@ -670,31 +674,39 @@ def _check_sonder_inference(*, env=None, gateway=None) -> dict:
     except Exception as exc:  # pragma: no cover - import guard
         return _skip("Sonder Inference adapter unavailable (%s)" % exc)
     gateway = gateway if gateway is not None else SonderInferenceGateway(env=env)
-    entry = gateway.provider_status()["sonder_inference"]
+    readiness = gateway.readiness()
     fallback = bindings.fallbacks.get("sonder_inference")
-    where = entry.get("base_url") or "unconfigured endpoint"
-    detail = "%s: %s" % (where, entry.get("detail") or entry.get("state"))
-    api_version = entry.get("api_version")
-    if api_version is not None and api_version != 1:
-        return {"status": STATUS_FAIL, "detail": detail}
-    if entry.get("state") == "ready":
-        if entry.get("synthetic") is True:
+    detail = readiness.detail
+    if readiness.kind == "ready":
+        if readiness.synthetic:
             return {
                 "status": STATUS_WARN,
                 "detail": detail + " -- MOCK backend: synthetic output, not a "
                 "quality or performance signal",
             }
         return {"status": STATUS_OK, "detail": detail}
-    if fallback is not None:
+    if readiness.kind == "overloaded":
         return {
             "status": STATUS_WARN,
-            "detail": detail + " -- requests it never receives fall back to %s"
-            % fallback,
+            "detail": detail + " -- requests are refused as over capacity "
+            "until load drops",
+        }
+    if readiness.kind == "unreachable":
+        if fallback is not None:
+            return {
+                "status": STATUS_WARN,
+                "detail": detail + " -- requests it never receives fall back to %s"
+                % fallback,
+            }
+        return {
+            "status": STATUS_FAIL,
+            "detail": detail + " -- start `sonder-infer serve` or set "
+            "SONDER_INFERENCE_FALLBACK=ollama (and restart)",
         }
     return {
         "status": STATUS_FAIL,
-        "detail": detail + " -- start `sonder-infer serve` or set "
-        "SONDER_INFERENCE_FALLBACK=ollama",
+        "detail": detail + " -- every request fails until this is fixed; "
+        "the fallback does not apply",
     }
 
 
