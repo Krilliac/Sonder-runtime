@@ -193,6 +193,67 @@ Linux host that meets all of these conditions:
 
 On Windows, and on Linux without the uid, promotion always stops for a human.
 
+### Operator-driven path (`/selfmod run`, `approve`, `deploy`, `rollback`)
+
+The REPL console, the HTTP app chain (`sonder_serve._handle_slash`) and the
+MCP `sonder` tool all reach `server.control_command`, which forwards
+`/selfmod` to `server._selfmod_command`. Only the REPL passes
+`operator_approved`, and only when a person is attached to the console
+(`_console_has_operator()`).
+
+- **Isolation selection.** `selfmod.operator_candidate_isolation` decides for
+  every operator run. It calls `selfmod.candidate_isolation_refusal()`, the
+  same preflight and ledger-exposure check the nightly driver uses
+  (`nightly_selfmod._isolation_refusal` now delegates to it). With a usable
+  supervisor the run is always isolated, whatever flags were given.
+  Without one it raises `selfmod.CandidateIsolationRefused` (a
+  `PermissionError` carrying the host `reason`). The only exception is an
+  opt-in that meets all of these conditions:
+  - the operator typed `--unisolated` for this command;
+  - a console operator is attached;
+  - `SELFMOD_LOW_INTEGRITY=1` is not set;
+  - the run is not an `auto-low-risk` candidate.
+
+  HTTP and MCP callers can never pass `operator_approved`. A written
+  `/permissions` allow rule lets them reach `/selfmod run`, but it does not let
+  them skip isolation. `_selfmod_command` checks isolation before it creates the
+  run. `_execute_selfmod_run` checks it again, and that check is the one that
+  counts, before any backup or workspace exists. That second check writes
+  its decision as an `isolation` event in the run's audit trail. On refusal
+  the surface returns
+  `refused /selfmod run: candidate isolation unavailable, no candidate run
+  started: ...`. On Linux, that message names `SONDER_SELFMOD_CANDIDATE_UID`
+  and this document.
+- **Isolated checks.** `_execute_selfmod_run` passes `low_integrity=True` for
+  an isolated run and `False` for an opted-in unisolated one. The value goes
+  to every `selfmod.record_test` (`syntax`, `targeted`, `regression`, and
+  `security` for maintenance runs) and to `selfmod.record_smoke`, which now
+  takes the same `low_integrity`/`protected_paths`/`isolation` arguments. Its
+  `protected_paths` are `selfmod.evaluator_truth_paths(run_id)`: the sealed
+  backup bundle and its manifest. Nightly builds its evaluator truth from the
+  same function, adding its held-out snapshot. An unisolated run records its
+  rows as `unverified`.
+- **Stage journal.** `server._selfmod_stage_journal()` returns
+  `_application().selfmod_service()`, the bootstrap-composed
+  `GuardedLegacySelfmodService`. The following stages go through
+  `journaled_stage`:
+  - `/selfmod run`: `create_backup`, `prepare_workspace`,
+    `record_reproducer_before`, `begin_testing`, every `record_test`,
+    `record_smoke` and `review`. `record_smoke` is a new repeatable stage
+    entry: `selfmod-record-smoke:<run>:attempt-<n>`, with success = `passed`.
+  - `/selfmod approve`, `deploy` and `rollback`. The automatic rollback after
+    a failed live reload is included.
+
+  Without a composed journal the command refuses before it mutates anything.
+  `deploy` and `rollback` admit a one-shot intent before the legacy phase
+  check runs. For that reason, `_selfmod_command` refuses a known run in the
+  wrong phase (`deploy` needs `approved`, `rollback` needs `deployed`) before
+  it admits the intent.
+- The reproducer (`record_reproducer_before`) is journaled but not isolated.
+  It runs the declared check against the untouched live source rather than
+  candidate bytes, and `_record_command` already exempts it from
+  auto-low-risk isolation.
+
 ### Operator requirements
 
 The candidate uid must be able to read the checkout (`cwd`), the Python
@@ -252,6 +313,30 @@ so it skips them.
     still imports and behaves as before.
   - (any Linux) Without the uid, `run()` refuses before creating a run and
     names `SONDER_SELFMOD_CANDIDATE_UID` and this document.
+- `tests/test_selfmod_operator_isolation.py` drives the operator path. The
+  ledger, backup, workspace, checks and bootstrap-composed journal are real.
+  Only the editing model is replaced.
+  - (any host) The isolation decision: a host with a supervisor always
+    isolates. A host without one refuses an unrequested opt-in, an
+    unattended opt-in, an opt-in under `SELFMOD_LOW_INTEGRITY=1`, and an
+    `auto-low-risk` run.
+  - (any host) `approve`, `deploy` and `rollback` are journaled. The
+    wrong-phase guard admits no intent. Without a journal nothing mutates.
+  - (any host) With a supervisor, every candidate check gets
+    `low_integrity=True` and the backup bundle as protected truth.
+  - (Linux, uid unset) The REPL refuses without `--unisolated`, and a piped
+    console refuses with it. HTTP (`_handle_slash`) and MCP (`server.sonder`)
+    refuse both forms even with an allow rule, and no run is created.
+  - (Linux, uid unset) An attended `--unisolated` run reaches `reviewing`. Its
+    rows are `unverified`, the opt-in is in the audit events, and every stage
+    is journaled.
+  - (root) A run with `SONDER_SELFMOD_CANDIDATE_UID` set records `linux-uid`
+    on `syntax`, `targeted`, `regression` and `smoke`, naming the candidate
+    uid and supervisor uid 0. Every stage is `completed` in the journal, and
+    the live checkout is unchanged.
+  - (root) A candidate that writes the live checkout on import gets
+    `Permission denied` and is rejected, as a settled `failed` journal
+    effect.
 - `tests/test_wiring_selfmod_attestation.py` (any host) covers:
   - the typed attestation rules;
   - cross-supervisor refusal;
@@ -399,13 +484,24 @@ so it skips them.
 8. **CI qualification.** A root-capable Linux CI job for
    `tests/test_linux_candidate_isolation.py` and
    `tests/test_wiring_selfmod_linux_nightly.py` does not exist yet.
-9. **Operator-driven selfmod on Linux.** `/selfmod test` and the other
-   REPL/HTTP stages (`server._selfmod_command` and `_execute_selfmod_run` in
-   `server.py`) still run candidate commands through `selfmod.record_test`
-   without `low_integrity=True`. They are therefore unisolated unless the run
-   is `auto-low-risk` or `SELFMOD_LOW_INTEGRITY=1` is set. They also call the
-   legacy module directly rather than through the stage journal. `server.py`
-   is outside this slice.
+9. **Operator-driven selfmod: residual limits.** The operator path now
+   selects isolation and uses the stage journal (see "Operator-driven path").
+   These limits remain:
+   - An attended `--unisolated` run on a host without a supervisor executes
+     the candidate with the operator's own privileges. That is the purpose of
+     the opt-in, and the run's rows say `unverified`.
+   - The console attests only that a person is attached
+     (`_console_has_operator()`). A written allow rule for `selfmod` stops the
+     REPL prompt, so at such a console the typed `--unisolated` is the only
+     explicit consent.
+   - Under the uid supervisor the checkout is read-only to the candidate, as
+     for nightly. An operator's `--tests` command that writes next to its
+     sources, or a regression run that needs `.pytest_cache`, degrades or
+     fails.
+   - `reject`, `cancel`, `resume`, `verify_backup` and the editing agent's
+     guarded file tools still run outside the stage journal.
+   - The CI gap in item 8 also covers
+     `tests/test_selfmod_operator_isolation.py`'s root-only cases.
 
 ## Verification commands
 
@@ -415,6 +511,7 @@ python -m pytest -q tests/test_517_linux_uid_separated_candidate_evaluator.py
 python -m pytest -q tests/test_selfmod_independent_oracle.py              # root-only canaries: Linux, euid 0
 python -m pytest -q tests/test_wiring_selfmod_linux_nightly.py tests/test_wiring_selfmod_attestation.py  # dry cycles: Linux, euid 0
 python -m pytest -q tests/test_selfmod.py tests/test_selfmod_low_integrity.py tests/test_selfmod_isolation_scope.py
+python -m pytest -q tests/test_selfmod_operator_isolation.py tests/test_selfmod_deploy_gate.py  # uid-supervisor cases: Linux, euid 0
 python scripts/check_architecture.py
 python scripts/check_error_signals.py
 git diff --check

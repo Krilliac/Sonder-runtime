@@ -18079,7 +18079,7 @@
     "schemas": 4,
     "tools": 216
   },
-  "digest": "56ee66952b825556dfdd8e5892adb8147fb7c8d851cb4031a92e87faa950c5ad",
+  "digest": "56a452192f75a010aff798b769411aa043a2669fe7ac57bb187e1e661e44a083",
   "events": [
     {
       "name": "session.started",
@@ -46406,7 +46406,7 @@
   },
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "ce214fa8ed0ce5822a0ef69bc5321a0287852e45a4babaaab2877dba01956ba3",
+    "server.py": "13ad97363881828ea31b9039d7a4e6c7d8c5bc76825cda6d03735d523b41da99",
     "sonder_runtime/application/tools/generated_catalogs.py": "57a490ddd581e3e7a5d4b7b73379d205048f1db6de8e7e73c71f1124c6d84900",
     "sonder_runtime/bootstrap/native_mcp.py": "f88dcc1eb15ba75200359a06f9fb05b4673bbe5013dca64dfca3e158d873675d",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",

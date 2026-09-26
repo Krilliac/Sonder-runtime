@@ -68,14 +68,32 @@ The unattended nightly driver now uses those identities in production:
   `uncertain`, so the run needs reconciliation before that stage can be
   retried.
 
+The operator path (`server._selfmod_command` and `_execute_selfmod_run`,
+reached from the REPL, HTTP and MCP) now journals through the same bootstrap
+service. `server._selfmod_stage_journal()` returns
+`_application().selfmod_service()`. These stages go through `journaled_stage`:
+
+- `/selfmod run`: `create_backup`, `prepare_workspace`,
+  `record_reproducer_before`, `begin_testing`, every `record_test`, the new
+  repeatable `record_smoke` stage (`selfmod-record-smoke:<run>:attempt-<n>`)
+  and `review`;
+- `/selfmod approve`, `deploy` and `rollback`, including the automatic
+  rollback after a failed live reload.
+
+Without a composed journal each of these refuses before it mutates anything.
+`deploy` and `rollback` keep their journal-first semantics, so the operator
+command refuses a known run in the wrong phase before admitting their
+one-shot intent. Candidate isolation on this path is described in
+[#517 Linux isolation](REMAINING-SELFMOD-517-LINUX-ISOLATION.md).
+
 What remains:
 
-- `verify_backup`, `record_host_grade`, `reject` and `cancel` still run outside
-  the journal. None of them has a stage entry or success predicate.
-- The operator REPL/HTTP path (`server._selfmod_command` and
-  `_execute_selfmod_run` in `server.py`) still calls the legacy module
-  directly. Wiring it needs a change to `server.py`, which is outside this
-  slice.
+- `verify_backup`, `record_host_grade`, `reject`, `cancel` and `resume`
+  still run outside the journal. None of them has a stage entry or success
+  predicate.
+- An operator `deploy`/`rollback` of an id that has no run record still admits
+  (and leaves `uncertain`) a one-shot intent for that id, because the legacy
+  call refuses only after admission.
 - Self-mod operation families have no provider verifier. An `uncertain`
   stage can be cleared only by future trusted reconciliation.
 
@@ -89,6 +107,14 @@ reads the journal back:
 - there are five contiguous `record_test` attempts;
 - a rejected candidate's failing gate is a settled `failed` effect.
 
+`tests/test_selfmod_operator_isolation.py` reads the journal back after an
+operator `/selfmod run`. Backup, workspace, reproducer, `begin_testing`,
+three contiguous `record_test` attempts, `record_smoke` and review are all
+`completed`. The same file shows that `approve`, `deploy` and `rollback` are
+journaled and that the wrong-phase guard admits no intent. Its root-only case
+also shows that a rejected candidate is a settled `failed` effect.
+`tests/test_selfmod_deploy_gate.py` gives each test its own bootstrap-composed
+journal.
 `test_production_stage_journal_is_the_bootstrap_selfmod_service` checks that
 the default composition returns the bootstrap service.
 `tests/test_wiring_selfmod_attestation.py` checks that `journaled_stage` fails
