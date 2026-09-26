@@ -76,6 +76,13 @@ def build_runtime(
     from .system_clock import SystemClock
     bindings = config.provider_bindings or ProviderBindings.uniform(config.model_backend)
     if route_evidence is not None:
+        # A fallback would serve an identity-bound route from a backend whose
+        # identity was never attested; refuse the combination outright.
+        if bindings.fallbacks:
+            raise ValueError(
+                "identity-bound routing cannot be combined with a provider "
+                "fallback (unset SONDER_INFERENCE_FALLBACK)"
+            )
         if len(bindings.required_providers) != 1:
             raise ValueError("identity-bound runtime requires a single concrete provider")
         selected = next(iter(bindings.required_providers))

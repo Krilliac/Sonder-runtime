@@ -153,3 +153,39 @@ def test_application_graph_composes_mixed_provider_bindings(monkeypatch, tmp_pat
         assert application.provider_bindings.tier_providers["code"] == "ollama"
     finally:
         bootstrap_app.reset_for_tests()
+
+
+def test_factory_selects_sonder_inference_for_every_alias(monkeypatch):
+    from sonder_runtime.adapters.inference.sonder_inference_gateway import (
+        SonderInferenceGateway,
+    )
+
+    for backend in ("sonder-inference", "sonder_inference", "sonder-infer", " Inference "):
+        monkeypatch.setenv("SONDER_MODEL_BACKEND", backend)
+        assert isinstance(build_model_gateway(), SonderInferenceGateway)
+    monkeypatch.setenv("SONDER_MODEL_BACKEND", "sonder")
+    with pytest.raises(InvalidInput, match="sonder-inference"):
+        build_model_gateway()
+
+
+def test_inference_chat_tiers_with_ollama_embeddings_compose_a_dispatcher(monkeypatch):
+    from sonder_runtime.adapters.inference.sonder_inference_gateway import (
+        SonderInferenceGateway,
+    )
+
+    monkeypatch.setenv("SONDER_MODEL_BACKEND", "sonder-inference")
+    monkeypatch.setenv("SONDER_EMBEDDING_PROVIDER", "ollama")
+    gateway = build_model_gateway()
+    assert isinstance(gateway, ProviderDispatchGateway)
+    for tier in ("fast", "general", "code", "reasoning", "vision", "sonder"):
+        provider = gateway._provider_for_request(ModelRequest(prompt="x", tier=tier))
+        assert provider == "sonder_inference"
+        assert isinstance(gateway._providers[provider], SonderInferenceGateway)
+    assert isinstance(gateway._providers["ollama"], OllamaGateway)
+
+
+def test_factory_rejects_an_invalid_fallback(monkeypatch):
+    monkeypatch.setenv("SONDER_MODEL_BACKEND", "sonder-inference")
+    monkeypatch.setenv("SONDER_INFERENCE_FALLBACK", "openai")
+    with pytest.raises(InvalidInput, match="SONDER_INFERENCE_FALLBACK"):
+        build_model_gateway()

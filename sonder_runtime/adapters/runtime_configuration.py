@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from .provider_bindings import (
+    INFERENCE_FALLBACK_ENV,
     TIER_PROVIDER_ENV,
     ProviderBindings,
     provider_bindings_from_env,
@@ -33,10 +34,15 @@ def build_config_from_env(
     """
 
     source = os.environ if env is None else env
-    binding_keys = (*TIER_PROVIDER_ENV.values(), "SONDER_EMBEDDING_PROVIDER")
+    binding_keys = (
+        *TIER_PROVIDER_ENV.values(), "SONDER_EMBEDDING_PROVIDER",
+        INFERENCE_FALLBACK_ENV,
+    )
     has_provider_overrides = any(
         str(source.get(key, "") or "").strip() for key in binding_keys
     )
+    # The raw alias is kept (e.g. "sonder-inference"); ProviderBindings
+    # normalizes it at composition, where unknown names fail closed.
     return RuntimeConfig(
         profile=profile,
         model_backend=(

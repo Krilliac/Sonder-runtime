@@ -45,6 +45,7 @@ SECRET_ENV_VARS = (
     "SONDER_ISOLATED_WRITE_APPROVAL_CODE",
     "SONDER_LAUNCHER_CONTROL_GATE",
     "SONDER_OPENAI_API_KEY",
+    "SONDER_INFERENCE_API_KEY",
 )
 
 _unsafe_child_secret_name = unsafe_child_secret_name

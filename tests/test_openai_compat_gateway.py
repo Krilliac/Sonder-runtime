@@ -271,3 +271,106 @@ def test_graph_selects_backend_by_env(tmp_path, monkeypatch):
         bootstrap_app.build_application().model_gateway, OpenAICompatibleGateway
     )
     bootstrap_app.reset_for_tests()
+
+
+def test_default_hooks_keep_the_historical_label_and_headers(monkeypatch):
+    labels = []
+    monkeypatch.setattr(
+        "sonder_runtime.adapters.inference.openai_compat_gateway.dispatch_provider",
+        lambda label, op, payload, send: labels.append(label) or send(),
+    )
+    seen = {}
+
+    def transport(url, payload, headers, timeout):
+        seen.update(headers)
+        return _chat_response("ok")
+
+    OpenAICompatibleGateway(_local_cfg(api_key="k"), transport=transport).generate(
+        ModelRequest(prompt="hi", tier="code"), _ctx()
+    )
+    assert labels == ["openai-compatible"]
+    assert seen == {"Content-Type": "application/json", "Authorization": "Bearer k"}
+
+
+def test_extra_headers_are_per_call_and_cannot_replace_credentials():
+    seen = []
+
+    def transport(url, payload, headers, timeout):
+        seen.append(dict(headers))
+        return _chat_response("ok")
+
+    gw = OpenAICompatibleGateway(
+        _local_cfg(api_key="real"), transport=transport,
+        extra_headers=lambda context: {
+            "X-Trace": context.correlation_id,
+            "Authorization": "Bearer forged", "content-type": "text/plain",
+        },
+    )
+    gw.generate(ModelRequest(prompt="hi", tier="code"), _ctx())
+    assert seen[0]["X-Trace"] == "req_oai"
+    assert seen[0]["Authorization"] == "Bearer real"
+    assert seen[0]["Content-Type"] == "application/json"
+    assert "content-type" not in seen[0]
+
+
+def test_error_classifiers_see_bounded_bodies_and_connect_reasons():
+    import io
+
+    classified = []
+
+    def http_classifier(status, body):
+        classified.append((status, body))
+        return CapacityExceeded("classified") if status == 503 else None
+
+    def connect_classifier(reason):
+        classified.append(type(reason).__name__)
+        return InvalidInput("refused, classified")
+
+    def transport(url, payload, headers, timeout):
+        if payload["messages"][-1]["content"] == "http":
+            raise urllib.error.HTTPError(url, 503, "busy", {}, io.BytesIO(b"x" * 20_000))
+        if payload["messages"][-1]["content"] == "other":
+            raise urllib.error.HTTPError(url, 400, "bad", {}, None)
+        raise urllib.error.URLError(ConnectionRefusedError(111, "refused"))
+
+    gw = OpenAICompatibleGateway(
+        _local_cfg(), transport=transport,
+        http_error_classifier=http_classifier, connect_error_classifier=connect_classifier,
+    )
+    with pytest.raises(CapacityExceeded, match="classified"):
+        gw.generate(ModelRequest(prompt="http", tier="code"), _ctx())
+    assert classified[0][0] == 503 and len(classified[0][1]) == 16_384
+    with pytest.raises(InvalidInput, match="HTTP 400"):
+        gw.generate(ModelRequest(prompt="other", tier="code"), _ctx())
+    with pytest.raises(InvalidInput, match="refused, classified"):
+        gw.generate(ModelRequest(prompt="refused", tier="code"), _ctx())
+    assert classified[-1] == "ConnectionRefusedError"
+
+
+def test_get_json_returns_error_documents_and_maps_transport_failures():
+    gets = []
+
+    def get_transport(url, headers, timeout):
+        gets.append((url, headers, timeout))
+        if url.endswith("/down"):
+            raise urllib.error.URLError(ConnectionRefusedError(111, "refused"))
+        if url.endswith("/slow"):
+            raise socket.timeout("slow")
+        return 503, b'{"status": "starting"}'
+
+    gw = OpenAICompatibleGateway(_local_cfg(api_key="k"), get_transport=get_transport)
+    assert gw.get_json("/health", timeout=2.0) == (503, {"status": "starting"})
+    assert gets[0] == (
+        "http://127.0.0.1:8080/health",
+        {"Authorization": "Bearer k", "Accept": "application/json"},
+        2.0,
+    )
+    with pytest.raises(DependencyUnavailable, match="cannot reach endpoint"):
+        gw.get_json("/down", timeout=1.0)
+    with pytest.raises(DeadlineExceeded):
+        gw.get_json("/slow", timeout=1.0)
+
+
+def test_unknown_provider_label_is_rejected_at_construction():
+    with pytest.raises(ValueError, match="unknown provider label"):
+        OpenAICompatibleGateway(_local_cfg(), provider_label="mystery")

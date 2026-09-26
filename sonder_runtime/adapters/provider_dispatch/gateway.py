@@ -104,3 +104,31 @@ class ProviderDispatchGateway:
         self, texts: Sequence[str], context: OperationContext
     ) -> Sequence[Embedding]:
         return self._providers[self._embedding_provider].embed(texts, context)
+
+    def provider_status(self) -> Mapping[str, Mapping[str, object]]:
+        """Aggregate each configured provider's content-free status.
+
+        Providers that do not report status appear as ``unknown`` rather than
+        being guessed healthy or unhealthy.
+        """
+        status: dict[str, Mapping[str, object]] = {}
+        for name in sorted(self._providers):
+            reporter = getattr(self._providers[name], "provider_status", None)
+            if callable(reporter):
+                reported = reporter()
+                status.update({key: dict(value) for key, value in reported.items()})
+                if name not in reported:
+                    status[name] = {"provider": name, "state": "unknown"}
+            else:
+                status[name] = {"provider": name, "state": "unknown"}
+        return status
+
+    def capability_health(self, provider: str | None = None):
+        """Delegate to one provider (the default generation provider if unset)."""
+        name = provider or self._default_generation_provider
+        if name not in self._providers:
+            raise InvalidInput("provider %r is not configured" % name)
+        reporter = getattr(self._providers[name], "capability_health", None)
+        if not callable(reporter):
+            raise InvalidInput("provider %r does not report capability health" % name)
+        return reporter()

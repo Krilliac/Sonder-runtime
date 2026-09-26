@@ -21,13 +21,21 @@ def build_model_gateway(
     bindings: ProviderBindings | None = None,
     provider_factories: Mapping[str, ProviderFactory] | None = None,
     *, target_resolver=None, generate_factory=None, embedding_provider=None,
-    backend: str | None = None,
+    backend: str | None = None, fallback_observer=None,
 ) -> ModelGateway:
     """Construct the configured direct or tier-dispatching model gateway.
 
     Ollama remains the default. OpenAI-compatible aliases opt into the packaged
-    transport, whose own consent boundary remains authoritative. Unknown names
-    and incomplete factory maps fail closed rather than changing transport.
+    transport, whose own consent boundary remains authoritative. Sonder
+    Inference aliases select ``SonderInferenceGateway``. Unknown names and
+    incomplete factory maps fail closed rather than changing transport.
+
+    A declared fallback (only ``sonder_inference -> ollama``) wraps the
+    primary in ``PreSendFallbackGateway``.  The fallback target is constructed
+    once and shared with any direct binding of the same provider, but it is
+    never exposed to tier dispatch unless it is also bound: a fallback is an
+    outage path, not a routable provider.  ``fallback_observer`` receives
+    ``(from_provider, to_provider, reason_code, context)`` per fallback.
     """
     if bindings is not None and backend is not None:
         raise InvalidInput("bindings and backend cannot both be supplied")
@@ -44,6 +52,7 @@ def build_model_gateway(
 
     if provider_factories is None:
         from .inference.openai_compat_gateway import OpenAICompatibleGateway
+        from .inference.sonder_inference_gateway import SonderInferenceGateway
 
         factories: dict[str, ProviderFactory] = {
             "ollama": lambda: OllamaGateway(
@@ -52,6 +61,7 @@ def build_model_gateway(
                 embedding_provider=embedding_provider,
             ),
             "openai_compatible": OpenAICompatibleGateway,
+            "sonder_inference": SonderInferenceGateway,
         }
     else:
         factories = dict(provider_factories)
@@ -59,10 +69,25 @@ def build_model_gateway(
     missing = sorted(selected.required_providers - set(factories))
     if missing:
         raise InvalidInput("missing provider factories: %s" % ", ".join(missing))
-    gateways = {
+    constructed = {
         provider: factories[provider]()
         for provider in sorted(selected.required_providers)
     }
+    gateways = {
+        provider: constructed[provider]
+        for provider in sorted(selected.bound_providers)
+    }
+    if selected.fallbacks:
+        from .provider_dispatch.fallback import PreSendFallbackGateway
+
+        for primary, target in selected.fallbacks.items():
+            gateways[primary] = PreSendFallbackGateway(
+                constructed[primary],
+                fallback=constructed[target],
+                primary_id=primary,
+                fallback_id=target,
+                observer=fallback_observer,
+            )
     if len(gateways) == 1:
         return next(iter(gateways.values()))
     return ProviderDispatchGateway(

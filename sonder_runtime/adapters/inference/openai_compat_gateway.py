@@ -27,6 +27,7 @@ import socket
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Sequence
 from urllib.parse import urlsplit
@@ -55,6 +56,7 @@ from ...domain.common.errors import (
     Forbidden,
     InternalFailure,
     InvalidInput,
+    SonderError,
 )
 from ...domain.model_capabilities import (
     GATEWAY_CAPABILITY_CHAT,
@@ -66,10 +68,21 @@ from ..model_request_admission import (
     HostModelRequestAdmission,
     host_model_request_admission,
 )
+from ..provider_bindings import provider_id_for_label
 from .telemetry import from_openai_compatible
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
 _DEFAULT_TIMEOUT = 300
+# Error bodies and GET responses are read with a hard bound: an error page is
+# only ever inspected for a machine-readable code, never stored or relayed.
+ERROR_BODY_LIMIT = 16_384
+GET_BODY_LIMIT = 1_048_576
+
+# Hook shapes (all optional, all additive; see OpenAICompatibleGateway).
+ExtraHeaders = Callable[[OperationContext], Mapping[str, str]]
+HttpErrorClassifier = Callable[[int, bytes], "SonderError | None"]
+ConnectErrorClassifier = Callable[[BaseException], "SonderError | None"]
+GetTransport = Callable[[str, dict, float], "tuple[int, bytes]"]
 
 # Static, provider-shape facts — never a live probe result.  One configured
 # endpoint and model serve every request; there is no per-request local/cloud
@@ -106,12 +119,40 @@ class OpenAICompatibleGateway:
     ``transport`` is an injection seam ``(url, payload, headers, timeout) -> dict``
     so tests never touch the network; when absent the stdlib urllib transport is
     used. ``config`` overrides env resolution (mainly for tests).
+
+    Additive hooks used by provider adapters that speak this wire format
+    (defaults keep the historical behaviour exactly):
+
+    * ``provider_label`` -- the ``dispatch_provider`` label recorded as capture
+      evidence; one of ``provider_bindings.PROVIDER_LABEL_IDS``.
+    * ``extra_headers(context)`` -- headers computed per call from the
+      OperationContext.  They can never replace ``Content-Type`` or
+      ``Authorization``.
+    * ``http_error_classifier(status, body)`` -- sees the bounded error body
+      and may return the domain error to raise instead of the default mapping.
+    * ``connect_error_classifier(reason)`` -- same for transport failures that
+      happened before any HTTP response (refused, unresolvable, ...).
+    * ``get_transport(url, headers, timeout) -> (status, body)`` -- the GET
+      seam behind :meth:`get_json`; it returns non-2xx statuses instead of
+      raising so callers can read error bodies such as a 503 health document.
     """
 
     def __init__(
         self, config: OpenAICompatibleConfig | None = None, *,
         transport=None, request_admission: HostModelRequestAdmission | None = None,
+        provider_label: str = "openai-compatible",
+        extra_headers: ExtraHeaders | None = None,
+        http_error_classifier: HttpErrorClassifier | None = None,
+        connect_error_classifier: ConnectErrorClassifier | None = None,
+        get_transport: GetTransport | None = None,
     ):
+        self._provider_label = str(provider_label)
+        # Fail at construction on a label that would not map to a provider id.
+        self._provider_id = provider_id_for_label(self._provider_label)
+        self._extra_headers = extra_headers
+        self._http_error_classifier = http_error_classifier
+        self._connect_error_classifier = connect_error_classifier
+        self._get_transport = get_transport
         self._config = config
         self._transport = transport
         self._request_admission = (
@@ -239,7 +280,7 @@ class OpenAICompatibleGateway:
             f"OpenAICompatibleGateway.generate: completed in {duration_ms}ms, "
             f"tokens_in={response.tokens_in}, tokens_out={response.tokens_out}"
         )
-        default_registry().observe_inference("openai_compatible", telemetry)
+        default_registry().observe_inference(self._provider_id, telemetry)
         return response
 
     # -- embed -------------------------------------------------------------
@@ -308,11 +349,32 @@ class OpenAICompatibleGateway:
         text = message.get("content")
         return require_model_text(text)
 
-    def _headers(self, cfg: OpenAICompatibleConfig) -> dict:
-        headers = {"Content-Type": "application/json"}
+    def _headers(
+        self, cfg: OpenAICompatibleConfig,
+        context: OperationContext | None = None,
+    ) -> dict:
+        headers: dict[str, str] = {}
+        if context is not None and self._extra_headers is not None:
+            for name, value in dict(self._extra_headers(context)).items():
+                if str(name).lower() not in ("content-type", "authorization"):
+                    headers[str(name)] = str(value)
+        headers["Content-Type"] = "application/json"
         if cfg.api_key:
             headers["Authorization"] = "Bearer %s" % cfg.api_key
         return headers
+
+    @staticmethod
+    def _bounded_error_body(exc: urllib.error.HTTPError) -> bytes:
+        try:
+            body = exc.read(ERROR_BODY_LIMIT)
+        except Exception:  # noqa: BLE001 - an unreadable error page has no code
+            return b""
+        return body if isinstance(body, bytes) else b""
+
+    def _classified_connect_error(self, reason: BaseException) -> SonderError | None:
+        if self._connect_error_classifier is None:
+            return None
+        return self._connect_error_classifier(reason)
 
     def _post(
         self, path: str, payload: dict, cfg: OpenAICompatibleConfig, timeout,
@@ -329,16 +391,23 @@ class OpenAICompatibleGateway:
                 "host model request rate admission refused; "
                 f"retry after about {admission.retry_after:.3f}s"
             )
+        headers = self._headers(cfg, context)
         try:
             if path == "/v1/chat/completions":
                 data = dispatch_provider(
-                    "openai-compatible", path, payload,
-                    lambda: transport(url, payload, self._headers(cfg), timeout),
+                    self._provider_label, path, payload,
+                    lambda: transport(url, payload, headers, timeout),
                 )
             else:
-                data = transport(url, payload, self._headers(cfg), timeout)
+                data = transport(url, payload, headers, timeout)
         except urllib.error.HTTPError as exc:
             code = getattr(exc, "code", 0)
+            if self._http_error_classifier is not None:
+                classified = self._http_error_classifier(
+                    int(code or 0), self._bounded_error_body(exc),
+                )
+                if classified is not None:
+                    raise classified from exc
             if code in (401, 403):
                 logger.error(
                     f"authentication failed for OpenAI-compatible endpoint, "
@@ -379,8 +448,16 @@ class OpenAICompatibleGateway:
                 f"OpenAI-compatible endpoint unreachable: url={url!r}, "
                 f"reason={reason}"
             )
+            classified = self._classified_connect_error(
+                reason if isinstance(reason, BaseException) else exc
+            )
+            if classified is not None:
+                raise classified from exc
             raise DependencyUnavailable("cannot reach endpoint: %s" % reason) from exc
         except OSError as exc:
+            classified = self._classified_connect_error(exc)
+            if classified is not None:
+                raise classified from exc
             logger.error(
                 f"OpenAI-compatible endpoint unreachable (OSError), url={url!r}",
                 exc_info=True,
@@ -389,6 +466,66 @@ class OpenAICompatibleGateway:
         if not isinstance(data, dict):
             raise InternalFailure("endpoint transport returned a non-object response")
         return data
+
+    def get_json(
+        self, path: str, *, timeout: float,
+        cfg: OpenAICompatibleConfig | None = None,
+    ) -> tuple[int, dict | None]:
+        """GET ``path`` on the configured endpoint; return ``(status, object)``.
+
+        Shares the POST path's credentials and transport error mapping
+        (including ``connect_error_classifier``).  Non-2xx statuses are
+        returned, not raised, so a caller can read a structured error
+        document.  ``object`` is ``None`` when the body is not a JSON object.
+        Consent is the caller's responsibility: this helper sends no prompt
+        content, but it does send credentials, so callers enforce their
+        endpoint policy before calling it.
+        """
+        cfg = cfg or self._resolved_config()
+        url = cfg.base_url.rstrip("/") + path
+        headers = self._headers(cfg)
+        headers.pop("Content-Type", None)
+        headers["Accept"] = "application/json"
+        transport = self._get_transport or self._default_get_transport
+        try:
+            status, body = transport(url, headers, float(timeout))
+        except (socket.timeout, TimeoutError) as exc:
+            raise DeadlineExceeded("endpoint timed out") from exc
+        except urllib.error.URLError as exc:
+            reason = getattr(exc, "reason", exc)
+            if isinstance(reason, (socket.timeout, TimeoutError)):
+                raise DeadlineExceeded("endpoint timed out") from exc
+            classified = self._classified_connect_error(
+                reason if isinstance(reason, BaseException) else exc
+            )
+            if classified is not None:
+                raise classified from exc
+            raise DependencyUnavailable("cannot reach endpoint: %s" % reason) from exc
+        except OSError as exc:
+            classified = self._classified_connect_error(exc)
+            if classified is not None:
+                raise classified from exc
+            raise DependencyUnavailable("cannot reach endpoint: %s" % exc) from exc
+        if not isinstance(body, (bytes, bytearray)) or len(body) > GET_BODY_LIMIT:
+            raise DependencyUnavailable("endpoint returned an oversized or invalid body")
+        try:
+            value = json.loads(bytes(body).decode("utf-8")) if body else None
+        except (UnicodeDecodeError, ValueError):
+            value = None
+        return int(status), value if isinstance(value, dict) else None
+
+    @staticmethod
+    def _default_get_transport(url: str, headers: dict, timeout: float) -> tuple[int, bytes]:
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout or _DEFAULT_TIMEOUT) as resp:
+                return int(resp.status), resp.read(GET_BODY_LIMIT + 1)
+        except urllib.error.HTTPError as exc:
+            try:
+                body = exc.read(GET_BODY_LIMIT + 1)
+            except Exception:  # noqa: BLE001 - the status alone still answers
+                body = b""
+            return int(exc.code), body if isinstance(body, bytes) else b""
 
     @staticmethod
     def _default_transport(url: str, payload: dict, headers: dict, timeout) -> dict:
