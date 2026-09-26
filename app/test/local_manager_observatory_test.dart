@@ -58,25 +58,72 @@ void main() {
     setUp(() => temp = Directory.systemTemp.createTempSync('obs-path-'));
     tearDown(() => temp.deleteSync(recursive: true));
 
+    // Real files, so this uses the host's own PATH syntax. A Windows temp
+    // directory (C:\Users\...) holds a drive-letter colon, which a POSIX
+    // ':'-separated PATH would split apart.
     test('findExecutableOnPath finds a real file on PATH, in PATH order', () {
-      final first = Directory('${temp.path}/first')..createSync();
-      final second = Directory('${temp.path}/second')..createSync();
-      File('${second.path}/sonder-observatory').writeAsStringSync('');
-      final env = {'PATH': '/does/not/exist::${first.path}:${second.path}'};
-      expect(
-          LocalManager.findExecutableOnPath('sonder-observatory', env,
-              operatingSystem: 'linux'),
-          '${second.path}/sonder-observatory');
-      File('${first.path}/sonder-observatory').writeAsStringSync('');
-      expect(
-          LocalManager.findExecutableOnPath('sonder-observatory', env,
-              operatingSystem: 'linux'),
-          '${first.path}/sonder-observatory');
+      final windows = Platform.isWindows;
+      final sep = windows ? ';' : ':';
+      final slash = Platform.pathSeparator;
+      final missing = windows ? r'C:\does\not\exist' : '/does/not/exist';
+      final first = Directory('${temp.path}${slash}first')..createSync();
+      final second = Directory('${temp.path}${slash}second')..createSync();
+      File('${second.path}${slash}sonder-observatory').writeAsStringSync('');
+      final env = {
+        'PATH': '$missing$sep$sep${first.path}$sep${second.path}',
+        if (windows) 'PATHEXT': '.EXE',
+      };
+      expect(LocalManager.findExecutableOnPath('sonder-observatory', env),
+          '${second.path}${slash}sonder-observatory');
+      File('${first.path}${slash}sonder-observatory').writeAsStringSync('');
+      expect(LocalManager.findExecutableOnPath('sonder-observatory', env),
+          '${first.path}${slash}sonder-observatory');
       expect(
           LocalManager.findExecutableOnPath(
-              'sonder-observatory', const {'PATH': ''},
-              operatingSystem: 'linux'),
+              'sonder-observatory', const {'PATH': ''}),
           isNull);
+    });
+
+    test('a POSIX PATH splits on : and skips empty entries', () {
+      final tried = <String>[];
+      final found = LocalManager.findExecutableOnPath(
+        'sonder-observatory',
+        const {'PATH': '/does/not/exist::/opt/a/:/opt/b'},
+        operatingSystem: 'linux',
+        fileExists: (path) {
+          tried.add(path);
+          return path == '/opt/b/sonder-observatory';
+        },
+      );
+      expect(found, '/opt/b/sonder-observatory');
+      expect(tried, [
+        '/does/not/exist/sonder-observatory',
+        '/opt/a/sonder-observatory',
+        '/opt/b/sonder-observatory',
+      ]);
+    });
+
+    test('a Windows PATH keeps each drive-letter colon inside its entry', () {
+      final tried = <String>[];
+      final found = LocalManager.findExecutableOnPath(
+        'sonder-observatory',
+        const {
+          'PATH': r'C:\Users\RUNNER~1\AppData\Local\Temp\obs\first;;'
+              r'D:\obs\second',
+          'PATHEXT': '.EXE',
+        },
+        operatingSystem: 'windows',
+        fileExists: (path) {
+          tried.add(path);
+          return path == r'D:\obs\second\sonder-observatory';
+        },
+      );
+      expect(found, r'D:\obs\second\sonder-observatory');
+      expect(tried, [
+        r'C:\Users\RUNNER~1\AppData\Local\Temp\obs\first\sonder-observatory',
+        r'C:\Users\RUNNER~1\AppData\Local\Temp\obs\first\sonder-observatory.exe',
+        r'D:\obs\second\sonder-observatory',
+      ]);
     });
 
     test('on Windows it splits on ; and tries each PATHEXT suffix', () {
