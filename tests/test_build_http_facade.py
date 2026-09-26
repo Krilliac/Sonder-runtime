@@ -182,6 +182,8 @@ def test_serve_registers_the_build_routes_behind_developer_authority():
     gate = inspect.getsource(typed_gateway.serve_developer_route)
     assert "developer_authorized(auth)" in gate
     get_source = inspect.getsource(serve.Handler.do_GET)
-    post_source = inspect.getsource(serve.Handler.do_POST)
+    # do_POST opens the per-request turn scope and delegates the routing.
+    assert "self._handle_post_request()" in inspect.getsource(serve.Handler.do_POST)
+    post_source = inspect.getsource(serve.Handler._handle_post_request)
     assert '_handle_build_request("GET", path)' in get_source
     assert '_handle_build_request("POST", path, req)' in post_source
