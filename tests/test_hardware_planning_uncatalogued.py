@@ -44,12 +44,49 @@ def test_requested_model_that_cannot_fit_falls_back_with_a_reason():
     assert any("70b" in item and "cannot preserve" in item for item in plan.inference.rejected)
 
 
-def test_uncatalogued_request_trains_from_the_pinned_catalog():
-    plan = build_plan(host(24, 64), options("27b", "qwen3.8:27b", 27.0))
+@pytest.mark.parametrize("size", ("27b", "13"))
+def test_uncatalogued_request_disables_training_instead_of_substituting(size):
+    # 24 GB NVIDIA / 64 GB RAM would train the pinned 7b under "auto".
+    assert build_plan(host(24, 64), PlanOptions(model="auto")).training.enabled
 
-    assert any("no pinned training base" in item for item in plan.training.rejected)
-    if plan.training.enabled:
-        assert plan.training.model_size in ("1.5b", "3b", "7b")
+    plan = build_plan(host(24, 64), PlanOptions(model=size))
+
+    assert plan.training.enabled is False
+    assert plan.training.model_size == ""
+    assert plan.training.model == ""
+    assert any("no pinned training base" in item and "disabled" in item
+               for item in plan.training.rejected)
+    assert plan.inference.enabled
+    assert plan.inference.model_size == ("13b" if size == "13" else size)
+
+
+def test_uncatalogued_request_is_not_substituted_for_dense_training():
+    plan = build_plan(host(80, 256), PlanOptions(model="27b", full_finetune=True))
+
+    assert plan.training.enabled is False
+    assert not plan.training.method.startswith("full-parameter")
+
+
+def test_uncatalogued_start_does_not_launch_training():
+    import adaptive_training
+
+    launches = []
+    plan = build_plan(host(24, 64), PlanOptions(model="27b"))
+
+    ok, message = adaptive_training.start_training(
+        plan, confirmed=True, runner=lambda *args, **kwargs: launches.append(args),
+    )
+
+    assert ok is False
+    assert launches == []
+    assert "no pinned training base" in message
+
+
+def test_catalog_request_still_trains_its_own_size():
+    plan = build_plan(host(24, 64), PlanOptions(model="3b"))
+
+    assert plan.training.enabled
+    assert plan.training.model_size == "3b"
 
 
 def test_size_token_without_explicit_parameter_count_is_parsed():

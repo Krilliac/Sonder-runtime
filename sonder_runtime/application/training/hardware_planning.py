@@ -203,9 +203,15 @@ def build_plan(profile=None, options=None):
         train_rejected.append("Local QLoRA disabled: this bitsandbytes path requires a supported NVIDIA CUDA runtime.")
     if options.allow_cpu_offload:
         train_rejected.append(TRAINING_CPU_OFFLOAD_REASON)
-    if requested == "auto" or requested not in MODEL_SPECS:
-        if requested != "auto":
-            train_rejected.append(f"Requested {requested} has no pinned training base; planning QLoRA from the pinned catalog.")
+    uncatalogued = requested != "auto" and requested not in MODEL_SPECS
+    if uncatalogued:
+        # An explicit size is a request to train that size.  Substituting a
+        # different pinned base would start an attended weight update on a
+        # model the operator did not ask for, so training stays disabled and
+        # the inference plan still covers the requested model.
+        train_rejected.append(f"Requested {requested} has no pinned training base; local weight training is disabled for it (request auto, 1.5b, 3b, or 7b to train).")
+        candidates = []
+    elif requested == "auto":
         candidates = ["7b", "3b", "1.5b"]
     else:
         candidates = [requested]
@@ -223,7 +229,7 @@ def build_plan(profile=None, options=None):
         if options.allow_cpu_offload: reasons.append("requested CPU offload backend is unavailable")
         train_rejected.append(f"QLoRA {size} rejected: "+"; ".join(reasons or ["runtime unsupported"])+".")
     method = "QLoRA (4-bit NF4)"
-    if options.full_finetune:
+    if options.full_finetune and not uncatalogued:
         dense_size = requested if requested in MODEL_SPECS else "1.5b"
         dense_vram, dense_ram = round(MODEL_SPECS[dense_size]["params"] * 16 + 4, 1), round(MODEL_SPECS[dense_size]["params"] * 8 + 8, 1)
         if not runtime_supported or dense_vram > usable_vram or dense_ram > usable_ram:
