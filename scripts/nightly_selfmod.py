@@ -397,22 +397,16 @@ def _compose_stage_journal():
 def _evaluator_truth_paths(run_id, held_out, oracle=None) -> tuple[str, ...]:
     """Evaluator truth every candidate gate must leave byte-for-byte untouched.
 
-    The held-out snapshot, the rollback point (the sealed backup bundle
-    and its manifest, which also records the baseline hashes) and, when one
-    is held, the independent oracle's case set.  Supervisors
-    refuse to launch when any of these is candidate-writable (Linux) and
-    re-digest them after each check.  The selfmod ledger is checked for
-    candidate write exposure once per run instead (``_isolation_refusal``):
-    the parent writes it between gates, so its bytes are not stable.
+    The held-out snapshot plus ``selfmod.evaluator_truth_paths``: the rollback
+    point (the sealed backup bundle and its manifest, which also records the
+    baseline hashes) and, when one is held, the independent oracle's case
+    set.  Supervisors refuse to launch when any of these is
+    candidate-writable (Linux) and re-digest them after each check.  The
+    selfmod ledger is checked for candidate write exposure once per run
+    instead (``_isolation_refusal``): the parent writes it between gates, so
+    its bytes are not stable.
     """
-    paths = [str(path) for path in held_out.get("protected_paths", ())]
-    bundle = selfmod._backup_dir(run_id)
-    if bundle.is_dir():
-        paths.append(str(bundle))
-        # The Windows supervisor digests files only; name them explicitly.
-        for name in ("manifest.json", "manifest.sha256"):
-            if (bundle / name).is_file():
-                paths.append(str(bundle / name))
+    paths = list(selfmod.evaluator_truth_paths(run_id, held_out.get("protected_paths", ())))
     if oracle is not None:
         paths.append(str(oracle.path))
     return tuple(dict.fromkeys(paths))
@@ -421,21 +415,13 @@ def _evaluator_truth_paths(run_id, held_out, oracle=None) -> tuple[str, ...]:
 def _isolation_refusal() -> str | None:
     """Why this host cannot isolate unattended candidates, else ``None``.
 
-    On a Linux host with the uid supervisor selected, the selfmod ledger
-    (baseline, tested digests, decisions) and its directory chain must also
-    be closed to the candidate uid before any run starts.
+    ``selfmod.candidate_isolation_refusal``: the selected supervisor's
+    preflight and, on a Linux host with the uid supervisor selected, the
+    selfmod ledger (baseline, tested digests, decisions) and its directory
+    chain closed to the candidate uid before any run starts.  The operator
+    ``/selfmod run`` path consults the same function.
     """
-    refusal = selfmod_linux_isolation.candidate_isolation_preflight()
-    if refusal:
-        return refusal
-    _runner, kind = selfmod_linux_isolation.candidate_supervisor()
-    if kind == selfmod_linux_isolation.ATTESTATION:
-        try:
-            selfmod_linux_isolation.require_not_candidate_writable([selfmod.database_path()])
-        except selfmod_linux_isolation.LinuxIsolationUnavailable as error:
-            return "selfmod ledger is exposed to the candidate uid: %s; see %s" % (
-                str(error)[:300], selfmod_linux_isolation.ISOLATION_DOC)
-    return None
+    return selfmod.candidate_isolation_refusal()
 
 
 # The selfmod model sees only the candidate module. These suites are selected

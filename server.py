@@ -183,6 +183,7 @@ from sonder_runtime.application.context_health import (
     ContextMemorySnapshot,
 )
 from sonder_runtime.domain.common.errors import InvalidInput
+from sonder_runtime.domain.common.errors import SonderError as _SonderError
 from sonder_runtime.domain.runtime_identity import (
     runtime_identity_block as _runtime_identity_block,
 )
@@ -2889,13 +2890,61 @@ def _selfmod_agent_policy(run):
     return policy
 
 
-def _execute_selfmod_run(run_id, explicit_tests=None):
+def _selfmod_stage_journal():
+    """The bootstrap-composed selfmod stage journal for operator-driven stages.
+
+    The same ``GuardedLegacySelfmodService`` the nightly driver journals
+    through: its binding factory is the host's ``_compose_selfmod_binding``
+    over the shared worker-effects journal, so an operator stage and a
+    nightly stage of one run share journal identities and per-attempt
+    numbering.  Raises when the graph composes no selfmod service; callers
+    refuse to mutate rather than run a stage unjournaled.
+    """
+    factory = getattr(_application(), "selfmod_service", None)
+    if not callable(factory):
+        raise RuntimeError("the application graph does not compose a selfmod service")
+    return factory()
+
+
+def _selfmod_journal_refusal(action, exc):
+    return ("refused /selfmod %s: selfmod stage journal unavailable (%s); "
+            "refusing to mutate without journaled effects" % (action, type(exc).__name__))
+
+
+def _execute_selfmod_run(run_id, explicit_tests=None, *, unisolated=False, operator_approved=False):
+    """Drive one operator-authorized selfmod run through its candidate checks.
+
+    Every mutating stage goes through the selfmod stage journal
+    (``_selfmod_stage_journal``), and every command that executes candidate
+    bytes (each ``record_test`` and the ``record_smoke`` probe) runs under the
+    isolation ``selfmod.operator_candidate_isolation`` selects: the host's
+    candidate supervisor (the Linux uid supervisor when
+    ``SONDER_SELFMOD_CANDIDATE_UID`` is configured, Windows low integrity on
+    Windows) or -- only on a host without one, and only for an attended
+    console operator who typed ``--unisolated`` -- an unisolated run that the
+    run's audit events record as such.  Both are settled before a backup or
+    workspace exists.
+    """
+    try:
+        isolated = selfmod.operator_candidate_isolation(
+            unisolated_requested=bool(unisolated),
+            operator_attended=bool(operator_approved), run_id=run_id,
+        )
+    except selfmod.CandidateIsolationRefused as exc:
+        return "refused /selfmod run: %s" % exc
+    try:
+        stages = _selfmod_stage_journal()
+    except Exception as exc:
+        return _selfmod_journal_refusal("run", exc)
     run = selfmod.get_run(run_id)
     if run["phase"] == "proposed":
-        selfmod.create_backup(run_id)
-        run = selfmod.prepare_workspace(run_id)
+        stages.journaled_stage(run_id, "create_backup", {},
+                               lambda: selfmod.create_backup(run_id))
+        run = stages.journaled_stage(run_id, "prepare_workspace", {},
+                                     lambda: selfmod.prepare_workspace(run_id))
     elif run["phase"] == "backed_up":
-        run = selfmod.prepare_workspace(run_id)
+        run = stages.journaled_stage(run_id, "prepare_workspace", {},
+                                     lambda: selfmod.prepare_workspace(run_id))
     if run["phase"] != "editing":
         return "ERROR: selfmod run is not ready for editing: %s" % run["phase"]
     owner = selfmod.claim(run_id)
@@ -2913,7 +2962,15 @@ def _execute_selfmod_run(run_id, explicit_tests=None):
     try:
         workspace = run["workspace_path"]
         test_commands = _selfmod_test_commands(run, explicit_tests or [])
-        selfmod.record_reproducer_before(run_id, test_commands[1][1])
+        reproducer = [str(item) for item in test_commands[1][1]]
+        # The reproducer runs the declared check against the untouched live
+        # source, not candidate bytes, so it is journaled but not isolated
+        # (``selfmod._record_command`` exempts it from auto-low-risk isolation
+        # for the same reason).
+        stages.journaled_stage(
+            run_id, "record_reproducer_before", {"command": reproducer},
+            lambda: selfmod.record_reproducer_before(run_id, reproducer),
+        )
         prompt = (
             "Implement this bounded self-improvement only inside the isolated workspace.\n"
             "Objective: %s\nEvidence: %s\nAcceptance criteria: %s\n"
@@ -2937,14 +2994,35 @@ def _execute_selfmod_run(run_id, explicit_tests=None):
         if not diff["changed_files"]:
             selfmod.reject(run_id, "editing agent produced no scoped diff")
             return "Selfmod rejected: editing agent produced no scoped diff.\n\n" + output
-        selfmod.begin_testing(run_id)
+        stages.journaled_stage(run_id, "begin_testing", {},
+                               lambda: selfmod.begin_testing(run_id))
+        # The rollback point (sealed backup bundle and manifest) is evaluator
+        # truth: a supervisor refuses to launch while it is candidate-writable
+        # and re-digests it after every check.
+        protected = selfmod.evaluator_truth_paths(run_id)
         for kind, command in test_commands:
-            selfmod.record_test(run_id, kind, command)
+            argv = [str(item) for item in command]
+            stages.journaled_stage(
+                run_id, "record_test",
+                {"kind": str(kind), "command": argv,
+                 "protected_paths": list(protected), "low_integrity": isolated},
+                lambda kind=kind, argv=argv: selfmod.record_test(
+                    run_id, kind, argv, protected_paths=protected,
+                    low_integrity=isolated,
+                ),
+            )
         # review() requires a passing `smoke`; this is what supplies it. It runs
         # the candidate rather than describing it, so it is recorded here rather
-        # than being one more argv in the list above.
-        selfmod.record_smoke(run_id)
-        selfmod.review(run_id)
+        # than being one more argv in the list above -- under the same isolation.
+        stages.journaled_stage(
+            run_id, "record_smoke",
+            {"protected_paths": list(protected), "low_integrity": isolated},
+            lambda: selfmod.record_smoke(
+                run_id, protected_paths=protected, low_integrity=isolated,
+            ),
+        )
+        stages.journaled_stage(run_id, "review", {"require_kinds": None},
+                               lambda: selfmod.review(run_id))
         return selfmod.format_run(run_id) + "\n\nAgent evidence:\n" + output
     except Exception as exc:
         current = selfmod.get_run(run_id)
@@ -3225,6 +3303,8 @@ def _mission_command(arg: str, project: str = "", request_owner: str = "") -> st
 # refusing a status read unattended would be the over-refusal this gate exists
 # to avoid.
 _SELFMOD_SOURCE_WRITING_ACTIONS = frozenset({"deploy", "rollback"})
+# The legacy phase each one-shot source-writing stage starts from.
+_SELFMOD_OPERATOR_STAGE_PHASES = {"deploy": "approved", "rollback": "deployed"}
 
 
 def _selfmod_command(arg: str, *, repository_root="", operator_approved=False) -> str:
@@ -3282,11 +3362,28 @@ def _selfmod_command(arg: str, *, repository_root="", operator_approved=False) -
             return "pruned backups: %s" % (", ".join(removed) or "none")
         if action in {"plan", "run"}:
             selfmod.recursive_guard()
-            maintenance = "--maintenance" in rest.split()
-            parsed_rest = " ".join(part for part in rest.split() if part != "--maintenance")
+            words = rest.split()
+            maintenance = "--maintenance" in words
+            unisolated = selfmod.UNISOLATED_FLAG in words
+            parsed_rest = " ".join(
+                part for part in words
+                if part not in ("--maintenance", selfmod.UNISOLATED_FLAG)
+            )
             objective, files, tests = selfmod.parse_plan_text(parsed_rest)
             if not files:
-                return "usage: /selfmod %s <objective> --files path.py,test_path.py [--tests python -m pytest ...]" % action
+                return "usage: /selfmod %s <objective> --files path.py,test_path.py [--tests python -m pytest ...] [--maintenance] [%s]" % (action, selfmod.UNISOLATED_FLAG)
+            if action == "run":
+                # Settle candidate isolation before a run record exists, so a
+                # host without a candidate supervisor leaves nothing behind.
+                # ``_execute_selfmod_run`` decides again, authoritatively,
+                # against the run it is about to execute.
+                try:
+                    selfmod.operator_candidate_isolation(
+                        unisolated_requested=unisolated,
+                        operator_attended=bool(operator_approved),
+                    )
+                except selfmod.CandidateIsolationRefused as exc:
+                    return "refused /selfmod run: %s" % exc
             evidence = ["explicit user-authorized objective: %s" % objective, "host improvement report: %s" % system_improvement_report()[:2000]]
             run = selfmod.create_plan(
                 objective, root, problem=objective, evidence=evidence, files=files,
@@ -3296,14 +3393,43 @@ def _selfmod_command(arg: str, *, repository_root="", operator_approved=False) -
             )
             if action == "plan":
                 return selfmod.format_run(run["id"])
-            return _execute_selfmod_run(run["id"], tests)
+            return _execute_selfmod_run(
+                run["id"], tests, unisolated=unisolated,
+                operator_approved=bool(operator_approved),
+            )
+        if action in {"approve", "deploy", "rollback"}:
+            # These stages mutate the run (and, for deploy/rollback, Sonder's
+            # own source); each goes through the selfmod stage journal or
+            # does not run at all.
+            required = _SELFMOD_OPERATOR_STAGE_PHASES.get(action)
+            if required:
+                # Deploy and rollback admit their one-shot journal intent
+                # before the legacy precondition runs, so a call from the
+                # wrong phase would fence the run behind reconciliation.
+                # Refuse a known run in the wrong phase before that.
+                try:
+                    phase = str(selfmod.get_run(rest).get("phase", ""))
+                except KeyError:
+                    phase = None
+                if phase is not None and phase != required:
+                    return "refused /selfmod %s: run %s is %s; it requires phase %s" % (
+                        action, rest, phase, required)
+            try:
+                stages = _selfmod_stage_journal()
+            except Exception as exc:
+                return _selfmod_journal_refusal(action, exc)
         if action == "resume":
             run = selfmod.resume(rest)
             return selfmod.format_run(run["id"])
         if action == "cancel":
             return selfmod.format_run(selfmod.cancel(rest)["id"])
         if action == "approve":
-            return selfmod.format_run(selfmod.approve(rest, approver="explicit local/developer user")["id"])
+            approver = "explicit local/developer user"
+            approved = stages.journaled_stage(
+                rest, "approve", {"approver": approver},
+                lambda: selfmod.approve(rest, approver=approver),
+            )
+            return selfmod.format_run(approved["id"])
         if action == "reject":
             run_id, _, reason = rest.partition(" ")
             return selfmod.format_run(selfmod.reject(run_id, reason or "explicit user rejection")["id"])
@@ -3320,7 +3446,11 @@ def _selfmod_command(arg: str, *, repository_root="", operator_approved=False) -
             # tree whose rollback was broken. `selfmod.deploy` now dry-runs both
             # rollback routes itself, unconditionally, so that property cannot be
             # lost by editing the argv here or by a caller that passes none.
-            run = selfmod.deploy(rest, health_command=[sys.executable, "-c", "import server; print(server.status())"])
+            health_command = [sys.executable, "-c", "import server; print(server.status())"]
+            run = stages.journaled_stage(
+                rest, "deploy", {"health_command": health_command, "commit": True},
+                lambda: selfmod.deploy(rest, health_command=health_command),
+            )
             module_names = {
                 Path(path).stem for path in run["files"]
                 if path.endswith(".py") and "/" not in path
@@ -3333,20 +3463,29 @@ def _selfmod_command(arg: str, *, repository_root="", operator_approved=False) -
                     if row.get("error")
                 ]
                 if failures:
-                    selfmod.rollback(rest, reason="in-process live reload health failed")
+                    reason = "in-process live reload health failed"
+                    stages.journaled_stage(
+                        rest, "rollback", {"reason": reason},
+                        lambda: selfmod.rollback(rest, reason=reason),
+                    )
                     return "ERROR: live reload failed; automatic rollback completed: %s" % failures
             return selfmod.format_run(run["id"])
         if action == "rollback":
-            return selfmod.format_run(selfmod.rollback(rest)["id"])
+            reason = "user requested rollback"
+            restored = stages.journaled_stage(
+                rest, "rollback", {"reason": reason},
+                lambda: selfmod.rollback(rest, reason=reason),
+            )
+            return selfmod.format_run(restored["id"])
         if action in {"help", "?"}:
             return (
                 "selfmod: status|opportunities|history|inspect <id>|plan <objective> --files a,b|"
-                "run <objective> --files a,b --tests <command>|diff <id>|tests <id>|approve <id>|"
+                "run <objective> --files a,b --tests <command> [--unisolated]|diff <id>|tests <id>|approve <id>|"
                 "reject <id>|deploy <id>|rollback <id>|backups|verify-backup <id>|"
                 "mode observe|propose|auto-low-risk|resume <id>|cancel <id>|retention <days> <GB>|prune-backups|disable|enable"
             )
         return "ERROR: unknown selfmod action; try /selfmod help"
-    except (KeyError, ValueError, RuntimeError, PermissionError, OSError) as exc:
+    except (KeyError, ValueError, RuntimeError, PermissionError, OSError, _SonderError) as exc:
         return "ERROR: %s" % exc
 
 

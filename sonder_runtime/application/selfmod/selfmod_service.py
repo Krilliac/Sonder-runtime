@@ -244,6 +244,12 @@ _STAGE_EFFECTS: Mapping[str, _StageEffect] = {
         "selfmod-record-test", "record-test", True, _result_passed,
         frozenset({"testing"}),
     ),
+    # The candidate-importing smoke probe that ``review`` requires; retried
+    # like any other check.
+    "record_smoke": _StageEffect(
+        "selfmod-record-smoke", "record-smoke", True, _result_passed,
+        frozenset({"testing"}),
+    ),
     # A review can auto-approve an eligible run in the same legacy call.
     "review": _StageEffect(
         "selfmod-review", "review", False,
@@ -559,9 +565,10 @@ class GuardedLegacySelfmodService:
     ) -> Mapping[str, object]:
         """Run one legacy stage that a host driver invokes itself, journaled.
 
-        Unattended drivers (``scripts/nightly_selfmod.py``) call the legacy
-        module with arguments the typed methods do not model (candidate
-        isolation limits, protected evaluator truth, nightly review kinds).
+        Host drivers (the unattended ``scripts/nightly_selfmod.py`` and the
+        operator ``/selfmod`` path in ``server.py``) call the legacy module
+        with arguments the typed methods do not model (candidate isolation
+        choice and limits, protected evaluator truth, nightly review kinds).
         This gives those calls the same effect-journal identity, per-attempt
         numbering for repeatable stages, phase precondition and success
         predicate as the typed methods.  It fails closed when no binding

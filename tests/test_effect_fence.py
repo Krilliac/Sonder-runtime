@@ -306,6 +306,15 @@ def test_the_selfmod_editor_runs_under_the_run_fence(monkeypatch):
     monkeypatch.setattr(server.selfmod, "reject", lambda run_id, reason: None)
     monkeypatch.setattr(server, "_selfmod_test_commands", lambda run, explicit: [("a", ["x"]), ("b", ["y"])])
     monkeypatch.setattr(server, "_selfmod_agent_policy", lambda run: None)
+    # Isolation selection and the stage journal are covered by
+    # tests/test_selfmod_operator_isolation.py; this test is about the fence.
+    monkeypatch.setattr(server.selfmod, "operator_candidate_isolation", lambda **_k: True)
+
+    class _PassThroughStages:
+        def journaled_stage(self, run_id, stage, request, invoke):
+            return invoke()
+
+    monkeypatch.setattr(server, "_selfmod_stage_journal", _PassThroughStages)
     out = server._execute_selfmod_run("run-9")
     assert out.startswith("ERROR: selfmod run failed closed: stop here")
     assert seen["fence"].label == "selfmod:run-9"

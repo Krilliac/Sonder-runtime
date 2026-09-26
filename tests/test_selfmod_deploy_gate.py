@@ -68,6 +68,25 @@ def no_real_write_path(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def per_test_stage_journal(tmp_path, monkeypatch):
+    """A real, per-test selfmod stage journal.
+
+    ``/selfmod deploy|rollback`` go through the bootstrap-composed stage
+    journal, whose one-shot identities (``selfmod-deploy:<run>``) are durable.
+    Every test here reuses ``RUN1``, so each gets its own journal rather than
+    inheriting an earlier test's admitted intent.
+    """
+    from sonder_runtime.bootstrap.app import build_application
+    from sonder_runtime.platform.config import SonderConfig, StateConfig
+
+    home = tmp_path / "journal-home"
+    application = build_application(config=SonderConfig(state=StateConfig(home=str(home))))
+    stages = application.selfmod_service()
+    monkeypatch.setattr(server, "_selfmod_stage_journal", lambda: stages)
+    return stages
+
+
+@pytest.fixture(autouse=True)
 def mode_sandbox(tmp_path, monkeypatch):
     """A tmp state file and a known starting mode for every test here."""
     monkeypatch.setattr(pm, "_state_path", lambda: str(tmp_path / "mode.json"))

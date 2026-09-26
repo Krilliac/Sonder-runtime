@@ -892,6 +892,14 @@ def begin_testing(run_id):
     return _phase(run_id, {"editing", "interrupted"}, "testing", "testing", "host-controlled validation started")
 
 
+def _auto_candidate(run) -> bool:
+    """Whether ``run`` is eligible for unattended low-risk evaluation."""
+    return (
+        run.get("mode") == "auto-low-risk" and run.get("risk") == "low"
+        and not run.get("approval_required", True)
+    )
+
+
 def _record_command(
     run, kind, command, cwd_path, seconds, expect_failure=False, receipt=None,
     protected_paths=(), low_integrity=None, isolation=None,
@@ -904,10 +912,7 @@ def _record_command(
     # environment fallback for older callers and operators that already opt in
     # through the process environment, but do not make nightly's choice a
     # process-global side effect.
-    auto_candidate = (
-        run.get("mode") == "auto-low-risk" and run.get("risk") == "low"
-        and not run.get("approval_required", True) and kind != "reproducer_before"
-    )
+    auto_candidate = _auto_candidate(run) and kind != "reproducer_before"
     if auto_candidate and low_integrity is False:
         raise PermissionError("auto-low-risk candidate tests require low-integrity isolation")
     use_low_integrity = auto_candidate or (
@@ -1019,6 +1024,126 @@ def _linux_isolation_unconfigured() -> str:
     except ImportError:
         return "Linux candidate isolation is not configured"
     return UNCONFIGURED_GUIDANCE
+
+
+class CandidateIsolationRefused(PermissionError):
+    """An operator-driven candidate check cannot run behind an isolation boundary.
+
+    Raised before any run, backup, workspace or candidate process exists when
+    this host has no usable candidate supervisor (on Linux: no dedicated
+    candidate uid, or a supervisor that is not root) and the caller has no
+    attended opt-in to run the candidate unisolated.  ``reason`` is the host
+    fact behind the refusal; it never quotes candidate output.
+    """
+
+    def __init__(self, message: str, *, reason: str):
+        super().__init__(message)
+        self.reason = reason
+
+
+# The explicit per-command flag an attended console operator adds to
+# ``/selfmod run`` to accept an unisolated candidate on a host that has no
+# candidate supervisor.  It is honoured only with a console operator attached
+# (``server.control_command(operator_approved=True)``, set only by the REPL).
+UNISOLATED_FLAG = "--unisolated"
+
+
+def candidate_isolation_refusal() -> str | None:
+    """Why this host cannot isolate candidate checks, else ``None``.
+
+    The same host facts every candidate-running driver consults before it
+    creates anything: the selected supervisor's preflight (Linux, a root
+    supervisor, ``no_new_privs``, a configured spare unprivileged uid; on
+    Windows the low-integrity supervisor proves its own boundary per command)
+    and, when the Linux uid supervisor is selected, that the selfmod ledger
+    (baseline, tested digests, decisions) and its directory chain are closed
+    to the candidate uid.  ``run_isolated`` re-checks the boundary for every
+    command, so ``None`` here never authorizes a launch by itself.
+    """
+    from scripts import selfmod_linux_isolation
+
+    refusal = selfmod_linux_isolation.candidate_isolation_preflight()
+    if refusal:
+        return refusal
+    _runner, kind = selfmod_linux_isolation.candidate_supervisor()
+    if kind == selfmod_linux_isolation.ATTESTATION:
+        try:
+            selfmod_linux_isolation.require_not_candidate_writable([database_path()])
+        except selfmod_linux_isolation.LinuxIsolationUnavailable as error:
+            return "selfmod ledger is exposed to the candidate uid: %s; see %s" % (
+                str(error)[:300], selfmod_linux_isolation.ISOLATION_DOC)
+    return None
+
+
+def operator_candidate_isolation(
+    *, unisolated_requested: bool, operator_attended: bool, run_id: str = "",
+) -> bool:
+    """Choose isolation for an operator-driven run: ``True`` isolated, ``False`` not.
+
+    A host with a candidate supervisor always isolates, whatever was asked.
+    Without one the run is refused (``CandidateIsolationRefused``) unless all
+    of these hold: the operator typed ``--unisolated`` for this command, a
+    console operator is attached (HTTP, MCP and piped callers never are),
+    ``SELFMOD_LOW_INTEGRITY=1`` is not demanding isolation for this process,
+    and the run is not an ``auto-low-risk`` candidate (those always require
+    isolation).  With ``run_id`` the decision is written to the run's audit
+    events.
+    """
+    refusal = candidate_isolation_refusal()
+    if refusal is None:
+        choice, detail = True, "candidate checks run under the selected candidate supervisor"
+    else:
+        remedy = (
+            "configure candidate isolation, or, at an attended console, rerun "
+            "/selfmod run with %s to accept an unisolated candidate" % UNISOLATED_FLAG
+        )
+        if not unisolated_requested:
+            raise CandidateIsolationRefused(
+                "candidate isolation unavailable, no candidate run started: %s; %s"
+                % (refusal, remedy), reason=refusal,
+            )
+        if not operator_attended:
+            raise CandidateIsolationRefused(
+                "candidate isolation unavailable and %s requires an attended console "
+                "operator; HTTP, MCP and unattended callers cannot run a candidate "
+                "unisolated: %s" % (UNISOLATED_FLAG, refusal), reason=refusal,
+            )
+        if os.environ.get("SELFMOD_LOW_INTEGRITY") == "1":
+            raise CandidateIsolationRefused(
+                "candidate isolation unavailable and SELFMOD_LOW_INTEGRITY=1 requires "
+                "isolated candidate checks in this process: %s" % refusal, reason=refusal,
+            )
+        if run_id and _auto_candidate(get_run(run_id)):
+            raise CandidateIsolationRefused(
+                "candidate isolation unavailable and auto-low-risk candidate tests "
+                "require isolation: %s" % refusal, reason=refusal,
+            )
+        choice = False
+        detail = "attended console operator accepted an unisolated candidate (%s): %s" % (
+            UNISOLATED_FLAG, refusal[:300])
+    if run_id:
+        with _tx() as conn:
+            _event(conn, run_id, "isolation", detail)
+    return choice
+
+
+def evaluator_truth_paths(run_id, extra=()) -> tuple[str, ...]:
+    """Evaluator truth every candidate check of ``run_id`` must leave untouched.
+
+    ``extra`` (for example a held-out snapshot) followed by the rollback point:
+    the sealed backup bundle and its manifest, which also records the baseline
+    hashes.  Supervisors refuse to launch when any of these is
+    candidate-writable (Linux) and re-digest them after each check.
+    """
+    paths = [str(path) for path in extra]
+    bundle = _backup_dir(run_id)
+    if bundle.is_dir():
+        paths.append(str(bundle))
+        # The Windows supervisor digests files only; name them explicitly.
+        for name in ("manifest.json", "manifest.sha256"):
+            if (bundle / name).is_file():
+                paths.append(str(bundle / name))
+    return tuple(dict.fromkeys(paths))
 
 
 def record_reproducer_before(run_id, command, timeout=None):
@@ -1342,7 +1467,7 @@ def _smoke_receipt(workspace: Path, present, absent) -> str:
     )
 
 
-def record_smoke(run_id, *, timeout=None):
+def record_smoke(run_id, *, timeout=None, protected_paths=(), low_integrity=None, isolation=None):
     """Run the candidate, and require proof that it was the candidate that ran.
 
     `review()` will not approve a self-modification without a passing check of
@@ -1358,6 +1483,10 @@ def record_smoke(run_id, *, timeout=None):
     What runs instead is bounded and offline -- a stdlib child process, no
     network, no model, no operator -- and it writes nothing, so a failure cannot
     leave state behind. It fails by naming the module and the exception.
+
+    ``low_integrity``, ``protected_paths`` and ``isolation`` select the
+    candidate supervisor exactly as for ``record_test``: the probe imports the
+    candidate, so an operator-driven run isolates it like every other check.
     """
     run = get_run(run_id)
     if run["phase"] != "testing":
@@ -1377,7 +1506,8 @@ def record_smoke(run_id, *, timeout=None):
         )
         return _record_command(
             run, "smoke", [sys.executable, "-c", "raise SystemExit(%r)" % message],
-            workspace, seconds,
+            workspace, seconds, protected_paths=protected_paths,
+            low_integrity=low_integrity, isolation=isolation,
         )
 
     payload = _json({
@@ -1385,7 +1515,11 @@ def record_smoke(run_id, *, timeout=None):
     })
     command = [sys.executable, "-c", _SMOKE_PROBE, payload]
     receipt = _smoke_receipt(workspace, plan["present"], plan["absent"])
-    return _record_command(run, "smoke", command, workspace, seconds, receipt=receipt)
+    return _record_command(
+        run, "smoke", command, workspace, seconds, receipt=receipt,
+        protected_paths=protected_paths, low_integrity=low_integrity,
+        isolation=isolation,
+    )
 
 
 def test_results(run_id):
