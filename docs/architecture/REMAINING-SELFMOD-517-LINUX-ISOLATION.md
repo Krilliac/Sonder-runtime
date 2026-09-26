@@ -245,10 +245,15 @@ MCP `sonder` tool all reach `server.control_command`, which forwards
     a failed live reload is included.
 
   Without a composed journal the command refuses before it mutates anything.
-  `deploy` and `rollback` admit a one-shot intent before the legacy phase
-  check runs. For that reason, `_selfmod_command` refuses a known run in the
-  wrong phase (`deploy` needs `approved`, `rollback` needs `deployed`) before
-  it admits the intent.
+  Before it composes a binding, `_selfmod_command` also refuses an unknown
+  run id and a run in the wrong phase (`approve` needs `reviewing`, `deploy`
+  `approved`, `rollback` `deployed`). It holds the run's ledger lease
+  (`_selfmod_operator_lease`) across the stage, so a concurrent operator call
+  on the same run is refused instead of fencing this one. The legacy
+  `deploy`/`rollback` refusals made before any write (lock held, source
+  changed, rollback conflict and others) settle as `failed` `:not-applied`
+  outcomes and can be retried. See
+  [SELFMOD-001–006](REMAINING-SELFMOD-001-006.md).
 - The reproducer (`record_reproducer_before`) is journaled but not isolated.
   It runs the declared check against the untouched live source rather than
   candidate bytes, and `_record_command` already exempts it from
@@ -321,7 +326,13 @@ so it skips them.
     unattended opt-in, an opt-in under `SELFMOD_LOW_INTEGRITY=1`, and an
     `auto-low-risk` run.
   - (any host) `approve`, `deploy` and `rollback` are journaled. The
-    wrong-phase guard admits no intent. Without a journal nothing mutates.
+    wrong-phase guard and the unknown-id guard admit no intent. Without a
+    journal nothing mutates. A concurrent second operator call on a run is
+    refused while the first completes. The real
+    `server._selfmod_stage_journal()` composition drives a real `approve`.
+  - (Linux) The real legacy `deploy` refused under a held deployment lock,
+    and the real `rollback` refused on a conflict, both succeed when retried
+    after the cause is cleared.
   - (any host) With a supervisor, every candidate check gets
     `low_integrity=True` and the backup bundle as protected truth.
   - (Linux, uid unset) The REPL refuses without `--unisolated`, and a piped
@@ -337,6 +348,10 @@ so it skips them.
   - (root) A candidate that writes the live checkout on import gets
     `Permission denied` and is rejected, as a settled `failed` journal
     effect.
+  - (root) The same isolated, journaled run driven through HTTP
+    (`sonder_serve._handle_slash`) and MCP (`server.sonder`) with an allow
+    rule. These surfaces need no attendance on a host with a supervisor. The
+    test redirects only the repository root to the fixture checkout.
 - `tests/test_wiring_selfmod_attestation.py` (any host) covers:
   - the typed attestation rules;
   - cross-supervisor refusal;
@@ -500,6 +515,11 @@ so it skips them.
      fails.
    - `reject`, `cancel`, `resume`, `verify_backup` and the editing agent's
      guarded file tools still run outside the stage journal.
+   - A `deploy`/`rollback` that fails before mutating for a reason other than
+     the typed legacy refusals (for example an `OSError` on the backup
+     manifest) still leaves its intent `uncertain`, and selfmod effects have
+     no verifier to clear it. The run lease serializes operator calls, not
+     operator calls against the nightly driver on the same run.
    - The CI gap in item 8 also covers
      `tests/test_selfmod_operator_isolation.py`'s root-only cases.
 

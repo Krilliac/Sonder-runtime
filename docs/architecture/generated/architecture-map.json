@@ -698,6 +698,7 @@
         "sonder_runtime/application/selfmod/independent_oracle.py",
         "sonder_runtime/application/selfmod/reproducer_contract.py",
         "sonder_runtime/application/selfmod/selfmod_service.py",
+        "sonder_runtime/application/selfmod/stage_refusal.py",
         "sonder_runtime/application/selfmod/verification_lifecycle.py",
         "sonder_runtime/application/session/__init__.py",
         "sonder_runtime/application/session/archive.py",

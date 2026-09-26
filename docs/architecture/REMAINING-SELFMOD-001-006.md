@@ -81,9 +81,43 @@ service. `server._selfmod_stage_journal()` returns
   rollback after a failed live reload.
 
 Without a composed journal each of these refuses before it mutates anything.
-`deploy` and `rollback` keep their journal-first semantics, so the operator
-command refuses a known run in the wrong phase before admitting their
-one-shot intent. Candidate isolation on this path is described in
+Before it composes a journal binding, the operator command also refuses an
+unknown run id, a run already held by another `/selfmod` call and a run in
+the wrong phase (`approve` needs `reviewing`, `deploy` `approved`, `rollback`
+`deployed`). None of these refusals writes a journal record.
+
+- **One operator call per run.** Composing a selfmod binding treats any open
+  intent of the run as orphaned. Two concurrent operator calls on one run
+  (a double submit, or the REPL and an HTTP caller) would otherwise fence each
+  other mid-effect. `server._selfmod_operator_lease` holds the run's ledger
+  lease (`selfmod.claim`, one live owner per run across threads and
+  processes, renewed by a heartbeat) from before the binding is composed
+  until the command returns. For `/selfmod run` it covers every stage from
+  the backup on. A second caller gets `refused /selfmod <action>: run <id> is
+  already being driven by another /selfmod call`.
+- **Benign refusals are retryable.** `deploy` and `rollback` still admit
+  their one-shot intent before the legacy body runs. The legacy module now
+  raises `SelfmodStageNotApplied`
+  (`sonder_runtime/application/selfmod/stage_refusal.py`, a `RuntimeError`)
+  for the refusals it makes before writing anything:
+  - `deploy`: the phase check, the deployment lock held by another
+    deployer, the source tree changed since the proposal, a failed backup
+    verification, a diff outside the approved scope, a missing tested-bytes
+    record, and candidate bytes that differ from the tested bytes;
+  - `rollback`: the phase check, the deployment lock, and "rollback
+    conflict: deployed files changed after deployment".
+
+  `GuardedLegacySelfmodService._mutating_call` settles such a refusal as a
+  `failed` outcome whose receipt ends in `:not-applied`, then re-raises it.
+  A later call of a one-shot stage gets a new identity
+  (`<operation>:<run>:retry-<n>`, receipt `selfmod:<run>:<stage>:retry-<n>`)
+  only while every earlier call of that stage settled `:not-applied`. A
+  completed call, a `failed` call that ran, and an in-flight or `uncertain`
+  call keep the original identity, so the journal refuses the duplicate as
+  before. Any other exception, including a failure after the first live
+  byte was replaced, still leaves the intent `uncertain`.
+
+Candidate isolation on this path is described in
 [#517 Linux isolation](REMAINING-SELFMOD-517-LINUX-ISOLATION.md).
 
 What remains:
@@ -91,9 +125,13 @@ What remains:
 - `verify_backup`, `record_host_grade`, `reject`, `cancel` and `resume`
   still run outside the journal. None of them has a stage entry or success
   predicate.
-- An operator `deploy`/`rollback` of an id that has no run record still admits
-  (and leaves `uncertain`) a one-shot intent for that id, because the legacy
-  call refuses only after admission.
+- Only the legacy refusals listed above are typed as not applied. A
+  `deploy`/`rollback` that fails for any other reason before mutating (for
+  example an `OSError` reading the backup manifest) still leaves the intent
+  `uncertain` and fences the run.
+- The run lease serializes operator calls only. The nightly driver does not
+  claim its runs, so an operator stage and a nightly stage on the same run at
+  the same time are still not serialized against each other.
 - Self-mod operation families have no provider verifier. An `uncertain`
   stage can be cleared only by future trusted reconciliation.
 
@@ -112,7 +150,24 @@ operator `/selfmod run`. Backup, workspace, reproducer, `begin_testing`,
 three contiguous `record_test` attempts, `record_smoke` and review are all
 `completed`. The same file shows that `approve`, `deploy` and `rollback` are
 journaled and that the wrong-phase guard admits no intent. Its root-only case
-also shows that a rejected candidate is a settled `failed` effect.
+also shows that a rejected candidate is a settled `failed` effect. It also
+covers:
+
+- the production composition: the real `server._selfmod_stage_journal()`
+  over a hermetic state home, driving a real `approve`;
+- a concurrent second `deploy` refused while the first completes, and a
+  rollback afterwards;
+- a run leased by another owner, refused before any journal record;
+- unknown or overlong run ids, refused without a journal record;
+- the real legacy `deploy` refused under a held deployment lock and the real
+  `rollback` refused on a conflict, each retried after the cause is cleared
+  (Linux);
+- an untyped failure, which still fences the run.
+
+`tests/test_guarded_selfmod_stage_effects.py` covers the `:not-applied`
+settlement and the `:retry-<n>` identities at the service level. It shows
+that a completed deploy, or a failed one that ran, still refuses a second
+call.
 `tests/test_selfmod_deploy_gate.py` gives each test its own bootstrap-composed
 journal.
 `test_production_stage_journal_is_the_bootstrap_selfmod_service` checks that

@@ -160,7 +160,11 @@ cannot, and `SELFMOD_LOW_INTEGRITY=1` forbids it. An unisolated run records its
 checks with isolation `unverified` and writes the opt-in to the run's audit
 events. Each mutating stage of `/selfmod run`, `approve`, `deploy` and
 `rollback` goes through the selfmod stage journal; without one the command is
-refused. See
+refused. An unknown run id, a run in the wrong phase, and a run that another
+`/selfmod` call is driving are refused before anything is journaled. A
+`deploy` or `rollback` refused before it writes anything (deployment lock
+held, source changed since the proposal, rollback conflict) can be retried
+once the cause is fixed. See
 [the Linux isolation notes](docs/architecture/REMAINING-SELFMOD-517-LINUX-ISOLATION.md).
 
 The hosted chat API accepts the same slash lifecycle with developer/admin
