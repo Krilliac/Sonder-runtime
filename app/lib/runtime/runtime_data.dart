@@ -1,5 +1,6 @@
 /// Read models and a small HTTP source for the Runtime detail views: work
-/// runs (P1-4), jobs, fanout and compute (P1-10) and pending approvals.
+/// runs (P1-4), jobs, fanout and compute (P1-10), pending approvals and the
+/// host tool inventory ([ToolInventoryApi]).
 ///
 /// Work runs and approvals use lane A's DTOs and clients ([WorkRun],
 /// [WorkRunsApi], [PendingApproval], [IssuedApproval], [ApprovalsApi]); this
@@ -148,6 +149,12 @@ abstract interface class RuntimeDataSource {
   Future<List<FanoutSummary>> fanoutRuns();
   Future<List<ComputeNode>> computeNodes();
   Future<ApprovalsPage> approvals();
+
+  /// `GET /v1/tools/inventory`, optionally one [category] (admin).
+  Future<ToolInventory> toolInventory({String? category});
+
+  /// `POST /v1/tools/inventory/refresh`: rediscover host tools (admin).
+  Future<ToolInventory> refreshToolInventory();
 }
 
 /// Direct HTTP reads bound to the configured server only (no fallback).
@@ -280,4 +287,12 @@ class HttpRuntimeDataSource implements RuntimeDataSource {
   @override
   Future<ApprovalsPage> approvals() async => ApprovalsPage.fromSnapshot(
       await ApprovalsApi(_endpoint, timeout: timeout).list());
+
+  @override
+  Future<ToolInventory> toolInventory({String? category}) =>
+      ToolInventoryApi(_endpoint, timeout: timeout).get(category: category);
+
+  @override
+  Future<ToolInventory> refreshToolInventory() =>
+      ToolInventoryApi(_endpoint, timeout: timeout).refresh();
 }

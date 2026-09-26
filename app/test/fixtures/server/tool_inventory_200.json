@@ -1,0 +1,116 @@
+{
+  "object": "tool_inventory",
+  "snapshot_digest": "865330bf698bd2b5d807de28920bbf3db32a0fe5158eec1a04a10bde98c79e44",
+  "created_at": 1790334000.0,
+  "age_seconds": 754,
+  "stale": false,
+  "os": "Linux",
+  "machine": "x86_64",
+  "counts": {
+    "compiler": 2,
+    "build_system": 2,
+    "test_runner": 1,
+    "debugger_profiler": 1,
+    "runtime": 1,
+    "vcs": 1
+  },
+  "tools": [
+    {
+      "name": "clang",
+      "category": "compiler",
+      "version": "",
+      "version_status": "timeout",
+      "source": "path",
+      "on_path": true,
+      "path": "/usr/bin/clang",
+      "alternatives": [],
+      "details": {}
+    },
+    {
+      "name": "gcc",
+      "category": "compiler",
+      "version": "13.2.0",
+      "version_status": "ok",
+      "source": "path",
+      "on_path": true,
+      "path": "/usr/bin/gcc",
+      "alternatives": [
+        "/usr/local/bin/gcc"
+      ],
+      "details": {}
+    },
+    {
+      "name": "cmake",
+      "category": "build_system",
+      "version": "3.28.3",
+      "version_status": "ok",
+      "source": "path",
+      "on_path": true,
+      "path": "~/.local/bin/cmake",
+      "alternatives": [],
+      "details": {}
+    },
+    {
+      "name": "ninja",
+      "category": "build_system",
+      "version": "",
+      "version_status": "deferred",
+      "source": "path",
+      "on_path": true,
+      "path": "/usr/bin/ninja",
+      "alternatives": [],
+      "details": {}
+    },
+    {
+      "name": "pytest",
+      "category": "test_runner",
+      "version": "",
+      "version_status": "project_local_not_probed",
+      "source": "known_prefix",
+      "on_path": false,
+      "path": "~/project/.venv/bin/pytest",
+      "alternatives": [],
+      "details": {}
+    },
+    {
+      "name": "gdb",
+      "category": "debugger_profiler",
+      "version": "",
+      "version_status": "failed",
+      "source": "path",
+      "on_path": true,
+      "path": "/usr/bin/gdb",
+      "alternatives": [],
+      "details": {}
+    },
+    {
+      "name": "python3",
+      "category": "runtime",
+      "version": "3.12.3",
+      "version_status": "ok",
+      "source": "path",
+      "on_path": true,
+      "path": "/usr/bin/python3",
+      "alternatives": [],
+      "details": {
+        "py:3.11": "/usr/bin/python3.11"
+      }
+    },
+    {
+      "name": "git",
+      "category": "vcs",
+      "version": "2.43.0",
+      "version_status": "ok",
+      "source": "path",
+      "on_path": true,
+      "path": "/usr/bin/git",
+      "alternatives": [],
+      "details": {}
+    }
+  ],
+  "filtered_by": "",
+  "notes": [
+    "skipped 1 relative or invalid PATH entries"
+  ],
+  "truncated": false
+}

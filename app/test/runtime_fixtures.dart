@@ -93,6 +93,15 @@ class FakeRuntimeData implements RuntimeDataSource {
   List<FanoutSummary> fanoutList;
   List<ComputeNode> nodes;
   Object? computeError;
+
+  /// Host tool inventory reads: [toolInventoryFor] answers each read (by
+  /// requested category); [toolInventoryError] fails every read.
+  ToolInventory Function(String? category)? toolInventoryFor;
+  Object? toolInventoryError;
+  ToolInventory? rediscovered;
+  Object? rediscoverError;
+  final List<String?> toolInventoryReads = [];
+  int rediscoveries = 0;
   final List<String> cancelled = [];
 
   /// When set, cancel requests wait on it (a slow server).
@@ -110,6 +119,10 @@ class FakeRuntimeData implements RuntimeDataSource {
     this.fanoutList = const [],
     this.nodes = const [],
     this.computeError,
+    this.toolInventoryFor,
+    this.toolInventoryError,
+    this.rediscovered,
+    this.rediscoverError,
   }) : runs = runs ?? [];
 
   @override
@@ -146,5 +159,19 @@ class FakeRuntimeData implements RuntimeDataSource {
   Future<List<ComputeNode>> computeNodes() async {
     if (computeError != null) throw computeError!;
     return nodes;
+  }
+
+  @override
+  Future<ToolInventory> toolInventory({String? category}) async {
+    toolInventoryReads.add(category);
+    if (toolInventoryError != null) throw toolInventoryError!;
+    return toolInventoryFor?.call(category) ?? const ToolInventory();
+  }
+
+  @override
+  Future<ToolInventory> refreshToolInventory() async {
+    rediscoveries++;
+    if (rediscoverError != null) throw rediscoverError!;
+    return rediscovered ?? const ToolInventory();
   }
 }

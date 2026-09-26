@@ -99,6 +99,12 @@ through Sonder Runtime's bounded authenticated launcher. See
 - **Restart-safe fleets**: the System panel reads the shared private fleet ledger,
   shows interrupted work from any local Sonder Runtime process, and offers a confirmed
   local retry without silently replaying work after a crash.
+- **Host developer tools** (Runtime > Host tools, administrators only): a
+  read-only view of the server's host tool inventory (`GET /v1/tools/inventory`)
+  grouped by category, with each tool's version or why no version was probed and
+  its redacted path. A category picker narrows the list, and **Rediscover** asks
+  the server to probe again (`POST /v1/tools/inventory/refresh`). The app has no
+  view of build, fix or debug runs: the server offers no list route for them.
 - **Slash commands** built in — `/stats`, `/context`, `/compact`, `/todo`,
   `/commands`, `/runtime`, `/mcp`, `/learning`, `/asset`, `/artifactcheck`, `/dump`, `/permissions`, `/train`, `/pass`, `/fail`, `/help` — handled
   by the serve layer exactly like the REPL.

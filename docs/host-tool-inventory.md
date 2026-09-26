@@ -197,9 +197,19 @@ Errors:
 |---|---|---|
 | 400 | `INVALID_TOOL_INVENTORY_QUERY` | Unknown or repeated query keys, `refresh` on GET, a category outside the enum, or a name outside `^[A-Za-z0-9+._-]{1,64}$` |
 | 401 | — | Not authenticated |
-| 403 | — | Not an administrator |
+| 403 | `FORBIDDEN` | Not an administrator |
+| 429 | `TOOL_INVENTORY_BUSY` | Two inventory requests are already running |
 | 413 | `TOOL_INVENTORY_TOO_LARGE` | The view is over 256 KiB; filter by category or name |
 | 503 | `TOOL_INVENTORY_UNAVAILABLE` | The inventory is not composed in this runtime, or discovery failed with no previous snapshot |
+
+The Flutter app reads these routes in Runtime > Host tools
+(`app/lib/api/tools_inventory.dart`, `app/lib/runtime/host_tools_panel.dart`).
+It loads the list only when the section's Details disclosure opens, shows 401
+and 403 as "Needs an administrator account", shows 429 as a warning with
+Retry, and on 413 asks for a category. The app's test fixtures
+(`app/test/fixtures/server/tool_inventory_*.json`) come from this facade and
+`serve.py`, and `tests/test_app_tool_inventory_fixtures.py` fails when they
+drift from the wire format.
 
 ## Related surfaces
 

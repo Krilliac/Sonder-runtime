@@ -31,6 +31,7 @@ export 'api/transport.dart'
         responseException,
         isPreRequestConnectFailure,
         newIdempotencyKey;
+export 'api/tools_inventory.dart';
 export 'api/work_runs.dart';
 
 /// Return the catalog spelling of a saved model selector when it still exists.

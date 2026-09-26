@@ -14,6 +14,7 @@ import '../settings.dart';
 import '../theme.dart';
 import '../workspace_ui.dart';
 import 'approvals_panel.dart';
+import 'host_tools_panel.dart';
 import 'jobs_panel.dart';
 import 'overview.dart';
 import 'runtime_data.dart';
@@ -44,8 +45,8 @@ class RuntimeScreen extends StatefulWidget {
   final bool liveUpdates;
   final ValueChanged<WorkspaceDestination>? onNavigate;
 
-  /// Work runs, approvals, jobs, fanout and compute. Defaults to direct HTTP
-  /// reads of [settings]' server; tests pass a fake.
+  /// Work runs, approvals, jobs, fanout, compute and host tools. Defaults to
+  /// direct HTTP reads of [settings]' server; tests pass a fake.
   final RuntimeDataSource? dataSource;
 
   /// Fixed clock for goldens; live screens use [DateTime.now].
@@ -134,6 +135,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
     ('updates', 'Updates', Icons.extension_outlined),
     ('deployment', 'Deployment', Icons.lan_outlined),
     ('jobs', 'Jobs', Icons.work_history_outlined),
+    ('tools', 'Host tools', Icons.construction_outlined),
     ('actions', 'Actions', Icons.tune_outlined),
   ];
   final Map<String, GlobalKey> _sectionKeys = {
@@ -147,6 +149,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
   bool _detailsOpenByDefault = true;
 
   late RuntimeDataSource _data = _dataSourceFor(widget);
+  final ScrollController _scroll = ScrollController();
 
   RuntimeDataSource _dataSourceFor(RuntimeScreen screen) =>
       screen.dataSource ??
@@ -198,9 +201,17 @@ class _RuntimeScreenState extends State<RuntimeScreen>
     if (destination.id != 'overview' && !_isOpen(destination.id)) {
       setState(() => _expanded[destination.id] = true);
     }
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      final target = destination.key.currentContext;
-      if (target == null || !mounted) return;
+    WidgetsBinding.instance
+        .addPostFrameCallback((_) => _reveal(destination, 0));
+  }
+
+  /// Scrolls [destination] into view. The page is a lazy list, so a section
+  /// far from the viewport has no context yet: step a viewport at a time
+  /// towards it (up when a later section is already built) until it builds.
+  void _reveal(_RuntimeDestination destination, int steps) {
+    if (!mounted) return;
+    final target = destination.key.currentContext;
+    if (target != null) {
       Scrollable.ensureVisible(
         target,
         duration: MediaQuery.disableAnimationsOf(context)
@@ -209,7 +220,22 @@ class _RuntimeScreenState extends State<RuntimeScreen>
         curve: Curves.easeOutCubic,
         alignment: 0.02,
       );
-    });
+      return;
+    }
+    if (!_scroll.hasClients || steps >= 64) return;
+    final position = _scroll.position;
+    final index = _destinations.indexOf(destination);
+    final passed = _destinations
+        .skip(index + 1)
+        .any((later) => later.key.currentContext != null);
+    final step =
+        passed ? -position.viewportDimension : position.viewportDimension;
+    final next = (position.pixels + step)
+        .clamp(position.minScrollExtent, position.maxScrollExtent);
+    if (next == position.pixels) return;
+    position.jumpTo(next);
+    WidgetsBinding.instance
+        .addPostFrameCallback((_) => _reveal(destination, steps + 1));
   }
 
   String? _agentsSummary(SystemInfo? info) {
@@ -310,6 +336,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
     _customCommand.dispose();
     _trainCount.dispose();
     _autopilotGoal.dispose();
+    _scroll.dispose();
     _pollTimer?.cancel();
     super.dispose();
   }
@@ -943,6 +970,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
           final destinations = _destinations;
           final content = ListView(
             key: const Key('runtime-scroll'),
+            controller: _scroll,
             padding: const EdgeInsets.all(16),
             children: [
               if (!wide) ...[
@@ -1341,6 +1369,11 @@ class _RuntimeScreenState extends State<RuntimeScreen>
                 'jobs',
                 'Jobs, fanout & compute',
                 children: [JobsPanel(source: _data, now: widget.now)],
+              ),
+              _group(
+                'tools',
+                'Host developer tools',
+                children: [HostToolsPanel(source: _data)],
               ),
               _group(
                 'actions',

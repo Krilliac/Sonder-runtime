@@ -31,3 +31,14 @@ source at that commit, because the live run did not trigger them:
 | `internal_500.txt` | a proxy's non-JSON 500 |
 
 Regenerate the rebuilt ones with `python3 test/fixtures/server/generate_fixtures.py test/fixtures/server` from `app/`.
+
+## Host tool inventory
+
+`tool_inventory_*.json` are produced by the server code itself rather than
+hand-written: the 200, 413 and 503 bodies come from
+`sonder_runtime/interfaces/http/facades/host_tools.py` over a fixed snapshot,
+and the 403 and 429 bodies are the ones `serve.py` writes. These bodies are
+checked against a live test server. `tests/test_app_tool_inventory_fixtures.py`
+fails when any of them drifts. To regenerate them, run
+`python -m tests.test_app_tool_inventory_fixtures --write` from the repository
+root.
