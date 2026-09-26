@@ -13,6 +13,101 @@ from ...domain.common.errors import IntegrityFailure, InternalFailure, SonderErr
 
 _owner = ContextVar("provider_attempt_owner", default=None)
 
+# One process-wide, content-free observer of provider sends (installed by the
+# composition root for live telemetry).  It sees the provider label, the
+# operation, the model name and usage counts -- never a payload or response
+# body -- and it can neither fail nor delay a send: every call into it is
+# guarded, and it runs on the sending thread only for bookkeeping.
+_attempt_observer = None
+
+
+def install_provider_attempt_observer(observer) -> None:
+    """Install the observer notified around every ``dispatch_provider`` send."""
+    global _attempt_observer
+    for name in ("provider_send_started", "provider_send_finished"):
+        if not callable(getattr(observer, name, None)):
+            raise TypeError("provider attempt observer must implement %s" % name)
+    _attempt_observer = observer
+
+
+def clear_provider_attempt_observer(observer=None) -> None:
+    """Remove ``observer`` (or any observer when None); a stale owner is a no-op."""
+    global _attempt_observer
+    if observer is None or _attempt_observer is observer:
+        _attempt_observer = None
+
+
+def report_provider_fallback(from_provider, to_provider, reason_code) -> None:
+    """Tell the observer a request moved to another provider before any send.
+
+    A pre-send refusal (for example a cached not-ready health state) never
+    reaches ``dispatch_provider``, so a fallback wrapper reports the change
+    here.  Observers without ``provider_fallback`` ignore it; it never raises.
+    """
+    observer = _attempt_observer
+    hook = getattr(observer, "provider_fallback", None)
+    if not callable(hook):
+        return
+    try:
+        hook(str(from_provider), str(to_provider), str(reason_code))
+    except Exception:
+        pass
+
+
+def _count(value):
+    return value if type(value) is int and value >= 0 else None
+
+
+def _response_evidence(result):
+    """Extract (model, prompt_tokens, completion_tokens) from a provider reply.
+
+    Both wire shapes are understood: Ollama's ``prompt_eval_count`` /
+    ``eval_count`` and OpenAI-compatible ``usage``.  Text fields are never
+    read.
+    """
+    if not isinstance(result, dict):
+        return None, None, None
+    model = result.get("model") if isinstance(result.get("model"), str) else None
+    prompt, completion = _count(result.get("prompt_eval_count")), _count(result.get("eval_count"))
+    usage = result.get("usage")
+    if isinstance(usage, dict):
+        if prompt is None:
+            prompt = _count(usage.get("prompt_tokens"))
+        if completion is None:
+            completion = _count(usage.get("completion_tokens"))
+    return model, prompt, completion
+
+
+def _observed(provider, operation, payload, send):
+    observer = _attempt_observer
+    if observer is None:
+        return send()
+    requested = payload.get("model") if isinstance(payload, dict) else None
+    try:
+        handle = observer.provider_send_started(
+            provider, operation, requested if isinstance(requested, str) else None,
+        )
+    except Exception:
+        return send()
+    try:
+        result = send()
+    except BaseException as error:
+        code = error.code if isinstance(error, SonderError) else type(error).__name__
+        try:
+            observer.provider_send_finished(handle, error_code=str(code))
+        except Exception:
+            pass
+        raise
+    try:
+        model, prompt_tokens, completion_tokens = _response_evidence(result)
+        observer.provider_send_finished(
+            handle, model=model, prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
+    except Exception:
+        pass
+    return result
+
 
 class ProviderCaptureFailure(IntegrityFailure):
     """Evidence storage failed; this is not a model transport failure."""
@@ -96,7 +191,7 @@ def dispatch_provider(provider, operation, payload, send):
     """
     owner = _owner.get()
     if owner is None:
-        return send()
+        return _observed(provider, operation, payload, send)
     if owner.failure is not None:
         raise owner.failure
     if owner.pending is None:
@@ -110,7 +205,7 @@ def dispatch_provider(provider, operation, payload, send):
     except Exception as error:
         owner.fail("could not persist provider admission", error)
     try:
-        result = send()
+        result = _observed(provider, operation, payload, send)
     except Exception as error:
         code = error.code if isinstance(error, SonderError) else InternalFailure.code
         try:

@@ -32,6 +32,23 @@ production lifecycle and admission layer (`sonder_lifecycle.py`).
 | `GET /v1/sonder/feed` | any authorized caller | Owner-scoped live execution feed: the caller's own active and recently completed responses (category/name, state, elapsed, redacted summary, current operation). Never exposes prompts, tool arguments, paths, outputs, reasoning, or another principal's work. |
 | `GET /v1/client/schema` | any authorized caller | API-008 client/SDK schema envelope (`{"type":"client_schema","version":1,"schema":{...,"digest"},"streams":[{"stream_id","event_types"}]}`). `schema` is derived from the served typed tool catalog; clients cache it and advertise its `digest` on reconnect. `streams` lists the stream ids this server instance serves; they are outside the digest and change on every restart. |
 | `POST /v1/client/reconnect` | any authorized caller | API-007 reconnect plan for a `{"type":"reconnect","version":1,...}` body: a stale or missing `schema_digest` returns `refresh_schema` (a malformed one is a 400), a known stream resumes from its watermark in batches of at most `batch_limit` with `has_more`, and an unknown stream or out-of-range watermark is `rejected`. The only stream is the in-memory `control.<instance>` stream of `control.snapshot` permission-mode events. It gets a new id and restarts at sequence 1 with the process, so a cursor from before a restart is `rejected` as an unknown stream and the client refetches the schema for the new id. A malformed body is a 400. |
+| `GET /.well-known/sonder-telemetry` | admin | Observatory discovery document (`sonder.telemetry.producer/1`): producer identity, stream URLs, resume window, auth. |
+| `GET /v1/observability/events` | admin | Content-free live telemetry stream: SSE by default, NDJSON with `?format=ndjson` or `Accept: application/x-ndjson`; resumes from `Last-Event-ID`. |
+| `GET /v1/sonder/ecosystem` | admin | `sonder.runtime.ecosystem/1`: provider bindings, per-provider status, Observatory stream URLs and connect URLs. |
+
+The three telemetry routes answer 404 when `SONDER_OBSERVATORY_EXPORT=0`.
+Browsers reach them through the route-scoped `SONDER_OBSERVATORY_ORIGINS`
+allowlist, which grants nothing else; stream subscribers are capped (429 with
+`Retry-After`) and never hold a chat admission slot. The event vocabulary,
+resume rules and Observatory setup are in
+[observatory-telemetry.md](../architecture/observatory-telemetry.md).
+
+When a tier is bound to a provider other than Ollama (`SONDER_MODEL_BACKEND`,
+`SONDER_<TIER>_PROVIDER`), `POST /v1/chat/completions` serves that tier
+through the model gateway: Ollama-only features (`response_format`,
+thinking, native tools) return 400, a provider outage returns 503 without
+escalating, and `sonder_receipt.degraded` names any Ollama-only step the turn
+ran without.
 
 `/live` may be unauthenticated so an external check never needs the key;
 everything else requires the bearer key unless the peer is loopback (the

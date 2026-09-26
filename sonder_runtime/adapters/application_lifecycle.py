@@ -33,6 +33,11 @@ class ApplicationLifecycle(Generic[ApplicationT]):
                 self._application = self._factory()
             return self._application
 
+    def current(self) -> ApplicationT | None:
+        """Return the built instance without building one (None when unbuilt)."""
+        with self._lock:
+            return None if self._terminal else self._application
+
     def reset(self) -> None:
         with self._lock:
             if self._owned:

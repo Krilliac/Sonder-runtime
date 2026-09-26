@@ -36,6 +36,7 @@ from ..adapters.inspection_executor import InspectionExecutorAdapter
 from ..adapters.local_observability import LocalObservabilitySink
 from ..adapters.model_gateway_factory import build_model_gateway
 from ..adapters.operations_event_sink import OperationsEventSink
+from ..adapters.observability.event_bridge import TeeEventSink
 from ..adapters.persistence.autopilot_repository import AutopilotRepository
 from ..adapters.persistence.durable_continuation import (
     SQLiteDurableContinuationRepository,
@@ -393,6 +394,91 @@ def _debug_executor_chain(debug_tools, developer_tools):
     """
     return debug_tool_executor(
         debug_tools, developer_tool_executor(developer_tools, PackagedToolExecutor()))
+@dataclass(frozen=True)
+class _LiveTelemetry:
+    """The composed Observatory export chain, or all-None when disabled."""
+
+    telemetry: object | None = None
+    producer: object | None = None
+    event_bridge: object | None = None
+    close: Callable[[], None] | None = None
+
+
+def _observability_settings(config: SonderConfig | None):
+    """Typed ``[observability]`` for this graph, env-folded when untyped."""
+    if config is not None:
+        return config.observability
+    from ..domain.common.errors import InvalidInput
+    from ..platform.config import ObservabilityConfig, apply_observability_environment
+
+    errors: list[str] = []
+    settings = apply_observability_environment(
+        ObservabilityConfig(), dict(os.environ), errors,
+    )
+    if errors:
+        raise InvalidInput("; ".join(errors))
+    return settings
+
+
+def _compose_live_telemetry(
+    config: SonderConfig | None, redactor, provider_bindings: ProviderBindings,
+) -> _LiveTelemetry:
+    """Compose producer -> redacting sink -> vocabulary, and its observer.
+
+    Nothing here performs I/O or starts a thread: the producer is an
+    in-memory ring read only by the admin-gated HTTP stream routes.
+    """
+    settings = _observability_settings(config)
+    if not settings.live_export:
+        logger.info("Observatory live telemetry export disabled")
+        return _LiveTelemetry()
+    from ..adapters.observability.event_bridge import EventSinkTelemetryBridge
+    from ..adapters.observability.observatory_producer import ObservatoryProducer
+    from ..application.capabilities.observability import RedactingTelemetrySink
+    from ..application.observability.runtime_telemetry import RuntimeTelemetry
+    from ..application.session.provider_attempts import (
+        clear_provider_attempt_observer,
+        install_provider_attempt_observer,
+    )
+    from ..platform.version import VERSION
+
+    producer = ObservatoryProducer(
+        version=VERSION,
+        capacity=settings.live_export_buffer,
+        max_subscribers=settings.live_export_max_subscribers,
+    )
+    sink = RedactingTelemetrySink(producer, redactor)
+    telemetry = RuntimeTelemetry(sink, session_id=producer.session_id, version=VERSION)
+    projection = provider_bindings.status_projection()
+    projection.setdefault("fallbacks", dict(getattr(provider_bindings, "fallbacks", {}) or {}))
+    telemetry.session_started(projection)
+    install_provider_attempt_observer(telemetry)
+    closed = False
+
+    def close() -> None:
+        nonlocal closed
+        if closed:
+            return
+        closed = True
+        clear_provider_attempt_observer(telemetry)
+        stats = producer.stats()
+        telemetry.session_ended(
+            emitted_events=stats["emitted_events"],
+            dropped_events=stats["dropped_events"],
+        )
+        producer.report_final()
+        producer.close_subscribers()
+
+    logger.info(
+        f"Observatory live telemetry export enabled, instance={producer.instance_id!r}, "
+        f"buffer={producer.capacity}"
+    )
+    return _LiveTelemetry(
+        telemetry=telemetry,
+        producer=producer,
+        event_bridge=EventSinkTelemetryBridge(sink, redactor),
+        close=close,
+    )
 
 
 def build_application(
@@ -1826,8 +1912,17 @@ def build_application(
     from ..platform.logging import redactor_for_config
 
     runtime_redactor = redactor_for_config(config or SonderConfig())
+    live_telemetry = _compose_live_telemetry(
+        config, runtime_redactor, provider_bindings,
+    )
+    # The export bridge is a sibling of the durable sink inside the local
+    # inspection decorator: LocalObservabilitySink itself still has no
+    # exporter, and operations.db still receives every event first.
     events = LocalObservabilitySink(
-        OperationsEventSink(redactor=runtime_redactor),
+        TeeEventSink(
+            OperationsEventSink(redactor=runtime_redactor),
+            live_telemetry.event_bridge,
+        ),
         redactor=runtime_redactor,
     )
     permission_receipts.install(lambda: events)
@@ -2004,6 +2099,9 @@ def build_application(
         remote_world_provider=None,
         developer_tools=developer_tools,
         debug_tools=debug_tools,
+        telemetry=live_telemetry.telemetry,
+        telemetry_feed=live_telemetry.producer,
+        close_telemetry=live_telemetry.close,
     )
     if config is not None and config.child_storage.backend == 'postgresql':
         try:
@@ -2242,6 +2340,16 @@ def stop_owned_application(application: Application) -> None:
     from .legacy_interfaces import detach_owned_application
 
     detach_owned_application(application)
+
+
+def built_default_app() -> Application | None:
+    """The default graph if one is already built; never composes one.
+
+    Observability paths use this so describing a request can never be the
+    reason a whole application graph gets constructed.
+    """
+    application = _application_lifecycle.current()
+    return application if type(application) is Application else None
 
 
 def default_app(*, config: SonderConfig | None = None) -> Application:

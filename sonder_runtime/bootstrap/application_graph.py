@@ -55,6 +55,8 @@ from ..application.runtime_policy.use_cases import RuntimePolicyService
 from ..application.workflows.use_cases import WorkflowService
 from ..application.context_integration import ContextPlanningFacade
 from ..application.control_plane import ControlPlaneSnapshotService
+from ..application.observability.runtime_telemetry import RuntimeTelemetry
+from ..application.ports.telemetry_feed import TelemetryFeed
 from ..application.context import OperationContext
 from ..platform.config import SonderConfig
 
@@ -149,6 +151,12 @@ class Application:
     # Crash and profile digests (bootstrap/debug_tools.py); None when this
     # runtime did not compose them, which every surface reports instead.
     debug_tools: "DebugDigestService | None" = None
+    # Observatory live producer: the Runtime v1 vocabulary (session, request,
+    # route events) and the bounded feed the admin telemetry routes read.
+    # Both are None when SONDER_OBSERVATORY_EXPORT=0.
+    telemetry: RuntimeTelemetry | None = None
+    telemetry_feed: TelemetryFeed | None = None
+    close_telemetry: Callable[[], None] | None = field(default=None, repr=False)
 
     def operational_capabilities(self):
         from ..domain.operational_capabilities import build_operational_capabilities
@@ -246,6 +254,13 @@ class Application:
     def close_providers(self, timeout: float | None = None) -> None:
         """Quiesce every composed runtime resource before process shutdown."""
         started = monotonic()
+        if self.close_telemetry is not None:
+            # Best effort and in-memory only: session.ended, then the live
+            # streams close so HTTP stream handlers exit before the listener.
+            try:
+                self.close_telemetry()
+            except Exception:
+                logger.warning("live telemetry close failed", exc_info=True)
         try:
             if self.close_artifact_mobility is not None:
                 self.close_artifact_mobility()

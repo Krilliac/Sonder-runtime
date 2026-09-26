@@ -222,3 +222,80 @@ def test_unknown_task_is_reported_as_task_not_found(tmp_path):
     for method in ("GetTask", "CancelTask"):
         body = _rpc(handler, method, {"id": "missing-task"})
         assert body["error"] == {"code": -32001, "message": "task not found"}, (method, body)
+class _RecordingTelemetry:
+    """RuntimeTelemetry over a list sink, as the composed graph wires it."""
+
+    def __init__(self):
+        from sonder_runtime.application.observability.runtime_telemetry import RuntimeTelemetry
+
+        self.events = []
+        self.runtime = RuntimeTelemetry(self, session_id="rts-0123456789ab", version="v")
+
+    def emit(self, event):
+        self.events.append(event)
+
+
+class _ContextRecordingChat:
+    def __init__(self, error=None):
+        self.contexts = []
+        self.error = error
+
+    def complete(self, command, context):
+        from sonder_runtime.application.context import current_operation_context
+
+        self.contexts.append((context, current_operation_context()))
+        if self.error is not None:
+            raise self.error
+        return _ChatResult()
+
+
+def _send(handler, message_id):
+    return handler("SendMessage", {"message": {
+        "messageId": message_id, "role": "ROLE_USER", "parts": [{"text": "hello"}],
+    }})["task"]
+
+
+def _telemetry_application(chat):
+    telemetry = _RecordingTelemetry()
+    application = _AdmittingApplication()
+    application.chat = chat
+    application.telemetry = telemetry.runtime
+    return application, telemetry
+
+
+def test_send_message_turn_uses_the_message_id_as_turn_id():
+    application, telemetry = _telemetry_application(_ContextRecordingChat())
+    handler = build_application_a2a_handler(application, base_url="https://sonder.test")
+    assert _send(handler, "e2e-a2a-1")["status"]["state"] == "TASK_STATE_COMPLETED"
+    context, ambient = application.chat.contexts[0]
+    assert context.correlation_id == "e2e-a2a-1"
+    assert ambient is context
+    assert [e.event_code for e in telemetry.events] == ["request.started", "request.completed"]
+    assert {e.correlation_id for e in telemetry.events} == {"e2e-a2a-1"}
+    assert telemetry.events[0].fields["surface"] == "a2a"
+    assert telemetry.events[1].fields["http_status"] == 200
+
+
+def test_send_message_with_an_unjoinable_id_falls_back_to_the_http_correlation():
+    from sonder_runtime.application.context import bind_operation_context, local_owner_context
+
+    application, telemetry = _telemetry_application(_ContextRecordingChat())
+    handler = build_application_a2a_handler(application, base_url="https://sonder.test")
+    with bind_operation_context(local_owner_context(correlation_id="http-corr-42", source="http")):
+        _send(handler, "message id with spaces")
+    context, _ambient = application.chat.contexts[0]
+    assert context.correlation_id == "http-corr-42"
+    assert {e.correlation_id for e in telemetry.events} == {"http-corr-42"}
+
+
+def test_failed_send_message_ends_the_turn_as_failed():
+    from sonder_runtime.domain.common.errors import DependencyUnavailable
+
+    application, telemetry = _telemetry_application(
+        _ContextRecordingChat(DependencyUnavailable("provider down")),
+    )
+    handler = build_application_a2a_handler(application, base_url="https://sonder.test")
+    assert _send(handler, "e2e-a2a-fail")["status"]["state"] == "TASK_STATE_FAILED"
+    terminal = telemetry.events[-1]
+    assert terminal.event_code == "request.failed"
+    assert terminal.fields["error_code"] == "DEPENDENCY_UNAVAILABLE"

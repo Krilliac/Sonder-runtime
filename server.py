@@ -177,6 +177,9 @@ from sonder_runtime.adapters.model_inventory import inventory_rows as _inventory
 from sonder_runtime.domain.context import compaction as context_compaction
 from sonder_runtime.domain.context import overflow as context_overflow
 from sonder_runtime.application.routing import tier_escalation
+# The per-rung provider ContextVar lives in this package module, not here, so
+# a live reload of server.py cannot orphan an in-flight rung binding.
+from sonder_runtime.application.chat import provider_bridge as _provider_bridge
 from sonder_runtime.application.context_health import (
     ContextHealthService,
     ContextHealthSettings,
@@ -1749,7 +1752,12 @@ def _make_generate(
             total_tokens=reasoning_total_tokens,
         )
     if not cloud and (num_ctx is None or int(num_ctx or 0) <= 0):
-        num_ctx = _auto_model_context(model)
+        # /api/show is an Ollama probe.  A non-Ollama rung requests the
+        # runtime's default window instead of probing a model it never uses.
+        num_ctx = (
+            _auto_model_context(model)
+            if _provider_bridge.active_rung() is None else None
+        )
 
     def gen(prompt, history=None):
         gen.last_usage = {}
@@ -1821,6 +1829,12 @@ def _make_generate(
                     single_send=single_send,
                     **local_chat_options,
                 )
+                if (
+                    _provider_bridge.active_rung() is not None
+                    and isinstance(out.get("model"), str) and out["model"]
+                ):
+                    # A bridged rung reports the provider's served model.
+                    used_model = out["model"]
             tokens_in = _model_usage_count(out.get("prompt_eval_count"))
             tokens_out = _model_usage_count(out.get("eval_count"))
             source = _model_usage_source(tokens_in, tokens_out)
@@ -1903,9 +1917,12 @@ def _generate_text(prompt, tier="fast", system="", temperature=0.2,
                    num_predict=256, num_ctx=0, timeout=None):
     _refresh_live_cloud_tiers()
     model = TIERS.get(tier, TIERS["fast"])
-    return _make_generate(
-        model, system, temperature, num_predict, num_ctx, timeout=timeout,
-    )(prompt)
+    # A helper call names its own tier; it must never inherit the enclosing
+    # chat rung's provider binding (it keeps its historical Ollama route).
+    with _provider_bridge.suspend_rung():
+        return _make_generate(
+            model, system, temperature, num_predict, num_ctx, timeout=timeout,
+        )(prompt)
 
 
 _APP_GRAPH = None
@@ -2234,25 +2251,38 @@ def _gateway_generate_text(prompt, tier="fast", system="", temperature=0.2,
     gateway resolves the native session context via _make_generate.
     """
     from sonder_runtime.application.chat.handle_chat import ChatCommand
-    from sonder_runtime.application.context import local_owner_context
+    from sonder_runtime.application.context import (
+        current_operation_context,
+        local_owner_context,
+    )
     from sonder_runtime.domain.common import errors as _errors
 
+    # An offload made inside a turn joins that turn's run (same correlation
+    # id R) so the next producer's events group with it.
+    ambient = current_operation_context()
     context = local_owner_context(
-        correlation_id="offload-%s" % os.urandom(4).hex(),
+        correlation_id=(
+            ambient.correlation_id if ambient is not None
+            else "offload-%s" % os.urandom(4).hex()
+        ),
         source="system",
         cloud_allowed=_cloud_allowed_policy(os.environ),
         remote_ollama_allowed=not _ollama_endpoint_is_local(),
         timeout_seconds=float(timeout) if timeout else None,
     )
     try:
-        result = _application().chat.complete(
-            ChatCommand(
-                content=prompt, tier=tier, system=system,
-                temperature=temperature, num_predict=num_predict,
-                num_ctx=num_ctx,
-            ),
-            context,
-        )
+        # The offload asks for its own tier; the gateway routes it, never the
+        # enclosing chat rung's binding (the Ollama gateway re-enters
+        # _chat_request, which must take the ordinary path).
+        with _provider_bridge.suspend_rung():
+            result = _application().chat.complete(
+                ChatCommand(
+                    content=prompt, tier=tier, system=system,
+                    temperature=temperature, num_predict=num_predict,
+                    num_ctx=num_ctx,
+                ),
+                context,
+            )
     except _errors.SonderError as exc:
         # Translate the domain taxonomy back to the legacy transport error
         # at the adapter edge so callers' URLError handling is unchanged.
@@ -4094,6 +4124,13 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
     qv = embeddings.embed(prompt)
     if not embeddings.valid_vector(qv):
         qv = None
+    if qv is None and augment and _provider_bridge.active_rung() is not None:
+        # Recall ranks by the Ollama embedder even when generation runs on
+        # another provider; say so instead of silently recalling less.
+        _note_bridged_degradation(
+            "memory_recall_embeddings",
+            "embedding provider unavailable; recall used no query vector",
+        )
     blob = embeddings.to_blob(qv) if qv else None
     embedding_provenance = embeddings.provenance(qv) if qv else {}
     if augment:
@@ -5143,6 +5180,119 @@ def _preserve_reasoning_failure_usage(
     error.reasoning_segments = max(1, int(segments), later_segments)
 
 
+# --- HTTP chat through the ModelGateway for non-Ollama rungs -----------------
+# The legacy chat path below is Ollama-shaped.  When a rung's tier is bound to
+# another provider (SONDER_*_PROVIDER / SONDER_MODEL_BACKEND), the local
+# branch of _chat_request hands the payload to the application's
+# model_gateway instead; conversion, shaping and error classification live in
+# sonder_runtime/application/chat/provider_bridge.py.  With every tier on
+# Ollama none of this runs.
+
+
+def _bridge_provider_bindings():
+    """Bindings of the live graph when one exists, else the same env parse."""
+    bindings = getattr(_APP_GRAPH, "provider_bindings", None)
+    if bindings is not None:
+        return bindings
+    from sonder_runtime.adapters.provider_bindings import provider_bindings_from_env
+
+    try:
+        return provider_bindings_from_env()
+    except ValueError as exc:
+        # The gateway composition would refuse the same configuration; fail
+        # the turn loudly rather than silently serving it from Ollama.
+        raise ModelCallError("configuration", str(exc), status=503) from exc
+
+
+def _bridge_provider_for_tier(tier_label, cloud=False):
+    """The non-Ollama provider serving a local rung, or None for Ollama."""
+    if cloud:
+        return None
+    provider = _provider_bridge.provider_for_tier(tier_label, _bridge_provider_bindings())
+    return provider if _provider_bridge.is_bridged(provider) else None
+
+
+class _BridgeCancellation:
+    """Cancellation that honours both the ambient token and a legacy check."""
+
+    def __init__(self, base, cancel_check):
+        self._base = base
+        self._check = cancel_check
+
+    @property
+    def cancelled(self):
+        if self._base is not None and self._base.cancelled:
+            return True
+        return bool(self._check()) if callable(self._check) else False
+
+    def wait(self, timeout=None):
+        if self._base is not None:
+            return self._base.wait(timeout)
+        if timeout:
+            time.sleep(max(timeout, 0.0))
+        return self.cancelled
+
+
+def _bridge_operation_context(timeout, cancel_check):
+    """The ambient turn context (correlation id R), bounded by this call.
+
+    The HTTP context's own 30 s default is an admission budget, not a model
+    budget; the legacy call's timeout is the deadline, as on the Ollama path.
+    Consent follows the same host policy _gateway_generate_text applies.
+    """
+    import dataclasses
+    from sonder_runtime.application.context import (
+        current_operation_context,
+        local_owner_context,
+    )
+
+    deadline = time.monotonic() + float(timeout) if timeout else None
+    cloud_allowed = _cloud_allowed_policy(os.environ)
+    remote_ollama_allowed = not _ollama_endpoint_is_local()
+    ambient = current_operation_context()
+    if ambient is not None:
+        return dataclasses.replace(
+            ambient,
+            deadline_monotonic=deadline,
+            cancellation=_BridgeCancellation(ambient.cancellation, cancel_check),
+            cloud_allowed=cloud_allowed,
+            remote_ollama_allowed=remote_ollama_allowed,
+        )
+    return local_owner_context(
+        correlation_id="chat-%s" % os.urandom(6).hex(),
+        timeout_seconds=float(timeout) if timeout else None,
+        cancellation=_BridgeCancellation(None, cancel_check),
+        cloud_allowed=cloud_allowed,
+        remote_ollama_allowed=remote_ollama_allowed,
+    )
+
+
+def _bridged_chat_request(payload, rung, *, timeout, cancel_check):
+    """Serve one local chat step through the gateway for a non-Ollama rung."""
+    from sonder_runtime.domain.common.errors import SonderError
+
+    context = _bridge_operation_context(timeout, cancel_check)
+    try:
+        out, response = _provider_bridge.generate_via_gateway(
+            _application().model_gateway, payload, tier=rung.tier, context=context,
+        )
+    except SonderError as exc:
+        failure = _provider_bridge.classify_failure(exc, provider=rung.provider)
+        raise ModelCallError(
+            failure.kind, failure.detail, status=failure.status,
+            transient=failure.transient, attempts=1, cloud=False,
+        ) from exc
+    return out, response.text
+
+
+def _note_bridged_degradation(step, detail):
+    """An Ollama-only step a non-Ollama rung ran without: loud, never silent."""
+    logging.getLogger("sonder.server").warning(
+        "non-Ollama chat turn degraded: %s (%s)", step, detail,
+    )
+    _provider_bridge.record_degradation(step)
+
+
 def _chat_request(
     payload: dict,
     *,
@@ -5168,6 +5318,20 @@ def _chat_request(
         raise ValueError("single_send requires a local, non-thinking, single-segment call")
     if cloud and reasoning_continuation:
         raise ValueError("reasoning continuation is available only for local models")
+    bridged_rung = None if cloud else _provider_bridge.active_rung()
+    if bridged_rung is not None:
+        # Delegation hook: this rung's tier is bound to a non-Ollama provider.
+        # Every Ollama-only probe below (thinking budget, think support) is
+        # skipped by returning here.
+        if reasoning_continuation:
+            raise ModelCallError(
+                _provider_bridge.UNSUPPORTED_FEATURE_KIND,
+                "reasoning continuation is only available on Ollama tiers",
+                status=400, attempts=0,
+            )
+        return _bridged_chat_request(
+            payload, bridged_rung, timeout=timeout, cancel_check=cancel_check,
+        )
     if reasoning_continuation:
         options = payload.get("options") if isinstance(payload, dict) else None
         initial_chunk = options.get("num_predict") if isinstance(options, dict) else None
@@ -5471,6 +5635,13 @@ def prewarm_model(tier: str = "") -> bool:
     except Exception:
         return False
     if cloud or not model or tier_label in (None, "cloud-disabled"):
+        return False
+    try:
+        if _bridge_provider_for_tier(tier_label) is not None:
+            # The tier is served by another provider; loading its Ollama model
+            # would be wasted work (and a probe of an Ollama that may be absent).
+            return False
+    except ModelCallError:
         return False
     with _PREWARM_LOCK:
         if model in _PREWARM_INFLIGHT:
@@ -6975,6 +7146,9 @@ def _answer_with_history_impl(
     session_id = _resolve_session(session) if (session or "").strip() else None
     project_id = _resolve_project(project)
     interaction_snapshot = None
+    # Each rung binds the provider its tier is bound to (None = Ollama); the
+    # binding covers every local model step of the rung, including repairs.
+    rung_scope = contextlib.ExitStack()
     conn = _open_db()
     try:
         if session_id:
@@ -6989,6 +7163,11 @@ def _answer_with_history_impl(
             )
             following = escalation_plan.next_rung(attempt)
             detail = ""
+            rung_scope.close()
+            bridged_provider = _bridge_provider_for_tier(tier_label, cloud)
+            rung_binding = rung_scope.enter_context(
+                _provider_bridge.bind_rung(bridged_provider, tier_label)
+            )
             # Every attempt reports its own target, so the receipt names the
             # model that answered -- including a pre-routed first attempt,
             # which is not the route the request resolved to.
@@ -7001,7 +7180,11 @@ def _answer_with_history_impl(
             learn = _should_learn(_canonical_learn_tier(tier_label), True)
             req_ctx = (
                 pinned_ctx if pinned_ctx is not None
-                else (0 if cloud else _auto_model_context(model))
+                else 0 if cloud
+                # No Ollama context probe for a model a non-Ollama rung never
+                # loads; _make_generate requests the default window instead.
+                else None if bridged_provider is not None
+                else _auto_model_context(model)
             )
             try:
                 if learn:
@@ -7038,9 +7221,12 @@ def _answer_with_history_impl(
                     request_cache_key = None
                     request_cache_status = ""
                     endpoint_is_local = _ollama_endpoint_is_local()
+                    # The cache revision is an Ollama model digest; a
+                    # non-Ollama rung has none, so it never uses the cache.
                     model_revision = (
                         _cache_model_revision(model)
-                        if not cloud and endpoint_is_local else ""
+                        if not cloud and endpoint_is_local
+                        and bridged_provider is None else ""
                     )
                     if model_revision and request_cache.eligible(
                         scope=cache_scope, cloud=cloud, temperature=temperature,
@@ -7110,6 +7296,11 @@ def _answer_with_history_impl(
                         if following is not None else None
                     )
                     if reason is None:
+                        if rung_binding is not None and rung_binding.served_model:
+                            # The receipt names the model the provider says
+                            # answered, not the rung's Ollama model name.
+                            model = rung_binding.served_model
+                            _observe_target(model, tier_label, cloud)
                         break
                     detail = tier_escalation.VERIFIER_DETAIL
                 # The empty or unverified attempt was captured; it must not
@@ -7132,6 +7323,7 @@ def _answer_with_history_impl(
         return ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
                 "running? (the tray app / `ollama serve`)" % (_ollama_display(), e))
     finally:
+        rung_scope.close()
         conn.close()
     # The serve handler already routes web intents pre-model (no double routing
     # here); this is only the post-hoc net for denial phrasings it missed.
@@ -7263,16 +7455,22 @@ def structured_answer_with_history(
             target_observer(model, tier_label, cloud)
         except Exception:
             pass
+    bridged_provider = _bridge_provider_for_tier(tier_label, cloud)
     req_ctx = (
         _platform_requested_context(context_size, default_value=SESSION_NUM_CTX)
         if str(context_size or "").strip()
-        else (0 if cloud else _auto_model_context(model))
+        else 0 if cloud
+        else None if bridged_provider is not None
+        else _auto_model_context(model)
     )
     system = _build_system("", False, "", model=model, cloud=cloud)
-    response = _make_generate(
-        model, system, 0.2, 1024, req_ctx, cloud=cloud, schema=schema,
-        allow_cloud_fallback=_allow_cloud_fallback_for_target(tier_label),
-    )(prompt, history or None)
+    # A non-Ollama rung refuses decoder schemas with a 400 (the bridge
+    # cannot carry ``format``) instead of reaching an absent Ollama.
+    with _provider_bridge.bind_rung(bridged_provider, tier_label):
+        response = _make_generate(
+            model, system, 0.2, 1024, req_ctx, cloud=cloud, schema=schema,
+            allow_cloud_fallback=_allow_cloud_fallback_for_target(tier_label),
+        )(prompt, history or None)
     try:
         data = json.loads(
             response,

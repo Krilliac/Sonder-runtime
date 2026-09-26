@@ -408,6 +408,14 @@ class ObservabilityConfig:
     metrics_enabled: bool = True
     metrics_path: str = "/metrics"
     audit_retention_days: int = 90
+    # Observatory live producer (docs/architecture/observatory-telemetry.md).
+    # Export is content-free and admin-gated; ``live_export_origins`` is the
+    # route-scoped browser allowlist for the three telemetry GET routes only,
+    # so granting Observatory never widens the global admin CORS list.
+    live_export: bool = True
+    live_export_buffer: int = 4096
+    live_export_max_subscribers: int = 8
+    live_export_origins: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1248,6 +1256,49 @@ _env_bool = env_bool
 _env_int = env_int
 
 
+LIVE_EXPORT_BUFFER_MIN = 256
+LIVE_EXPORT_BUFFER_MAX = 65536
+LIVE_EXPORT_MAX_SUBSCRIBERS_LIMIT = 64
+
+
+def apply_observability_environment(
+    observability: ObservabilityConfig, env: dict[str, str], errors: list[str],
+) -> ObservabilityConfig:
+    """Fold the Observatory live-export variables into ``[observability]``.
+
+    The ring size is clamped to 256..65536 rather than rejected, matching the
+    documented contract; a malformed integer is still a configuration error.
+    """
+    obs = observability
+    if env.get("SONDER_OBSERVATORY_EXPORT", "").strip():
+        obs = replace(obs, live_export=_env_bool(env["SONDER_OBSERVATORY_EXPORT"]))
+    obs = replace(
+        obs,
+        live_export_buffer=_env_int(
+            "SONDER_OBSERVATORY_BUFFER", env, obs.live_export_buffer, errors,
+        ),
+        live_export_max_subscribers=_env_int(
+            "SONDER_OBSERVATORY_MAX_SUBSCRIBERS", env,
+            obs.live_export_max_subscribers, errors,
+        ),
+    )
+    if "SONDER_OBSERVATORY_ORIGINS" in env:
+        obs = replace(
+            obs,
+            live_export_origins=tuple(
+                part.strip() for part in env["SONDER_OBSERVATORY_ORIGINS"].split(",")
+                if part.strip()
+            ),
+        )
+    return replace(
+        obs,
+        live_export_buffer=max(
+            LIVE_EXPORT_BUFFER_MIN,
+            min(LIVE_EXPORT_BUFFER_MAX, obs.live_export_buffer),
+        ),
+    )
+
+
 def _apply_environment(
     config: SonderConfig, env: dict[str, str], errors: list[str]
 ) -> SonderConfig:
@@ -1517,9 +1568,13 @@ def _apply_environment(
         # the path into Secrets made config report a key as present while
         # every backup was still written in plaintext, so refuse it instead.
         errors.append(BACKUP_KEY_FILE_UNSUPPORTED)
+    observability = apply_observability_environment(
+        config.observability, env, errors,
+    )
 
     return replace(
         config,
+        observability=observability,
         server=server,
         state=state,
         ollama=ollama,
@@ -2060,6 +2115,17 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         errors.append("[observability].audit_retention_days must be >= 1")
     if not obs.metrics_path.startswith("/"):
         errors.append("[observability].metrics_path must start with '/'")
+    if not 1 <= obs.live_export_max_subscribers <= LIVE_EXPORT_MAX_SUBSCRIBERS_LIMIT:
+        errors.append(
+            "[observability].live_export_max_subscribers must be within 1..%d"
+            % LIVE_EXPORT_MAX_SUBSCRIBERS_LIMIT
+        )
+    for origin in obs.live_export_origins:
+        if origin == "*" or not re.fullmatch(r"[a-z][a-z0-9+.-]*://[^/\s]+", origin):
+            errors.append(
+                "[observability].live_export_origins entries must be exact "
+                "origins (scheme://host[:port]), not %r" % origin
+            )
 
     if config.backup.enabled and config.backup.target:
         if not Path(config.backup.target).expanduser().is_absolute():

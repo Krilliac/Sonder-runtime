@@ -140,4 +140,6 @@ implementation work is tracked only in the
 | AMD VitisAI NPU execution | Degraded | Target-unverified; not labeled NPU acceleration without effective-device evidence. |
 | Windows ML or DirectML as NPU execution | Unsupported | Windows ML is descriptor-only and DirectML is not claimed as an NPU. |
 | Adapter training inside Ollama | Unsupported | Ollama serves the deployed result; the Hugging Face/PEFT stack trains the adapter. |
+| HTTP chat and A2A turns served by a non-Ollama provider binding | Experimental | Local model steps go through the model gateway; REPL, MCP, autopilot and fleet stay on Ollama ([observatory-telemetry](docs/architecture/observatory-telemetry.md)). |
+| Observatory live telemetry producer and ecosystem status routes | Experimental | Admin-gated, content-free, bounded ring; browser origins only via `SONDER_OBSERVATORY_ORIGINS`. |
 | One packaged implementation path with no root-level business modules or compatibility shims | Proposed | ARCH-002, ARCH-003, and CORE-005 track removal of the remaining root modules and aliases. |

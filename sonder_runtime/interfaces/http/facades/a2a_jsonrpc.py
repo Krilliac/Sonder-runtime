@@ -1,13 +1,19 @@
 """Authenticated HTTP presentation for the bounded A2A JSON-RPC seam."""
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import uuid
 from dataclasses import dataclass
 from typing import Any, Mapping
 
 from ....application.chat.handle_chat import ChatCommand
-from ....application.context import local_owner_context
+from ....application.context import (
+    bind_operation_context,
+    current_operation_context,
+    local_owner_context,
+)
+from ....application.observability.runtime_telemetry import turn_id
 from ....application.ports.jobs import JobIdentity, JobStatus
 from ....application.errors import NotFound
 from ...a2a.jsonrpc import A2AJsonRpcTransport, A2ATaskNotFound
@@ -155,16 +161,52 @@ def build_application_a2a_handler(
         service.start(identity)
         worker_id = f"a2a-http-{uuid.uuid4().hex}"
         service.claim(job_id, worker_id, lease_seconds=300)
+        # One turn id R for telemetry and the provider-facing correlation id:
+        # the messageId when it fits the cross-producer grammar, else the HTTP
+        # request's correlation id (published by serve.py as ambient context).
+        ambient = current_operation_context()
+        rid = turn_id(message_id, ambient.correlation_id if ambient is not None else None)
+        context = local_owner_context(
+            correlation_id=rid,
+            source="http",
+            auth_level="admin",
+            timeout_seconds=300,
+            cloud_allowed=False,
+        )
+        telemetry = getattr(application, "telemetry", None)
+        telemetry_turn = None
+        outcome, error_code = "failed", "unrecorded"
+        with contextlib.ExitStack() as scope:
+            scope.enter_context(bind_operation_context(context))
+            if telemetry is not None:
+                try:
+                    telemetry_turn = telemetry.begin_turn(
+                        turn_id=rid, surface="a2a", stream=False,
+                        requested_model="sonder", source="http",
+                    )
+                    scope.enter_context(telemetry.activate(telemetry_turn))
+                except Exception:
+                    telemetry_turn = None
+            try:
+                record, outcome, error_code = run_chat(
+                    service, chat, job_id, worker_id, content, context,
+                )
+            finally:
+                if telemetry_turn is not None:
+                    try:
+                        telemetry.finish_turn(
+                            telemetry_turn, outcome=outcome, http_status=200,
+                            error_code=error_code,
+                        )
+                    except Exception:
+                        pass
+        return {"task": task_payload(record)}
+
+    def run_chat(service, chat, job_id, worker_id, content, context):
         try:
             result = chat.complete(
                 ChatCommand(content=content, tier="sonder"),
-                local_owner_context(
-                    correlation_id=message_id,
-                    source="http",
-                    auth_level="admin",
-                    timeout_seconds=300,
-                    cloud_allowed=False,
-                ),
+                context,
             )
             record = service.finish(
                 job_id,
@@ -183,7 +225,11 @@ def build_application_a2a_handler(
                 JobStatus.FAILED,
                 error=f"{type(error).__name__}: {error}"[:1024],
             )
-        return {"task": task_payload(record)}
+            code = getattr(error, "code", "")
+            return record, "failed", (
+                code if isinstance(code, str) and code else type(error).__name__
+            )
+        return record, "completed", None
 
     def handler(method, params):
         if method == "SendMessage":
