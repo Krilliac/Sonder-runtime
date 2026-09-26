@@ -277,7 +277,12 @@ back to the exact before-digest reads as not applied. The details are in
     (a fix report grades the fix's own edits, not an earlier generation), and
     `verification_reach` lists no build tool, because the agent loop cannot
     dispatch the typed build tools, so no agent run could satisfy it;
-  - point the legacy `build_run` help text at `build_job`.
+  - open: point the legacy `build_run` help text at `build_job`. The agent
+    help lists only tools `_agent_dispatch` can run, and it has no branch for
+    the typed build tools, so this waits for an agent dispatch path. That path
+    must keep the approval bound to the planned `resolved_command` (TOOL-004)
+    rather than the agent gate's tool-name decision; changing the help first
+    would send the agent to a tool that answers `unknown tool`.
 
 ## Configuration
 
