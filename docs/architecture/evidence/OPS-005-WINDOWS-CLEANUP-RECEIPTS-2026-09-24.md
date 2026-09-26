@@ -37,3 +37,17 @@ OPS-005 remains implemented_unverified. Raw Windows tree absence, containment
 restoration after service restart, escaped descendants, live POSIX group-kill
 completion and the larger held identity-propagation patch remain unqualified.
 No production deployment or broader requirement completion is claimed.
+
+## Port to this branch
+
+This change reached the integration branch as a cherry-picked port of open
+PR #559 onto `a0e998fb` (commits `80dec315`), not as a merge of the PR. The
+Windows 11/WSL cohorts and full-suite figures above were measured on
+`eae3da71` plus the PR patch and were not rerun on this branch. Here only
+Linux CPython 3.12 was run: the full suite gave 20,975 passed and 193 skipped;
+12 `tests/test_adaptive_training.py` deployment tests failed only on their
+real free-disk precondition (the host had 4.1 GB free, 4.2 GB required) and
+one release-smoke test passed on rerun. Platform-independent tests now pin the
+deadline-retry path that keeps a pending cancellation after the root exits,
+including after an owner restart. Windows qualification of the port is
+outstanding.

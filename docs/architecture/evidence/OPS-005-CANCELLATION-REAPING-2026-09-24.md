@@ -53,3 +53,17 @@ group kill, escaping descendants, Windows tree absence after root exit, or the
 larger held startup/identity-propagation candidate. Those broader gates remain
 open and OPS-005 remains implemented_unverified. The existing finite graceful
 drain deadline validation remains part of the requirement's implementation.
+
+## Port to this branch
+
+This change reached the integration branch as a cherry-picked port of open
+PR #557 onto `a0e998fb` (commits `78f063e6`, `ecd63f98`), not as a merge of the PR. The
+Windows 11/WSL cohorts and full-suite figures above were measured on
+`6b31a39c` plus the PR patch and were not rerun on this branch. Here only
+Linux CPython 3.12 was run: the full suite gave 20,975 passed and 193 skipped;
+12 `tests/test_adaptive_training.py` deployment tests failed only on their
+real free-disk precondition (the host had 4.1 GB free, 4.2 GB required) and
+one release-smoke test passed on rerun. Platform-independent tests now pin the
+deadline-retry path that keeps a pending cancellation after the root exits,
+including after an owner restart. Windows qualification of the port is
+outstanding.
