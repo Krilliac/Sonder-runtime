@@ -98,6 +98,13 @@ def test_public_generator_freshness_check_passes():
 
 
 def test_runtime_reference_fails_closed_when_tool_source_is_unavailable(monkeypatch):
+    # The slash-command catalog is read first and imports ``server`` itself on
+    # its first (memoised) call. Prime it so the synthetic failure below hits
+    # the tool-source read this test is about, whatever ran earlier in the
+    # worker; otherwise the ImportError escapes from the command catalog.
+    catalogs.importlib.import_module(
+        "sonder_runtime.adapters.command_catalog"
+    ).command_catalog.catalog()
     original = catalogs.importlib.import_module
 
     def unavailable(name):
