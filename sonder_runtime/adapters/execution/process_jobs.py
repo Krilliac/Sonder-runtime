@@ -528,6 +528,12 @@ class SubprocessJobProvider:
             self._schedule_deadline(job_id, self._cleanup_retry_seconds)
             return ProcessJobWait(records[-1], exit_code)
         current = self._registry.poll(job_id)
+        if containment is None and current.status is JobStatus.CANCELLATION_REQUESTED:
+            # Reaping the root does not settle a recorded tree cancellation.
+            # Reuse the cleanup contract, retaining ownership and its retry
+            # timer when descendants or their identity remain unproven.
+            self.cancel(job_id, reason=current.error or "cancellation requested")
+            return ProcessJobWait(self._registry.poll(job_id), exit_code)
         if containment is not None and (
             containment.forced or current.status is JobStatus.CANCELLATION_REQUESTED
         ):

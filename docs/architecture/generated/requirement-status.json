@@ -1027,9 +1027,9 @@
     },
     {
       "checked": false,
-      "claim": "The shared graceful-drain contract now rejects non-finite, non-numeric, boolean and non-positive deadline values before starting shutdown barriers, preserving finite timeout semantics. Existing lifecycle admission and receipt-backed cleanup contracts remain unchanged.",
+      "claim": "Graceful drain rejects invalid or non-finite deadlines. Process wait preserves an already recorded cancellation through cleanup instead of ordinary exit classification, retaining owned resources while cleanup is incomplete. A reaped POSIX root can complete cancellation only when its recorded root-owned group is observed absent without sending termination signals.",
       "requirement_id": "OPS-005",
-      "revision": 3,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "58082c03fcab4bf4b735acaae617d1a173d29f71a2a92441ee58709aa86ddb34",
+    "ledger_sha256": "306f014c1643d824db16f30b04c5e02c66c2cb63e119893e5f22a82bb68743c3",
     "spec_sha256": "1d7da49c5910bcf0bd5099ef1858312a8491a0429a4df33895d8088942278e33"
   }
 }
