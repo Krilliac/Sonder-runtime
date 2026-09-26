@@ -189,3 +189,29 @@ def test_a_real_legacy_pytest_run_goes_through_the_structured_runner(stack, monk
     assert "  ok: True" in output and "  returncode: 0" in output
     output = server.test_run(root=str(project), path=str(project / "test_mod.py"), timeout=60)
     assert "  ok: False" in output and "FAILED test_mod.py::test_bad" in output
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(os.name != "posix", reason="the real runner stack reads /proc")
+def test_a_host_bound_project_outside_the_file_roots_keeps_the_harness_run(stack, monkeypatch):
+    # The agent's dispatch authorizes its host-selected project through
+    # harness_tools.authorized_root_scope, which only the harness honors. The
+    # structured planner confines to the operator's file roots alone, so it
+    # would refuse this project with PROJECT_OUTSIDE_ROOTS; the call must keep
+    # the harness run it always had instead of turning into that refusal.
+    project = stack.allowed.parent / "hostproject"
+    project.mkdir()
+    (project / "pytest.ini").write_text("[pytest]\n")
+    (project / "test_mod.py").write_text("def test_ok():\n    assert True\n")
+    monkeypatch.setattr(server, "_developer_tool_services",
+                        lambda: SimpleNamespace(test_runs=stack.service))
+    with harness_tools.authorized_root_scope(str(project)):
+        output = server.test_run(root=str(project), framework="pytest", timeout=60)
+    assert "PROJECT_OUTSIDE_ROOTS" not in output
+    assert "  ok: True" in output and "  returncode: 0" in output
+    assert "1 passed" in output
+
+    # Outside the scope the harness itself refuses the same project, so the
+    # fallback grants nothing the harness would not.
+    output = server.test_run(root=str(project), framework="pytest", timeout=60)
+    assert output.startswith("ERROR:") and "  ok: True" not in output

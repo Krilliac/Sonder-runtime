@@ -13121,8 +13121,10 @@ def _structured_legacy_test_run(root, framework, path, pattern, coverage, timeou
 
     None hands the call to ``harness_tools.test_run``: no composed test
     runner, a framework other than pytest, a coverage run, path and pattern
-    together (the runner takes one selector), or a root/path the harness
-    refuses (it answers that refusal in its own words). The retired
+    together (the runner takes one selector), a root/path the harness
+    refuses (it answers that refusal in its own words), or a project only
+    the agent dispatch's ``authorized_root_scope`` authorizes (the planner
+    confines to the file roots and would refuse it). The retired
     ``extra_args_json`` is refused before anything else.
     """
     from sonder_runtime.application.testing.legacy_runs import (
@@ -13144,6 +13146,15 @@ def _structured_legacy_test_run(root, framework, path, pattern, coverage, timeou
     try:
         resolved = harness_tools._resolve_root(root)
         target = harness_tools._resolve_target_path(resolved, path)
+    except (PermissionError, ValueError, OSError):
+        return None
+    try:
+        # The harness also honors the ONE project an agent dispatch's
+        # ``authorized_root_scope`` binds; the structured planner confines to
+        # the operator's file roots alone and would refuse that project with
+        # PROJECT_OUTSIDE_ROOTS. Such a project keeps its harness run.
+        file_ops.resolve_repository_read_path(
+            str(resolved), allow_workspace_root=True, reject_sensitive=True)
     except (PermissionError, ValueError, OSError):
         return None
     if framework == "auto" and harness_tools._detect_test_framework(resolved) != "pytest":

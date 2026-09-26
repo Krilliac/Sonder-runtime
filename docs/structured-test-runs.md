@@ -374,6 +374,11 @@ Some calls keep the harness's own command line:
 - coverage runs (this runner has no coverage template)
 - calls that pass both `path` and `pattern` (this runner takes one selector)
 - runtimes that do not compose the developer tools
+- a project the agent's dispatch binds that lies outside the configured file
+  roots. The harness honors the one project the host bound for that agent
+  run; this runner confines to the file roots alone and would refuse it with
+  `PROJECT_OUTSIDE_ROOTS`, so such a project keeps the harness run it always
+  had. Outside an agent dispatch the harness refuses the same project too.
 
 That command line is now built entirely by the host: fixed flags, a
 confined `path`, and `pattern` passed only as the value of `-k`.

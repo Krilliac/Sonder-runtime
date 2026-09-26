@@ -166,7 +166,9 @@ def _structured(monkeypatch, tmp_path, report):
     from types import SimpleNamespace
 
     (tmp_path / "test_x.py").write_text("def test_x(): pass\n")
-    monkeypatch.setattr(server.harness_tools, "_resolve_root", lambda root: tmp_path)
+    # A project inside the operator's file roots: both the harness and the
+    # structured planner accept it, so the structured runner answers.
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(tmp_path))
     monkeypatch.setattr(server, "_developer_tool_services", lambda: SimpleNamespace(
         test_runs=SimpleNamespace(run=lambda *a, **k: report)))
     monkeypatch.setattr(server.harness_tools, "test_run",
