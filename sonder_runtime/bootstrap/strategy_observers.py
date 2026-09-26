@@ -6,6 +6,7 @@ effect replay safety from a model response or an error string.
 """
 from __future__ import annotations
 
+from dataclasses import fields, replace
 import hashlib
 import json
 
@@ -26,6 +27,46 @@ from sonder_runtime.domain.strategy.models import (
 def _digest(value) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=True,
                                      default=str).encode("ascii")).hexdigest()
+
+
+# Per-attempt clamp for host counters copied into sealed usage. Values above
+# it are recorded at the clamp; the strategy budgets below are sized from it.
+_COUNTER_CLAMP = 64
+
+
+def _counter(value) -> int:
+    """Bound a host-owned integer counter; anything else counts as zero."""
+    if type(value) is not int or value < 0:
+        return 0
+    return min(value, _COUNTER_CLAMP)
+
+
+def _within_sealed(trace, run_id: str, requested: StrategyBudget) -> StrategyBudget:
+    """Never request more than the budget a run was already sealed with."""
+    sealed = trace.sealed_budget(run_id)
+    if sealed is None:
+        return requested
+    return StrategyBudget(**{
+        item.name: min(getattr(requested, item.name), getattr(sealed, item.name))
+        for item in fields(StrategyBudget)
+    })
+
+
+def _as_sealed(attempt: StrategyAttempt, history) -> StrategyAttempt:
+    """Keep the charge and progress of an attempt that is already sealed.
+
+    Usage and progress are fixed when an attempt is first recorded. A replay
+    still re-derives identity, outcome, failure, evidence and route, and the
+    trace rejects any difference in those; it never re-prices the sealed
+    attempt, so checkpoints written before a counter was attributed remain
+    replayable.
+    """
+    for sealed in history:
+        if sealed.attempt_id == attempt.attempt_id:
+            return replace(attempt, usage=sealed.usage,
+                           progress_before=sealed.progress_before,
+                           progress_after=sealed.progress_after)
+    return attempt
 
 
 def codegen_objective_digest(project_dir: str, spec: str, build_program: str) -> str:
@@ -162,14 +203,32 @@ def observe_workbench_lane(trace, *, lane: dict, memory_service=None):
         ("lane:" + scope,), _digest((lane.get("task", ""), lane.get("tier", ""))),
         "complete host-scoped interactive lane", "lane-completion",
     )
-    attempt = StrategyAttempt(
+    # ``used_steps`` is the lane's lifetime count of dispatched model turns
+    # and is stable while an attempt is terminal. This attempt is charged the
+    # turns not already charged to earlier sealed attempts of the lane, so the
+    # run's total model_calls equals the durable lane counter. Turns from
+    # attempts that were never observed (for example an interrupted attempt)
+    # are charged to the next observed attempt rather than dropped.
+    history = trace.history(run_id)
+    prior = history
+    for index, sealed in enumerate(history):
+        if sealed.attempt_id == attempt_id:
+            prior = history[:index]
+            break
+    charged = sum(item.usage.model_calls for item in prior)
+    used_steps = lane.get("used_steps")
+    model_calls = _counter(used_steps - charged) if type(used_steps) is int else 0
+    attempt = _as_sealed(StrategyAttempt(
         run_id, attempt_id, signature,
         "uncertain" if uncertain else "succeeded" if status == "completed" else "failed",
-        failure, before, after, StrategyUsage(attempts=1),
+        failure, before, after, StrategyUsage(attempts=1, model_calls=model_calls),
         model_route=str(lane.get("tier") or "")[:128],
-    )
+    ), history)
+    step_budget = max(1, min(int(lane["max_steps"]), 64))
     decision = trace.record(
-        attempt, budget=StrategyBudget(attempts=max(1, min(int(lane["max_steps"]), 64))),
+        attempt, budget=_within_sealed(trace, run_id, StrategyBudget(
+            attempts=step_budget, model_calls=step_budget,
+        )),
         available_actions=(StrategyAction.INSPECT, StrategyAction.REPAIR, StrategyAction.CRITIC),
         unresolved_effects=uncertain,
         policy_blocked=failure_class is FailureClass.PERMISSION_DENIED,
@@ -257,11 +316,30 @@ def observe_autopilot_task(trace, *, run: dict, task: dict, memory_service=None)
         _digest(task.get("instruction", "")),
         f"complete host-scoped {task['kind']} task", "autopilot-task",
     )
-    before = ProgressVector(scope, (ProgressMetric("task_passed", 0, "maximize"),),
-                            complete=True)
-    after = ProgressVector(scope, (ProgressMetric("task_passed", int(status == "passed"),
-                                                "maximize"),), complete=status != "uncertain")
-    receipt = task.get("host_receipt") or {}
+    # The host receipt is built by the guarded workbench from host-observed
+    # facts (HostTaskResult.receipt), never from model output. Anything that
+    # is not a dict, or a field with the wrong type, contributes nothing.
+    receipt = task.get("host_receipt")
+    if not isinstance(receipt, dict):
+        receipt = {}
+    before_metrics = [ProgressMetric("task_passed", 0, "maximize")]
+    after_metrics = [ProgressMetric("task_passed", int(status == "passed"), "maximize")]
+    if task["kind"] == "validate":
+        before_metrics.append(ProgressMetric("validation_passed", 0, "maximize"))
+        after_metrics.append(ProgressMetric(
+            "validation_passed", int(receipt.get("validation_passed") is True), "maximize",
+        ))
+    before = ProgressVector(scope, tuple(before_metrics), complete=True)
+    after = ProgressVector(scope, tuple(after_metrics), complete=status != "uncertain")
+    tools = receipt.get("tools")
+    # The receipt lists the distinct host tools used, not every call, so
+    # tool_calls is a lower bound on the task's calls. validation_attempted
+    # likewise proves at least one verifier run.
+    usage = StrategyUsage(
+        attempts=1,
+        tool_calls=_counter(len(tools)) if isinstance(tools, (list, tuple)) else 0,
+        verifier_calls=int(receipt.get("validation_attempted") is True),
+    )
     failure = None if status == "passed" else FailureObservation(
         FailureClass.UNCERTAIN_SIDE_EFFECT if status == "uncertain" else
         FailureClass.VERIFIER_FAILURE if task["kind"] == "validate" else
@@ -271,19 +349,24 @@ def observe_autopilot_task(trace, *, run: dict, task: dict, memory_service=None)
         _digest((receipt, task.get("error", ""))),
     )
     evidence = ()
-    certificate = receipt.get("delegated_verification") if isinstance(receipt, dict) else None
+    certificate = receipt.get("delegated_verification")
     if isinstance(certificate, dict) and certificate.get("certificate_id"):
         evidence = (EvidenceRef("verifier", str(certificate["certificate_id"])[:512],
                                 _digest(certificate)),)
-    attempt = StrategyAttempt(
+    attempt = _as_sealed(StrategyAttempt(
         run_id, f"{task_id}-attempt-{number}", signature,
         "succeeded" if status == "passed" else "uncertain" if status == "uncertain" else "failed",
-        failure, before, after, StrategyUsage(attempts=1), evidence,
+        failure, before, after, usage, evidence,
         model_route=str(run.get("tier", ""))[:128],
-    )
+    ), trace.history(run_id))
+    # Autopilot has no host tool or verifier budget of its own; these bounds
+    # are the per-attempt clamps times the attempt budget, so only the
+    # attempt dimension can exhaust an Autopilot strategy budget.
     decision = trace.record(
-        attempt, budget=StrategyBudget(attempts=50, model_calls=100,
-                                       strategy_switches=50, replans=6),
+        attempt, budget=_within_sealed(trace, run_id, StrategyBudget(
+            attempts=50, model_calls=100, tool_calls=50 * _COUNTER_CLAMP,
+            verifier_calls=50, strategy_switches=50, replans=6,
+        )),
         available_actions=(StrategyAction.INSPECT, StrategyAction.REPLAN),
         unresolved_effects=status == "uncertain", transport_replay_safe=False,
     )

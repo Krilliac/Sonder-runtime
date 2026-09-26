@@ -80,6 +80,15 @@ class StrategyTraceService:
         _, data = self._restore(run_id)
         return () if data is None else tuple(StrategyAttempt.from_dict(x) for x in data["attempts"])
 
+    def sealed_budget(self, run_id: str) -> StrategyBudget | None:
+        """Return the authenticated budget a run was sealed with, if any.
+
+        A recorded budget may only narrow, so observers use this to avoid
+        requesting an expansion for runs sealed under an older budget.
+        """
+        _, data = self._restore(run_id)
+        return None if data is None else StrategyBudget(**data["budget"])
+
     def observed_decisions(self, run_id: str) -> tuple[StrategyDecision, ...]:
         """Read decisions in attempt order from the authenticated checkpoint."""
         _, data = self._restore(run_id)
