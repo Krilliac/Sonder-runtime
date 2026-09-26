@@ -285,7 +285,11 @@ automated test coverage, since tests never touch a model.
 drives every catalogued command on every surface (console loop, control
 chain, legacy and native MCP, served API, agent dispatch), the
 natural-language router and the CLI, in a hermetic home with the model
-stubbed, and classifies each outcome instead of asserting one. It is not a
+stubbed and web search, fetch and weather switched off (`SONDER_WEB_TOOLS=0`;
+`--live-network` opts back in to real calls), and classifies each outcome
+instead of asserting one. An exception that escapes the console loop is
+recorded as a `crash` for the line that raised it and the loop resumes from
+the next line, so one defect does not abort the run. It is not a
 CI gate; run it on a build to see what a caller sees on every door at once
 and read its "needs reading" list. It leaves the checkout as it found it:
 every module-local file root is redirected into its home, and a run that

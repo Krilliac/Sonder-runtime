@@ -10,7 +10,10 @@ test did not think to ask.
 
 Hermetic by construction: a fresh Sonder home and a throwaway workspace, the
 operator's mode and rules untouched, the model stubbed (``--live-model`` to
-use the configured local model instead). Everything a command writes lands in
+use the configured local model instead), and no network: web search, fetch
+and weather are switched off with ``SONDER_WEB_TOOLS=0`` so those commands
+answer ``unavailable`` instead of reaching the internet (``--live-network``
+lets them make real calls). Everything a command writes lands in
 the sweep's temporary directories: the guarded file root, every module that
 anchors a writable file to its own directory (standing instructions, emotion
 vectors, workflows, generated assets and games, self-heal, the code runner)
@@ -45,7 +48,7 @@ Usage::
 
     python scripts/surface_sweep.py --out eval_runs/sweep [--mode manual|auto|plan]
         [--surfaces control,console,mcp,native,http,agent,router,cli]
-        [--only /name ...] [--timeout 20] [--live-model]
+        [--only /name ...] [--timeout 20] [--live-model] [--live-network]
 """
 from __future__ import annotations
 
@@ -85,8 +88,12 @@ class SweepTimeout(Exception):
 # --- environment ----------------------------------------------------------------
 
 
-def _prepare_environment(root: str) -> dict:
-    """Point every store at a throwaway home before the runtime imports."""
+def _prepare_environment(root: str, *, live_network: bool = False) -> dict:
+    """Point every store at a throwaway home before the runtime imports.
+
+    Web tools default to on when ``SONDER_WEB_TOOLS`` is unset, so the sweep
+    sets it explicitly: ``0`` unless ``live_network`` asks for real calls.
+    """
     home = os.path.join(root, "home")
     workspace = os.path.join(root, "workspace")
     os.makedirs(home, exist_ok=True)
@@ -104,10 +111,11 @@ def _prepare_environment(root: str) -> dict:
     os.environ["SONDER_HOME"] = home
     for name in (
         "SONDER_FILE_ROOTS", "SONDER_FILE_BYPASS", "SONDER_FILE_APPROVAL_CODE",
-        "SONDER_ALLOW_CLOUD", "SONDER_WEB_TOOLS", "SONDER_ALLOW_REMOTE_OLLAMA",
+        "SONDER_ALLOW_CLOUD", "SONDER_ALLOW_REMOTE_OLLAMA",
         "SONDER_API_KEY", "SONDER_ALLOW_PERMISSION_EDITS",
     ):
         os.environ.pop(name, None)
+    os.environ["SONDER_WEB_TOOLS"] = "1" if live_network else "0"
     os.environ.setdefault("OLLAMA_HOST", "http://127.0.0.1:9")
     return {"home": home, "workspace": workspace}
 
@@ -400,16 +408,17 @@ def checkout_changes(before: dict, after: dict) -> list:
 
 class Sweep:
     def __init__(self, *, out_dir: str, mode: str, surfaces: tuple, only: tuple,
-                 timeout: float, live_model: bool) -> None:
+                 timeout: float, live_model: bool, live_network: bool = False) -> None:
         self.out_dir = out_dir
         self.mode = mode
         self.surfaces = surfaces
         self.only = set(only)
         self.timeout = timeout
         self.live_model = live_model
+        self.live_network = live_network
         self.records: list[dict] = []
         self.root = tempfile.mkdtemp(prefix="sonder-sweep-")
-        self.paths = _prepare_environment(self.root)
+        self.paths = _prepare_environment(self.root, live_network=live_network)
         self.checkout_before = checkout_state()
         self._cwd = os.getcwd()
         self._redact = None
@@ -612,6 +621,22 @@ class Sweep:
                     continue
                 except SystemExit:
                     break
+                except Exception as exc:  # noqa: BLE001 - a crash is a finding, not a stop
+                    # An exception escaped the loop: record the line that
+                    # raised it as a crash and resume from the next one. One
+                    # that escapes before any line was read would recur on
+                    # every fresh loop, so it is recorded once and ends the
+                    # console surface instead.
+                    signal.setitimer(signal.ITIMER_REAL, 0)
+                    detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
+                    if state["current"] is None:
+                        self.record("console", "(loop)", "", detail, exception=exc)
+                        break
+                    name, line, _start, began = state["current"]
+                    self.record("console", name, line, detail, exception=exc,
+                                elapsed=time.monotonic() - began)
+                    state["current"] = None
+                    continue
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, previous_handler)
@@ -865,7 +890,8 @@ class Sweep:
     def write(self) -> dict:
         os.makedirs(self.out_dir, exist_ok=True)
         summary = {"mode": self.mode, "surfaces": list(self.surfaces),
-                   "live_model": self.live_model, "records": len(self.records),
+                   "live_model": self.live_model, "live_network": self.live_network,
+                   "records": len(self.records),
                    "by_surface": {}, "by_class": {}}
         for row in self.records:
             summary["by_class"][row["class"]] = summary["by_class"].get(row["class"], 0) + 1
@@ -950,7 +976,9 @@ def _documented_phrases() -> list[tuple[str, str | None, str]]:
 
 def render(summary: dict, records: list[dict]) -> str:
     lines = ["# Surface sweep (mode: %s)" % summary["mode"], ""]
-    lines.append("records: %d; model: %s" % (summary["records"], "live" if summary["live_model"] else "stubbed"))
+    lines.append("records: %d; model: %s; network: %s" % (
+        summary["records"], "live" if summary["live_model"] else "stubbed",
+        "live" if summary.get("live_network") else "off"))
     lines.append("")
     lines.append("| surface | " + " | ".join(CLASSES) + " |")
     lines.append("|---|" + "---|" * len(CLASSES))
@@ -975,13 +1003,16 @@ def main(argv=None) -> int:
     parser.add_argument("--only", action="append", default=[])
     parser.add_argument("--timeout", type=float, default=20.0)
     parser.add_argument("--live-model", action="store_true")
+    parser.add_argument("--live-network", action="store_true",
+                        help="let web search, fetch and weather make real network calls")
     args = parser.parse_args(argv)
     surfaces = tuple(s.strip() for s in args.surfaces.split(",") if s.strip())
     unknown = [s for s in surfaces if s not in SURFACES]
     if unknown:
         parser.error("unknown surfaces: %s" % ", ".join(unknown))
     sweep = Sweep(out_dir=args.out, mode=args.mode, surfaces=surfaces, only=tuple(args.only),
-                  timeout=args.timeout, live_model=args.live_model)
+                  timeout=args.timeout, live_model=args.live_model,
+                  live_network=args.live_network)
     try:
         sweep.boot()
         for surface in surfaces:
