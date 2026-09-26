@@ -8,9 +8,14 @@ would make, and nothing else:
 * ``/test``, ``/digest``, ``/build`` and ``/fix-build`` become one typed tool
   call through the typed gateway -- the call ``/v1/tools/test-run``,
   ``/v1/tools/output-digest`` and ``/v1/build/*`` make -- as the
-  authenticated principal with ``source="http"``, graded unattended by the
-  permission modes (so a refused ``test_run`` or ``build_job`` names a
-  ``call_id`` that can be approved once);
+  authenticated principal with ``source="http"``. The line is graded
+  unattended by the permission modes at ``_handle_slash``'s chain gate,
+  before this module parses it and without the call's arguments, so a mode
+  that refuses a run (``manual``, ``acceptEdits``, ``plan``) refuses the line
+  there and the refusal names no call. Approving one run by its ``call_id``
+  goes through the HTTP route (``POST /v1/tools/test-run`` or
+  ``/v1/build/*``), whose refusal names it. ``render_refusal`` still shows a
+  ``call_id`` when a gateway refusal carries one;
 * ``/crash`` and ``/profile`` become one request to the admin
   ``DebugToolsHttpFacade`` -- the ``/v1/tools/crash-*``, ``profile-*`` and
   ``debug-runs`` routes -- with the same admin guard, the same permission

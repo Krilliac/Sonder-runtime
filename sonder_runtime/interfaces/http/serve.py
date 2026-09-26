@@ -3014,10 +3014,14 @@ def _developer_chat_reply(cmd, arg, context):
 
     Each line becomes exactly the call its HTTP route makes (see
     ``interfaces/http/facades/developer_chat.py``): a typed gateway call as
-    the authenticated principal with ``source="http"`` (graded unattended),
-    or an admin ``DebugToolsHttpFacade`` request (same guard, grading and
+    the authenticated principal with ``source="http"``, or an admin ``DebugToolsHttpFacade`` request (same guard, grading and
     caps as ``/v1/tools/crash-*``). The authority check is the route's:
     developer or admin for the typed tools, admin for crash and profile.
+
+    The permission modes have already graded the line unattended at the
+    chain gate (``_http_slash_refusal``), without the call's arguments; a
+    mode that refuses the run refuses it there, naming no call. Approval of
+    one run by ``call_id`` goes through the HTTP route.
     """
     from sonder_runtime.interfaces.http.facades import developer_chat as chat
 

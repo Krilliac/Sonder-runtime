@@ -267,7 +267,26 @@ def test_manual_mode_refuses_a_chat_run_at_the_chain_gate_but_not_its_reads(monk
     assert [request.tool_name for request in gateway.requests] == ["test_run_result"]
 
 
-def test_a_gateway_refusal_names_its_call_id_and_remedies(monkeypatch):
+@pytest.mark.parametrize("mode", [pm.MANUAL, pm.ACCEPT_EDITS, pm.PLAN])
+@pytest.mark.parametrize("line", ["/test pytest", "/build run game", "/fix-build game"])
+def test_a_run_the_modes_refuse_is_refused_at_the_chain_gate_naming_no_call(
+        monkeypatch, mode, line):
+    # The real permission modes never let one of these lines reach the
+    # gateway only to be refused there: the chain gate refuses it first, with
+    # no arguments, so the reply names no call_id. Approving one run by its
+    # call_id goes through the HTTP route instead.
+    pm.set_mode(mode)
+    gateway = SpyGateway()
+    _serve_gateway(monkeypatch, gateway)
+    reply = ts._handle_slash(line, context=ADMIN)
+    assert reply.startswith("refused %s:" % line.split()[0])
+    assert "call_id" not in reply
+    assert gateway.requests == []
+
+
+def test_the_renderer_names_a_refused_decisions_call_id_and_remedies(monkeypatch):
+    # Renderer contract only: AUTO lets the line past the chain gate, and the
+    # spy gateway injects a refusal that carries a decision with a call_id.
     denied = Forbidden("permission gate refused build_job: unattended")
     denied.decision = {"tool": "build_job", "call_id": "c0ffee12", "source": "unattended"}
     _serve_gateway(monkeypatch, SpyGateway(raises=denied))
