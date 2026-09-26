@@ -6,3 +6,5 @@ pytest-xdist>=3.2
 # screen tests skip as a platform decision and the piped contracts still run.
 pexpect==4.9.0; sys_platform != "win32"
 pyte==0.8.2; sys_platform != "win32"
+# Exact pin: the lint gate's findings, and so its baseline, are version-specific.
+ruff==0.16.9

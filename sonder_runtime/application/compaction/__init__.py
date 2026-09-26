@@ -14,5 +14,5 @@ __all__ = [
     "CompactionAppendError", "CompactionAppendService",
     "ImmutableSourceEventRange", "StructuredCompaction",
     "SessionCompactionError", "SessionCompactionService",
-    *_legacy.__all__,
 ]
+__all__ += list(_legacy.__all__)

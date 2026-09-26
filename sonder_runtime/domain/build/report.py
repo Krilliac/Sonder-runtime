@@ -230,7 +230,9 @@ def scrub_paths(text: str, *, source_root: str, build_dir: str) -> str:
     value = str(text or "")
     for root, replacement in _roots_pattern(source_root, build_dir):
         pattern = re.compile(re.escape(root) + r"[/\\]?", re.IGNORECASE if ":" in root[:3] else 0)
-        value = pattern.sub(lambda _m: (replacement + "/") if replacement else "", value)
+        # Bind this root's replacement explicitly; a callable keeps it literal.
+        substitute = (replacement + "/") if replacement else ""
+        value = pattern.sub(lambda _m, text=substitute: text, value)
     return value
 
 

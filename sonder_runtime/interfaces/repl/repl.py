@@ -3991,7 +3991,9 @@ def main(*, machine_output=False):
                 history=input_history,
                 composer=attended,
                 argument_completer=model_argument_completer,
-                refresh_frame=(lambda: _status_text(
+                # Bind this turn's session and project: the frame belongs to
+                # the prompt being read, even if a later turn rebinds them.
+                refresh_frame=(lambda session_id=session_id, project=project: _status_text(
                     active_tier, width=_composer_frame_width(),
                     context=_composer_context(session_id, project),
                     model_override=active_model,
@@ -4494,30 +4496,35 @@ def main(*, machine_output=False):
                         else:
                             workspace_file_command(
                                 arg.strip(),
-                                lambda path: server.file_read(path=path, token=CURRENT_TOKEN),
+                                lambda path, token=CURRENT_TOKEN: server.file_read(
+                                    path=path, token=token,
+                                ),
                             )
                     elif cmd in ("/write", "/append"):
                         parts = arg.split(None, 1)
                         if len(parts) != 2:
                             _emit("usage: %s <path> <text>" % cmd)
                         else:
-                            workspace_file_command(parts[0], lambda path: server.file_write(
-                                path=path,
-                                content=parts[1],
-                                mode="append" if cmd == "/append" else "create",
-                                token=CURRENT_TOKEN,
-                            ))
+                            write_mode = "append" if cmd == "/append" else "create"
+                            workspace_file_command(
+                                parts[0],
+                                lambda path, content=parts[1], mode=write_mode, token=CURRENT_TOKEN: (
+                                    server.file_write(
+                                        path=path, content=content, mode=mode, token=token,
+                                    )
+                                ),
+                            )
                     elif cmd == "/edit":
                         pieces = arg.split("|", 2)
                         if len(pieces) != 3 or not pieces[0].strip():
                             _emit("usage: /edit <path>|<old>|<new>")
                         else:
-                            workspace_file_command(pieces[0].strip(), lambda path: server.file_edit(
-                                path=path,
-                                old=pieces[1],
-                                new=pieces[2],
-                                token=CURRENT_TOKEN,
-                            ))
+                            workspace_file_command(
+                                pieces[0].strip(),
+                                lambda path, old=pieces[1], new=pieces[2], token=CURRENT_TOKEN: (
+                                    server.file_edit(path=path, old=old, new=new, token=token)
+                                ),
+                            )
                     elif cmd == "/mkdir":
                         if not arg.strip():
                             _emit("usage: /mkdir <path>")
@@ -4532,8 +4539,8 @@ def main(*, machine_output=False):
                         else:
                             workspace_file_command(
                                 arg.strip(),
-                                lambda path: server.file_delete(
-                                    path=path, dry_run=True, token=CURRENT_TOKEN,
+                                lambda path, token=CURRENT_TOKEN: server.file_delete(
+                                    path=path, dry_run=True, token=token,
                                 ),
                             )
                     elif cmd == "/master":

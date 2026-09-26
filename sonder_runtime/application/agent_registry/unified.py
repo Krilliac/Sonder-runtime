@@ -157,4 +157,4 @@ class UnifiedAgentRegistryService:
         raise AttributeError(name)
 
 
-__all__ = ["AdmissionReceipt", "UnifiedAgentRegistryBackend", "UnifiedAgentRegistryService"]
+__all__ = ["AdmissionReceipt", "UnifiedAgentRegistryService"]
