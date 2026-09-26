@@ -276,7 +276,7 @@ configuration error. It never widens anything.
 | `SONDER_BUILD_ENV_PASSTHROUGH` | Extra variable names a job inherits. The adapter denylist still applies. | none |
 | `SONDER_BUILD_NETWORK` | `enforce`, `default` or `advisory` | `default` |
 | `SONDER_BUILD_MAX_TIMEOUT_SECONDS` | Operator deadline cap (30..86400) | 7200 |
-| `SONDER_BUILD_FIX_WORLD` | `host` or `container` | `host` |
+| `SONDER_BUILD_FIX_WORLD` | `host` only. `container` is a configuration error that refuses startup; no container path exists for build jobs or fixes, and a fix is never moved to the host instead. | `host` |
 | `SONDER_BUILD_UTILITY_TARGETS` | Utility and custom targets the operator allows | none |
 | `SONDER_BUILD_USER_PRESETS` | Read `CMakeUserPresets.json` | on |
 | `SONDER_BUILD_CLANGD_CONFIG` | Let clangd read a project `.clangd` | off |

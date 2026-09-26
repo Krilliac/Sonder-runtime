@@ -465,7 +465,9 @@ class Secrets:
 # never reaches any of it. Unset keys keep the conservative defaults; a
 # malformed value is a configuration error, never a silent widening.
 BUILD_NETWORK_MODES = ("enforce", "default", "advisory")
-BUILD_FIX_WORLDS = ("host", "container")
+# The only world a build fix runs in. ``container`` is refused, never mapped
+# to the host: no container build path exists for the fix loop's CMake jobs.
+BUILD_FIX_WORLDS = ("host",)
 BUILD_MAX_TIMEOUT_CAP_SECONDS = 86_400
 BUILD_DEFAULT_MAX_TIMEOUT_SECONDS = 7_200
 BUILD_DEFAULT_FIX_MODEL_ROUTE = "codegen"
@@ -488,8 +490,6 @@ class BuildToolsConfig:
     network: str = "default"
     # SONDER_BUILD_MAX_TIMEOUT_SECONDS: operator cap on a job's deadline.
     max_timeout_seconds: int = BUILD_DEFAULT_MAX_TIMEOUT_SECONDS
-    # SONDER_BUILD_FIX_WORLD: host | container.
-    fix_world: str = "host"
     # SONDER_BUILD_UTILITY_TARGETS: utility/custom targets the operator allows.
     utility_targets: tuple[str, ...] = ()
     # SONDER_BUILD_USER_PRESETS: read CMakeUserPresets.json (default on).
@@ -558,11 +558,13 @@ def build_tools_config_from_env(env, errors: list[str] | None = None) -> BuildTo
                 problems.append("SONDER_BUILD_MAX_TIMEOUT_SECONDS must be within 30..%d"
                                 % BUILD_MAX_TIMEOUT_CAP_SECONDS)
     world = text.get("SONDER_BUILD_FIX_WORLD", "").strip().lower()
-    if world:
-        if world in BUILD_FIX_WORLDS:
-            config = replace(config, fix_world=world)
-        else:
-            problems.append("SONDER_BUILD_FIX_WORLD must be host or container")
+    if world == "container":
+        # Refused, not narrowed: a fix asked to run in a container must never
+        # run on the host instead.
+        problems.append("SONDER_BUILD_FIX_WORLD=container is not supported; build jobs and "
+                        "fixes run only in the host world (unset it or set host)")
+    elif world and world not in BUILD_FIX_WORLDS:
+        problems.append("SONDER_BUILD_FIX_WORLD must be host")
     utility = text.get("SONDER_BUILD_UTILITY_TARGETS", "")
     if utility.strip():
         config = replace(config, utility_targets=_build_names(

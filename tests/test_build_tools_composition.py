@@ -166,7 +166,7 @@ def test_a_failing_composition_leaves_the_services_none(monkeypatch):
 def test_defaults_are_the_narrow_choice():
     config = build_tools_config_from_env({})
     assert config == BuildToolsConfig()
-    assert (config.network, config.fix_world, config.max_timeout_seconds) == ("default", "host", 7200)
+    assert (config.network, config.max_timeout_seconds) == ("default", 7200)
     assert config.user_presets is True and config.clangd_config is False
     assert config.fix_propose_only_ok is False and config.utility_targets == ()
 
@@ -178,7 +178,7 @@ def test_every_key_parses():
         "SONDER_BUILD_ENV_PASSTHROUGH": "CUDA_PATH, VULKAN_SDK;SCE_ROOT_DIR",
         "SONDER_BUILD_NETWORK": "Enforce",
         "SONDER_BUILD_MAX_TIMEOUT_SECONDS": "86400",
-        "SONDER_BUILD_FIX_WORLD": "container",
+        "SONDER_BUILD_FIX_WORLD": "Host",
         "SONDER_BUILD_UTILITY_TARGETS": "deploy,upload_symbols",
         "SONDER_BUILD_USER_PRESETS": "0",
         "SONDER_BUILD_CLANGD_CONFIG": "1",
@@ -187,10 +187,29 @@ def test_every_key_parses():
     }, errors)
     assert errors == []
     assert config.env_passthrough == ("CUDA_PATH", "VULKAN_SDK", "SCE_ROOT_DIR")
-    assert (config.network, config.fix_world, config.max_timeout_seconds) == ("enforce", "container", 86400)
+    assert (config.network, config.max_timeout_seconds) == ("enforce", 86400)
     assert config.utility_targets == ("deploy", "upload_symbols")
     assert config.user_presets is False and config.clangd_config is True
     assert config.fix_model_route == "local/codegen" and config.fix_propose_only_ok is True
+
+
+def test_a_container_fix_world_is_refused_never_run_on_the_host(tmp_path):
+    """No container build path exists for build jobs or fixes, so asking for
+    one is a configuration error: startup refuses it instead of quietly
+    running the fix on the host."""
+    from sonder_runtime.platform.config import ConfigError, load_config
+
+    errors = []
+    config = build_tools_config_from_env({"SONDER_BUILD_FIX_WORLD": " Container "}, errors)
+    assert len(errors) == 1 and "SONDER_BUILD_FIX_WORLD=container is not supported" in errors[0]
+    assert config == BuildToolsConfig()
+    with pytest.raises(ConfigError) as refused:
+        load_config(env={"SONDER_BUILD_FIX_WORLD": "container",
+                         "SONDER_STATE_HOME": str(tmp_path / "state")})
+    assert "SONDER_BUILD_FIX_WORLD=container" in str(refused.value)
+    assert load_config(env={"SONDER_BUILD_FIX_WORLD": "host",
+                            "SONDER_STATE_HOME": str(tmp_path / "state")}).build_tools \
+        == BuildToolsConfig()
 
 
 @pytest.mark.parametrize("key, value", [
@@ -204,7 +223,7 @@ def test_bad_values_are_reported_and_never_widen(key, value):
     config = build_tools_config_from_env({key: value}, errors)
     assert errors and key in errors[0]
     default = BuildToolsConfig()
-    assert config.network == default.network and config.fix_world == default.fix_world
+    assert config.network == default.network
     assert config.max_timeout_seconds == default.max_timeout_seconds
     assert "a:b" not in config.utility_targets and "A=B" not in config.env_passthrough
     assert config.fix_model_route == default.fix_model_route
