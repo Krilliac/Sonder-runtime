@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
+from sonder_runtime.application.testing.legacy_runs import retired_extra_args
 from sonder_runtime.adapters.git_mutation_guard import (
     ConcurrentGitMutation,
     guard_git_mutation,
@@ -387,9 +388,21 @@ def test_discover(root=".", framework="auto", extra_roots=""):
 
 def test_run(
     root=".", framework="auto", path="", pattern="", verbose=False,
-    coverage=False, timeout=120, extra_args_json="[]",
+    coverage=False, timeout=120, extra_args_json="",
     extra_roots="",
 ):
+    """Run a project's tests with a host-built command line.
+
+    ``extra_args_json`` is retired: raw argv let a caller hand pytest ``-p``,
+    ``-c`` or ``--rootdir`` and step around every host-owned template. It is
+    kept in the signature only so a caller that still passes it gets a clear
+    refusal instead of a silently dropped argument. Omitted, ``""`` and
+    ``"[]"`` keep working.
+    """
+    refusal = retired_extra_args(extra_args_json)
+    if refusal is not None:
+        refusal["framework"] = framework
+        return refusal
     root = _resolve_root(root, extra_roots)
     # Confine the argv-appended path too; see _resolve_target_path.
     path = _resolve_target_path(root, path)
@@ -438,13 +451,6 @@ def test_run(
             cmd.append("-v")
         if coverage:
             cmd.append("-cover")
-
-    try:
-        extra = json.loads(extra_args_json)
-        if isinstance(extra, list):
-            cmd.extend(str(a) for a in extra)
-    except (json.JSONDecodeError, TypeError):
-        pass
 
     result = _run(cmd, cwd=root, timeout=timeout)
     result["framework"] = framework

@@ -25,8 +25,9 @@ route through the typed gateway, so every call is checked in this order:
 4. redaction
 5. durable receipt
 
-The legacy `server.py` `test_run` tool (backed by `harness_tools`) is a
-separate, older path. It is described under [known debt](#known-debt).
+The legacy `server.py` `test_run` tool (the legacy agent's and the direct
+MCP spelling) keeps its own arguments and result shape. Its pytest runs go
+through this runner; see [the legacy `test_run`](#the-legacy-test_run).
 
 ## What the model may choose
 
@@ -341,12 +342,52 @@ The host-configured `run_tests` catalog in
   cancelled, or whose exit the runtime never observed (the runtime stopped
   while it ran), has no exit code to keep.
 
-## Known debt
+## The legacy `test_run`
 
-The legacy `server.py` MCP `test_run` (via `harness_tools.test_run`) still
-exists for the legacy agent. It accepts an `extra_args_json` raw-argv
-parameter and runs synchronously. Its output gains an opt-in digest block
-from the diagnostics lane.
+`server.test_run` (`harness_tools.test_run` underneath) keeps its arguments
+(`root`, `framework`, `path`, `pattern`, `verbose`, `coverage`, `timeout`) and
+its result keys (`ok`, `returncode`, `timed_out`, `elapsed_ms`, `stdout`,
+`stderr`, `command`, `cwd`, `framework`). Its renderer and the grounded-outcome
+evidence read those keys.
 
-Migrating it onto this structured runner, and retiring `extra_args_json`, is
-recorded debt and out of scope for this change.
+- **pytest runs go through this runner** when the runtime composes it. The
+  call is mapped to a single selector: `pattern` becomes `k:<pattern>` and
+  `path` becomes a project-relative node id. It then runs with the host-owned
+  template, the scrubbed environment, the hard deadline and process-tree
+  cleanup, as the local owner.
+- **`stdout` is rebuilt from the report** in pytest's own `-q` shape: one
+  `FAILED`/`ERROR` line per failure, with the runner's summary line last. A
+  reader that takes the final line or greps `FAILED|ERROR` keeps working.
+  The result also carries `job_id`, `status` and `command_digest`.
+- **A refusal is a legacy error result.** Examples are a pattern that is not a
+  `k:` expression and a project outside the roots. The result has `ok: false`
+  and an `error_code`, and nothing runs.
+- **`extra_args_json` is retired.** Anything other than empty or `"[]"` is
+  refused with `EXTRA_ARGS_RETIRED` ("extra_args_json retired; use
+  path/pattern") before any runner starts. This includes malformed JSON,
+  which the old path silently ignored. The parameter stays in the signature
+  only so that refusal is explicit, and the agent help no longer lists it.
+
+Some calls keep the harness's own command line:
+
+- runs of other frameworks
+- coverage runs (this runner has no coverage template)
+- calls that pass both `path` and `pattern` (this runner takes one selector)
+- runtimes that do not compose the developer tools
+
+That command line is now built entirely by the host: fixed flags, a
+confined `path`, and `pattern` passed only as the value of `-k`.
+
+Two differences from the old command line:
+
+- **The interpreter changes.** The structured path uses the project
+  virtualenv, or the host inventory's `python3`, as every structured run does
+  (see [Runners and templates](#runners-and-templates)). It does not use
+  Sonder's own interpreter. A project that relied on Sonder's interpreter
+  having pytest installed now needs its own virtualenv. Otherwise the run
+  reports `error` with the interpreter's "No module named pytest" line.
+  A run that ends as `error` with no test results is given `returncode: -1`,
+  the legacy marker for "no verdict", so grounded outcomes file nothing for
+  it. Its real exit code stays in `exit_code`.
+- **`verbose` has no effect** on the structured path, because the report
+  already lists every failure.

@@ -135,6 +135,9 @@ def test_project_scope_keeps_an_omitted_digest_path_omitted(tmp_path):
 
 
 def test_legacy_test_run_output_carries_a_digest_block(monkeypatch):
+    # The harness command line (no composed structured runner); the
+    # structured path is covered in tests/test_legacy_test_run_structured.py.
+    monkeypatch.setattr(server, "_developer_tool_services", lambda: None)
     monkeypatch.setattr(server.harness_tools, "test_run", lambda **_k: {
         "command": ["python", "-m", "pytest"], "cwd": "/w", "ok": False, "returncode": 1,
         "timed_out": False, "elapsed_ms": 5, "framework": "pytest",

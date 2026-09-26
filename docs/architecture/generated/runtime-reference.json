@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "c20e4b1dd5362f9c675f0a0caebf92abe8ef736ddd1a2a85974ba4a8a7e1028c",
+    "catalog_digest": "1b178d9c0fa675b82c42f258b77e6f63627f182d894f2bdfc3cc0aa2821376f0",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "c20e4b1dd5362f9c675f0a0caebf92abe8ef736ddd1a2a85974ba4a8a7e1028c",
+      "catalog_digest": "1b178d9c0fa675b82c42f258b77e6f63627f182d894f2bdfc3cc0aa2821376f0",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -6607,7 +6607,7 @@
           "name": "test_discover"
         },
         {
-          "description": "Run tests with auto-detected or specified framework (pytest, jest, vitest, cargo, go, mocha, dotnet). Supports filtering by path/pattern, coverage, and extra args.",
+          "description": "Run tests with auto-detected or specified framework (pytest, jest, vitest, cargo, go, mocha, dotnet). Filter with path or pattern.\n\n    pytest runs through the structured test runner (host-owned command,\n    scrubbed environment, hard deadline, process-tree cleanup) when the\n    runtime composes it; coverage runs, and path and pattern together, keep\n    the host-built legacy command. ``extra_args_json`` is retired: anything\n    but empty or ``\"[]\"`` is refused.\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -6618,7 +6618,7 @@
                 "type": "boolean"
               },
               "extra_args_json": {
-                "default": "[]",
+                "default": "",
                 "title": "Extra Args Json",
                 "type": "string"
               },
@@ -15594,7 +15594,7 @@
           "type": "int"
         },
         {
-          "default": "[]",
+          "default": "",
           "name": "extra_args_json",
           "required": false,
           "type": "str"
@@ -18079,7 +18079,7 @@
     "schemas": 4,
     "tools": 216
   },
-  "digest": "329c0353735402408392f4c71a1f42e2254301db22ca77a52675f26f96151de4",
+  "digest": "3ba00e3979c13cb104937854cad4111ce95aa95090c289a890c8a8fe076db554",
   "events": [
     {
       "name": "session.started",
@@ -20690,9 +20690,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "c20e4b1dd5362f9c675f0a0caebf92abe8ef736ddd1a2a85974ba4a8a7e1028c",
+    "catalog_digest": "1b178d9c0fa675b82c42f258b77e6f63627f182d894f2bdfc3cc0aa2821376f0",
     "client": {
-      "digest": "c20e4b1dd5362f9c675f0a0caebf92abe8ef736ddd1a2a85974ba4a8a7e1028c",
+      "digest": "1b178d9c0fa675b82c42f258b77e6f63627f182d894f2bdfc3cc0aa2821376f0",
       "events": [
         {
           "name": "approval.denied",
@@ -23036,7 +23036,7 @@
           {
             "name": "test_run",
             "schema_available": true,
-            "summary": "Run tests with auto-detected or specified framework (pytest, jest, vitest, cargo, go, mocha, dotnet). Supports filtering by path/pattern, coverage, and extra args."
+            "summary": "Run tests with auto-detected or specified framework (pytest, jest, vitest, cargo, go, mocha, dotnet). Filter with path or pattern.\n\n    pytest runs through the structured test runner (host-owned command,\n    scrubbed environment, hard deadline, process-tree cleanup) when the\n    runtime composes it; coverage runs, and path and pattern together, keep\n    the host-built legacy command. ``extra_args_json`` is retired: anything\n    but empty or ``\"[]\"`` is refused.\n    "
           },
           {
             "name": "text_patch",
@@ -29689,7 +29689,7 @@
           "name": "test_discover"
         },
         {
-          "description": "Run tests with auto-detected or specified framework (pytest, jest, vitest, cargo, go, mocha, dotnet). Supports filtering by path/pattern, coverage, and extra args.",
+          "description": "Run tests with auto-detected or specified framework (pytest, jest, vitest, cargo, go, mocha, dotnet). Filter with path or pattern.\n\n    pytest runs through the structured test runner (host-owned command,\n    scrubbed environment, hard deadline, process-tree cleanup) when the\n    runtime composes it; coverage runs, and path and pattern together, keep\n    the host-built legacy command. ``extra_args_json`` is retired: anything\n    but empty or ``\"[]\"`` is refused.\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -29700,7 +29700,7 @@
                 "type": "boolean"
               },
               "extra_args_json": {
-                "default": "[]",
+                "default": "",
                 "title": "Extra Args Json",
                 "type": "string"
               },
@@ -37901,7 +37901,7 @@
           "name": "test_discover"
         },
         {
-          "description": "Run tests with auto-detected or specified framework (pytest, jest, vitest, cargo, go, mocha, dotnet). Supports filtering by path/pattern, coverage, and extra args.",
+          "description": "Run tests with auto-detected or specified framework (pytest, jest, vitest, cargo, go, mocha, dotnet). Filter with path or pattern.\n\n    pytest runs through the structured test runner (host-owned command,\n    scrubbed environment, hard deadline, process-tree cleanup) when the\n    runtime composes it; coverage runs, and path and pattern together, keep\n    the host-built legacy command. ``extra_args_json`` is retired: anything\n    but empty or ``\"[]\"`` is refused.\n    ",
           "inputSchema": {
             "properties": {
               "coverage": {
@@ -37910,7 +37910,7 @@
                 "type": "boolean"
               },
               "extra_args_json": {
-                "default": "[]",
+                "default": "",
                 "title": "Extra Args Json",
                 "type": "string"
               },
@@ -45471,7 +45471,7 @@
         },
         {
           "function": {
-            "description": "Run tests with auto-detected or specified framework (pytest, jest, vitest, cargo, go, mocha, dotnet). Supports filtering by path/pattern, coverage, and extra args.",
+            "description": "Run tests with auto-detected or specified framework (pytest, jest, vitest, cargo, go, mocha, dotnet). Filter with path or pattern.\n\n    pytest runs through the structured test runner (host-owned command,\n    scrubbed environment, hard deadline, process-tree cleanup) when the\n    runtime composes it; coverage runs, and path and pattern together, keep\n    the host-built legacy command. ``extra_args_json`` is retired: anything\n    but empty or ``\"[]\"`` is refused.\n    ",
             "name": "test_run",
             "parameters": {
               "properties": {
@@ -45481,7 +45481,7 @@
                   "type": "boolean"
                 },
                 "extra_args_json": {
-                  "default": "[]",
+                  "default": "",
                   "title": "Extra Args Json",
                   "type": "string"
                 },
@@ -46406,7 +46406,7 @@
   },
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "7dca503515393fca1dd8e8611755b8ca2f0f86abb98fbe5feaa87854a157679b",
+    "server.py": "de6d57ba63353f485366dd12a7e0075b7d9e912a2f4e19346ce94c1b6303d38f",
     "sonder_runtime/application/tools/generated_catalogs.py": "0cb58ae27e9f0e56102282b7e2a5b7b8a9d955a4322055e87d18d3970fe644d8",
     "sonder_runtime/bootstrap/native_mcp.py": "f88dcc1eb15ba75200359a06f9fb05b4673bbe5013dca64dfca3e158d873675d",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
@@ -52560,7 +52560,7 @@
       }
     },
     {
-      "description": "Run tests with auto-detected or specified framework (pytest, jest, vitest, cargo, go, mocha, dotnet). Supports filtering by path/pattern, coverage, and extra args.",
+      "description": "Run tests with auto-detected or specified framework (pytest, jest, vitest, cargo, go, mocha, dotnet). Filter with path or pattern.\n\n    pytest runs through the structured test runner (host-owned command,\n    scrubbed environment, hard deadline, process-tree cleanup) when the\n    runtime composes it; coverage runs, and path and pattern together, keep\n    the host-built legacy command. ``extra_args_json`` is retired: anything\n    but empty or ``\"[]\"`` is refused.\n    ",
       "name": "test_run",
       "parameters": {
         "properties": {
@@ -52570,7 +52570,7 @@
             "type": "boolean"
           },
           "extra_args_json": {
-            "default": "[]",
+            "default": "",
             "title": "Extra Args Json",
             "type": "string"
           },

@@ -13115,6 +13115,48 @@ def test_discover(
     return "\n".join(lines)
 
 
+def _structured_legacy_test_run(root, framework, path, pattern, coverage, timeout,
+                                extra_args_json):
+    """A legacy pytest ``test_run`` on the structured runner, or None.
+
+    None hands the call to ``harness_tools.test_run``: no composed test
+    runner, a framework other than pytest, a coverage run, path and pattern
+    together (the runner takes one selector), or a root/path the harness
+    refuses (it answers that refusal in its own words). The retired
+    ``extra_args_json`` is refused before anything else.
+    """
+    from sonder_runtime.application.testing.legacy_runs import (
+        legacy_pytest_request,
+        retired_extra_args,
+        run_legacy_pytest,
+    )
+
+    refusal = retired_extra_args(extra_args_json)
+    if refusal is not None:
+        refusal["framework"] = framework
+        return refusal
+    if coverage or (path and pattern) or framework not in ("auto", "pytest"):
+        return None
+    services = _developer_tool_services()
+    runs = getattr(services, "test_runs", None) if services is not None else None
+    if runs is None:
+        return None
+    try:
+        resolved = harness_tools._resolve_root(root)
+        target = harness_tools._resolve_target_path(resolved, path)
+    except (PermissionError, ValueError, OSError):
+        return None
+    if framework == "auto" and harness_tools._detect_test_framework(resolved) != "pytest":
+        return None
+    request = legacy_pytest_request(
+        str(resolved), path=target, pattern=str(pattern or ""),
+        timeout=harness_tools._bounded_int(timeout, 120, 5, harness_tools.MAX_TIMEOUT),
+    )
+    if request is None:
+        return None
+    return run_legacy_pytest(runs, request, _developer_tool_context())
+
+
 @mcp.tool()
 def test_run(
     root: str = ".",
@@ -13124,18 +13166,29 @@ def test_run(
     verbose: bool = False,
     coverage: bool = False,
     timeout: int = 120,
-    extra_args_json: str = "[]",
+    extra_args_json: str = "",
 ) -> str:
-    """Run tests with auto-detected or specified framework (pytest, jest, vitest, cargo, go, mocha, dotnet). Supports filtering by path/pattern, coverage, and extra args."""
+    """Run tests with auto-detected or specified framework (pytest, jest, vitest, cargo, go, mocha, dotnet). Filter with path or pattern.
+
+    pytest runs through the structured test runner (host-owned command,
+    scrubbed environment, hard deadline, process-tree cleanup) when the
+    runtime composes it; coverage runs, and path and pattern together, keep
+    the host-built legacy command. ``extra_args_json`` is retired: anything
+    but empty or ``"[]"`` is refused.
+    """
     _maybe_live_reload()
     started = time.time()
     args = {"root": root, "framework": framework, "path": path, "pattern": pattern, "timeout": timeout}
     try:
-        data = harness_tools.test_run(
-            root=root, framework=framework, path=path, pattern=pattern,
-            verbose=verbose, coverage=coverage, timeout=timeout,
-            extra_args_json=extra_args_json,
+        data = _structured_legacy_test_run(
+            root, framework, path, pattern, coverage, timeout, extra_args_json,
         )
+        if data is None:
+            data = harness_tools.test_run(
+                root=root, framework=framework, path=path, pattern=pattern,
+                verbose=verbose, coverage=coverage, timeout=timeout,
+                extra_args_json=extra_args_json,
+            )
     except Exception as exc:
         _record_direct_tool("test_run", args, ok=False, started=started, summary=str(exc),
                             evidence={"error": str(exc)})
@@ -17142,7 +17195,7 @@ AGENT_TOOL_HELP = """Available tools:
 - workspace_run: {"program": "git", "args_json": ["status", "--short"], "cwd": ".", "timeout": 30}
 - script_run: {"path": "scripts/check.py", "args_json": [], "cwd": ".", "timeout": 30, "risk_policy": "off|report|deny-high|deny-medium|deny-unknown"} -- request may strengthen but never weaken operator policy
 - test_discover: {"root": ".", "framework": "auto"} -- discover tests; auto-detects pytest/jest/vitest/cargo/go/dotnet
-- test_run: {"root": ".", "framework": "auto", "path": "", "pattern": "", "verbose": false, "coverage": false, "timeout": 120, "extra_args_json": "[]"} -- run tests with filtering, coverage, extra args
+- test_run: {"root": ".", "framework": "auto", "path": "", "pattern": "", "verbose": false, "coverage": false, "timeout": 120} -- run tests filtered by path or pattern; pytest uses the structured runner (host-owned command, hard deadline)
 - lint_run: {"root": ".", "tool": "auto", "path": "", "fix": false, "timeout": 60} -- lint with ruff/flake8/eslint/clippy; fix=true to auto-fix
 - format_code: {"root": ".", "tool": "auto", "path": "", "check_only": false, "timeout": 60} -- format with ruff/black/prettier/rustfmt/gofmt
 - typecheck_run: {"root": ".", "tool": "auto", "path": "", "timeout": 120} -- type check with mypy/pyright/tsc
@@ -19249,7 +19302,9 @@ def _agent_dispatch(
                 verbose=args.get("verbose", False),
                 coverage=args.get("coverage", False),
                 timeout=args.get("timeout", 120),
-                extra_args_json=args.get("extra_args_json", "[]"),
+                # Retired: forwarded only so a caller still sending it is
+                # refused by name instead of silently dropped.
+                extra_args_json=args.get("extra_args_json", ""),
             )
         if tool_name == "lint_run":
             return lint_run(

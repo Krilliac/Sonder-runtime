@@ -39,6 +39,14 @@ REALLY_FAILED = {
 }
 
 
+@pytest.fixture(autouse=True)
+def harness_command_line(monkeypatch):
+    """These tests are about the harness verdict wiring, so the legacy
+    ``test_run`` must not route pytest to the structured runner here; that
+    path's wiring is tested at the end of this file."""
+    monkeypatch.setattr(server, "_developer_tool_services", lambda: None)
+
+
 @pytest.fixture
 def ledger(monkeypatch):
     """A pending generation plus a capture of every outcome row written."""
@@ -149,6 +157,53 @@ def test_a_verification_that_passed_is_unaffected(
     })
 
     assert ledger == [("i1", signal)]
+
+
+# --- the legacy test_run on the structured runner -------------------------
+
+
+def _structured(monkeypatch, tmp_path, report):
+    from types import SimpleNamespace
+
+    (tmp_path / "test_x.py").write_text("def test_x(): pass\n")
+    monkeypatch.setattr(server.harness_tools, "_resolve_root", lambda root: tmp_path)
+    monkeypatch.setattr(server, "_developer_tool_services", lambda: SimpleNamespace(
+        test_runs=SimpleNamespace(run=lambda *a, **k: report)))
+    monkeypatch.setattr(server.harness_tools, "test_run",
+                        lambda **_k: pytest.fail("the harness command line ran"))
+    return server.test_run(root=str(tmp_path), framework="pytest")
+
+
+def _report(**changes):
+    from sonder_runtime.domain.testing.report import TestReport, TestTotals
+
+    values = dict(runner="pytest", status="failed", job_id="test-run-" + "a" * 32,
+                  command_digest="d", display_command=("python",), project="p", selector="",
+                  exit_code=1, duration_seconds=1.0, totals=TestTotals(0, 1, 0, 0, 1),
+                  totals_source="junit_xml", totals_reliable=True, summary_line="1 failed")
+    values.update(changes)
+    return TestReport(**values)
+
+
+@pytest.mark.parametrize("changes, signal", [
+    ({}, "failed"),
+    ({"status": "passed", "exit_code": 0, "totals": None}, "tests_passed"),
+])
+def test_a_structured_verdict_is_filed(monkeypatch, tmp_path, ledger, changes, signal):
+    _structured(monkeypatch, tmp_path, _report(**changes))
+    assert ledger == [("i1", signal)]
+
+
+@pytest.mark.parametrize("changes", [
+    {"status": "timed_out", "exit_code": None, "totals": None},
+    {"status": "cancelled", "exit_code": None, "totals": None},
+    # The interpreter could not import pytest: exit 1, but no test ran.
+    {"status": "error", "exit_code": 1, "totals": None},
+])
+def test_a_structured_run_without_a_verdict_files_nothing(monkeypatch, tmp_path, ledger, changes):
+    _structured(monkeypatch, tmp_path, _report(**changes))
+    assert ledger == []
+    assert go.pending_count() == 1
 
 
 # --- the code runners -----------------------------------------------------

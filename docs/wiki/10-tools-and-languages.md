@@ -323,7 +323,9 @@ bounded.
   lane-test jobs.
 
 The legacy `test_run`, `build_run`, `lint_run` and `typecheck_run` renderings
-end with a bounded `digest:` block.
+end with a bounded `digest:` block. The legacy `test_run` runs pytest through
+the structured runner. Its raw `extra_args_json` argv is retired and refused.
+See [the legacy `test_run`](../structured-test-runs.md#the-legacy-test_run).
 
 In the REPL:
 - `/digest <job|path>` digests a job or a log.
