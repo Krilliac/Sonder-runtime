@@ -17,16 +17,17 @@ jobs:
     # The required tests context is the merge gate for the native Windows
     # boundary too. Keep this job present after an upstream failure so a
     # skipped/cancelled Windows job cannot look like a passing required check.
-    needs: [windows-focused, container-qualification]
+    needs: [windows-focused, container-qualification, linux-selfmod-isolation]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
       - name: Require native Windows gate
-        if: ${{ needs.windows-focused.result != 'success' || needs.container-qualification.result != 'success' }}
+        if: ${{ needs.windows-focused.result != 'success' || needs.container-qualification.result != 'success' || needs.linux-selfmod-isolation.result != 'success' }}
         run: |
           echo "windows-focused result: ${{ needs.windows-focused.result }}"
           echo "container-qualification result: ${{ needs.container-qualification.result }}"
+          echo "linux-selfmod-isolation result: ${{ needs.linux-selfmod-isolation.result }}"
           exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -122,6 +123,48 @@ jobs:
   # standalone qualification without duplicating automatic PR/main runs.
   container-qualification:
     uses: ./.github/workflows/codegen-container-qualification.yml
+
+  # The Linux uid-separated selfmod supervisor (#517) must run as root: it
+  # switches to the candidate uid and creates the candidate's network
+  # namespace. The "tests" job runs as the unprivileged runner user, where
+  # these canaries skip, so this job runs them under sudo with the same
+  # interpreter and refuses any skip.
+  linux-selfmod-isolation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+      # uv installs the same requirement file into setup-python's interpreter
+      # (--system), where the pip install used to land, several times faster.
+      # uv itself is pinned like the actions above; bump it deliberately.
+      - name: Install test dependencies
+        run: |
+          python -m pip install uv==0.12.19
+          uv pip install -r requirements-dev.txt --system
+      - name: Prove the root-only candidate boundary and refuse any skipped test
+        shell: bash
+        # -B keeps root-owned bytecode out of the checkout. The candidate uid
+        # reads the setup-python interpreter and its site-packages, which the
+        # hosted toolcache keeps world-readable.
+        run: |
+          set -euo pipefail
+          python_bin="$(command -v python)"
+          sudo "$python_bin" -B -m pytest -q -rs -p no:cacheprovider \
+            tests/test_linux_candidate_isolation.py \
+            tests/test_wiring_selfmod_linux_nightly.py \
+            --junitxml="$RUNNER_TEMP/selfmod-linux-isolation.xml"
+          python - "$RUNNER_TEMP/selfmod-linux-isolation.xml" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+          suites = list(ET.parse(sys.argv[1]).getroot().iter("testsuite"))
+          assert len(suites) == 1, suites
+          suite = suites[0]
+          assert int(suite.get("tests", "0")) > 0, suite.attrib
+          assert all(int(suite.get(key, "0")) == 0 for key in ("skipped", "errors", "failures")), suite.attrib
+          PY
 
   # Native Windows boundaries are invisible to the required Ubuntu "tests"
   # context. The release workflow reuses this workflow at the tagged SHA, so

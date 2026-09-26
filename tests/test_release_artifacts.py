@@ -289,6 +289,16 @@ def test_release_workflow_stamps_and_gates_artifacts():
     assert "Run tag-time runtime smoke" in ci
     assert "scripts/release_smoke.sh --tag" in ci
     assert "  windows-focused:\n    runs-on: windows-latest" in ci
+    # The root-only Linux selfmod candidate boundary (#517) is part of the
+    # same required gate: its job runs the canaries under sudo, refuses any
+    # skip, and the "tests" context fails unless it succeeded.
+    assert "needs: [windows-focused, container-qualification, linux-selfmod-isolation]" in ci
+    assert "needs.linux-selfmod-isolation.result != 'success'" in ci
+    linux_isolation = ci.split("\n  linux-selfmod-isolation:\n", 1)[1].split("\n  windows-focused:\n", 1)[0]
+    assert 'sudo "$python_bin" -B -m pytest' in linux_isolation
+    assert "tests/test_linux_candidate_isolation.py" in linux_isolation
+    assert "tests/test_wiring_selfmod_linux_nightly.py" in linux_isolation
+    assert '("skipped", "errors", "failures")' in linux_isolation
     assert "python -m venv" in ci
     assert "tests/test_managed_runtime_payload.py" in ci
     assert "tests/test_managed_runtime_owner.py" in ci

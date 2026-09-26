@@ -29,19 +29,23 @@ run under these controls:
 | Control | Mechanism |
 | --- | --- |
 | Distinct identity | A dedicated unprivileged uid/gid. In the pre-exec step: `setgroups([])`, `setresgid`, `setresuid`. The code checks that `getresuid`/`getresgid` report the new ids and that `setresuid(0, 0, 0)` fails. |
-| No privilege regain | `prctl(PR_SET_NO_NEW_PRIVS)`, set before the uid drop and verified with `PR_GET_NO_NEW_PRIVS`. |
+| No privilege regain | `prctl(PR_SET_NO_NEW_PRIVS)`, set on the reaper before it launches anything and again in the candidate's pre-exec step before the uid drop, each verified with `PR_GET_NO_NEW_PRIVS`. The flag is inherited and cannot be cleared, so a setuid-root binary run by the candidate keeps the candidate's euid. The supervisor reads `NoNewPrivs: 1` from `/proc/<reaper>/status` before it allows the launch. |
+| No network | While still root and before launching anything, the reaper calls `unshare(CLONE_NEWNET)` and checks that the new namespace has a different inode, contains only `lo`, and has `lo` down (`SIOCGIFFLAGS`). Loopback is deliberately not brought up, so the candidate has no route at all, including to `127.0.0.1`. The reaper reports the namespace and then blocks on a go pipe. The supervisor does not trust that report. It reads `/proc/<reaper>/ns/net`, which must differ from its own namespace and match the report, and `/proc/<reaper>/net/dev`, which must list only `lo`. Only after these checks does it release the reaper. The candidate's pre-exec step also checks that it is still in the confirmed namespace. The candidate cannot rejoin the host namespace, because that needs `CAP_SYS_ADMIN` over it. A namespace that cannot be created (for example `EPERM` without `CAP_SYS_ADMIN`) or that does not match these checks raises `LinuxIsolationUnavailable` and nothing launches. The run never falls back to the host network. |
 | Process tree | A new session (`setsid`). Teardown goes by uid, not process group: the supervisor sends SIGKILL to every live process whose real uid is the candidate uid until none remain, so a descendant that called `setsid()` cannot escape. Teardown runs on timeout, on a job-memory breach, and as soon as the main candidate process exits. The reaper reaps orphans, so no zombies are left counting against RLIMIT_NPROC. |
 | Bounds | `RLIMIT_AS` = `process_memory_mb`, `RLIMIT_NPROC` = `active_processes` (per real uid), `RLIMIT_CPU` = timeout + 5 s, `RLIMIT_FSIZE` = 1 GiB, `RLIMIT_CORE` = 0. `job_memory_mb` limits the summed RSS of all candidate processes. The supervisor enforces it by sampling every 100 ms, reported as `job_memory_enforcement: sampled-rss`. This is not atomic like a cgroup. |
 | Exclusive uid claim | Before the spare-uid check, the supervisor takes an exclusive, non-blocking `flock` on `/run/sonder-selfmod-candidate/<uid>.lock` (directory root-owned, not group/other-writable) and holds it for the whole run. A second supervisor on the same uid fails closed instead of launching a candidate that could `ptrace` or signal the first run's candidate, or whose teardown would kill it. |
 | Environment | The environment is replaced, not filtered. It contains a fixed `PATH`; locale/`TZ`; a private `HOME` and `TMPDIR`/`TMP`/`TEMP` (created by the supervisor, owned by the candidate uid, mode 0700, removed after the run); `PYTHONNOUSERSITE`; `PYTHONDONTWRITEBYTECODE`; and `PYTHONPYCACHEPREFIX`. `umask` is 077. |
 | Evaluator truth | Before launch, each protected path must pass these checks, on both its literal and resolved ancestor chains: it is not a symlink; no ancestor directory is candidate-owned or candidate-writable (a sticky directory like `/tmp` is accepted only when the next entry is not candidate-owned); no POSIX ACL is present; and for a protected directory, no entry inside it is writable or a symlink. Any failure raises `ProtectedPathExposed` and nothing launches. After the run, the supervisor digests the bytes, ownership, mode and inode of each path and its ancestors again. Any change gives `integrity_failed: true` (exit code 2, not a pass). |
-| Attestation | The supervisor builds the `job` report from the kernel wait status and its own observations: `integrity: "linux-uid"`, `uid`, `gid`, `supervisor_uid`, `limits`, `exit`, `timed_out`, `limit_hit`, `peak_process_memory_mb` (VmHWM samples plus the reaper's `RUSAGE_CHILDREN` maxrss), `peak_job_memory_mb`, `peak_processes`, `lingering_processes_killed`. Candidate stdout never contributes to it. |
+| Attestation | The supervisor builds the `job` report from the kernel wait status and its own observations: `integrity: "linux-uid"`, `uid`, `gid`, `supervisor_uid`, `limits`, `network` (`isolation: "netns"`, `netns_inode`, `supervisor_netns_inode`, `interfaces: ["lo"]`, `loopback_up: false`), `no_new_privs: true`, `exit`, `timed_out`, `limit_hit`, `peak_process_memory_mb` (VmHWM samples plus the reaper's `RUSAGE_CHILDREN` maxrss), `peak_job_memory_mb`, `peak_processes`, `lingering_processes_killed`. Candidate stdout never contributes to it. |
 
 The following cases raise `LinuxIsolationUnavailable` before the candidate
 launches: a non-Linux host; a non-root supervisor; no configured uid; a
 uid/gid of 0 or equal to the supervisor's; a uid that already has live
-processes (not spare); a kernel without `no_new_privs` or without `/proc`; and
-a reaper that cannot become a subreaper or launch the candidate.
+processes (not spare); a kernel without `no_new_privs` or without `/proc`; a
+kernel or Python without network namespaces; a reaper that cannot set
+`no_new_privs`, create or verify its network namespace, become a subreaper or
+launch the candidate; and a boundary the supervisor cannot confirm from
+`/proc` within 10 seconds.
 `ProtectedPathExposed` is a subclass of `LinuxIsolationUnavailable`.
 
 ### Selection and wiring
@@ -61,7 +65,15 @@ a reaper that cannot become a subreaper or launch the candidate.
   `selfmod_linux_isolation.run_isolated` builds `kind="linux-uid"` with the
   candidate uid/gid and the supervisor uid. A `linux-uid` attestation cannot
   be constructed without a positive candidate uid that differs from the
-  supervisor uid, and its pass flag must match the exit status.
+  supervisor uid, and its pass flag must match the exit status. It also
+  cannot be constructed without `network_isolated=True` and
+  `no_new_privs=True`. `from_supervisor_result` sets these only from a report
+  whose `network` names a `netns` inode different from the supervisor's,
+  lists exactly `["lo"]` with `loopback_up: false`, and carries
+  `no_new_privs: true`. Every consumer of a `linux-uid` attestation
+  (`selfmod._record_command`, the host grader's clean replay and the nightly
+  parent-scored gate) goes through this constructor, so a report without the
+  network boundary is recorded as `unverified` (exit code 125).
 - `selfmod._record_command` re-derives the attestation from the selected
   supervisor's report with `IsolationAttestation.from_supervisor_result`. It
   does not trust a supplied object; a supplied one must be equal. A report
@@ -272,10 +284,19 @@ did not launch.
 
 ## Evidence
 
-Evidence here is from a root container only. No CI qualification is claimed.
 The Linux boundary tests skip, with an explicit reason, unless the platform
-is Linux and `euid == 0`. Ordinary GitHub-hosted CI runs as a non-root user,
-so it skips them.
+is Linux and `euid == 0`. The `tests` job in `.github/workflows/ci.yml` runs
+as the unprivileged runner user, so it skips them. The
+`linux-selfmod-isolation` job in the same workflow runs
+`tests/test_linux_candidate_isolation.py` and
+`tests/test_wiring_selfmod_linux_nightly.py` under `sudo` with the
+setup-python interpreter. It writes a JUnit report and fails if any test is
+skipped, errors or fails. The required `tests` context needs this job to
+succeed, as it does for `windows-focused` and `container-qualification`.
+`tests/test_release_artifacts.py` pins that wiring. The evidence below
+comes from a root container. The job itself has not yet run on a
+GitHub-hosted runner, so hosted-runner qualification is not claimed until it
+passes there.
 
 - `tests/test_linux_candidate_isolation.py` (root only) covers these cases:
   - The candidate reports a distinct uid/gid, `groups=[]` and `NoNewPrivs: 1`.
@@ -303,6 +324,26 @@ so it skips them.
   - The post-exit re-digest detects changed truth.
   - `selfmod` records `linux-uid` from the real supervisor.
   - A second run on a uid another supervisor has claimed fails closed.
+  - Network and privilege canaries:
+    - The candidate sees only `lo`, reports `NoNewPrivs: 1`, and runs in the
+      namespace inode that the report attests. That inode differs from the
+      supervisor's, and the supervisor stays in the host namespace.
+    - The test binds TCP listeners on `127.0.0.1`, on every non-loopback
+      IPv4 address the host has, and on `::1` where the kernel has IPv6. A
+      host-side control first connects to each one. The candidate cannot
+      connect to any of them, and none of them ever accepts a connection
+      from it.
+    - Name resolution (`getaddrinfo`) fails. TCP egress to public IPv4/IPv6
+      addresses and a UDP datagram fail with an unreachable (or,
+      without IPv6, unsupported-family) errno.
+    - A root-owned setuid copy of `id` returns euid `0` in a control run as
+      the candidate uid without `no_new_privs`, which proves the mount
+      honours setuid. Under the supervisor it returns the candidate uid.
+    - With `CAP_SYS_ADMIN` dropped from the bounding set, a root supervisor
+      raises `LinuxIsolationUnavailable` ("network namespace unavailable")
+      and the candidate never runs.
+    - A reported namespace that is the supervisor's own, or that does not
+      match what `/proc` shows, is refused.
 - `tests/test_wiring_selfmod_linux_nightly.py` drives the real entry point,
   `scripts.nightly_selfmod.run`. It uses a real Git checkout, the real selfmod
   ledger, the real Linux supervisor and the bootstrap-composed stage journal.
@@ -353,7 +394,9 @@ so it skips them.
     rule. These surfaces need no attendance on a host with a supervisor. The
     test redirects only the repository root to the fixture checkout.
 - `tests/test_wiring_selfmod_attestation.py` (any host) covers:
-  - the typed attestation rules;
+  - the typed attestation rules, including refusal of a `linux-uid` report or
+    hand-built attestation without the network namespace boundary or
+    `no_new_privs`;
   - cross-supervisor refusal;
   - the gate's binding to the selected supervisor kind;
   - the preflight message.
@@ -363,7 +406,8 @@ so it skips them.
     identity;
   - platform-bound selection;
   - `selfmod` mapping every Linux fail-closed error to exit code 125;
-  - acceptance of only supervisor-built `linux-uid`;
+  - acceptance of only supervisor-built `linux-uid`, and `selfmod` recording
+    a report without the network/`no_new_privs` boundary as `unverified`;
   - refusal of a `low` claim from the Linux supervisor and of a `linux-uid`
     claim from the Windows one;
   - protected-path membership;
@@ -459,11 +503,18 @@ so it skips them.
      and the nightly refuses to run otherwise. Any other principal with
      ledger write access is trusted.
    - **Windows.** No confidential oracle exists on Windows.
-   - **Network.** Candidate network access (item 2) is not bounded.
+   - **Network.** Candidates run with no network (item 2), but path
+     `AF_UNIX` sockets the candidate uid may open remain a channel.
    - **Nightly promotion.** The nightly driver still does not promote
      unattended, because `regression_medium` is never evaluated.
-2. **Network isolation.** The candidate uid keeps the host's network access.
-   Neither a network namespace nor an egress policy is applied.
+2. **Network isolation: limits of the namespace boundary.** Candidates now
+   run with no network at all (see "No network" above). Two limits remain.
+   The candidate can still reach host services through filesystem-path
+   `AF_UNIX` sockets whose permissions admit its uid. Abstract `AF_UNIX`
+   sockets belong to the network namespace, so those are cut off, but no
+   Landlock or seccomp rule restricts path sockets. Also, a candidate test
+   that needs loopback fails rather than being given a partial network. How
+   many repository tests that affects is part of item 6.
 3. **Confidentiality.** World-readable files, including held-out suites that
    the candidate must be able to read in order to run them, are readable by
    the candidate uid. Only write access is denied. The Sonder state home is
@@ -491,14 +542,25 @@ so it skips them.
    Regressions that appear only when the checkout is read-only to the test
    process are therefore not characterized yet. Tests that write next to
    their sources are one example.
-7. **Kernel attack surface.** No seccomp filter is applied, and unprivileged
+7. **Kernel attack surface (partially addressed).** `no_new_privs` now blocks
+   privilege gain through setuid/setgid binaries and file capabilities, and
+   it is attested. The network namespace removes the host's network stack
+   from reach. Still missing: no seccomp filter is applied, and unprivileged
    user namespaces stay available to the candidate if the host kernel allows
-   them. They do not change the candidate's host uid (so file permissions and
-   uid-based teardown still apply), but they widen the kernel surface the
-   candidate can reach.
-8. **CI qualification.** A root-capable Linux CI job for
-   `tests/test_linux_candidate_isolation.py` and
-   `tests/test_wiring_selfmod_linux_nightly.py` does not exist yet.
+   them. A candidate could create its own user and network namespaces there.
+   These do not change its host uid, so file permissions and uid-based
+   teardown still apply, and they give it no route to the host network. They
+   do widen the kernel surface it can reach. A seccomp filter would have to
+   cover every syscall used by the Python test stack under evaluation, so it
+   is not a small change and is not attempted here.
+8. **CI qualification (wired; hosted run pending).** The
+   `linux-selfmod-isolation` job in `.github/workflows/ci.yml` runs both root
+   suites under `sudo` and refuses skips, and the required `tests` context
+   depends on it. It has not yet been observed passing on a GitHub-hosted
+   runner. Until it has, the evidence above is root-container evidence only.
+   The job assumes that the runner's `/tmp` honours setuid (the canary's
+   control run fails loudly if it does not) and that the toolcache
+   interpreter can be read by an arbitrary uid.
 9. **Operator-driven selfmod: residual limits.** The operator path now
    selects isolation and uses the stage journal (see "Operator-driven path").
    These limits remain:
@@ -520,13 +582,14 @@ so it skips them.
      manifest) still leaves its intent `uncertain`, and selfmod effects have
      no verifier to clear it. The run lease serializes operator calls, not
      operator calls against the nightly driver on the same run.
-   - The CI gap in item 8 also covers
+   - The item 8 CI job does not run
      `tests/test_selfmod_operator_isolation.py`'s root-only cases.
 
 ## Verification commands
 
 ```text
-python -m pytest -q tests/test_linux_candidate_isolation.py            # Linux, euid 0
+python -m pytest -q tests/test_linux_candidate_isolation.py            # Linux, euid 0 (CI: linux-selfmod-isolation, under sudo)
+python -m pytest -q tests/test_release_artifacts.py                     # pins the CI job wiring
 python -m pytest -q tests/test_517_linux_uid_separated_candidate_evaluator.py
 python -m pytest -q tests/test_selfmod_independent_oracle.py              # root-only canaries: Linux, euid 0
 python -m pytest -q tests/test_wiring_selfmod_linux_nightly.py tests/test_wiring_selfmod_attestation.py  # dry cycles: Linux, euid 0
