@@ -505,16 +505,22 @@ def _parse_created_at(value: object) -> datetime.datetime | None:
     in true chronological order, and a missing or unparseable stamp is
     reported as ``None`` so callers can rank it as the oldest entry instead
     of letting a string such as ``"unknown"`` sort above every real date.
+    A stamp whose offset puts it outside the representable UTC range is
+    treated the same way, so one malformed manifest cannot make listing or
+    pruning of the whole target raise.
     """
     if not isinstance(value, str):
         return None
     try:
         parsed = datetime.datetime.fromisoformat(value)
-    except ValueError:
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=datetime.timezone.utc)
+        # An offset stamp at the edge of the datetime range (for example
+        # ``0001-01-01T00:00:00+01:00``) parses but cannot be expressed in
+        # UTC; it is as unusable as an unparseable stamp.
+        return parsed.astimezone(datetime.timezone.utc)
+    except (ValueError, OverflowError):
         return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
-    return parsed.astimezone(datetime.timezone.utc)
 
 
 PRE_EPOCH2_PREFIX = "pre-epoch2-"

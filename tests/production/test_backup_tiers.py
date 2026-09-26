@@ -309,3 +309,41 @@ def test_undated_newest_verified_backup_protects_every_pre_epoch2_copy(
         target, daily=1, weekly=1, monthly=1
     ) == []
     assert raw.is_dir() and undated.is_dir()
+
+
+@pytest.mark.parametrize(
+    "stamp", ["0001-01-01T00:00:00+01:00", "9999-12-31T23:59:59-01:00"]
+)
+def test_out_of_range_offset_stamp_ranks_as_undated(isolated_state, stamp):
+    target = isolated_state / "backups"
+    good = sonder_backup.create_backup(target).path
+    _redate(good, "2026-09-26T00:00:00Z")
+    overflow = sonder_backup.create_backup(target).path
+    _redate(overflow, stamp)
+
+    entries = sonder_backup.list_backups(target)
+
+    assert [e["path"] for e in entries] == [str(good), str(overflow)]
+    assert entries[1]["created_at_valid"] is False
+    assert entries[1]["created_at_utc"] == stamp
+
+
+@pytest.mark.parametrize("mode", ["keep", "tiered"])
+def test_prune_removes_out_of_range_offset_backup_instead_of_raising(
+    isolated_state, mode
+):
+    target = isolated_state / "backups"
+    good = sonder_backup.create_backup(target).path
+    _redate(good, "2026-09-26T00:00:00Z")
+    overflow = sonder_backup.create_backup(target).path
+    _redate(overflow, "0001-01-01T00:00:00+01:00")
+
+    if mode == "keep":
+        removed = sonder_backup.prune_backups(target, keep=1)
+    else:
+        removed = sonder_backup.prune_backups_tiered(
+            target, daily=1, weekly=1, monthly=1
+        )
+
+    assert removed == [str(overflow)]
+    assert good.is_dir()
