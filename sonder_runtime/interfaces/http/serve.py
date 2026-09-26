@@ -113,6 +113,11 @@ from sonder_runtime.domain.operational_capabilities import (
 )
 from sonder_runtime.interfaces.http.facades import HealthStatusFacade
 from sonder_runtime.interfaces.http.facades.a2a import A2AAgentCardFacade
+from sonder_runtime.interfaces.http.facades.client_protocol import (
+    RECONNECT_ROUTE as _CLIENT_RECONNECT_ROUTE,
+    SCHEMA_ROUTE as _CLIENT_SCHEMA_ROUTE,
+    ClientProtocolHost,
+)
 from sonder_runtime.interfaces.http.facades.a2a_jsonrpc import (
     build_application_a2a_handler,
     dispatch_a2a_jsonrpc_route,
@@ -1594,6 +1599,49 @@ def _request_cache_scope(context):
     """
     material = "request-cache-owner\0" + _state_principal(context)
     return "qc-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+_CLIENT_PROTOCOL_LOCK = threading.Lock()
+_CLIENT_PROTOCOL_HOST = None
+
+
+def _client_protocol_host():
+    """The client schema/reconnect host bound to the current application.
+
+    Built once per application graph: it opens the host-owned ``control``
+    stream on that graph's protocol facade.  ``None`` when the graph composes
+    no protocol facade.
+    """
+    global _CLIENT_PROTOCOL_HOST
+    from sonder_runtime.bootstrap.app import default_app
+
+    protocol = getattr(default_app(), "protocol", None)
+    if protocol is None:
+        return None
+    with _CLIENT_PROTOCOL_LOCK:
+        host = _CLIENT_PROTOCOL_HOST
+        if host is None or host.protocol is not protocol:
+            host = ClientProtocolHost(
+                protocol,
+                control_state=lambda: {"permission_mode": permission_policy.current_mode()},
+            )
+            _CLIENT_PROTOCOL_HOST = host
+        return host
+
+
+def _observe_client_control_state():
+    """Record a permission-mode change on the client control stream.
+
+    Best effort by design: the stream is a reconnect aid, so a failure to
+    publish is logged and never fails the request that changed or read the
+    mode.
+    """
+    try:
+        host = _client_protocol_host()
+        if host is not None:
+            host.observe()
+    except Exception:
+        _serve_logger.warning("client control stream observation failed", exc_info=True)
 
 
 def _feed_request_owner(context):
@@ -5970,6 +6018,22 @@ class Handler(BaseHTTPRequestHandler):
             }
             self._send_json_payload(payload)
             return
+        if path == _CLIENT_SCHEMA_ROUTE:
+            context = self._request_auth_context()
+            if not context["authorized"]:
+                self._send_auth_error()
+                return
+            host = _client_protocol_host()
+            if host is None:
+                self._send_json_payload(
+                    {"error": {"message": "client schema is unavailable",
+                               "type": "server_error",
+                               "code": "CLIENT_SCHEMA_UNAVAILABLE"}},
+                    status=503,
+                )
+                return
+            self._send_json_payload(host.schema_payload())
+            return
         if path == "/v1/sonder/feed":
             # Owner-scoped by construction: the tracker only returns spans
             # recorded under this caller's opaque principal, so unlike
@@ -6173,6 +6237,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._request_auth_context()["authorized"]:
             self._send_auth_error()
             return True
+        _observe_client_control_state()
         self._send_json_payload(server.permission_mode_data())
         return True
 
@@ -6445,6 +6510,42 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json_payload(receipt or {"error": {"message": "fanout receipt was unavailable", "type": "not_found"}}, status=200 if receipt else 404)
         return True
 
+    def _handle_client_reconnect(self, req, context):
+        """Plan one client reconnect against the served schema and streams."""
+        from sonder_runtime.application.protocol.facade import (
+            ProtocolAuthorizationError,
+        )
+        from sonder_runtime.application.protocol.mobile_parity import MobileWireError
+
+        if not context["authorized"]:
+            self._send_auth_error()
+            return
+        host = _client_protocol_host()
+        if host is None:
+            self._send_json_payload(
+                {"error": {"message": "client reconnect is unavailable",
+                           "type": "server_error",
+                           "code": "CLIENT_RECONNECT_UNAVAILABLE"}},
+                status=503,
+            )
+            return
+        try:
+            payload = host.reconnect(req, authenticated=True)
+        except MobileWireError as error:
+            self._send_json_payload(
+                {"error": {"message": str(error), "type": "invalid_request"}},
+                status=400,
+            )
+            return
+        except ProtocolAuthorizationError as error:
+            self._send_json_payload(
+                {"error": {"message": str(error), "type": "forbidden",
+                           "code": "FORBIDDEN"}},
+                status=403,
+            )
+            return
+        self._send_json_payload(payload)
+
     def _handle_permission_mode_post(self, req, context=None):
         """Switch the autonomy mode. Deliberately cannot grant elevation."""
         wanted = ""
@@ -6471,6 +6572,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if _send_idempotency_refusal(self, result):
             return
+        _observe_client_control_state()
         self._send_json_payload(server.permission_mode_data())
 
 
@@ -6839,6 +6941,9 @@ class Handler(BaseHTTPRequestHandler):
         if self._handle_build_request("POST", path, req):
             return
         if self._handle_test_tools_request("POST", path, req):
+            return
+        if path == _CLIENT_RECONNECT_ROUTE:
+            self._handle_client_reconnect(req, context)
             return
         compute_route = _compute_job_route(path)
         if compute_route is not None and compute_route[0] in ("submit", "cancel"):

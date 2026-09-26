@@ -1136,6 +1136,7 @@
         "sonder_runtime/interfaces/http/facades/approvals.py",
         "sonder_runtime/interfaces/http/facades/artifact_transfer.py",
         "sonder_runtime/interfaces/http/facades/build_tools.py",
+        "sonder_runtime/interfaces/http/facades/client_protocol.py",
         "sonder_runtime/interfaces/http/facades/compute_fabric.py",
         "sonder_runtime/interfaces/http/facades/compute_inventory.py",
         "sonder_runtime/interfaces/http/facades/control_plane.py",

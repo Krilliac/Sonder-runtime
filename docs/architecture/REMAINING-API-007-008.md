@@ -40,6 +40,36 @@ This keeps reconnect safe for intermittent mobile connectivity and makes
 provider neutrality explicit: no provider name, transport implementation, or
 Flutter type enters the application contract.
 
+## HTTP host
+
+The served runtime exposes the contract over HTTP (see
+`docs/wiki/05-http-api-and-lifecycle.md`):
+
+- The application graph composes one deny-by-default
+  `ProtocolApplicationFacade` from the served typed tool catalog
+  (`bootstrap/app.py`), so the schema digest changes exactly when that
+  catalog does.
+- `interfaces/http/facades/client_protocol.py` is the hosting interface. It
+  supplies the authorization decisions: a request-scoped view may reconnect
+  only when the HTTP layer authenticated the request, and only the host may
+  open a stream. It owns one stream, `control`, whose events are
+  `control.snapshot` records of the process-global permission mode. The host
+  publishes when it observes the mode differ from the last published value:
+  on a mode change or read through the API and before every reconnect. A
+  change made in another process is therefore recorded when a client next
+  looks, not when it happened. A full stream is folded into a snapshot
+  instead of refusing the event.
+- `GET /v1/client/schema` returns `encode_client_schema()`;
+  `POST /v1/client/reconnect` runs `decode_reconnect_request()`, the
+  facade's authorized `reconnect()`, and `encode_reconnect_response()`.
+  Both require an authorized caller; a malformed body is a 400.
+
+Limits: the stream is in memory and single-process, so a watermark from
+before a restart is rejected as out of range and the client must refetch
+state. Session, job, and work-run events are not published into protocol
+streams, and the Flutter app does not call these routes yet.
+`tests/test_client_protocol_http.py` covers the routes end to end.
+
 ## Evidence
 
 `tests/test_remaining_client_schema.py` proves:

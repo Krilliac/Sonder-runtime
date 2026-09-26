@@ -23,6 +23,9 @@ from .client_schema import (
 from ...domain.protocol.events import EventEnvelope, Snapshot
 
 
+MAX_CLIENT_ID_CHARS = 256
+
+
 class MobileWireError(ValueError):
     """Raised for malformed or unsupported reconnect payloads."""
 
@@ -71,6 +74,12 @@ def decode_reconnect_request(payload: Mapping[str, Any]) -> ReconnectRequest:
             cursors.append(ResumeCursor(str(item["stream_id"]), item["watermark"]))
         except (KeyError, TypeError, ValueError) as exc:
             raise MobileWireError("invalid resume cursor") from exc
+    client_id = value.get("client_id")
+    if (not isinstance(client_id, str) or not client_id.strip()
+            or len(client_id) > MAX_CLIENT_ID_CHARS):
+        raise MobileWireError(
+            f"client_id must be a non-empty string of at most {MAX_CLIENT_ID_CHARS} characters"
+        )
     digest = value.get("schema_digest")
     if digest is not None:
         try:
@@ -79,7 +88,7 @@ def decode_reconnect_request(payload: Mapping[str, Any]) -> ReconnectRequest:
             raise MobileWireError("invalid schema_digest") from exc
     try:
         return ReconnectRequest(
-            client_id=value["client_id"], schema_digest=digest,
+            client_id=client_id, schema_digest=digest,
             cursors=tuple(cursors), batch_limit=value.get("batch_limit", 256),
         )
     except (KeyError, TypeError, ValueError) as exc:

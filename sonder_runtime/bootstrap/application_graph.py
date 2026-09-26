@@ -9,6 +9,7 @@ from time import monotonic
 from ..application.tools.facade import ToolApplicationFacade
 from ..application.developer_tools import DeveloperToolServices
 from ..application.debugging.service import DebugDigestService
+from ..application.protocol.facade import ProtocolApplicationFacade
 from ..adapters.provider_bindings import ProviderBindings
 from ..application.chat.handle_chat import ChatService
 from ..application.vision import VisionService
@@ -123,6 +124,9 @@ class Application:
     # on every surface, with the runtime's permission modes as its evaluator
     # and operations-grade durable receipts (see bootstrap/typed_tools.py).
     tools: ToolApplicationFacade | None = None
+    # Client/SDK schema and reconnect contract derived from ``tools``'
+    # catalog; deny-by-default until a hosting interface authorizes it.
+    protocol: ProtocolApplicationFacade | None = None
     container_world_provider: Any | None = None
     remote_world_provider: Any | None = None
     compute_inventory_page: Callable[..., dict] | None = None

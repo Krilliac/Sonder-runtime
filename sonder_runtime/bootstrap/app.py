@@ -149,6 +149,7 @@ from ..application.session import (
     SessionCheckpointPrivacyService,
     SessionContinuityService,
 )
+from ..application.protocol.facade import ProtocolApplicationFacade
 from ..application.session.http_facade import HttpSessionFacade
 from ..application.subagents.durable_continuation import DurableContinuationService
 from ..application.tools.facade import (
@@ -1894,6 +1895,11 @@ def build_application(
         ),),
     )
     typed_tools_ref["tools"] = tools
+    # The portable client/SDK schema (API-007/008) is derived from the same
+    # served tool catalog, so its digest changes exactly when that catalog
+    # does.  The facade is deny-by-default: the hosting interface supplies
+    # authorization and owns any stream it opens on it.
+    protocol = ProtocolApplicationFacade.compose(tools.catalogs)
 
     from .artifact_mobility import compose_artifact_mobility
     mobility_binding, mobility_status, mobility_list, mobility_available, mobility_close = (
@@ -1930,6 +1936,7 @@ def build_application(
         unit_of_work=memory_unit_of_work,
         tool_executor=ToolExecutorAdapter(),
         tools=tools,
+        protocol=protocol,
         tool_audit=tool_audit,
         process_probe=ProcessProbeAdapter(),
         events=events,
