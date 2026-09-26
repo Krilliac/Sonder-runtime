@@ -6,8 +6,8 @@ from sonder_runtime.adapters import client_fallback
 
 
 def test_build_request_with_key():
-    url, headers, body = tc.build_request("http://h:1", "k", "hi")
-    assert url == "http://h:1/v1/chat/completions"
+    url, headers, body = tc.build_request("https://h:1", "k", "hi")
+    assert url == "https://h:1/v1/chat/completions"
     assert headers["Authorization"] == "Bearer k"
     assert headers["Content-Type"] == "application/json"
     obj = json.loads(body.decode("utf-8"))
