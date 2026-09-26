@@ -66,7 +66,7 @@ def application(monkeypatch):
     catalogs = _catalogs()
     app = SimpleNamespace(protocol=ProtocolApplicationFacade.compose(catalogs), catalogs=catalogs)
     monkeypatch.setattr("sonder_runtime.bootstrap.app.default_app", lambda: app)
-    monkeypatch.setattr(sonder_serve, "_CLIENT_PROTOCOL_HOST", None)
+    monkeypatch.setattr(sonder_serve, "_CLIENT_PROTOCOL_SLOT", sonder_serve._CLIENT_PROTOCOL_SLOT.fresh())
     return app
 
 
@@ -271,7 +271,7 @@ def test_the_application_graph_serves_its_tool_catalog_schema(
 
     app = build_application()
     monkeypatch.setattr("sonder_runtime.bootstrap.app.default_app", lambda: app)
-    monkeypatch.setattr(sonder_serve, "_CLIENT_PROTOCOL_HOST", None)
+    monkeypatch.setattr(sonder_serve, "_CLIENT_PROTOCOL_SLOT", sonder_serve._CLIENT_PROTOCOL_SLOT.fresh())
     assert app.protocol is not None
     status, body = _request(http_server, "/v1/client/schema")
     assert status == 200

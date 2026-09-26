@@ -113,19 +113,17 @@ from sonder_runtime.domain.operational_capabilities import (
 )
 from sonder_runtime.interfaces.http.facades import HealthStatusFacade
 from sonder_runtime.interfaces.http.facades.a2a import A2AAgentCardFacade
+from sonder_runtime.interfaces.http.facades import client_protocol as _client_protocol
 from sonder_runtime.interfaces.http.facades.client_protocol import (
     RECONNECT_ROUTE as _CLIENT_RECONNECT_ROUTE,
     SCHEMA_ROUTE as _CLIENT_SCHEMA_ROUTE,
-    ClientProtocolHost,
 )
 from sonder_runtime.interfaces.http.facades.a2a_jsonrpc import (
     build_application_a2a_handler,
     dispatch_a2a_jsonrpc_route,
 )
 from sonder_runtime.interfaces.http.facades.control_plane import ControlPlaneFacade
-from sonder_runtime.interfaces.http.facades.approvals import (
-    approvals_payload, approve_call, refusal_receipt, revoke_approval,
-)
+from sonder_runtime.interfaces.http.facades.approvals import refusal_receipt
 from sonder_runtime.interfaces.http.facades.extensions import dispatch_extension_route
 from sonder_runtime.interfaces.http.facades.model_request import (
     ModelFacadeError,
@@ -1601,47 +1599,20 @@ def _request_cache_scope(context):
     return "qc-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
-_CLIENT_PROTOCOL_LOCK = threading.Lock()
-_CLIENT_PROTOCOL_HOST = None
+_CLIENT_PROTOCOL_SLOT = _client_protocol.ClientProtocolHostSlot(
+    lambda: {"permission_mode": permission_policy.current_mode()})
 
 
 def _client_protocol_host():
-    """The client schema/reconnect host bound to the current application.
-
-    Built once per application graph: it opens the host-owned ``control``
-    stream on that graph's protocol facade.  ``None`` when the graph composes
-    no protocol facade.
-    """
-    global _CLIENT_PROTOCOL_HOST
+    """The client schema/reconnect host bound to the current application graph."""
     from sonder_runtime.bootstrap.app import default_app
 
-    protocol = getattr(default_app(), "protocol", None)
-    if protocol is None:
-        return None
-    with _CLIENT_PROTOCOL_LOCK:
-        host = _CLIENT_PROTOCOL_HOST
-        if host is None or host.protocol is not protocol:
-            host = ClientProtocolHost(
-                protocol,
-                control_state=lambda: {"permission_mode": permission_policy.current_mode()},
-            )
-            _CLIENT_PROTOCOL_HOST = host
-        return host
+    return _CLIENT_PROTOCOL_SLOT.bound_to(getattr(default_app(), "protocol", None))
 
 
 def _observe_client_control_state():
-    """Record a permission-mode change on the client control stream.
-
-    Best effort by design: the stream is a reconnect aid, so a failure to
-    publish is logged and never fails the request that changed or read the
-    mode.
-    """
-    try:
-        host = _client_protocol_host()
-        if host is not None:
-            host.observe()
-    except Exception:
-        _serve_logger.warning("client control stream observation failed", exc_info=True)
+    """Best-effort permission-mode publish on the client control stream."""
+    _client_protocol.observe_control_state(_client_protocol_host, _serve_logger)
 
 
 def _feed_request_owner(context):
@@ -3057,73 +3028,38 @@ def _http_debug_context(auth, correlation_id):
     return replace(context, principal_id=principal, source="http", workspace_roots=roots)
 
 
-def _developer_chat_reply(cmd, arg, context):
-    """``/test``, ``/digest``, ``/build``, ``/fix-build``, ``/crash``, ``/profile`` in chat.
+def _debug_tools_http_facade(application):
+    """The admin crash/profile facade over ``application.debug_tools``.
 
-    Each line becomes exactly the call its HTTP route makes (see
-    ``interfaces/http/facades/developer_chat.py``): a typed gateway call as
-    the authenticated principal with ``source="http"``, or an admin ``DebugToolsHttpFacade`` request (same guard, grading and
-    caps as ``/v1/tools/crash-*``). The authority check is the route's:
-    developer or admin for ``/build`` and ``/fix-build``, admin for
-    ``/test``, ``/digest``, ``/crash`` and ``/profile``.
-
-    The permission modes have already graded the line unattended at the
-    chain gate (``_http_slash_refusal``), without the call's arguments; a
-    mode that refuses the run refuses it there, naming no call. Approval of
-    one run by ``call_id`` goes through the HTTP route.
+    Host-launching routes are graded by the permission modes first, exactly
+    as the typed gateway grades an HTTP caller.
     """
-    from sonder_runtime.interfaces.http.facades import developer_chat as chat
-
-    admin_only = cmd in chat.ADMIN_COMMANDS
-    if not isinstance(context, dict):
-        return "refused %s: an authenticated HTTP caller is required" % cmd
-    allowed = _admin_authorized(context) if admin_only else _developer_authorized(context)
-    if not allowed:
-        return "refused %s: %s authority is required" % (
-            cmd, "admin" if admin_only else "developer or admin")
-    principal = _http_principal(context)
-    if not principal:
-        return "refused %s: authenticated account identity is unavailable" % cmd
-    try:
-        call = chat.parse_chat_command(cmd, arg)
-    except chat.ChatUsage as usage:
-        return str(usage)
-    from sonder_runtime.bootstrap.app import default_app
-
-    application = default_app()
-    if isinstance(call, chat.TypedCall):
-        from sonder_runtime.interfaces.http.facades.typed_gateway import execute_typed_call
-
-        roots = _http_workspace_roots(context)
-        auth_level = "admin" if _admin_authorized(context) else "developer"
-        while True:
-            status, body = execute_typed_call(
-                lambda: getattr(application, "tools", None), call.tool, call.arguments,
-                call.codes, principal_id=principal, workspace_roots=roots,
-                auth_level=auth_level,
-            )
-            if (call.fallback is not None and status == 404
-                    and chat.error_code(body) == "JOB_NOT_FOUND"):
-                call = call.fallback
-                continue
-            return chat.render_typed(call, status, body)
     from sonder_runtime.bootstrap.debug_tools import debug_http_authorizer
     from sonder_runtime.interfaces.http.facades.debug_tools import DebugToolsHttpFacade
 
     service = getattr(application, "debug_tools", None)
-    facade = DebugToolsHttpFacade(lambda: service, authorize=debug_http_authorizer(service))
-    try:
-        operation = _http_debug_context(context, "chat-" + uuid.uuid4().hex)
-    except PermissionError:
-        return "refused %s: authenticated account identity is unavailable" % cmd
-    while True:
-        status, body = facade.dispatch(call.method, call.route, call.payload, operation,
-                                       admin=True, wait_seconds=call.wait_seconds)
-        if (call.fallback is not None and status >= 400
-                and chat.error_code(body) == call.on_code):
-            call = call.fallback
-            continue
-        return chat.render_debug(call, status, body)
+    return DebugToolsHttpFacade(lambda: service, authorize=debug_http_authorizer(service))
+
+
+def _developer_chat_reply(cmd, arg, context):
+    """``/test``, ``/digest``, ``/build``, ``/fix-build``, ``/crash``, ``/profile`` in chat.
+
+    ``interfaces/http/facades/developer_chat.py`` turns the line into exactly
+    the call its HTTP route makes, under that route's authority check. The
+    permission modes have already graded the line unattended at the chain
+    gate (``_http_slash_refusal``), without the call's arguments; a mode that
+    refuses the run refuses it there, naming no call. Approval of one run by
+    ``call_id`` goes through the HTTP route.
+    """
+    from sonder_runtime.bootstrap.app import default_app
+    from sonder_runtime.interfaces.http.facades import developer_chat
+
+    return developer_chat.reply(
+        cmd, arg, context, admin_authorized=_admin_authorized,
+        developer_authorized=_developer_authorized, principal_of=_http_principal,
+        workspace_roots_of=_http_workspace_roots, application=default_app,
+        debug_facade=_debug_tools_http_facade, debug_context=_http_debug_context,
+    )
 
 
 def _handle_slash(content, messages=None, state=None, project="", context=None,
@@ -5214,46 +5150,20 @@ class Handler(BaseHTTPRequestHandler):
         """Authenticate, bind the principal, and send one typed gateway route.
 
         ``admin_only`` requires admin authority; otherwise developer or admin
-        authority is required. Workspace roots are passed only for admin
-        callers; the permission modes grade every call as an unattended HTTP
-        caller.
+        authority is required (see ``facades/typed_gateway.py``).
         """
-        auth = self._request_auth_context()
-        if not auth.get("authorized"):
-            self._send_auth_error()
-            return True
-        allowed = _admin_authorized(auth) if admin_only else _developer_authorized(auth)
-        if not allowed:
-            self._send_json_payload({"error": {"code": "FORBIDDEN", "message": (
-                "admin authority is required" if admin_only
-                else "developer or admin authority is required")}}, status=403)
-            return True
         from sonder_runtime.bootstrap.app import default_app
+        from sonder_runtime.interfaces.http.facades.typed_gateway import serve_developer_route
 
-        try:
-            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query,
-                                          keep_blank_values=True, max_num_fields=16)
-        except ValueError:
-            self._send_json_payload({"error": {"code": invalid_code}}, status=400)
-            return True
-        if method == "GET" and self._unread_request_body_bytes() != 0:
-            self._send_json_payload({"error": {"code": invalid_code,
-                                               "message": "%s do not accept a body" % read_noun}},
-                                    status=400)
-            return True
-        principal = _http_principal(auth)
-        if not principal:
-            self._send_json_payload({"error": {"code": "FORBIDDEN"}}, status=403)
-            return True
-        application = default_app()
-        roots = _http_workspace_roots(auth)
-        routes = routes_type(lambda: getattr(application, "tools", None))
-        status, body = routes.dispatch(
-            method, path, query, payload, principal_id=principal, workspace_roots=roots,
-            auth_level="admin" if _admin_authorized(auth) else "developer",
+        return serve_developer_route(
+            self, method, path, payload, routes_type, invalid_code=invalid_code,
+            read_noun=read_noun, admin_only=admin_only, admin_authorized=_admin_authorized,
+            developer_authorized=_developer_authorized, principal_of=_http_principal,
+            workspace_roots_of=_http_workspace_roots, application=default_app,
+            query_of=lambda: urllib.parse.parse_qs(
+                urllib.parse.urlsplit(self.path).query, keep_blank_values=True,
+                max_num_fields=16),
         )
-        self._send_json_payload(body, status=status, headers={"Cache-Control": "no-store"})
-        return True
 
     def _handle_agent_lane_request(self, method, path, payload=None):
         """Bind lane commands to authenticated identity and configured scope."""
@@ -6023,16 +5933,8 @@ class Handler(BaseHTTPRequestHandler):
             if not context["authorized"]:
                 self._send_auth_error()
                 return
-            host = _client_protocol_host()
-            if host is None:
-                self._send_json_payload(
-                    {"error": {"message": "client schema is unavailable",
-                               "type": "server_error",
-                               "code": "CLIENT_SCHEMA_UNAVAILABLE"}},
-                    status=503,
-                )
-                return
-            self._send_json_payload(host.schema_payload())
+            status, body = _client_protocol.schema_response(_client_protocol_host())
+            self._send_json_payload(body, status=status)
             return
         if path == "/v1/sonder/feed":
             # Owner-scoped by construction: the tracker only returns spans
@@ -6107,124 +6009,41 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json_payload(payload)
         return True
 
-    def _approvals_access(self, context):
-        """(ledger, done): ``done`` when an error response was already sent.
+    def _approval_ports(self):
+        """This process's approval ledger, authority check and replay guard."""
+        from sonder_runtime.interfaces.http.facades.approval_routes import HttpApprovalPorts
 
-        Approving a refused call is the attended answer to the gate's ask, the
-        same authority ``/approve`` needs at the console: a developer or
-        administrator (``_developer_authorized``; the single-user local-open
-        listener counts, exactly as for ``/v1/permission-mode``).
-        """
-        if not context["authorized"]:
-            self._send_auth_error()
-            return None, True
-        if not _developer_authorized(context):
-            self._send_json_payload(
-                sonder_lifecycle.error_envelope(
-                    "FORBIDDEN",
-                    "developer or administrator authorization is required "
-                    "to review or approve calls",
-                    self._correlation(),
-                    retryable=False,
-                ),
-                status=403,
-            )
-            return None, True
-        try:
-            ledger = permission_policy.approval_ledger()
-        except Exception:
-            _serve_logger.error("approval ledger unavailable", exc_info=True)
-            ledger = None
-        if ledger is None:
-            self._send_json_payload(
-                {"error": {"message": "one-shot approvals are not available in this process",
-                           "type": "server_error", "code": "APPROVALS_UNAVAILABLE"}},
-                status=503,
-            )
-            return None, True
-        return ledger, False
+        return HttpApprovalPorts(
+            developer_authorized=_developer_authorized,
+            error_envelope=lambda *a, **k: sonder_lifecycle.error_envelope(*a, **k),
+            ledger=lambda: permission_policy.approval_ledger(),
+            idempotent_action=_idempotent_http_action,
+            send_idempotency_refusal=_send_idempotency_refusal,
+            approver_of=_http_approver, audit=_audit_http_approval,
+            clock=lambda: time.time(), log=_serve_logger,
+        )
 
     def _handle_approvals_get(self):
         """``GET /v1/approvals``: refused calls waiting for approval, and approvals."""
+        from sonder_runtime.interfaces.http.facades import approval_routes
+
         split = urllib.parse.urlsplit(self.path)
-        if (split.path.rstrip("/") or "/") != "/v1/approvals":
-            return False
-        ledger, done = self._approvals_access(self._request_auth_context())
-        if done:
-            return True
-        query = urllib.parse.parse_qs(split.query, keep_blank_values=True)
-        try:
-            limit = int((query.get("limit") or ["20"])[0])
-        except ValueError:
-            limit = 0
-        if not 1 <= limit <= 200:
-            self._send_json_payload(
-                {"error": {"message": "limit must be between 1 and 200",
-                           "type": "invalid_request"}}, status=400)
-            return True
-        include_spent = (query.get("include_spent") or [""])[0].lower() in ("1", "true", "yes")
-        try:
-            payload = approvals_payload(ledger, limit=limit, include_spent=include_spent)
-        except Exception:
-            _serve_logger.error("approval ledger read failed", exc_info=True)
-            self._send_json_payload(
-                {"error": {"message": "one-shot approvals are not available",
-                           "type": "server_error", "code": "APPROVALS_UNAVAILABLE"}},
-                status=503)
-            return True
-        self._send_json_payload(payload)
-        return True
+        return approval_routes.serve_get(
+            self, split.path,
+            lambda: urllib.parse.parse_qs(split.query, keep_blank_values=True),
+            self._approval_ports(),
+        )
 
     def _handle_approvals_post(self, path, req, context):
         """``POST /v1/approvals/<call_id>`` and ``POST /v1/approvals/revoke/<nonce>``.
 
         An authenticated developer/administrator POST is an attended approval
-        surface, like ``POST /v1/permission-mode``: the person holding the
-        credential answered the gate's ask for exactly one refused call. The
-        approval is bound to that call's digest, single-use and expiring (see
-        ``facades.approvals``), recorded as approver ``developer:<user>``,
-        ``admin-key`` or ``local-open`` with surface ``http``, and audited on
-        the direct-tool path as ``permission_approve``.
+        surface, like ``POST /v1/permission-mode``; see
+        ``facades/approval_routes.py``.
         """
-        parts = path[len("/v1/approvals"):].strip("/").split("/")
-        if len(parts) == 2 and parts[0] == "revoke" and parts[1]:
-            action, target = "revoke", parts[1]
-        elif len(parts) == 1 and parts[0] and parts[0] != "revoke":
-            action, target = "approve", parts[0]
-        else:
-            self._send_not_found()
-            return
-        ledger, done = self._approvals_access(context)
-        if done:
-            return
-        approver = _http_approver(context)
-        started = time.time()
+        from sonder_runtime.interfaces.http.facades import approval_routes
 
-        def run():
-            if action == "revoke":
-                return revoke_approval(ledger, target)
-            return approve_call(ledger, target, req, approver=approver, surface="http")
-
-        action_text = "approval\0%s\0%s\0%s" % (
-            action, target.lower(), json.dumps(req, sort_keys=True, default=str),
-        )
-        try:
-            result = _idempotent_http_action(
-                context, self.headers.get("Idempotency-Key", ""), action_text, run,
-            )
-        except Exception:
-            _serve_logger.error("approval request failed", exc_info=True)
-            self._send_json_payload(
-                {"error": {"message": "one-shot approvals are not available",
-                           "type": "server_error", "code": "APPROVALS_UNAVAILABLE"}},
-                status=503)
-            return
-        if _send_idempotency_refusal(self, result):
-            return
-        if result.status < 300:
-            approval = (result.body or {}).get("approval") or {}
-            _audit_http_approval(action, approval, started)
-        self._send_json_payload(dict(result.body), status=result.status)
+        approval_routes.serve_post(self, path, req, context, self._approval_ports())
 
     def _handle_permission_mode_get(self):
         """Current autonomy mode, so a client can show it before you send.
@@ -6263,288 +6082,47 @@ class Handler(BaseHTTPRequestHandler):
         return run, None
 
     def _handle_work_run_request(self, method, path, context=None):
-        """``GET /v1/work-runs[/<id>]`` and ``POST /v1/work-runs/<id>/cancel``.
+        """``GET /v1/work-runs[/<id>]`` and ``POST /v1/work-runs/<id>/cancel``."""
+        from sonder_runtime.interfaces.http.facades import work_runs
 
-        Runs are visible only to the principal that started them.  Cancel
-        stops the run's effects (files, programs, destructive tools) at the
-        next attempt; model steps already admitted finish to their step bound.
-        """
-        route = path.rstrip("/")
-        if route != "/v1/work-runs" and not route.startswith("/v1/work-runs/"):
-            return False
-        parts = route[len("/v1/work-runs"):].strip("/").split("/") if route != "/v1/work-runs" else []
-        if context is None:
-            context = self._request_auth_context()
-        if not context["authorized"]:
-            self._send_auth_error()
-            return True
-        if not _developer_authorized(context):
-            self._send_json_payload({"error": {
-                "message": "developer or admin authentication is required for work runs",
-                "type": "forbidden", "code": "FORBIDDEN"}}, status=403)
-            return True
-        run_id = parts[0] if parts else ""
-        if run_id and not re.fullmatch(r"wr-[0-9a-f]{32}", run_id):
-            self._send_json_payload({"error": {"message": "invalid work run id",
-                                               "type": "invalid_request"}}, status=400)
-            return True
-        principal = _state_principal(context)
-        try:
-            if method == "GET" and not parts:
-                self._send_json_payload({"runs": _WORK_RUNNER.recent(principal)},
-                                        headers={"Cache-Control": "no-store"})
-                return True
-            if method == "GET" and len(parts) == 1:
-                record = _WORK_RUNNER.get(run_id, principal)
-            elif method == "POST" and len(parts) == 2 and parts[1] == "cancel":
-                record = _WORK_RUNNER.cancel(run_id, principal)
-            else:
-                self._send_json_payload({"error": {"message": "method not allowed",
-                                                   "type": "invalid_request"}}, status=405)
-                return True
-        except (OSError, sqlite3.Error):
-            _serve_logger.error("work run store unavailable", exc_info=True)
-            self._send_json_payload({"error": {"message": "work run store unavailable",
-                                               "type": "server_error",
-                                               "code": "WORK_RUN_STORE_UNAVAILABLE"}},
-                                    status=503, headers={"Retry-After": "1"})
-            return True
-        if record is None:
-            self._send_json_payload({"error": {"message": "work run not found",
-                                               "type": "not_found", "code": "NOT_FOUND"}},
-                                    status=404)
-            return True
-        self._send_json_payload(record, headers={"Cache-Control": "no-store"})
-        return True
+        return work_runs.serve_request(
+            self, method, path, context, runner=_WORK_RUNNER,
+            developer_authorized=_developer_authorized, principal_of=_state_principal,
+            store_errors=(OSError, sqlite3.Error), log=_serve_logger,
+        )
 
     def _handle_fanout_get(self):
-        route = urllib.parse.urlsplit(self.path).path.rstrip("/")
-        if route == "/v1/fanout":
-            context = self._request_auth_context()
-            if not context["authorized"]:
-                self._send_auth_error()
-                return True
-            if not _developer_authorized(context):
-                self._send_json_payload({"error": {"message": "developer or admin authentication is required for model fanout", "type": "forbidden"}}, status=403)
-                return True
-            query = urllib.parse.parse_qs(
-                urllib.parse.urlsplit(self.path).query, keep_blank_values=True,
-            )
-            # A history query is a small, explicitly bounded contract.  Do
-            # not let duplicate values acquire accidental first-value-wins
-            # semantics through a proxy or a client encoder.
-            for name in ("limit", "include_finished"):
-                if len(query.get(name, ())) > 1:
-                    self._send_json_payload({"error": {"message": "%s must be supplied at most once" % name, "type": "invalid_request"}}, status=400)
-                    return True
-            limit_text = (query.get("limit") or ["20"])[0]
-            finished_text = (query.get("include_finished") or ["true"])[0].casefold()
-            try:
-                limit = int(limit_text)
-            except (TypeError, ValueError):
-                self._send_json_payload({"error": {"message": "limit must be an integer between 1 and 100", "type": "invalid_request"}}, status=400)
-                return True
-            if not 1 <= limit <= 100:
-                self._send_json_payload({"error": {"message": "limit must be an integer between 1 and 100", "type": "invalid_request"}}, status=400)
-                return True
-            if finished_text not in ("true", "false"):
-                self._send_json_payload({"error": {"message": "include_finished must be true or false", "type": "invalid_request"}}, status=400)
-                return True
-            account = context.get("account") or {}
-            request_owner = None
-            if context.get("mode") != "local-open" and account.get("role") != "admin":
-                request_owner = _fanout_request_owner(context)
-            self._send_json_payload({"runs": server.fanout_store.recent_run_summaries(
-                request_owner=request_owner, include_finished=finished_text == "true",
-                limit=limit,
-            )})
-            return True
-        prefix = "/v1/fanout/"
-        if not route.startswith(prefix) or "/" in route[len(prefix):]:
-            return False
-        run_id = route[len(prefix):]
-        if not run_id or len(run_id) > 80:
-            self._send_json_payload({"error": {"message": "invalid fanout run id", "type": "invalid_request"}}, status=400)
-            return True
-        context = self._request_auth_context()
-        if not context["authorized"]:
-            self._send_auth_error()
-            return True
-        _run, error = self._fanout_run_for_context(context, run_id)
-        if error:
-            status, message = error
-            self._send_json_payload({"error": {"message": message, "type": "forbidden" if status == 403 else "not_found"}}, status=status)
-            return True
-        self._send_json_payload(server._fanout_receipt(run_id))
-        return True
+        from sonder_runtime.interfaces.http.facades import fanout
+
+        return fanout.serve_get(
+            self, urllib.parse.urlsplit(self.path).path.rstrip("/"),
+            parse_query=lambda: urllib.parse.parse_qs(
+                urllib.parse.urlsplit(self.path).query, keep_blank_values=True),
+            developer_authorized=_developer_authorized,
+            request_owner_of=_fanout_request_owner, runtime=server,
+        )
 
     def _handle_fanout_post(self, path, req, context):
         """Mutate or locally synthesize one caller-authorized fanout receipt."""
-        prefix = "/v1/fanout/"
-        if not path.startswith(prefix):
-            return False
-        suffix = path[len(prefix):].strip("/")
-        parts = suffix.split("/")
-        if (len(parts) != 2 or parts[1] not in ("cancel", "resume", "synthesize")
-                or not parts[0] or len(parts[0]) > 80):
-            return False
-        run_id, action = parts
-        # Use the injected compatibility namespace rather than reaching
-        # around it directly.  Besides keeping the route bound to the
-        # composition-time runtime, this preserves the established patch seam
-        # for callers that replace a single legacy operation in tests.
-        runtime = server
-        if not context["authorized"]:
-            self._send_auth_error()
-            return True
-        _run, error = self._fanout_run_for_context(context, run_id)
-        if error:
-            status, message = error
-            self._send_json_payload({"error": {"message": message, "type": "forbidden" if status == 403 else "not_found"}}, status=status)
-            return True
-        supplied_key = self.headers.get("Idempotency-Key", "")
+        from sonder_runtime.interfaces.http.facades import fanout
 
-        def replay(action_name, factory):
-            # The run is already owner-authorized above.  Bind each replay to
-            # both that durable run and the complete small action payload, so
-            # a client key cannot turn a cancel into a resume or select a
-            # different synthesis model.  _http_action_idempotency_key hashes
-            # this text; neither it nor the raw header is retained.
-            return _idempotent_http_action(
-                context,
-                supplied_key,
-                "fanout\0%s\0%s" % (run_id, action_name),
-                factory,
-            )
-        if action == "synthesize":
-            if set(req) - {"synth_model"}:
-                self._send_json_payload({"error": {"message": "synthesis accepts only synth_model", "type": "invalid_request"}}, status=400)
-                return True
-            synth_model = req.get("synth_model", "")
-            if not isinstance(synth_model, str):
-                self._send_json_payload({"error": {"message": "synth_model must be a string", "type": "invalid_request"}}, status=400)
-                return True
-            # Synthesis starts a fresh bounded local generation.  In shared
-            # deployments it must consume the same per-account admission
-            # budget as chat completions, otherwise callers can bypass the
-            # inference rate limit by repeatedly synthesizing one receipt.
-            conn = runtime._open_db()
-            try:
-                ok, message = admin_auth.rate_limit(conn, context.get("account"))
-            finally:
-                conn.close()
-            if not ok:
-                self._send_json_payload(
-                    {"error": {"message": message, "type": "rate_limit"}},
-                    status=429,
-                )
-                return True
-            try:
-                payload = replay(
-                    "synthesize\0%s" % synth_model,
-                    lambda: runtime._fanout_synthesize_run(_run, synth_model),
-                )
-                if not _send_idempotency_refusal(self, payload):
-                    self._send_json_payload(payload)
-            except runtime.ModelCallError as exc:
-                status = exc.status or (
-                    400 if exc.kind == "configuration" else
-                    504 if exc.kind == "timeout" else 502
-                )
-                if status == 408:
-                    status = 504
-                if status not in (400, 403, 404, 429, 502, 503, 504):
-                    status = 502
-                error_type = "invalid_request_error" if 400 <= status < 500 else "server_error"
-                headers = None
-                if status in (429, 503, 504):
-                    wait = exc.retry_after_seconds
-                    retry_after = 1 if wait is None else max(0, int(round(wait)))
-                    headers = {"Retry-After": str(retry_after)}
-                self._send_json_payload(
-                    {"error": {"message": exc.detail, "type": error_type}},
-                    status=status, headers=headers,
-                )
-            return True
-        if action == "cancel":
-            cancelled = replay("cancel", lambda: runtime.fanout_store.request_cancel(run_id))
-            if _send_idempotency_refusal(self, cancelled):
-                return True
-        else:
-            for name in ("include_failed", "retry_unknown"):
-                if name in req and not isinstance(req[name], bool):
-                    self._send_json_payload({"error": {"message": "%s must be a boolean" % name, "type": "invalid_request"}}, status=400)
-                    return True
-            include_failed = req.get("include_failed") is True
-            retry_unknown = req.get("retry_unknown") is True
-
-            def resume():
-                resumed = runtime.fanout_store.resume_run(
-                    run_id,
-                    include_failed=include_failed,
-                    retry_unknown=retry_unknown,
-                )
-                if resumed is None:
-                    return False
-                # A resume is an explicit replay instruction. _execute
-                # preserves the stored snapshot and never retries unknown rows
-                # unless this request included retry_unknown=true.
-                runtime._execute_fanout_run(run_id)
-                return True
-
-            resumed = replay(
-                "resume\0include_failed=%d\0retry_unknown=%d" % (
-                    include_failed, retry_unknown,
-                ),
-                resume,
-            )
-            if _send_idempotency_refusal(self, resumed):
-                return True
-            if resumed is None:
-                self._send_json_payload({"error": {"message": "fanout run is not resumable with the selected retry options", "type": "invalid_request"}}, status=400)
-                return True
-            if not resumed:
-                self._send_json_payload({"error": {"message": "fanout run is not resumable with the selected retry options", "type": "invalid_request"}}, status=400)
-                return True
-        receipt = runtime._fanout_receipt(run_id)
-        self._send_json_payload(receipt or {"error": {"message": "fanout receipt was unavailable", "type": "not_found"}}, status=200 if receipt else 404)
-        return True
+        # Pass the injected compatibility namespace rather than reaching
+        # around it: this keeps the route bound to the composition-time
+        # runtime and preserves the patch seam for callers that replace a
+        # single legacy operation in tests.
+        return fanout.serve_post(
+            self, path, req, context, runtime=server, account_auth=admin_auth,
+            idempotent_http_action=_idempotent_http_action,
+            send_idempotency_refusal=_send_idempotency_refusal,
+        )
 
     def _handle_client_reconnect(self, req, context):
         """Plan one client reconnect against the served schema and streams."""
-        from sonder_runtime.application.protocol.facade import (
-            ProtocolAuthorizationError,
-        )
-        from sonder_runtime.application.protocol.mobile_parity import MobileWireError
-
         if not context["authorized"]:
             self._send_auth_error()
             return
-        host = _client_protocol_host()
-        if host is None:
-            self._send_json_payload(
-                {"error": {"message": "client reconnect is unavailable",
-                           "type": "server_error",
-                           "code": "CLIENT_RECONNECT_UNAVAILABLE"}},
-                status=503,
-            )
-            return
-        try:
-            payload = host.reconnect(req, authenticated=True)
-        except MobileWireError as error:
-            self._send_json_payload(
-                {"error": {"message": str(error), "type": "invalid_request"}},
-                status=400,
-            )
-            return
-        except ProtocolAuthorizationError as error:
-            self._send_json_payload(
-                {"error": {"message": str(error), "type": "forbidden",
-                           "code": "FORBIDDEN"}},
-                status=403,
-            )
-            return
-        self._send_json_payload(payload)
+        status, body = _client_protocol.reconnect_response(_client_protocol_host(), req)
+        self._send_json_payload(body, status=status)
 
     def _handle_permission_mode_post(self, req, context=None):
         """Switch the autonomy mode. Deliberately cannot grant elevation."""
@@ -6728,72 +6306,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_debug_tools_request(self, method, route):
         """``/v1/tools/crash-*``, ``profile-*`` and ``debug-runs/<id>`` (admin)."""
-        from sonder_runtime.interfaces.http.facades.debug_tools import (
-            DebugToolsHttpFacade, route_kind,
-        )
+        from sonder_runtime.interfaces.http.facades import debug_tools
 
-        if route_kind(method, route) is None:
-            return False
-        # do_GET has already applied the origin and auth rate-limit checks by
-        # the time it reaches this route; do_POST dispatches here first.
-        if method == "POST" and (self._reject_disallowed_origin() or self._auth_rate_limited()):
-            return True
-        auth = self._request_auth_context()
-        if not auth["authorized"]:
-            self._send_auth_error()
-            return True
-        admin = _admin_authorized(auth)
-        if not admin:
-            self._send_json_payload({"ok": False, "error_code": "FORBIDDEN",
-                                     "error": {"code": "FORBIDDEN"}}, status=403)
-            return True
-        try:
-            wait_seconds = 0
-            payload = None
-            if method == "POST" and not route.endswith("/cancel"):
-                if "?" in self.path:
-                    raise ValueError("debug tool requests take a JSON body only")
-                payload = self._read_json(max_bytes=16 * 1024)
-            else:
-                self._validate_request_framing()
-                if self._unread_request_body_bytes() != 0:
-                    raise ValueError("this debug route does not accept a body")
-                query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query,
-                    keep_blank_values=True, max_num_fields=1)
-                if set(query) - {"wait_seconds"} or any(len(v) != 1 for v in query.values()):
-                    raise ValueError("unknown debug run query parameter")
-                if "wait_seconds" in query:
-                    raw = query["wait_seconds"][0]
-                    if not raw.isdigit() or len(raw) > 2:
-                        raise ValueError("wait_seconds must be 0..60")
-                    wait_seconds = int(raw)
+        def facade():
             from sonder_runtime.bootstrap.app import default_app
 
-            from sonder_runtime.bootstrap.debug_tools import debug_http_authorizer
+            return _debug_tools_http_facade(default_app())
 
-            service = getattr(default_app(), "debug_tools", None)
-            # Host-launching routes are graded by the permission modes first,
-            # exactly as the typed gateway grades an HTTP caller.
-            facade = DebugToolsHttpFacade(lambda: service,
-                                          authorize=debug_http_authorizer(service))
-            status, body = facade.dispatch(
-                method, route, payload, self._debug_tools_context(auth),
-                admin=admin, wait_seconds=wait_seconds,
-            )
-        except HTTPRequestError as error:
-            status, body = error.status, {"ok": False, "error_code": "INVALID_DEBUG_REQUEST",
-                                          "error": {"code": "INVALID_DEBUG_REQUEST"}}
-        except PermissionError:
-            status, body = 403, {"ok": False, "error_code": "FORBIDDEN",
-                                 "error": {"code": "FORBIDDEN"}}
-        except (ValueError, TypeError):
-            status, body = 400, {"ok": False, "error_code": "INVALID_DEBUG_REQUEST",
-                                 "error": {"code": "INVALID_DEBUG_REQUEST"}}
-        except Exception:
-            status, body = 503, {"ok": False, "error_code": "DEBUG_TOOLS_UNAVAILABLE",
-                                 "error": {"code": "DEBUG_TOOLS_UNAVAILABLE"}}
-        self._send_json_payload(body, status=status, headers={"Cache-Control": "no-store"})
-        return True
+        return debug_tools.serve_request(
+            self, method, route, admin_authorized=_admin_authorized,
+            request_error=HTTPRequestError, facade_factory=facade,
+            parse_query=lambda: urllib.parse.parse_qs(
+                urllib.parse.urlsplit(self.path).query, keep_blank_values=True,
+                max_num_fields=1),
+        )
 
     def _handle_account_logout(self):
         """Revoke an explicitly supplied login; never infer a target account.

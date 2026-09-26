@@ -38,8 +38,12 @@ import uuid
 from typing import Any, Callable, Mapping
 
 from sonder_runtime.application.protocol.events import ProtocolEventType
-from sonder_runtime.application.protocol.facade import ProtocolApplicationFacade
+from sonder_runtime.application.protocol.facade import (
+    ProtocolApplicationFacade,
+    ProtocolAuthorizationError,
+)
 from sonder_runtime.application.protocol.mobile_parity import (
+    MobileWireError,
     decode_reconnect_request,
     encode_client_schema,
     encode_reconnect_response,
@@ -162,7 +166,77 @@ class ClientProtocolHost:
         return encode_reconnect_response(view.reconnect(request))
 
 
+class ClientProtocolHostSlot:
+    """The one host bound to the current application graph's protocol facade.
+
+    ``serve.py`` resolves the graph and passes its ``protocol``; the slot
+    builds a host (opening its ``control`` stream) the first time and again
+    only when the graph's facade changes.  ``None`` when the graph composes
+    no protocol facade.
+    """
+
+    def __init__(self, control_state: Callable[[], Mapping[str, Any]]) -> None:
+        self._control_state = control_state
+        self._lock = threading.Lock()
+        self._host: ClientProtocolHost | None = None
+
+    def fresh(self) -> "ClientProtocolHostSlot":
+        """An empty slot with the same control-state reader."""
+        return ClientProtocolHostSlot(self._control_state)
+
+    def bound_to(self, protocol: Any) -> ClientProtocolHost | None:
+        if protocol is None:
+            return None
+        with self._lock:
+            host = self._host
+            if host is None or host.protocol is not protocol:
+                host = ClientProtocolHost(protocol, control_state=self._control_state)
+                self._host = host
+            return host
+
+
+def observe_control_state(host_provider: Callable[[], Any], log: logging.Logger) -> None:
+    """Record a permission-mode change on the client control stream.
+
+    Best effort by design: the stream is a reconnect aid, so a failure to
+    publish is logged and never fails the request that changed or read the
+    mode.
+    """
+    try:
+        host = host_provider()
+        if host is not None:
+            host.observe()
+    except Exception:
+        log.warning("client control stream observation failed", exc_info=True)
+
+
+def _unavailable(noun: str, code: str) -> tuple[int, dict[str, Any]]:
+    return 503, {"error": {"message": "client %s is unavailable" % noun,
+                           "type": "server_error", "code": code}}
+
+
+def schema_response(host: ClientProtocolHost | None) -> tuple[int, dict[str, Any]]:
+    """``GET /v1/client/schema`` for an authorized caller."""
+    if host is None:
+        return _unavailable("schema", "CLIENT_SCHEMA_UNAVAILABLE")
+    return 200, host.schema_payload()
+
+
+def reconnect_response(host: ClientProtocolHost | None, body: Any) -> tuple[int, dict[str, Any]]:
+    """``POST /v1/client/reconnect`` for an authorized caller."""
+    if host is None:
+        return _unavailable("reconnect", "CLIENT_RECONNECT_UNAVAILABLE")
+    try:
+        return 200, host.reconnect(body, authenticated=True)
+    except MobileWireError as error:
+        return 400, {"error": {"message": str(error), "type": "invalid_request"}}
+    except ProtocolAuthorizationError as error:
+        return 403, {"error": {"message": str(error), "type": "forbidden",
+                               "code": "FORBIDDEN"}}
+
+
 __all__ = [
-    "CONTROL_STREAM_PREFIX", "ClientProtocolHost", "HOST_CLIENT_ID",
-    "RECONNECT_ROUTE", "SCHEMA_ROUTE",
+    "CONTROL_STREAM_PREFIX", "ClientProtocolHost", "ClientProtocolHostSlot",
+    "HOST_CLIENT_ID", "RECONNECT_ROUTE", "SCHEMA_ROUTE", "observe_control_state",
+    "reconnect_response", "schema_response",
 ]

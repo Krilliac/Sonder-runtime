@@ -1111,7 +1111,7 @@
       ]
     },
     {
-      "file_count": 63,
+      "file_count": 66,
       "name": "interfaces",
       "python_files": [
         "sonder_runtime/interfaces/__init__.py",
@@ -1133,6 +1133,7 @@
         "sonder_runtime/interfaces/http/facades/a2a.py",
         "sonder_runtime/interfaces/http/facades/a2a_jsonrpc.py",
         "sonder_runtime/interfaces/http/facades/agent_lanes.py",
+        "sonder_runtime/interfaces/http/facades/approval_routes.py",
         "sonder_runtime/interfaces/http/facades/approvals.py",
         "sonder_runtime/interfaces/http/facades/artifact_transfer.py",
         "sonder_runtime/interfaces/http/facades/build_tools.py",
@@ -1143,6 +1144,7 @@
         "sonder_runtime/interfaces/http/facades/debug_tools.py",
         "sonder_runtime/interfaces/http/facades/developer_chat.py",
         "sonder_runtime/interfaces/http/facades/extensions.py",
+        "sonder_runtime/interfaces/http/facades/fanout.py",
         "sonder_runtime/interfaces/http/facades/health_status.py",
         "sonder_runtime/interfaces/http/facades/host_tools.py",
         "sonder_runtime/interfaces/http/facades/model_request.py",
@@ -1150,6 +1152,7 @@
         "sonder_runtime/interfaces/http/facades/session.py",
         "sonder_runtime/interfaces/http/facades/testing_tools.py",
         "sonder_runtime/interfaces/http/facades/typed_gateway.py",
+        "sonder_runtime/interfaces/http/facades/work_runs.py",
         "sonder_runtime/interfaces/http/handlers.py",
         "sonder_runtime/interfaces/http/host_policy.py",
         "sonder_runtime/interfaces/http/memory_replication.py",

@@ -470,6 +470,82 @@ def _bucket_wire(bucket: Any) -> dict:
     }
 
 
+def serve_request(
+    handler: Any,
+    method: str,
+    route: str,
+    *,
+    admin_authorized: Callable[[Any], bool],
+    request_error: type[Exception],
+    parse_query: Callable[[], dict],
+    facade_factory: Callable[[], "DebugToolsHttpFacade"],
+) -> bool:
+    """Serve one ``/v1/tools/crash-*``, ``profile-*`` or ``debug-runs`` request.
+
+    ``handler`` is serve.py's request handler: this function uses its origin,
+    rate-limit and auth checks, its body readers and its JSON sender, so the
+    wire behaviour is the handler's. ``request_error`` is serve.py's
+    ``HTTPRequestError``; ``parse_query`` parses the request's query string
+    (at most one field) and ``facade_factory`` builds the admin facade over
+    the application's debug service. Returns ``False`` for a route this
+    family does not own.
+    """
+    if route_kind(method, route) is None:
+        return False
+    # do_GET has already applied the origin and auth rate-limit checks by
+    # the time it reaches this route; do_POST dispatches here first.
+    if method == "POST" and (handler._reject_disallowed_origin() or handler._auth_rate_limited()):
+        return True
+    auth = handler._request_auth_context()
+    if not auth["authorized"]:
+        handler._send_auth_error()
+        return True
+    admin = admin_authorized(auth)
+    if not admin:
+        handler._send_json_payload({"ok": False, "error_code": "FORBIDDEN",
+                                    "error": {"code": "FORBIDDEN"}}, status=403)
+        return True
+    try:
+        wait_seconds = 0
+        payload = None
+        if method == "POST" and not route.endswith("/cancel"):
+            if "?" in handler.path:
+                raise ValueError("debug tool requests take a JSON body only")
+            payload = handler._read_json(max_bytes=16 * 1024)
+        else:
+            handler._validate_request_framing()
+            if handler._unread_request_body_bytes() != 0:
+                raise ValueError("this debug route does not accept a body")
+            query = parse_query()
+            if set(query) - {"wait_seconds"} or any(len(v) != 1 for v in query.values()):
+                raise ValueError("unknown debug run query parameter")
+            if "wait_seconds" in query:
+                raw = query["wait_seconds"][0]
+                if not raw.isdigit() or len(raw) > 2:
+                    raise ValueError("wait_seconds must be 0..60")
+                wait_seconds = int(raw)
+        facade = facade_factory()
+        status, body = facade.dispatch(
+            method, route, payload, handler._debug_tools_context(auth),
+            admin=admin, wait_seconds=wait_seconds,
+        )
+    except request_error as error:
+        status, body = error.status, {"ok": False, "error_code": "INVALID_DEBUG_REQUEST",
+                                      "error": {"code": "INVALID_DEBUG_REQUEST"}}
+    except PermissionError:
+        status, body = 403, {"ok": False, "error_code": "FORBIDDEN",
+                             "error": {"code": "FORBIDDEN"}}
+    except (ValueError, TypeError):
+        status, body = 400, {"ok": False, "error_code": "INVALID_DEBUG_REQUEST",
+                             "error": {"code": "INVALID_DEBUG_REQUEST"}}
+    except Exception:
+        status, body = 503, {"ok": False, "error_code": "DEBUG_TOOLS_UNAVAILABLE",
+                             "error": {"code": "DEBUG_TOOLS_UNAVAILABLE"}}
+    handler._send_json_payload(body, status=status, headers={"Cache-Control": "no-store"})
+    return True
+
+
 __all__ = [
     "DebugToolsHttpFacade", "MAX_RESPONSE_BYTES", "POST_ROUTES", "route_kind", "run_id_of",
+    "serve_request",
 ]

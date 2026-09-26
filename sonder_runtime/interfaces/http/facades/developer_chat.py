@@ -26,14 +26,17 @@ would make, and nothing else:
 
 Console-only forms (``/test cancel``, ``/crash symbols``, ``/crash fix``,
 ``--repro``) answer with where to run them instead. This module parses and
-renders only; ``serve.py`` authenticates, derives the principal and sends.
+renders, and ``reply`` runs one line through callables ``serve.py`` injects
+(authority checks, principal, workspace roots, the application graph and the
+debug facade); ``serve.py`` authenticates and sends.
 """
 from __future__ import annotations
 
 import json
 import re
+import uuid
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from ...repl.facades import build_tools as repl_build
 from ...repl.facades import debug_tools as repl_debug
@@ -339,8 +342,75 @@ def error_code(body: Mapping[str, Any]) -> str:
     return _error_parts(body)[0]
 
 
+def reply(
+    cmd: str,
+    arg: str,
+    context: Any,
+    *,
+    admin_authorized: Callable[[Any], bool],
+    developer_authorized: Callable[[Any], bool],
+    principal_of: Callable[[Any], str],
+    workspace_roots_of: Callable[[Any], tuple],
+    application: Callable[[], Any],
+    debug_facade: Callable[[Any], Any],
+    debug_context: Callable[[Any, str], Any],
+) -> str:
+    """Answer one chat line with exactly the call its HTTP route makes.
+
+    A typed gateway call as the authenticated principal with
+    ``source="http"``, or an admin ``DebugToolsHttpFacade`` request (same
+    guard, grading and caps as ``/v1/tools/crash-*``). The authority check is
+    the route's: developer or admin for ``/build`` and ``/fix-build``, admin
+    for ``/test``, ``/digest``, ``/crash`` and ``/profile``.
+    """
+    admin_only = cmd in ADMIN_COMMANDS
+    if not isinstance(context, dict):
+        return "refused %s: an authenticated HTTP caller is required" % cmd
+    allowed = admin_authorized(context) if admin_only else developer_authorized(context)
+    if not allowed:
+        return "refused %s: %s authority is required" % (
+            cmd, "admin" if admin_only else "developer or admin")
+    principal = principal_of(context)
+    if not principal:
+        return "refused %s: authenticated account identity is unavailable" % cmd
+    try:
+        call = parse_chat_command(cmd, arg)
+    except ChatUsage as usage:
+        return str(usage)
+    app = application()
+    if isinstance(call, TypedCall):
+        from .typed_gateway import execute_typed_call
+
+        roots = workspace_roots_of(context)
+        auth_level = "admin" if admin_authorized(context) else "developer"
+        while True:
+            status, body = execute_typed_call(
+                lambda: getattr(app, "tools", None), call.tool, call.arguments,
+                call.codes, principal_id=principal, workspace_roots=roots,
+                auth_level=auth_level,
+            )
+            if (call.fallback is not None and status == 404
+                    and error_code(body) == "JOB_NOT_FOUND"):
+                call = call.fallback
+                continue
+            return render_typed(call, status, body)
+    facade = debug_facade(app)
+    try:
+        operation = debug_context(context, "chat-" + uuid.uuid4().hex)
+    except PermissionError:
+        return "refused %s: authenticated account identity is unavailable" % cmd
+    while True:
+        status, body = facade.dispatch(call.method, call.route, call.payload, operation,
+                                       admin=True, wait_seconds=call.wait_seconds)
+        if (call.fallback is not None and status >= 400
+                and error_code(body) == call.on_code):
+            call = call.fallback
+            continue
+        return render_debug(call, status, body)
+
+
 __all__ = [
     "ADMIN_COMMANDS", "CHAT_COMMANDS", "ChatUsage", "DEVELOPER_COMMANDS", "DIGEST_USAGE",
     "DebugCall", "TEST_USAGE", "TypedCall", "error_code", "parse_chat_command",
-    "render_debug", "render_refusal", "render_typed",
+    "render_debug", "render_refusal", "render_typed", "reply",
 ]

@@ -161,7 +161,59 @@ def execute_typed_call(tools_getter: Callable[[], Any], tool: str, arguments: Ma
     return 200, body
 
 
+def serve_developer_route(
+    handler: Any, method: str, path: str, payload: Any, routes_type: Any, *,
+    invalid_code: str, read_noun: str, admin_only: bool,
+    admin_authorized: Callable[[Any], bool], developer_authorized: Callable[[Any], bool],
+    query_of: Callable[[], dict], principal_of: Callable[[Any], str],
+    workspace_roots_of: Callable[[Any], tuple], application: Callable[[], Any],
+) -> bool:
+    """Authenticate, bind the principal, and send one typed gateway route.
+
+    ``admin_only`` requires admin authority; otherwise developer or admin
+    authority is required. Workspace roots are passed only for admin
+    callers; the permission modes grade every call as an unattended HTTP
+    caller. ``handler`` is serve.py's request handler (auth, body framing and
+    JSON sender); ``query_of`` parses the query string and may raise
+    ``ValueError``.
+    """
+    auth = handler._request_auth_context()
+    if not auth.get("authorized"):
+        handler._send_auth_error()
+        return True
+    allowed = admin_authorized(auth) if admin_only else developer_authorized(auth)
+    if not allowed:
+        handler._send_json_payload({"error": {"code": "FORBIDDEN", "message": (
+            "admin authority is required" if admin_only
+            else "developer or admin authority is required")}}, status=403)
+        return True
+    try:
+        query = query_of()
+    except ValueError:
+        handler._send_json_payload({"error": {"code": invalid_code}}, status=400)
+        return True
+    if method == "GET" and handler._unread_request_body_bytes() != 0:
+        handler._send_json_payload({"error": {"code": invalid_code,
+                                              "message": "%s do not accept a body" % read_noun}},
+                                   status=400)
+        return True
+    principal = principal_of(auth)
+    if not principal:
+        handler._send_json_payload({"error": {"code": "FORBIDDEN"}}, status=403)
+        return True
+    app = application()
+    roots = workspace_roots_of(auth)
+    routes = routes_type(lambda: getattr(app, "tools", None))
+    status, body = routes.dispatch(
+        method, path, query, payload, principal_id=principal, workspace_roots=roots,
+        auth_level="admin" if admin_authorized(auth) else "developer",
+    )
+    handler._send_json_payload(body, status=status, headers={"Cache-Control": "no-store"})
+    return True
+
+
 __all__ = [
     "GatewayErrorCodes", "MAX_BODY_KEYS", "MethodNotAllowed", "UnknownRoute",
     "error_response", "execute_typed_call", "parse_body", "parse_output", "parse_query",
+    "serve_developer_route",
 ]
