@@ -186,7 +186,8 @@ Nothing is launched to find a repro. You (or the model) fix the code and run
 the existing build and test tools.
 
 When strategy tracing is on, each later console `/test` of exactly that repro
-(same runner and selector) that finishes as passed or failed is recorded as
+(same runner and selector), run in the same checkout `/crash fix` ran in
+(the same workspace root), that finishes as passed or failed is recorded as
 one attempt of this crash in the strategy trace, with the metric
 `crash_reproduced` (1 while the repro still crashes, 0 once it passes,
 minimized) and the handoff's `CRASH_REPRODUCED` failure while it still
@@ -195,7 +196,9 @@ crashes. The console prints one line such as
 numbered from the trace's own history of this crash in this checkout, so a
 restarted console continues the run; at most 12 are recorded. A run that
 errored, found no tests, timed out or was cancelled records nothing, and
-with tracing off nothing is recorded or shown. Only the console `/test` path
+with tracing off nothing is recorded or shown. A `/test` of the same test in
+another checkout records nothing, since it says nothing about this crash.
+Only the console `/test` path
 records attempts; a test run through another surface does not.
 
 ## Never done

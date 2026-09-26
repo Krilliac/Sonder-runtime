@@ -18,6 +18,7 @@ Ctrl+C while waiting cancels the run (the provider kills the process tree).
 """
 from __future__ import annotations
 
+import os
 import re
 import shlex
 import time
@@ -393,16 +394,27 @@ def crash_fix_brief(
     return render_crash_fix_brief(handoff, run_id=identifier)
 
 
+def _same_checkout(first: str, second: str) -> bool:
+    """Whether two workspace roots name the same checkout ("" only matches "")."""
+    if not first or not second:
+        return first == second
+    return os.path.normcase(os.path.realpath(first)) == os.path.normcase(os.path.realpath(second))
+
+
 def crash_repro_observation(
     report: Any,
     *,
+    workspace_root: str,
     trace_getter: Callable[[], Any],
     observe: Callable[..., Any],
 ) -> str | None:
     """Record a finished ``/test`` run of the remembered crash repro.
 
     Only a run of exactly the repro ``/crash fix`` named (same runner and
-    selector) that measured something counts (``crash_reproduced_in``); it
+    selector), in the checkout ``/crash fix`` ran in (``workspace_root`` is
+    the ``/test`` run's own workspace root), that measured something counts
+    (``crash_reproduced_in``); a pass of the same test in another checkout
+    says nothing about this crash. It
     becomes one attempt of that crash in the strategy trace, with the metric
     ``crash_reproduced`` going 1 -> 0 once the crash is gone. Without strategy
     tracing (``trace_getter()`` is None) nothing is recorded and nothing is
@@ -410,6 +422,8 @@ def crash_repro_observation(
     """
     handoff = _REPRO_WATCH.get("handoff")
     if handoff is None:
+        return None
+    if not _same_checkout(str(workspace_root or ""), str(_REPRO_WATCH.get("project", ""))):
         return None
     reproduced = crash_reproduced_in(report, handoff.repro)
     if reproduced is None:

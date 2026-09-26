@@ -2517,6 +2517,9 @@ def _test_command(
 def _crash_repro_note(services, job_id, context):
     """Record a finished ``/test`` of the ``/crash fix`` repro as a crash-fix attempt.
 
+    Only a run in the checkout ``/crash fix`` ran in counts; ``context`` is the
+    ``/test`` run's own, so its workspace root is compared with that checkout.
+
     The strategy trace is optional: without it (rollout off, or unavailable)
     nothing is recorded and nothing is shown. The run's own report is read
     once, without waiting; a run that measured nothing about the crash is
@@ -2534,8 +2537,10 @@ def _crash_repro_note(services, job_id, context):
     from sonder_runtime.bootstrap.debug_tools import observe_crash_repro
     from sonder_runtime.bootstrap.strategy import try_configured_strategy_trace
 
+    roots = tuple(getattr(context, "workspace_roots", ()) or ())
     return _crash_repro_observation(
-        report, trace_getter=try_configured_strategy_trace, observe=observe_crash_repro,
+        report, workspace_root=str(roots[0]) if roots else "",
+        trace_getter=try_configured_strategy_trace, observe=observe_crash_repro,
     )
 
 

@@ -155,7 +155,7 @@ def test_crash_fix_then_the_repro_run_records_an_attempt(trace):
                                    repro="game_tests")
     assert "/test ctest game_tests" in brief
     observe = lambda report: facade.crash_repro_observation(  # noqa: E731
-        report, trace_getter=lambda: trace, observe=observe_crash_repro)
+        report, workspace_root=PROJECT, trace_getter=lambda: trace, observe=observe_crash_repro)
 
     assert observe(RunReport("ctest", "game_tests", "failed", (CRASHED,))) == (
         "crash repro still crashes: crash_reproduced 1 -> 1 (attempt 1)")
@@ -174,10 +174,12 @@ def test_without_a_strategy_trace_or_a_crash_fix_nothing_is_recorded(trace):
         calls.append(args)
 
     passed = RunReport("ctest", "game_tests", "passed")
-    assert facade.crash_repro_observation(passed, trace_getter=lambda: trace,
+    assert facade.crash_repro_observation(passed, workspace_root=PROJECT,
+                                          trace_getter=lambda: trace,
                                           observe=observe) is None  # no /crash fix yet
     facade.crash_fix_brief(_crash_service(), "crash-run-1", _context(), repro="game_tests")
-    assert facade.crash_repro_observation(passed, trace_getter=lambda: None,
+    assert facade.crash_repro_observation(passed, workspace_root=PROJECT,
+                                          trace_getter=lambda: None,
                                           observe=observe) is None  # tracing off
     assert calls == []
 
@@ -189,6 +191,7 @@ def test_a_trace_fault_is_reported_not_raised():
         raise ValueError("strategy history cannot be restored safely")
 
     note = facade.crash_repro_observation(RunReport("ctest", "game_tests", "passed"),
+                                          workspace_root=PROJECT,
                                           trace_getter=lambda: object(), observe=broken)
     assert note == "crash repro not recorded: ValueError"
 
@@ -256,3 +259,34 @@ def test_the_console_records_the_repro_run_after_crash_fix(monkeypatch, trace):
     handoff = facade._REPRO_WATCH["handoff"]
     (attempt,) = trace.history(crash_repro_run_id(handoff, PROJECT))
     assert attempt.outcome == "succeeded"
+
+
+def test_a_repro_run_in_another_checkout_records_nothing(monkeypatch, trace):
+    """/crash fix in checkout A, then a passing /test of the same test in
+    checkout B: B's pass says nothing about A's crash and is not an attempt."""
+    import sonder_runtime.bootstrap.strategy as strategy
+
+    other = "/w/other-game"
+    runs = ScriptedTestRuns(_test_report("failed", (CRASHED,)))
+    monkeypatch.setattr(repl, "_developer_services", lambda: SimpleNamespace(test_runs=runs))
+    monkeypatch.setattr(repl, "_debug_services", _crash_service)
+    monkeypatch.setattr(repl, "_crash_source_lookup", lambda workspace="": None)
+    monkeypatch.setattr(repl, "_RECENT_TEST_JOBS", [])
+    monkeypatch.setattr(strategy, "try_configured_strategy_trace", lambda: trace)
+    repl._test_command("ctest game_tests", PROJECT, poll_seconds=0.0, out=lambda line: None)
+    monkeypatch.setattr(repl, "_emit", lambda text: None)
+    repl._crash_command("fix crash-run-1", PROJECT)
+    handoff = facade._REPRO_WATCH["handoff"]
+    assert handoff is not None
+
+    runs.report = _test_report("passed")
+    out = []
+    repl._test_command("ctest game_tests", other, poll_seconds=0.0, out=out.append)
+    assert not any(line.startswith("crash repro") for line in out)
+    assert tuple(trace.history(crash_repro_run_id(handoff, PROJECT))) == ()
+    assert tuple(trace.history(crash_repro_run_id(handoff, other))) == ()
+
+    # The same run in the crash's own checkout is still attempt 1.
+    out = []
+    repl._test_command("ctest game_tests", PROJECT, poll_seconds=0.0, out=out.append)
+    assert out[-1] == "crash repro passes: crash_reproduced 1 -> 0 (attempt 1)"
