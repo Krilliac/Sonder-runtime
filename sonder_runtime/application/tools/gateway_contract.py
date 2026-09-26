@@ -441,8 +441,10 @@ class ToolGateway:
         (child run, worker, dispatch attempt, call ordinal and the canonical
         request digest), so a resumed runner that re-issues it meets the
         settled receipt (``SettledEffectReplay``) or, for a different
-        request at that ordinal, ``DivergentEffectReplay``.  Every other
-        caller keeps its own ``request_id`` as the key.
+        request at that ordinal, ``DivergentEffectReplay``.  The sequence
+        consumes an ordinal only for a durably admitted or settled call; any
+        other admission failure halts it, so no later call of that runner
+        runs.  Every other caller keeps its own ``request_id`` as the key.
         """
         calls = gateway_calls.current()
         if calls is None:
@@ -452,14 +454,9 @@ class ToolGateway:
                 request_digest=_digest(dict(request.arguments)),
                 reconciliation=request.permission.reconciliation,
             )
-        call = calls.allocate(
+        return calls.admit(
             journal_binding, tool_name=request.tool_name,
             arguments=request.arguments, effects=request.permission.effects,
-        )
-        return journal_binding.begin_request(
-            operation_id=call.operation_id,
-            idempotency_key=call.idempotency_key,
-            request_digest=call.request_digest,
             reconciliation=request.permission.reconciliation,
         )
 

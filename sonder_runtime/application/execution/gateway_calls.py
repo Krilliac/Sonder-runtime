@@ -26,6 +26,15 @@ therefore carries the settled idempotency key and is refused with
 ``SettledEffectReplay`` before any journal write.  A different request at
 that ordinal addresses the same intent id with a different key and is
 refused with ``DivergentEffectReplay``; nothing runs.
+
+An ordinal is consumed only when the journal durably admitted the call or
+matched it to a settled receipt.  Any other admission failure (a divergent
+replay, a transient journal error) halts the sequence: every later call of
+that runner incarnation is refused, no checkpoint can be stamped from it,
+and the provider fails the child as ``recovery_required`` even if the runner
+swallowed the error.  A runner can therefore never move past a call the
+journal did not account for, and a later retry can never land at an ordinal
+that a resumed runner would address differently.
 """
 from __future__ import annotations
 
@@ -39,7 +48,12 @@ from dataclasses import dataclass
 from threading import Lock
 from typing import Any
 
-from .effect_journal import EffectJournalError, JournalBinding
+from .effect_journal import (
+    EffectIntent,
+    EffectJournalError,
+    JournalBinding,
+    SettledEffectReplay,
+)
 
 GATEWAY_CALL_CONTRACT = "gateway-call-v1"
 _OPERATION_PREFIX = "gateway-call:"
@@ -103,14 +117,32 @@ def gateway_request_digest(tool_name: str, arguments: Mapping[str, Any],
     ).encode("utf-8")).hexdigest()
 
 
+class GatewayCallSequenceHalted(EffectJournalError):
+    """A gateway call was refused because an earlier admission failed.
+
+    The runner incarnation that owns the sequence may not issue further
+    effects; its child must fail and resume from its last checkpoint.
+    """
+
+    def __init__(self, cause: str) -> None:
+        super().__init__(
+            "gateway call sequence halted after an unaccounted admission failure "
+            f"({cause}); the child must resume from its checkpoint"
+        )
+        self.cause = cause
+
+
 class GatewayCallSequence:
     """Host-owned ordinal allocator for one child runner incarnation.
 
-    ``issued`` is the number of ordinals allocated so far, starting from the
-    value a resumed runner's checkpoint recorded.  Allocation is serialized,
-    and an ordinal is consumed even when the journal then refuses the call,
-    so a runner that re-issues its calls in order meets them again at the
-    same ordinals.
+    ``issued`` is the number of ordinals consumed so far, starting from the
+    value a resumed runner's checkpoint recorded.  ``admit`` holds the
+    sequence lock across journal admission, so ordinals are assigned in
+    admission order and a failed admission never leaves a gap: the ordinal
+    is consumed only when the intent is durably admitted or the call is
+    matched to its settled receipt (``SettledEffectReplay``).  Any other
+    failure halts the sequence (see ``halted``) instead of handing the next
+    call a different ordinal.
     """
 
     def __init__(self, *, run_id: str, worker_id: str, child_id: str,
@@ -127,6 +159,7 @@ class GatewayCallSequence:
         self.run_id, self.worker_id, self.child_id = run_id, worker_id, child_id
         self.dispatch_attempt = dispatch_attempt
         self._issued = issued
+        self._halted: str | None = None
         self._lock = Lock()
 
     @property
@@ -134,23 +167,18 @@ class GatewayCallSequence:
         with self._lock:
             return self._issued
 
-    def allocate(self, binding: JournalBinding, *, tool_name: str,
-                 arguments: Mapping[str, Any], effects: Iterable[str]) -> GatewayCallIdentity:
-        """Allocate the next ordinal and derive the call's journal identity.
-
-        The journal binding in force must be this child's run and worker;
-        anything else is refused before an ordinal is consumed.
-        """
-        if not isinstance(binding, JournalBinding) or (
-            binding.run_id, binding.worker_id,
-        ) != (self.run_id, self.worker_id):
-            raise EffectJournalError(
-                "gateway call sequence does not belong to the bound journal run"
-            )
-        digest = gateway_request_digest(tool_name, arguments, effects)
+    @property
+    def halted(self) -> str | None:
+        """Why the sequence halted (the failing admission's error type), or ``None``."""
         with self._lock:
-            self._issued += 1
-            ordinal = self._issued
+            return self._halted
+
+    def identity(self, ordinal: int, *, tool_name: str, arguments: Mapping[str, Any],
+                 effects: Iterable[str]) -> GatewayCallIdentity:
+        """The journal identity of a request at ``ordinal``; pure, consumes nothing."""
+        if type(ordinal) is not int or ordinal < 1:
+            raise EffectJournalError("gateway call ordinal must be positive")
+        digest = gateway_request_digest(tool_name, arguments, effects)
         return GatewayCallIdentity(
             ordinal,
             gateway_call_operation_id(self.child_id, self.dispatch_attempt, ordinal),
@@ -161,6 +189,52 @@ class GatewayCallSequence:
             ),
             digest,
         )
+
+    def admit(self, binding: JournalBinding, *, tool_name: str,
+              arguments: Mapping[str, Any], effects: Iterable[str],
+              reconciliation: str = "manual") -> EffectIntent:
+        """Journal the call's intent at the next ordinal.
+
+        The journal binding in force must be this child's run and worker, and
+        the request must be well formed; either refusal happens before an
+        ordinal is addressed and does not halt the sequence.  Then, under
+        the sequence lock: ``SettledEffectReplay`` consumes the ordinal (the
+        call is the one that settled there) and propagates; any other
+        failure halts the sequence without consuming it and propagates;
+        success consumes it and returns the admitted intent.
+        """
+        if not isinstance(binding, JournalBinding) or (
+            binding.run_id, binding.worker_id,
+        ) != (self.run_id, self.worker_id):
+            raise EffectJournalError(
+                "gateway call sequence does not belong to the bound journal run"
+            )
+        effects = tuple(effects)
+        gateway_request_digest(tool_name, arguments, effects)
+        with self._lock:
+            if self._halted is not None:
+                raise GatewayCallSequenceHalted(self._halted)
+            ordinal = self._issued + 1
+            try:
+                call = self.identity(ordinal, tool_name=tool_name,
+                                     arguments=arguments, effects=effects)
+                intent = binding.begin_request(
+                    operation_id=call.operation_id,
+                    idempotency_key=call.idempotency_key,
+                    request_digest=call.request_digest,
+                    reconciliation=reconciliation,
+                )
+            except SettledEffectReplay:
+                self._issued = ordinal
+                raise
+            except BaseException as error:
+                # Durability of the failed admission is unknown to the
+                # runner; moving on would hand its retry a new ordinal that
+                # a resumed runner re-addresses at this one.
+                self._halted = type(error).__name__
+                raise
+            self._issued = ordinal
+            return intent
 
 
 _CURRENT: contextvars.ContextVar[GatewayCallSequence | None] = contextvars.ContextVar(
@@ -187,6 +261,6 @@ def bound(sequence: GatewayCallSequence) -> Iterator[GatewayCallSequence]:
 
 __all__ = [
     "GATEWAY_CALL_CONTRACT", "GatewayCallIdentity", "GatewayCallOperation",
-    "GatewayCallSequence", "bound", "current", "gateway_call_operation_id",
-    "gateway_request_digest", "parse_gateway_call_operation",
+    "GatewayCallSequence", "GatewayCallSequenceHalted", "bound", "current",
+    "gateway_call_operation_id", "gateway_request_digest", "parse_gateway_call_operation",
 ]

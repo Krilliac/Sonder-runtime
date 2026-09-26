@@ -36,6 +36,7 @@ from sonder_runtime.application.execution.effect_journal import (
 )
 from sonder_runtime.application.execution.gateway_calls import (
     GatewayCallSequence,
+    GatewayCallSequenceHalted,
     gateway_call_operation_id,
     gateway_request_digest,
     parse_gateway_call_operation,
@@ -88,14 +89,41 @@ def _sequence(issued: int = 0, *, attempt: int = 1) -> GatewayCallSequence:
 # --- identity -------------------------------------------------------------
 
 
+class _Journal:
+    """Minimal journal: records admitted intents, optionally fails ``begin``."""
+
+    def __init__(self, fail: BaseException | None = None):
+        self.fail = fail
+        self.intents = {}
+
+    def get(self, intent_id):
+        return self.intents.get(intent_id)
+
+    def begin(self, intent):
+        if self.fail is not None:
+            error, self.fail = self.fail, None
+            raise error
+        self.intents[intent.intent_id] = intent
+        return intent
+
+
+def _admit(sequence, binding, content="x"):
+    return sequence.admit(binding, tool_name="write_file",
+                          arguments={"path": "a", "content": content},
+                          effects={"write_files"})
+
+
 def test_call_identity_is_fixed_by_child_attempt_and_ordinal_and_keyed_by_request():
-    binding = JournalBinding(object(), RUN, WORKER, 1, "/workspace")  # type: ignore[arg-type]
+    binding = JournalBinding(_Journal(), RUN, WORKER, 1, "/workspace")  # type: ignore[arg-type]
     request = {"tool_name": "write_file", "arguments": {"path": "a", "content": "x"},
                "effects": {"write_files"}}
-    first = _sequence().allocate(binding, **request)
-    second = _sequence().allocate(replace(binding, owner_epoch=7), **request)
+    first = _sequence().identity(1, **request)
+    admitted = _admit(_sequence(), binding)
     # A new incarnation (new epoch) re-derives the same identity.
-    assert first == second
+    again = _admit(_sequence(), replace(binding, journal=_Journal(), owner_epoch=7))
+    assert (admitted.operation_id, admitted.idempotency_key, admitted.request_digest) \
+        == (again.operation_id, again.idempotency_key, again.request_digest) \
+        == (first.operation_id, first.idempotency_key, first.request_digest)
     assert first.ordinal == 1
     assert first.operation_id == gateway_call_operation_id(CHILD, 1, 1)
     assert parse_gateway_call_operation(first.operation_id) == gateway_calls.GatewayCallOperation(
@@ -108,7 +136,7 @@ def test_call_identity_is_fixed_by_child_attempt_and_ordinal_and_keyed_by_reques
         "gateway-call", RUN, WORKER, CHILD, 1, 1, first.request_digest,
     ]
     # A different request at the same ordinal: same intent id, different key.
-    other = _sequence().allocate(binding, tool_name="write_file",
+    other = _sequence().identity(1, tool_name="write_file",
                                  arguments={"path": "a", "content": "y"},
                                  effects={"write_files"})
     assert other.operation_id == first.operation_id
@@ -119,10 +147,14 @@ def test_call_identity_is_fixed_by_child_attempt_and_ordinal_and_keyed_by_reques
     assert gateway_request_digest("write_file", {"path": "a", "content": "x"}, []) \
         != first.request_digest
     # The dispatch attempt and a resumed starting ordinal move the identity.
-    assert _sequence(attempt=2).allocate(binding, **request).operation_id \
+    assert _sequence(attempt=2).identity(1, **request).operation_id \
         == gateway_call_operation_id(CHILD, 2, 1)
     resumed = _sequence(issued=3)
-    assert resumed.allocate(binding, **request).ordinal == 4 and resumed.issued == 4
+    assert _admit(resumed, replace(binding, journal=_Journal())).operation_id \
+        == gateway_call_operation_id(CHILD, 1, 4)
+    assert resumed.issued == 4
+    with pytest.raises(EffectJournalError):
+        _sequence().identity(0, **request)
     for text in ("gateway-call:c#dispatch-attempt-0#call-1", "gateway-call:c#call-1",
                  "subagent-dispatch:c", "gateway-call:#dispatch-attempt-1#call-1"):
         assert parse_gateway_call_operation(text) is None
@@ -132,15 +164,30 @@ def test_sequence_refuses_a_foreign_journal_binding_without_consuming_an_ordinal
     sequence = _sequence()
     for run_id, worker_id in ((RUN + "-other", WORKER), (RUN, WORKER + "-other")):
         with pytest.raises(EffectJournalError, match="does not belong"):
-            sequence.allocate(
-                JournalBinding(object(), run_id, worker_id, 1, "/w"),  # type: ignore[arg-type]
-                tool_name="write_file", arguments={}, effects=(),
-            )
-    assert sequence.issued == 0
+            _admit(sequence, JournalBinding(_Journal(), run_id, worker_id, 1, "/w"))  # type: ignore[arg-type]
+    # A malformed request is refused before any ordinal is addressed.
+    with pytest.raises(EffectJournalError, match="tool name"):
+        sequence.admit(JournalBinding(_Journal(), RUN, WORKER, 1, "/w"),  # type: ignore[arg-type]
+                       tool_name=" ", arguments={}, effects=())
+    assert (sequence.issued, sequence.halted) == (0, None)
     for bad in ({"dispatch_attempt": 0}, {"issued": -1}, {"child_id": " "}):
         with pytest.raises(EffectJournalError):
             GatewayCallSequence(**{"run_id": RUN, "worker_id": WORKER, "child_id": CHILD,
                                    "dispatch_attempt": 1, "issued": 0, **bad})
+
+
+def test_a_failed_admission_halts_the_sequence_without_consuming_its_ordinal():
+    journal = _Journal(fail=sqlite3.OperationalError("database is locked"))
+    binding = JournalBinding(journal, RUN, WORKER, 1, "/w")  # type: ignore[arg-type]
+    sequence = _sequence()
+    with pytest.raises(sqlite3.OperationalError):
+        _admit(sequence, binding)
+    assert (sequence.issued, sequence.halted) == (0, "OperationalError")
+    # The journal would now accept the retry, but the runner may not move
+    # past a call the journal did not account for.
+    with pytest.raises(GatewayCallSequenceHalted, match="OperationalError"):
+        _admit(sequence, binding)
+    assert sequence.issued == 0 and journal.intents == {}
 
 
 # --- gateway --------------------------------------------------------------
@@ -251,6 +298,75 @@ def test_gateway_refuses_a_call_sequence_for_another_run(tmp_path):
     assert invoker.calls == [] and journal.high_water("other-run") == 0
 
 
+def _resumed_after_crash(journal, *, issued: int = 0):
+    """Settled receipts and binding for a resumed incarnation (epoch 2)."""
+    journal.claim_owner(RUN, WORKER, 2)
+    settled = {record.idempotency_key: record.receipt_key
+               for record in journal.effects_since(RUN, 0).records}
+    return JournalBinding(journal, RUN, WORKER, 2, "/w"), settled
+
+
+def test_runner_that_swallows_a_divergent_replay_cannot_rerun_a_settled_call(tmp_path):
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    gateway, invoker = _gateway()
+    with bound(JournalBinding(journal, RUN, WORKER, 1, "/w")), \
+            gateway_calls.bound(_sequence()):
+        gateway.execute(_request("fresh-1", "x"))
+    # Crash; resume from a checkpoint at ordinal 0 with the receipts bound.
+    binding, settled = _resumed_after_crash(journal)
+    with bound(binding), settled_receipts(settled), \
+            gateway_calls.bound(_sequence(issued=0)) as calls:
+        with pytest.raises(DivergentEffectReplay):
+            gateway.execute(_request("fresh-2", "z"))
+        # The runner handles the refusal and asks for the call that settled.
+        # It must not run again at a fresh ordinal.
+        with pytest.raises(GatewayCallSequenceHalted, match="DivergentEffectReplay"):
+            gateway.execute(_request("fresh-3", "x"))
+        with pytest.raises(GatewayCallSequenceHalted):
+            gateway.execute(_request("fresh-4", "new"))
+        assert (calls.issued, calls.halted) == (0, "DivergentEffectReplay")
+    assert [call["content"] for call in invoker.calls] == ["x"]
+    assert [(r.operation_id, r.state) for r in journal.effects_since(RUN, 0).records] == [
+        (gateway_call_operation_id(CHILD, 1, 1), EffectState.COMPLETED),
+    ]
+
+
+def test_transient_admission_failure_then_retry_cannot_shift_a_settled_ordinal(
+    tmp_path, monkeypatch,
+):
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    gateway, invoker = _gateway()
+    actual_begin = journal.begin
+    failures = [sqlite3.OperationalError("database is locked")]
+
+    def begin_once_locked(intent):
+        if failures:
+            raise failures.pop()
+        return actual_begin(intent)
+
+    monkeypatch.setattr(journal, "begin", begin_once_locked)
+    with bound(JournalBinding(journal, RUN, WORKER, 1, "/w")), \
+            gateway_calls.bound(_sequence()) as calls:
+        with pytest.raises(sqlite3.OperationalError):
+            gateway.execute(_request("fresh-1", "x"))
+        # The runner retries: refused, so nothing settles at ordinal 2.
+        with pytest.raises(GatewayCallSequenceHalted, match="OperationalError"):
+            gateway.execute(_request("fresh-2", "x"))
+        assert calls.issued == 0
+    assert invoker.calls == [] and journal.high_water(RUN) == 0
+
+    # The child fails and resumes from ordinal 0: the call runs once, at 1.
+    binding, settled = _resumed_after_crash(journal)
+    with bound(binding), settled_receipts(settled), \
+            gateway_calls.bound(_sequence(issued=0)) as calls:
+        gateway.execute(_request("fresh-3", "x"))
+        assert (calls.issued, calls.halted) == (1, None)
+    assert [call["content"] for call in invoker.calls] == ["x"]
+    assert [(r.operation_id, r.state) for r in journal.effects_since(RUN, 0).records] == [
+        (gateway_call_operation_id(CHILD, 1, 1), EffectState.COMPLETED),
+    ]
+
+
 # --- provenance -----------------------------------------------------------
 
 
@@ -286,6 +402,14 @@ def test_stamp_records_the_bound_ordinal_and_refuses_a_foreign_sequence(tmp_path
     ):
         with gateway_calls.bound(foreign), pytest.raises(CheckpointProvenanceError):
             stamp(_subject())
+    halted = _sequence(issued=2)
+    with pytest.raises(sqlite3.OperationalError):
+        _admit(halted, JournalBinding(
+            _Journal(fail=sqlite3.OperationalError("database is locked")),  # type: ignore[arg-type]
+            RUN, WORKER, 1, "/w",
+        ))
+    with gateway_calls.bound(halted), pytest.raises(CheckpointProvenanceError, match="halted"):
+        stamp(_subject())
 
 
 def _v1(provenance: CheckpointProvenance) -> CheckpointProvenance:
@@ -402,14 +526,34 @@ def test_validator_hands_back_the_ordinal_and_refuses_one_behind_the_journal(tmp
     assert behind.reason is CheckpointResumeRefusal.GATEWAY_ORDINAL_BEHIND_JOURNAL
 
 
-def test_validator_refuses_a_version_one_checkpoint_followed_by_a_request_id_keyed_call(tmp_path):
+def test_validator_refuses_a_request_id_keyed_call_after_any_checkpoint(tmp_path):
     journal, source = _source(tmp_path)
     _complete(journal, "op-a", "key-a")
     journal.claim_owner(RUN, WORKER, 2)
     assert _validate(_checkpoint(source, ordinal=0, position=0, legacy=True), source).allowed
-    _complete(journal, "fresh-request-id", "fresh-request-id", epoch=2)
-    refused = _validate(_checkpoint(source, ordinal=0, position=0, legacy=True), source)
-    assert refused.reason is CheckpointResumeRefusal.LEGACY_GATEWAY_CALL_AFTER_POSITION
-    # The same journal is fine for a version-2 checkpoint: its later calls
-    # carry deterministic identities.
     assert _validate(_checkpoint(source, ordinal=0, position=0), source).allowed
+    _complete(journal, "fresh-request-id", "fresh-request-id", epoch=2)
+    # Version 1 predates deterministic identities.  In a version-2 run such
+    # an intent means a runner bound the child's journal without its call
+    # sequence; a resumed runner would re-issue it under another key.
+    for legacy in (True, False):
+        refused = _validate(_checkpoint(source, ordinal=0, position=0, legacy=legacy), source)
+        assert refused.reason is CheckpointResumeRefusal.REQUEST_ID_KEYED_CALL_AFTER_POSITION
+
+
+def test_validator_refuses_a_gap_in_the_gateway_calls_after_the_checkpoint(tmp_path):
+    journal, source = _source(tmp_path)
+    _complete(journal, gateway_call_operation_id(CHILD, 1, 1), "call-1")
+    _complete(journal, gateway_call_operation_id(CHILD, 1, 3), "call-3")
+    journal.claim_owner(RUN, WORKER, 2)
+    gap = _validate(_checkpoint(source, ordinal=0, position=0), source)
+    assert gap.reason is CheckpointResumeRefusal.GATEWAY_ORDINAL_GAP
+    assert "call 3, expected 2" in gap.detail
+    # Resumed after ordinal 1 the gap is still the first thing it meets.
+    assert _validate(_checkpoint(source, ordinal=1, position=1), source).reason \
+        is CheckpointResumeRefusal.GATEWAY_ORDINAL_GAP
+    # A checkpoint that covers both calls has nothing after it to re-address.
+    assert _validate(_checkpoint(source, ordinal=3, position=2), source).allowed
+    # Ordinals that do not start right after the checkpoint's are a gap too.
+    assert _validate(_checkpoint(source, ordinal=1, position=0), source).reason \
+        is CheckpointResumeRefusal.GATEWAY_ORDINAL_GAP

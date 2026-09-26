@@ -122,7 +122,8 @@ class JournalProvenanceStamp:
     runner had issued (the ``GatewayCallSequence`` the provider binds for
     the runner thread), so a runner resumed from this checkpoint re-issues
     its later calls at the same ordinals.  A sequence bound for another
-    child run refuses the stamp; no bound sequence records zero, which is
+    child run refuses the stamp, and so does a halted sequence (an admission
+    it could not account for); no bound sequence records zero, which is
     exact because the gateway then journals no deterministic call.
     """
 
@@ -152,6 +153,12 @@ class JournalProvenanceStamp:
                 binding.run_id, binding.worker_id, subject.child_id):
             raise CheckpointProvenanceError(
                 "gateway call sequence belongs to a different child run"
+            )
+        if calls is not None and calls.halted is not None:
+            # A halted sequence no longer accounts for every call the runner
+            # tried; the child keeps its previous checkpoint.
+            raise CheckpointProvenanceError(
+                "gateway call sequence halted after a refused admission"
             )
         try:
             return CheckpointProvenance.stamp(
@@ -188,7 +195,8 @@ class CheckpointResumeRefusal(str, Enum):
     JOURNAL_PAGE_BUDGET_EXHAUSTED = "journal_page_budget_exhausted"
     JOURNAL_CHANGED = "journal_changed_during_validation"
     GATEWAY_ORDINAL_BEHIND_JOURNAL = "gateway_ordinal_behind_journal"
-    LEGACY_GATEWAY_CALL_AFTER_POSITION = "legacy_gateway_call_after_position"
+    GATEWAY_ORDINAL_GAP = "gateway_ordinal_gap"
+    REQUEST_ID_KEYED_CALL_AFTER_POSITION = "request_id_keyed_call_after_position"
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,15 +399,32 @@ def validate_checkpoint_resume(
             return _refuse(R.GATEWAY_ORDINAL_BEHIND_JOURNAL,
                            f"journal sequence {record.sequence} is a gateway call beyond "
                            "the checkpoint's recorded ordinal", checkpoint)
-    if provenance.version < 2:
-        for record in later:
-            if record.operation_id == record.idempotency_key:
-                # Before deterministic gateway call identities, a gateway
-                # call was journaled under its fresh request id.  A resumed
-                # runner re-issuing it would get a new id and repeat it.
-                return _refuse(R.LEGACY_GATEWAY_CALL_AFTER_POSITION,
-                               f"journal sequence {record.sequence} was keyed by a per-call "
-                               "request id after a version-1 checkpoint", checkpoint)
+    expected_ordinal: dict[tuple[str, int], int] = {}
+    for record in later:
+        call = gateway_calls.parse_gateway_call_operation(record.operation_id)
+        if call is None or call.ordinal <= provenance.gateway_call_ordinal:
+            continue
+        stream = (call.child_id, call.dispatch_attempt)
+        expected = expected_ordinal.get(stream, provenance.gateway_call_ordinal + 1)
+        if call.ordinal != expected:
+            # Ordinals are consumed only by admitted or settled calls, in
+            # admission order, so the calls after the checkpoint continue it
+            # without a gap.  A gap means a call landed at an ordinal the
+            # resumed runner would address with a different request.
+            return _refuse(R.GATEWAY_ORDINAL_GAP,
+                           f"journal sequence {record.sequence} is gateway call "
+                           f"{call.ordinal}, expected {expected}", checkpoint)
+        expected_ordinal[stream] = expected + 1
+    for record in later:
+        if record.operation_id == record.idempotency_key:
+            # A typed gateway call journaled under its fresh request id: a
+            # version-1 checkpoint predates deterministic identities, and in
+            # a version-2 run it means a runner bound the child's journal
+            # without its call sequence.  Either way a resumed runner would
+            # re-issue it under a different key and repeat it.
+            return _refuse(R.REQUEST_ID_KEYED_CALL_AFTER_POSITION,
+                           f"journal sequence {record.sequence} was keyed by a per-call "
+                           "request id after the checkpoint", checkpoint)
     settled_keys: dict[str, SettledReceipt] = {}
     for record in covered:
         settled_keys[record.idempotency_key] = _receipt(record)

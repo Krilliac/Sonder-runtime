@@ -19,7 +19,11 @@ the re-issued call was a new intent and the append ran twice.  Now:
   run stays fenced, the resume is refused and nothing runs again;
 * receipt settled, then a resumed runner issuing a *different* request at
   that ordinal: ``DivergentEffectReplay``, the child fails recoverably and
-  the file is unchanged.
+  the file is unchanged;
+* the same, but the runner handles the refusal and carries on as a model
+  tool loop would: the sequence is halted, the settled call it asks for next
+  is refused rather than run at a fresh ordinal, and the child still fails
+  recoverably.
 """
 from __future__ import annotations
 
@@ -133,6 +137,28 @@ def _checkpointed_calls_factory(root: Path, *, crash_after_second: bool):
                     os._exit(CRASH_EXIT)
             save({"step": 2}, "after-b")
             return "checkpointed output"
+
+        return run
+
+    return lambda *_args: bind
+
+
+def _swallowing_factory(root: Path, *, save_after: bool):
+    """A model-style tool loop: a refused call is reported and the loop goes on."""
+    from sonder_runtime.application.execution.effect_journal import EffectJournalError
+
+    def bind(request, _context):
+        def run(state, save, _control):
+            for content in ("z", "x"):
+                try:
+                    receipt = _append(root, content)
+                except EffectJournalError as refused:
+                    _trace(root, f"refused {content}: {type(refused).__name__}")
+                else:
+                    _trace(root, f"wrote {content} ({receipt.success})")
+            if save_after:
+                save({"step": 2}, "after-loop")
+            return "loop output"
 
         return run
 
@@ -417,6 +443,49 @@ def test_divergent_gateway_call_at_the_same_ordinal_is_refused(tmp_path, monkeyp
     after = _records(tmp_path)
     assert after == settled
     assert after[1].state is EffectState.COMPLETED
+
+
+@pytest.mark.parametrize(("save_after", "refusal"), [
+    # The loop checkpoints afterwards: the stamp refuses a halted sequence.
+    (True, "halted after a refused admission"),
+    # It returns without a checkpoint: the provider fails the child itself.
+    (False, "halted after an unaccounted admission failure"),
+])
+def test_runner_that_swallows_a_divergent_replay_fails_without_rerunning(
+    tmp_path, monkeypatch, save_after, refusal,
+):
+    from sonder_runtime.application.ports.subagents import SubagentStatus
+
+    _crash(tmp_path, "after_receipt")
+    target = tmp_path / "workspace" / "append.txt"
+    settled = _records(tmp_path)
+
+    # The resumed runner asks for ``z`` at ordinal 1, handles the refusal
+    # and then asks for ``x`` (the call that settled there) and returns.
+    application, restore_mode = _compose(
+        tmp_path, monkeypatch, factory=_swallowing_factory(tmp_path, save_after=save_after),
+    )
+    try:
+        result = _delegate(application, tmp_path).result(timeout=60)
+        assert result.status is SubagentStatus.FAILED, result
+        assert result.error is not None and result.error.code == "runner_failed"
+        assert refusal in result.error.message, result.error.message
+        repository = application.delegation_service()._provider._local_service._repository
+        child = repository.get(CHILD)
+        assert child.recovery_required
+        # No checkpoint moved past the refused call.
+        assert child.checkpoint.state == {"step": 1}
+    finally:
+        application.close_delegation(timeout=10)
+        restore_mode()
+
+    assert target.read_text(encoding="utf-8") == "x"
+    assert _trace_lines(tmp_path) == [
+        "wrote x",
+        "refused z: DivergentEffectReplay",
+        "refused x: GatewayCallSequenceHalted",
+    ]
+    assert _records(tmp_path) == settled
 
 
 if __name__ == "__main__" and len(sys.argv) == 4 and sys.argv[1] == "--crash-owner":

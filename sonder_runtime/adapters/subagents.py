@@ -21,6 +21,7 @@ from ..application.execution.effect_journal import (
 )
 from ..application.execution.gateway_calls import (
     GatewayCallSequence,
+    GatewayCallSequenceHalted,
 )
 from ..application.execution.gateway_calls import (
     bound as bound_gateway_calls,
@@ -174,7 +175,9 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
     child, dispatch attempt, call ordinal and request digest) instead of a
     fresh request id.  The checkpoint provenance records the ordinal, and a
     resumed runner continues from it, so a re-issued call meets its settled
-    receipt and a divergent one is refused.
+    receipt and a divergent one is refused.  A refused admission other than
+    a settled replay halts the sequence; a runner that swallows it still
+    fails, as ``recovery_required``.
     """
 
     def __init__(
@@ -415,7 +418,7 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
                     # identities: this child's run, worker and settled
                     # dispatch attempt plus a call ordinal that a resumed
                     # runner continues from its validated checkpoint.
-                    scope.enter_context(bound_gateway_calls(
+                    calls = scope.enter_context(bound_gateway_calls(
                         self._gateway_call_sequence(binding, child_id, resume),
                     ))
                     if resume is not None:
@@ -429,6 +432,12 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
                             }.items()
                         }))
                     output = runner(state, bounded_save, control)
+                    if calls.halted is not None:
+                        # The runner handled a refused gateway admission and
+                        # carried on.  Its later calls were refused, but its
+                        # result cannot stand: fail the child so it resumes
+                        # from its last checkpoint.
+                        raise GatewayCallSequenceHalted(calls.halted)
             if not isinstance(output, str):
                 raise InvalidSubagentRequest("local runner output must be text")
             # Four UTF-8 characters is a conservative local token estimate;
