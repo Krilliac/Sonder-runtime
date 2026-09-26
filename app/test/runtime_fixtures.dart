@@ -102,6 +102,9 @@ class FakeRuntimeData implements RuntimeDataSource {
   Object? rediscoverError;
   final List<String?> toolInventoryReads = [];
   int rediscoveries = 0;
+
+  /// When set, inventory reads wait on it (a server still discovering).
+  Future<void>? toolInventoryGate;
   final List<String> cancelled = [];
 
   /// When set, cancel requests wait on it (a slow server).
@@ -164,6 +167,7 @@ class FakeRuntimeData implements RuntimeDataSource {
   @override
   Future<ToolInventory> toolInventory({String? category}) async {
     toolInventoryReads.add(category);
+    await toolInventoryGate;
     if (toolInventoryError != null) throw toolInventoryError!;
     return toolInventoryFor?.call(category) ?? const ToolInventory();
   }

@@ -208,9 +208,11 @@ It loads the list only when the section's Details disclosure opens, shows 401
 and 403 as "Needs an administrator account", shows 429 as a warning with
 Retry, and on 413 asks for a category. Rediscover with a category picked
 treats a 413 from the refresh route as done (the server saves the new snapshot
-before it sizes the unfiltered answer) and re-reads that category. Both routes get a 90 s client timeout,
-because a GET also runs a full discovery on first use and after the refresh
-window. The app's test fixtures
+before it sizes the unfiltered answer) and re-reads that category. Both routes
+get a 90 s client timeout, because a GET also runs a full discovery on first
+use and after the refresh window. When the configured server changes while
+the section is open, the app drops any read still running against the old
+server and loads the new one. The app's test fixtures
 (`app/test/fixtures/server/tool_inventory_*.json`) come from this facade and
 `serve.py`, and `tests/test_app_tool_inventory_fixtures.py` fails when they
 drift from the wire format.

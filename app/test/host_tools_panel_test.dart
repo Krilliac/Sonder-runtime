@@ -1,6 +1,7 @@
 // The Runtime "Host developer tools" section: lazy load, grouping, the
 // admin-only/busy/too-large states and Rediscover, fed with the server's own
 // inventory bodies.
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -22,6 +23,16 @@ ToolInventory _byCategory(String? category) => category == 'compiler'
     ? inventoryFixture('tool_inventory_compiler_200.json')
     : inventoryFixture('tool_inventory_200.json');
 
+Widget _panelApp(FakeRuntimeData data, {bool expanded = true}) => MaterialApp(
+      theme: SonderTheme.dark,
+      home: Scaffold(
+        body: SingleChildScrollView(
+          padding: const EdgeInsets.all(16),
+          child: HostToolsPanel(source: data, initiallyExpanded: expanded),
+        ),
+      ),
+    );
+
 Future<void> _pumpPanel(WidgetTester tester, FakeRuntimeData data,
     {bool expanded = true}) async {
   tester.view.physicalSize = const Size(900, 1400);
@@ -30,15 +41,7 @@ Future<void> _pumpPanel(WidgetTester tester, FakeRuntimeData data,
     tester.view.resetPhysicalSize();
     tester.view.resetDevicePixelRatio();
   });
-  await tester.pumpWidget(MaterialApp(
-    theme: SonderTheme.dark,
-    home: Scaffold(
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
-        child: HostToolsPanel(source: data, initiallyExpanded: expanded),
-      ),
-    ),
-  ));
+  await tester.pumpWidget(_panelApp(data, expanded: expanded));
   await tester.pumpAndSettle();
 }
 
@@ -233,6 +236,56 @@ void main() {
     expect(data.toolInventoryReads, [null]);
     expect(find.text('Too many tools to list at once. Pick a category.'),
         findsOneWidget);
+  });
+
+  testWidgets('a new server while open resets the filter and loads its list',
+      (tester) async {
+    final first = FakeRuntimeData(toolInventoryFor: _byCategory);
+    await _pumpPanel(tester, first);
+    await _pickCompilers(tester);
+    expect(first.toolInventoryReads, [null, 'compiler']);
+
+    final second = FakeRuntimeData(
+        toolInventoryFor: (_) =>
+            inventoryFixture('tool_inventory_stale_200.json'));
+    await tester.pumpWidget(_panelApp(second));
+    await tester.pumpAndSettle();
+    expect(second.toolInventoryReads, [null]);
+    expect(first.toolInventoryReads, [null, 'compiler']);
+    expect(find.text('Loading…'), findsNothing);
+    expect(
+        find.textContaining('older than its refresh window'), findsOneWidget);
+    expect(find.byTooltip('Refresh host tools'), findsOneWidget);
+  });
+
+  testWidgets('a read still running against the old server is dropped',
+      (tester) async {
+    final gate = Completer<void>();
+    final first = FakeRuntimeData(toolInventoryFor: _byCategory)
+      ..toolInventoryGate = gate.future;
+    await _pumpPanel(tester, first);
+    expect(first.toolInventoryReads, [null]);
+    expect(find.text('Loading…'), findsOneWidget);
+
+    final second = FakeRuntimeData(
+        toolInventoryFor: (_) =>
+            inventoryFixture('tool_inventory_compiler_200.json'));
+    await tester.pumpWidget(_panelApp(second));
+    await tester.pumpAndSettle();
+    expect(second.toolInventoryReads, [null]);
+
+    gate.complete();
+    await tester.pumpAndSettle();
+    // Only the new server's compilers; the old full list never shows.
+    expect(find.text('Compilers · 2'), findsOneWidget);
+    expect(find.text('Version control · 1'), findsNothing);
+    expect(find.text('Rediscover'), findsOneWidget);
+    expect(
+        tester
+            .widget<TextButton>(find.ancestor(
+                of: find.text('Rediscover'), matching: find.byType(TextButton)))
+            .onPressed,
+        isNotNull);
   });
 
   testWidgets('Runtime screen: rail items reach unbuilt sections both ways',

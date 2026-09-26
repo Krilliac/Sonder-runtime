@@ -44,32 +44,48 @@ class _HostToolsPanelState extends State<HostToolsPanel> {
   bool _loading = false;
   bool _rediscovering = false;
   String? _category;
+  bool _expanded = false;
+
+  /// Bumped when [HostToolsPanel.source] changes: a read that started against
+  /// the previous server is dropped instead of shown under the new one.
+  int _generation = 0;
 
   bool get _busy => _loading || _rediscovering;
 
   @override
   void initState() {
     super.initState();
-    if (widget.initiallyExpanded) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _load();
-      });
-    }
+    _expanded = widget.initiallyExpanded;
+    if (_expanded) _loadAfterFrame();
+  }
+
+  void _loadAfterFrame() {
+    final generation = _generation;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && generation == _generation) _load();
+    });
   }
 
   @override
   void didUpdateWidget(covariant HostToolsPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.source != widget.source) {
+      _generation++;
       _inventory = null;
       _error = null;
       _category = null;
+      _loading = false;
+      _rediscovering = false;
+      // An open disclosure shows the new server's list, not a stuck spinner.
+      if (_expanded) _loadAfterFrame();
     }
   }
 
   Future<void> _run(Future<ToolInventory> Function() read,
       {bool rediscover = false}) async {
     if (_busy) return;
+    final generation = _generation;
+    bool current() => mounted && generation == _generation;
     setState(() {
       _loading = !rediscover;
       _rediscovering = rediscover;
@@ -77,13 +93,13 @@ class _HostToolsPanelState extends State<HostToolsPanel> {
     });
     try {
       final inventory = await read();
-      if (!mounted) return;
+      if (!current()) return;
       setState(() => _inventory = inventory);
     } catch (error) {
-      if (!mounted) return;
+      if (!current()) return;
       setState(() => _error = error);
     } finally {
-      if (mounted) {
+      if (current()) {
         setState(() {
           _loading = false;
           _rediscovering = false;
@@ -288,6 +304,7 @@ class _HostToolsPanelState extends State<HostToolsPanel> {
               )
             : null,
         onExpansionChanged: (open) {
+          _expanded = open;
           if (open && _inventory == null && !_busy) _load();
         },
         children: [_body()],
