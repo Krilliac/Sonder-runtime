@@ -15,6 +15,12 @@ consistent because SQLite databases are copied with the online-backup API.
   checksums.sha256
 ```
 
+Backups are plaintext copies of private state: the checksums detect
+corruption, not tampering, and there is no encryption or key-based
+authentication (`SONDER_BACKUP_KEY_FILE` is refused at config load). Keep
+the backup target private (the server installer creates `/var/backups/sonder`
+with mode `0700`) or on an encrypted volume.
+
 ## Create / verify / list / prune
 
 ```bash

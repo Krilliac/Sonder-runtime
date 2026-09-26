@@ -447,6 +447,34 @@ def test_process_env_beats_secrets_file(tmp_path):
     assert config.secrets.api_key == "b" * 32
 
 
+@pytest.mark.parametrize("source", ["process", "secrets_file"])
+def test_backup_key_file_is_refused_instead_of_silently_ignored(tmp_path, source):
+    key_path = str(tmp_path / "private-backup-material.key")
+    if source == "process":
+        kwargs = {"env": {"SONDER_BACKUP_KEY_FILE": key_path}}
+    else:
+        secrets = tmp_path / "sonder.env"
+        secrets.write_text(
+            "SONDER_BACKUP_KEY_FILE=%s\n" % key_path, encoding="utf-8"
+        )
+        os.chmod(secrets, 0o600)
+        kwargs = {"secrets_path": secrets, "env": _CLEAN_ENV}
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(**kwargs)
+
+    assert platform_config.BACKUP_KEY_FILE_UNSUPPORTED in excinfo.value.errors
+    assert key_path not in str(excinfo.value)
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_empty_backup_key_file_is_accepted_and_never_populates_secrets(value):
+    config = load_config(env={"SONDER_BACKUP_KEY_FILE": value})
+
+    assert config.secrets.backup_key_file == ""
+    assert config.secrets.as_redacted_dict()["backup_key_file"] == "[unset]"
+
+
 def test_remote_ollama_requires_consent():
     with pytest.raises(ConfigError) as excinfo:
         load_config(env={"OLLAMA_HOST": "192.168.1.50:11434"})

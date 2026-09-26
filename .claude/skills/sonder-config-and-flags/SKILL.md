@@ -176,7 +176,7 @@ Accepted only from the secrets env file or process environment, never TOML
 |---|---|---|
 | `SONDER_API_KEY` | >= 24 chars required for `server-private` profile or any non-loopback bind | `config.py:55`, `490-500` |
 | `SONDER_AUTH_SECRET` | account-bearing auth modes refuse the public dev value `sonder-local-dev-secret` | `config.py:64`, `507-514` |
-| `SONDER_BACKUP_KEY_FILE` | path to backup key material | `config.py:48`, `425-428` |
+| `SONDER_BACKUP_KEY_FILE` | not implemented: backups are neither encrypted nor key-authenticated, so any non-empty value fails config load (`BACKUP_KEY_FILE_UNSUPPORTED`); still scrubbed from child environments | `platform/config.py:91`, `118-122`, `1319-1324` |
 | `SONDER_LAUNCHER_HEALTH_TOKEN` | >= 32 chars (`MIN_TOKEN_LENGTH`) for the launcher HMAC health proof; scrubbed from child environments | `domain/launcher_health.py:11-15`, `platform/logging.py:22` |
 
 ## Catalog: model, retry, and retrieval tuning (env-read, not typed)

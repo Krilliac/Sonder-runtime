@@ -112,6 +112,15 @@ _SECRET_TOML_KEYS = frozenset(
 
 MIN_API_KEY_LENGTH = 24
 
+# Backups carry no encryption or key-based authentication. The environment
+# variable is still scrubbed from child processes (``SECRET_ENV_KEYS``) but a
+# non-empty value fails configuration instead of being silently ignored.
+BACKUP_KEY_FILE_UNSUPPORTED = (
+    "SONDER_BACKUP_KEY_FILE is not supported: backups are not encrypted or "
+    "key-authenticated; unset it and protect the backup target with "
+    "filesystem permissions or an encrypted volume"
+)
+
 # Auth modes that mint/verify account session tokens (as opposed to the plain
 # API-key or local-open profiles).  These key an HMAC with the auth secret.
 ACCOUNT_BEARING_AUTH_MODES = ("account", "both", "either")
@@ -416,6 +425,10 @@ class Secrets:
 
     api_key: str = field(default="", repr=False)
     auth_secret: str = field(default="", repr=False)
+    # Reserved positional slot only: no loader populates it and no backup code
+    # reads it (SONDER_BACKUP_KEY_FILE is refused by the loader). It stays so
+    # positional ``Secrets(api_key, auth_secret, ...)`` callers keep binding
+    # later fields correctly.
     backup_key_file: str = field(default="", repr=False)
     artifact_transfer_key: str = field(default="", repr=False)
     memory_replication_key: str = field(default="", repr=False)
@@ -1496,10 +1509,12 @@ def _apply_environment(
         )
     if env.get("SONDER_AUTH_SECRET", "").strip():
         secrets = replace(secrets, auth_secret=env["SONDER_AUTH_SECRET"].strip())
-    if env.get("SONDER_BACKUP_KEY_FILE", "").strip():
-        secrets = replace(
-            secrets, backup_key_file=env["SONDER_BACKUP_KEY_FILE"].strip()
-        )
+    backup_key_file = env.get("SONDER_BACKUP_KEY_FILE", "")
+    if not isinstance(backup_key_file, str) or backup_key_file.strip():
+        # Backups are neither encrypted nor authenticated with a key. Loading
+        # the path into Secrets made config report a key as present while
+        # every backup was still written in plaintext, so refuse it instead.
+        errors.append(BACKUP_KEY_FILE_UNSUPPORTED)
 
     return replace(
         config,
