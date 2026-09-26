@@ -48,9 +48,13 @@ signature against a writer able to recompute SHA-256.
 catalog from the store, re-activates each catalog-active revision in the
 injected `ActiveSkillPort`, and hands the store to
 `ProceduralPublicationService`.  Publish, rollback, `disable`, and `enable`
-then save the staged snapshot as the last step inside the guarded catalog
-transaction: a failed save restores the in-memory catalog and the active-skill
-snapshot exactly like any other failure.  `ActiveSkillPort` has no
+then save the staged snapshot inside the guarded catalog transaction: a failed
+save restores the in-memory catalog and the active-skill snapshot exactly like
+any other failure.  The save is the commit point, so
+`procedural_skill_published` is emitted only after it; when anything fails
+after a successful save (the event sink, or the transaction exit), the service
+writes the prior snapshot back as a compensating save, and if that save also
+fails it raises `PublicationError` naming the durable divergence.  `ActiveSkillPort` has no
 deactivation seam, so a disabled skill is withdrawn from `catalog.current()`
 but a host's active port keeps its last activation until the host consults the
 catalog.
@@ -62,7 +66,8 @@ Evidence:
 - `tests/test_mem008_procedural_catalog_sqlite.py` (publish, reopen, and
   rollback over a real SQLite file; tampered and malformed rows fail closed;
   an injected save failure leaves catalog and active port unchanged; a second
-  writer on the same file is refused and rolled back)
+  writer on the same file is refused and rolled back; the committed event
+  follows the durable save and a post-save failure is compensated)
 - focused command: `python -m pytest -q tests/test_remaining_procedural_publication.py tests/test_mem008_procedural_composition.py tests/test_mem008_procedural_catalog_sqlite.py`
 - `python scripts/check_architecture.py`
 - `python scripts/check_requirement_evidence.py`

@@ -252,3 +252,92 @@ def test_unloaded_store_refuses_to_overwrite_existing_catalog(tmp_path):
     with pytest.raises(CatalogStoreError, match="changed since it was loaded"):
         stranger.save(DurableLastGoodCatalog().snapshot())
     assert stranger.generation() == 4
+
+
+class _RecordingEvents:
+    def __init__(self, fail_on=None):
+        self.events = []
+        self.fail_on = fail_on
+
+    def emit(self, kind, *, summary, detail):
+        self.events.append((kind, summary))
+        if kind == self.fail_on:
+            raise RuntimeError("event sink unavailable")
+
+
+def _open_with_events(store, events, active=None):
+    return build_procedural_publication_composition(
+        active=active or InMemoryActiveSkillPort(), store=store, events=events,
+    )
+
+
+def test_committed_event_is_emitted_only_after_the_durable_save(tmp_path):
+    store = _FailingStore(tmp_path / "skills.sqlite3")
+    events = _RecordingEvents()
+    graph = _open_with_events(store, events)
+    _publish(graph, "bounded", "1")
+    assert events.events == [
+        ("procedural_skill_published", "procedural skill publication committed"),
+    ]
+
+    store.fail = True
+    events.events.clear()
+    with pytest.raises(PublicationError, match="rolled back"):
+        _publish(graph, "bounded", "2")
+    assert events.events == [
+        ("procedural_skill_publication_failed", "procedural skill publication rolled back"),
+    ]
+
+
+def test_failure_after_the_durable_save_writes_the_prior_catalog_back(tmp_path):
+    path = tmp_path / "skills.sqlite3"
+    store = SQLiteCatalogSnapshotStore(path)
+    events = _RecordingEvents()
+    active = InMemoryActiveSkillPort()
+    graph = _open_with_events(store, events, active)
+    first = _publish(graph, "bounded", "1")
+    catalog_before = graph.catalog.snapshot()
+
+    events.fail_on = "procedural_skill_published"
+    with pytest.raises(PublicationError, match="rolled back"):
+        _publish(graph, "bounded", "2")
+    assert graph.catalog.snapshot() == catalog_before
+    assert active.current("bounded") == first
+    # The compensating save moved the generation on but restored the content.
+    assert store.generation() == 3
+    assert store.load() == catalog_before
+
+    restarted = InMemoryActiveSkillPort()
+    _, reopened = _open(path, restarted)
+    assert reopened.catalog.current("bounded").version == "1"
+    assert restarted.current("bounded").version == "1"
+
+
+class _SaveOnceStore(SQLiteCatalogSnapshotStore):
+    """Accepts the next save, then fails every later one."""
+
+    armed = False
+
+    def save(self, snapshot):
+        if self.armed == "failing":
+            raise OSError("disk went away")
+        super().save(snapshot)
+        if self.armed:
+            self.armed = "failing"
+
+
+def test_failed_compensation_is_reported_as_a_durable_divergence(tmp_path):
+    store = _SaveOnceStore(tmp_path / "skills.sqlite3")
+    events = _RecordingEvents()
+    active = InMemoryActiveSkillPort()
+    graph = _open_with_events(store, events, active)
+    first = _publish(graph, "bounded", "1")
+    catalog_before = graph.catalog.snapshot()
+
+    store.armed = True
+    events.fail_on = "procedural_skill_published"
+    with pytest.raises(PublicationError, match="durable catalog rollback failed") as failed:
+        _publish(graph, "bounded", "2")
+    assert isinstance(failed.value.__cause__, OSError)
+    assert graph.catalog.snapshot() == catalog_before
+    assert active.current("bounded") == first
