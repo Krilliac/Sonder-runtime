@@ -287,6 +287,33 @@ Refusals and failures:
   a repeated query parameter. These are answered with
   `400 INVALID_TEST_REQUEST`.
 
+### In the app chat
+
+The app's chat sends `/test` and `/digest` to the HTTP chat dispatcher
+(`serve._handle_slash`). The authority check is the same as for the routes
+above: developer or admin. Each line becomes the same typed gateway call,
+made as the same principal with `source="http"`:
+
+| Chat line | Typed call |
+|---|---|
+| `/test [runner] [selector]` | `test_run`, which waits up to 20 s and then returns the report or the status with the job id |
+| `/test status <id>` | `test_run_result` with no wait |
+| `/test result <id>` | `test_run_result`, which waits up to 30 s |
+| `/digest <id\|path>` | `output_digest`. A job-shaped argument names the caller's own job first, then a file of that name. |
+
+`/test cancel <id>` answers with where to cancel (`POST /v1/jobs/{id}/cancel`,
+or the console) rather than cancelling.
+
+Grading in the chat:
+
+- The chat's own permission gate grades each line first. `/test status` and
+  `/test result` are graded by the safe `test_run_result`. Every other `/test`
+  line is graded by `test_run`.
+- The gate is unattended. A chat run is therefore refused in `manual` and
+  `acceptEdits`, and runs under `auto` or with an allow rule.
+- That refusal names no call. To approve one run by its `call_id`, use
+  `POST /v1/tools/test-run`.
+
 There is no HTTP cancel route in this family. Cancel with
 `POST /v1/jobs/{id}/cancel` as above. The facade is
 `sonder_runtime/interfaces/http/facades/testing_tools.py`. It shares its one

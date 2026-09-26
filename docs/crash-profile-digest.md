@@ -52,7 +52,10 @@ killed.
 
 `/crash` and `/profile` are graded as execution (`crash_digest`,
 `profile_capture_digest`): they ask in manual mode and are refused in plan
-mode. Pure formats never start a job.
+mode. The read forms are graded by the safe tool they reach:
+`/crash triage` by `crash_triage`, and `status`/`result` of either command by
+`debug_run_result`. `cancel` and every capture path keep the execution grade.
+Pure formats never start a job.
 
 ### Model tools
 
@@ -83,6 +86,32 @@ unattended typed-gateway call from HTTP (the same plan binding, deny rules and
 `plan` mode). A refusal is 403 `PERMISSION_DENIED` with the `call_id` an
 operator can approve once. Payloads are compact JSON of at most 48,000 bytes; failures
 carry `{"ok": false, "error_code": ...}`.
+
+### App chat
+
+The app's chat sends `/crash` and `/profile` to the HTTP chat dispatcher.
+Each line there becomes exactly one request to the admin routes above. The
+guard, the permission grading of host launches, the 48,000-byte cap and
+`SYMBOL_SERVER_NEEDS_CONSOLE` are the same as on those routes.
+
+- `/crash triage <path>` goes to `crash-triage`.
+- `/crash <capture> [--exe P] [--sym DIR]... [--engine E]` goes to
+  `crash-digest`. With `--symbols-online` it is refused with
+  `SYMBOL_SERVER_NEEDS_CONSOLE`.
+- `/profile <capture> [--budget MS] [--top N] [--thread T] [--frame-zone Z]`
+  goes to `profile-digest`. A binary capture answers
+  `CAPTURE_NEEDS_HOST_TOOL`, and the line is then sent to
+  `profile-capture-digest`, which is graded. This is the console's own rule.
+- `status`, `result` and `cancel <run_id>` go to `debug-runs`.
+
+Some forms are console-only and answer with that instead of running:
+`/crash symbols`, `/crash fix` and `--repro`. A caller who is not an admin
+gets a refusal line.
+
+The chat's own permission gate runs first, graded as described above. It is
+unattended, so a capture is refused in `manual` and `acceptEdits` and runs
+under `auto`. That refusal names no call, so to approve one capture by its
+`call_id`, use the admin HTTP route.
 
 ## Windows setup (MSVC)
 

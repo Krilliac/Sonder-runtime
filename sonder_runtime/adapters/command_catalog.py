@@ -1187,7 +1187,54 @@ def narrow_branch_tools(cmd, argument, tools):
     if command in _NATIVE_TYPED_BRANCH_WORK:
         narrowed = _build_branch_member(command, _build_words(argument))
         return narrowed if narrowed and all(name in union for name in narrowed) else union
+    if command in _DEVELOPER_READ_FORMS and union:
+        narrowed = _developer_read_member(command, argument)
+        return narrowed or union
     return union
+
+
+# Developer console/chat commands whose follow-up forms only read the
+# caller's own run. ``/test status|result <id>`` never starts a run (both
+# surfaces answer a usage line for a malformed id), ``/crash triage <path>``
+# runs the pure reader and launches nothing, and ``status|result <run_id>``
+# of ``/crash`` and ``/profile`` poll an existing run. Everything else --
+# including ``cancel`` and a capture path -- keeps the branch's strictest
+# member.
+_DEVELOPER_READ_FORMS = frozenset({"/test", "/crash", "/profile"})
+
+
+def _developer_read_member(command, argument):
+    """The safe typed tool a developer read form reaches, or ()."""
+    if command == "/test":
+        # Split exactly as the console and chat parsers do (``str.split``).
+        words = str(argument or "").split()
+        if len(words) == 2 and words[0].lower() in ("status", "result"):
+            return ("test_run_result",)
+        return ()
+    words = _debug_words(argument)
+    if not words:
+        return ()
+    action = words[0].lower()
+    if action in ("status", "result") and len(words) == 2:
+        return ("debug_run_result",)
+    if command == "/crash" and action == "triage":
+        return ("crash_triage",)
+    return ()
+
+
+def _debug_words(argument):
+    """Split a ``/crash``/``/profile`` line as their parser does, or None.
+
+    ``shlex.split(posix=False)`` with surrounding quotes stripped, the
+    console facade's own splitter: a separator that ``str.split`` honours
+    but this one keeps inside a word must not turn a capture path into a
+    read form here.
+    """
+    try:
+        words = shlex.split(str(argument or ""), posix=False)
+    except ValueError:
+        return None
+    return [w[1:-1] if len(w) >= 2 and w[0] == w[-1] and w[0] in "\"'" else w for w in words]
 
 
 _BUILD_JOB_ID = re.compile(r"^build-job-[0-9a-f]{16,32}$")

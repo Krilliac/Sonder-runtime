@@ -2979,6 +2979,100 @@ def _slash_system_operation(command, argument):
 _BARE_SLASH_COMMAND = re.compile(r"/[A-Za-z][A-Za-z0-9_-]{0,63}")
 
 
+def _http_principal(auth):
+    """The principal an authenticated HTTP caller acts as, or "" when unknown.
+
+    An account is its hashed identity; the owner key and the local-open
+    listener are ``owner``. Shared by the typed developer routes and their
+    chat spellings so both bind the same principal.
+    """
+    return _build_principal(auth if isinstance(auth, dict) else None)
+
+
+def _http_workspace_roots(auth):
+    """Configured workspace roots for an admin caller; () for anyone else."""
+    if not _admin_authorized(auth):
+        return ()
+    from sonder_runtime.bootstrap.app import default_app
+
+    state = getattr(getattr(default_app(), "config", None), "state", None)
+    return tuple(str(Path(root).resolve()) for root in getattr(state, "workspace_roots", ()))
+
+
+def _http_debug_context(auth, correlation_id):
+    """Typed debug-tool context: source=http, principal from the account."""
+    principal = _http_principal(auth)
+    if not principal:
+        raise PermissionError("authenticated account identity is unavailable")
+    context = sonder_lifecycle.get().operation_context(correlation_id, auth)
+    roots = tuple(Path(root) for root in _http_workspace_roots(auth))
+    return replace(context, principal_id=principal, source="http", workspace_roots=roots)
+
+
+def _developer_chat_reply(cmd, arg, context):
+    """``/test``, ``/digest``, ``/build``, ``/fix-build``, ``/crash``, ``/profile`` in chat.
+
+    Each line becomes exactly the call its HTTP route makes (see
+    ``interfaces/http/facades/developer_chat.py``): a typed gateway call as
+    the authenticated principal with ``source="http"`` (graded unattended),
+    or an admin ``DebugToolsHttpFacade`` request (same guard, grading and
+    caps as ``/v1/tools/crash-*``). The authority check is the route's:
+    developer or admin for the typed tools, admin for crash and profile.
+    """
+    from sonder_runtime.interfaces.http.facades import developer_chat as chat
+
+    admin_only = cmd in chat.ADMIN_COMMANDS
+    if not isinstance(context, dict):
+        return "refused %s: an authenticated HTTP caller is required" % cmd
+    allowed = _admin_authorized(context) if admin_only else _developer_authorized(context)
+    if not allowed:
+        return "refused %s: %s authority is required" % (
+            cmd, "admin" if admin_only else "developer or admin")
+    principal = _http_principal(context)
+    if not principal:
+        return "refused %s: authenticated account identity is unavailable" % cmd
+    try:
+        call = chat.parse_chat_command(cmd, arg)
+    except chat.ChatUsage as usage:
+        return str(usage)
+    from sonder_runtime.bootstrap.app import default_app
+
+    application = default_app()
+    if isinstance(call, chat.TypedCall):
+        from sonder_runtime.interfaces.http.facades.typed_gateway import execute_typed_call
+
+        roots = _http_workspace_roots(context)
+        auth_level = "admin" if _admin_authorized(context) else "developer"
+        while True:
+            status, body = execute_typed_call(
+                lambda: getattr(application, "tools", None), call.tool, call.arguments,
+                call.codes, principal_id=principal, workspace_roots=roots,
+                auth_level=auth_level,
+            )
+            if (call.fallback is not None and status == 404
+                    and chat.error_code(body) == "JOB_NOT_FOUND"):
+                call = call.fallback
+                continue
+            return chat.render_typed(call, status, body)
+    from sonder_runtime.bootstrap.debug_tools import debug_http_authorizer
+    from sonder_runtime.interfaces.http.facades.debug_tools import DebugToolsHttpFacade
+
+    service = getattr(application, "debug_tools", None)
+    facade = DebugToolsHttpFacade(lambda: service, authorize=debug_http_authorizer(service))
+    try:
+        operation = _http_debug_context(context, "chat-" + uuid.uuid4().hex)
+    except PermissionError:
+        return "refused %s: authenticated account identity is unavailable" % cmd
+    while True:
+        status, body = facade.dispatch(call.method, call.route, call.payload, operation,
+                                       admin=True, wait_seconds=call.wait_seconds)
+        if (call.fallback is not None and status >= 400
+                and chat.error_code(body) == call.on_code):
+            call = call.fallback
+            continue
+        return chat.render_debug(call, status, body)
+
+
 def _handle_slash(content, messages=None, state=None, project="", context=None,
                   idempotency_key=""):
     """Return response text if `content` is a recognized slash command, else None."""
@@ -3102,6 +3196,8 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         return server.control_command(stripped, project=project)
     if cmd in ("/activity", "/tools"):
         return server.activity_status()
+    if cmd in ("/test", "/digest", "/build", "/fix-build", "/crash", "/profile"):
+        return _developer_chat_reply(cmd, arg, context)
     if cmd in ("/autopilot", "/auto"):
         # Starting a persistent run is a side effect.  A caller may not know
         # whether its connection died before or after the controller accepted
@@ -5087,14 +5183,12 @@ class Handler(BaseHTTPRequestHandler):
                                                "message": "%s do not accept a body" % read_noun}},
                                     status=400)
             return True
-        principal = _build_principal(auth)
+        principal = _http_principal(auth)
         if not principal:
             self._send_json_payload({"error": {"code": "FORBIDDEN"}}, status=403)
             return True
         application = default_app()
-        state = getattr(getattr(application, "config", None), "state", None)
-        roots = tuple(str(Path(root).resolve()) for root in getattr(state, "workspace_roots", ())) \
-            if _admin_authorized(auth) else ()
+        roots = _http_workspace_roots(auth)
         routes = routes_type(lambda: getattr(application, "tools", None))
         status, body = routes.dispatch(
             method, path, query, payload, principal_id=principal, workspace_roots=roots,
@@ -6518,20 +6612,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _debug_tools_context(self, auth):
         """Typed HTTP context: source=http, principal from the account."""
-        context = sonder_lifecycle.get().operation_context(self._correlation(), auth)
-        account = auth.get("account")
-        if account is not None:
-            identity = _account_identity(account)
-            if not identity:
-                raise PermissionError("authenticated account identity is unavailable")
-            principal = "account:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
-        else:
-            principal = "owner"
-        from sonder_runtime.bootstrap.app import default_app
-
-        state = getattr(getattr(default_app(), "config", None), "state", None)
-        roots = tuple(Path(root).resolve() for root in getattr(state, "workspace_roots", ()))
-        return replace(context, principal_id=principal, source="http", workspace_roots=roots)
+        return _http_debug_context(auth, self._correlation())
 
     def _handle_debug_tools_request(self, method, route):
         """``/v1/tools/crash-*``, ``profile-*`` and ``debug-runs/<id>`` (admin)."""

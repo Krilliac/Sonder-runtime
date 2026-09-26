@@ -642,7 +642,35 @@ def profile_command(
     out(_render_outcome(outcome, "profile"))
 
 
+def split_line(arg: str) -> list[str]:
+    """The words of a ``/crash`` or ``/profile`` line; ``ValueError`` on bad quoting.
+
+    Shared with the HTTP chat spelling so both surfaces read one grammar.
+    """
+    try:
+        return _split(arg)
+    except _Usage:
+        raise ValueError("unbalanced quotes") from None
+
+
+def parse_crash_words(words: list[str]) -> dict:
+    """``/crash <capture> [options]`` options; ``ValueError`` on bad usage."""
+    try:
+        return _parse_crash(list(words))
+    except _Usage:
+        raise ValueError(CRASH_USAGE) from None
+
+
+def parse_profile_words(words: list[str]) -> dict:
+    """``/profile <capture> [options]`` options; ``ValueError`` on bad usage."""
+    try:
+        return _parse_profile(list(words))
+    except _Usage:
+        raise ValueError(PROFILE_USAGE) from None
+
+
 __all__ = [
-    "CRASH_USAGE", "HELP_LINES", "NOT_COMPOSED", "PROFILE_USAGE",
-    "crash_command", "crash_fix_brief", "crash_repro_observation", "profile_command",
+    "CRASH_USAGE", "HELP_LINES", "NOT_COMPOSED", "PROFILE_USAGE", "RUN_ACTIONS",
+    "crash_command", "crash_fix_brief", "crash_repro_observation", "parse_crash_words",
+    "parse_profile_words", "profile_command", "split_line",
 ]
