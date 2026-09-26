@@ -509,7 +509,10 @@ class SQLiteDurableJobRegistry(SQLiteWorkerCapacity):
         return OutputPage(tuple(OutputEvent(OutputWatermark(seq), stream, data, spill)
                                 for seq, stream, data, spill in selected), last, has_more, truncated)
 
-    def transition(self, job_id: str, status: JobStatus, *, result: Any = None, error: str = "") -> JobRecord:
+    def transition(
+        self, job_id: str, status: JobStatus, *, result: Any = None, error: str = "",
+        expected_revision: int | None = None, expected_status: JobStatus | None = None,
+    ) -> JobRecord:
         if not isinstance(status, JobStatus):
             raise TypeError("status must be a JobStatus")
         with self._lock, self._connect() as connection:
@@ -517,15 +520,21 @@ class SQLiteDurableJobRegistry(SQLiteWorkerCapacity):
             current = self._record(row)
             if current is None:
                 raise KeyError(f"unknown job {job_id!r}")
+            if (
+                (expected_revision is not None and current.revision != expected_revision)
+                or (expected_status is not None and current.status is not expected_status)
+            ):
+                return current
             if current.is_terminal:
                 return current
             if status is JobStatus.SUCCEEDED and error:
                 raise ValueError("successful jobs cannot carry an error")
             now = self._clock()
             connection.execute(
-                "UPDATE durable_job SET status=?,revision=?,updated_at=?,result_json=?,error=? WHERE job_id=? AND revision=?",
+                "UPDATE durable_job SET status=?,revision=?,updated_at=?,result_json=?,error=? "
+                "WHERE job_id=? AND revision=? AND status=?",
                 (status.value, current.revision + 1, now, None if result is None else _json(result), error,
-                 job_id, current.revision),
+                 job_id, current.revision, current.status.value),
             )
             return self._record(self._row(connection, job_id))  # type: ignore[return-value]
 

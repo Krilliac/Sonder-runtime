@@ -556,15 +556,8 @@ class SubprocessJobProvider:
                 self._schedule_deadline(job_id, self._cleanup_retry_seconds)
                 raise
             return ProcessJobWait(records[-1], exit_code)
-        if containment is not None or job_id in self._cleanup_observations:
-            self._cleanup_observations[job_id] = exit_code
-            try:
-                self._release_memory_limit(job_id)
-                self._release_capacity(job_id)
-            except Exception:
-                self._schedule_deadline(job_id, self._cleanup_retry_seconds)
-                raise
-        output_failure = self._take_output_failure(job_id)
+        with self._output_failure_lock:
+            output_failure = self._output_failures.get(job_id)
         status = (
             JobStatus.SUCCEEDED
             if exit_code == 0 and output_failure is None
@@ -584,7 +577,24 @@ class SubprocessJobProvider:
             status,
             result={"exit_code": exit_code} if observed else None,
             error=error,
+            expected_revision=current.revision,
+            expected_status=current.status,
         )
+        if record.status is JobStatus.CANCELLATION_REQUESTED:
+            self.cancel(job_id, reason=record.error or "cancellation requested")
+            return ProcessJobWait(self._registry.poll(job_id), exit_code)
+        if not record.is_terminal:
+            self._schedule_deadline(job_id, self._cleanup_retry_seconds)
+            return ProcessJobWait(record, exit_code)
+        self._take_output_failure(job_id)
+        if containment is not None or job_id in self._cleanup_observations:
+            self._cleanup_observations[job_id] = exit_code
+            try:
+                self._release_memory_limit(job_id)
+                self._release_capacity(job_id)
+            except Exception:
+                self._schedule_deadline(job_id, self._cleanup_retry_seconds)
+                raise
         if self._jobs._lifecycle is not None:
             self._jobs._lifecycle.record(record)
         self._processes.pop(job_id, None)

@@ -235,6 +235,7 @@ jobs:
           tests/test_process_wait_hardening.py
           tests/test_job004_process_provider.py
           tests/test_process_cancellation_reaping.py
+          tests/test_process_completion_race.py
           tests/test_process_group_absence.py
           tests/test_process_tree_supervisor.py
           tests/test_api003_subprocess_provider.py
