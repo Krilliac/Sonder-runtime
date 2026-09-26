@@ -311,9 +311,9 @@ Remaining limits:
   `dispatch_compute_job_cancel` on the bootstrap-composed worker, exercised by
   `tests/test_wiring_selfmod_compute_cancel_attempts.py` (only the systemd
   containment seam is replaced).
-- Compute-cancel and self-mod operation families still have no provider
-  verifier, so their fences can be cleared only by future trusted composition.
-  Compute-submit and subagent-dispatch verifiers are described below; they
+- *Superseded for compute-cancel by "The `compute-cancel` verifier" below.*
+  Self-mod operation families still have no provider verifier, so their
+  fences can be cleared only by future trusted composition. Compute-submit and subagent-dispatch verifiers are described below; they
   prove launch or admission only, never workload or runner success.
 - A full hosted regression and deployment receipt are still required before
   LOOP-008 can be promoted to `verified`.
@@ -727,9 +727,10 @@ What remains:
   a new key and was not matched to the settled receipt. A journaled child
   runner's gateway calls now use deterministic identities; other callers
   keep the request id.
-- Compute-cancel and selfmod families still have no provider verifier, so
-  startup reconciliation leaves them fenced. That is correct and fail-closed,
-  but clearing them still needs future trusted composition.
+- *Superseded for compute-cancel by "The `compute-cancel` verifier" below.*
+  The selfmod families still have no provider verifier, so startup
+  reconciliation leaves them fenced. That is correct and fail-closed; the
+  same section records why no sound selfmod verifier exists today.
 - The journal and child store remain separate files. The cross-store window
   is covered by validation, not by a transaction.
 - While any peer runtime process on the node is live, the startup pass is
@@ -1076,3 +1077,184 @@ Limits:
   as for any in-flight call.
 - No master-spec checkbox changes. LOOP-008, AGENT-006 and SESSION-007 stay
   unverified.
+
+## The `compute-cancel` verifier, and why selfmod stays fenced (2026-09-26)
+
+*Supersedes, for compute-cancel only,* the statements above that
+compute-cancel has no provider verifier and that startup reconciliation
+leaves it fenced.
+
+Before this slice an interrupted `ComputeJobWorker.cancel` intent could never
+be proven: the durable job registry recorded the job's terminal status and a
+free-form cancellation reason, but nothing tied that state to the journaled
+cancel request. A registry row can also become `cancelled` through other
+paths (a hard deadline, a cleanup retry), so the status alone is not proof
+that this request was admitted for this job.
+
+What is wired now (caller -> callee):
+
+- **Durable request binding.** `ComputeJobWorker.cancel` keeps its
+  per-attempt identity (`compute-cancel:<worker>:<job>` for attempt 1,
+  `compute-cancel:<worker>:attempt-<n>:<job>` for attempt 2..32) and now
+  invokes `_cancel_bound` inside `journaled_effect`. That runs after the
+  intent commits and before the provider is asked to cancel. It calls
+  `SubprocessJobProvider.bind_cancel_request`, which calls
+  `bind_cancel_request` on the durable registry: `SQLiteDurableJobRegistry`
+  (one `BEGIN IMMEDIATE` transaction) or the in-memory `DurableJobRegistry`.
+  The registry records `{attempt idempotency key: journaled request digest}`
+  under the job's `cancel_request_digests` metadata. The digest is the same
+  canonical SHA-256 that `journaled_effect` stores in the intent
+  (`worker_bindings._digest` of `{"remote_job_id", "reason"}`). The shared
+  helper `_bind_cancel_request_metadata` in `application/jobs/durable_registry.py`
+  applies these rules:
+  - A binding is write-once. The same key with the same digest is a no-op,
+    and another digest is refused.
+  - At most 32 bindings are kept per job, matching
+    `MAX_COMPUTE_CANCEL_ATTEMPTS`.
+  - The record revision is not changed, so cleanup evidence bound to a
+    revision stays valid.
+  - A provider without `bind_cancel_request`, such as a test double, still
+    cancels, but a crash before its receipt can then never be proven.
+  - A binding failure raises inside the effect, which leaves the intent
+    `uncertain` (fail-closed).
+- **Verifier.** `get_worker_effect_journal` in `bootstrap/app.py` registers
+  `adapters/execution/compute_effect_verifier.DurableComputeCancelVerifier(get_job_registry)`
+  for the `compute-cancel` family, next to `process-start`, `compute-submit`,
+  `subagent-dispatch` and `build-fix`. The `compute` family was already in
+  `worker_families`, so the startup pass (`reconcile_worker_effects`), the
+  operator pass (`Application.worker_effect_reconciliation`) and every
+  auto-reconciling `recover_before_restart` of the compute worker reach it.
+  The verifier reads one registry view and the immutable cleanup record. It
+  runs under the journal's bounded verifier timeout (2 s by default) and
+  within its process-wide verifier slots. It returns a proof only when all of
+  the following hold:
+  - The operation id parses exactly as the worker mints it. The intent's
+    idempotency key, worker (`compute:<worker>`), run
+    (`runtime:compute-jobs`), scope (`compute-jobs`) and `idempotent`
+    strategy all match, and the digest is SHA-256.
+  - The registry row is the exact remote job:
+    - its job id is the `cf-` id this worker derives from the row's own
+      submit idempotency key, so a row swapped under another id fails;
+    - its kind is a local compute kind;
+    - `compute_worker_id` and the controller binding match;
+    - `require_job_scope` is `1`.
+  - `cancel_request_digests[<attempt key>]` equals the intent's request
+    digest. A legacy row without bindings, a binding for another attempt, or
+    another digest gives no proof.
+  - The status is exactly `cancelled`. `cancellation_requested`, `running`,
+    `succeeded`, `failed` and `interrupted` give no proof.
+  - Immutable cleanup evidence (`process_cleanup_proof`) exists for that
+    record revision and passes `_validate_cleanup_evidence`: process exited,
+    containment empty, resources released, and the same status and revision.
+    Its self-digest must also recompute.
+
+  The proof is `completed`, with receipt `<job>:cancelled` (the live receipt
+  shape for a cleaned cancellation) and external reference
+  `job-registry:<job>:<revision>`. Its outcome digest binds the job, kind,
+  controller, both idempotency keys, the request digest, status, revision and
+  the cleanup digest. The verifier never reads caller text, process output,
+  the cancellation reason or an in-memory handle.
+
+Evidence (focused, not a requirement verification):
+
+- `tests/test_compute_cancel_effect_reconciliation.py` has 35 tests:
+  - A success proof for attempts 1, 2 and 32, followed by stale-epoch
+    refusal, a newer-epoch reconcile, and `resume`.
+  - Each mismatch stays `uncertain` and fenced: request digest, legacy or
+    missing binding, a binding for another attempt, kind, the job's submit
+    idempotency key, the intent's idempotency key, worker, controller,
+    unscoped job, and strategy.
+  - Each unfinished state stays fenced: `cancellation_requested`, `running`,
+    `succeeded`, `failed`, no cleanup evidence, cleanup evidence for a stale
+    revision, and a forged cleanup digest.
+  - A missing job, a swapped job (another job's request digest, and another
+    job's row moved under this id), and malformed operation ids give no
+    proof.
+  - A hung registry read times out. The intent stays `uncertain` and the run
+    fenced, and the same evidence proves the cancel once the read returns.
+  - Binding rules for both registries: write-once, conflict refusal, digest
+    and key validation, unknown job, a bound of 32, and no revision change.
+  - Through a real `ComputeJobWorker` and `SubprocessJobProvider` (with a
+    scoped containment double): the binding is durable before the provider
+    cancels, and a lost receipt after cleanup is proven by a restarted
+    worker's auto-reconciling binding. With cleanup still pending, the intent
+    stays fenced until the provider's own cleanup retry makes the record
+    `cancelled` with cleanup evidence, and then it is proven. A completed
+    cancel is not retried.
+- `tests/test_wiring_compute_cancel_startup_reconcile.py` (2 tests) runs
+  through `build_application`. Only the containment seam, launcher and
+  deadline timer are replaced.
+  - A lost cancel receipt after cleanup is proven by the next composition's
+    startup pass (`verified:durable-compute-cancel-v1:job-registry:...`). The
+    fence clears, and the successor worker composes and refuses a retry of
+    the completed cancel.
+  - A lost receipt with cleanup pending stays `uncertain`. The fence stays
+    set, compute-worker composition refuses, and a second pass changes
+    nothing. After the orphaned provider's cleanup retry completes, the
+    operator pass proves the cancel and clears the fence.
+- Mutation check: six planted defects each made at least one of these tests
+  fail. They skipped the digest binding check, accepted any terminal status,
+  dropped the cleanup-evidence requirement, dropped the job-id derivation
+  (swap) check, dropped the intent idempotency-key check, and dropped the
+  kind check. The source was restored afterwards.
+
+Compute-cancel limits:
+
+- A pending-cleanup job whose owning process dies is later marked
+  `interrupted` by the successor provider's deadline restore ("deadline owner
+  process exited or changed identity"). That record is not `cancelled` and
+  has no cleanup evidence, so its cancel intent stays fenced, and no
+  automatic path resolves it. The wiring test fires only the orphaned
+  provider's retry, and states this explicitly.
+- A cancel journaled before this slice, or through a provider without
+  durable bindings, has no binding and stays fenced.
+- Remote (HTTP) compute cancellation is not a `ComputeJobWorker` effect on
+  this host and is not covered.
+- The proof shows that the exact job reached a cleaned, terminal cancelled
+  state after this exact request was durably bound. It does not show which
+  code path performed the final transition: the explicit cancel, or a
+  provider cleanup retry of it. That is the idempotent outcome the intent
+  declares.
+
+### Why the selfmod families stay fenced
+
+The selfmod stage effects (`selfmod-backup`, `selfmod-prepare-workspace`,
+`selfmod-reproducer-before`, `selfmod-begin-testing`, `selfmod-record-test`,
+`selfmod-review`, `selfmod-approve`, `selfmod-deploy`, `selfmod-rollback`)
+were assessed against the legacy durable store in `selfmod.py`. That store
+has the `selfmod_runs` phase row, `selfmod_tests`, `selfmod_backups`,
+`selfmod_deployed_files` and free-text `selfmod_events`. No sound verifier
+can be built from it today:
+
+- Nothing in the store binds the journaled request digest. The stage
+  requests (for example deploy's `health_command` and `commit`, and a
+  test's command and kind) are digested only in the effect journal. The legacy
+  rows record outcomes, not the request that produced them, so a proof could
+  not be bound to the intent the way the compute and dispatch verifiers are.
+- Phase state is not unique to the journaled path. The operator `/selfmod`
+  path in `server.py` (`_selfmod_command`, `_execute_selfmod_run`) now goes
+  through the stage journal for its run, approve, deploy and rollback stages,
+  but `reject`, `cancel`, `resume` and `verify_backup` still call the legacy
+  module directly. Stale-owner recovery in `selfmod.py` also moves runs
+  to `interrupted` or requires an exact restore. A phase such as `backed_up`
+  or `deployed` therefore cannot show that the journaled attempt, rather than
+  an unjournaled call, performed the change.
+- Repeatable stages have no durable attempt identity outside the journal.
+  `selfmod_tests` rows carry no `attempt-<n>`, so
+  `selfmod-record-test:<run>:attempt-<n>` cannot be matched to one row.
+- Deploy's effect spans the live source tree, a git commit, health and
+  rollback checks, and an automatic restore. Its phase cannot distinguish a
+  deployed-then-restored run from a partially applied one without per-file
+  evidence bound to the intent.
+- Every selfmod stage is journaled with `reconciliation="manual"`. The
+  adapter itself declares that these effects need operator reconciliation.
+
+A future verifier would need the selfmod store to durably record, in the
+same transaction as each stage's mutation, the journaled operation id,
+attempt and request digest. It would also need the operator path routed
+through `GuardedLegacySelfmodService.journaled_stage`. Until then, selfmod
+intents stay `uncertain` and fenced.
+`tests/test_wiring_journal_child_startup_reconcile.py` still asserts this for
+an unprovable `selfmod-deploy` intent.
+
+No master-spec checkbox changes. LOOP-008 stays unverified.
