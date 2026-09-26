@@ -41,6 +41,7 @@ from sonder_runtime.application.selfmod.independent_oracle import (
     ledger_output as oracle_ledger_output,
     payload_nonce,
 )
+from sonder_runtime.application.selfmod.stage_refusal import SelfmodStageNotApplied
 
 
 MODES = ("observe", "propose", "auto-low-risk")
@@ -1723,7 +1724,10 @@ def deployment_lock(run_id, owner_id=None):
         row = conn.execute("SELECT * FROM selfmod_deployment_lock WHERE id=1").fetchone()
         stale = _deployment_owner_stale(row, now)
         if not stale:
-            raise RuntimeError("another deployment/rollback holds the process-safe lock")
+            # Refused before this caller changed anything: the stage journal
+            # settles it as not applied, so a retry after the holder finishes
+            # is admitted.
+            raise SelfmodStageNotApplied("another deployment/rollback holds the process-safe lock")
         conn.execute(
             "UPDATE selfmod_deployment_lock SET owner_id=?,owner_pid=?,owner_host=?,lease_until=?,run_id=? WHERE id=1",
             (owner_id, os.getpid(), socket.gethostname(), now + LEASE_SECONDS, run_id),
@@ -2072,28 +2076,41 @@ def deploy(run_id, *, health_command=None, commit=True, expected_digests=None):
     """
     run = get_run(run_id)
     if run["phase"] != "approved":
-        raise RuntimeError("deployment requires explicit/host approval")
+        raise SelfmodStageNotApplied("deployment requires explicit/host approval")
     with deployment_lock(run_id) as deployment_owner:
-        verify_backup(run_id)
-        ok, conflict = _current_source_matches(run)
-        if not ok:
-            raise RuntimeError(conflict)
-        diff = inspect_diff(run_id)
-        _renew_deployment_lock(deployment_owner)
-        if set(diff["changed_files"]) - set(run["files"]):
-            raise RuntimeError("candidate diff no longer matches approved scope")
-        root, workspace = Path(run["repository_root"]), candidate_path(run_id)
-        tested = tested_digests(run_id)
-        if tested is None:
-            raise RuntimeError("deployment requires a tested-bytes record; run was never bound")
-        if expected_digests is not None and dict(expected_digests) != tested["files"]:
-            raise RuntimeError("caller digests do not match the tested-bytes record")
-        expected_digests = tested["files"]
-        mismatched = _digest_mismatches(workspace, diff["changed_files"], expected_digests)
-        if mismatched:
-            raise RuntimeError(
-                "candidate bytes differ from tested bytes: %s" % ", ".join(mismatched)
-            )
+        # Every precondition below is checked before the first live byte is
+        # replaced, so a refusal here is ``SelfmodStageNotApplied``: nothing
+        # was deployed and the operator may fix the cause and retry.  Only
+        # failures inside the mutation block below can leave live source
+        # changed.
+        try:
+            verify_backup(run_id)
+            ok, conflict = _current_source_matches(run)
+            if not ok:
+                raise SelfmodStageNotApplied(conflict)
+            diff = inspect_diff(run_id)
+            _renew_deployment_lock(deployment_owner)
+            if set(diff["changed_files"]) - set(run["files"]):
+                raise SelfmodStageNotApplied("candidate diff no longer matches approved scope")
+            root, workspace = Path(run["repository_root"]), candidate_path(run_id)
+            tested = tested_digests(run_id)
+            if tested is None:
+                raise SelfmodStageNotApplied(
+                    "deployment requires a tested-bytes record; run was never bound")
+            if expected_digests is not None and dict(expected_digests) != tested["files"]:
+                raise SelfmodStageNotApplied("caller digests do not match the tested-bytes record")
+            expected_digests = tested["files"]
+            mismatched = _digest_mismatches(workspace, diff["changed_files"], expected_digests)
+            if mismatched:
+                raise SelfmodStageNotApplied(
+                    "candidate bytes differ from tested bytes: %s" % ", ".join(mismatched)
+                )
+        except SelfmodStageNotApplied:
+            raise
+        except RuntimeError as exc:
+            # verify_backup/inspect_diff/lease renewal refusals: still before
+            # any live byte changed.
+            raise SelfmodStageNotApplied(str(exc)) from exc
         try:
             for rel in diff["changed_files"]:
                 source, target = workspace / rel, root / rel
@@ -2240,11 +2257,13 @@ def restore(run_id, from_candidate_only=False):
 def rollback(run_id, reason="user requested rollback"):
     run = get_run(run_id)
     if run["phase"] != "deployed":
-        raise RuntimeError("only a deployed run can be rolled back")
+        raise SelfmodStageNotApplied("only a deployed run can be rolled back")
     with deployment_lock(run_id):
         conflicts = _deployed_file_mismatches(run_id)
         if conflicts:
-            raise RuntimeError(
+            # Refused before any byte is restored: the operator may reconcile
+            # the manual edit and retry the rollback.
+            raise SelfmodStageNotApplied(
                 "rollback conflict: deployed files changed after deployment; "
                 "preserving current bytes: %s" % ", ".join(conflicts)
             )

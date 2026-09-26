@@ -86,6 +86,39 @@ def per_test_stage_journal(tmp_path, monkeypatch):
     return stages
 
 
+@pytest.fixture
+def ready_run(tmp_path, monkeypatch):
+    """A real ledger run, in the phase ``/selfmod <action>`` starts from.
+
+    A journaled operator stage refuses an unknown id or a wrong phase before
+    it reaches the legacy write path, so the tests that prove the gate *lets
+    an approved caller through* need a run that stage would accept.  The
+    phase is set on the real ledger; nothing else about the run matters here,
+    because the write path itself is the probe above.
+    """
+    monkeypatch.setenv("SONDER_SELFMOD_HOME", str(tmp_path / "selfmod"))
+    monkeypatch.delenv("SONDER_SELFMOD_DB", raising=False)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "sample.py").write_text("VALUE = 1\n", encoding="utf-8")
+    selfmod.set_enabled(True)
+
+    def make(action):
+        run = selfmod.create_plan(
+            "gate probe", repo, evidence=["measured"], files=["sample.py"],
+            criteria=["gate reached"],
+        )
+        path = {"deploy": ("reviewing", "approved"),
+                "rollback": ("reviewing", "approved", "deployed")}[action]
+        phase = run["phase"]
+        for target in path:
+            selfmod._phase(run["id"], {phase}, target, "test", "fixture: %s" % target)
+            phase = target
+        return run["id"]
+
+    return make
+
+
 @pytest.fixture(autouse=True)
 def mode_sandbox(tmp_path, monkeypatch):
     """A tmp state file and a known starting mode for every test here."""
@@ -192,7 +225,7 @@ def test_reading_selfmod_state_is_never_blocked_by_this(mode, form):
 
 
 @pytest.mark.parametrize("action", ("deploy", "rollback"))
-def test_an_explicit_allow_rule_still_satisfies_the_ask(monkeypatch, action):
+def test_an_explicit_allow_rule_still_satisfies_the_ask(monkeypatch, action, ready_run):
     """The unattended escape hatch an operator can actually write.
 
     An explicit ``allow`` rule resolves the mode's ``ask`` before the degrade
@@ -201,13 +234,14 @@ def test_an_explicit_allow_rule_still_satisfies_the_ask(monkeypatch, action):
     """
     pm.set_mode("manual")
     monkeypatch.setattr(pm, "_rule_lookup", _rules(pm.ALLOW))
+    run_id = ready_run(action)
     with pytest.raises(_Reached):
-        server.control_command("/selfmod %s RUN1" % action)
+        server.control_command("/selfmod %s %s" % (action, run_id))
 
 
 @pytest.mark.parametrize("mode", UNATTENDED_MODES)
 @pytest.mark.parametrize("action", ("deploy", "rollback"))
-def test_the_console_operator_who_answered_the_prompt_still_deploys(mode, action):
+def test_the_console_operator_who_answered_the_prompt_still_deploys(mode, action, ready_run):
     """The other half of the fix, and the half that makes it a gate not a wall.
 
     ``sonder_repl`` prompts at ``_named_command_gate`` and then forwards to
@@ -221,9 +255,10 @@ def test_the_console_operator_who_answered_the_prompt_still_deploys(mode, action
     behaviour. It is a guard, not a reproduction, and is labelled as such.
     """
     pm.set_mode(mode)
+    run_id = ready_run(action)
     with pytest.raises(_Reached):
         server.control_command(
-            "/selfmod %s RUN1" % action, operator_approved=True,
+            "/selfmod %s %s" % (action, run_id), operator_approved=True,
         )
 
 

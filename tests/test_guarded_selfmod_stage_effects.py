@@ -38,6 +38,7 @@ from sonder_runtime.application.execution.worker_bindings import (
 from sonder_runtime.application.selfmod.selfmod_service import (
     GuardedLegacySelfmodService,
 )
+from sonder_runtime.application.selfmod.stage_refusal import SelfmodStageNotApplied
 from sonder_runtime.application.selfmod.verification_lifecycle import (
     VerificationKind,
 )
@@ -424,6 +425,107 @@ def test_phase_refusal_admits_no_intent_and_does_not_fence_the_run(tmp_path):
     assert journal.get(
         f"{JOURNAL_RUN}:selfmod-record-test:{RUN}:attempt-1"
     ).state is EffectState.COMPLETED
+
+
+class _RefusingDeployLegacy(LegacyDouble):
+    """Legacy deploy/rollback that refuse before mutating until told otherwise."""
+
+    refuse = True
+
+    def deploy(self, run_id, **kwargs):
+        if self.refuse:
+            self.calls.append(("deploy-refused", kwargs))
+            raise SelfmodStageNotApplied("another deployment/rollback holds the process-safe lock")
+        return super().deploy(run_id, **kwargs)
+
+
+def _approved(service, legacy) -> None:
+    service.prepare(RUN)
+    legacy.phase = "approved"  # unrestricted mode: the typed gates are not under test
+
+
+def test_a_not_applied_refusal_settles_failed_and_admits_a_retry(tmp_path):
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    legacy = _RefusingDeployLegacy()
+    service = _service(legacy, journal, unrestricted=True)
+    _approved(service, legacy)
+    with pytest.raises(SelfmodStageNotApplied, match="holds the process-safe lock"):
+        service.deploy(RUN, health_command=HEALTH, commit=False)
+    refused = journal.get(f"{JOURNAL_RUN}:selfmod-deploy:{RUN}")
+    assert refused.state is EffectState.FAILED
+    assert refused.receipt_key == f"selfmod:{RUN}:deploy:not-applied"
+    assert refused.idempotency_key == f"selfmod:{RUN}:deploy"
+    assert not journal.effects_since(JOURNAL_RUN, 0, limit=1000).unresolved
+
+    # A second refusal gets the next retry identity; nothing is fenced.
+    service = _service(legacy, journal, unrestricted=True)
+    legacy.phase = "approved"
+    with pytest.raises(SelfmodStageNotApplied):
+        service.deploy(RUN, health_command=HEALTH, commit=False)
+    legacy.refuse = False
+    service = _service(legacy, journal, unrestricted=True)
+    legacy.phase = "approved"
+    service.deploy(RUN, health_command=HEALTH, commit=False)
+    deploys = [record for record in _records(journal)
+               if record.operation_id.startswith(f"selfmod-deploy:{RUN}")]
+    assert [(r.operation_id, r.state, r.receipt_key) for r in deploys] == [
+        (f"selfmod-deploy:{RUN}", EffectState.FAILED, f"selfmod:{RUN}:deploy:not-applied"),
+        (f"selfmod-deploy:{RUN}:retry-2", EffectState.FAILED,
+         f"selfmod:{RUN}:deploy:retry-2:not-applied"),
+        (f"selfmod-deploy:{RUN}:retry-3", EffectState.COMPLETED, f"selfmod:{RUN}:deploy:retry-3"),
+    ]
+    assert [name for name, _ in legacy.calls].count("deploy") == 1
+
+
+def test_a_completed_one_shot_still_refuses_a_second_call(tmp_path):
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    legacy = _RefusingDeployLegacy()
+    legacy.refuse = False
+    service = _service(legacy, journal, unrestricted=True)
+    _approved(service, legacy)
+    service.deploy(RUN, health_command=HEALTH, commit=False)
+    legacy.phase = "approved"  # pretend the legacy store forgot the deployment
+    with pytest.raises(EffectJournalError, match="duplicate effect intent"):
+        service.deploy(RUN, health_command=HEALTH, commit=False)
+    assert [name for name, _ in legacy.calls].count("deploy") == 1
+    assert journal.get(f"{JOURNAL_RUN}:selfmod-deploy:{RUN}:retry-2") is None
+
+
+def test_an_untyped_failure_still_leaves_the_one_shot_uncertain(tmp_path):
+    class ExplodingLegacy(LegacyDouble):
+        def deploy(self, run_id, **kwargs):
+            self.calls.append(("deploy", kwargs))
+            raise RuntimeError("installed bytes differ from tested bytes")
+
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    legacy = ExplodingLegacy()
+    service = _service(legacy, journal, unrestricted=True)
+    _approved(service, legacy)
+    with pytest.raises(RuntimeError, match="installed bytes differ"):
+        service.deploy(RUN, health_command=HEALTH, commit=False)
+    assert journal.get(f"{JOURNAL_RUN}:selfmod-deploy:{RUN}").state is EffectState.UNCERTAIN
+    with pytest.raises(EffectJournalError, match="reconciliation"):
+        _service(legacy, journal, unrestricted=True)._effect_binding_factory(RUN)
+
+
+def test_a_not_applied_refusal_after_a_real_failure_is_still_fenced(tmp_path):
+    """A retry is admitted only when every earlier attempt was not applied."""
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+
+    class MissingReceiptLegacy(_RefusingDeployLegacy):
+        def deploy(self, run_id, **kwargs):
+            self.calls.append(("deploy", kwargs))
+            return self._run()  # ran, but no deployed phase: a settled failure
+
+    legacy = MissingReceiptLegacy()
+    service = _service(legacy, journal, unrestricted=True)
+    _approved(service, legacy)
+    service.deploy(RUN, health_command=HEALTH, commit=False)
+    assert journal.get(f"{JOURNAL_RUN}:selfmod-deploy:{RUN}").receipt_key == f"selfmod:{RUN}:deploy"
+    legacy.phase = "approved"
+    with pytest.raises(EffectJournalError, match="duplicate effect intent"):
+        service.deploy(RUN, health_command=HEALTH, commit=False)
+    assert journal.get(f"{JOURNAL_RUN}:selfmod-deploy:{RUN}:retry-2") is None
 
 
 if __name__ == "__main__":

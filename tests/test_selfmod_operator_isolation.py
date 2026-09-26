@@ -23,6 +23,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 import pytest
@@ -459,4 +460,285 @@ def test_repl_run_candidate_cannot_write_the_live_checkout(host, monkeypatch):
     assert failed, operations
     # A rejected candidate is a settled outcome, never an uncertain effect.
     assert "uncertain" not in operations.values(), operations
+    assert linux.live_uid_pids(CANDIDATE_UID) == set()
+
+
+# --- the production journal composition ---------------------------------------
+
+
+def test_the_operator_path_composes_the_production_stage_journal(host, tmp_path, monkeypatch):
+    """``server._selfmod_stage_journal`` itself, not a test replacement.
+
+    Every other test here swaps it for a per-test journal.  This one lets the
+    server build its own application graph (hermetic state home) and drives a
+    real ``/selfmod approve`` through it, so a rename or a composition failure
+    in the bootstrap selfmod service fails here instead of silently refusing
+    every production operator stage.
+    """
+    from sonder_runtime.application.execution.worker_bindings import AuthenticatedWorkerBinding
+    from sonder_runtime.application.selfmod.selfmod_service import GuardedLegacySelfmodService
+
+    monkeypatch.undo()  # drop the fixture's replacement and environment ...
+    monkeypatch.setenv("SONDER_SELFMOD_HOME", str(host["area"] / "selfmod"))  # ... keep its ledger
+    monkeypatch.setattr(pm, "_rule_lookup", lambda _tool: None)
+    monkeypatch.setenv("SONDER_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("SONDER_WORKER_EFFECTS_DB", str(tmp_path / "worker-effects.db"))
+    monkeypatch.setattr(server, "_APP_GRAPH", None)
+    monkeypatch.setattr(server, "_APP_GRAPH_OWNED_BY_SERVER", False)
+    try:
+        stages = server._selfmod_stage_journal()
+        assert isinstance(stages, GuardedLegacySelfmodService)
+        run = selfmod.create_plan(
+            "raise VALUE", host["repo"], evidence=["measured"], files=["sample.py"],
+            criteria=["VALUE is 2"],
+        )
+        rid = run["id"]
+        binding = stages._effect_binding_factory(rid)
+        assert isinstance(binding, AuthenticatedWorkerBinding)
+        assert binding.scope == "selfmod-mutation"
+        assert binding.run_id == "selfmod:%s" % rid
+
+        selfmod._phase(rid, {"proposed"}, "reviewing", "test", "fixture: reviewed")
+        out = server._selfmod_command("approve %s" % rid)
+        assert selfmod.get_run(rid)["phase"] == "approved", out
+        assert _journal(server._selfmod_stage_journal(), rid) == {
+            f"selfmod-approve:{rid}": "completed"}
+        # The server built (and owns) the graph that journaled the stage, and
+        # its journal is a hermetic state home's, never the suite's shared one.
+        assert server._APP_GRAPH is not None and server._APP_GRAPH_OWNED_BY_SERVER
+        journal_path = Path(binding.journal.database_path).resolve()
+        assert journal_path.name == "worker-effects.db"
+        assert any(root.resolve() in journal_path.parents
+                   for root in (tmp_path, host["area"])), journal_path
+    finally:
+        server._close_server_owned_application()
+
+
+# --- operator stages: serialization and benign refusals ---------------------
+
+
+def _approved_run(host) -> str:
+    run = selfmod.create_plan(
+        "raise VALUE", host["repo"], evidence=["measured"], files=["sample.py"],
+        criteria=["VALUE is 2"],
+    )
+    selfmod._phase(run["id"], {"proposed"}, "reviewing", "test", "fixture: reviewed")
+    selfmod._phase(run["id"], {"reviewing"}, "approved", "test", "fixture: approved")
+    return run["id"]
+
+
+def test_a_concurrent_second_deploy_is_refused_and_the_first_completes(host, monkeypatch):
+    """A double submit no longer fences the run it was meant to deploy.
+
+    The second call finds the run's owner lease held and refuses before it
+    composes a journal binding, so the first call's in-flight intent is never
+    treated as orphaned; the first deploy settles ``completed`` and the run
+    can still be rolled back.
+    """
+    stages = host["stages"]
+    rid = _approved_run(host)
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    def deploy(run_id, **_kwargs):
+        calls.append(run_id)
+        entered.set()
+        assert release.wait(30)
+        return selfmod._phase(run_id, {"approved"}, "deployed", "test", "fixture: deployed")
+
+    def rollback(run_id, reason=""):
+        return selfmod._phase(run_id, {"deployed"}, "restored", "test", reason)
+
+    monkeypatch.setattr(selfmod, "deploy", deploy)
+    monkeypatch.setattr(selfmod, "rollback", rollback)
+    monkeypatch.setattr(selfmod, "format_run", lambda run_id: "run %s" % run_id)
+    first = []
+    worker = threading.Thread(
+        target=lambda: first.append(
+            server._selfmod_command("deploy %s" % rid, operator_approved=True)),
+        daemon=True,
+    )
+    worker.start()
+    assert entered.wait(30)
+    try:
+        second = server._selfmod_command("deploy %s" % rid, operator_approved=True)
+        assert second.startswith("refused /selfmod deploy: run %s is already being driven" % rid), second
+        # So is any other operator stage of the same run meanwhile.
+        other = server._selfmod_command("rollback %s" % rid, operator_approved=True)
+        assert other.startswith("refused /selfmod rollback: run %s is already being driven" % rid), other
+    finally:
+        release.set()
+        worker.join(30)
+    assert first == ["run %s" % rid]
+    assert calls == [rid]
+    assert selfmod.get_run(rid)["phase"] == "deployed"
+    assert selfmod.get_run(rid)["owner_id"] is None  # lease released
+    assert _journal(stages, rid) == {f"selfmod-deploy:{rid}": "completed"}
+    assert server._selfmod_command("rollback %s" % rid, operator_approved=True) == "run %s" % rid
+    assert _journal(stages, rid) == {
+        f"selfmod-deploy:{rid}": "completed", f"selfmod-rollback:{rid}": "completed"}
+
+
+def test_a_run_leased_by_another_process_is_refused_before_the_journal(host):
+    """The lease is the ledger's, so it serializes across processes too."""
+    stages = host["stages"]
+    run = selfmod.create_plan(
+        "raise VALUE", host["repo"], evidence=["measured"], files=["sample.py"],
+        criteria=["VALUE is 2"],
+    )
+    rid = run["id"]
+    selfmod._phase(rid, {"proposed"}, "reviewing", "test", "fixture: reviewed")
+    owner = selfmod.claim(rid)
+    try:
+        out = server._selfmod_command("approve %s" % rid)
+        assert out.startswith("refused /selfmod approve: run %s is already being driven" % rid), out
+        assert selfmod.get_run(rid)["phase"] == "reviewing"
+        assert _journal(stages, rid) == {}
+    finally:
+        selfmod.release(rid, owner)
+    server._selfmod_command("approve %s" % rid)
+    assert selfmod.get_run(rid)["phase"] == "approved"
+
+
+@pytest.mark.parametrize("text", [
+    "deploy " + "x" * 5000,
+    "rollback no-such-run trailing words",
+    "approve no-such-run",
+], ids=["overlong-deploy", "rollback-trailing-words", "approve-typo"])
+def test_an_unknown_run_is_refused_without_a_journal_record(host, text):
+    """A typo'd id never becomes a permanent uncertain journal identity."""
+    stages = host["stages"]
+    action, _, rid = text.partition(" ")
+    out = server._selfmod_command(text, operator_approved=True)
+    assert out.startswith("refused /selfmod %s: unknown selfmod run " % action), out
+    assert len(out) < 300
+    # The binding composes cleanly: nothing uncertain was left for this id.
+    assert _journal(stages, rid) == {}
+
+
+def _lock_deployments_as_a_live_owner() -> None:
+    import socket
+
+    with sqlite3.connect(selfmod.database_path()) as conn:
+        conn.execute(
+            "UPDATE selfmod_deployment_lock SET owner_id=?,owner_pid=?,owner_host=?,"
+            "lease_until=?,run_id=? WHERE id=1",
+            ("other-deployer", os.getpid(), socket.gethostname(), 4e9, "other-run"),
+        )
+
+
+def _unlock_deployments() -> None:
+    with sqlite3.connect(selfmod.database_path()) as conn:
+        conn.execute(
+            "UPDATE selfmod_deployment_lock SET owner_id=NULL,owner_pid=NULL,"
+            "owner_host=NULL,lease_until=NULL,run_id=NULL WHERE id=1")
+
+
+@needs_linux
+def test_benign_deploy_and_rollback_refusals_can_be_retried(host, monkeypatch):
+    """Real legacy deploy/rollback: a refusal before any write never fences the run.
+
+    ``deploy`` refused because another deployment holds the lock, and
+    ``rollback`` refused because the deployed file was edited afterwards,
+    both settle ``failed`` with a ``:not-applied`` receipt; once the operator
+    clears the cause, the retry reaches the legacy function, deploys the
+    tested bytes and rolls them back.
+    """
+    stages = host["stages"]
+    repo = host["repo"]
+    # The deploy health command imports ``server``; this checkout's stands in.
+    (repo / "server.py").write_text("def status():\n    return 'ok'\n", encoding="utf-8")
+    (repo / "server.py").chmod(0o644)
+    _git(repo, "add", "server.py")
+    _git(repo, "commit", "-q", "-m", "health stand-in")
+    _editing_model(monkeypatch)
+    server._selfmod_command(
+        _run_text(flag="--unisolated"), repository_root=repo, operator_approved=True,
+    )
+    rid = _only_run()["id"]
+    assert selfmod.get_run(rid)["phase"] == "reviewing"
+    server._selfmod_command("approve %s" % rid)
+    assert selfmod.get_run(rid)["phase"] == "approved"
+
+    _lock_deployments_as_a_live_owner()
+    out = server._selfmod_command("deploy %s" % rid, operator_approved=True)
+    assert out == "ERROR: another deployment/rollback holds the process-safe lock", out
+    assert selfmod.get_run(rid)["phase"] == "approved"
+    assert (repo / "sample.py").read_text(encoding="utf-8") == ORIGINAL
+    binding = stages._effect_binding_factory(rid)  # composes: nothing uncertain
+    refused = binding.journal.get(f"{binding.run_id}:selfmod-deploy:{rid}")
+    assert refused.state.value == "failed"
+    assert refused.receipt_key == f"selfmod:{rid}:deploy:not-applied"
+
+    _unlock_deployments()
+    out = server._selfmod_command("deploy %s" % rid, operator_approved=True)
+    assert selfmod.get_run(rid)["phase"] == "deployed", out
+    assert (repo / "sample.py").read_text(encoding="utf-8") == EDITED
+    assert _journal(stages, rid)[f"selfmod-deploy:{rid}:retry-2"] == "completed"
+
+    (repo / "sample.py").write_text("VALUE = 3  # operator edit\n", encoding="utf-8")
+    out = server._selfmod_command("rollback %s" % rid, operator_approved=True)
+    assert out.startswith("ERROR: rollback conflict: deployed files changed"), out
+    assert selfmod.get_run(rid)["phase"] == "deployed"
+    (repo / "sample.py").write_text(EDITED, encoding="utf-8")
+    out = server._selfmod_command("rollback %s" % rid, operator_approved=True)
+    assert selfmod.get_run(rid)["phase"] == "restored", out
+    assert (repo / "sample.py").read_text(encoding="utf-8") == ORIGINAL
+
+    operations = _journal(stages, rid)
+    assert operations[f"selfmod-deploy:{rid}"] == "failed"
+    assert operations[f"selfmod-rollback:{rid}"] == "failed"
+    assert operations[f"selfmod-rollback:{rid}:retry-2"] == "completed"
+    assert "uncertain" not in operations.values(), operations
+    assert "intent" not in operations.values(), operations
+
+
+def test_a_stage_failure_after_mutation_still_fences_the_run(host, monkeypatch):
+    """Only the typed pre-mutation refusal is retryable; anything else stays fenced."""
+    stages = host["stages"]
+    rid = _approved_run(host)
+
+    def deploy(run_id, **_kwargs):
+        raise RuntimeError("installed bytes differ from tested bytes: sample.py")
+
+    monkeypatch.setattr(selfmod, "deploy", deploy)
+    out = server._selfmod_command("deploy %s" % rid, operator_approved=True)
+    assert out == "ERROR: installed bytes differ from tested bytes: sample.py"
+    out = server._selfmod_command("deploy %s" % rid, operator_approved=True)
+    assert out == "ERROR: worker restart requires explicit reconciliation of uncertain effects"
+
+
+# --- HTTP and MCP drive a real isolated run ---------------------------------
+
+
+@needs_root
+@pytest.mark.parametrize("surface", ["http", "mcp"])
+def test_an_unattended_surface_runs_an_isolated_journaled_candidate(host, monkeypatch, surface):
+    """With a candidate supervisor, HTTP and MCP need no attendance -- and get isolation.
+
+    Driven through ``sonder_serve._handle_slash`` / ``server.sonder`` with the
+    written allow rule an unattended surface needs; only the repository root
+    is redirected to the fixture checkout (``control_command`` passes none).
+    """
+    import functools
+
+    monkeypatch.setenv(linux.CANDIDATE_UID_ENV, str(CANDIDATE_UID))
+    host["home"].chmod(0o711)
+    _allow_selfmod_rule(monkeypatch)
+    _editing_model(monkeypatch)
+    monkeypatch.setattr(server, "_selfmod_command", functools.partial(
+        server._selfmod_command, repository_root=host["repo"]))
+    command = "/selfmod " + _run_text()
+    out = sonder_serve._handle_slash(command) if surface == "http" else server.sonder(command)
+
+    run = _only_run()
+    rows = {row["kind"]: row for row in _rows(run["id"])}
+    assert run["phase"] == "reviewing", (out, {k: r["output"][-800:] for k, r in rows.items()})
+    for kind in ("syntax", "targeted", "regression", "smoke"):
+        assert rows[kind]["isolation"] == "linux-uid", dict(rows[kind])
+        assert rows[kind]["passed"] == 1
+    events = [e["details"] for e in selfmod.events(run["id"]) if e["kind"] == "isolation"]
+    assert events == ["candidate checks run under the selected candidate supervisor"]
+    _assert_fully_journaled(host["stages"], run["id"], checks=3)
+    assert (host["repo"] / "sample.py").read_text(encoding="utf-8") == ORIGINAL
     assert linux.live_uid_pids(CANDIDATE_UID) == set()

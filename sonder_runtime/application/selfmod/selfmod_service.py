@@ -41,6 +41,7 @@ from .governance import (
     WorktreeMetadata,
 )
 from .reproducer_contract import FailureEvidence, ReproducerEvidence
+from .stage_refusal import SelfmodStageNotApplied
 from .verification_lifecycle import (
     ActivationRecord,
     BackupRecord,
@@ -269,8 +270,13 @@ _STAGE_EFFECTS: Mapping[str, _StageEffect] = {
 }
 # Bound on journaled attempts of one repeatable stage per run.  Every retry
 # requires all earlier attempts settled, so this also bounds the keyed journal
-# lookups used to derive the next attempt.
+# lookups used to derive the next attempt.  One-shot stages share the bound
+# for their retries after a not-applied refusal.
 MAX_SELFMOD_STAGE_ATTEMPTS = 256
+# Receipt suffix of a stage the legacy module refused before mutating
+# anything (``SelfmodStageNotApplied``).  Such a ``failed`` outcome is the
+# only one that admits a retry of a one-shot stage.
+NOT_APPLIED_RECEIPT_SUFFIX = ":not-applied"
 
 
 @dataclass(frozen=True)
@@ -595,7 +601,10 @@ class GuardedLegacySelfmodService:
         Without a composed binding factory the legacy call runs directly, as
         before.  Otherwise the stage's own success predicate classifies the
         receipt: a receipt that misses it is a settled ``failed`` outcome, and
-        an exception (or unpublishable receipt) leaves the intent uncertain.
+        an exception (or unpublishable receipt) leaves the intent uncertain --
+        except ``SelfmodStageNotApplied``, the legacy module's typed refusal
+        before any mutation, which settles ``failed`` with a ``:not-applied``
+        receipt and is then re-raised to the caller.
         """
         effect = _STAGE_EFFECTS[stage]
         if self._effect_binding_factory is None:
@@ -615,19 +624,72 @@ class GuardedLegacySelfmodService:
             receipt_key = f"selfmod:{run_id}:{effect.receipt}:attempt-{attempt}"
         else:
             # One-shot stages keep one identity per run; a second call is a
-            # duplicate intent and refuses.  Deploy/rollback ids are unchanged.
-            operation_id = f"{effect.operation}:{run_id}"
-            receipt_key = f"selfmod:{run_id}:{effect.receipt}"
-        return journaled_effect(
+            # duplicate intent and refuses.  Deploy/rollback ids are unchanged
+            # for the first attempt; only a not-applied refusal admits a retry.
+            operation_id, receipt_key = self._one_shot_identity(binding, run_id, effect)
+        refused: list[SelfmodStageNotApplied] = []
+        not_applied: dict[str, object] = {}
+
+        def invoke_classifying_refusal() -> Mapping[str, object]:
+            try:
+                return invoke()
+            except SelfmodStageNotApplied as exc:
+                refused.append(exc)
+                # Type name only in the settled record: refusal text may name
+                # operator paths.
+                not_applied.update(stage=effect.receipt, refused=type(exc).__name__)
+                return not_applied
+
+        def settled_success(result: Mapping[str, object]) -> bool:
+            return False if result is not_applied else effect.success(result)
+
+        def settled_receipt(result: Mapping[str, object]) -> str:
+            return receipt_key + NOT_APPLIED_RECEIPT_SUFFIX if result is not_applied else receipt_key
+
+        result = journaled_effect(
             binding,
             operation_id=operation_id,
             idempotency_key=receipt_key,
             request=request,
-            invoke=invoke,
-            receipt_key=receipt_key,
+            invoke=invoke_classifying_refusal,
+            receipt_key=settled_receipt,
             reconciliation="manual",
-            success=effect.success,
+            success=settled_success,
         )
+        if refused:
+            raise refused[0]
+        return result
+
+    @staticmethod
+    def _one_shot_identity(
+        binding: AuthenticatedWorkerBinding, run_id: str, effect: _StageEffect,
+    ) -> tuple[str, str]:
+        """The journal identity of a one-shot stage's next admissible call.
+
+        The first call is ``<operation>:<run>``.  A later call gets a new
+        identity (``:retry-N``) only when every earlier one settled ``failed``
+        with a ``:not-applied`` receipt -- a legacy refusal before any
+        mutation.  Any other prior outcome (completed, failed after running,
+        in flight, uncertain) keeps that identity, so the journal refuses the
+        duplicate exactly as before.
+        """
+        base_operation = f"{effect.operation}:{run_id}"
+        base_receipt = f"selfmod:{run_id}:{effect.receipt}"
+        lookup = getattr(binding.journal, "get", None)
+        if not callable(lookup):
+            return base_operation, base_receipt
+        operation_id, receipt_key = base_operation, base_receipt
+        for attempt in range(2, MAX_SELFMOD_STAGE_ATTEMPTS + 2):
+            prior = lookup(f"{binding.run_id}:{operation_id}")
+            if (
+                prior is None
+                or prior.state is not EffectState.FAILED
+                or prior.receipt_key != receipt_key + NOT_APPLIED_RECEIPT_SUFFIX
+            ):
+                return operation_id, receipt_key
+            operation_id = f"{base_operation}:retry-{attempt}"
+            receipt_key = f"{base_receipt}:retry-{attempt}"
+        raise EffectJournalError(f"selfmod {effect.receipt} retries are exhausted")
 
     @staticmethod
     def _next_stage_attempt(
