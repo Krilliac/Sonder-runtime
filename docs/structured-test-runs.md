@@ -191,7 +191,13 @@ Gradle and Maven report trees:
    - `inherit_environment=False`;
    - the deadline from the plan, which is killed as a process tree (a POSIX
      process group, or `taskkill /T` on Windows);
-   - at most 64 descendants (128 for cargo, gradle and maven);
+   - at most 64 descendants (128 for cargo, gradle and maven). On Windows
+     the Job Object enforces this exactly. On POSIX the only per-launch bound
+     is `RLIMIT_NPROC`, which the kernel charges to every task of the real
+     uid, so it is a runaway-fork backstop set above the uid's current task
+     count (room for that work to double, plus the descendant cap), never
+     the bare cap: a bare cap failed every fork of a run whose uid already
+     ran that many tasks;
    - 4 GiB of memory.
 
    The host executable is checked again at launch. The report directory
