@@ -56,6 +56,15 @@ python scripts/check_history_privacy.py --json
 python -m pytest -q -n auto --dist load --durations=25
 ```
 
+After the full suite, the same job installs `requirements-update.txt` and runs
+the SPEC-4 TUF update-trust suites (`tests/production/test_tuf_publisher.py`,
+`tests/test_update_manifest_trust.py`); any skip there fails the job. Locally:
+
+```bash
+python -m pip install -r requirements-dev.txt -r requirements-update.txt
+python -m pytest -q -rs tests/production/test_tuf_publisher.py tests/test_update_manifest_trust.py
+```
+
 `requirements-dev.txt` also pins `pexpect` and `pyte` on every non-Windows
 platform: the REPL screen tests under `tests/repl` drive the real REPL in a
 pseudo-terminal and fail (rather than skip) if either is missing. On Windows

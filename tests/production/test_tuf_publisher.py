@@ -9,7 +9,9 @@ import pytest
 
 # The publisher and the client's TUF verify path use the optional update
 # dependencies (requirements-update.txt). Skip cleanly where they are absent
-# (e.g. base CI) rather than erroring at collection.
+# (the default dev install) rather than erroring at collection; CI runs this
+# file in a dedicated step with requirements-update.txt installed and fails on
+# any skip.
 pytest.importorskip("tuf")
 pytest.importorskip("securesystemslib")
 

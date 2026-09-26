@@ -304,3 +304,43 @@ def test_release_workflow_stamps_and_gates_artifacts():
     assert "tests/test_managed_runtime_owner.py" in ci
     assert "tests/test_artifact_fetch.py" in ci
     assert "tests/test_selfmod_low_integrity.py" in ci
+
+
+WORKFLOWS = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+
+
+def _job_block(workflow: str, job: str) -> str:
+    """The text of one top-level job, up to the next job or the end."""
+    marker = "\n  %s:\n" % job
+    assert marker in workflow, job
+    rest = workflow.split(marker, 1)[1]
+    lines = []
+    for line in rest.splitlines():
+        if line.startswith("  ") and not line.startswith("   ") and line.rstrip().endswith(":"):
+            break
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _step_block(job_text: str, name: str) -> str:
+    """The text of one ``- name:`` step inside a job, up to the next step."""
+    marker = "      - name: %s\n" % name
+    assert marker in job_text, name
+    rest = job_text.split(marker, 1)[1]
+    return rest.split("\n      - ", 1)[0]
+
+
+def test_ci_runs_the_tuf_update_trust_suites_and_refuses_skips():
+    ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+    step = _step_block(_job_block(ci, "tests"), "Run the TUF update-trust suites (no skips allowed)")
+    assert "if: ${{ !cancelled() }}" in step
+    assert "uv pip install -r requirements-dev.txt -r requirements-update.txt --system" in step
+    assert "tests/production/test_tuf_publisher.py" in step
+    assert "tests/test_update_manifest_trust.py" in step
+    assert '--junitxml="$RUNNER_TEMP/update-trust.xml"' in step
+    assert 'assert totals["tests"] > 0' in step
+    assert 'assert totals["skipped"] == totals["errors"] == totals["failures"] == 0' in step
+    # The trust suites must stay importorskip-guarded on tuf only: the default
+    # dev install leaves the TUF stack out, and this step is what runs them.
+    assert "tuf" not in (Path(__file__).resolve().parents[1] / "requirements-dev.txt").read_text(
+        encoding="utf-8")

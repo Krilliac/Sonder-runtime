@@ -101,6 +101,30 @@ jobs:
         run: >-
           python -m pytest -q -n auto --dist load --durations=25
           --junitxml=pytest-report.xml
+      # The SPEC-4 TUF update-trust path needs requirements-update.txt, which
+      # the runtime and dev requirements deliberately leave out, so the full
+      # suite above skips it. Install the pinned TUF stack after that suite
+      # has run and require every update-trust test to run: a skip here means
+      # the verification path went unexercised, which is a failure.
+      - name: Run the TUF update-trust suites (no skips allowed)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv pip install -r requirements-dev.txt -r requirements-update.txt --system
+          python -m pytest -q -rs -p no:cacheprovider \
+            tests/production/test_tuf_publisher.py tests/test_update_manifest_trust.py \
+            --junitxml="$RUNNER_TEMP/update-trust.xml"
+          python - "$RUNNER_TEMP/update-trust.xml" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+          suites = list(ET.parse(sys.argv[1]).getroot().iter("testsuite"))
+          assert suites, "no junit test suites were written"
+          totals = {key: sum(int(suite.get(key, "0")) for suite in suites)
+                    for key in ("tests", "skipped", "errors", "failures")}
+          assert totals["tests"] > 0, totals
+          assert totals["skipped"] == totals["errors"] == totals["failures"] == 0, totals
+          PY
       - name: Upload test report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
