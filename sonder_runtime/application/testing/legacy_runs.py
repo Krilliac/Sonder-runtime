@@ -33,6 +33,11 @@ LEGACY_WAIT_SLICE_SECONDS = 30
 # Past the run's own hard deadline, how long the wrapper keeps waiting for the
 # terminal report (collection and process-tree cleanup are included).
 _DEADLINE_GRACE_SECONDS = 60
+# While the caller's concurrent-run slots are all taken (TEST_RUN_BUSY), how
+# often the wrapper asks again, and the longest it queues before answering busy.
+LEGACY_BUSY_POLL_SECONDS = 2.0
+LEGACY_MAX_QUEUE_SECONDS = 600
+_BUSY = "TEST_RUN_BUSY"
 
 
 def retired_extra_args(extra_args_json: Any) -> dict | None:
@@ -148,18 +153,56 @@ def report_to_legacy(report: TestReport) -> dict:
     return result
 
 
+def _pause(context: OperationContext | None, seconds: float) -> bool:
+    """Wait ``seconds``; True when the caller's operation was cancelled."""
+    cancellation = getattr(context, "cancellation", None)
+    if cancellation is not None:
+        return bool(cancellation.wait(seconds))
+    time.sleep(seconds)
+    return False
+
+
+def _start(service: Any, request: TestRunRequest, context: OperationContext, *,
+           clock: Callable[[], float], pause: Callable[[float], bool]):
+    """``service.run``, queueing while the caller's run slots are all taken.
+
+    The legacy tool never had a concurrency cap, and its callers (parallel
+    agent runs, fleets) expect the run to happen rather than a busy answer.
+    The structured runner's per-principal cap stays in force: a busy start is
+    retried every ``LEGACY_BUSY_POLL_SECONDS`` until a slot frees, for at most
+    the run's own timeout (``LEGACY_MAX_QUEUE_SECONDS`` without one). Past
+    that, or on cancellation, the busy refusal is the answer.
+    """
+    queue_until = clock() + min(LEGACY_MAX_QUEUE_SECONDS,
+                                request.timeout_seconds or LEGACY_MAX_QUEUE_SECONDS)
+    while True:
+        try:
+            return service.run(request, context, wait_seconds=LEGACY_WAIT_SLICE_SECONDS)
+        except SonderError as exc:
+            if str(getattr(exc, "code", "") or "") != _BUSY or clock() >= queue_until:
+                raise
+            if context is not None and getattr(context, "expired", False):
+                raise
+            if pause(LEGACY_BUSY_POLL_SECONDS):
+                raise
+
+
 def run_legacy_pytest(service: Any, request: TestRunRequest, context: OperationContext, *,
-                      clock: Callable[[], float] = time.monotonic) -> dict:
+                      clock: Callable[[], float] = time.monotonic,
+                      pause: Callable[[float], bool] | None = None) -> dict:
     """Run ``request`` to its report and answer in the legacy shape.
 
-    Waits in bounded slices until the run is terminal; the run's own hard
-    deadline ends it, so the loop ends too. A refusal (bad selector, project
-    outside the roots, busy) is a legacy error result, never a raise.
+    A start refused only because the caller's run slots are all taken queues
+    for a slot (see ``_start``). Then it waits in bounded slices until the
+    run is terminal; the run's own hard deadline ends it, so the loop ends
+    too. A refusal (bad selector, project outside the roots, still busy past
+    the queue bound) is a legacy error result, never a raise.
     """
+    wait = pause if pause is not None else (lambda seconds: _pause(context, seconds))
     budget = (request.timeout_seconds or 600) + _DEADLINE_GRACE_SECONDS
-    give_up = clock() + budget
     try:
-        value = service.run(request, context, wait_seconds=LEGACY_WAIT_SLICE_SECONDS)
+        value = _start(service, request, context, clock=clock, pause=wait)
+        give_up = clock() + budget
         while not isinstance(value, TestReport):
             if clock() >= give_up:
                 return {"ok": False, "returncode": -1, "timed_out": True, "elapsed_ms": 0,
@@ -176,6 +219,6 @@ def run_legacy_pytest(service: Any, request: TestRunRequest, context: OperationC
 
 
 __all__ = [
-    "RETIRED_EXTRA_ARGS", "legacy_pytest_request", "report_to_legacy", "retired_extra_args",
+    "LEGACY_BUSY_POLL_SECONDS", "LEGACY_MAX_QUEUE_SECONDS", "RETIRED_EXTRA_ARGS", "legacy_pytest_request", "report_to_legacy", "retired_extra_args",
     "run_legacy_pytest",
 ]

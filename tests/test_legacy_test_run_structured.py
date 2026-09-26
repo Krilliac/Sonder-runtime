@@ -17,6 +17,7 @@ import pytest
 import harness_tools
 import server
 from sonder_runtime.application.testing.legacy_runs import (
+    LEGACY_BUSY_POLL_SECONDS,
     RETIRED_EXTRA_ARGS,
     legacy_pytest_request,
     report_to_legacy,
@@ -142,6 +143,78 @@ def test_the_wrapper_waits_for_the_report_and_answers_refusals_in_shape():
     assert refused["error"].startswith("INVALID_SELECTOR: selector refused")
 
 
+def _busy():
+    from sonder_runtime.domain.common.errors import CapacityExceeded
+
+    error = CapacityExceeded("at most 2 test runs may run at once per caller")
+    error.code = "TEST_RUN_BUSY"
+    return error
+
+
+def test_a_busy_start_queues_for_a_slot_instead_of_answering_busy():
+    now = [0.0]
+    attempts, pauses = [], []
+
+    class Runs:
+        def run(self, request, context, *, wait_seconds):
+            attempts.append(now[0])
+            if len(attempts) < 3:
+                raise _busy()
+            return _report(status="passed", exit_code=0)
+
+    def pause(seconds):
+        pauses.append(seconds)
+        now[0] += seconds
+        return False
+
+    data = run_legacy_pytest(Runs(), legacy_pytest_request("/w", timeout=60), context=None,
+                             clock=lambda: now[0], pause=pause)
+    assert data["ok"] is True and data["returncode"] == 0
+    assert len(attempts) == 3 and pauses == [LEGACY_BUSY_POLL_SECONDS] * 2
+
+
+def test_a_start_still_busy_past_the_queue_bound_answers_busy():
+    now = [0.0]
+
+    class Runs:
+        def run(self, request, context, *, wait_seconds):
+            raise _busy()
+
+    def pause(seconds):
+        now[0] += seconds
+        return False
+
+    data = run_legacy_pytest(Runs(), legacy_pytest_request("/w", timeout=30), context=None,
+                             clock=lambda: now[0], pause=pause)
+    assert data["ok"] is False and data["error_code"] == "TEST_RUN_BUSY"
+    # The queue is bounded by the run's own timeout.
+    assert 30 <= now[0] < 30 + LEGACY_BUSY_POLL_SECONDS + 1
+
+
+def test_a_cancelled_caller_stops_queueing_and_other_refusals_never_queue():
+    calls = []
+
+    class Busy:
+        def run(self, request, context, *, wait_seconds):
+            calls.append("busy")
+            raise _busy()
+
+    data = run_legacy_pytest(Busy(), legacy_pytest_request("/w"), context=None,
+                             pause=lambda seconds: True)
+    assert data["error_code"] == "TEST_RUN_BUSY" and calls == ["busy"]
+
+    class Refusing:
+        def run(self, request, context, *, wait_seconds):
+            calls.append("refused")
+            error = InvalidInput("selector refused")
+            error.code = "INVALID_SELECTOR"
+            raise error
+
+    data = run_legacy_pytest(Refusing(), legacy_pytest_request("/w"), context=None,
+                             pause=lambda seconds: pytest.fail("a non-busy refusal queued"))
+    assert data["error_code"] == "INVALID_SELECTOR" and calls == ["busy", "refused"]
+
+
 # --- routing -----------------------------------------------------------------------------------
 
 
@@ -215,3 +288,31 @@ def test_a_host_bound_project_outside_the_file_roots_keeps_the_harness_run(stack
     # fallback grants nothing the harness would not.
     output = server.test_run(root=str(project), framework="pytest", timeout=60)
     assert output.startswith("ERROR:") and "  ok: True" not in output
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(os.name != "posix", reason="the real runner stack reads /proc")
+def test_a_legacy_run_past_the_owners_two_slots_queues_and_runs(stack, monkeypatch):
+    from sonder_runtime.application.testing.ports import TestRunRequest
+
+    project = stack.allowed / "busy"
+    project.mkdir()
+    (project / "pytest.ini").write_text("[pytest]\n")
+    (project / "test_slow.py").write_text("import time\n\ndef test_slow():\n    time.sleep(2)\n")
+    (project / "test_fast.py").write_text("def test_fast():\n    assert True\n")
+    monkeypatch.setattr(server, "_developer_tool_services",
+                        lambda: SimpleNamespace(test_runs=stack.service))
+    context = server._developer_tool_context()
+    slow = TestRunRequest(project=str(project), runner="pytest", selector="test_slow.py",
+                          timeout_seconds=60)
+    held = [stack.service.start(slow, context) for _ in range(2)]
+    with pytest.raises(Exception) as busy:
+        stack.service.start(slow, context)
+    assert getattr(busy.value, "code", "") == "TEST_RUN_BUSY"
+
+    output = server.test_run(root=str(project), framework="pytest",
+                             path="test_fast.py", timeout=60)
+    assert "TEST_RUN_BUSY" not in output
+    assert "  ok: True" in output and "1 passed" in output
+    for job_id in held:
+        assert stack.service.result(job_id, context, wait_seconds=30).status == "passed"

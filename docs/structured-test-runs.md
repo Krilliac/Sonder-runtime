@@ -362,6 +362,18 @@ evidence read those keys.
 - **A refusal is a legacy error result.** Examples are a pattern that is not a
   `k:` expression and a project outside the roots. The result has `ok: false`
   and an `error_code`, and nothing runs.
+- **It shares the local owner's run slots.** Every legacy run is started as
+  the local owner principal (`owner`), whoever called it: the agent, a fleet
+  worker, the REPL, or an account's chat `/test_run`. The durable job is
+  recorded as the owner's. The owner may run at most two structured test runs
+  at once, and this cap covers legacy runs and the owner's HTTP and REPL runs
+  together. A legacy run that finds both slots taken does not fail. It waits
+  for a slot, asking again every 2 seconds, for at most its own `timeout`
+  (600 seconds if none is given). The wait ends early if the caller is
+  cancelled. If no slot frees by then, the answer is a `TEST_RUN_BUSY` error
+  result. Parallel agent runs therefore take turns, two at a time. While
+  they hold both slots, the owner's own HTTP `POST /v1/tools/test-run` is
+  answered `429 TEST_RUN_BUSY`.
 - **`extra_args_json` is retired.** Anything other than empty or `"[]"` is
   refused with `EXTRA_ARGS_RETIRED` ("extra_args_json retired; use
   path/pattern") before any runner starts. This includes malformed JSON,
