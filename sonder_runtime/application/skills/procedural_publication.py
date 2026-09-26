@@ -138,6 +138,19 @@ class PublicationError(ValueError):
     """Raised when a publication cannot safely change active state."""
 
 
+class CatalogStorePort(Protocol):
+    """Durable catalog persistence seam owned by a host adapter.
+
+    ``save`` must replace the stored snapshot atomically or raise without
+    changing it.  ``load`` returns ``None`` for an empty store and must refuse
+    (raise) a snapshot whose integrity digest does not verify.
+    """
+
+    def load(self) -> CatalogSnapshot | None: ...
+
+    def save(self, snapshot: CatalogSnapshot) -> None: ...
+
+
 class DurableLastGoodCatalog:
     """Append-only version catalog with explicit active/last-good state.
 
@@ -312,10 +325,27 @@ class InMemoryActiveSkillPort:
 class ProceduralPublicationService:
     """Transactional bridge from memory/promotion evidence to active skills."""
 
-    def __init__(self, catalog: DurableLastGoodCatalog, active: ActiveSkillPort, events: PublicationEventPort | None = None) -> None:
+    def __init__(
+        self,
+        catalog: DurableLastGoodCatalog,
+        active: ActiveSkillPort,
+        events: PublicationEventPort | None = None,
+        store: CatalogStorePort | None = None,
+    ) -> None:
         self.catalog = catalog
         self.active = active
         self.events = events
+        self.store = store
+
+    def _persist(self, staged: DurableLastGoodCatalog) -> None:
+        """Durably commit the staged catalog as the transaction's last step.
+
+        The save runs inside the catalog transaction, so a store failure
+        propagates into the caller's guarded failure path and leaves both the
+        in-memory catalog and the active-skill port at their prior state.
+        """
+        if self.store is not None:
+            self.store.save(staged.snapshot())
 
     def publish(
         self,
@@ -373,6 +403,7 @@ class ProceduralPublicationService:
                             "rollback_reference": published.rollback_reference,
                         },
                     )
+                self._persist(staged)
         except BaseException as exc:
             self.catalog.restore(catalog_before)
             try:
@@ -401,6 +432,7 @@ class ProceduralPublicationService:
             with self.catalog.transaction() as staged:
                 restored = staged.rollback(skill_id)
                 self.active.activate(restored)
+                self._persist(staged)
         except BaseException as exc:
             self.catalog.restore(catalog_before)
             self.active.restore(active_before)
@@ -409,9 +441,39 @@ class ProceduralPublicationService:
             raise PublicationError("procedural skill rollback failed") from exc
         return restored
 
+    def disable(self, skill_id: str, reason: str) -> None:
+        """Quarantine a skill in the catalog and persist the decision.
+
+        ``ActiveSkillPort`` has no deactivation seam, so hosts must route
+        through ``catalog.current()``, which is ``None`` for a disabled skill.
+        """
+        catalog_before = self.catalog.snapshot()
+        try:
+            with self.catalog.transaction() as staged:
+                staged.disable(skill_id, reason)
+                self._persist(staged)
+        except BaseException as exc:
+            self.catalog.restore(catalog_before)
+            if isinstance(exc, PublicationError):
+                raise
+            raise PublicationError("procedural skill disable failed") from exc
+
+    def enable(self, skill_id: str) -> None:
+        """Lift a persisted quarantine so publication or rollback may resume."""
+        catalog_before = self.catalog.snapshot()
+        try:
+            with self.catalog.transaction() as staged:
+                staged.enable(skill_id)
+                self._persist(staged)
+        except BaseException as exc:
+            self.catalog.restore(catalog_before)
+            if isinstance(exc, PublicationError):
+                raise
+            raise PublicationError("procedural skill enable failed") from exc
+
 
 __all__ = [
-    "CatalogSnapshot", "DurableLastGoodCatalog", "HeldOutEvidence",
+    "CatalogSnapshot", "CatalogStorePort", "DurableLastGoodCatalog", "HeldOutEvidence",
     "ActiveSkillPort", "InMemoryActiveSkillPort", "ProceduralPublicationService",
     "PublicationError", "PublicationEventPort", "PublicationState", "SkillPublication",
 ]

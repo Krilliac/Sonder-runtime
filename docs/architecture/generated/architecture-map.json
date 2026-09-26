@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 347,
+      "file_count": 348,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -306,6 +306,7 @@
         "sonder_runtime/adapters/persistence/sqlite/physical_identity.py",
         "sonder_runtime/adapters/persistence/sqlite/runtime_checkpoints.py",
         "sonder_runtime/adapters/persistence/sqlite/selfmod.py",
+        "sonder_runtime/adapters/persistence/sqlite/skill_catalog.py",
         "sonder_runtime/adapters/persistence/sqlite/strategy_memory.py",
         "sonder_runtime/adapters/persistence/sqlite/training.py",
         "sonder_runtime/adapters/persistence/sqlite/updates.py",
