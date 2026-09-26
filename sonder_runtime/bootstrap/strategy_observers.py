@@ -10,6 +10,7 @@ from dataclasses import fields, replace
 import hashlib
 import json
 
+from sonder_runtime.application.ports.runtime_checkpoints import CheckpointConflict
 from sonder_runtime.domain.strategy.models import (
     EvidenceRef,
     FailureClass,
@@ -28,6 +29,10 @@ def _digest(value) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=True,
                                      default=str).encode("ascii")).hexdigest()
 
+
+# Bounded re-derivations of a Workbench charge when a concurrent observation
+# changes the lane's sealed history between the read and the CAS.
+_CHARGE_ATTEMPTS = 4
 
 # Per-attempt clamp for host counters copied into sealed usage. Values above
 # it are recorded at the clamp; the strategy budgets below are sized from it.
@@ -224,34 +229,47 @@ def observe_workbench_lane(trace, *, lane: dict, memory_service=None):
     # run's total model_calls equals the durable lane counter. Turns from
     # attempts that were never observed (for example an interrupted attempt)
     # are charged to the next observed attempt rather than dropped.
+    # The charge is derived from one read of the history and ``record`` is
+    # told which attempts it was derived from; it refuses inside its own
+    # generation CAS when those differ, so an observation interleaved with a
+    # concurrent one is re-derived instead of double-charging the lane.
     step_budget = max(1, min(int(lane["max_steps"]), 64))
     requested = StrategyBudget(attempts=step_budget, model_calls=step_budget)
-    history = trace.history(run_id)
-    prior = history
-    for index, sealed in enumerate(history):
-        if sealed.attempt_id == attempt_id:
-            prior = history[:index]
-            break
-    charged = sum(item.usage.model_calls for item in prior)
     used_steps = lane.get("used_steps")
-    model_calls = (
-        _counter(used_steps - charged)
-        if type(used_steps) is int and _attributes_counters(trace, run_id, requested)
-        else 0
-    )
-    attempt = _as_sealed(StrategyAttempt(
-        run_id, attempt_id, signature,
-        "uncertain" if uncertain else "succeeded" if status == "completed" else "failed",
-        failure, before, after, StrategyUsage(attempts=1, model_calls=model_calls),
-        model_route=str(lane.get("tier") or "")[:128],
-    ), history)
-    decision = trace.record(
-        attempt, budget=_within_sealed(trace, run_id, requested),
-        available_actions=(StrategyAction.INSPECT, StrategyAction.REPAIR, StrategyAction.CRITIC),
-        unresolved_effects=uncertain,
-        policy_blocked=failure_class is FailureClass.PERMISSION_DENIED,
-        transport_replay_safe=False,
-    )
+    for _ in range(_CHARGE_ATTEMPTS):
+        history = trace.history(run_id)
+        prior = history
+        for index, sealed in enumerate(history):
+            if sealed.attempt_id == attempt_id:
+                prior = history[:index]
+                break
+        charged = sum(item.usage.model_calls for item in prior)
+        model_calls = (
+            _counter(used_steps - charged)
+            if type(used_steps) is int and _attributes_counters(trace, run_id, requested)
+            else 0
+        )
+        attempt = _as_sealed(StrategyAttempt(
+            run_id, attempt_id, signature,
+            "uncertain" if uncertain else "succeeded" if status == "completed" else "failed",
+            failure, before, after, StrategyUsage(attempts=1, model_calls=model_calls),
+            model_route=str(lane.get("tier") or "")[:128],
+        ), history)
+        try:
+            decision = trace.record(
+                attempt, budget=_within_sealed(trace, run_id, requested),
+                available_actions=(StrategyAction.INSPECT, StrategyAction.REPAIR,
+                                   StrategyAction.CRITIC),
+                unresolved_effects=uncertain,
+                policy_blocked=failure_class is FailureClass.PERMISSION_DENIED,
+                transport_replay_safe=False,
+                expected_prior=tuple(item.attempt_id for item in prior),
+            )
+            break
+        except CheckpointConflict:
+            continue
+    else:
+        raise CheckpointConflict("lane strategy history kept changing during observation")
     if memory_service is not None and attempt.outcome in {"succeeded", "failed"}:
         memory_service.observe_recorded(
             run_id, attempt_id, project_scope=project_scope,

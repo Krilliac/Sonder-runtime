@@ -1,6 +1,10 @@
 """E5: Workbench and Autopilot strategy attempts carry host-counted usage."""
 from dataclasses import replace
 
+import pytest
+
+from sonder_runtime.application.ports.runtime_checkpoints import CheckpointConflict
+
 from sonder_runtime.bootstrap.strategy import compose_strategy_trace
 from sonder_runtime.bootstrap.strategy_observers import (
     observe_autopilot_task,
@@ -235,3 +239,53 @@ def test_autopilot_interrupted_retry_is_not_charged_the_previous_receipt(tmp_pat
     assert second.usage == StrategyUsage(attempts=1)
     assert _metrics(second.progress_after) == {"task_passed": 0, "validation_passed": 0}
     assert decision.action is StrategyAction.RECONCILE
+
+
+class _InterleavingTrace:
+    """Trace proxy that runs a concurrent observation right after one read."""
+
+    def __init__(self, trace, interleave):
+        self._trace = trace
+        self._interleave = interleave
+        self.history_reads = 0
+
+    def history(self, run_id):
+        value = self._trace.history(run_id)
+        self.history_reads += 1
+        if self._interleave is not None:
+            interleave, self._interleave = self._interleave, None
+            interleave()
+        return value
+
+    def __getattr__(self, name):
+        return getattr(self._trace, name)
+
+
+def test_workbench_charge_is_rederived_when_history_changes_before_the_cas(tmp_path):
+    trace = _trace(tmp_path)
+    later = _lane(tmp_path, attempt_id="attempt-2", used_steps=9)
+    racing = _InterleavingTrace(
+        trace, lambda: observe_workbench_lane(trace, lane=later),
+    )
+
+    # A stale terminal snapshot of attempt-1 (used_steps=5) is observed while
+    # attempt-2 (used_steps=9) is sealed between its history read and CAS.
+    observe_workbench_lane(racing, lane=_lane(tmp_path, used_steps=5))
+
+    history = _reopen(tmp_path).history("lane-1")
+    assert [(item.attempt_id, item.usage.model_calls) for item in history] == [
+        ("attempt-2", 9), ("attempt-1", 0),
+    ]
+    assert sum(item.usage.model_calls for item in history) == 9
+    assert racing.history_reads == 2
+
+
+def test_record_refuses_a_charge_derived_from_a_different_history(tmp_path):
+    trace = _trace(tmp_path)
+    observe_workbench_lane(trace, lane=_lane(tmp_path, used_steps=3))
+    stale = replace(trace.history("lane-1")[0], attempt_id="attempt-2")
+    with pytest.raises(CheckpointConflict, match="history changed"):
+        trace.record(stale, budget=StrategyBudget(attempts=8, model_calls=8),
+                     available_actions=(StrategyAction.INSPECT,),
+                     transport_replay_safe=False, expected_prior=())
+    assert [item.attempt_id for item in trace.history("lane-1")] == ["attempt-1"]
