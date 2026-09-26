@@ -32,7 +32,13 @@ dir_fd=parent)`, inspects the final component with
 opened the same way (`os.scandir(fd)`, `os.rmdir(..., dir_fd=...)`), with each
 child directory's descriptor identity compared with the `lstat` taken just
 before it was opened. A symlink appearing in any component, at the final
-name, or inside the tree is refused, never followed or unlinked. A caller may
+name, or inside the tree is refused, never followed or unlinked. A recursive
+delete first walks the whole tree through the same descriptors without
+removing anything, enforcing the 256-level depth bound (one open descriptor
+per level), the symlink refusal and the caller's entry guard, so a tree that
+would be refused is left intact; the removal pass then repeats every check,
+and only a concurrent change between the two passes can still interrupt a
+removal part-way. A caller may
 pass the `lstat` of the checked target; a different object at execution time
 is refused. The executor raises `PlatformCapabilityError` on Windows and on any
 host where `open`, `stat`, `unlink` or `rmdir` is missing from
@@ -60,5 +66,6 @@ is the trust anchor.
 Evidence: `tests/test_remaining_race_resistance.py` (contract) and
 `tests/test_intent_executor_delete.py` (Linux: symlink swapped into an
 intermediate component after preflight, symlink and directory rebinding during
-a recursive walk, target replacement, in-root-only deletion, and fail-closed
-capability checks).
+a recursive walk, target replacement, in-root-only deletion, over-deep and
+symlinked trees refused with nothing removed, and fail-closed capability
+checks).

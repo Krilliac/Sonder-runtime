@@ -12,7 +12,10 @@ so a symlink swapped into a parent component after the caller's preflight is
 refused by the kernel (``ELOOP``/``ENOTDIR``) instead of being followed.  The
 final component is inspected with ``fstatat(..., AT_SYMLINK_NOFOLLOW)`` and
 removed with ``unlinkat``; a directory is emptied through descriptors opened
-the same way, so no name inside the tree is ever re-resolved from a path.
+the same way, so no name inside the tree is ever re-resolved from a path.  A
+recursive delete walks the tree once without removing anything, so the depth
+bound, the symlink refusal and the caller's entry guard refuse a tree before
+any of it is deleted; the removal pass repeats every check.
 
 Windows is not supported: the stdlib exposes no ``dir_fd`` operations there,
 and a pathname fallback would reintroduce exactly the check/use race this
@@ -123,12 +126,23 @@ def _open_parent(root: Path, parents: tuple[str, ...]) -> int:
     return fd
 
 
-def _remove_directory_contents(
+def _walk_directory_contents(
     directory_fd: int,
     lexical: Path,
     guard: EntryGuard | None,
     depth: int,
+    *,
+    remove: bool,
 ) -> None:
+    """Visit (and, when ``remove`` is set, delete) a directory's contents.
+
+    The same descriptor walk serves both passes of a recursive delete: a
+    read-only pass that enforces the depth bound, the symlink refusal and the
+    entry guard for the whole tree before anything is removed, and the
+    removal pass, which repeats every check because the tree may change in
+    between.
+    """
+
     if depth > MAX_TREE_DEPTH:
         raise RaceResistanceError("recursive delete exceeds the depth bound")
     with os.scandir(directory_fd) as iterator:
@@ -150,11 +164,14 @@ def _remove_directory_contents(
                     raise RaceResistanceError(
                         "directory changed during delete: %s" % child_path
                     )
-                _remove_directory_contents(child_fd, child_path, guard, depth + 1)
+                _walk_directory_contents(
+                    child_fd, child_path, guard, depth + 1, remove=remove
+                )
             finally:
                 os.close(child_fd)
-            os.rmdir(name, dir_fd=directory_fd)
-        else:
+            if remove:
+                os.rmdir(name, dir_fd=directory_fd)
+        elif remove:
             os.unlink(name, dir_fd=directory_fd)
 
 
@@ -197,8 +214,14 @@ def execute_delete(
         try:
             if not same_identity(os.fstat(directory_fd), info):
                 raise RaceResistanceError("delete target changed after it was opened")
-            _remove_directory_contents(
-                directory_fd, root.joinpath(*parts), entry_guard, 1
+            lexical = root.joinpath(*parts)
+            # Refuse an over-deep, symlinked or guarded tree before removing
+            # anything, so a refusal never leaves a partly deleted tree.
+            _walk_directory_contents(
+                directory_fd, lexical, entry_guard, 1, remove=False
+            )
+            _walk_directory_contents(
+                directory_fd, lexical, entry_guard, 1, remove=True
             )
         finally:
             os.close(directory_fd)

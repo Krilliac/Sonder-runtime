@@ -295,3 +295,60 @@ def test_non_delete_intent_is_rejected(tmp_path):
         intent_executor.execute_delete(build_open_intent(target, [root], "read"))
 
     assert target.exists()
+
+
+def test_over_deep_tree_is_refused_before_anything_is_removed(
+    monkeypatch, workspace
+):
+    # A small bound keeps the per-entry protected-path guard cheap; the
+    # executor reads the module constant at call time.
+    monkeypatch.setattr(intent_executor, "MAX_TREE_DEPTH", 8)
+    tree = workspace / "deep"
+    tree.mkdir()
+    first = tree / "a_first.txt"
+    first.write_text("keep", encoding="utf-8")
+    chain = tree
+    for _ in range(intent_executor.MAX_TREE_DEPTH + 4):
+        chain = chain / "d"
+    chain.mkdir(parents=True)
+    (chain / "leaf.txt").write_text("leaf", encoding="utf-8")
+
+    with pytest.raises(PermissionError, match="depth bound"):
+        _confirmed_delete(tree, recursive=True)
+
+    assert first.read_text(encoding="utf-8") == "keep"
+    assert (chain / "leaf.txt").read_text(encoding="utf-8") == "leaf"
+
+
+def test_tree_at_the_depth_bound_is_deleted(monkeypatch, workspace):
+    monkeypatch.setattr(intent_executor, "MAX_TREE_DEPTH", 8)
+    tree = workspace / "bounded"
+    chain = tree
+    for _ in range(intent_executor.MAX_TREE_DEPTH - 1):
+        chain = chain / "d"
+    chain.mkdir(parents=True)
+    (chain / "leaf.txt").write_text("leaf", encoding="utf-8")
+
+    result = _confirmed_delete(tree, recursive=True)
+
+    assert result["deleted"] is True
+    assert not tree.exists()
+
+
+def test_executor_refuses_a_nested_symlink_without_partial_removal(tmp_path):
+    root = tmp_path / "root"
+    tree = root / "tree"
+    (tree / "z_later").mkdir(parents=True)
+    first = tree / "a_first.txt"
+    first.write_text("keep", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tree / "z_later" / "link").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(RaceResistanceError, match="symlink"):
+        intent_executor.execute_delete(
+            build_open_intent(tree, [root], "delete"), recursive=True
+        )
+
+    assert first.read_text(encoding="utf-8") == "keep"
+    assert outside.is_dir()
