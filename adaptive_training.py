@@ -50,47 +50,6 @@ PERSONAL_MODEL = "sonder-personal:latest"
 ROLLBACK_MODEL = "sonder:latest"
 LLAMA_CPP_REVISION = "99f3dc32296f825fec94f202da1e9fede1e78cf9"
 LLAMA_CPP_TREE_SHA256 = "3cb23bb624453dc3511df618bc1445169d44b8fb635bd04a1b3eabc45db2d4df"
-MODEL_SPECS = {
-    "1.5b": {
-        "params": 1.5,
-        "hf": "Qwen/Qwen2.5-Coder-1.5B-Instruct",
-        "hf_revision": "2e1fd397ee46e1388853d2af2c993145b0f1098a",
-        "ollama": "qwen2.5-coder:1.5b",
-        "train_vram": 2.8,
-        "train_ram": 6.0,
-        "infer_vram": 1.6,
-        "infer_ram": 3.0,
-    },
-    "3b": {
-        "params": 3.0,
-        "hf": "Qwen/Qwen2.5-Coder-3B-Instruct",
-        "hf_revision": "488639f1ff808d1d3d0ba301aef8c11461451ec5",
-        "ollama": "qwen2.5-coder:3b",
-        "train_vram": 5.0,
-        "train_ram": 10.0,
-        "infer_vram": 2.8,
-        "infer_ram": 5.0,
-    },
-    "7b": {
-        "params": 7.0,
-        "hf": "Qwen/Qwen2.5-Coder-7B-Instruct",
-        "hf_revision": "c03e6d358207e414f1eca0bb1891e29f1db0e242",
-        "ollama": "qwen2.5-coder:7b",
-        "train_vram": 10.0,
-        "train_ram": 18.0,
-        "infer_vram": 5.5,
-        "infer_ram": 9.0,
-    },
-}
-MODEL_ALIASES = {
-    "1.5": "1.5b", "1.5b": "1.5b", "3": "3b", "3b": "3b",
-    "7": "7b", "7b": "7b",
-}
-TRAINING_CPU_OFFLOAD_SUPPORTED = False
-TRAINING_CPU_OFFLOAD_REASON = (
-    "Training CPU offload is disabled for the current bitsandbytes/Trainer "
-    "backend: its device_map='auto' path is intended for inference, not QLoRA training."
-)
 
 
 # Compatibility names for callers that still import the legacy entrypoint.
@@ -98,9 +57,13 @@ TRAINING_CPU_OFFLOAD_REASON = (
 # lifecycle/deployment code below remains intentionally in this module until
 # its external process and policy seams can be extracted safely.
 from sonder_runtime.application.training.hardware_planning import (
-    HardwarePlan,
+    MODEL_ALIASES as MODEL_ALIASES,
+    MODEL_SPECS as MODEL_SPECS,
+    TRAINING_CPU_OFFLOAD_REASON as TRAINING_CPU_OFFLOAD_REASON,
+    TRAINING_CPU_OFFLOAD_SUPPORTED as TRAINING_CPU_OFFLOAD_SUPPORTED,
+    HardwarePlan as HardwarePlan,
     PlanOptions,
-    Recommendation,
+    Recommendation as Recommendation,
     build_plan as _application_build_plan,
     format_hardware as _application_format_hardware,
     format_plan as _application_format_plan,

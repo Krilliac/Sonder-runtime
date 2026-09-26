@@ -71,8 +71,15 @@ python adaptive_training.py release-alias --confirm
 python adaptive_training.py rollback
 ```
 
-Planning options include `--model auto|1.5b|3b|7b`,
-`--allow-cpu-offload`, `--max-vram`, `--max-system-ram`,
+Planning options include `--model auto|1.5b|3b|7b` or any other explicit
+parameter size such as `14b` or `27b`. A size outside the pinned 1.5B/3B/7B
+catalog gets an *inference-only* recommendation from a parameter-count heuristic (4-bit
+weights, a per-parameter KV slope and fixed runtime overhead); that is an
+estimate, not proof that the model fits, and serve-time residency may still
+need a smaller context or model. Training never uses an uncatalogued base: the
+QLoRA and dense recommendations stay on the pinned, revision-locked catalog and
+the plan records a rejection note naming the requested size. Other planning
+options are `--allow-cpu-offload`, `--max-vram`, `--max-system-ram`,
 `--context-length`, `--sequence-length`, `--batch-size`, `--gpu-index`, and
 `--gradient-accumulation`. `--full-finetune` is a feasibility/planning switch
 only; the attended start path intentionally supports QLoRA and rejects dense
