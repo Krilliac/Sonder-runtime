@@ -27,9 +27,6 @@ import pytest
 
 import permission_modes as pm
 
-pytest.importorskip("sonder_runtime.domain.build.repair", reason="needs lane A-domain-build")
-pytest.importorskip("sonder_runtime.adapters.build.launcher", reason="needs lane B1-run-and-model")
-
 from sonder_runtime.adapters.build.collector import BuildOutputCollector  # noqa: E402
 from sonder_runtime.adapters.build.environment import ScrubbedEnvironmentProvider  # noqa: E402
 from sonder_runtime.adapters.build.launcher import ProcessBuildLauncher  # noqa: E402
@@ -187,8 +184,7 @@ class Stack:
 
 
 def project(stack, compiler):
-    if not FIXTURE.is_dir():
-        pytest.skip("the sparklite fixture (lane A) is missing")
+    assert FIXTURE.is_dir(), "the sparklite fixture is missing: %s" % FIXTURE
     path = shutil.which(compiler)
     if path is None:
         pytest.skip("%s is not installed" % compiler)

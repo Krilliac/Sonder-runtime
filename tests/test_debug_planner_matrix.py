@@ -11,9 +11,6 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("sonder_runtime.domain.debugging.symbol_path")
-pytest.importorskip("sonder_runtime.domain.crash.model")
-
 from sonder_runtime.adapters.debugging.capture_source import GuardedCaptureSource  # noqa: E402
 from sonder_runtime.adapters.debugging.planner import (  # noqa: E402
     HostDebugPlanner,
@@ -378,7 +375,7 @@ def pe_pairs(tmp_path_factory):
 
 
 def _dump_for(image: Path) -> bytes:
-    builder_module = pytest.importorskip("tests.support.minidump_builder")
+    from tests.support import minidump_builder as builder_module
     from sonder_runtime.domain.binaries.pe_debug import read_pe_identity
     from sonder_runtime.domain.binaries.reader import BytesReader
 

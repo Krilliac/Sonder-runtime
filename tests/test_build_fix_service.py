@@ -19,9 +19,6 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("sonder_runtime.domain.build.repair", reason="needs lane A-domain-build")
-pytest.importorskip("sonder_runtime.application.build.ports", reason="needs lane B1-run-and-model")
-
 from sonder_runtime.adapters.build.preimages import FilePreimageStore  # noqa: E402
 from sonder_runtime.application.build.fix_ports import (  # noqa: E402
     BuildFixRequest,

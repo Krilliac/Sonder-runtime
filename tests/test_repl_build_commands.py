@@ -24,7 +24,6 @@ from sonder_runtime.interfaces.repl.facades import build_tools as facade
 from tests.test_build_executor import (
     compose_facade,
     fake_services,
-    port_doubles,  # noqa: F401 - fixture
 )
 
 pytestmark = pytest.mark.unit
@@ -66,7 +65,7 @@ def console(monkeypatch):
 
 
 @pytest.fixture
-def composed(tmp_path, monkeypatch, port_doubles):  # noqa: F811 - fixture
+def composed(tmp_path, monkeypatch):
     services = fake_services(tmp_path, tmp_path / "build")
     tools, audit, grants = compose_facade(tmp_path, services)
     monkeypatch.setattr(repl, "_typed_tools", lambda: tools)

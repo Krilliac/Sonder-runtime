@@ -2,8 +2,6 @@
 TTL, refresh, and a brief summary that never reads."""
 from __future__ import annotations
 
-import sys
-import types
 import uuid
 
 import pytest
@@ -65,23 +63,16 @@ class SpyPlanner:
 
 @pytest.fixture
 def domain_summary(monkeypatch):
-    """``domain.build.model.build_context_summary`` (lane A), or a stand-in until it lands."""
+    """Swap ``domain.build.model.build_context_summary`` for one that reads the fakes.
+
+    The fakes here are not domain models, so the real summary cannot read them.
+    """
+    import sonder_runtime.domain.build.model as real
+
     def summary(model, *, max_chars=600):
         return ("build %s" % model.project_label)[:max_chars]
 
-    try:
-        import sonder_runtime.domain.build.model as real
-    except ImportError:
-        real = None
-    if real is not None:  # the fakes here are not domain models
-        monkeypatch.setattr(real, "build_context_summary", summary)
-        return
-    package = types.ModuleType("sonder_runtime.domain.build")
-    package.__path__ = []
-    module = types.ModuleType("sonder_runtime.domain.build.model")
-    module.build_context_summary = summary
-    monkeypatch.setitem(sys.modules, "sonder_runtime.domain.build", package)
-    monkeypatch.setitem(sys.modules, "sonder_runtime.domain.build.model", module)
+    monkeypatch.setattr(real, "build_context_summary", summary)
 
 
 def make(ttl=600):

@@ -80,11 +80,7 @@ def test_registry_specs_for_the_digest_engines():
 
 # -- plans with a fake inventory (system="Windows") ------------------------------------------
 
-try:
-    from sonder_runtime.adapters.debugging.planner import HostDebugPlanner
-    from sonder_runtime.domain.crash.model import CrashReport, ModuleInfo
-except ImportError:  # lane A (templates, readers) not merged into this tree yet
-    HostDebugPlanner = CrashReport = ModuleInfo = None
+from sonder_runtime.adapters.debugging.planner import HostDebugPlanner  # noqa: E402
 from sonder_runtime.application.context import local_owner_context  # noqa: E402
 from sonder_runtime.application.debugging.ports import (  # noqa: E402
     CaptureIdentity,
@@ -92,8 +88,7 @@ from sonder_runtime.application.debugging.ports import (  # noqa: E402
     ProfileDigestRequest,
 )
 from sonder_runtime.domain.common.errors import SonderError  # noqa: E402
-
-lane_a = pytest.mark.skipif(HostDebugPlanner is None, reason="needs the lane A crash domain")
+from sonder_runtime.domain.crash.model import CrashReport, ModuleInfo  # noqa: E402
 
 CDB_COMMANDS = (
     ".echo SONDER_{nonce}_BEGIN;.ecxr;.echo SONDER_{nonce}_STACK;kn 64;.echo SONDER_{nonce}_ANALYZE;"
@@ -151,7 +146,6 @@ def plan_cdb(**kwargs):
                             identity=dump_identity(), tier0=kwargs.pop("tier0", tier0("game.exe", "ntdll.dll")))
 
 
-@lane_a
 def test_cdb_argv_is_exact():
     plan = plan_cdb()
     (step,) = plan.steps
@@ -167,7 +161,6 @@ def test_cdb_argv_is_exact():
     assert step.memory_limit_bytes == 4 << 30 and step.timeout_seconds == 180
 
 
-@lane_a
 def test_cdb_environment_is_built_from_scratch():
     env = dict(plan_cdb().steps[0].environment)
     assert env["USERPROFILE"] == env["LOCALAPPDATA"] == env["APPDATA"] == "{rundir}\\home"
@@ -180,7 +173,6 @@ def test_cdb_environment_is_built_from_scratch():
         assert forbidden not in env
 
 
-@lane_a
 def test_xperf_alone_gets_the_symbol_cache_variables():
     plan = planner().plan_profile(ProfileDigestRequest("C:\\t\\trace.etl"), ctx(),
                                   identity=dump_identity("etw_etl"))
@@ -191,7 +183,6 @@ def test_xperf_alone_gets_the_symbol_cache_variables():
     assert any("experimental" in note for note in plan.notes)
 
 
-@lane_a
 @pytest.mark.parametrize("module", ["coreclr.dll", "clr.dll", "mscorwks.dll", "CoreCLR.DLL"])
 def test_managed_dumps_are_refused_for_cdb(module):
     with pytest.raises(SonderError) as caught:
@@ -199,14 +190,12 @@ def test_managed_dumps_are_refused_for_cdb(module):
     assert caught.value.code == "ENGINE_REFUSED_MANAGED_DUMP"
 
 
-@lane_a
 def test_an_unreadable_dump_is_not_handed_to_cdb():
     with pytest.raises(SonderError) as caught:
         plan_cdb(tier0=None)
     assert caught.value.code == "ENGINE_REFUSED_MANAGED_DUMP"
 
 
-@lane_a
 def test_auto_skips_cdb_on_a_managed_dump_and_walks_with_stackwalk():
     request = CrashDigestRequest("C:\\dumps\\game.dmp")
     plan = planner().plan_crash(request, ctx(), network_allowed=False, identity=dump_identity(),
@@ -216,7 +205,6 @@ def test_auto_skips_cdb_on_a_managed_dump_and_walks_with_stackwalk():
     assert "--symbols-url" not in plan.steps[0].template_argv
 
 
-@lane_a
 @pytest.mark.parametrize("bad", [
     "\\\\buildserver\\symbols", "srv*C:\\cache*https://msdl.microsoft.com/download/symbols",
     "C:\\syms;D:\\more", "C:\\syms*", "https://symbols.example.com", "..\\syms", "C:\\a\\..\\b",
@@ -228,14 +216,12 @@ def test_symbol_dirs_that_could_reach_the_network_are_rejected(bad):
     assert caught.value.code == "SYMBOL_PATH_REJECTED"
 
 
-@lane_a
 def test_a_mapped_network_drive_is_rejected():
     with pytest.raises(SonderError) as caught:
         plan_cdb(dirs=("Z:\\builds\\syms",), planner={"drive": 4})
     assert caught.value.code == "SYMBOL_PATH_REJECTED"
 
 
-@lane_a
 def test_local_symbol_dirs_feed_the_symbol_and_image_paths():
     plan = plan_cdb(dirs=("C:\\build\\RelWithDebInfo", "D:\\engine\\pdb"))
     bindings = dict(plan.bindings)
@@ -244,7 +230,6 @@ def test_local_symbol_dirs_feed_the_symbol_and_image_paths():
     assert "srv*" not in bindings["sympath"]
 
 
-@lane_a
 def test_operator_stores_appear_only_with_network():
     stores = ("\\\\buildserver\\symbols", "https://symbols.studio.example")
     offline = plan_cdb(planner={"stores": stores})
@@ -258,7 +243,6 @@ def test_operator_stores_appear_only_with_network():
     assert online.command_digest != offline.command_digest
 
 
-@lane_a
 def test_a_malformed_operator_store_is_rejected():
     with pytest.raises(SonderError) as caught:
         plan_cdb(planner={"stores": ("http://plain.example/symbols",)}, network=True,
@@ -266,19 +250,16 @@ def test_a_malformed_operator_store_is_rejected():
     assert caught.value.code == "SYMBOL_STORE_REJECTED"
 
 
-@lane_a
 def test_a_store_cannot_come_from_tool_arguments():
     fields = set(CrashDigestRequest.__dataclass_fields__)
     assert not fields & {"stores", "store", "symbol_path", "argv", "env"}
 
 
-@lane_a
 def test_network_needs_both_the_request_and_the_service_decision():
     plan = plan_cdb(network=True)  # the service allowed it, but the request did not ask
     assert plan.network is False
 
 
-@lane_a
 @pytest.mark.parametrize("engine", ["gdb", "eu_stack", "lldb"])
 def test_linux_debuggers_are_refused_for_cores_on_windows(engine):
     request = CrashDigestRequest("C:\\dumps\\core", engine=engine, executable="")
@@ -288,7 +269,6 @@ def test_linux_debuggers_are_refused_for_cores_on_windows(engine):
     assert caught.value.code == "ENGINE_UNSUPPORTED_ON_PLATFORM"
 
 
-@lane_a
 @pytest.mark.parametrize("kind,engine", [("perf_data", "auto"), ("heaptrack_capture", "auto")])
 def test_linux_profilers_are_refused_on_windows(kind, engine):
     with pytest.raises(SonderError) as caught:
@@ -297,7 +277,6 @@ def test_linux_profilers_are_refused_on_windows(kind, engine):
     assert caught.value.code == "ENGINE_UNSUPPORTED_ON_PLATFORM"
 
 
-@lane_a
 def test_the_store_windbg_cdb_is_refused():
     with pytest.raises(SonderError) as caught:
         plan_cdb(planner={"tools": {"cdb": WINDOWS_APPS_CDB}})
@@ -305,14 +284,12 @@ def test_the_store_windbg_cdb_is_refused():
     assert "WindowsApps" in str(caught.value)
 
 
-@lane_a
 def test_cdb_is_unavailable_when_not_installed():
     with pytest.raises(SonderError) as caught:
         plan_cdb(planner={"tools": {}})
     assert caught.value.code == "ENGINE_UNAVAILABLE"
 
 
-@lane_a
 def test_wpaexporter_is_refused_until_its_profile_ships(tmp_path):
     with pytest.raises(SonderError) as caught:
         planner({"wpaexporter": "C:\\wpa.exe"}, profiles_dir=tmp_path).plan_profile(

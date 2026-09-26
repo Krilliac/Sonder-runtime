@@ -7,19 +7,16 @@ and the process-job provider:
 1. ``build_model`` before configure answers ``BUILD_TREE_MISSING``;
 2. ``build_job configure`` then ``build_model`` lists the targets;
 3. ``build_job build`` fails on the seeded error, attributed to its file;
-4. ``build_fix`` (when the fix loop is composed) repairs it with a scripted
-   generator that edits only in-scope files; otherwise the repair is an
-   in-scope ``write_file`` through the same gateway;
+4. ``build_fix`` repairs it with a scripted generator that edits only
+   in-scope files, through the same gateway under the fix's grant;
 5. ``build_job build`` passes.
 
-Runs for g++ and clang++. Skips when the build packages (lanes A/B1) or the
-host tools are missing; when the fix-loop package (lane B2) is importable but
-does not compose, the test fails rather than skipping, so a composition
-mismatch surfaces at merge.
+Runs for g++ and clang++. Skips only when the host tools (cmake, ninja, the
+compiler) are missing; if the build packages or the fix loop do not compose,
+the test fails rather than skipping.
 """
 from __future__ import annotations
 
-import importlib
 import json
 import os
 import shutil
@@ -36,21 +33,6 @@ pytestmark = [pytest.mark.integration,
               pytest.mark.skipif(os.name == "nt", reason="POSIX process groups on this host")]
 
 
-def _importable(*names):
-    for name in names:
-        try:
-            importlib.import_module(name)
-        except ImportError:
-            return False
-    return True
-
-
-BUILD_STACK = _importable("sonder_runtime.domain.build.model", "sonder_runtime.domain.build.templates",
-                          "sonder_runtime.application.build.run_service",
-                          "sonder_runtime.adapters.build.planner",
-                          "sonder_runtime.adapters.build.launcher")
-FIX_STACK = _importable("sonder_runtime.application.build.fix_service",
-                        "sonder_runtime.adapters.build.source_editor")
 HOST_TOOLS = all(shutil.which(name) for name in ("cmake", "ninja"))
 
 MATH_BAD = "#include \"math.h\"\nint area(int w, int h) {\n  return w * lenght;\n}\n"
@@ -135,9 +117,9 @@ def runtime(tmp_path, monkeypatch):
         digest=compose_output_digest_service(lambda: registry),
         process_job_provider=lambda: provider, job_registry=lambda: registry, redactor=None,
         grants=grants, tools_getter=lambda: holder.get("tools"),
-        candidate_generator=ScriptedGenerator() if FIX_STACK else None,
+        candidate_generator=ScriptedGenerator(),
     )
-    assert services is not None, "the build packages are present but did not compose"
+    assert services is not None, "the build packages did not compose"
     tools = ToolApplicationFacade.compose(
         typed_tool_registry(),
         build_tool_executor(services, PackagedToolExecutor(), grants=grants),
@@ -197,7 +179,7 @@ def _wait_job(tools, body, tool="build_job_result", limit=240):
     return body
 
 
-@pytest.mark.skipif(not (BUILD_STACK and HOST_TOOLS), reason="needs lanes A/B1 and cmake+ninja")
+@pytest.mark.skipif(not HOST_TOOLS, reason="needs cmake and ninja")
 @pytest.mark.parametrize("compiler", ["g++", "clang++"])
 def test_model_build_fix_build(runtime, compiler):
     if not shutil.which(compiler):
@@ -231,24 +213,19 @@ def test_model_build_fix_build(runtime, compiler):
     assert report["status"] == "failed", report
     assert "math.cpp" in json.dumps(report.get("first_errors") or report)
 
-    if FIX_STACK:
-        assert services.fix is not None, "the fix-loop package is present but did not compose"
-        _, started = _call(tools, "build_fix", {**common, "target": "game", "attempts": 3})
-        assert started.get("ok"), started
-        assert started.get("grant") == "bound", "the approval became the job's grant"
-        fixed = _wait_job(tools, started, tool="build_fix_result", limit=600)
-        assert fixed["status"] == "fixed", fixed
-        changed = {item.get("rel") for item in fixed.get("files", [])}
-        assert changed == {"src/core/math.cpp"}
-        # The fix's own writes went through the gateway under its grant.
-        writes = [receipt for receipt in tools.receipts
-                  if receipt.tool_name in ("text_patch", "write_file")]
-        assert writes and all("build_fix_grant:" in receipt.policy_match for receipt in writes)
-        assert len(grants) == 0, "the grant died with the job"
-    else:
-        receipt, body = _call(tools, "write_file", {"path": str(project / "src/core/math.cpp"),
-                                                    "content": MATH_GOOD, "mode": "overwrite"})
-        assert receipt.success, body
+    assert services.fix is not None, "the fix loop did not compose"
+    _, started = _call(tools, "build_fix", {**common, "target": "game", "attempts": 3})
+    assert started.get("ok"), started
+    assert started.get("grant") == "bound", "the approval became the job's grant"
+    fixed = _wait_job(tools, started, tool="build_fix_result", limit=600)
+    assert fixed["status"] == "fixed", fixed
+    changed = {item.get("rel") for item in fixed.get("files", [])}
+    assert changed == {"src/core/math.cpp"}
+    # The fix's own writes went through the gateway under its grant.
+    writes = [receipt for receipt in tools.receipts
+              if receipt.tool_name in ("text_patch", "write_file")]
+    assert writes and all("build_fix_grant:" in receipt.policy_match for receipt in writes)
+    assert len(grants) == 0, "the grant died with the job"
     assert (project / "src/core/math.cpp").read_text() == MATH_GOOD
     assert (project / "CMakeLists.txt").read_text().startswith("cmake_minimum_required")
 

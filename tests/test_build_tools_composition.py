@@ -8,10 +8,10 @@ is reported.
 """
 from __future__ import annotations
 
-import importlib
 import json
 import os
 import stat
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -28,17 +28,14 @@ from sonder_runtime.platform.config import BuildToolsConfig, build_tools_config_
 pytestmark = pytest.mark.unit
 
 
-def _present(name):
-    try:
-        importlib.import_module(name)
-    except ImportError:
-        return False
-    return True
+def _make_absent(monkeypatch, *names):
+    """Make the named modules fail to import, as in a runtime shipped without them.
 
-
-B1_PRESENT = all(_present(name) for name in (
-    "sonder_runtime.application.build.run_service", "sonder_runtime.adapters.build.planner",
-    "sonder_runtime.domain.build.model"))
+    A ``None`` entry in ``sys.modules`` makes ``import`` raise ImportError;
+    monkeypatch restores the real modules afterwards.
+    """
+    for name in names:
+        monkeypatch.setitem(sys.modules, name, None)
 
 
 class Spy:
@@ -75,14 +72,17 @@ def _compose(tmp_path, monkeypatch, **kwargs):
     return services, provider, registry, inventory
 
 
-@pytest.mark.skipif(B1_PRESENT, reason="the build packages are present in this checkout")
-def test_without_the_build_packages_composition_returns_none(tmp_path, monkeypatch):
+@pytest.mark.parametrize("missing", [
+    "sonder_runtime.application.build.run_service",
+    "sonder_runtime.adapters.build.planner",
+])
+def test_without_the_build_packages_composition_returns_none(tmp_path, monkeypatch, missing):
+    _make_absent(monkeypatch, missing)
     services, provider, registry, inventory = _compose(tmp_path, monkeypatch)
     assert services is None
     assert provider.calls == registry.calls == inventory.calls == []
 
 
-@pytest.mark.skipif(not B1_PRESENT, reason="needs the build packages (lanes A and B1)")
 def test_composition_performs_no_probes_reads_or_launches(tmp_path, monkeypatch):
     services, provider, registry, inventory = _compose(tmp_path, monkeypatch)
     assert services is not None and services.model is not None and services.jobs is not None
@@ -114,11 +114,8 @@ def test_the_runtime_composes_the_build_tools_into_its_typed_gateway(tmp_path, m
             ToolPermission(frozenset({"read_files"})))
         receipt = application.tools.execute(request)
         body = json.loads(receipt.output)
-        if not B1_PRESENT:
-            assert body["error_code"] == "BUILD_TOOLS_UNAVAILABLE"
-        else:
-            assert "error_code" not in body or body["error_code"] in (
-                "BUILD_TREE_MISSING", "BUILD_MODEL_UNAVAILABLE", "PROJECT_OUTSIDE_ROOTS")
+        assert "error_code" not in body or body["error_code"] in (
+            "BUILD_TREE_MISSING", "BUILD_MODEL_UNAVAILABLE", "PROJECT_OUTSIDE_ROOTS")
         # a build is refused in plan mode before anything is planned
         from sonder_runtime.domain.common.errors import Forbidden
 
@@ -237,10 +234,7 @@ def test_profiles_load_only_from_a_private_regular_file(tmp_path):
     assert load_build_profiles(str(path)) == ()
     os.chmod(path, 0o600)
     loaded = load_build_profiles(str(path))
-    if _present("sonder_runtime.domain.build.templates"):
-        assert [profile.name for profile in loaded] == ["fastbuild"]
-    else:
-        assert loaded == ()
+    assert [profile.name for profile in loaded] == ["fastbuild"]
     link = tmp_path / "link.json"
     os.symlink(path, link)
     assert load_build_profiles(str(link)) == ()
@@ -248,6 +242,15 @@ def test_profiles_load_only_from_a_private_regular_file(tmp_path):
     assert load_build_profiles("") == ()
     assert load_build_profiles(str(path), platform_name="nt") == ()
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+def test_profiles_are_ignored_without_the_build_domain(tmp_path, monkeypatch):
+    path = tmp_path / "profiles.json"
+    path.write_text(PROFILE)
+    os.chmod(path, 0o600)
+    _make_absent(monkeypatch, "sonder_runtime.domain.build.templates")
+    assert load_build_profiles(str(path)) == ()
 
 
 # --- clangd (lane D) wiring ---------------------------------------------------------------

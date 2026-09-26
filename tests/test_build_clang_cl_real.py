@@ -18,8 +18,6 @@ pytestmark = [
 
 
 def test_clang_cl_show_includes_and_codeless_diagnostics(tmp_path):
-    pytest.importorskip("sonder_runtime.domain.build.output",
-                        reason="needs the build domain (lane A-domain-build)")
     from dataclasses import replace
 
     from sonder_runtime.adapters.build.collector import BuildOutputCollector

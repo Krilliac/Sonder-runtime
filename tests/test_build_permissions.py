@@ -18,7 +18,6 @@ from tests.test_build_executor import (
     fake_services,
     gateway_call,
     output,
-    port_doubles,  # noqa: F401 - fixture
 )
 
 pytestmark = pytest.mark.unit
@@ -62,7 +61,7 @@ def test_the_execution_grade_is_what_the_gate_reads(monkeypatch):
 @pytest.mark.parametrize("tool, arguments", [
     ("build_job", {"target": "game"}), ("build_fix", {"target": "game"}),
 ])
-def test_plan_mode_refuses_before_planning(tmp_path, port_doubles, ledger, mode, tool, arguments):
+def test_plan_mode_refuses_before_planning(tmp_path, ledger, mode, tool, arguments):
     mode(pm.PLAN)
     services = fake_services(tmp_path, tmp_path / "build")
     tools, audit, grants = compose_facade(tmp_path, services)
@@ -79,7 +78,7 @@ def test_plan_mode_refuses_before_planning(tmp_path, port_doubles, ledger, mode,
 @pytest.mark.parametrize("current", [pm.MANUAL, pm.ACCEPT_EDITS])
 @pytest.mark.parametrize("source", ["mcp", "http", "worker"])
 def test_unattended_manual_and_accept_edits_refuse_builds_with_a_call_id(
-        tmp_path, port_doubles, ledger, mode, current, source):
+        tmp_path, ledger, mode, current, source):
     mode(current)
     services = fake_services(tmp_path, tmp_path / "build")
     tools, _, grants = compose_facade(tmp_path, services)
@@ -91,7 +90,7 @@ def test_unattended_manual_and_accept_edits_refuse_builds_with_a_call_id(
     assert services.jobs.runs == [] and services.fix.started == [] and len(grants) == 0
 
 
-def test_a_console_operator_is_asked_once_and_the_surface_decides(tmp_path, port_doubles, ledger, mode):
+def test_a_console_operator_is_asked_once_and_the_surface_decides(tmp_path, ledger, mode):
     """manual at an interactive console: the REPL prompts, then forwards gate=surface."""
     mode(pm.MANUAL)
     services = fake_services(tmp_path, tmp_path / "build")
@@ -105,7 +104,7 @@ def test_a_console_operator_is_asked_once_and_the_surface_decides(tmp_path, port
     assert ledger.pending() == []
 
 
-def test_auto_allows_builds_and_fixes(tmp_path, port_doubles, ledger, mode):
+def test_auto_allows_builds_and_fixes(tmp_path, ledger, mode):
     mode(pm.AUTO)
     services = fake_services(tmp_path, tmp_path / "build")
     tools, _, grants = compose_facade(tmp_path, services)
@@ -130,7 +129,7 @@ def _approve(ledger, services, tool, arguments):
 
 
 def test_a_job_approval_is_bound_to_the_command_digest_and_template(
-        tmp_path, port_doubles, ledger, mode):
+        tmp_path, ledger, mode):
     mode(pm.MANUAL)
     services = fake_services(tmp_path, tmp_path / "build")
     tools, _, _ = compose_facade(tmp_path, services)
@@ -149,7 +148,7 @@ def test_a_job_approval_is_bound_to_the_command_digest_and_template(
     assert [request.target for request, _, _ in services.jobs.runs] == ["game"]
 
 
-def test_a_refused_plan_is_refused_before_anyone_is_asked(tmp_path, port_doubles, ledger, mode):
+def test_a_refused_plan_is_refused_before_anyone_is_asked(tmp_path, ledger, mode):
     for current in (pm.MANUAL, pm.AUTO):
         mode(current)
         services = fake_services(tmp_path, tmp_path / "build")
@@ -165,7 +164,7 @@ def test_a_refused_plan_is_refused_before_anyone_is_asked(tmp_path, port_doubles
         assert services.jobs.runs == [] and services.fix.started == []
 
 
-def test_allow_network_needs_its_own_decision(tmp_path, port_doubles, ledger, mode, monkeypatch):
+def test_allow_network_needs_its_own_decision(tmp_path, ledger, mode, monkeypatch):
     mode(pm.AUTO)
     monkeypatch.setattr(pm, "_rule_lookup", lambda tool: {"action": "deny", "pattern": tool}
                         if tool == "build_network" else None)
@@ -183,7 +182,7 @@ def test_allow_network_needs_its_own_decision(tmp_path, port_doubles, ledger, mo
 
 
 def test_manual_network_decision_is_refused_unattended_even_after_a_surface_prompt(
-        tmp_path, port_doubles, ledger, mode):
+        tmp_path, ledger, mode):
     mode(pm.MANUAL)
     services = fake_services(tmp_path, tmp_path / "build")
     tools, _, _ = compose_facade(tmp_path, services)
@@ -195,7 +194,7 @@ def test_manual_network_decision_is_refused_unattended_even_after_a_surface_prom
     assert caught.value.decision["call_id"]
 
 
-def test_restore_is_a_mutation_graded_by_mode(tmp_path, port_doubles, ledger, mode):
+def test_restore_is_a_mutation_graded_by_mode(tmp_path, ledger, mode):
     services = fake_services(tmp_path, tmp_path / "build")
     tools, _, _ = compose_facade(tmp_path, services)
     mode(pm.AUTO)

@@ -8,8 +8,6 @@ import uuid
 
 import pytest
 
-pytest.importorskip("sonder_runtime.domain.build.model", reason="needs lane A-domain-build")
-
 from sonder_runtime.adapters.build.preimages import FilePreimageStore  # noqa: E402
 from sonder_runtime.application.build.fix_ports import PreimageIntegrityError  # noqa: E402
 from sonder_runtime.domain.common.errors import InvalidInput, NotFound  # noqa: E402

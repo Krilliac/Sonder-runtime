@@ -168,7 +168,8 @@ def test_lines_are_read_by_the_build_tools_output_parser_as_fatal_at_the_same_pl
     attributes a build_job/build_fix report) reads the crash lines as fatal
     diagnostics at the same file and line, so a fix loop sees them as it
     sees a compiler's."""
-    build_output = pytest.importorskip("sonder_runtime.domain.build.output")
+    from sonder_runtime.domain.build import output as build_output
+
     report = _report(MAPPED, hints=(CauseHint("null_deref", "high", "0x0"),))
     dset = build_output.parse_build_diagnostics("\n".join(cf.crash_diagnostic_lines(report)))
     assert [(d.severity, d.file, d.line) for d in dset.diagnostics] == [

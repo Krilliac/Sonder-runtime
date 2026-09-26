@@ -11,9 +11,6 @@ from types import SimpleNamespace
 
 import pytest
 
-pytest.importorskip("sonder_runtime.domain.build.templates",
-                    reason="needs the build domain (lane A-domain-build)")
-
 from sonder_runtime.adapters.build.network import NetworkIsolation  # noqa: E402
 from sonder_runtime.adapters.build.planner import ProjectBuildPlanner  # noqa: E402
 from sonder_runtime.adapters.build.tree_reader import GuardedBuildTreeReader  # noqa: E402

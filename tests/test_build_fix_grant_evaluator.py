@@ -30,7 +30,6 @@ from tests.test_build_executor import (
     fake_services,
     gateway_call,
     output,
-    port_doubles,  # noqa: F401 - fixture
 )
 
 pytestmark = pytest.mark.unit
@@ -70,7 +69,7 @@ def project(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def stack(tmp_path, project, port_doubles):
+def stack(tmp_path, project):
     clock = Clock()
     services = fake_services(project, project / "build", clock=clock)
     grants = BuildFixGrantRegistry(clock=clock, current_mode=lambda: pm.current_mode())
@@ -253,7 +252,7 @@ def test_the_grant_carries_network_only_when_the_fix_was_approved_with_it(stack,
                                            SimpleNamespace(**{**vars(child), "network": "allowed"}))
 
 
-def test_an_unclaimed_grant_dies_and_claims_are_single_use(port_doubles, tmp_path):
+def test_an_unclaimed_grant_dies_and_claims_are_single_use(tmp_path):
     clock = Clock()
     grants = BuildFixGrantRegistry(clock=clock)
     fix = FakeFix(tmp_path, tmp_path / "build", clock=clock, grants=grants)
@@ -276,7 +275,7 @@ def test_an_unclaimed_grant_dies_and_claims_are_single_use(port_doubles, tmp_pat
     assert grants.claim("r2", "owner") is None
 
 
-def test_a_failed_start_leaves_no_approval_behind(port_doubles, tmp_path):
+def test_a_failed_start_leaves_no_approval_behind(tmp_path):
     from tests.test_build_executor import FixRequestDouble
 
     grants = BuildFixGrantRegistry()
@@ -288,7 +287,7 @@ def test_a_failed_start_leaves_no_approval_behind(port_doubles, tmp_path):
     assert not grants.approved(plan.plan_digest, "owner") and len(grants) == 0
 
 
-def test_a_mismatched_plan_is_refused_by_the_real_service(port_doubles):
+def test_a_mismatched_plan_is_refused_by_the_real_service():
     from sonder_runtime.application.build.fix_ports import BuildFixRequest
     from sonder_runtime.application.build.fix_service import BuildFixService
 
@@ -300,7 +299,7 @@ def test_a_mismatched_plan_is_refused_by_the_real_service(port_doubles):
     assert "does not match" in str(caught.value)
 
 
-def test_lane_tests_evaluator_keeps_test_run_and_gains_the_build_resolvers(port_doubles, tmp_path):
+def test_lane_tests_evaluator_keeps_test_run_and_gains_the_build_resolvers(tmp_path):
     from tests.test_tools_test_runs_fakes import services as developer_services
 
     catalog = SimpleNamespace(targets={}, require_current=lambda: None, digest="d")

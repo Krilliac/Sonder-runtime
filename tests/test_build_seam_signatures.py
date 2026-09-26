@@ -17,9 +17,6 @@ import inspect
 
 import pytest
 
-pytest.importorskip("sonder_runtime.application.build.fix_service", reason="needs lane B2")
-pytest.importorskip("sonder_runtime.adapters.build.launcher", reason="needs lane B1")
-
 from sonder_runtime.adapters.build import candidates, clangd, collector, environment, executor  # noqa: E402
 from sonder_runtime.adapters.build import launcher, network, planner, preimages  # noqa: E402
 from sonder_runtime.adapters.build import source_editor, tree_reader  # noqa: E402

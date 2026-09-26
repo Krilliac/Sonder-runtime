@@ -22,7 +22,7 @@ from sonder_runtime.interfaces.http.facades.build_tools import (
     BuildHttpRoutes,
     route_call,
 )
-from tests.test_build_executor import compose_facade, fake_services, port_doubles  # noqa: F401
+from tests.test_build_executor import compose_facade, fake_services
 
 pytestmark = pytest.mark.unit
 
@@ -141,7 +141,7 @@ def test_no_gateway_is_unavailable():
     assert isinstance(register_build_http_routes(lambda: None), BuildHttpRoutes)
 
 
-def test_manual_mode_refuses_http_builds_and_auto_runs_them(tmp_path, port_doubles, monkeypatch):
+def test_manual_mode_refuses_http_builds_and_auto_runs_them(tmp_path, monkeypatch):
     monkeypatch.setattr(pm, "_rule_lookup", lambda _tool: None)
     monkeypatch.setattr(pm, "_approval_ledger", lambda: None)
     services = fake_services(tmp_path, tmp_path / "build")

@@ -60,10 +60,9 @@ def test_console_branches_carry_their_execution_stand_ins():
 
 
 def test_execution_command_parity_for_the_debug_stand_ins():
-    """Both stand-ins must grade ``execution`` (lane C's permission_modes hunk)."""
-    if "crash_digest" not in pm.EXECUTION_TOOLS:
-        pytest.skip("lane C's permission_modes hunk (EXECUTION_TOOLS) is not merged yet")
+    """Both stand-ins must grade ``execution`` through ``EXECUTION_TOOLS``."""
     for name in ("crash_digest", "profile_capture_digest"):
+        assert name in pm.EXECUTION_TOOLS, name
         assert pm.risk_of(name) == "execution", name
         assert name not in pm.EXECUTION_COMMANDS, (
             "a typed tool is graded by EXECUTION_TOOLS, not EXECUTION_COMMANDS")

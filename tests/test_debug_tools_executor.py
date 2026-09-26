@@ -192,7 +192,8 @@ def test_directory_triage_returns_the_bucket_table_shape():
 
 
 def test_crash_reports_from_the_readers_fit_48_kb():
-    model = pytest.importorskip("sonder_runtime.domain.crash.model")
+    from sonder_runtime.domain.crash import model
+
     frames = tuple(model.StackFrame(index=i, module="m.dll", function="f" * 200 + str(i),
                                     file="C:\\src\\" + "d" * 200 + ".cpp", line=i)
                    for i in range(64))
@@ -248,7 +249,8 @@ def test_os_permission_errors_do_not_name_the_path():
 
 
 def test_crash_report_module_and_frame_paths_are_redacted_on_the_wire():
-    model = pytest.importorskip("sonder_runtime.domain.crash.model")
+    from sonder_runtime.domain.crash import model
+
     frame = model.StackFrame(index=0, module="game", function="Renderer::Submit",
                              file="/home/op/src/render.cpp", line=7)
     report = model.CrashReport(

@@ -7,20 +7,17 @@ digest depends on exactly the fields the real planner digests (action,
 target, config, platform, preset, file, network), and they refuse what the
 real planner refuses at this seam (an unknown target, a utility target).
 
-When the build packages of lanes A/B1/B2 are absent, ``port_doubles``
-installs stand-ins for ``application.build.ports`` and
-``application.build.fix_ports`` with the spec's request fields; when they are
-present, the real request types are used unchanged.
+The ``*RequestDouble`` dataclasses carry the spec's request fields for the
+fake plans; the executor itself builds the real request types from
+``application.build.ports`` and ``application.build.fix_ports``.
 """
 from __future__ import annotations
 
 import hashlib
-import importlib
 import json
 import os
 import sys
 import time
-import types
 import uuid
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -104,40 +101,6 @@ class FixRequestDouble:
     timeout_seconds: int | None = None
     verify_dependents: bool = False
     allow_network: bool = False
-
-
-def _module_missing(name: str) -> bool:
-    try:
-        importlib.import_module(name)
-    except ImportError:
-        return True
-    return False
-
-
-@pytest.fixture
-def port_doubles(monkeypatch):
-    """Install request-type stand-ins for build packages this checkout lacks."""
-    package = "sonder_runtime.application.build"
-    if _module_missing(package):
-        module = types.ModuleType(package)
-        module.__path__ = []  # a package with no files of its own
-        monkeypatch.setitem(sys.modules, package, module)
-        import sonder_runtime.application as application_pkg
-
-        monkeypatch.setattr(application_pkg, "build", module, raising=False)
-    for name, attrs in (
-        (package + ".ports", {"BuildModelRequest": ModelRequestDouble,
-                              "BuildJobRequest": JobRequestDouble}),
-        (package + ".fix_ports", {"BuildFixRequest": FixRequestDouble}),
-    ):
-        if _module_missing(name):
-            module = types.ModuleType(name)
-            for key, value in attrs.items():
-                setattr(module, key, value)
-            monkeypatch.setitem(sys.modules, name, module)
-            monkeypatch.setattr(sys.modules[package], name.rsplit(".", 1)[1], module,
-                                raising=False)
-    return True
 
 
 # --- service doubles -----------------------------------------------------------------------
@@ -420,22 +383,27 @@ def test_uncomposed_services_answer_build_tools_unavailable(name):
 
 
 @pytest.mark.parametrize("name", ["build_fix", "build_fix_result", "build_fix_restore"])
-def test_fix_tools_are_unavailable_without_the_fix_loop(port_doubles, name):
+def test_fix_tools_are_unavailable_without_the_fix_loop(name):
     executor = BuildToolExecutor(fake_services(fix=False), PackagedToolExecutor())
     result = _execute(executor, name, _MINIMAL[name])
     assert result.error_code == BUILD_TOOLS_UNAVAILABLE
     assert _execute(executor, "build_model", {}).success
 
 
-@pytest.mark.skipif(not _module_missing("sonder_runtime.application.build.ports"),
-                    reason="the build ports are present in this checkout")
-def test_missing_build_packages_report_unavailable_not_a_crash():
-    result = _execute(BuildToolExecutor(fake_services(), PackagedToolExecutor()), "build_model", {})
-    assert result.error_code == BUILD_TOOLS_UNAVAILABLE
+@pytest.mark.parametrize("missing, tool, arguments", [
+    ("sonder_runtime.application.build.ports", "build_model", {}),
+    ("sonder_runtime.application.build.ports", "build_job", {"target": "game"}),
+    ("sonder_runtime.application.build.fix_ports", "build_fix", {"target": "game"}),
+])
+def test_missing_build_packages_report_unavailable_not_a_crash(monkeypatch, missing, tool, arguments):
+    # A None entry makes the import fail, as in a runtime shipped without the package.
+    monkeypatch.setitem(sys.modules, missing, None)
+    result = _execute(BuildToolExecutor(fake_services(), PackagedToolExecutor()), tool, arguments)
+    assert not result.success and result.error_code == BUILD_TOOLS_UNAVAILABLE
 
 
 @pytest.mark.parametrize("code", sorted(KNOWN_ERROR_CODES - {BUILD_TOOLS_UNAVAILABLE}))
-def test_every_build_error_code_maps_through(port_doubles, code):
+def test_every_build_error_code_maps_through(code):
     services = fake_services()
 
     def refuse(*args, **kwargs):
@@ -457,7 +425,7 @@ def test_every_build_error_code_maps_through(port_doubles, code):
     (OSError("/home/secret/path failed"), "HOST_IO_FAILURE"),
     (ValueError("bad value"), "INVALID_INPUT"),
 ])
-def test_uncoded_failures_get_stable_codes_and_no_host_paths(port_doubles, exc, code):
+def test_uncoded_failures_get_stable_codes_and_no_host_paths(exc, code):
     services = fake_services()
 
     def refuse(*args, **kwargs):
@@ -470,7 +438,7 @@ def test_uncoded_failures_get_stable_codes_and_no_host_paths(port_doubles, exc, 
     assert "/home/secret" not in (result.error or "")
 
 
-def test_handlers_map_arguments_to_requests(port_doubles):
+def test_handlers_map_arguments_to_requests():
     services = fake_services()
     executor = BuildToolExecutor(services, PackagedToolExecutor())
     result = _execute(executor, "build_model", {"detail": "targets", "max_items": 900, "preset": "ninja-debug"})
@@ -523,7 +491,7 @@ def test_handlers_map_arguments_to_requests(port_doubles):
     ("build_fix", {"target": "game", "editable_globs": ["C:\\Windows\\*.dll"]}),
     ("build_fix", {"target": "game", "focus_file": "\\\\host\\share\\a.cpp"}),
 ])
-def test_option_and_command_shaped_names_are_refused_before_planning(port_doubles, tool, arguments):
+def test_option_and_command_shaped_names_are_refused_before_planning(tool, arguments):
     services = fake_services()
     executor = BuildToolExecutor(services, PackagedToolExecutor())
     refused = _execute(executor, tool, arguments)
@@ -537,7 +505,7 @@ def test_option_and_command_shaped_names_are_refused_before_planning(port_double
     {"target": "my-lib.test", "preset": "ninja-debug", "build_preset": "ninja_debug2"},
     {"target": "Tools\\ShaderGen", "file": "src/a b.cpp"},
 ])
-def test_legitimate_model_names_still_pass(port_doubles, arguments):
+def test_legitimate_model_names_still_pass(arguments):
     services = fake_services()
     executor = BuildToolExecutor(services, PackagedToolExecutor())
     result = _execute(executor, "build_job", arguments)
@@ -546,7 +514,7 @@ def test_legitimate_model_names_still_pass(port_doubles, arguments):
     assert services.jobs.runs or result.error_code == "UNKNOWN_TARGET"
 
 
-def test_results_and_cancel_are_owner_scoped(port_doubles):
+def test_results_and_cancel_are_owner_scoped():
     services = fake_services()
     executor = BuildToolExecutor(services, PackagedToolExecutor())
     job_id = json.loads(_execute(executor, "build_job", {"target": "game"}).output)["job_id"]
@@ -560,7 +528,7 @@ def test_results_and_cancel_are_owner_scoped(port_doubles):
     assert cancelled["status"] == "cancelled" and services.jobs.cancelled == [job_id]
 
 
-def test_fix_start_restore_and_conflict(port_doubles):
+def test_fix_start_restore_and_conflict():
     services = fake_services()
     executor = BuildToolExecutor(services, PackagedToolExecutor(), grants=BuildFixGrantRegistry())
     started = json.loads(_execute(executor, "build_fix", {"target": "game", "attempts": 20}).output)

@@ -105,7 +105,6 @@ def test_out_of_scope_paths_fall_through(path):
 
 
 def test_the_tool_sources_exclusion_names_its_reason():
-    pytest.importorskip("sonder_runtime.domain.build.repair", reason="needs lane A-domain-build")
     book, grant, _ = book_with_grant()
     decision = book.authorize(grant.token, principal_id="owner", tool_name="text_patch",
                               arguments={"root": ROOT, "patch": diff("tools/shadergen.cpp")})

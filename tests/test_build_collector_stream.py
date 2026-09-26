@@ -94,13 +94,11 @@ def test_a_symlinked_log_is_not_followed(tmp_path):
     assert scan_log(str(link)).missing
 
 
-# -- report assembly (needs the build domain) --------------------------------------
+# -- report assembly --------------------------------------------------------------
 
 
 @pytest.fixture
 def collector(tmp_path):
-    pytest.importorskip("sonder_runtime.domain.build.report",
-                        reason="needs the build domain (lane A-domain-build)")
     from sonder_runtime.adapters.build.collector import BuildOutputCollector
 
     run_root = tmp_path / "build-runs"

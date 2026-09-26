@@ -11,8 +11,6 @@ import hashlib
 
 import pytest
 
-pytest.importorskip("sonder_runtime.domain.build.repair", reason="needs lane A-domain-build")
-
 from sonder_runtime.application.build.fix_ports import FixDecision  # noqa: E402
 from sonder_runtime.application.build.strategy_bridge import (  # noqa: E402
     StrategyFixAdapter,

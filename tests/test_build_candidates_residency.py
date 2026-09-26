@@ -12,8 +12,6 @@ from dataclasses import dataclass, replace
 
 import pytest
 
-pytest.importorskip("sonder_runtime.domain.build.repair", reason="needs lane A-domain-build")
-
 from sonder_runtime.adapters.build.candidates import ModelCandidateGenerator  # noqa: E402
 from sonder_runtime.application.build.fix_ports import ResidencyRefused  # noqa: E402
 from sonder_runtime.application.context import local_owner_context  # noqa: E402

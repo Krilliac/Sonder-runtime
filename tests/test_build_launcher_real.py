@@ -359,9 +359,7 @@ class FullStack(LauncherStack):
 
 
 def full_stack(tmp_path, monkeypatch, **kwargs):
-    """The production build stack over a temporary allowed root (skips without the domain)."""
-    pytest.importorskip("sonder_runtime.domain.build.templates",
-                        reason="needs the build domain (lane A-domain-build)")
+    """The production build stack over a temporary allowed root (skips without the host tools)."""
     if not HAVE_TOOLS:
         pytest.skip("cmake, ninja, make and g++ are required")
     allowed = tmp_path / "allowed"
