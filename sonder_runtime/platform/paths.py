@@ -60,6 +60,17 @@ def _configured_home() -> Path | None:
         return _HOME_OVERRIDE
 
 
+def configured_home() -> Path | None:
+    """The process-local typed state home, or ``None`` when none is set.
+
+    Callers whose path must agree with another process that may not share
+    this process-local override (for example an operator CLI and the
+    nightly) use this to detect that the environment alone no longer
+    determines ``state_path``.
+    """
+    return _configured_home()
+
+
 def windows_system_drive(env=None) -> str:
     """Return the active Windows system drive, falling back only to ``C:``."""
     values = os.environ if env is None else env

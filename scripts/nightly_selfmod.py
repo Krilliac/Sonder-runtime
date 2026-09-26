@@ -76,7 +76,7 @@ WHAT THE GATES DO AND DO NOT PROVE
     evaluator holds cases for the target function (scripts/selfmod_oracle.py),
     the independent oracle gate sends the candidate only nonce-bound,
     token-labelled inputs, compares its raw outputs in this process with
-    expected values the candidate uid was proven unable to read, and seals a
+    expected values the candidate uid was proven unable to read, and records a
     receipt bound to the tested bytes and the baseline. A failing oracle
     rejects the candidate; a missing or non-independent one (every non-Linux
     host) is recorded as not evaluated and blocks unattended promotion.
@@ -1406,7 +1406,10 @@ def _load_oracle(target: str, function_name: str):
     except (selfmod_oracle.OracleUnavailable, independent_oracle.OracleError) as exc:
         return None, "held case set unusable (%s)" % str(exc)[:200]
     if loaded is None:
-        return None, "no evaluator-held cases for %s.%s" % (module, function_name)
+        # Name the directory actually searched: an operator who provisioned
+        # into another home sees the mismatch here.
+        return None, "no evaluator-held cases for %s.%s in %s" % (
+            module, function_name, selfmod_oracle.oracle_home())
     return loaded, ""
 
 
@@ -1416,11 +1419,27 @@ def _independent_oracle_gate(run_id: str, workspace: Path, loaded, timeout: int,
 
     The candidate probe receives only this run's nonce and token-labelled
     inputs in a random order; ``selfmod.record_oracle_grade`` compares its raw
-    outputs with the held outcomes in this process and seals a receipt bound
+    outputs with the held outcomes in this process and records a receipt bound
     to the tested candidate bytes and the baseline.  The receipt is
     independent only when the Linux uid supervisor ran the probe and the
     candidate uid was refused the case set at the OS boundary.
     """
+    try:
+        return _grade_independent_oracle(run_id, workspace, loaded, timeout,
+                                          stages=stages, protected_paths=protected_paths)
+    except (independent_oracle.OracleError, selfmod_oracle.OracleUnavailable,
+            RuntimeError, PermissionError) as exc:
+        # Fail closed without crashing the nightly: a challenge that cannot
+        # be built, a case set re-provisioned mid-run, changed tested bytes
+        # or an unbound probe row all leave no verdict, so the caller
+        # rejects and discards the run instead of stranding it in testing.
+        return {"passed": False, "independent": False,
+                "detail": "oracle could not grade the candidate (%s: %s)" % (
+                    type(exc).__name__, str(exc)[:200])}
+
+
+def _grade_independent_oracle(run_id: str, workspace: Path, loaded, timeout: int,
+                              *, stages=None, protected_paths=()) -> dict:
     confidential, why = selfmod_oracle.confidentiality(loaded.path)
     if confidential:
         read_denied, seal = selfmod_oracle.prove_read_denied(
@@ -1431,7 +1450,7 @@ def _independent_oracle_gate(run_id: str, workspace: Path, loaded, timeout: int,
     command = selfmod_oracle.challenge_command(
         workspace, challenge, loaded.case_set, python=_test_python())
     probe = _record_candidate_test(
-        run_id, "oracle_probe", command, timeout=timeout,
+        run_id, independent_oracle.ORACLE_PROBE_KIND, command, timeout=timeout,
         protected_paths=tuple(dict.fromkeys((*protected_paths, str(loaded.path)))),
         stages=stages,
     )
@@ -1442,7 +1461,7 @@ def _independent_oracle_gate(run_id: str, workspace: Path, loaded, timeout: int,
         return {"passed": False, "independent": False,
                 "detail": f"oracle challenge lacked an attested {selected_kind} probe"}
     graded = selfmod.record_oracle_grade(
-        run_id, probe["test_id"], challenge=challenge, loaded=loaded,
+        run_id, probe, challenge=challenge, loaded=loaded,
         attestation=typed, confidential=confidential, read_denied=read_denied,
     )
     return {**graded, "detail": "%s; %s" % (graded.get("detail", ""), seal)}
@@ -1647,6 +1666,8 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0,
         log("  host_grade: NOT EVALUATED -- no safe literal assertion for selected function")
     if oracle is None:
         log("  oracle_grade: NOT EVALUATED -- %s" % oracle_note)
+    else:
+        log("  oracle_grade: held cases %s (sha256 %s)" % (oracle.path, oracle.sha256[:12]))
     try:
         for kind, command in checks:
             # cwd is deliberately NOT passed: the default is the candidate
@@ -1687,6 +1708,8 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0,
             log("  oracle_grade: %s (independent=%s)" % (
                 "pass" if passed else "FAIL", "yes" if oracle_independent else "no"))
             if not passed:
+                # The detail names the refusal (never an input or expected value).
+                log("  oracle_grade detail: %s" % str(outcome.get("detail", ""))[:300])
                 selfmod.reject(run_id, reason="independent oracle failed")
                 _discard_workspace(run_id)
                 return "candidate rejected: independent oracle failed"

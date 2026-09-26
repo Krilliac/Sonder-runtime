@@ -42,7 +42,8 @@ backup bundles.
   requires explicit approval.
 - `auto-low-risk`: deterministic host checks may approve only narrowly scoped
   low-risk work. High/critical and protected work always requires a user.
-  Host approval also needs a sealed independent-oracle receipt. That receipt
+  Host approval also needs a passing independent-oracle receipt and a fixed
+  floor of passed unattended gates. That receipt
   exists only on a Linux host with a dedicated candidate uid and
   evaluator-held cases for the target function (see
   [#517 Linux isolation](docs/architecture/REMAINING-SELFMOD-517-LINUX-ISOLATION.md)).

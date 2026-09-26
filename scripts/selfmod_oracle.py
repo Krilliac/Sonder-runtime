@@ -5,9 +5,11 @@ The comparison rules and the durable receipt live in
 owns everything that touches the host:
 
 * **Storage.**  Held-out cases for one ``module.function`` live in
-  ``<oracle home>/<module>.<function>.json``.  The oracle home defaults to
-  ``<selfmod state root>/oracle`` (``SONDER_SELFMOD_ORACLE_HOME`` overrides
-  it), is created ``0700`` and owned by the evaluator, and every case file is
+  ``<oracle home>/<module>.<function>.json``.  The oracle home is
+  ``SONDER_SELFMOD_ORACLE_HOME`` (absolute) or, when that is unset and no
+  typed state home is configured in the process, ``<selfmod state
+  root>/oracle`` (:func:`oracle_home`); it is created ``0700`` and owned by
+  the evaluator, and every case file is
   written ``0600`` with ``O_NOFOLLOW`` and an atomic replace.  The candidate
   checkout never contains them.
 * **Confidentiality.**  On a host where the Linux uid supervisor is selected,
@@ -33,7 +35,11 @@ Operators provision cases with::
 
 ``held_cases.json`` is a list of ``{"args": [...], "kwargs": {...},
 "expected": value}`` or ``{"args": [...], "raises": "ValueError"}`` objects;
-delete it after provisioning.  ``inspect`` never prints expected values.
+delete it after provisioning.  ``inspect`` never prints expected values.  A
+set whose challenge (for any candidate root up to PATH_MAX) or all-correct
+result frame would exceed the channel bound is refused at provisioning.
+Run both commands with the same environment as the nightly; set
+``SONDER_SELFMOD_ORACLE_HOME`` when the runtime uses a typed ``state.home``.
 """
 
 from __future__ import annotations
@@ -75,10 +81,31 @@ class OracleUnavailable(RuntimeError):
 
 
 def oracle_home() -> Path:
-    """The evaluator-owned directory holding held-out case sets."""
+    """The evaluator-owned directory holding held-out case sets.
+
+    The operator CLI and the nightly must resolve the same directory, so
+    the result depends only on the environment: ``SONDER_SELFMOD_ORACLE_HOME``
+    (which must be absolute, so the working directory cannot move it), else
+    ``<selfmod state root>/oracle``.  A process that composed a typed state
+    home (``paths.configure_home``, e.g. a runtime started with
+    ``state.home``) resolves the selfmod state root differently from a bare
+    ``python scripts/selfmod_oracle.py``; there the default is refused and
+    the explicit variable is required, so the nightly reports the oracle as
+    unusable instead of silently finding no cases.
+    """
     configured = os.environ.get(ORACLE_HOME_ENV, "").strip()
     if configured:
-        return Path(configured).expanduser()
+        path = Path(configured).expanduser()
+        if not path.is_absolute():
+            raise OracleUnavailable(f"{ORACLE_HOME_ENV} must be an absolute path")
+        return path
+    from sonder_runtime.platform import paths
+
+    if paths.configured_home() is not None:
+        raise OracleUnavailable(
+            f"a typed state home is configured in this process, so the default oracle "
+            f"home differs from the one the operator CLI provisions; set {ORACLE_HOME_ENV} "
+            f"to an absolute path for both")
     import selfmod
 
     return selfmod.state_root() / "oracle"

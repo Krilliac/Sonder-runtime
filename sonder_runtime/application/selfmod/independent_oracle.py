@@ -18,6 +18,11 @@ pure half of the oracle that closes that gap:
   exactly one bounded frame that echoes this run's nonce and exactly this
   run's token set, and compares every raw per-case output with the held
   expected outcome.  Exit codes and pytest summaries are never inputs.
+* :func:`ledger_command` and :func:`ledger_output` are the only forms of
+  the probe's argv and output the selfmod ledger stores: nonce and digests,
+  never the held inputs or the raw outputs, so no ledger read (``/selfmod
+  tests``, the HTTP read surface) yields an input -> expected-value table a
+  later candidate could replay by input.
 * :class:`OracleReceipt` is the durable decision receipt.  It binds the
   verdict to the exact tested candidate digests, the baseline (starting
   commit and sealed backup manifest), the case-set digest, the challenge
@@ -40,6 +45,10 @@ from typing import Any, Callable, Mapping, Sequence
 from sonder_runtime.application.selfmod.candidate_isolation import ISOLATION_KINDS, LINUX_UID
 
 ORACLE_FRAME_PREFIX = "SELFMOD ORACLE OUTPUTS "
+WITHHELD_OUTPUT_PREFIX = "SELFMOD ORACLE WITHHELD "
+# The ledger kind of the candidate-side probe; its row is always redacted
+# (``ledger_command`` / ``ledger_output``).
+ORACLE_PROBE_KIND = "oracle_probe"
 CASE_SET_VERSION = 1
 RECEIPT_VERSION = 1
 MAX_ORACLE_CASES = 64
@@ -48,6 +57,11 @@ MAX_ORACLE_CASES = 64
 # 100 000-character output column, so truncation can never manufacture or
 # hide a frame.
 MAX_ORACLE_PAYLOAD_BYTES = 65_536
+# A case set must fit the channel for any candidate root up to PATH_MAX, so a
+# provisioned set can never make the challenge or a correct frame overflow.
+MAX_CHALLENGE_ROOT_BYTES = 4096
+_NONCE_HEX = 32
+_TOKEN_HEX = 24
 _OUTCOME_KEYS = frozenset({"value", "raised"})
 
 
@@ -150,6 +164,31 @@ class CaseSet:
             if key in seen:
                 raise OracleError("case set repeats an input")
             seen.add(key)
+        self._require_channel_fits()
+
+    def _require_channel_fits(self) -> None:
+        """Refuse a set whose challenge or all-correct frame exceeds the bound.
+
+        Measured with worst-case overhead: a PATH_MAX candidate root, a
+        full-length nonce and tokens, and the probe's own JSON spelling of
+        the frame (``json.dumps`` with ASCII escapes and default
+        separators), which is what the grader measures.
+        """
+        tokens = [format(index, "0%dx" % _TOKEN_HEX) for index in range(len(self.cases))]
+        challenge = canonical_json({
+            "root": "r" * MAX_CHALLENGE_ROOT_BYTES, "module": self.module,
+            "function": self.function, "nonce": "n" * _NONCE_HEX,
+            "cases": [{"token": token, "args": list(case.args), "kwargs": dict(case.kwargs)}
+                      for token, case in zip(tokens, self.cases)],
+        })
+        if len(challenge.encode("utf-8")) > MAX_ORACLE_PAYLOAD_BYTES:
+            raise OracleError("case set inputs exceed the oracle challenge bound")
+        frame = json.dumps({
+            "nonce": "n" * _NONCE_HEX,
+            "outputs": {token: dict(case.outcome) for token, case in zip(tokens, self.cases)},
+        }, sort_keys=True, allow_nan=False)
+        if len(frame.encode("utf-8")) > MAX_ORACLE_PAYLOAD_BYTES:
+            raise OracleError("case set expected outputs exceed the oracle result frame bound")
 
     @classmethod
     def parse(cls, raw: object) -> "CaseSet":
@@ -209,10 +248,10 @@ def new_challenge(case_count: int, *, token_hex: Callable[[int], str] = secrets.
     (shuffle or secrets.SystemRandom().shuffle)(order)
     tokens: list[str] = []
     while len(tokens) < case_count:
-        token = token_hex(12)
+        token = token_hex(_TOKEN_HEX // 2)
         if token not in tokens:
             tokens.append(token)
-    return OracleChallenge(token_hex(16), tuple(tokens), tuple(order))
+    return OracleChallenge(token_hex(_NONCE_HEX // 2), tuple(tokens), tuple(order))
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,8 +278,12 @@ def grade_frame(output: str, challenge: OracleChallenge, case_set: CaseSet) -> O
     """Compare raw per-case outputs with held outcomes; nothing else counts.
 
     The frame must be unique, bounded, echo this challenge's nonce and carry
-    exactly this challenge's tokens.  The detail never contains an expected
-    value, so a verdict stored in the ledger or a log cannot leak the set.
+    exactly this challenge's tokens.  The verdict detail never contains an
+    input or an expected value.  That alone does not keep the set out of
+    the ledger: a passing frame *is* the expected values, and the challenge
+    payload names the inputs, so the probe row itself is stored redacted
+    (:func:`ledger_command`, :func:`ledger_output`) and this function is
+    only ever given the parent's in-memory copy of the output.
     """
     count = len(case_set.cases)
 
@@ -413,7 +456,7 @@ def challenge_payload(challenge: OracleChallenge, case_set: CaseSet, *, root: st
 
 
 def payload_nonce(command: Sequence[object]) -> str | None:
-    """The nonce carried by a recorded probe command, if it is an oracle probe."""
+    """The nonce carried by a probe command or its ledger form, if any."""
     if not command:
         return None
     try:
@@ -422,3 +465,38 @@ def payload_nonce(command: Sequence[object]) -> str | None:
         return None
     nonce = payload.get("nonce") if isinstance(payload, dict) else None
     return nonce if isinstance(nonce, str) else None
+
+
+def _text_digest(text: str) -> tuple[int, str]:
+    data = str(text).encode("utf-8", "surrogatepass")
+    return len(data), hashlib.sha256(data).hexdigest()
+
+
+def ledger_command(command: Sequence[object]) -> list[str]:
+    """The oracle probe argv as the selfmod ledger stores it.
+
+    The trailing challenge payload (held inputs keyed by this run's tokens)
+    is replaced by its nonce and SHA-256, so no ledger row, ``/selfmod
+    tests`` listing or HTTP read of the ledger can pair a held input with
+    the output a correct candidate produced for it.
+    """
+    items = [str(item) for item in command]
+    if not items:
+        return items
+    size, digest = _text_digest(items[-1])
+    items[-1] = canonical_json({
+        "withheld": "evaluator challenge inputs", "nonce": payload_nonce(items),
+        "payload_bytes": size, "payload_sha256": digest,
+    })
+    return items
+
+
+def ledger_output(output: str) -> str:
+    """The oracle probe output as the selfmod ledger stores it.
+
+    A passing candidate's raw outputs are the held expected values, so the
+    ledger keeps only their size and SHA-256.  The parent grades the
+    in-memory output and proves it is the recorded one by this digest.
+    """
+    size, digest = _text_digest(output)
+    return WITHHELD_OUTPUT_PREFIX + canonical_json({"bytes": size, "sha256": digest})

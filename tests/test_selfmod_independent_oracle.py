@@ -7,16 +7,22 @@ oracle that closes that gap:
 * pure contract (any host): only raw outputs for this run's nonce and tokens
   that equal the held outcomes pass; forged frames, forged pytest summaries,
   replayed frames and rewritten-nonce replays fail; receipts are canonical,
-  sealed and bound to candidate and baseline digests;
-* ledger wiring (any host): ``record_oracle_grade`` grades in the parent,
-  refuses unbound probes, and a non-``linux-uid`` receipt never makes a run
-  eligible for unattended promotion;
+  digest-checked and bound to candidate and baseline digests; case sets that
+  cannot fit the channel are refused;
+* ledger wiring (any host): the ``oracle_probe`` row holds only the nonce and
+  digests of the held material; ``record_oracle_grade`` grades the parent's
+  in-memory result, refuses unbound probes and changed tested bytes; a
+  non-``linux-uid`` receipt never makes a run eligible for unattended
+  promotion; ``approve`` re-checks the receipt; the oracle home resolves the
+  same way for the operator CLI and the nightly;
 * adversarial canaries under the real Linux uid supervisor (Linux, euid 0):
   the candidate uid is refused the expected-values file by the kernel, a
   forged frame, a forged pytest summary and replayed outputs from a previous
-  nonce are rejected through the real nightly entry point, and a clean
-  candidate still advances with an independent receipt; ``review`` only
-  auto-approves when that receipt and every existing gate pass.
+  nonce are rejected through the real nightly entry point, an input-keyed
+  replay built from the ledger finds nothing to replay, an oracle that cannot
+  grade rejects and discards the run, and a clean candidate still advances
+  with an independent receipt; ``review`` only auto-approves when that
+  receipt and the fixed unattended gate floor pass.
 """
 
 from __future__ import annotations
@@ -37,14 +43,19 @@ from scripts import nightly_selfmod
 from scripts import selfmod_linux_isolation as linux
 from scripts import selfmod_oracle
 from sonder_runtime.application.selfmod.independent_oracle import (
+    MAX_ORACLE_PAYLOAD_BYTES,
     ORACLE_FRAME_PREFIX,
+    WITHHELD_OUTPUT_PREFIX,
     CaseSet,
     HeldCase,
     OracleChallenge,
     OracleError,
     OracleReceipt,
     canonical_json,
+    challenge_payload,
     grade_frame,
+    ledger_command,
+    ledger_output,
     new_challenge,
 )
 
@@ -254,7 +265,7 @@ def _receipt(**overrides) -> OracleReceipt:
     return OracleReceipt(**values)
 
 
-def test_receipt_is_canonical_sealed_and_bound():
+def test_receipt_is_canonical_digested_and_bound():
     receipt = _receipt()
     assert receipt.independent
     assert OracleReceipt.from_json(receipt.to_json()) == receipt
@@ -447,7 +458,8 @@ def test_low_supervisor_oracle_pass_is_recorded_but_never_independent(low_seam):
     assert reviewed["auto_evaluation_eligible"] is False
     with pytest.raises(PermissionError):
         selfmod.approve(run_id, "host:auto-low-risk")
-    # The seal is re-verified on read: an edited receipt refuses admission.
+    # The recorded digest is re-checked on read: a partial edit of the row
+    # refuses admission.
     with sqlite3.connect(selfmod.database_path()) as conn:
         text = conn.execute("SELECT receipt_json FROM selfmod_oracle_receipts WHERE run_id=?",
                             (run_id,)).fetchone()[0]
@@ -456,9 +468,23 @@ def test_low_supervisor_oracle_pass_is_recorded_but_never_independent(low_seam):
         edited["candidate_uid"] = 300_001
         conn.execute("UPDATE selfmod_oracle_receipts SET receipt_json=? WHERE run_id=?",
                      (canonical_json(edited), run_id))
-    with pytest.raises(OracleError, match="seal"):
+    with pytest.raises(OracleError, match="recorded digest"):
         selfmod.oracle_receipt(run_id)
     assert "could not be verified" in selfmod._oracle_admission_refusal(run_id, selfmod.get_run(run_id))
+    # Recomputing the unkeyed digest still leaves the row's own columns
+    # disagreeing with the edited receipt ...
+    forged = OracleReceipt.from_json(canonical_json(edited))
+    with sqlite3.connect(selfmod.database_path()) as conn:
+        conn.execute("UPDATE selfmod_oracle_receipts SET receipt_sha256=? WHERE run_id=?",
+                     (forged.digest(), run_id))
+    with pytest.raises(OracleError, match="recorded digest"):
+        selfmod.oracle_receipt(run_id)
+    # ... but a writer who rewrites the whole row consistently is not caught:
+    # the digest is a corruption check, not a seal.  Receipt integrity rests
+    # on the ledger being closed to the candidate uid (_isolation_refusal).
+    with sqlite3.connect(selfmod.database_path()) as conn:
+        conn.execute("UPDATE selfmod_oracle_receipts SET independent=1 WHERE run_id=?", (run_id,))
+    assert selfmod.oracle_receipt(run_id) == forged and forged.independent
 
 
 @pytest.mark.parametrize("body, reason", [
@@ -492,23 +518,276 @@ def test_oracle_grade_refuses_a_probe_issued_for_another_challenge(low_seam):
         run_id, "oracle_probe",
         selfmod_oracle.challenge_command(workspace, issued, loaded.case_set), timeout=60)
 
+    def grade(result, challenge=issued):
+        return selfmod.record_oracle_grade(
+            run_id, result, challenge=challenge, loaded=loaded,
+            attestation=probe["attestation"], confidential=False, read_denied=False)
+
     with pytest.raises(PermissionError, match="not issued for this challenge"):
-        selfmod.record_oracle_grade(
-            run_id, probe["test_id"], challenge=new_challenge(len(loaded.case_set.cases)),
-            loaded=loaded, attestation=probe["attestation"], confidential=False,
-            read_denied=False)
+        grade(probe, new_challenge(len(loaded.case_set.cases)))
+    # The in-memory result must be the one its (redacted) ledger row records:
+    # a substituted output or argv, or a bare row id, is refused.
+    forged_output = _correct_frame(issued, loaded.case_set)
+    with pytest.raises(PermissionError, match="does not match its ledger row"):
+        grade({**probe, "output": forged_output})
+    with pytest.raises(PermissionError, match="does not match its ledger row"):
+        grade({**probe, "command": probe["command"][:-1] + ["{}"]})
+    with pytest.raises(PermissionError, match="recorded oracle probe result"):
+        grade(probe["test_id"])
     # A case set changed after it was loaded is not graded against.
     selfmod_oracle.provision("reflection", "selected", HELD_CASES[:2])
     with pytest.raises(RuntimeError, match="changed after it was loaded"):
-        selfmod.record_oracle_grade(
-            run_id, probe["test_id"], challenge=issued, loaded=loaded,
-            attestation=probe["attestation"], confidential=False, read_denied=False)
+        grade(probe)
+    assert selfmod.oracle_receipt(run_id) is None
 
 
 def test_nightly_without_held_cases_names_the_oracle_as_not_evaluated(tmp_path, monkeypatch):
     monkeypatch.setenv(selfmod_oracle.ORACLE_HOME_ENV, str(tmp_path / "oracle"))
     loaded, note = nightly_selfmod._load_oracle("reflection.py", "selected")
     assert loaded is None and "no evaluator-held cases for reflection.selected" in note
+
+
+def test_probe_ledger_row_withholds_the_held_inputs_and_outputs(low_seam):
+    import selfmod
+
+    run_id, workspace = low_seam(_guarded_module())
+    loaded = selfmod_oracle.load_case_set("reflection", "selected")
+    challenge = new_challenge(len(loaded.case_set.cases))
+    command = selfmod_oracle.challenge_command(workspace, challenge, loaded.case_set)
+    probe = nightly_selfmod._record_candidate_test(run_id, "oracle_probe", command, timeout=60)
+    assert grade_frame(probe["output"], challenge, loaded.case_set).passed
+
+    served = selfmod.test_results(run_id)
+    (row,) = [item for item in served if item["kind"] == "oracle_probe"]
+    assert row["command"] == ledger_command(command)
+    assert row["command"][:-1] == command[:-1]
+    assert json.loads(row["command"][-1])["nonce"] == challenge.nonce
+    assert row["output"] == ledger_output(probe["output"])
+    text = json.dumps(served, default=str) + json.dumps(selfmod.events(run_id), default=str)
+    assert command[-1] not in text
+    _assert_no_held_material(served)
+
+    graded = selfmod.record_oracle_grade(
+        run_id, probe, challenge=challenge, loaded=loaded,
+        attestation=probe["attestation"], confidential=False, read_denied=False)
+    assert graded["passed"] is True and graded["independent"] is False
+    after = selfmod.test_results(run_id)
+    assert command[-1] not in json.dumps(after, default=str)
+    _assert_no_held_material(after)
+
+
+def _assert_no_held_material(rows) -> None:
+    """No served row carries an oracle challenge payload or result frame.
+
+    (The public host grade's ``host_probe`` payload carries public literal
+    assertions by design; only oracle probe payloads are held material.)
+    """
+    for row in rows:
+        last = row["command"][-1] if isinstance(row["command"], list) and row["command"] else None
+        try:
+            payload = json.loads(last) if isinstance(last, str) else None
+        except ValueError:
+            payload = None
+        assert row["kind"] != "oracle_probe" or not (
+            isinstance(payload, dict) and "cases" in payload), row["kind"]
+        assert not any(line.startswith(ORACLE_FRAME_PREFIX)
+                       for line in str(row["output"]).splitlines()), row["kind"]
+
+
+def test_oracle_grade_refuses_changed_tested_bytes(low_seam):
+    import selfmod
+
+    run_id, workspace = low_seam(_guarded_module())
+    loaded = selfmod_oracle.load_case_set("reflection", "selected")
+    challenge = new_challenge(len(loaded.case_set.cases))
+    probe = nightly_selfmod._record_candidate_test(
+        run_id, "oracle_probe",
+        selfmod_oracle.challenge_command(workspace, challenge, loaded.case_set), timeout=60)
+    (workspace / "reflection.py").write_text(ORIGINAL, encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="tested candidate bytes"):
+        selfmod.record_oracle_grade(
+            run_id, probe, challenge=challenge, loaded=loaded,
+            attestation=probe["attestation"], confidential=False, read_denied=False)
+    assert selfmod.oracle_receipt(run_id) is None
+    # Through the nightly gate the same refusal fails closed instead of raising.
+    outcome = nightly_selfmod._independent_oracle_gate(run_id, workspace, loaded, 60)
+    assert outcome["passed"] is False and outcome["independent"] is False
+    assert "oracle could not grade the candidate (RuntimeError" in outcome["detail"]
+
+
+def test_oracle_gate_fails_closed_when_the_case_set_changes_mid_run(low_seam):
+    import selfmod
+
+    run_id, workspace = low_seam(_guarded_module())
+    loaded = selfmod_oracle.load_case_set("reflection", "selected")
+    selfmod_oracle.provision("reflection", "selected", HELD_CASES[:2])
+
+    outcome = nightly_selfmod._independent_oracle_gate(run_id, workspace, loaded, 60)
+
+    assert outcome["passed"] is False and "changed after it was loaded" in outcome["detail"]
+    assert selfmod.oracle_receipt(run_id) is None
+
+
+def _independent_receipt(run_id: str, **overrides) -> OracleReceipt:
+    """A consistent independent receipt bound to the run's real bytes and baseline."""
+    import selfmod
+
+    values = dict(
+        run_id=run_id, probe_id=1, attestation="linux-uid", candidate_uid=300_001,
+        supervisor_uid=0, case_set_sha256="a" * 64, case_count=4, matched=4,
+        nonce="n" * 32, outputs_sha256="b" * 64, confidential=True, read_denied=True,
+        passed=True, candidate=selfmod.tested_digests(run_id),
+        baseline=selfmod._baseline_binding(selfmod.get_run(run_id)),
+    )
+    values.update(overrides)
+    return OracleReceipt(**values)
+
+
+def _store_receipt(run_id: str, receipt: OracleReceipt | None) -> None:
+    import selfmod
+
+    with sqlite3.connect(selfmod.database_path()) as conn:
+        conn.execute("DELETE FROM selfmod_oracle_receipts WHERE run_id=?", (run_id,))
+        if receipt is not None:
+            conn.execute("INSERT INTO selfmod_oracle_receipts VALUES(?,?,?,?,?,?,?)",
+                         (run_id, receipt.probe_id, int(receipt.passed),
+                          int(receipt.independent), receipt.to_json(), receipt.digest(), 0.0))
+
+
+def test_host_approval_rechecks_the_oracle_receipt_at_approve_time(low_seam):
+    """approve() re-verifies the receipt, not only review's eligibility flag.
+
+    The run is placed at ``reviewing`` with ``auto_evaluation_eligible=1``
+    (what review leaves behind for an eligible run), so the older
+    eligibility check in approve() passes; only the oracle re-check can
+    refuse the later changes below.
+    """
+    import selfmod
+
+    run_id, _workspace = low_seam(_guarded_module(), mode="auto-low-risk")
+    with sqlite3.connect(selfmod.database_path()) as conn:
+        conn.execute("UPDATE selfmod_runs SET phase='reviewing', auto_evaluation_eligible=1 "
+                     "WHERE id=?", (run_id,))
+    run = selfmod.get_run(run_id)
+    assert run["mode"] == "auto-low-risk" and run["risk"] == "low"
+    assert run["approval_required"] is False
+
+    def refused(match: str) -> None:
+        with pytest.raises(PermissionError, match="independent oracle receipt: .*" + match):
+            selfmod.approve(run_id, "host:auto-low-risk")
+        assert selfmod.get_run(run_id)["phase"] == "reviewing"
+
+    refused("no independent oracle receipt")
+    _store_receipt(run_id, _independent_receipt(run_id, matched=3, passed=False))
+    refused("independent oracle failed")
+    _store_receipt(run_id, _independent_receipt(
+        run_id, baseline={"starting_commit": "0" * 40, "manifest_sha256": "f" * 64}))
+    refused("different baseline")
+    _store_receipt(run_id, _independent_receipt(run_id))
+    with sqlite3.connect(selfmod.database_path()) as conn:
+        original = conn.execute("SELECT sha256 FROM selfmod_tested_files WHERE run_id=?",
+                                (run_id,)).fetchone()[0]
+        conn.execute("UPDATE selfmod_tested_files SET sha256=? WHERE run_id=?", ("0" * 64, run_id))
+    refused("candidate bytes changed after testing began")
+    with sqlite3.connect(selfmod.database_path()) as conn:
+        conn.execute("UPDATE selfmod_tested_files SET sha256=? WHERE run_id=?", (original, run_id))
+    _store_receipt(run_id, _independent_receipt(
+        run_id, candidate={"files": {"reflection.py": "0" * 64}, "diff_sha256": "d" * 64}))
+    refused("different candidate bytes")
+
+    _store_receipt(run_id, _independent_receipt(run_id))
+    approved = selfmod.approve(run_id, "host:auto-low-risk")
+    assert approved["phase"] == "approved" and approved["approved_by"] == "host:auto-low-risk"
+
+
+def test_unattended_floor_covers_every_gate_the_nightly_runs():
+    import selfmod
+
+    floor = set(selfmod.UNATTENDED_REQUIRED_KINDS)
+    assert set(nightly_selfmod.REGRESSION_KINDS) <= floor
+    assert {"syntax", "held_out", "host_probe", "host_grade", "oracle_probe",
+            "oracle_grade"} <= floor
+
+
+@pytest.mark.skipif(not POSIX, reason="POSIX modes")
+def test_oracle_home_is_resolved_the_same_way_by_the_cli_and_the_nightly(tmp_path, monkeypatch):
+    import selfmod
+    from sonder_runtime.platform import paths
+
+    monkeypatch.setenv("SONDER_SELFMOD_HOME", str(tmp_path / "state"))
+    monkeypatch.delenv(selfmod_oracle.ORACLE_HOME_ENV, raising=False)
+    paths.reset_home()
+    assert selfmod_oracle.oracle_home() == selfmod.state_root() / "oracle"
+    assert selfmod_oracle.main(["provision", "--module", "reflection", "--function", "selected",
+                                "--cases", str(_write_cases(tmp_path, HELD_CASES))]) == 0
+    loaded, _note = nightly_selfmod._load_oracle("reflection.py", "selected")
+    assert loaded is not None and loaded.path.parent == tmp_path / "state" / "oracle"
+
+    # A typed state home in the nightly's process would re-home the default,
+    # so the default is refused and the explicit variable is named.
+    paths.configure_home(tmp_path / "typed-home")
+    loaded, note = nightly_selfmod._load_oracle("reflection.py", "selected")
+    assert loaded is None and selfmod_oracle.ORACLE_HOME_ENV in note
+    monkeypatch.setenv(selfmod_oracle.ORACLE_HOME_ENV, "relative/oracle")
+    with pytest.raises(selfmod_oracle.OracleUnavailable, match="absolute"):
+        selfmod_oracle.oracle_home()
+    monkeypatch.setenv(selfmod_oracle.ORACLE_HOME_ENV, str(tmp_path / "state" / "oracle"))
+    loaded, _note = nightly_selfmod._load_oracle("reflection.py", "selected")
+    assert loaded is not None
+
+
+def _write_cases(tmp_path: Path, cases) -> Path:
+    path = tmp_path / "held_cases.json"
+    path.write_text(json.dumps(cases), encoding="utf-8")
+    return path
+
+
+def test_case_sets_that_cannot_fit_the_oracle_channel_are_refused(tmp_path, monkeypatch):
+    monkeypatch.setenv(selfmod_oracle.ORACLE_HOME_ENV, str(tmp_path / "oracle"))
+    wide_inputs = [{"args": ["i%02d" % n + "x" * 2000], "expected": n} for n in range(40)]
+    wide_outputs = [{"args": [n], "expected": "o%02d" % n + "x" * 2000} for n in range(40)]
+    with pytest.raises(OracleError, match="challenge bound"):
+        selfmod_oracle.provision("reflection", "selected", wide_inputs)
+    with pytest.raises(OracleError, match="result frame bound"):
+        selfmod_oracle.provision("reflection", "selected", wide_outputs)
+    assert not selfmod_oracle.case_path("reflection", "selected").exists()
+    # Non-ASCII outputs are measured as the probe spells them (\\u escapes).
+    with pytest.raises(OracleError, match="result frame bound"):
+        CaseSet("m", "f", tuple(HeldCase.from_mapping({"args": [n], "expected": "\u00e9" * 1200})
+                                for n in range(10)))
+    # A set that is accepted always fits: the real challenge and a correct
+    # frame for a PATH_MAX root stay inside the bound.
+    fits = [{"args": ["i%02d" % n + "x" * 700], "expected": "o%02d" % n + "x" * 700}
+            for n in range(40)]
+    selfmod_oracle.provision("reflection", "selected", fits)
+    loaded = selfmod_oracle.load_case_set("reflection", "selected")
+    challenge = new_challenge(len(loaded.case_set.cases))
+    payload = challenge_payload(challenge, loaded.case_set, root="/" + "r" * 4095)
+    assert len(payload.encode("utf-8")) <= MAX_ORACLE_PAYLOAD_BYTES
+    assert grade_frame(_correct_frame(challenge, loaded.case_set), challenge,
+                       loaded.case_set).passed
+
+
+def test_ledger_forms_carry_only_the_nonce_and_digests():
+    case_set = _case_set()
+    challenge = new_challenge(len(case_set.cases))
+    command = ["python", "-I", "-c", "probe",
+               challenge_payload(challenge, case_set, root="/candidate")]
+    frame = _correct_frame(challenge, case_set)
+
+    stored_command, stored_output = ledger_command(command), ledger_output(frame)
+
+    assert stored_command[:-1] == command[:-1]
+    withheld = json.loads(stored_command[-1])
+    assert withheld["nonce"] == challenge.nonce and set(withheld) == {
+        "withheld", "nonce", "payload_bytes", "payload_sha256"}
+    assert withheld["payload_sha256"] == hashlib.sha256(command[-1].encode()).hexdigest()
+    assert stored_output.startswith(WITHHELD_OUTPUT_PREFIX)
+    assert not stored_output.startswith(ORACLE_FRAME_PREFIX)
+    assert json.loads(stored_output[len(WITHHELD_OUTPUT_PREFIX):])["sha256"] == \
+        hashlib.sha256(frame.encode()).hexdigest()
+    assert not grade_frame(stored_output, challenge, case_set).passed
 
 
 # ------------------------------------ real Linux uid supervisor (Linux, root)
@@ -603,13 +882,53 @@ def _latest_run():
     return selfmod.list_runs(1)[0]
 
 
-def _cycle(host, monkeypatch, reply: str, stages=None):
+def _cycle(host, monkeypatch, reply: str, stages=None, probes=None):
+    """One real nightly cycle; ``probes`` collects the parent's in-memory
+    oracle probe results (the ledger keeps only their digests)."""
     monkeypatch.setattr(nightly_selfmod, "_ask", lambda *_a, **_k: reply)
+    if probes is not None:
+        record = nightly_selfmod._record_candidate_test
+
+        def capture(run_id, kind, command, **kwargs):
+            result = record(run_id, kind, command, **kwargs)
+            if kind == "oracle_probe":
+                probes.append(result)
+            return result
+
+        monkeypatch.setattr(nightly_selfmod, "_record_candidate_test", capture)
     logs: list[str] = []
     result = nightly_selfmod.run(object(), logs.append, test_timeout=120,
                                  stages=stages or _stages(host["home"]))
     run = _latest_run()
     return result, run, {row["kind"]: row for row in _rows(run["id"])}, logs
+
+
+def _ledger_table(run_id: str) -> dict[str, object]:
+    """Replay the review's input-keyed attack against what the ledger serves.
+
+    ``selfmod.test_results`` is what ``/selfmod tests <run>`` returns (also on
+    the hosted HTTP read surface).  Before the fix, its ``oracle_probe`` row
+    held the challenge payload (token -> args/kwargs) and the passing frame
+    (token -> output): together a complete input -> expected-value table.
+    """
+    import selfmod
+
+    table: dict[str, object] = {}
+    for row in selfmod.test_results(run_id):
+        try:
+            payload = json.loads(str(row["command"][-1])) if row["command"] else {}
+        except (TypeError, ValueError, KeyError):
+            payload = {}
+        frames = [line[len(ORACLE_FRAME_PREFIX):] for line in str(row["output"]).splitlines()
+                  if line.startswith(ORACLE_FRAME_PREFIX)]
+        cases = payload.get("cases") if isinstance(payload, dict) else None
+        if not cases or not frames:
+            continue
+        outputs = json.loads(frames[0]).get("outputs", {})
+        for case in cases:
+            if case.get("token") in outputs:
+                table[canonical_json([case["args"], case["kwargs"]])] = outputs[case["token"]]
+    return table
 
 
 @needs_root
@@ -700,14 +1019,16 @@ def test_forging_candidate_is_rejected_by_the_real_nightly(host, monkeypatch, fo
     repo = host["repo"]
     head = _git(repo, "rev-parse", "HEAD")
 
-    result, run, by_kind, _logs = _cycle(host, monkeypatch, _oracle_branch(body))
+    probes: list[dict] = []
+    result, run, by_kind, _logs = _cycle(host, monkeypatch, _oracle_branch(body), probes=probes)
 
     assert result == "candidate rejected: independent oracle failed", result
     # The candidate passed every public gate: only the held oracle caught it.
     for kind in ("regression", "held_out", "host_probe", "host_grade", "oracle_probe"):
         assert by_kind[kind]["passed"] == 1 and by_kind[kind]["isolation"] == "linux-uid", kind
-    probe_output = by_kind["oracle_probe"]["output"]
-    assert "oracle read refused: [Errno 13] Permission denied" in probe_output
+    assert len(probes) == 1
+    assert "oracle read refused: [Errno 13] Permission denied" in probes[0]["output"]
+    assert by_kind["oracle_probe"]["output"].startswith(WITHHELD_OUTPUT_PREFIX)
     assert by_kind["oracle_grade"]["passed"] == 0
     receipt = selfmod.oracle_receipt(run["id"])
     assert receipt.passed is False and not receipt.independent
@@ -718,9 +1039,12 @@ def test_forging_candidate_is_rejected_by_the_real_nightly(host, monkeypatch, fo
 
 @needs_root
 def test_replayed_outputs_from_a_previous_nonce_are_rejected(host, monkeypatch):
-    clean, _run, by_kind, _logs = _cycle(host, monkeypatch, GUARDED_REPLY)
+    probes: list[dict] = []
+    clean, _run, _by_kind, _logs = _cycle(host, monkeypatch, GUARDED_REPLY, probes=probes)
     assert clean.startswith("COMMITTED ")
-    frames = [line for line in by_kind["oracle_probe"]["output"].splitlines()
+    # The frame a previous correct candidate printed (held by the parent in
+    # memory only): replaying it, verbatim or with this run's nonce, fails.
+    frames = [line for line in probes[0]["output"].splitlines()
               if line.startswith(ORACLE_FRAME_PREFIX)]
     assert len(frames) == 1
     recorded = frames[0][len(ORACLE_FRAME_PREFIX):]
@@ -738,14 +1062,73 @@ def test_replayed_outputs_from_a_previous_nonce_are_rejected(host, monkeypatch):
 
 
 @needs_root
+def test_ledger_never_yields_an_input_keyed_replay_table(host, monkeypatch):
+    import selfmod
+
+    probes: list[dict] = []
+    clean, clean_run, by_kind, _logs = _cycle(host, monkeypatch, GUARDED_REPLY, probes=probes)
+    assert clean.startswith("COMMITTED ")
+    payload = json.loads(probes[0]["command"][-1])
+    frame = [line for line in probes[0]["output"].splitlines()
+             if line.startswith(ORACLE_FRAME_PREFIX)][0]
+    # What /selfmod tests serves for the passing run holds neither the held
+    # inputs nor the raw outputs, only the nonce and their digests.
+    served = json.dumps(selfmod.test_results(clean_run["id"]), default=str)
+    assert frame not in served and probes[0]["command"][-1] not in served
+    _assert_no_held_material(selfmod.test_results(clean_run["id"]))
+    (row,) = [item["command"][-1] for item in selfmod.test_results(clean_run["id"])
+              if item["kind"] == "oracle_probe"]
+    assert by_kind["oracle_probe"]["output"].startswith(WITHHELD_OUTPUT_PREFIX)
+    assert json.loads(row) == {
+        "withheld": "evaluator challenge inputs", "nonce": payload["nonce"],
+        "payload_bytes": len(probes[0]["command"][-1].encode("utf-8")),
+        "payload_sha256": hashlib.sha256(probes[0]["command"][-1].encode("utf-8")).hexdigest(),
+    }
+    assert _ledger_table(clean_run["id"]) == {}
+
+    # The attack from the review: answer the new challenge by input from the
+    # prior run's ledger rows, falling back to the (wrong) identity.  With
+    # nothing to replay it is graded on its own outputs and rejected.
+    body = (
+        "table = %r\n"
+        "answered = {c['token']: table.get(json.dumps([c['args'], c['kwargs']], sort_keys=True, "
+        "separators=(',', ':')), {'value': c['args'][0] if c['args'] else None}) for c in cases}\n"
+        "sys.stdout.write(%r + json.dumps({'nonce': payload['nonce'], 'outputs': answered}) + '\\n')"
+        % (_ledger_table(clean_run["id"]), ORACLE_FRAME_PREFIX))
+    result, run, rows, _logs = _cycle(host, monkeypatch, _oracle_branch(body))
+    assert result == "candidate rejected: independent oracle failed", result
+    assert "differ from evaluator-held outcomes" in rows["oracle_grade"]["output"]
+    assert selfmod.oracle_receipt(run["id"]).passed is False
+    assert linux.live_uid_pids(CANDIDATE_UID) == set()
+
+
+@needs_root
+def test_an_oracle_that_cannot_grade_rejects_and_discards_the_run(host, monkeypatch):
+    import selfmod
+
+    def changed_mid_run(*_args, **_kwargs):
+        raise RuntimeError("held oracle case set changed after it was loaded")
+
+    monkeypatch.setattr(selfmod, "record_oracle_grade", changed_mid_run)
+    result, run, _rows, logs = _cycle(host, monkeypatch, GUARDED_REPLY)
+
+    assert result == "candidate rejected: independent oracle failed", (result, logs)
+    assert any("oracle could not grade the candidate (RuntimeError" in line for line in logs), logs
+    final = selfmod.get_run(run["id"])
+    assert final["phase"] in {"rejected", "restored"}
+    with pytest.raises(RuntimeError, match="workspace is unavailable"):
+        selfmod.candidate_path(run["id"])
+    assert linux.live_uid_pids(CANDIDATE_UID) == set()
+
+
+@needs_root
 def test_host_auto_approval_requires_the_independent_oracle_and_existing_gates(host):
     import selfmod
 
     repo = host["repo"]
     selfmod.set_mode("auto-low-risk")
-    held = {"host_cases": ({"args": [3], "kwargs": {}, "expected": 3},), "protected_paths": ()}
 
-    def gated_run(with_oracle: bool):
+    def gated_run(*, with_oracle: bool, full_gates: bool):
         run = selfmod.create_plan(
             "Guard selected against None input.", str(repo), problem="p", evidence=["e"],
             files=["reflection.py"], criteria=["c"], risk="low",
@@ -757,28 +1140,53 @@ def test_host_auto_approval_requires_the_independent_oracle_and_existing_gates(h
         selfmod.apply_candidate_changes(rid, {"reflection.py": _guarded_module()})
         selfmod.begin_testing(rid)
         workspace = selfmod.candidate_path(rid)
-        truth = nightly_selfmod._evaluator_truth_paths(rid, held)
-        assert selfmod.record_test(rid, "syntax", [sys.executable, "-m", "py_compile",
-                                                   "reflection.py"], protected_paths=truth,
-                                   low_integrity=True)["isolation"] == "linux-uid"
-        assert nightly_selfmod._parent_scored_gate(
-            rid, workspace, "reflection.py", "selected", held, 60,
-            protected_paths=truth)["passed"]
-        if with_oracle:
-            loaded = selfmod_oracle.load_case_set("reflection", "selected")
-            outcome = nightly_selfmod._independent_oracle_gate(
-                rid, workspace, loaded, 60, protected_paths=truth)
-            assert outcome["passed"] and outcome["independent"], outcome
+        held_out = nightly_selfmod._prepare_held_out("reflection.py", workspace, 120, "selected")
+        loaded = selfmod_oracle.load_case_set("reflection", "selected")
+        try:
+            assert held_out["host_cases"]
+            truth = nightly_selfmod._evaluator_truth_paths(rid, held_out, loaded)
+            checks = [("syntax", [sys.executable, "-m", "py_compile", "reflection.py"])]
+            if full_gates:
+                checks += [(kind, nightly_selfmod._regression_command(
+                    sys.executable, ignore_paths=held_out["source_paths"], kind=kind, workers=1))
+                    for kind in nightly_selfmod.REGRESSION_KINDS]
+                checks.append(("held_out", held_out["command"]))
+            for kind, command in checks:
+                outcome = nightly_selfmod._record_candidate_test(
+                    rid, kind, command, timeout=120, protected_paths=truth,
+                    isolation=(nightly_selfmod._regression_isolation(kind, 1)
+                               if kind in nightly_selfmod.REGRESSION_KINDS else None))
+                assert outcome["passed"] and outcome["isolation"] == "linux-uid", (kind, outcome)
+            assert nightly_selfmod._parent_scored_gate(
+                rid, workspace, "reflection.py", "selected", held_out, 60,
+                protected_paths=truth)["passed"]
+            if with_oracle:
+                outcome = nightly_selfmod._independent_oracle_gate(
+                    rid, workspace, loaded, 60, protected_paths=truth)
+                assert outcome["passed"] and outcome["independent"], outcome
+        finally:
+            if held_out.get("cleanup") is not None:
+                held_out["cleanup"].cleanup()
+        # A deliberately narrow acceptance set: the unattended floor, not the
+        # caller's require_kinds, decides auto-approval.
         return selfmod.review(rid, require_kinds={"syntax"})
 
-    without = gated_run(with_oracle=False)
+    without = gated_run(with_oracle=False, full_gates=True)
     assert without["phase"] == "reviewing" and without["auto_evaluation_eligible"] is False
     assert "no independent oracle receipt" in selfmod.events(without["id"])[-1]["details"]
     with pytest.raises(PermissionError):
         selfmod.approve(without["id"], "host:auto-low-risk")
     selfmod.cancel(without["id"])
 
-    with_oracle = gated_run(with_oracle=True)
+    narrow = gated_run(with_oracle=True, full_gates=False)
+    assert narrow["phase"] == "reviewing" and narrow["auto_evaluation_eligible"] is False
+    assert ("unattended gates not passed: held_out, regression, regression_heavy"
+            in selfmod.events(narrow["id"])[-1]["details"])
+    with pytest.raises(PermissionError):
+        selfmod.approve(narrow["id"], "host:auto-low-risk")
+    selfmod.cancel(narrow["id"])
+
+    with_oracle = gated_run(with_oracle=True, full_gates=True)
     assert with_oracle["auto_evaluation_eligible"] is True
     assert with_oracle["phase"] == "approved"
     assert with_oracle["approved_by"] == "host:auto-low-risk"

@@ -8,7 +8,7 @@ candidate checks and an evaluator-held independent oracle that grades
 candidates against expected values the candidate uid cannot read. It does not
 close #517, and no master-spec checkbox changes. The former
 `_UNATTENDED_ORACLE_INDEPENDENT = False` switch in `selfmod.py` is replaced by
-a per-run check of a sealed oracle receipt; see "When automatic promotion may
+a per-run check of an oracle receipt plus a fixed floor of unattended gates; see "When automatic promotion may
 be enabled" below. The nightly driver still never promotes unattended.
 
 ## What exists
@@ -127,12 +127,13 @@ candidate cannot read.
 
 | Part | Where | What it does |
 | --- | --- | --- |
-| Held case set | `scripts/selfmod_oracle.py` | `<oracle home>/<module>.<function>.json`. The oracle home is `SONDER_SELFMOD_ORACLE_HOME`, or `<selfmod state root>/oracle` when unset. The directory is `0700` and owned by the evaluator; each file is `0600`, written with `O_NOFOLLOW` and an atomic replace. Operators add cases with `python scripts/selfmod_oracle.py provision --module M --function F --cases FILE`. A case is `{"args", "kwargs", "expected"}` or `{"args", "kwargs", "raises": "ExcName"}`, 1 to 64 per set. `inspect` prints the path, digest, case count and confidentiality, and never prints an expected value. |
+| Held case set | `scripts/selfmod_oracle.py` | `<oracle home>/<module>.<function>.json`. The oracle home is `SONDER_SELFMOD_ORACLE_HOME`, which must be an absolute path. When it is unset, the home is `<selfmod state root>/oracle`, but only if no typed state home is configured in the process (`paths.configured_home()`). A runtime that composed `state.home` resolves the selfmod state root differently from a bare `python scripts/selfmod_oracle.py`. There the default is refused as unusable, the nightly reports that as not evaluated, and the variable must be set. The nightly logs the path it loaded, or the path it searched. The directory is `0700` and owned by the evaluator; each file is `0600`, written with `O_NOFOLLOW` and an atomic replace. Operators add cases with `python scripts/selfmod_oracle.py provision --module M --function F --cases FILE`, run with the nightly's environment. A case is `{"args", "kwargs", "expected"}` or `{"args", "kwargs", "raises": "ExcName"}`, 1 to 64 per set. A set is refused at provisioning or loading when its challenge (for any candidate root up to 4096 bytes) or its all-correct result frame (as the probe spells it) would exceed the 64 KiB channel bound. `inspect` prints the path, digest, case count and confidentiality, and never prints an expected value. |
 | Confidentiality | `selfmod_linux_isolation.require_not_candidate_readable`, `selfmod_oracle.confidentiality` | On the `linux-uid` host, refuses a case file that the candidate uid can read. It also refuses a directory the candidate uid can list or traverse, a symlink, a POSIX ACL, and candidate ownership, and it applies `require_not_candidate_writable`. The Windows low-integrity supervisor does not bound reads, so there the set is never confidential. |
 | OS-boundary proof | `selfmod_oracle.prove_read_denied` | Each run, runs evaluator-only code (`python -I`, so no candidate bytes) *as the candidate uid* through the supervisor. The probe must get `EACCES` when it opens the case file and when it lists the oracle home. Only a supervisor-attested `linux-uid` pass with both denials counts. |
 | Channel | `selfmod_oracle.challenge_command`, `independent_oracle.new_challenge` | The parent picks a fresh 128-bit nonce, a fresh token per case and a random presentation order. The candidate probe receives only the nonce and `(token, args, kwargs)`. It prints one `SELFMOD ORACLE OUTPUTS` frame of raw outputs (a value, or the raised exception's class name) through the supervisor's output channel. |
-| Comparison | `independent_oracle.grade_frame`, called by `selfmod.record_oracle_grade` | Runs in the evaluator process. It re-reads the probe's own ledger row and requires that row's command to carry this challenge's nonce. It requires the case file to still have the digest it was loaded with. It accepts exactly one bounded frame that echoes the nonce and answers exactly this challenge's token set. Every raw output must equal the held outcome. Exit codes, pytest summaries and host-challenge frames are not inputs. The detail never repeats an expected value. |
-| Durable decision receipt | `independent_oracle.OracleReceipt`, table `selfmod_oracle_receipts` | A canonical JSON receipt sealed by its SHA-256. It binds the verdict to the tested candidate digests (`files`, `diff_sha256`, re-derived from disk and required to equal the tested-bytes record), the baseline (`starting_commit` and the sealed backup `manifest.json` digest), the case-set digest, the nonce, the output digest, the probe row, and the probe's attestation kind and candidate/supervisor uids. `independent` is true only for a pass under `linux-uid` with the confidentiality check and the read-denial proof both passing. `oracle_receipt()` re-verifies the seal on every read. `record_test` refuses the `oracle_grade` kind, and a second receipt for a run is refused. |
+| Ledger redaction | `independent_oracle.ledger_command` / `ledger_output`, applied by `selfmod._record_command` to every `oracle_probe` row | The challenge payload names the held inputs, and a passing frame *is* the held expected values. The ledger therefore stores the probe argv with its payload replaced by `{"nonce", "payload_bytes", "payload_sha256"}` and the output as `SELFMOD ORACLE WITHHELD {"bytes", "sha256"}`. Neither `/selfmod tests`, the hosted HTTP read surface, nor any other ledger read can build an input to expected-value table that a later candidate could replay by input. The journal stores only digests of the stage request and result. |
+| Comparison | `independent_oracle.grade_frame`, called by `selfmod.record_oracle_grade` | Runs in the evaluator process on the parent's in-memory probe result. That result's argv and output must reproduce the redacted ledger row exactly, and its exit verdict must match the row. The argv must carry this challenge's nonce, the tested candidate bytes must be unchanged, and the case file must still have the digest it was loaded with. It accepts exactly one bounded frame that echoes the nonce and answers exactly this challenge's token set. Every raw output must equal the held outcome. Exit codes, pytest summaries and host-challenge frames are not inputs. The detail never repeats an input or an expected value. If grading cannot happen (for example, a challenge that cannot be built, a set re-provisioned mid-run, changed tested bytes or an unbound probe), `_independent_oracle_gate` returns a failed verdict. The nightly then rejects and discards the run instead of crashing with it left in `testing`. |
+| Durable decision receipt | `independent_oracle.OracleReceipt`, table `selfmod_oracle_receipts` | A canonical JSON receipt stored with its SHA-256. The digest is unkeyed and sits in the same row, so it catches corruption and partial edits but is **not a seal**: a writer who can edit the row can recompute it. Receipt integrity rests on the ledger being closed to the candidate uid, which the nightly checks before every run (`_isolation_refusal`). It binds the verdict to the tested candidate digests (`files`, `diff_sha256`, re-derived from disk and required to equal the tested-bytes record), the baseline (`starting_commit` and the sealed backup `manifest.json` digest), the case-set digest, the nonce, the output digest, the probe row, and the probe's attestation kind and candidate/supervisor uids. `independent` is true only for a pass under `linux-uid` with the confidentiality check and the read-denial proof both passing. `oracle_receipt()` re-checks the digest and the row's `passed`/`independent` columns on every read. `record_test` refuses the `oracle_grade` kind, and a second receipt for a run is refused. |
 
 The nightly driver (`scripts/nightly_selfmod.run`) loads the held set for the
 target function before any candidate process runs. It adds the file to the
@@ -151,17 +152,24 @@ or a verdict that is not independent (every non-Linux host), is passed to
    false.
 2. There are no review failures and no unevaluated checks.
 3. Every candidate check carries a supervisor-built isolation attestation.
-4. Exactly one passing `host_grade` exists.
-5. Exactly one `oracle_grade` exists, and its receipt passes
+4. Every kind in `selfmod.UNATTENDED_REQUIRED_KINDS` has a passing row:
+   `syntax`, `regression`, `regression_heavy`, `held_out`, `host_probe`,
+   `host_grade`, `oracle_probe` and `oracle_grade`. This floor is fixed. It
+   applies whatever `require_kinds` the caller passes, so a narrow acceptance
+   set cannot reach auto-approval.
+5. Exactly one passing `host_grade` exists.
+6. Exactly one `oracle_grade` exists, and its receipt passes
    `_oracle_admission_refusal`:
-   - the seal is intact;
+   - the recorded digest and columns agree with the receipt;
    - the verdict passed;
    - the attestation is `linux-uid`;
    - confidentiality and read denial were both proven;
    - the receipt is bound to the current tested bytes and the current
      baseline.
 
-`approve` re-checks item 5 for every `host:` approver.
+`approve` re-checks item 6 for every `host:` approver, so a receipt that is
+removed, fails, or no longer matches the tested bytes or the baseline after
+review is refused at approval time.
 
 The nightly driver still never promotes unattended. It always records the
 `regression_medium` partition as not evaluated, and it also requires
@@ -173,7 +181,12 @@ Linux host that meets all of these conditions:
 
 - `SONDER_SELFMOD_CANDIDATE_UID` is configured and the supervisor runs as
   root;
-- the oracle home is root-owned `0700` with `0600` case files;
+- the oracle home is root-owned `0700` with `0600` case files, and
+  `SONDER_SELFMOD_ORACLE_HOME` is set (absolute) whenever the runtime uses a
+  typed `state.home`;
+- the HTTP read surface and the ledger are not reachable by the candidate
+  uid, since receipt integrity rests on ledger permissions (see "What
+  remains");
 - every target that should auto-promote has provisioned held cases whose
   values were never committed to the repository or left in a
   candidate-readable file.
@@ -263,16 +276,29 @@ so it skips them.
       host-challenge frame, a verbatim replay from a previous nonce, a
       replay with the nonce rewritten, duplicate or oversized frames and
       non-finite or unencodable outputs all fail;
-    - case sets and receipts are strict;
+    - case sets and receipts are strict, and sets that cannot fit the
+      channel are refused at provisioning;
+    - the ledger forms of a probe carry only the nonce and digests;
     - only a `linux-uid` pass with a proven read denial is independent;
     - receipts are bound to candidate and baseline digests.
   - (POSIX) The store is `0700`/`0600`. It refuses symlinked, malformed and
     wrong-target sets.
   - (any host, low-report seam) A low-supervisor oracle pass is recorded but
     never independent and never auto-approves. Forging candidates are
-    rejected by `review`. A probe issued for another challenge is refused. A
-    case set changed after loading is refused. An edited receipt fails its
-    seal and refuses admission.
+    rejected by `review`. The probe's ledger row, as `/selfmod tests` serves
+    it, holds no challenge payload or result frame. A probe issued for
+    another challenge, an in-memory result that does not match its ledger
+    row, and changed tested bytes are refused. A case set changed after
+    loading is refused, and through the nightly gate that fails closed
+    instead of raising. A partially edited receipt fails its digest check
+    and refuses admission. A consistent rewrite of the whole row is accepted,
+    which the test records as the limit of an unkeyed digest. `approve`
+    re-checks the receipt at approval time: a missing, failed,
+    other-baseline or other-bytes receipt, or changed tested bytes, is
+    refused even though `auto_evaluation_eligible` is set. The oracle home
+    resolves to the same directory for the operator CLI and the nightly, a
+    typed state home without the explicit variable is refused, and a
+    relative variable is refused.
   - (root) The real supervisor gives the candidate uid `PermissionError` on
     the expected-values file. `prove_read_denied` passes, and an exposed
     (`0644` in `0755`) set is refused by both checks.
@@ -283,13 +309,23 @@ so it skips them.
     - A forged-frame candidate and a forged-pytest-summary candidate pass
       every public gate (`regression`, `held_out`, `host_probe`,
       `host_grade`). Each is rejected with `candidate rejected: independent
-      oracle failed`, and its attempt to read the held file is logged as
-      `[Errno 13] Permission denied`.
+      oracle failed`. Its attempt to read the held file appears in the
+      parent's in-memory probe output as `[Errno 13] Permission denied`,
+      and the ledger row is withheld.
     - Verbatim and nonce-rewritten replays of a previous clean run's frame
       are rejected.
-  - (root) `review` auto-approves (`host:auto-low-risk`) under `linux-uid`
-    only when the independent receipt exists. The same gates without it
-    stop at `reviewing` with `no independent oracle receipt`.
+    - The input-keyed replay from the review is also rejected. After a
+      clean run, the attack rebuilds an input to output table from that
+      run's `/selfmod tests` rows, finds nothing, and the candidate is then
+      graded on its own wrong outputs.
+    - An oracle that cannot grade (for example, a case set that changed
+      mid-run) rejects and discards the run.
+  - (root) `review(require_kinds={"syntax"})` auto-approves
+    (`host:auto-low-risk`) under `linux-uid` only when the independent
+    receipt exists and every unattended floor kind passed. The full gates
+    without the receipt stop at `reviewing` with `no independent oracle
+    receipt`. The receipt with only `syntax` and the grades stops with
+    `unattended gates not passed: held_out, regression, regression_heavy`.
 
 ## What remains (do not claim #517 closed)
 
@@ -307,8 +343,21 @@ so it skips them.
      baseline code in the readable live checkout. That is still producing the
      outputs, not forging them.
    - **Confidentiality scope.** On Linux, confidentiality holds only against
-     the candidate uid, and only while the host keeps the oracle home and the
-     operator's provisioning input unreadable to it.
+     the candidate uid. It also depends on the host keeping the oracle home,
+     the operator's provisioning input and the selfmod ledger unreadable to
+     that uid. The ledger stores only digests of the held material, and the
+     verdict detail never names it. Still, the candidate sees each held
+     input in the clear on every run, and a correct candidate knows its own
+     outputs. A candidate that smuggles those out through a channel it
+     controls, such as a world-writable path or the network (item 2), can
+     hand them to a later candidate. Every case is sent on every run,
+     because sending a subset would let a wrong candidate pass on the cases
+     left out.
+   - **Receipt integrity.** The receipt digest is an unkeyed corruption
+     check, not a seal. A process that can write the ledger can forge a
+     consistent receipt. The ledger must stay closed to the candidate uid,
+     and the nightly refuses to run otherwise. Any other principal with
+     ledger write access is trusted.
    - **Windows.** No confidential oracle exists on Windows.
    - **Network.** Candidate network access (item 2) is not bounded.
    - **Nightly promotion.** The nightly driver still does not promote

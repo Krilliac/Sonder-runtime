@@ -33,9 +33,12 @@ from sonder_runtime.application.selfmod.candidate_isolation import (
     IsolationAttestationError,
 )
 from sonder_runtime.application.selfmod.independent_oracle import (
+    ORACLE_PROBE_KIND,
     OracleError,
     OracleReceipt,
     grade_frame,
+    ledger_command as oracle_ledger_command,
+    ledger_output as oracle_ledger_output,
     payload_nonce,
 )
 
@@ -111,6 +114,18 @@ LEASE_SECONDS = 180
 # expected values the candidate uid was proven unable to read, bound to the
 # exact tested candidate bytes and baseline.  See ``_oracle_admission_refusal``
 # and docs/architecture/REMAINING-SELFMOD-517-LINUX-ISOLATION.md.
+
+# The fixed set of candidate checks that must each have run and passed before
+# ``review`` may auto-approve, whatever ``require_kinds`` the caller passes:
+# the low-integrity regression partitions and held-out suite the nightly runs
+# (``scripts/nightly_selfmod.py`` ``REGRESSION_KINDS``), the parent-scored
+# host grade over public assertions, and the independent oracle.  The
+# medium-integrity partition is never run against a candidate, and the
+# nightly reports it as not evaluated, which also blocks auto-approval.
+UNATTENDED_REQUIRED_KINDS = (
+    "syntax", "regression", "regression_heavy", "held_out",
+    "host_probe", "host_grade", "oracle_probe", "oracle_grade",
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS selfmod_settings (
@@ -977,10 +992,17 @@ def _record_command(
             "  expected: %s"
             % (output, str(kind).upper(), code, receipt)
         )[:100_000]
+    stored_command, stored_output = list(command), output
+    if kind == ORACLE_PROBE_KIND:
+        # The challenge names the held inputs and a passing output is the
+        # held expected values; the ledger (served by /selfmod tests) keeps
+        # only their nonce and digests.  The caller grades the in-memory
+        # result, which ``record_oracle_grade`` binds to this row.
+        stored_command, stored_output = oracle_ledger_command(command), oracle_ledger_output(output)
     with _tx() as conn:
         cursor = conn.execute(
             "INSERT INTO selfmod_tests(run_id,kind,command_json,exit_code,duration_ms,output,passed,created_ts,isolation) VALUES(?,?,?,?,?,?,?,?,?)",
-            (run_id, str(kind)[:80], _json(list(command)), code, duration, output, int(passed), time.time(), attestation),
+            (run_id, str(kind)[:80], _json(stored_command), code, duration, stored_output, int(passed), time.time(), attestation),
         )
         test_id = getattr(cursor, "lastrowid", None)
         _event(conn, run_id, "test", "%s exit=%s expected=%s duration_ms=%s" % (kind, code, "failure" if expect_failure else "success", duration))
@@ -1072,25 +1094,33 @@ def _baseline_binding(run):
             "manifest_sha256": _sha(_backup_dir(run["id"]) / "manifest.json")}
 
 
-def record_oracle_grade(run_id, probe_id, *, challenge, loaded, attestation,
+def record_oracle_grade(run_id, probe, *, challenge, loaded, attestation,
                         confidential: bool, read_denied: bool) -> dict:
-    """Grade an oracle probe in this (evaluator) process and seal the receipt.
+    """Grade an oracle probe in this (evaluator) process and record the receipt.
 
-    ``challenge`` is the parent-held per-run challenge and ``loaded`` the
-    evaluator-held case set (``scripts.selfmod_oracle.LoadedCaseSet``).  The
-    probe's raw output is re-read from its own ledger row, the row's command
-    must carry this challenge's nonce, the case file must still have the
-    digest it was loaded with, and the tested candidate bytes must be
-    unchanged.  The durable receipt binds the verdict to those candidate
-    digests, the baseline and the probe's supervisor attestation.  Only a
-    ``linux-uid`` probe with a proven read denial yields an independent
-    receipt; that is what ``review`` requires for unattended promotion.
+    ``probe`` is the in-memory result ``record_test`` returned for the
+    ``oracle_probe`` check, ``challenge`` the parent-held per-run challenge
+    and ``loaded`` the evaluator-held case set
+    (``scripts.selfmod_oracle.LoadedCaseSet``).  The ledger row of that
+    probe stores only the nonce and digests of the challenge and output, so
+    the in-memory argv and output must reproduce exactly those digests
+    (they are the attested run's), the argv must carry this challenge's
+    nonce, the case file must still have the digest it was loaded with, and
+    the tested candidate bytes must be unchanged.  The durable receipt binds
+    the verdict to those candidate digests, the baseline and the probe's
+    supervisor attestation.  Only a ``linux-uid`` probe with a proven read
+    denial yields an independent receipt; that is what ``review`` requires
+    for unattended promotion.
     """
     from scripts import selfmod_oracle
 
     run = get_run(run_id)
     if run["phase"] != "testing":
         raise RuntimeError("oracle grade requires testing phase")
+    probe_id = probe.get("test_id") if isinstance(probe, dict) else None
+    command, output = (probe.get("command"), probe.get("output")) if isinstance(probe, dict) else (None, None)
+    if type(probe_id) is not int or not isinstance(command, list) or not isinstance(output, str):
+        raise PermissionError("oracle grade requires the recorded oracle probe result")
     candidate = _candidate_snapshot(run_id)
     if tested_digests(run_id) != candidate:
         raise RuntimeError("oracle grade requires the tested candidate bytes")
@@ -1099,45 +1129,50 @@ def record_oracle_grade(run_id, probe_id, *, challenge, loaded, attestation,
         raise RuntimeError("held oracle case set changed after it was loaded")
     typed = attestation if isinstance(attestation, IsolationAttestation) else None
     with _tx() as conn:
-        probe = conn.execute(
+        row = conn.execute(
             "SELECT kind,passed,isolation,output,command_json FROM selfmod_tests WHERE run_id=? AND id=?",
             (run_id, probe_id),
         ).fetchone()
-        if (probe is None or probe["kind"] != "oracle_probe"
-                or probe["isolation"] not in _ISOLATED_ATTESTATIONS
-                or typed is None or typed.kind != probe["isolation"]):
+        if (row is None or row["kind"] != ORACLE_PROBE_KIND
+                or row["isolation"] not in _ISOLATED_ATTESTATIONS
+                or typed is None or typed.kind != row["isolation"]):
             raise PermissionError("oracle grade requires an attested oracle probe")
-        if payload_nonce(json.loads(probe["command_json"])) != challenge.nonce:
+        if (row["command_json"] != _json(oracle_ledger_command(command))
+                or row["output"] != oracle_ledger_output(output)
+                or bool(row["passed"]) is not bool(probe.get("passed"))):
+            raise PermissionError("oracle probe result does not match its ledger row")
+        if payload_nonce(command) != challenge.nonce:
             raise PermissionError("oracle probe row was not issued for this challenge")
         if conn.execute(
             "SELECT 1 FROM selfmod_oracle_receipts WHERE run_id=?", (run_id,),
         ).fetchone() is not None:
             raise RuntimeError("oracle grade was already recorded")
-        verdict = grade_frame(probe["output"] if probe["passed"] else "", challenge, loaded.case_set)
-        detail = verdict.detail if probe["passed"] else "oracle probe did not exit cleanly"
+        probe_passed = bool(row["passed"])
+        verdict = grade_frame(output if probe_passed else "", challenge, loaded.case_set)
+        detail = verdict.detail if probe_passed else "oracle probe did not exit cleanly"
         receipt = OracleReceipt(
-            run_id=run_id, probe_id=int(probe_id), attestation=typed.kind,
+            run_id=run_id, probe_id=probe_id, attestation=typed.kind,
             candidate_uid=typed.candidate_uid, supervisor_uid=typed.supervisor_uid,
             case_set_sha256=loaded.sha256, case_count=verdict.case_count,
             matched=verdict.matched, nonce=challenge.nonce,
-            outputs_sha256=verdict.outputs_sha256 if probe["passed"] else None,
+            outputs_sha256=verdict.outputs_sha256 if probe_passed else None,
             confidential=bool(confidential), read_denied=bool(confidential and read_denied),
-            passed=bool(verdict.passed and probe["passed"]),
+            passed=bool(verdict.passed and probe_passed),
             candidate=candidate, baseline=baseline,
         )
         text = receipt.to_json()
         conn.execute(
             "INSERT INTO selfmod_oracle_receipts VALUES(?,?,?,?,?,?,?)",
-            (run_id, int(probe_id), int(receipt.passed), int(receipt.independent), text,
+            (run_id, probe_id, int(receipt.passed), int(receipt.independent), text,
              receipt.digest(), time.time()),
         )
         summary = "%s; independent=%s; receipt sha256=%s" % (
             detail, "yes" if receipt.independent else "no", receipt.digest())
         conn.execute(
             "INSERT INTO selfmod_tests(run_id,kind,command_json,exit_code,duration_ms,output,passed,created_ts,isolation) VALUES(?,?,?,?,?,?,?,?,?)",
-            (run_id, "oracle_grade", _json({"probe_id": int(probe_id)}),
+            (run_id, "oracle_grade", _json({"probe_id": probe_id}),
              0 if receipt.passed else 1, 0, summary, int(receipt.passed), time.time(),
-             probe["isolation"]),
+             row["isolation"]),
         )
         _event(conn, run_id, "oracle_grade", "independent oracle %s (independent=%s)" % (
             "passed" if receipt.passed else "failed", receipt.independent))
@@ -1147,7 +1182,15 @@ def record_oracle_grade(run_id, probe_id, *, challenge, loaded, attestation,
 
 
 def oracle_receipt(run_id):
-    """The run's sealed oracle receipt, or ``None``; a tampered row raises."""
+    """The run's oracle receipt, or ``None``; an inconsistent row raises.
+
+    ``receipt_sha256`` is an unkeyed digest stored in the same row, so this
+    check proves only that the row is canonical and self-consistent (it
+    catches corruption and partial edits).  It is not a seal: a writer who
+    can edit the row can recompute it.  The receipt's integrity rests on the
+    ledger being closed to the candidate uid, which the nightly refuses to
+    run without (``scripts/nightly_selfmod.py`` ``_isolation_refusal``).
+    """
     with _connect() as conn:
         row = conn.execute(
             "SELECT passed,independent,receipt_json,receipt_sha256 FROM selfmod_oracle_receipts WHERE run_id=?",
@@ -1159,7 +1202,7 @@ def oracle_receipt(run_id):
     if (receipt.digest() != row["receipt_sha256"] or receipt.run_id != run_id
             or bool(row["passed"]) is not receipt.passed
             or bool(row["independent"]) is not receipt.independent):
-        raise OracleError("oracle receipt does not match its seal")
+        raise OracleError("oracle receipt does not match its recorded digest")
     return receipt
 
 
@@ -1438,8 +1481,14 @@ def review(run_id, *, require_kinds=None, unevaluated=()):
     # Unattended promotion needs every existing gate AND an independent
     # oracle receipt bound to these tested bytes and this baseline.
     oracle_refusal = _oracle_admission_refusal(run_id, run)
+    # ``require_kinds`` is the caller's acceptance set and may be narrow; the
+    # unattended floor is fixed so no caller can reach auto-approval without
+    # the regression partitions, the held-out suite and both parent-scored
+    # grades having run and passed against these bytes.
+    unattended_missing = sorted(set(UNATTENDED_REQUIRED_KINDS) - {
+        row["kind"] for row in candidate_results if row["passed"]})
     auto_eligible = bool(
-        oracle_refusal is None and len(oracle_grades) == 1
+        oracle_refusal is None and len(oracle_grades) == 1 and not unattended_missing
         and not failures and not unevaluated and candidate_results
         and run["mode"] == "auto-low-risk" and run["risk"] == "low"
         and not run["approval_required"]
@@ -1452,7 +1501,9 @@ def review(run_id, *, require_kinds=None, unevaluated=()):
         passed_note += "; NOT EVALUATED (human review required): " + "; ".join(unevaluated)
     elif run["mode"] == "auto-low-risk" and not auto_eligible and not failures:
         passed_note += "; independent evaluator authority unverified (%s; human review required)" % (
-            oracle_refusal or "an existing unattended gate is unmet")
+            oracle_refusal
+            or ("unattended gates not passed: %s" % ", ".join(unattended_missing)
+                if unattended_missing else "an existing unattended gate is unmet"))
     _phase(
         run_id, {"testing"}, target, "review",
         "; ".join(failures) if failures else passed_note[:1000],
