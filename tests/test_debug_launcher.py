@@ -23,6 +23,7 @@ from sonder_runtime.adapters.debugging.capture_source import GuardedCaptureSourc
 from sonder_runtime.adapters.debugging.launcher import ProcessDebugLauncher
 from sonder_runtime.adapters.execution.process_jobs import SubprocessJobProvider
 from sonder_runtime.adapters.persistence.sqlite.job_registry import SQLiteDurableJobRegistry
+from sonder_runtime.adapters.process_liveness import PROCESS_DEAD, probe_process
 from sonder_runtime.adapters.process_termination import ProcessTreeSupervisor
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.debugging.ports import DebugPlan, DebugStep
@@ -122,11 +123,8 @@ def run_id():
 
 
 def _alive(pid: int) -> bool:
-    try:
-        state = Path("/proc/%d/stat" % pid).read_text().rsplit(")", 1)[1].split()[0]
-    except (FileNotFoundError, IndexError, ProcessLookupError):
-        return False
-    return state not in {"Z", "X"}
+    """Not yet proven dead: a zombie reads as dead, an unreadable probe as alive."""
+    return probe_process(pid)[0] != PROCESS_DEAD
 
 
 def _pids(path: Path, limit=30.0) -> list[int]:
@@ -176,9 +174,10 @@ def test_a_chain_binds_nonce_rundir_and_input_and_cleans_up(env):
     assert view.record.identity.kind == "tool.crash_digest"
     # staged capture, HOME, TMP and cwd are gone; only the small records stay
     assert sorted(os.listdir(rundir)) == ["chain.json", "plan.json"]
-    assert stat.S_IMODE(os.stat(rundir).st_mode) == 0o700
-    assert stat.S_IMODE(os.stat(env.state / "debug-runs").st_mode) == 0o700
-    assert stat.S_IMODE(os.stat(rundir / "plan.json").st_mode) == 0o600
+    if os.name != "nt":  # Windows st_mode carries only the read-only bit; the launcher skips chmod there
+        assert stat.S_IMODE(os.stat(rundir).st_mode) == 0o700
+        assert stat.S_IMODE(os.stat(env.state / "debug-runs").st_mode) == 0o700
+        assert stat.S_IMODE(os.stat(rundir / "plan.json").st_mode) == 0o600
 
 
 def test_every_run_gets_a_fresh_nonce(env):
