@@ -2,6 +2,7 @@
 Toolkit, the new registry specs, and the cdb/xperf plans with a fake inventory."""
 from __future__ import annotations
 
+import os
 import uuid
 from dataclasses import dataclass
 
@@ -222,11 +223,30 @@ def test_a_mapped_network_drive_is_rejected():
     assert caught.value.code == "SYMBOL_PATH_REJECTED"
 
 
-def test_local_symbol_dirs_feed_the_symbol_and_image_paths():
-    plan = plan_cdb(dirs=("C:\\build\\RelWithDebInfo", "D:\\engine\\pdb"))
+def _local_symbol_dirs(tmp_path, monkeypatch) -> tuple[str, str]:
+    """Two symbol dirs the planner accepts on this host.
+
+    Off Windows the planner only checks Windows-shaped dirs lexically (the
+    host cannot have them), so fixed drive paths serve. On a Windows host it
+    also requires each dir to exist inside the allowed file roots without a
+    link on its path, so real directories under an allowed root are made.
+    """
+    if os.name != "nt":
+        return "C:\\build\\RelWithDebInfo", "D:\\engine\\pdb"
+    root = tmp_path.resolve()
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(root))
+    first, second = root / "build" / "RelWithDebInfo", root / "engine" / "pdb"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    return str(first), str(second)
+
+
+def test_local_symbol_dirs_feed_the_symbol_and_image_paths(tmp_path, monkeypatch):
+    first, second = _local_symbol_dirs(tmp_path, monkeypatch)
+    plan = plan_cdb(dirs=(first, second))
     bindings = dict(plan.bindings)
-    assert bindings["sympath"] == "cache*{rundir}\\symcache;C:\\build\\RelWithDebInfo;D:\\engine\\pdb"
-    assert bindings["imagepath"] == "C:\\build\\RelWithDebInfo;D:\\engine\\pdb"
+    assert bindings["sympath"] == "cache*{rundir}\\symcache;%s;%s" % (first, second)
+    assert bindings["imagepath"] == "%s;%s" % (first, second)
     assert "srv*" not in bindings["sympath"]
 
 
