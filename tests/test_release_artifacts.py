@@ -344,3 +344,30 @@ def test_ci_runs_the_tuf_update_trust_suites_and_refuses_skips():
     # dev install leaves the TUF stack out, and this step is what runs them.
     assert "tuf" not in (Path(__file__).resolve().parents[1] / "requirements-dev.txt").read_text(
         encoding="utf-8")
+
+
+WINDOWS_DEVTOOLS_SUITES = (
+    "tests/test_build_environment_windows_fakes.py",
+    "tests/test_debug_windows_fakes.py",
+    "tests/test_host_tool_discovery_windows.py",
+    "tests/test_slash_menu_windows_keys.py",
+    "tests/test_build_executor.py",
+    "tests/test_build_tree_reader.py",
+    "tests/test_build_preimages.py",
+    "tests/test_debug_launcher.py",
+    "tests/test_debug_templates_symbol_path.py",
+    "tests/test_build_clang_cl_real.py",
+)
+
+
+def test_windows_focused_runs_the_devtools_suites_in_their_own_step():
+    ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+    job = _job_block(ci, "windows-focused")
+    step = _step_block(job, "Exercise the build, debug and host-tool Windows branches")
+    assert "if: ${{ !cancelled() && steps.install-focused-venv.outcome == 'success' }}" in step
+    assert "timeout-minutes: 8" in step
+    assert "continue-on-error" not in step, "the devtools step gates the job"
+    assert "-m pytest -q -rs" in step
+    for suite in WINDOWS_DEVTOOLS_SUITES:
+        assert suite in step, suite
+        assert (WORKFLOWS.parents[1] / suite).is_file(), suite

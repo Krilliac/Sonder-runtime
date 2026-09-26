@@ -195,7 +195,9 @@ jobs:
   # this focused job also blocks release when those boundaries regress.
   windows-focused:
     runs-on: windows-latest
-    timeout-minutes: 25
+    # The lifecycle step takes about 12 minutes; the devtools step is capped
+    # at 8 of its own.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
@@ -263,6 +265,27 @@ jobs:
           & "$env:RUNNER_TEMP\sonder-ci-venv\Scripts\python.exe" -m pytest -q
           tests/test_selfmod_low_integrity.py
           -k 'not test_git_bash_cannot_start_at_low_integrity'
+      - name: Exercise the build, debug and host-tool Windows branches
+        if: ${{ !cancelled() && steps.install-focused-venv.outcome == 'success' }}
+        # The build/debug/host-tool adapters carry Windows-only branches
+        # (registry, vcvars, symbol paths, key handling) that the Ubuntu job
+        # only reaches through fakes. A separate step keeps a devtools
+        # failure from hiding the lifecycle results above. clang-cl is not on
+        # PATH on hosted images, so the clang-cl test reports a skip (-rs)
+        # rather than counting as coverage.
+        timeout-minutes: 8
+        run: >-
+          & "$env:RUNNER_TEMP\sonder-ci-venv\Scripts\python.exe" -m pytest -q -rs
+          tests/test_build_environment_windows_fakes.py
+          tests/test_debug_windows_fakes.py
+          tests/test_host_tool_discovery_windows.py
+          tests/test_slash_menu_windows_keys.py
+          tests/test_build_executor.py
+          tests/test_build_tree_reader.py
+          tests/test_build_preimages.py
+          tests/test_debug_launcher.py
+          tests/test_debug_templates_symbol_path.py
+          tests/test_build_clang_cl_real.py
       - name: Observe native Codegen isolation feasibility (diagnostic only)
         if: ${{ !cancelled() && steps.install-focused-venv.outcome == 'success' }}
         # These probes record host-specific results and skip reasons. They do
