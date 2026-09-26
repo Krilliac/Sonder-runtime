@@ -23,14 +23,19 @@ from sonder_runtime.application.execution.effect_journal import (
     ReconciliationProof,
 )
 from sonder_runtime.application.jobs.durable_registry import (
+    CANCEL_REQUEST_BOUND_STATES,
     CANCEL_REQUEST_DIGESTS,
     _validate_cleanup_evidence,
 )
+from sonder_runtime.application.ports.jobs import TERMINAL_JOB_STATUSES, JobStatus
 from sonder_runtime.domain.compute_fabric import WorkloadKind
 
 _IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _SHA256 = re.compile(r"[a-f0-9]{64}\Z")
 _TERMINAL = frozenset({"succeeded", "failed", "cancelled"})
+_NON_TERMINAL = frozenset(
+    status.value for status in JobStatus if status not in TERMINAL_JOB_STATUSES
+)
 _CANCEL_ATTEMPT = re.compile(r"attempt-([1-9][0-9]{0,2})\Z")
 _LOCAL_KINDS = frozenset(
     f"compute-{kind.value}" for kind in WorkloadKind if kind is not WorkloadKind.INFERENCE
@@ -202,8 +207,12 @@ class DurableComputeCancelVerifier:
     idempotency key to the journaled request digest (written after the intent
     committed and before the provider was asked to cancel), a terminal
     ``cancelled`` status, and immutable cleanup evidence for that exact
-    record revision.  ``cancellation_requested``, any other terminal status,
-    a missing or legacy binding, or missing cleanup evidence yields no proof.
+    record revision.  The binding must also have been made while the record
+    was not yet terminal, at a revision older than the cancelled one:
+    terminal statuses are absorbing, so the cancelled transition happened
+    after this request was durably bound.  ``cancellation_requested``, any
+    other terminal status, a missing or legacy binding, a binding made on an
+    already-terminal record, or missing cleanup evidence yields no proof.
     Caller text, process output and in-memory handles are never consulted.
     """
 
@@ -241,6 +250,10 @@ class DurableComputeCancelVerifier:
             return None
         controller = metadata.get("compute_controller_job_id")
         bindings = metadata.get(CANCEL_REQUEST_DIGESTS)
+        bound_states = metadata.get(CANCEL_REQUEST_BOUND_STATES)
+        bound = bound_states.get(idempotency_key) if isinstance(bound_states, dict) else None
+        bound_revision = bound.get("revision") if isinstance(bound, dict) else None
+        bound_status = bound.get("status") if isinstance(bound, dict) else None
         status = getattr(getattr(record, "status", None), "value", None)
         revision = getattr(record, "revision", None)
         job_key = getattr(identity, "idempotency_key", None)
@@ -259,6 +272,11 @@ class DurableComputeCancelVerifier:
             or bindings.get(idempotency_key) != intent.request_digest
             or status != "cancelled"
             or type(revision) is not int or revision < 1
+            # The request was bound before the job became terminal: a record
+            # already cancelled (for example by a hard deadline) when the
+            # binding was written proves nothing about this request.
+            or type(bound_revision) is not int or not 1 <= bound_revision < revision
+            or not isinstance(bound_status, str) or bound_status not in _NON_TERMINAL
         ):
             return None
         cleanup = _cleanup_evidence(registry, record)
@@ -271,6 +289,8 @@ class DurableComputeCancelVerifier:
             "job_idempotency_key": job_key,
             "cancel_idempotency_key": idempotency_key,
             "effect_request_digest": intent.request_digest,
+            "bound_revision": bound_revision,
+            "bound_status": bound_status,
             "status": status,
             "revision": revision,
             "cleanup_digest": cleanup["digest"],

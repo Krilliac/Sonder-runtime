@@ -318,16 +318,20 @@ class SQLiteDurableJobRegistry(SQLiteWorkerCapacity):
 
         The binding is written in its own ``BEGIN IMMEDIATE`` transaction and
         leaves the record revision unchanged, so revision-bound cleanup
-        evidence stays valid.  Rebinding a key to another digest is refused.
+        evidence stays valid.  It records the revision and status read in that
+        same transaction, so a verifier can require that the binding preceded
+        the terminal transition.  Rebinding a key to another digest is refused.
         """
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = self._row(connection, job_id)
             if row is None:
                 raise KeyError(f"unknown job {job_id!r}")
+            record = self._record(row)
+            assert record is not None
             updated = _bind_cancel_request_metadata(
                 {} if row[21] is None else json.loads(row[21]),
-                idempotency_key, request_digest,
+                idempotency_key, request_digest, record,
             )
             if updated is None:
                 return

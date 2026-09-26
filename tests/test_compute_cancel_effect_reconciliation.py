@@ -3,10 +3,12 @@
 The ``compute-cancel`` verifier may prove an interrupted cancel only when the
 durable job registry shows, for the exact remote job this worker minted, a
 terminal ``cancelled`` record with immutable cleanup evidence *and* a durable
-binding of this attempt's idempotency key to the journaled request digest.
-Every other shape (legacy rows without the binding, other digests, kinds,
-keys, workers, non-terminal or non-cancelled states, missing cleanup, a
-swapped job) produces no proof, so restart stays fenced.
+binding of this attempt's idempotency key to the journaled request digest,
+made while the record was not yet terminal.  Every other shape (legacy rows
+without the binding, other digests, kinds, keys, workers, runs, scopes,
+non-terminal or non-cancelled states, missing cleanup, a binding made only
+after the job was already terminal, a swapped job) produces no proof, so
+restart stays fenced.
 """
 from __future__ import annotations
 
@@ -39,6 +41,7 @@ from sonder_runtime.application.execution.worker_bindings import (
     _digest as effect_request_digest,
 )
 from sonder_runtime.application.jobs.durable_registry import (
+    CANCEL_REQUEST_BOUND_STATES,
     CANCEL_REQUEST_DIGESTS,
     DurableJobRegistry,
     MAX_CANCEL_REQUEST_BINDINGS,
@@ -135,9 +138,10 @@ def _binding(journal, epoch: int, *, auto: bool = False) -> AuthenticatedWorkerB
 
 
 def _admit(journal, job_id: str, *, attempt: int = 1, digest: str | None = None,
-           idempotency_key: str | None = None, reconciliation: str = "idempotent"):
+           idempotency_key: str | None = None, reconciliation: str = "idempotent",
+           binding_factory=None):
     operation_id, key = _cancel_identity(job_id, attempt)
-    first = _binding(journal, 1)
+    first = (binding_factory or _binding)(journal, 1)
     assert first.recover_before_restart().action == "resume"
     return first.binding().begin_request(
         operation_id=operation_id,
@@ -161,9 +165,9 @@ def _seed(root: Path, *, attempt: int = 1, bind: bool = True, clean: bool = True
     return journal, registry, job_id, intent
 
 
-def _assert_fenced(journal, intent) -> None:
+def _assert_fenced(journal, intent, binding_factory=None) -> None:
     with pytest.raises(EffectJournalError, match="reconciliation"):
-        _binding(journal, 2).recover_before_restart()
+        (binding_factory or _binding)(journal, 2).recover_before_restart()
     assert journal.get(intent.intent_id).state is EffectState.UNCERTAIN
     with pytest.raises(EffectJournalError, match="no trusted proof"):
         journal.reconcile(intent.intent_id, owner_epoch=2)
@@ -216,10 +220,34 @@ def _tamper_metadata(root: Path, job_id: str, **changes) -> None:
         )
 
 
+# An intent journaled under another worker, run or scope than the one the
+# compute worker binds, with an otherwise valid ``compute-cancel`` operation id.
+_FOREIGN_INTENT_BINDINGS = {
+    "intent_worker": dict(worker_id="compute:other"),
+    "intent_run_id": dict(run_id="runtime:other-jobs"),
+    "intent_scope": dict(scope="other-jobs"),
+}
+
+
+def _foreign_binding(mismatch: str):
+    fields = {
+        "run_id": RUN_ID, "worker_id": f"compute:{WORKER_ID}", "scope": "compute-jobs",
+        **_FOREIGN_INTENT_BINDINGS.get(mismatch, {}),
+    }
+
+    def factory(journal, epoch: int, *, auto: bool = False) -> AuthenticatedWorkerBinding:
+        return AuthenticatedWorkerBinding(
+            journal, fields["run_id"], fields["worker_id"], epoch, fields["scope"],
+            auto_reconcile=auto,
+        )
+
+    return factory
+
+
 @pytest.mark.parametrize("mismatch", [
     "digest", "legacy_missing_binding", "binding_for_other_attempt", "kind",
     "job_idempotency_key", "intent_idempotency_key", "worker", "controller",
-    "unscoped", "strategy",
+    "unscoped", "strategy", *_FOREIGN_INTENT_BINDINGS,
 ])
 def test_identity_or_digest_mismatch_stays_fenced(tmp_path, mismatch):
     registry = SQLiteDurableJobRegistry(tmp_path / "jobs.db")
@@ -251,9 +279,15 @@ def test_identity_or_digest_mismatch_stays_fenced(tmp_path, mismatch):
             f"cancel:{job_id}:attempt-2" if mismatch == "intent_idempotency_key" else None
         ),
         reconciliation="manual" if mismatch == "strategy" else "idempotent",
+        binding_factory=_foreign_binding(mismatch),
     )
+    if mismatch in _FOREIGN_INTENT_BINDINGS:
+        # Everything but the intent's own worker/run/scope is valid evidence.
+        assert intent.operation_id == _cancel_identity(job_id)[0]
+        assert intent.idempotency_key == _cancel_identity(job_id)[1]
+        assert intent.request_digest == _request_digest(job_id)
     assert DurableComputeCancelVerifier(lambda: registry).verify(intent) is None
-    _assert_fenced(journal, intent)
+    _assert_fenced(journal, intent, _foreign_binding(mismatch))
 
 
 @pytest.mark.parametrize("state", [
@@ -289,6 +323,50 @@ def test_non_terminal_or_uncleaned_state_stays_fenced(tmp_path, state):
             "resources_released": True, "status": "cancelled", "digest": "0" * 64,
         }
         registry._record_process_cleanup(job_id, forged)
+    journal = _journal(tmp_path)
+    intent = _admit(journal, job_id)
+    assert DurableComputeCancelVerifier(lambda: registry).verify(intent) is None
+    _assert_fenced(journal, intent)
+
+
+@pytest.mark.parametrize("case", [
+    "bound_after_terminal", "missing_bound_state", "bound_status_terminal",
+    "bound_revision_not_older", "malformed_bound_state",
+])
+def test_binding_must_precede_the_cancelled_transition(tmp_path, case):
+    """A cancel already complete by another path when bound is not this request's proof."""
+    registry = SQLiteDurableJobRegistry(tmp_path / "jobs.db")
+    job_id = _start_job(registry)
+    key = _cancel_identity(job_id)[1]
+    if case == "bound_after_terminal":
+        # A hard deadline cancels and cleans the job first ...
+        registry.request_cancellation(job_id, reason="process deadline exceeded")
+        registry.cancel(job_id, reason="process deadline exceeded")
+        _publish_cleanup(registry, job_id)
+        revision = registry.poll(job_id).revision
+        # ... and only then is the operator request bound.
+        registry.bind_cancel_request(
+            job_id, idempotency_key=key, request_digest=_request_digest(job_id),
+        )
+        assert registry.poll(job_id).revision == revision
+        assert registry.view(job_id).metadata[CANCEL_REQUEST_BOUND_STATES][key] == {
+            "revision": revision, "status": "cancelled",
+        }
+    else:
+        registry.bind_cancel_request(
+            job_id, idempotency_key=key, request_digest=_request_digest(job_id),
+        )
+        _cancel_durably(registry, job_id)
+        cancelled_revision = registry.poll(job_id).revision
+        forged = {
+            "missing_bound_state": None,
+            "bound_status_terminal": {key: {"revision": 1, "status": "cancelled"}},
+            "bound_revision_not_older": {
+                key: {"revision": cancelled_revision, "status": "running"},
+            },
+            "malformed_bound_state": {key: {"revision": "1", "status": ["running"]}},
+        }[case]
+        _tamper_metadata(tmp_path, job_id, **{CANCEL_REQUEST_BOUND_STATES: forged})
     journal = _journal(tmp_path)
     intent = _admit(journal, job_id)
     assert DurableComputeCancelVerifier(lambda: registry).verify(intent) is None
@@ -392,11 +470,23 @@ def test_cancel_request_binding_is_write_once_bounded_and_revision_neutral(tmp_p
     )
     job_id = _start_job(registry)
     revision = registry.poll(job_id).revision
+    bound_status = registry.poll(job_id).status.value
+    assert bound_status not in {"succeeded", "failed", "cancelled"}
     digest = _request_digest(job_id)
     registry.bind_cancel_request(job_id, idempotency_key=f"cancel:{job_id}", request_digest=digest)
     registry.bind_cancel_request(job_id, idempotency_key=f"cancel:{job_id}", request_digest=digest)
     assert registry.poll(job_id).revision == revision
     assert registry.view(job_id).metadata[CANCEL_REQUEST_DIGESTS] == {f"cancel:{job_id}": digest}
+    assert registry.view(job_id).metadata[CANCEL_REQUEST_BOUND_STATES] == {
+        f"cancel:{job_id}": {"revision": revision, "status": bound_status},
+    }
+    # A no-op rebind after a later transition keeps the originally bound state.
+    registry.request_cancellation(job_id, reason=REASON)
+    registry.bind_cancel_request(job_id, idempotency_key=f"cancel:{job_id}", request_digest=digest)
+    assert registry.view(job_id).metadata[CANCEL_REQUEST_BOUND_STATES][f"cancel:{job_id}"] == {
+        "revision": revision, "status": bound_status,
+    }
+    revision = registry.poll(job_id).revision
     with pytest.raises(ValueError, match="conflicts"):
         registry.bind_cancel_request(
             job_id, idempotency_key=f"cancel:{job_id}", request_digest="f" * 64,
@@ -593,3 +683,35 @@ def test_pending_cleanup_stays_fenced_until_the_provider_finishes_cleanup(tmp_pa
     assert registry.process_cleanup_proof(job_id) is not None
     assert successor.recover_before_restart().action == "resume"
     assert journal.get(intent_id).state is EffectState.COMPLETED
+
+
+def test_cancel_of_a_job_already_cancelled_by_another_path_stays_fenced(tmp_path, monkeypatch):
+    """A deadline cancel that finished first is not proof of the operator cancel.
+
+    The live worker reports ``cancellation_requested`` for this request, not a
+    cleaned ``cancelled``, so a restart must not settle it as ``cancelled``.
+    """
+    monkeypatch.setattr(
+        ComputeJobWorker, "_artifact_stage_base",
+        staticmethod(lambda: tmp_path / "artifact-stages"),
+    )
+    journal = _journal(tmp_path)
+    worker, provider, registry = _live_worker(tmp_path, journal, 1, _scope())
+    job_id = worker.submit(_envelope()).remote_job_id
+    assert provider.cancel(job_id, "process deadline exceeded").cleanup_completed
+    assert registry.poll(job_id).status is JobStatus.CANCELLED
+    assert registry.process_cleanup_proof(job_id) is not None
+
+    _lose_receipt_after_cancel(monkeypatch, provider)
+    with pytest.raises(RuntimeError, match="receipt publication lost"):
+        worker.cancel(job_id, REASON)
+    intent_id = f"{RUN_ID}:compute-cancel:{WORKER_ID}:{job_id}"
+    intent = journal.get(intent_id)
+    assert intent.state is EffectState.UNCERTAIN
+    metadata = registry.view(job_id).metadata
+    assert metadata[CANCEL_REQUEST_DIGESTS] == {f"cancel:{job_id}": intent.request_digest}
+    assert metadata[CANCEL_REQUEST_BOUND_STATES][f"cancel:{job_id}"]["status"] == "cancelled"
+    assert DurableComputeCancelVerifier(lambda: registry).verify(intent) is None
+    with pytest.raises(EffectJournalError, match="reconciliation"):
+        _binding(journal, 2, auto=True).recover_before_restart()
+    assert journal.get(intent_id).state is EffectState.UNCERTAIN

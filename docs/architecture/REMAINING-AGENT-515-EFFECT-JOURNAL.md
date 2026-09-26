@@ -1089,7 +1089,8 @@ be proven: the durable job registry recorded the job's terminal status and a
 free-form cancellation reason, but nothing tied that state to the journaled
 cancel request. A registry row can also become `cancelled` through other
 paths (a hard deadline, a cleanup retry), so the status alone is not proof
-that this request was admitted for this job.
+that this request was admitted for this job, or that the cancellation came
+after it.
 
 What is wired now (caller -> callee):
 
@@ -1102,13 +1103,16 @@ What is wired now (caller -> callee):
   `bind_cancel_request` on the durable registry: `SQLiteDurableJobRegistry`
   (one `BEGIN IMMEDIATE` transaction) or the in-memory `DurableJobRegistry`.
   The registry records `{attempt idempotency key: journaled request digest}`
-  under the job's `cancel_request_digests` metadata. The digest is the same
+  under the job's `cancel_request_digests` metadata. In the same update it
+  records the record's revision and lifecycle status read at bind time under
+  `cancel_request_bound_states` (`{key: {"revision", "status"}}`). The digest is the same
   canonical SHA-256 that `journaled_effect` stores in the intent
   (`worker_bindings._digest` of `{"remote_job_id", "reason"}`). The shared
   helper `_bind_cancel_request_metadata` in `application/jobs/durable_registry.py`
   applies these rules:
-  - A binding is write-once. The same key with the same digest is a no-op,
-    and another digest is refused.
+  - A binding is write-once. The same key with the same digest is a no-op
+    that keeps the originally bound revision and status, and another digest
+    is refused.
   - At most 32 bindings are kept per job, matching
     `MAX_COMPUTE_CANCEL_ATTEMPTS`.
   - The record revision is not changed, so cleanup evidence bound to a
@@ -1141,6 +1145,16 @@ What is wired now (caller -> callee):
   - `cancel_request_digests[<attempt key>]` equals the intent's request
     digest. A legacy row without bindings, a binding for another attempt, or
     another digest gives no proof.
+  - `cancel_request_bound_states[<attempt key>]` shows the binding was made
+    while the record was not terminal (`pending`, `claimed`, `running`,
+    `cancellation_requested`, `paused` or `interrupted`), at a revision older
+    than the cancelled revision. Terminal statuses are absorbing in both
+    registries, so the `cancelled` transition happened after this request was
+    durably bound. A request bound on a record that was already terminal (for
+    example cancelled and cleaned earlier by a hard deadline) gives no proof;
+    the live worker reports `cancellation_requested`, not `cancelled`, for
+    that request, so a restart must not settle it as a cleaned cancel. A
+    missing, malformed or forged bound state also gives no proof.
   - The status is exactly `cancelled`. `cancellation_requested`, `running`,
     `succeeded`, `failed` and `interrupted` give no proof.
   - Immutable cleanup evidence (`process_cleanup_proof`) exists for that
@@ -1151,19 +1165,28 @@ What is wired now (caller -> callee):
   The proof is `completed`, with receipt `<job>:cancelled` (the live receipt
   shape for a cleaned cancellation) and external reference
   `job-registry:<job>:<revision>`. Its outcome digest binds the job, kind,
-  controller, both idempotency keys, the request digest, status, revision and
-  the cleanup digest. The verifier never reads caller text, process output,
+  controller, both idempotency keys, the request digest, the bound revision
+  and status, the final status and revision, and the cleanup digest. The verifier never reads caller text, process output,
   the cancellation reason or an in-memory handle.
 
 Evidence (focused, not a requirement verification):
 
-- `tests/test_compute_cancel_effect_reconciliation.py` has 35 tests:
+- `tests/test_compute_cancel_effect_reconciliation.py` has 44 tests:
   - A success proof for attempts 1, 2 and 32, followed by stale-epoch
     refusal, a newer-epoch reconcile, and `resume`.
   - Each mismatch stays `uncertain` and fenced: request digest, legacy or
     missing binding, a binding for another attempt, kind, the job's submit
-    idempotency key, the intent's idempotency key, worker, controller,
-    unscoped job, and strategy.
+    idempotency key, the intent's idempotency key, the registry's
+    `compute_worker_id`, controller, unscoped job, and strategy. Three more
+    cases admit an intent with a valid operation id, key and digest and valid
+    binding and cleanup evidence, but journaled under another worker
+    (`compute:other`), run id or scope.
+  - Ordering: a request bound after the job was already cancelled and cleaned
+    by a hard deadline stays fenced, as do a missing bound state, a bound
+    state forged as terminal, a bound revision not older than the cancelled
+    one, and a malformed bound state. A live worker whose cancel of a job
+    already cancelled by its deadline loses its receipt also stays fenced on
+    restart.
   - Each unfinished state stays fenced: `cancellation_requested`, `running`,
     `succeeded`, `failed`, no cleanup evidence, cleanup evidence for a stale
     revision, and a forged cleanup digest.
@@ -1173,7 +1196,8 @@ Evidence (focused, not a requirement verification):
   - A hung registry read times out. The intent stays `uncertain` and the run
     fenced, and the same evidence proves the cancel once the read returns.
   - Binding rules for both registries: write-once, conflict refusal, digest
-    and key validation, unknown job, a bound of 32, and no revision change.
+    and key validation, unknown job, a bound of 32, no revision change, and
+    a recorded bound revision and status that a later no-op rebind keeps.
   - Through a real `ComputeJobWorker` and `SubprocessJobProvider` (with a
     scoped containment double): the binding is durable before the provider
     cancels, and a lost receipt after cleanup is proven by a restarted
@@ -1192,11 +1216,13 @@ Evidence (focused, not a requirement verification):
     set, compute-worker composition refuses, and a second pass changes
     nothing. After the orphaned provider's cleanup retry completes, the
     operator pass proves the cancel and clears the fence.
-- Mutation check: six planted defects each made at least one of these tests
-  fail. They skipped the digest binding check, accepted any terminal status,
-  dropped the cleanup-evidence requirement, dropped the job-id derivation
-  (swap) check, dropped the intent idempotency-key check, and dropped the
-  kind check. The source was restored afterwards.
+- Mutation check: eleven planted defects each made at least one of these
+  tests fail. They skipped the digest binding check, accepted any terminal
+  status, dropped the cleanup-evidence requirement, dropped the job-id
+  derivation (swap) check, dropped the intent idempotency-key check, dropped
+  the kind check, dropped the intent worker, run id or scope check, and
+  dropped the bound-revision or bound-status ordering check. The source was
+  restored afterwards.
 
 Compute-cancel limits:
 
@@ -1210,11 +1236,14 @@ Compute-cancel limits:
   durable bindings, has no binding and stays fenced.
 - Remote (HTTP) compute cancellation is not a `ComputeJobWorker` effect on
   this host and is not covered.
-- The proof shows that the exact job reached a cleaned, terminal cancelled
-  state after this exact request was durably bound. It does not show which
-  code path performed the final transition: the explicit cancel, or a
-  provider cleanup retry of it. That is the idempotent outcome the intent
-  declares.
+- The proof shows that this exact request was durably bound while the job
+  was not yet terminal, and that the job afterwards reached a cleaned,
+  terminal cancelled state. It does not show which code path performed the
+  final transition: this cancel, a provider cleanup retry of it, or a
+  concurrent path (such as a hard deadline) that fired after the binding.
+  That is the idempotent outcome the intent declares.
+- A cancel request bound on an already-terminal job, then interrupted before
+  its receipt, stays fenced and needs operator reconciliation.
 
 ### Why the selfmod families stay fenced
 

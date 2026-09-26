@@ -247,9 +247,9 @@ class DurableJobRegistry:
         transition.
         """
         with self._lock:
-            self.poll(job_id)
+            record = self.poll(job_id)
             updated = _bind_cancel_request_metadata(
-                self._metadata.get(job_id), idempotency_key, request_digest,
+                self._metadata.get(job_id), idempotency_key, request_digest, record,
             )
             if updated is not None:
                 self._metadata[job_id] = updated
@@ -502,7 +502,7 @@ class DurableJobRegistry:
 
 
 __all__ = [
-    "CANCEL_REQUEST_DIGESTS", "DurableJobRegistry", "DurableJobView", "JobRecoveryReport",
+    "CANCEL_REQUEST_BOUND_STATES", "CANCEL_REQUEST_DIGESTS", "DurableJobRegistry", "DurableJobView", "JobRecoveryReport",
     "MAX_CANCEL_REQUEST_BINDINGS", "ProcessTreeCleanupContract",
     "ProcessTreeCleanupReceipt", "ProcessTreeCleanupRequest",
 ]
@@ -531,6 +531,14 @@ def _validate_cleanup_evidence(record, proof):
 # host verifier can later tie a terminal ``cancelled`` record to the exact
 # journaled request.  The key names no worker family; bindings are write-once.
 CANCEL_REQUEST_DIGESTS = "cancel_request_digests"
+# Companion metadata key, written in the same update as each binding:
+# ``{idempotency_key: {"revision": int, "status": str}}`` records the job
+# record's revision and lifecycle status at the moment the request was bound.
+# Terminal statuses are absorbing, so a binding made while the record was not
+# terminal orders any later terminal transition after the binding; a binding
+# made on an already-terminal record cannot show that this request caused (or
+# was even admitted before) that outcome.
+CANCEL_REQUEST_BOUND_STATES = "cancel_request_bound_states"
 MAX_CANCEL_REQUEST_BINDINGS = 32
 _CANCEL_KEY_MAX = 256
 
@@ -539,12 +547,16 @@ def _bind_cancel_request_metadata(
     metadata: Mapping[str, Any] | None,
     idempotency_key: str,
     request_digest: str,
+    record: JobRecord,
 ) -> dict[str, Any] | None:
     """Return metadata with one new cancel binding, or ``None`` if unchanged.
 
-    Rebinding a key to the same digest is an idempotent no-op.  Rebinding it
-    to another digest, malformed stored bindings, or exceeding the bound are
-    refused, so the durable evidence can only ever name one request per key.
+    Rebinding a key to the same digest is an idempotent no-op that keeps the
+    originally bound record state.  Rebinding it to another digest, malformed
+    stored bindings, or exceeding the bound are refused, so the durable
+    evidence can only ever name one request per key.  Each new binding also
+    records ``record``'s revision and status at bind time under
+    ``CANCEL_REQUEST_BOUND_STATES``.
     """
     if (
         not isinstance(idempotency_key, str)
@@ -565,6 +577,12 @@ def _bind_cancel_request_metadata(
         for key, value in bindings.items()
     ):
         raise ValueError("stored cancel request bindings are malformed")
+    bound_states = current.get(CANCEL_REQUEST_BOUND_STATES, {})
+    if not isinstance(bound_states, dict) or not all(
+        isinstance(key, str) and isinstance(value, dict)
+        for key, value in bound_states.items()
+    ):
+        raise ValueError("stored cancel request bound states are malformed")
     prior = bindings.get(idempotency_key)
     if prior is not None:
         if prior != request_digest:
@@ -572,5 +590,12 @@ def _bind_cancel_request_metadata(
         return None
     if len(bindings) >= MAX_CANCEL_REQUEST_BINDINGS:
         raise ValueError("cancel request bindings are exhausted for this job")
+    revision = record.revision
+    if type(revision) is not int or revision < 1:
+        raise ValueError("cancel binding requires a positive record revision")
     current[CANCEL_REQUEST_DIGESTS] = {**bindings, idempotency_key: request_digest}
+    current[CANCEL_REQUEST_BOUND_STATES] = {
+        **bound_states,
+        idempotency_key: {"revision": revision, "status": record.status.value},
+    }
     return current
