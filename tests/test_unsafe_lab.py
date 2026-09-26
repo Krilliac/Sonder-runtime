@@ -397,6 +397,9 @@ def test_unsafe_mode_preserves_artifact_and_process_operator_gates(
     if sys.platform.startswith("linux"):
         assert '"exact_handoff":"linux-memfd-sealed"' in output
         assert "execution allowed by effective policy deny-high" in output
+        # The sealed copy actually ran to completion, not just got admitted.
+        assert "  returncode: 0" in output
+        assert "stdout:\nlaunched" in output
     else:
         assert "exact_execution_handoff_unavailable" in output
         assert "launched" not in output
