@@ -626,11 +626,16 @@ class Sweep:
                     # raised it as a crash and resume from the next one. One
                     # that escapes before any line was read would recur on
                     # every fresh loop, so it is recorded once and ends the
-                    # console surface instead.
+                    # console surface instead; every line it never reached is
+                    # recorded as skipped so the report shows what went
+                    # unexercised.
                     signal.setitimer(signal.ITIMER_REAL, 0)
                     detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
                     if state["current"] is None:
                         self.record("console", "(loop)", "", detail, exception=exc)
+                        for name, line in feed:
+                            self.record("console", name, line, status="skipped",
+                                        extra={"note": "console loop could not restart"})
                         break
                     name, line, _start, began = state["current"]
                     self.record("console", name, line, detail, exception=exc,

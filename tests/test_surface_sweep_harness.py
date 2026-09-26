@@ -140,8 +140,47 @@ def test_a_console_loop_that_fails_before_reading_is_recorded_once(monkeypatch):
     sweep.sweep_console()
 
     assert len(calls) == 1
-    assert len(sweep.records) == 1
     row = sweep.records[0]
     assert row["class"] == "crash"
     assert row["command"] == "(loop)"
     assert "startup failed" in row["excerpt"]
+    assert [row["command"] for row in sweep.records].count("(loop)") == 1
+    skipped = sweep.records[1:]
+    assert [(r["command"], r["class"]) for r in skipped] == [
+        ("/alpha", "skipped"), ("/omega", "skipped"),
+    ]
+    assert all(r["note"] == "console loop could not restart" for r in skipped)
+
+
+def test_commands_after_a_loop_that_cannot_restart_are_reported_as_skipped(monkeypatch):
+    import sonder_runtime.interfaces.repl.repl as sonder_repl
+
+    module = _load_sweep()
+    catalog = [_command(n) for n in ("/alpha", "/boom", "/omega", "/zeta")]
+    sweep = _bare_sweep(module, catalog)
+    starts = []
+
+    def fake_main(*_args, **_kwargs):
+        starts.append(True)
+        if len(starts) > 1:
+            raise RuntimeError("cannot restart")
+        while True:
+            line = sonder_repl._read_input("> ")
+            if line == "/exit":
+                return
+            if line == "/boom":
+                raise RuntimeError("boom")
+            print("answered %s" % line)
+
+    monkeypatch.setattr(sonder_repl, "main", fake_main)
+    sweep.sweep_console()
+
+    rows = {row["command"]: row for row in sweep.records}
+    assert set(rows) == {"(loop)", "/alpha", "/boom", "/omega", "/zeta"}, sweep.records
+    assert rows["/boom"]["class"] == "crash"
+    assert rows["(loop)"]["class"] == "crash"
+    assert rows["/alpha"]["class"] == "ok"
+    for name in ("/omega", "/zeta"):
+        assert rows[name]["class"] == "skipped"
+        assert rows[name]["invocation"] == name
+        assert rows[name]["note"] == "console loop could not restart"
