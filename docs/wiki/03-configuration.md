@@ -222,13 +222,17 @@ same-user host code.
 
 Agent batching guard: within one agent turn, distinct single `file_read`
 calls get an advisory pointing at `context_pack` after
-`SONDER_AGENT_BATCH_ADVISORY_AFTER` targets (default 3, range 2–20). New-target
+`SONDER_AGENT_BATCH_ADVISORY_AFTER` targets (default 3, range 2–19). New-target
 singles are refused, without being dispatched, after
 `SONDER_AGENT_BATCH_REFUSE_AFTER` targets (default 6, from the advisory value
-to 20). The run ends at the `SONDER_AGENT_BATCH_MAX_REFUSALS`-th refusal
-(default 3, range 1–10). An invalid value logs a warning and keeps all
-defaults; the guard cannot be switched off. It never applies to mutating or
-execution tools.
+to 19). The run ends at the `SONDER_AGENT_BATCH_MAX_REFUSALS`-th refusal in
+one window (default 3, range 1–10); a successful `context_pack` or a state
+change starts a new window and a new refusal count. The ceiling of 19 keeps
+every accepted value able to fire within the 20-step turn clamp. An invalid
+value logs a warning and keeps all defaults; the guard cannot be switched
+off. It never applies to mutating or execution tools, and never refuses a
+retry of a failed read or a read of a file a successful `context_pack`
+returned.
 
 Consent gates: `SONDER_ALLOW_CLOUD`, `SONDER_WEB_TOOLS`,
 `SONDER_ALLOW_REMOTE_OLLAMA`, and `SONDER_ALLOW_REMOTE_COMPUTE`. These are

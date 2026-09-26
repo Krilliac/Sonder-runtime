@@ -111,8 +111,13 @@ exists for `file_read_range`, `file_digest`, `data_query` or any stat-style
 tool, so those are not covered; `directory_digest` hashes a whole tree and is
 not treated as a batch form of `file_digest`.
 
-Per `_agent_turn` call (the window) the guard counts distinct normalized
-targets of successful single `file_read` dispatches:
+Per `_agent_turn` call the guard keeps one window per family and counts
+distinct targets of successful single `file_read` dispatches. Target identity
+comes from `server._agent_batch_target_identity`: relative paths resolve
+against the workspace root as the file tools resolve them (project runs are
+already rebased onto the project), symlinks are followed, and the lexical
+absolute path is used when the filesystem cannot answer; `target_key` then
+normalizes separators and case.
 
 - at `advisory_after` (default 3) distinct targets a typed `BatchAdvisory`
   naming `context_pack` is appended to the model-visible observation *after*
@@ -122,25 +127,46 @@ targets of successful single `file_read` dispatches:
   new target is not dispatched; the model receives a typed `BatchRefusal`
   (`ERROR: HOST BATCH GUARD (batch_coalescing): ...`) with the refused path
   already in a `context_pack {"paths_json": [...]}` example;
-- the `max_refusals`-th (default 3) refusal in one turn ends the run through
-  the loop's normal early exit, so ignored steering cannot consume the rest of
-  the step budget.
+- the `max_refusals`-th (default 3) refusal in one window ends the run
+  through the loop's normal early exit, so ignored steering cannot consume
+  the rest of the step budget. The refusal count belongs to the window and
+  restarts with it, so a model that complied with a refusal is not ended by
+  the first refusal of a later window.
 
-Re-reading an already-counted target is never counted or refused (the
-existing identical-call and cached-inspection guards own that). Failed single
-reads do not count. The window restarts on a new turn, after any mutation or
-execution attempt (fresh reads after a change are legitimate), and after a
-successful `context_pack`. The guard never names a batch tool this run cannot
+Both texts state the model-observation budget (6000 characters per tool
+result) and recommend at most `recommended_batch_size` targets (4 at that
+budget) per `context_pack` call. The agent loop's model view of a
+`context_pack` result (`server._agent_model_observation_view`, backed by
+`observation_prompt.fit_sectioned_text`) gives every file section an equal
+share of that budget with a marked clip and a leading `[HOST VIEW: ...]`
+notice, instead of a head slice that silently hid every file after the first
+few thousand characters; the inspection cache and claim review use the same
+view. The host ledger keeps the full result.
+
+Never counted or refused: re-reading an already-counted target (the existing
+identical-call and cached-inspection guards own that); a target returned by a
+successful `context_pack` in this window (so a file the pack view clipped can
+be read singly); and a retry of a target whose single read failed in this
+window. The loop additionally never consults the guard for a call the host
+itself requires to be retried (`completion_blocking_failures`, the
+`read_only` + `require_file_evidence` fleet-worker contract). Failed single
+reads do not count. The window, its refusal count, and its attempted and
+covered targets restart on a new turn and after any mutation or execution
+attempt (fresh reads after a change are legitimate); a successful
+`context_pack` restarts the family's count and refusals. The guard never names a batch tool this run cannot
 use: it stays silent when `context_pack` is outside the run's allowlist or
 refused by `_agent_run_tool_refusal`, when the run carries an argument-aware
 `tool_policy` (selfmod and autopilot policies; consulting them would charge
 their budgets), or when `file_read` is a required or abort-on-failure tool.
 
 Thresholds are typed (`BatchCoalescingConfig`) from
-`SONDER_AGENT_BATCH_ADVISORY_AFTER` (2..20), `SONDER_AGENT_BATCH_REFUSE_AFTER`
-(advisory..20) and `SONDER_AGENT_BATCH_MAX_REFUSALS` (1..10). An invalid value
-keeps the defaults and logs a warning; there is no switch that disables the
-guard. Each advisory, refusal and exhausting refusal emits an `agent_guard`
+`SONDER_AGENT_BATCH_ADVISORY_AFTER` (2..19), `SONDER_AGENT_BATCH_REFUSE_AFTER`
+(advisory..19) and `SONDER_AGENT_BATCH_MAX_REFUSALS` (1..10). The ceiling is
+`AGENT_STEP_CEILING - 1`, pinned by a test to the agent loop's 20-step clamp
+(`server._AGENT_MAX_STEPS_CEILING`): the largest accepted thresholds can
+still advise on step 19 and refuse on step 20, so no accepted value is
+equivalent to "off". An invalid value keeps the defaults and logs a warning;
+there is no switch that disables the guard. Each advisory, refusal and exhausting refusal emits an `agent_guard`
 activity event (guard, action, family, tool, batch_tool, distinct_targets,
 threshold, refusals) and a `sonder.server` log line.
 
@@ -180,6 +206,18 @@ Batching/coalescing guard (2026-09-26, Linux, Python 3.12.3, `-n 4`):
 | agent-loop, speculation, workbench, orchestrator, autopilot and existing guard suites (`-n 4`) | 1198 passed, 3 skipped |
 | full `tests/` (`-n 8`) | 17382 passed, 166 skipped, 6 failed; 5 of the 6 pass when rerun alone, and `test_nightly_selfmod_model_selection.py::test_held_out_snapshot_rejects_candidate_mutation` also fails on the unmodified baseline `de522017` |
 
+Review follow-up (2026-09-26). Each fix has a test that fails when that fix
+alone is reverted:
+
+| Finding | Test | Reverted fix (RED) |
+|---|---|---|
+| refusal count covered the whole turn | `::test_refusal_count_restarts_with_the_window`, `::test_canary_refusal_count_restarts_after_compliant_batch` | refusals kept across a successful batch: 2 failed |
+| host-required `file_read` retry refused (`EVIDENCE_REQUIRED`) | `::test_canary_host_required_retry_is_dispatched`, `::test_retry_of_a_failed_target_is_never_refused` | both retry exemptions removed: 2 failed |
+| pack view head-sliced to 6000 characters | `::test_canary_pack_view_shows_every_file_and_marks_clips`, `::test_sectioned_view_keeps_every_pack_file_visible` | head slice restored: 1 failed |
+| thresholds of 20 could never fire | `::test_threshold_ceiling_matches_the_agent_step_clamp`, rejected `20` values | n/a (new ceiling) |
+| absolute spelling counted as a new target | `::test_resolver_merges_relative_absolute_and_symlinked_spellings`, `::test_canary_absolute_spelling_of_a_read_target_is_not_refused` | resolver not passed: 1 failed |
+| untested exclusions | `::test_negative_argument_aware_tool_policy_is_never_steered`, `::test_negative_abort_on_failure_tool_keeps_its_single_form`, `::test_canary_read_only_project_run_names_the_rebased_path` | `tool_policy` check removed: 1 failed; abort-on-failure filter removed: 1 failed |
+
 ## Requirement mapping
 
 | Requirement | Ledger revision | Why |
@@ -211,6 +249,11 @@ fake Git and fake compiler/model boundaries, not an end-to-end multi-lane run.
   autopilot) are never steered. Other single-target read families (line
   ranges, digests, queries, stats) need a real batch tool before they can be
   covered; none was invented. The guard window is in-memory per turn.
+  The pack view shares 6000 characters across files, so a large pack still
+  shows each file only in part (marked); the model reads the rest singly or
+  with `file_read_range`, which the guard never refuses for a packed file.
+  Target identity follows symlinks at decision time; a path that does not
+  exist yet keys on its lexical absolute form.
 - Still without canaries: fanout `MAX_MODELS`, interactive-lane capacity, and
   the fanout `cloud_workers` clamp.
 - Guard state is in-memory telemetry (`guard_snapshot`); it is not persisted

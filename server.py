@@ -240,6 +240,7 @@ from sonder_runtime.domain.agents.observation_prompt import (
     UNTRUSTED_OBSERVATION_FOOTER as _AGENT_UNTRUSTED_OBSERVATION_FOOTER,
     UNTRUSTED_OBSERVATION_HEADER as _AGENT_UNTRUSTED_OBSERVATION_HEADER,
     clip_prompt_text as _clip_agent_prompt_text,
+    fit_sectioned_text as _fit_sectioned_agent_text,
     frame_observations as _frame_agent_observations,
     observation_prompt as _agent_observation_prompt,
 )
@@ -11527,6 +11528,9 @@ def file_read(path: str, max_bytes: int = 256000, token: str = "", approval: str
 
 _CONTEXT_PACK_MAX_FILES = 64
 _CONTEXT_PACK_MAX_TOTAL_BYTES = 1_000_000
+# Every context_pack file section starts with this line prefix; the agent
+# loop's model view splits a pack on it (see _agent_model_observation_view).
+_CONTEXT_PACK_SECTION_PREFIX = "===== CONTEXT FILE "
 
 
 
@@ -11581,8 +11585,8 @@ def context_pack(
 
     for index, requested in enumerate(selected, 1):
         display = requested.replace("\r", "\\r").replace("\n", "\\n")
-        header = "===== CONTEXT FILE %d/%d: %s =====" % (
-            index, len(selected), display,
+        header = "%s%d/%d: %s =====" % (
+            _CONTEXT_PACK_SECTION_PREFIX, index, len(selected), display,
         )
         if remaining <= 0:
             truncated_files += 1
@@ -20044,6 +20048,60 @@ _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS = frozenset({
 })
 
 
+# Hard ceiling on one agent turn's steps.  The batching guard's threshold
+# ceilings are derived from the same number (batch_coalescing.AGENT_STEP_CEILING).
+_AGENT_MAX_STEPS_CEILING = 20
+# Characters of one tool observation shown to the model in the agent loop.
+_AGENT_MODEL_OBSERVATION_CHARS = 6000
+# Batch results with one section per target, keyed by tool: their model view
+# gives every section an equal share of the budget instead of a head slice.
+_AGENT_SECTIONED_OBSERVATION_PREFIXES = {
+    "context_pack": _CONTEXT_PACK_SECTION_PREFIX,
+}
+
+
+def _agent_model_observation_view(tool_name, text):
+    """Model-facing view of one tool observation; the host keeps the full text.
+
+    Ordinary observations keep their head slice.  A sectioned batch result
+    (one ``context_pack`` holding several files) is fitted so every file stays
+    visible with a marked clip, because a head slice would silently hide every
+    file after the first few thousand characters.
+    """
+    text = str(text)
+    prefix = _AGENT_SECTIONED_OBSERVATION_PREFIXES.get(tool_name)
+    if prefix is None:
+        return text[:_AGENT_MODEL_OBSERVATION_CHARS]
+    return _fit_sectioned_agent_text(
+        text, _AGENT_MODEL_OBSERVATION_CHARS, prefix,
+        clip_hint=(
+            "Read a clipped file with file_read or file_read_range to see "
+            "the rest; that is never refused by the batch guard."
+        ),
+    )
+
+
+def _agent_batch_target_identity(raw):
+    """Host identity of one batching-guard target path; never raises.
+
+    Relative paths resolve against the workspace root exactly as the file
+    tools resolve them, and symlinks are followed, so ``src/a.py``, its
+    absolute spelling and a symlink to it are one target.  When the
+    filesystem cannot answer, the lexical absolute path is used instead.
+    """
+    text = str(raw or "").strip()
+    try:
+        candidate = Path(text).expanduser()
+        if not candidate.is_absolute():
+            candidate = file_ops.workspace_root() / candidate
+    except (OSError, RuntimeError, ValueError):
+        return text
+    try:
+        return str(candidate.resolve())
+    except (OSError, RuntimeError, ValueError):
+        return os.path.normpath(str(candidate))
+
+
 @functools.lru_cache(maxsize=1)
 def _agent_batch_counterparts():
     """Batch counterparts the agent dispatcher really registers (Issue #510 s6).
@@ -20307,7 +20365,7 @@ def _agent_turn(
         tool_allowlist = None
         tool_policy = None
         auto_checklist = False
-    max_steps = _safe_limit_policy(max_steps, 6, 20)
+    max_steps = _safe_limit_policy(max_steps, 6, _AGENT_MAX_STEPS_CEILING)
     from sonder_runtime.bootstrap.prepared_workbench import prepared_target
     pinned_target = prepared_target(prompt, tier, max_steps, allow_web, project, allow_location)
     if pinned_target is not None:
@@ -20504,6 +20562,8 @@ def _agent_turn(
         ),
         _agent_batch_coalescing_config(),
         batch_admissible=_batch_admissible,
+        resolve_target=_agent_batch_target_identity,
+        view_chars=_AGENT_MODEL_OBSERVATION_CHARS,
     )
     # A later unrelated success must not turn a failed required/evidence call
     # into a host-approved completion. Key by the canonical call signature so
@@ -20944,7 +21004,7 @@ def _agent_turn(
                 review_number,
                 tool_name or "(missing)",
                 review.get("reason", ""),
-                observation_text[:6000],
+                _agent_model_observation_view(tool_name, observation_text),
             )
         )
 
@@ -21270,10 +21330,14 @@ def _agent_turn(
             )
         tool_dispatched = False
         batch_refusal = None
+        # A retry the host itself demands (a completion-blocking failed
+        # evidence call) is never refused; the guard also exempts every
+        # previously attempted target on its own.
         if (
             prior_identical_failures < 2
             and not policy_error
             and not cached_inspection
+            and call_signature not in completion_blocking_failures
         ):
             batch_refusal = batch_guard.before_dispatch(tool_name, policy_tool_args)
             if batch_refusal is not None:
@@ -21492,7 +21556,9 @@ def _agent_turn(
                 tool_name in _AGENT_DEDUPLICATED_INSPECTION_TOOLS
                 and not cached_inspection
             ):
-                successful_inspection_results[call_signature] = observation_text[:6000]
+                successful_inspection_results[call_signature] = (
+                    _agent_model_observation_view(tool_name, observation_text)
+                )
                 repeated_inspection_counts.pop(call_signature, None)
         if tool_name in _AGENT_FILE_EVIDENCE_TOOLS and tool_ok:
             file_evidence = True
@@ -21649,7 +21715,7 @@ def _agent_turn(
         # The advisory is steering for the model only: it is appended after
         # the host ledger, inspection cache and evidence checks have seen the
         # unchanged tool result.
-        model_observation = observation_text[:6000]
+        model_observation = _agent_model_observation_view(tool_name, observation_text)
         if batch_advisory is not None:
             model_observation += "\n" + batch_advisory.render()
         observations.append(

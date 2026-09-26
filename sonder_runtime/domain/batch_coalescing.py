@@ -19,7 +19,15 @@ materially different stages:
   :class:`BatchRefusal` naming the batch tool with the refused target already
   placed in its argument.  After ``max_refusals`` refusals in one window the
   refusal is marked ``exhausted`` and the caller ends the run instead of
-  spending the remaining step budget on ignored steering.
+  spending the remaining step budget on ignored steering.  The refusal count
+  belongs to the window: when the window restarts, so does the count.
+
+Both texts state the caller's model-observation budget (``view_chars``) and
+recommend at most :func:`recommended_batch_size` targets per batch call, so
+following the steering never hides a file behind a view clip.  A target the
+model received through a successful batch call is *covered*: reading it
+singly afterwards (for example to see a part the batch view clipped) is never
+counted or refused.
 
 What the guard never does: it never coalesces or rewrites a call itself, never
 changes a dispatched result, and never applies to a tool that can mutate
@@ -32,9 +40,13 @@ never steer a model to a tool a later gate would refuse.
 What restarts the window: a new agent turn (a new guard instance),
 :meth:`BatchCoalescingGuard.reset` (callers use it after any state-changing
 step, because re-reading after a change is legitimate), or a successful call
-of the family's batch tool (the model complied).  Re-reading an
-already-counted target is left to the existing identical-call guards and is
-never counted or refused here.
+of the family's batch tool (the model complied).  Re-reading a target that
+is already counted, already covered by a successful batch call, or that
+already failed in this window (a retry, which a host evidence contract may
+demand) is left to the existing identical-call and no-progress guards and is
+never counted or refused here.  Target identity comes from the caller's
+``resolve_target`` (the host resolves relative, absolute and symlinked
+spellings to one real path) followed by :func:`target_key`.
 
 The module is pure: no I/O, no clock, no environment access.
 :meth:`BatchCoalescingConfig.from_environ` takes an explicit mapping.
@@ -57,12 +69,22 @@ DEFAULT_ADVISORY_AFTER = 3
 DEFAULT_REFUSE_AFTER = 6
 DEFAULT_MAX_REFUSALS = 3
 
-# Configuration ceilings.  A window can never need more single reads than a
-# turn has steps (the agent loop clamps max_steps to 20), so larger values are
-# indistinguishable from "off" and are refused rather than silently accepted.
+# Configuration ceilings.  The agent loop clamps one turn to at most
+# ``AGENT_STEP_CEILING`` steps (the host pins its clamp to this value).  A
+# refusal needs ``refuse_after`` successful single reads plus one more call,
+# and an advisory is only useful when a later step can act on it, so a
+# threshold above ``AGENT_STEP_CEILING - 1`` could never fire within a turn.
+# Such values are indistinguishable from "off" and are refused rather than
+# silently accepted.
+AGENT_STEP_CEILING = 20
 MIN_ADVISORY_AFTER = 2
-MAX_THRESHOLD = 20
+MAX_THRESHOLD = AGENT_STEP_CEILING - 1
 MAX_REFUSALS_CEILING = 10
+
+# Minimum model-visible characters one batched target should keep.  The
+# steering texts recommend no more targets per batch call than the caller's
+# model-observation budget can show at this size each.
+MIN_VIEW_CHARS_PER_TARGET = 1500
 
 @dataclass(frozen=True)
 class BatchCounterpart:
@@ -206,6 +228,32 @@ def _batch_example(counterpart: BatchCounterpart, targets: Iterable[str]) -> str
     )
 
 
+def recommended_batch_size(view_chars: int) -> int:
+    """Targets per batch call that the model-observation budget can show.
+
+    ``view_chars`` is the number of characters of one tool result the caller
+    shows the model.  Each recommended target keeps at least
+    ``MIN_VIEW_CHARS_PER_TARGET`` of that budget; the result is at least 1.
+    """
+    return max(1, int(view_chars) // MIN_VIEW_CHARS_PER_TARGET)
+
+
+def _view_note(counterpart: BatchCounterpart, view_chars: int) -> str:
+    if view_chars <= 0:
+        return ""
+    return (
+        " One %s result is shown to you within %d characters shared across "
+        "its targets, so request at most %d targets per call; a target that "
+        "the view clips is marked, and reading a target already returned by "
+        "a successful %s call with %s is never refused."
+        % (
+            counterpart.batch_tool, view_chars,
+            recommended_batch_size(view_chars), counterpart.batch_tool,
+            counterpart.single_tool,
+        )
+    )
+
+
 @dataclass(frozen=True)
 class BatchAdvisory:
     """Typed steering attached after a successful single-target call."""
@@ -213,20 +261,23 @@ class BatchAdvisory:
     counterpart: BatchCounterpart
     distinct_targets: int
     refuse_after: int
+    view_chars: int = 0
     guard: str = GUARD_NAME
 
     def render(self) -> str:
         cp = self.counterpart
         return (
             "HOST BATCH ADVISORY (%s): %d distinct targets have now been read "
-            "with one %s call each in this turn. The result above is unchanged. "
-            "Request every remaining target you need in one %s call, for "
-            "example: %s. After %d distinct single %s targets in this window, "
-            "further single %s calls on new targets are refused."
+            "with one %s call each in this window. The result above is "
+            "unchanged. Request the remaining targets you need together in "
+            "%s calls instead, for example: %s. After %d distinct single %s "
+            "targets in this window, further single %s calls on new targets "
+            "are refused.%s"
             % (
                 self.guard, self.distinct_targets, cp.single_tool, cp.batch_tool,
                 _batch_example(cp, ["<next path>", "<another path>"]),
                 self.refuse_after, cp.single_tool, cp.single_tool,
+                _view_note(cp, self.view_chars),
             )
         )
 
@@ -252,6 +303,7 @@ class BatchRefusal:
     refuse_after: int
     refusals: int
     max_refusals: int
+    view_chars: int = 0
     guard: str = GUARD_NAME
 
     @property
@@ -262,14 +314,16 @@ class BatchRefusal:
         cp = self.counterpart
         text = (
             "ERROR: HOST BATCH GUARD (%s): %s was not run. %d distinct targets "
-            "were already read one %s call at a time in this turn (limit %d). "
-            "Request this target together with every other target you still "
-            "need in one %s call: %s. Re-reading a target that was already "
-            "read is not affected. Refusal %d of %d in this window."
+            "were already read one %s call at a time in this window (limit %d). "
+            "Request this target with %s instead, together with other targets "
+            "you still need: %s. Re-reading or retrying a target that was "
+            "already read or attempted is not affected.%s Refusal %d of %d in "
+            "this window; a successful %s call starts a new window."
             % (
                 self.guard, cp.single_tool, self.distinct_targets, cp.single_tool,
                 self.refuse_after, cp.batch_tool, _batch_example(cp, [self.target]),
-                self.refusals, self.max_refusals,
+                _view_note(cp, self.view_chars),
+                self.refusals, self.max_refusals, cp.batch_tool,
             )
         )
         if self.exhausted:
@@ -292,10 +346,12 @@ class BatchRefusal:
 def target_key(value) -> str | None:
     """Normalize one target for distinctness, or ``None`` when uncountable.
 
-    Separators are unified and the path is normalized and case-folded, so
-    spellings of one file never count as several targets.  Case folding can
-    only merge targets (undercount), never split one, so the guard errs
-    toward allowing a call.
+    Separators are unified and the path is lexically normalized and
+    case-folded, so lexically equivalent spellings of one file never count as
+    several targets.  Case folding can only merge targets (undercount), never
+    split one, so the guard errs toward allowing a call.  Relative versus
+    absolute spellings and symlinks need the filesystem; the guard's
+    ``resolve_target`` hook maps those to one real path before this runs.
     """
     if not isinstance(value, str):
         return None
@@ -306,10 +362,10 @@ def target_key(value) -> str | None:
 
 
 class BatchCoalescingGuard:
-    """Per-turn window over single-target read-only calls.
+    """Per-turn windows over single-target read-only calls, one per family.
 
     One instance covers one agent turn; callers construct a new instance per
-    turn, so a new turn always starts with an empty window.
+    turn, so a new turn always starts with empty windows.
     """
 
     def __init__(
@@ -318,6 +374,8 @@ class BatchCoalescingGuard:
         config: BatchCoalescingConfig | None = None,
         *,
         batch_admissible: Callable[[BatchCounterpart, str], bool] | None = None,
+        resolve_target: Callable[[str], str] | None = None,
+        view_chars: int = 0,
     ) -> None:
         self.config = config or BatchCoalescingConfig()
         self._by_single: dict[str, BatchCounterpart] = {}
@@ -326,17 +384,62 @@ class BatchCoalescingGuard:
             self._by_single.setdefault(counterpart.single_tool, counterpart)
             self._by_batch.setdefault(counterpart.batch_tool, []).append(counterpart)
         self._admissible = batch_admissible or (lambda _counterpart, _target: True)
-        # family -> normalized keys of targets read singly in this window
+        # The resolver is the caller's (host) identity for one target.  It
+        # must not raise; the host implementation degrades to a lexical
+        # absolute path when the filesystem cannot answer.
+        self._resolve = resolve_target or (lambda text: text)
+        if isinstance(view_chars, bool) or not isinstance(view_chars, int) or view_chars < 0:
+            raise ValueError("view_chars must be a non-negative integer")
+        self._view_chars = view_chars
+        # Per family, all scoped to the current window:
+        #   _targets   keys of targets read singly and successfully (counted)
+        #   _attempted keys of dispatched single calls that failed (a retry
+        #              is never refused)
+        #   _covered   keys returned by a successful batch call (a later
+        #              single read of them is never counted or refused)
+        #   _refusals  refusals issued in the window
         self._targets: dict[str, set[str]] = {}
-        self._refusals = 0
+        self._attempted: dict[str, set[str]] = {}
+        self._covered: dict[str, set[str]] = {}
+        self._refusals: dict[str, int] = {}
         self._stats = {"advisories": 0, "refusals": 0, "resets": 0}
 
     @property
     def active(self) -> bool:
         return bool(self._by_single)
 
-    def _window(self, counterpart: BatchCounterpart) -> set[str]:
-        return self._targets.setdefault(counterpart.family, set())
+    @property
+    def view_chars(self) -> int:
+        return self._view_chars
+
+    def _key(self, value) -> str | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        return target_key(self._resolve(value.strip()))
+
+    def _exempt(self, counterpart: BatchCounterpart, key: str) -> bool:
+        family = counterpart.family
+        return (
+            key in self._targets.get(family, ())
+            or key in self._attempted.get(family, ())
+            or key in self._covered.get(family, ())
+        )
+
+    def _batch_keys(self, counterpart: BatchCounterpart, args) -> set[str]:
+        raw = args.get(counterpart.batch_argument) if isinstance(args, dict) else None
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except ValueError:
+                return set()
+        if not isinstance(raw, (list, tuple)):
+            return set()
+        keys = set()
+        for item in raw:
+            key = self._key(item)
+            if key is not None:
+                keys.add(key)
+        return keys
 
     def before_dispatch(self, tool: str, args) -> BatchRefusal | None:
         """Return a refusal when this single call must not be dispatched."""
@@ -344,46 +447,59 @@ class BatchCoalescingGuard:
         if counterpart is None:
             return None
         raw = args.get(counterpart.target_argument) if isinstance(args, dict) else None
-        key = target_key(raw)
-        if key is None:
+        key = self._key(raw)
+        if key is None or self._exempt(counterpart, key):
             return None
         window = self._targets.get(counterpart.family, ())
-        if key in window or len(window) < self.config.refuse_after:
+        if len(window) < self.config.refuse_after:
             return None
         if not self._admissible(counterpart, raw.strip()):
             return None
-        self._refusals += 1
+        refusals = self._refusals.get(counterpart.family, 0) + 1
+        self._refusals[counterpart.family] = refusals
         self._stats["refusals"] += 1
         return BatchRefusal(
             counterpart=counterpart,
             target=raw.strip(),
             distinct_targets=len(window),
             refuse_after=self.config.refuse_after,
-            refusals=self._refusals,
+            refusals=refusals,
             max_refusals=self.config.max_refusals,
+            view_chars=self._view_chars,
         )
 
     def after_dispatch(self, tool: str, args, *, ok: bool) -> BatchAdvisory | None:
         """Account for a dispatched call; return an advisory when one is due.
 
-        Only successful calls count: a failed single read did no wasteful work
-        that a batch would have saved, and failure streaks already have their
-        own no-progress guard.
+        Only successful calls count toward a window: a failed single read did
+        no wasteful work that a batch would have saved, and failure streaks
+        already have their own no-progress guard.  A failed single target is
+        remembered as attempted so that its retry is never refused.
         """
-        if not ok:
-            return None
-        for counterpart in self._by_batch.get(tool, ()):
-            self._targets.pop(counterpart.family, None)
+        if ok:
+            for batch_counterpart in self._by_batch.get(tool, ()):
+                family = batch_counterpart.family
+                # The model complied: start a new window for the family and
+                # remember what the batch returned.
+                self._targets.pop(family, None)
+                self._refusals.pop(family, None)
+                self._covered.setdefault(family, set()).update(
+                    self._batch_keys(batch_counterpart, args)
+                )
         counterpart = self._by_single.get(tool)
         if counterpart is None:
             return None
         raw = args.get(counterpart.target_argument) if isinstance(args, dict) else None
-        key = target_key(raw)
+        key = self._key(raw)
         if key is None:
             return None
-        window = self._window(counterpart)
-        if key in window:
+        if not ok:
+            if not self._exempt(counterpart, key):
+                self._attempted.setdefault(counterpart.family, set()).add(key)
             return None
+        if self._exempt(counterpart, key):
+            return None
+        window = self._targets.setdefault(counterpart.family, set())
         window.add(key)
         if len(window) < self.config.advisory_after:
             return None
@@ -394,23 +510,33 @@ class BatchCoalescingGuard:
             counterpart=counterpart,
             distinct_targets=len(window),
             refuse_after=self.config.refuse_after,
+            view_chars=self._view_chars,
         )
 
     def reset(self) -> None:
-        """Start a new window (after a state-changing step)."""
-        if self._targets:
+        """Start new windows for every family (after a state-changing step).
+
+        Counted, attempted and covered targets and the refusal counts all
+        belong to the window, so all of them restart.
+        """
+        if self._targets or self._attempted or self._covered or self._refusals:
             self._stats["resets"] += 1
         self._targets.clear()
+        self._attempted.clear()
+        self._covered.clear()
+        self._refusals.clear()
 
     def snapshot(self) -> dict:
         """Bounded telemetry for status surfaces and tests."""
         return {
             "guard": GUARD_NAME,
             "families": {family: len(keys) for family, keys in self._targets.items()},
+            "window_refusals": dict(self._refusals),
             "advisories": self._stats["advisories"],
             "refusals": self._stats["refusals"],
             "resets": self._stats["resets"],
             "advisory_after": self.config.advisory_after,
             "refuse_after": self.config.refuse_after,
             "max_refusals": self.config.max_refusals,
+            "view_chars": self._view_chars,
         }
