@@ -322,23 +322,28 @@ def observe_autopilot_task(trace, *, run: dict, task: dict, memory_service=None)
     receipt = task.get("host_receipt")
     if not isinstance(receipt, dict):
         receipt = {}
+    # The controller assigns ``host_receipt`` only when an attempt completes
+    # and keeps it while a retry runs, so an interrupted (uncertain) attempt
+    # still carries the previous attempt's receipt. Its counters and
+    # validation progress are not this attempt's facts and are not charged.
+    counted = receipt if status != "uncertain" else {}
     before_metrics = [ProgressMetric("task_passed", 0, "maximize")]
     after_metrics = [ProgressMetric("task_passed", int(status == "passed"), "maximize")]
     if task["kind"] == "validate":
         before_metrics.append(ProgressMetric("validation_passed", 0, "maximize"))
         after_metrics.append(ProgressMetric(
-            "validation_passed", int(receipt.get("validation_passed") is True), "maximize",
+            "validation_passed", int(counted.get("validation_passed") is True), "maximize",
         ))
     before = ProgressVector(scope, tuple(before_metrics), complete=True)
     after = ProgressVector(scope, tuple(after_metrics), complete=status != "uncertain")
-    tools = receipt.get("tools")
+    tools = counted.get("tools")
     # The receipt lists the distinct host tools used, not every call, so
     # tool_calls is a lower bound on the task's calls. validation_attempted
     # likewise proves at least one verifier run.
     usage = StrategyUsage(
         attempts=1,
         tool_calls=_counter(len(tools)) if isinstance(tools, (list, tuple)) else 0,
-        verifier_calls=int(receipt.get("validation_attempted") is True),
+        verifier_calls=int(counted.get("validation_attempted") is True),
     )
     failure = None if status == "passed" else FailureObservation(
         FailureClass.UNCERTAIN_SIDE_EFFECT if status == "uncertain" else

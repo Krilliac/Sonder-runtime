@@ -176,3 +176,28 @@ def test_autopilot_replays_attempts_sealed_before_attribution(tmp_path):
     assert observe_autopilot_task(trace, run=_run(), task=_task(host_receipt=receipt)) is not None
     assert trace.history("run-1") == (legacy,)
     assert trace.sealed_budget("run-1").tool_calls == 64
+
+
+def test_autopilot_interrupted_retry_is_not_charged_the_previous_receipt(tmp_path):
+    from autopilot_controller import _mark_interrupted_tasks_uncertain
+
+    trace = _trace(tmp_path)
+    receipt = {"tools": ["file_read", "shell", "file_write"],
+               "validation_attempted": True, "validation_passed": False}
+    task = _task(status="failed", host_receipt=receipt, error="tests failed")
+    observe_autopilot_task(trace, run=_run(), task=task)
+
+    # The controller's retry path: status and attempt number change, the
+    # completed attempt's receipt stays on the task, then the controller dies.
+    task = dict(task, status="running", attempts=2)
+    plan = [task]
+    assert _mark_interrupted_tasks_uncertain(plan) == 1
+    decision = observe_autopilot_task(trace, run=_run(), task=plan[0])
+
+    first, second = _reopen(tmp_path).history("run-1")
+    assert first.usage == StrategyUsage(attempts=1, tool_calls=3, verifier_calls=1)
+    assert second.attempt_id == "task-01-attempt-2"
+    assert second.outcome == "uncertain"
+    assert second.usage == StrategyUsage(attempts=1)
+    assert _metrics(second.progress_after) == {"task_passed": 0, "validation_passed": 0}
+    assert decision.action is StrategyAction.RECONCILE
