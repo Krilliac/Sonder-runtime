@@ -423,6 +423,22 @@ substitute for demonstrated process, desktop, credential and broker boundaries.
 Task Scheduler/other brokers and a separate desktop remain explicit unqualified
 surfaces; no adapter is enabled from these probes.
 
+Known limitation, observed on hosted `windows-latest` (CI run 36273300357, head
+`d023a331`): the restricting-SID experiment fails at child launch. The child
+exits with `-1073741790` (`0xC0000022`, `STATUS_ACCESS_DENIED`) and prints
+nothing. The other low-integrity probes in the same job launch and report
+normally. A restricted token passes an access check only if both its normal SIDs
+and its restricting SIDs are granted. The experiment lists only the per-run
+random SID, and grants it only on the disposable stage. The staged `python.exe`
+must still load OS DLLs from `System32` and open process-wide object namespaces,
+and those DACLs do not name that SID. By design, the test never re-ACLs OS DLLs
+or the installed Python. So process start fails before any probe code runs.
+This is a property of a unique-SID-only restricting list, not a regression.
+A profile that starts must also list well-known SIDs such as Everyone, Users,
+RESTRICTED or the logon SID. That weakens the uniqueness the experiment is
+meant to show, and remains an open design decision. The step stays diagnostic
+only.
+
 ## Completion gate
 
 ### 2026-09-24 stalled-chat recovery and added hardening workload
