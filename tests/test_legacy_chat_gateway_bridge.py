@@ -307,12 +307,13 @@ def test_prewarm_skips_tiers_served_by_another_provider(monkeypatch):
 
 
 @contextmanager
-def _http(monkeypatch):
+def _http(monkeypatch, *, stub_web=True):
     monkeypatch.setattr(ts, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
-    monkeypatch.setattr(ts.server, "chat_web_response", lambda *a, **k: None)
+    if stub_web:
+        monkeypatch.setattr(ts.server, "chat_web_response", lambda *a, **k: None)
     httpd = ts.ThreadingHTTPServer(("127.0.0.1", 0), ts.Handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -366,3 +367,94 @@ def test_http_chat_provider_outage_returns_503(monkeypatch, no_ollama):
     assert status == 503, payload
     assert "openai_compatible" in json.loads(payload)["error"]["message"]
     assert headers.get("retry-after")
+
+
+def test_strict_sonder_alias_stays_on_ollama_like_a2a(monkeypatch):
+    """A resolved ``sonder`` label is the local alias; ProviderDispatchGateway
+    serves it only from Ollama, so the HTTP path must not bridge it."""
+    _install(monkeypatch, SimpleNamespace(provider_bindings=_bindings(),
+                                          model_gateway=OllamaMustNotBeUsed()))
+    assert server._bridge_provider_for_tier("sonder") is None
+    assert server._bridge_provider_for_tier("general") == "openai_compatible"
+
+
+def test_bridged_step_ignores_the_drain_token_but_honours_cancel_check(monkeypatch):
+    from sonder_runtime.platform.process import CancellationToken
+
+    drained = CancellationToken()
+    drained.cancel()
+    turn = local_owner_context(correlation_id="req-drain-1", source="http",
+                               cancellation=drained)
+    with bind_operation_context(turn):
+        context = server._bridge_operation_context(30, None)
+        assert context.correlation_id == "req-drain-1"
+        assert context.cancellation.cancelled is False
+        assert server._bridge_operation_context(30, lambda: True).cancellation.cancelled
+
+
+def test_drain_during_a_bridged_call_lets_the_turn_finish(monkeypatch, no_ollama):
+    """A drain that starts after admission must not discard the provider's answer."""
+    from sonder_runtime.adapters.web import lifecycle as sonder_lifecycle
+
+    lifecycle = sonder_lifecycle.RuntimeLifecycle()
+    monkeypatch.setattr(sonder_lifecycle, "_instance", lifecycle)
+    in_call, release = threading.Event(), threading.Event()
+    base = _openai_transport()
+
+    def slow_transport(url, payload, headers, timeout):
+        in_call.set()
+        assert release.wait(10)
+        return base(url, payload, headers, timeout)
+
+    graph = _graph(slow_transport)
+    _install(monkeypatch, graph)
+    result = {}
+    with _http(monkeypatch) as port:
+        def post():
+            result["response"] = _post_chat(port, {
+                "model": "general", "messages": [{"role": "user", "content": "hello"}],
+            })
+
+        client = threading.Thread(target=post)
+        client.start()
+        assert in_call.wait(10)
+        drainer = threading.Thread(target=lambda: lifecycle.coordinator.drain(reason="test"))
+        drainer.start()
+        for _ in range(200):
+            if lifecycle.coordinator.cancellation.cancelled:
+                break
+            threading.Event().wait(0.01)
+        assert lifecycle.coordinator.cancellation.cancelled
+        release.set()
+        client.join(15)
+        drainer.join(15)
+    status, _headers, payload = result["response"]
+    assert status == 200, payload
+    assert json.loads(payload)["choices"][0]["message"]["content"] == "provider answer"
+    assert len(base.sent) == 1
+
+
+def test_http_web_research_on_a_bound_tier_fails_closed(monkeypatch, no_ollama):
+    """The research agent only runs on Ollama; a bound tier gets a 503 naming it."""
+    transport = _openai_transport()
+    _install(monkeypatch, _graph(transport))
+    monkeypatch.setattr(server.web_tools, "enabled", lambda: True)
+    monkeypatch.setattr(server, "_agent_impl",
+                        lambda *a, **k: pytest.fail("the Ollama agent ran for a bound tier"))
+    with _http(monkeypatch, stub_web=False) as port:
+        status, _headers, payload = _post_chat(port, {
+            "model": "sonder",
+            "messages": [{"role": "user", "content": "search the web for the latest python release"}],
+        })
+    assert status == 503, payload
+    message = json.loads(payload)["error"]["message"]
+    assert "openai_compatible" in message and "'code'" in message
+    assert transport.sent == [] and no_ollama == []
+
+
+def test_web_research_keeps_its_ollama_route_outside_http(monkeypatch, no_ollama):
+    """REPL and MCP call chat_web_response without gateway_bound (documented)."""
+    _install(monkeypatch, _graph(_openai_transport()))
+    monkeypatch.setattr(server.web_tools, "enabled", lambda: True)
+    monkeypatch.setattr(server, "_agent_impl", lambda task, **k: "researched")
+    assert server.chat_web_response("search the web for the latest python release") == "researched"

@@ -146,6 +146,14 @@ class TelemetryTurn:
             index = attempt.number - 2
             return self.attempts[index] if index >= 0 else None
 
+    def failed_attempts_code(self) -> str | None:
+        """The last error code when the turn sent and every send failed, else None."""
+        with self._lock:
+            attempts = list(self.attempts)
+        if not attempts or not all(a.finished and a.error_code for a in attempts):
+            return None
+        return attempts[-1].error_code
+
     def _summary(self) -> dict[str, object]:
         with self._lock:
             attempts = list(self.attempts)

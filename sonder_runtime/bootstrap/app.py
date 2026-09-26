@@ -394,6 +394,8 @@ def _debug_executor_chain(debug_tools, developer_tools):
     """
     return debug_tool_executor(
         debug_tools, developer_tool_executor(developer_tools, PackagedToolExecutor()))
+
+
 @dataclass(frozen=True)
 class _LiveTelemetry:
     """The composed Observatory export chain, or all-None when disabled."""

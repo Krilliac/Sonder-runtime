@@ -21,6 +21,7 @@ network, filesystem, credential, or cloud permissions.
 from __future__ import annotations
 
 import ipaddress
+import logging
 import math
 import os
 import re
@@ -1256,6 +1257,62 @@ _env_bool = env_bool
 _env_int = env_int
 
 
+_config_logger = logging.getLogger("sonder.config")
+_DEFAULT_PORTS = {"http": "80", "https": "443"}
+
+
+def normalize_origin(value: str) -> str:
+    """Return the browser's spelling of an origin, or ``value`` unchanged.
+
+    Browsers send ``Origin`` with a lower-case scheme and host, no trailing
+    slash and no default port.  An allowlist entry written as
+    ``HTTP://127.0.0.1:4173/`` means the same origin; this spells it the way
+    the exact-match comparison sees it.  Anything that is not an origin (a
+    path, a query, ``*``) is returned unchanged so validation still rejects it.
+    """
+    text = str(value or "").strip()
+    match = re.fullmatch(r"([A-Za-z][A-Za-z0-9+.-]*)://([^/\s?#]+)/?", text)
+    if not match:
+        return text
+    scheme = match.group(1).lower()
+    authority = match.group(2)
+    if "@" in authority:
+        return text
+    if authority.startswith("["):
+        end = authority.find("]")
+        if end < 0:
+            return text
+        host, rest = authority[: end + 1], authority[end + 1:]
+        if rest and not rest.startswith(":"):
+            return text
+        port = rest[1:]
+    else:
+        host, _sep, port = authority.partition(":")
+        if ":" in port:
+            return text
+    if port and not port.isdigit():
+        return text
+    if port and _DEFAULT_PORTS.get(scheme) == port:
+        port = ""
+    host = host.lower()
+    return "%s://%s%s" % (scheme, host, ":" + port if port else "")
+
+
+def normalize_origins(values, *, setting: str) -> tuple[str, ...]:
+    """Normalize allowlist entries, warning once per rewritten entry."""
+    normalized: list[str] = []
+    for value in values:
+        spelled = normalize_origin(value)
+        if spelled != value:
+            _config_logger.warning(
+                "%s entry %r normalized to %r (the exact-match origin a browser "
+                "sends)", setting, value, spelled,
+            )
+        if spelled not in normalized:
+            normalized.append(spelled)
+    return tuple(normalized)
+
+
 LIVE_EXPORT_BUFFER_MIN = 256
 LIVE_EXPORT_BUFFER_MAX = 65536
 LIVE_EXPORT_MAX_SUBSCRIBERS_LIMIT = 64
@@ -2280,6 +2337,15 @@ def load_config(
             config, state=replace(config.state, home=str(sonder_paths.default_home()))
         )
 
+    # A trailing '/' or an upper-case scheme/host is the same origin; spell
+    # it the browser's way (with a WARNING) instead of refusing to start.
+    config = replace(config, observability=replace(
+        config.observability,
+        live_export_origins=normalize_origins(
+            config.observability.live_export_origins,
+            setting="[observability].live_export_origins",
+        ),
+    ))
     _validate(config, errors)
     if errors:
         raise ConfigError(errors)

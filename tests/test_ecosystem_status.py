@@ -1,10 +1,12 @@
 """GET /v1/sonder/ecosystem document (sonder.runtime.ecosystem/1), key for key."""
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from sonder_runtime.adapters.provider_bindings import ProviderBindings
 from sonder_runtime.application.observability.ecosystem_status import (
     ECOSYSTEM_SCHEMA,
     build_ecosystem_status,
+    ecosystem_warnings,
 )
 
 STATUS_KEYS = {
@@ -149,3 +151,33 @@ def test_disabled_export_with_a_status_surface_still_reports_providers():
     assert document["observatory"]["export_enabled"] is False
     assert document["observatory"]["runtime_stream"] is None
     assert document["observatory"]["connect_urls"] == []
+
+
+def test_a_global_origin_does_not_hide_the_missing_observatory_origin():
+    """A SONDER_CORS_ORIGINS entry (say the Flutter web app) is not Observatory."""
+    document = build_ecosystem_status(
+        generated_at=datetime(2026, 9, 26, 10, 0, 0, 123456, tzinfo=timezone.utc),
+        runtime={"version": "v", "instance_id": "rt-0123456789ab", "node_id": "h"},
+        bindings=_bindings(), gateway=SimpleNamespace(), export_enabled=True,
+        runtime_stream=None, stats=None,
+        observatory_origins=["http://127.0.0.1:8080"], dedicated_origins=[],
+        runtime_base_url="http://127.0.0.1:18435",
+    )
+    assert document["generated_at"] == "2026-09-26T10:00:00.123Z"
+    assert document["observatory"]["cors_origins"] == ["http://127.0.0.1:8080"]
+    warnings = " | ".join(document["observatory"]["warnings"])
+    assert "no SONDER_OBSERVATORY_ORIGINS entry" in warnings
+    assert "http://127.0.0.1:8080" in warnings
+    configured = ecosystem_warnings(
+        {"embedding_provider": "ollama", "default_generation_provider": "ollama",
+         "tier_providers": {}}, {}, export_enabled=True,
+        observatory_origins=["http://127.0.0.1:4173"],
+        dedicated_origins=["http://127.0.0.1:4173"],
+    )
+    assert configured == []
+
+
+def test_bound_provider_warning_names_the_ollama_only_http_dispatchers():
+    warnings = " | ".join(_build(_bindings(), SimpleNamespace())["observatory"]["warnings"])
+    for surface in ("work intents", "ensemble", "fanout", "web research"):
+        assert surface in warnings

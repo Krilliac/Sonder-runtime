@@ -19,13 +19,24 @@ which the provider change adds. The security decision is recorded in
 ## HTTP chat through the gateway
 
 `server.py`'s chat path builds Ollama-shaped `/api/chat` payloads. Each
-escalation rung now binds the provider its tier is bound to:
+escalation rung binds the provider of its *resolved* tier label
+(`server._serve_target`), not of the caller's `model` field:
 
-| Rung tier | Provider |
+| Resolved rung label | Provider |
 |---|---|
 | `fast`, `general`, `code`, `reasoning`, `vision` | `bindings.tier_providers[tier]` |
-| `sonder` (default route) | `bindings.default_generation_provider` |
+| `sonder` (the local alias: strict mode, or no chat tier model) | always `ollama` |
 | `model:*` pins and hosted/cloud tiers | always `ollama` |
+
+The default route (`model` `sonder`, `local`, blank or `gpt-*`) resolves to
+the chat policy tier (normally `general`), so it follows that tier's binding.
+A2A's `ChatService` resolves `sonder` the same way, and serves a resolved
+`sonder` label through `ProviderDispatchGateway.generate_strict_alias`, which
+requires Ollama. HTTP therefore keeps the resolved `sonder` alias on Ollama
+too, so both surfaces serve one alias from one provider. Contract section 4
+maps the tier `sonder` to `default_generation_provider`; after resolution the
+only rung still labelled `sonder` is the Ollama alias itself, so this is
+recorded under open questions rather than changing A2A.
 
 When that provider is not `ollama`, the local branch of `_chat_request` hands
 the payload to `application/chat/provider_bridge.py`, which converts it to a
@@ -45,6 +56,12 @@ the provider's `ModelResponse.model`.
   below) with the call's own timeout as its deadline and the host cloud
   policy as its consent. Without an ambient context a local-owner context
   with a fresh correlation id is used.
+- Drain: the context's cancellation is the legacy call's `cancel_check`
+  only, never the lifecycle coordinator's token. `drain()` cancels that
+  token the moment it starts, but an admitted turn is allowed to finish (the
+  drain waits for it, up to its deadline), exactly as on the Ollama path. A
+  bridged turn in flight when a drain starts therefore returns its answer
+  instead of discarding a reply the provider already produced.
 - Errors: `DependencyUnavailable` ends the turn with HTTP 503 and the
   provider's message; it is never an escalation reason. Decoder schemas
   (`response_format`), `think=True`, reasoning continuation, native tool calls
@@ -54,6 +71,9 @@ the provider's `ModelResponse.model`.
 - Ollama-only side calls are skipped on a bridged rung: the `/api/show`
   context probe, the request-cache model revision (so the request cache is
   not used), model prewarm and the thinking-model probes.
+- The shaped reply carries no `done_reason`: the gateway does not report
+  why the provider stopped, and claiming `stop` would hide a truncation from
+  code that looks for `length`.
 - Memory recall still ranks with the Ollama embedder. When a bridged turn
   gets no query vector it logs a WARNING and names the step in the receipt:
   `sonder_receipt.degraded = ["memory_recall_embeddings"]`.
@@ -63,6 +83,19 @@ The REPL, MCP tools, autopilot and fleet paths still call `_make_generate`
 directly and therefore stay on Ollama whatever the bindings say. `/v1/models`
 and the escalation ladder de-duplicate rungs by their Ollama model name, which
 means nothing for a tier served by another provider.
+
+Some dispatchers on the HTTP chat route run before the model path and have
+their own model loop. Bindings do not reach them:
+
+| HTTP chat dispatcher | Behaviour with a non-Ollama binding |
+|---|---|
+| Web research (`chat_web_response` -> `_agent_impl`, needs `SONDER_WEB_TOOLS`) | Its tool-using agent needs Ollama's native tool calls. When the tier it runs on (`code` for the default route) is bound elsewhere, the turn fails closed with 503 naming the binding (`SONDER_<TIER>_PROVIDER=ollama` restores it). Weather, location and capability answers need no model and are unaffected. REPL and MCP keep the Ollama route. |
+| Natural-language work intents (`_handle_work_intent`, developer only) | Autopilot/fleet lanes: stay on Ollama. |
+| Natural-language ensemble and fanout (developer only) | Poll named local models: stay on Ollama. |
+
+When one of these returns the legacy `ERROR ...` answer (HTTP 200), or every
+provider send of the turn failed, the terminal event is `request.failed`, not
+`request.completed` (see the vocabulary below).
 
 ## Live producer
 
@@ -77,14 +110,23 @@ EventSink -> LocalObservabilitySink -> TeeEventSink(OperationsEventSink,
                                                   EventSinkTelemetryBridge)
 ```
 
-- Instance id `rt-<12 hex>` per composed graph; process session id
-  `rts-<same hex>`. `event_id` is `<instance_id>-<sequence>`; sequences are
-  contiguous from 0. `mono_ns` is `time.monotonic_ns()` (Linux
-  `CLOCK_MONOTONIC`, shared with Sonder-Inference on the same host).
+- Instance id `rt-<12 hex>` per composed graph; session id `rts-<same hex>`.
+  A served process composes one graph (the owned default application refuses
+  a different configuration), so in practice this is one instance per
+  process, as contract section 6.1 says. A process that composes a second
+  graph (tests, tools) gets a second instance and a second `session.started`:
+  each ring numbers from 0, and sharing one instance id between two rings
+  would give two events the same `event_id`. Consumers treat a new instance
+  like a restart (contract section 14).
+- `event_id` is `<instance_id>-<sequence>`; sequences are contiguous from 0.
+  `mono_ns` is `time.monotonic_ns()` (Linux `CLOCK_MONOTONIC`, shared with
+  Sonder-Inference on the same host), read under the same lock that assigns
+  `sequence`, so ordering by `(mono_ns, sequence)` (Observatory's replay
+  order) agrees with ordering by `sequence`.
   `wall_time` is RFC 3339 UTC with milliseconds and `Z`. `node_id` is the
   hostname. `producer.role` is `runtime` and `producer.synthetic` is `false`.
-- Emission does no I/O and never raises. The ring lock covers numbering and
-  one append of an already serialized line.
+- Emission does no I/O and never raises. The ring lock covers numbering, one
+  clock read and one append of an otherwise serialized line.
 - A subscriber that falls behind loses its oldest undelivered events. SSE
   announces the loss with a `: dropped <n>` comment; the count is kept as
   `subscriber_dropped_events` in the producer stats. It is not a producer
@@ -92,8 +134,16 @@ EventSink -> LocalObservabilitySink -> TeeEventSink(OperationsEventSink,
 - `telemetry.dropped` reports only events the producer could not sequence (an
   envelope that failed to serialize), with a cumulative `dropped_events`.
 - Streams do not take request admission slots. Drain closes them: the
-  coordinator flush hook closes every subscription, and each stream also
-  stops within one second of the drain starting.
+  coordinator flush hook runs the graph's telemetry close, which emits
+  `session.ended` (and a final `telemetry.dropped` when the producer ever
+  dropped) and then closes every subscription. A closed subscription still
+  receives the events sequenced before the close, so connected subscribers
+  see `session.ended`. A drain does not cut streams at its start: admitted
+  turns finish first, so subscribers see them end. If the flush hooks never
+  run, an idle stream ends 35 s after the drain began.
+- A client that disconnects from an idle stream is noticed within about one
+  second (the socket is polled for EOF without writing), so its subscriber
+  slot is released without waiting for a heartbeat write to fail.
 
 ### Routes
 
@@ -117,6 +167,19 @@ All three routes require administrator authorization exactly as
 loopback caller; with an API key it is `Authorization: Bearer <key>`.
 Discovery reports `auth.required: false` only in local-open mode.
 
+DNS-rebinding defence: on a loopback bind the three routes refuse a `Host`
+header that does not name `127.0.0.1`, `localhost` or `[::1]` (any port)
+with 403 `{"error": {"code": "forbidden_host"}}`, as Sonder-Inference does
+(contract section 2.3). A rebinding page is same-origin, sends no `Origin`,
+and would otherwise pass the CORS check. The check is off when
+`SONDER_TLS_TERMINATED_BY_PROXY` declares a proxy that forwards its public
+name, and a request without `Host` (no browser sends one) is not refused.
+Other Runtime routes keep their existing posture.
+
+A request whose `Origin` is present but not allowed gets 403 with
+`{"error": {"message": "origin is not allowed", "type": "cors", "code":
+"forbidden_origin"}}` on every route (the `code` is additive).
+
 Browser access is controlled by two exact-match allowlists:
 
 - `SONDER_OBSERVATORY_ORIGINS` (`[observability].live_export_origins`) is
@@ -126,6 +189,11 @@ Browser access is controlled by two exact-match allowlists:
   local-open mode. Its preflight answer now includes `Accept`,
   `Cache-Control` and `Last-Event-ID` so streams work for origins already on
   it; do not add an Observatory origin to it just for telemetry.
+
+Entries are exact origins (`scheme://host[:port]`). A trailing `/`, an
+upper-case scheme or host and a default port (`:80` for http, `:443` for
+https) are rewritten to the browser's spelling with a WARNING instead of
+refusing startup; a path, a query or `*` is still a configuration error.
 
 Operator values for Observatory:
 
@@ -157,7 +225,7 @@ is replaced with `[unsafe-label]`.
 | `session.started` | `role: "runtime"`, `version`, `text_capture: "none"`, `provider_bindings {default_generation_provider, tier_providers, embedding_provider, fallbacks}` | graph composition |
 | `session.ended` | `emitted_events`, `dropped_events` | best effort when the graph closes |
 | `request.started` | `surface: "http.chat_completions" \| "a2a"`, `kind: "chat"`, `stream`, `requested_model`, `workload` | turn start, after request validation |
-| `route.selected` | `provider: "ollama" \| "openai_compatible" \| "sonder_inference"`, `operation: "chat" \| "generate"`, `model` (the provider-reported model when the reply names one), `attempt` (1-based in the turn), `status: "ok" \| "error"`, `error_code?` | once per provider send inside a turn, from the `dispatch_provider` observer |
+| `route.selected` | `provider: "ollama" \| "openai_compatible" \| "sonder_inference"`, `operation: "chat" \| "generate"`, `model` (the provider-reported model when the reply names one), `attempt` (1-based in the turn), `status: "ok" \| "error"`, `error_code?` | once per provider send inside a turn, from the `dispatch_provider` observer, when the send completes (it carries the reply's model and usage, so a hung send shows no route until it ends) |
 | `route.changed` | `from_provider`, `to_provider`, `reason_code`, `attempt` | attempt k's provider differs from attempt k-1's, or a fallback wrapper reports a pre-send fallback |
 | `request.completed` \| `request.failed` \| `request.cancelled` | `outcome`, `total_ms`, `http_status`, `provider`, `model`, `attempts`, `prompt_tokens?`, `completion_tokens?`, `error_code?` | exactly once per started turn |
 | `telemetry.dropped` | `dropped_events` (cumulative), `emitted_events`, `queue_capacity`, `final` | producer drops |
@@ -165,6 +233,26 @@ is replaced with `[unsafe-label]`.
 Provider ids come from the `dispatch_provider` labels, which stay unchanged
 as capture evidence: `ollama` to `ollama`, `openai-compatible` to
 `openai_compatible`, `sonder-inference` to `sonder_inference`.
+
+Error codes are domain codes, never Python class names:
+
+- `route.selected.error_code`: a domain error keeps its code; a timeout is
+  `DEADLINE_EXCEEDED`; a refused or reset connection or a provider 5xx is
+  `DEPENDENCY_UNAVAILABLE`; a 429 is `CAPACITY_EXCEEDED`; another 4xx is
+  `INVALID_INPUT`; an interrupt is `CANCELLED`; anything else is
+  `INTERNAL_FAILURE`.
+- Terminal events: a model-call failure reports its kind as a domain code
+  (`provider_unavailable` -> `DEPENDENCY_UNAVAILABLE`, `timeout` ->
+  `DEADLINE_EXCEEDED`, `configuration` and `unsupported_feature` ->
+  `INVALID_INPUT`); the kind `cancelled` (for example a client that went
+  away) ends the turn as `request.cancelled` with `CANCELLED`. A 200 turn
+  whose every provider send failed is `request.failed` with the last send's
+  code; a 200 whose body is the legacy `ERROR: ...`/`ERROR contacting ...`
+  answer with no failed send is `request.failed` with `ERROR_REPLY`. A
+  `configuration` refusal answered with 503 (web research on a bound tier)
+  reports `DEPENDENCY_UNAVAILABLE`, not `INVALID_INPUT`. Other
+  non-model failures (origin, admission, capture, stream write) report the
+  HTTP metric label.
 
 Provider sends outside a turn (background distillation, REPL, MCP) are not
 exported in v1. A request rejected before `request.started` (origin,
@@ -218,15 +306,21 @@ for the request carry `run_id = R` and `attributes.parent_request_id = R`.
   URL of every provider whose status names telemetry URLs.
 - `cors_origins` lists every origin that may read the telemetry routes.
 - Warnings cover `embedding_provider = sonder_inference`, a missing
-  Observatory origin, disabled export, synthetic providers, and generation
-  bindings that REPL, MCP, autopilot and fleet do not honour.
-- 404 when export is disabled and the gateway has no `provider_status`.
+  `SONDER_OBSERVATORY_ORIGINS` entry (a global `SONDER_CORS_ORIGINS` entry,
+  such as the Flutter web app, does not count; the warning names those
+  origins), disabled export, synthetic providers, and the surfaces that do
+  not honour generation bindings (REPL, MCP, autopilot, fleet, and the HTTP
+  chat dispatchers listed above).
+- 404 when export is disabled and the gateway has no `provider_status`
+  (contract section 9). With export disabled but a status surface, the
+  document is still served with `export_enabled: false` and
+  `runtime_stream: null`.
 
 ## Configuration
 
 | Variable | `[observability]` key | Default |
 |---|---|---|
-| `SONDER_OBSERVATORY_EXPORT` | `live_export` | `1`; `0` makes the three routes 404 |
+| `SONDER_OBSERVATORY_EXPORT` | `live_export` | `1`; `0` makes discovery and the event stream 404, and the ecosystem route 404 unless the gateway reports `provider_status()` |
 | `SONDER_OBSERVATORY_BUFFER` | `live_export_buffer` | `4096`, clamped to 256..65536 |
 | `SONDER_OBSERVATORY_MAX_SUBSCRIBERS` | `live_export_max_subscribers` | `8` (1..64) |
 | `SONDER_OBSERVATORY_ORIGINS` | `live_export_origins` | empty |
@@ -244,12 +338,17 @@ rather than invented.
   Observatory discovery schema pins no field for it (additive keys allowed).
 - A read-only telemetry capability for remote or token-bearing Observatory
   connections is unspecified; today the admin key is required.
+- Contract section 4 maps the tier `sonder` to `default_generation_provider`.
+  Runtime resolves the default route to the chat policy tier first (HTTP and
+  A2A alike), and keeps the resolved `sonder` alias on Ollama because
+  `generate_strict_alias` serves it only there. The contract text should say
+  that the default route follows the resolved chat tier's binding.
 
 ## Behavior status
 
 | Behavior | Status | Boundary |
 |---|---|---|
-| HTTP chat and A2A through a non-Ollama provider | Experimental | Local model steps only; REPL, MCP, autopilot and fleet stay on Ollama. |
+| HTTP chat and A2A through a non-Ollama provider | Experimental | Local model steps only; REPL, MCP, autopilot and fleet stay on Ollama, and so do HTTP work intents, ensemble and fanout; HTTP web research on a bound tier returns 503. |
 | Observatory live producer (`/v1/observability/events`, discovery) | Experimental | Admin-gated, content-free, loopback by default; same-host clock merge only. |
 | `GET /v1/sonder/ecosystem` | Experimental | Provider rows are `unknown` unless the gateway reports `provider_status()`. |
 | Read-only telemetry capability | Unsupported | Remote telemetry needs the admin bearer key. |

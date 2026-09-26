@@ -8,6 +8,7 @@ from sonder_runtime.platform.config import (
     Secrets,
     apply_observability_environment,
     load_config,
+    normalize_origin,
 )
 
 
@@ -101,3 +102,38 @@ def test_observatory_export_rejects_malformed_values(tmp_path):
     message = str(caught.value)
     assert "live_export_max_subscribers" in message
     assert "live_export_origins" in message
+
+
+def test_observatory_origins_are_normalised_with_a_warning_not_refused(caplog):
+    """A trailing '/' or upper-case scheme/host is the same origin (logged)."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="sonder.config"):
+        config = load_config(env={
+            "SONDER_OBSERVATORY_ORIGINS": "http://127.0.0.1:4173/, HTTP://LocalHost:4173",
+        })
+    assert config.observability.live_export_origins == (
+        "http://127.0.0.1:4173", "http://localhost:4173",
+    )
+    assert sum("normalized" in r.getMessage() for r in caplog.records) == 2
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("http://127.0.0.1:4173", "http://127.0.0.1:4173"),
+    ("http://127.0.0.1:4173/", "http://127.0.0.1:4173"),
+    ("HTTPS://Sonder.Example:443/", "https://sonder.example"),
+    ("http://[::1]:5173/", "http://[::1]:5173"),
+    ("tauri://localhost", "tauri://localhost"),
+    # Not origins: left alone so validation still refuses them.
+    ("http://127.0.0.1:4173/path", "http://127.0.0.1:4173/path"),
+    ("*", "*"),
+    ("http://host:port", "http://host:port"),
+])
+def test_normalize_origin(raw, expected):
+    assert normalize_origin(raw) == expected
+
+
+def test_a_path_is_still_not_an_origin():
+    with pytest.raises(Exception) as caught:
+        load_config(env={"SONDER_OBSERVATORY_ORIGINS": "http://127.0.0.1:4173/app"})
+    assert "live_export_origins" in str(caught.value)

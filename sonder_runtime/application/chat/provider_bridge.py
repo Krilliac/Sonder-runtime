@@ -63,18 +63,24 @@ class UnsupportedProviderFeature(InvalidInput):
 
 
 def provider_for_tier(tier_label: object, bindings: object) -> str:
-    """The provider a rung uses, per the contract's routing rules.
+    """The provider a rung uses.
 
-    The five provider tiers follow ``bindings.tier_providers``; the default
-    ``sonder`` route follows ``default_generation_provider``; exact
-    ``model:*`` pins and hosted/cloud tiers always stay on Ollama.
+    ``tier_label`` is the *resolved* rung label from ``server._serve_target``,
+    not the caller's ``model`` field.  The HTTP default route (``sonder``,
+    ``local`` or blank) resolves to the chat policy tier, so it follows that
+    tier's binding -- exactly as A2A's ChatService does.
+
+    * The five provider tiers follow ``bindings.tier_providers``.
+    * A resolved ``sonder`` label is the operator's local Ollama alias (strict
+      mode, or no chat tier model): like an exact ``model:*`` pin it always
+      stays on Ollama, matching ``ProviderDispatchGateway.generate_strict_alias``
+      so HTTP and A2A never serve the same alias from different providers.
+    * Hosted/cloud tiers always stay on Ollama.
     """
     tier = str(tier_label or "").strip().lower()
     tiers = getattr(bindings, "tier_providers", None) or {}
     if tier in tiers:
         return str(tiers[tier])
-    if tier == "sonder":
-        return str(getattr(bindings, "default_generation_provider", LEGACY_PROVIDER))
     return LEGACY_PROVIDER
 
 
@@ -213,11 +219,13 @@ def model_request_from_ollama_payload(
 
 def ollama_shape(response: ModelResponse) -> dict[str, object]:
     """Shape a ModelResponse as the Ollama reply legacy callers consume."""
+    # No ``done_reason``: the gateway does not report why the provider
+    # stopped, and claiming "stop" would hide a truncation from legacy
+    # consumers that look for "length".  Every consumer treats it as optional.
     shaped: dict[str, object] = {
         "model": response.model,
         "message": {"role": "assistant", "content": response.text},
         "done": True,
-        "done_reason": "stop",
     }
     if response.tokens_in is not None:
         shaped["prompt_eval_count"] = response.tokens_in

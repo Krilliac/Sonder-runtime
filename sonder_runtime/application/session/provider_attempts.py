@@ -78,6 +78,57 @@ def _response_evidence(result):
     return model, prompt, completion
 
 
+# Legacy transport failures carry a ``kind`` (ModelCallError); telemetry
+# exports the domain code instead of a Python class name.  The HTTP chat
+# route maps a turn's terminal ModelCallError kind with the same table.
+MODEL_ERROR_KIND_CODES = {
+    "timeout": "DEADLINE_EXCEEDED",
+    "cancelled": "CANCELLED",
+    "configuration": "INVALID_INPUT",
+    "unsupported_feature": "INVALID_INPUT",
+    "provider_unavailable": "DEPENDENCY_UNAVAILABLE",
+    "transport": "DEPENDENCY_UNAVAILABLE",
+    "request": "DEPENDENCY_UNAVAILABLE",
+    "protocol": "DEPENDENCY_UNAVAILABLE",
+    "empty_response": "DEPENDENCY_UNAVAILABLE",
+}
+
+
+def telemetry_error_code(error: BaseException) -> str:
+    """Classify a provider-send failure as a domain error code.
+
+    Domain errors keep their own code.  Transport failures are classified by
+    duck type (this layer imports no transport module): a timeout is
+    ``DEADLINE_EXCEEDED``, a refused or reset connection and a provider 5xx
+    are ``DEPENDENCY_UNAVAILABLE``, a 429 is ``CAPACITY_EXCEEDED`` and another
+    4xx is ``INVALID_INPUT``.  An interrupt is ``CANCELLED``; anything else is
+    ``INTERNAL_FAILURE``.
+    """
+    if isinstance(error, SonderError):
+        return error.code
+    kind = getattr(error, "kind", None)
+    if isinstance(kind, str) and kind in MODEL_ERROR_KIND_CODES:
+        status = getattr(error, "status", None)
+        if type(status) is int and status == 429:
+            return "CAPACITY_EXCEEDED"
+        return MODEL_ERROR_KIND_CODES[kind]
+    if not isinstance(error, Exception):
+        return "CANCELLED"
+    reason = getattr(error, "reason", None)
+    if isinstance(error, TimeoutError) or isinstance(reason, TimeoutError):
+        return "DEADLINE_EXCEEDED"
+    status = getattr(error, "code", None)
+    if type(status) is int and 400 <= status <= 599:
+        if status == 429:
+            return "CAPACITY_EXCEEDED"
+        if status in (408, 504):
+            return "DEADLINE_EXCEEDED"
+        return "DEPENDENCY_UNAVAILABLE" if status >= 500 else "INVALID_INPUT"
+    if isinstance(error, OSError):
+        return "DEPENDENCY_UNAVAILABLE"
+    return InternalFailure.code
+
+
 def _observed(provider, operation, payload, send):
     observer = _attempt_observer
     if observer is None:
@@ -92,9 +143,8 @@ def _observed(provider, operation, payload, send):
     try:
         result = send()
     except BaseException as error:
-        code = error.code if isinstance(error, SonderError) else type(error).__name__
         try:
-            observer.provider_send_finished(handle, error_code=str(code))
+            observer.provider_send_finished(handle, error_code=telemetry_error_code(error))
         except Exception:
             pass
         raise

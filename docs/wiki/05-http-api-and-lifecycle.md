@@ -36,19 +36,32 @@ production lifecycle and admission layer (`sonder_lifecycle.py`).
 | `GET /v1/observability/events` | admin | Content-free live telemetry stream: SSE by default, NDJSON with `?format=ndjson` or `Accept: application/x-ndjson`; resumes from `Last-Event-ID`. |
 | `GET /v1/sonder/ecosystem` | admin | `sonder.runtime.ecosystem/1`: provider bindings, per-provider status, Observatory stream URLs and connect URLs. |
 
-The three telemetry routes answer 404 when `SONDER_OBSERVATORY_EXPORT=0`.
-Browsers reach them through the route-scoped `SONDER_OBSERVATORY_ORIGINS`
-allowlist, which grants nothing else; stream subscribers are capped (429 with
-`Retry-After`) and never hold a chat admission slot. The event vocabulary,
+With `SONDER_OBSERVATORY_EXPORT=0` discovery and the event stream answer
+404; the ecosystem route also answers 404 unless the model gateway reports
+`provider_status()`, in which case it still reports providers with
+`export_enabled: false`. Browsers reach the three routes through the
+route-scoped `SONDER_OBSERVATORY_ORIGINS` allowlist, which grants nothing
+else; on a loopback bind they refuse a `Host` that is not `127.0.0.1`,
+`localhost` or `[::1]` (403 `forbidden_host`, the DNS-rebinding defence).
+Stream subscribers are capped (429 with `Retry-After`), never hold a chat
+admission slot, and release their slot within about a second of the client
+disconnecting. The event vocabulary,
 resume rules and Observatory setup are in
 [observatory-telemetry.md](../architecture/observatory-telemetry.md).
 
 When a tier is bound to a provider other than Ollama (`SONDER_MODEL_BACKEND`,
-`SONDER_<TIER>_PROVIDER`), `POST /v1/chat/completions` serves that tier
-through the model gateway: Ollama-only features (`response_format`,
-thinking, native tools) return 400, a provider outage returns 503 without
-escalating, and `sonder_receipt.degraded` names any Ollama-only step the turn
-ran without.
+`SONDER_<TIER>_PROVIDER`), the model path of `POST /v1/chat/completions`
+serves that tier through the model gateway: Ollama-only features
+(`response_format`, thinking, native tools) return 400, a provider outage
+returns 503 without escalating, a drain that starts mid-turn lets the turn
+finish, and `sonder_receipt.degraded` names any Ollama-only step the turn ran
+without. The default model (`sonder`) follows the chat policy tier's binding;
+exact model pins and the strict `sonder` alias stay on Ollama. Dispatchers
+that run before the model path keep their own route: web research (with
+`SONDER_WEB_TOOLS`) needs Ollama's tool calls and returns 503 naming the
+binding when its tier (`code` by default) is bound elsewhere; natural-language
+work intents, ensemble and fanout (developer only) stay on Ollama. A rejected
+`Origin` gets 403 with `"code": "forbidden_origin"`.
 
 `/live` may be unauthenticated so an external check never needs the key;
 everything else requires the bearer key unless the peer is loopback (the

@@ -5213,21 +5213,24 @@ def _bridge_provider_for_tier(tier_label, cloud=False):
 
 
 class _BridgeCancellation:
-    """Cancellation that honours both the ambient token and a legacy check."""
+    """Cancellation for one bridged model step: the legacy ``cancel_check`` only.
 
-    def __init__(self, base, cancel_check):
-        self._base = base
+    The ambient HTTP context carries the lifecycle coordinator's token, which
+    ``drain()`` cancels the moment a drain starts.  An admitted turn on the
+    Ollama path is never interrupted by that token -- drain waits for it --
+    so a bridged turn must not be either: honouring the coordinator token here
+    would throw away an answer the provider already produced (and billed).
+    Client disconnects and explicit cancels still arrive via ``cancel_check``.
+    """
+
+    def __init__(self, cancel_check):
         self._check = cancel_check
 
     @property
     def cancelled(self):
-        if self._base is not None and self._base.cancelled:
-            return True
         return bool(self._check()) if callable(self._check) else False
 
     def wait(self, timeout=None):
-        if self._base is not None:
-            return self._base.wait(timeout)
         if timeout:
             time.sleep(max(timeout, 0.0))
         return self.cancelled
@@ -5238,7 +5241,10 @@ def _bridge_operation_context(timeout, cancel_check):
 
     The HTTP context's own 30 s default is an admission budget, not a model
     budget; the legacy call's timeout is the deadline, as on the Ollama path.
-    Consent follows the same host policy _gateway_generate_text applies.
+    Its cancellation is the legacy ``cancel_check`` only (see
+    ``_BridgeCancellation``): a drain that starts after admission lets the
+    turn finish, exactly as it does for an Ollama rung.  Consent follows the
+    same host policy _gateway_generate_text applies.
     """
     import dataclasses
     from sonder_runtime.application.context import (
@@ -5254,14 +5260,14 @@ def _bridge_operation_context(timeout, cancel_check):
         return dataclasses.replace(
             ambient,
             deadline_monotonic=deadline,
-            cancellation=_BridgeCancellation(ambient.cancellation, cancel_check),
+            cancellation=_BridgeCancellation(cancel_check),
             cloud_allowed=cloud_allowed,
             remote_ollama_allowed=remote_ollama_allowed,
         )
     return local_owner_context(
         correlation_id="chat-%s" % os.urandom(6).hex(),
         timeout_seconds=float(timeout) if timeout else None,
-        cancellation=_BridgeCancellation(None, cancel_check),
+        cancellation=_BridgeCancellation(cancel_check),
         cloud_allowed=cloud_allowed,
         remote_ollama_allowed=remote_ollama_allowed,
     )
@@ -5283,6 +5289,31 @@ def _bridged_chat_request(payload, rung, *, timeout, cancel_check):
             transient=failure.transient, attempts=1, cloud=False,
         ) from exc
     return out, response.text
+
+
+def _refuse_ollama_agent_on_bound_tier(tier, step):
+    """Fail closed when an Ollama-only HTTP chat step meets a bound tier.
+
+    The tool-using agent (web research) drives Ollama's native tool calls,
+    which the gateway cannot carry.  When the tier it would run on is bound
+    to another provider, answering from Ollama would silently ignore the
+    binding -- and with Ollama absent it would return a transport error as a
+    200 answer -- so the turn ends with a 503 that names the binding.
+    """
+    _model, cloud, _augment, tier_label = _serve_target(tier, None)
+    if tier_label in (None, "cloud-disabled"):
+        return
+    provider = _bridge_provider_for_tier(tier_label, cloud)
+    if provider is None:
+        return
+    raise ModelCallError(
+        "configuration",
+        "%s runs a tool-using agent that only Ollama serves, but tier %r is "
+        "bound to provider %s; bind that tier to ollama "
+        "(SONDER_%s_PROVIDER=ollama) to use it over HTTP chat"
+        % (step, tier_label, provider, str(tier_label).upper()),
+        status=503, attempts=0,
+    )
 
 
 def _note_bridged_degradation(step, detail):
@@ -16321,8 +16352,16 @@ def chat_web_response(
     location_consent: bool = False,
     location_hint=None,
     allow_server_location_lookup: bool = False,
+    gateway_bound: bool = False,
 ) -> str | None:
-    """Handle explicit web chat intent before the plain model fallback."""
+    """Handle explicit web chat intent before the plain model fallback.
+
+    ``gateway_bound`` is set by the HTTP chat route, where provider bindings
+    apply: the research agent's tool-using model steps only exist on Ollama,
+    so a research turn whose tier is bound to another provider fails closed
+    (503 naming the binding) instead of reaching an Ollama the operator did
+    not bind.  REPL and MCP keep their documented Ollama route.
+    """
     _maybe_live_reload()
     refusal = intents.containment_egress_refusal(prompt)
     if refusal:
@@ -16417,6 +16456,8 @@ def chat_web_response(
     # workspace discovery, which wastes serialized local-model steps on a pure
     # web question (observed: a spurious local text_search after web results
     # already answered the prompt).
+    if gateway_bound:
+        _refuse_ollama_agent_on_bound_tier(tier or "code", "web research")
     return _agent_impl(
         task,
         tier=tier or "code",

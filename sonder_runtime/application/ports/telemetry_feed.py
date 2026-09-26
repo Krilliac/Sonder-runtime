@@ -8,9 +8,22 @@ The port carries no transport: HTTP framing lives in the interface layer.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Mapping, Protocol
 
 from ...domain.common.errors import CapacityExceeded
+
+
+def rfc3339_millis(moment: datetime) -> str:
+    """The protocol's wall-clock format: RFC 3339 UTC, milliseconds, ``Z``.
+
+    Used for envelope ``wall_time`` and document timestamps such as the
+    ecosystem ``generated_at``; a naive datetime is taken as UTC.
+    """
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    utc = moment.astimezone(timezone.utc)
+    return utc.strftime("%Y-%m-%dT%H:%M:%S.") + "%03dZ" % (utc.microsecond // 1000)
 
 
 class SubscriberLimitReached(CapacityExceeded):
@@ -83,4 +96,5 @@ __all__ = [
     "SubscriberLimitReached",
     "TelemetryFeed",
     "TelemetrySubscription",
+    "rfc3339_millis",
 ]

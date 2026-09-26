@@ -299,3 +299,48 @@ def test_failed_send_message_ends_the_turn_as_failed():
     terminal = telemetry.events[-1]
     assert terminal.event_code == "request.failed"
     assert terminal.fields["error_code"] == "DEPENDENCY_UNAVAILABLE"
+
+
+def test_http_a2a_route_binds_the_request_context_for_an_unjoinable_message_id(monkeypatch):
+    """Through the real HTTP handler: serve.py binds its own OperationContext,
+    so a messageId outside the correlation grammar joins X-Sonder-Correlation-Id."""
+    import http.client
+    import json
+    import threading
+
+    import sonder_runtime.bootstrap.app as bootstrap_app
+    import sonder_runtime.interfaces.http.serve as ts
+
+    application, telemetry = _telemetry_application(_ContextRecordingChat())
+    handler = build_application_a2a_handler(application, base_url="https://sonder.test")
+    monkeypatch.setattr(ts, "_A2A_REQUEST_HANDLER", handler)
+    monkeypatch.setattr(bootstrap_app, "default_app", lambda **_k: application)
+    monkeypatch.setattr(ts, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    httpd = ts.ThreadingHTTPServer(("127.0.0.1", 0), ts.Handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=30)
+        conn.request("POST", "/a2a", body=json.dumps({
+            "jsonrpc": "2.0", "id": 1, "method": "SendMessage",
+            "params": {"message": {"messageId": "message id with spaces",
+                                   "role": "ROLE_USER", "parts": [{"text": "hello"}]}},
+        }), headers={"Content-Type": "application/json"})
+        response = conn.getresponse()
+        body = json.loads(response.read())
+        correlation = response.getheader("X-Sonder-Correlation-Id")
+        conn.close()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+    assert response.status == 200, body
+    assert body["result"]["task"]["status"]["state"] == "TASK_STATE_COMPLETED"
+    context, ambient = application.chat.contexts[0]
+    assert correlation and context.correlation_id == correlation
+    assert ambient is context
+    assert {e.correlation_id for e in telemetry.events} == {correlation}
+    assert [e.event_code for e in telemetry.events] == ["request.started", "request.completed"]

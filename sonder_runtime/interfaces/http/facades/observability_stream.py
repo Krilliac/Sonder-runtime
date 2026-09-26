@@ -101,8 +101,14 @@ def stream_frames(
     heartbeat_seconds: float = HEARTBEAT_SECONDS,
     poll_seconds: float = POLL_SECONDS,
     clock: Callable[[], float] = time.monotonic,
+    peer_closed: Callable[[], bool] | None = None,
 ) -> Iterator[bytes]:
-    """Yield wire frames until the feed closes the subscription or ``should_stop``.
+    """Yield wire frames until the feed closes the subscription, ``should_stop``
+    says an idle stream must end, or ``peer_closed`` says the client went away.
+
+    ``peer_closed`` is checked once per poll without writing, so an idle
+    stream whose client disconnected releases its subscriber slot within
+    about ``poll_seconds`` instead of waiting for a heartbeat write to fail.
 
     SSE opens with ``retry: 2000``, announces a stale resume point as
     ``: resume-gap <from>-<to>`` and a per-subscriber loss as ``: dropped <n>``,
@@ -118,7 +124,9 @@ def stream_frames(
         if gap is not None:
             yield sse_comment("resume-gap %d-%d" % (gap.first_missing, gap.last_missing))
     last_write = clock()
-    while not should_stop():
+    while True:
+        if peer_closed is not None and peer_closed():
+            return
         batch = subscription.next_batch(poll_seconds)
         if batch.closed:
             return
@@ -130,7 +138,12 @@ def stream_frames(
         if chunks:
             yield b"".join(chunks)
             last_write = clock()
-        elif clock() - last_write >= heartbeat_seconds:
+            continue
+        # ``should_stop`` ends only an idle stream, so events already
+        # sequenced (a closing session.ended) are never cut off.
+        if should_stop():
+            return
+        if clock() - last_write >= heartbeat_seconds:
             yield sse_comment("keepalive") if sse else b"\n"
             last_write = clock()
 

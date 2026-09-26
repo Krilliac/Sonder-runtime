@@ -9,7 +9,10 @@ counters.  Nothing here probes a provider; a gateway without
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Mapping, Sequence
+
+from ..ports.telemetry_feed import rfc3339_millis
 
 ECOSYSTEM_SCHEMA = "sonder.runtime.ecosystem/1"
 PROVIDER_TIER_NAMES = ("fast", "general", "code", "reasoning", "vision")
@@ -108,19 +111,39 @@ def ecosystem_warnings(
     *,
     export_enabled: bool,
     observatory_origins: Sequence[str],
+    dedicated_origins: Sequence[str] | None = None,
 ) -> list[str]:
+    """Operator warnings for the ecosystem document.
+
+    ``observatory_origins`` are every origin that may read the telemetry
+    routes (the route-scoped list plus the global ``SONDER_CORS_ORIGINS``);
+    ``dedicated_origins`` are the route-scoped ``SONDER_OBSERVATORY_ORIGINS``
+    alone.  A global origin (for example the Flutter web app) does not mean
+    Observatory was configured, so the missing-origin warning looks at the
+    dedicated list.
+    """
     warnings: list[str] = []
+    dedicated = list(observatory_origins if dedicated_origins is None else dedicated_origins)
     if projection.get("embedding_provider") == "sonder_inference":
         warnings.append(
             "embedding_provider is sonder_inference, which does not serve "
             "embeddings; set SONDER_EMBEDDING_PROVIDER=ollama"
         )
-    if export_enabled and not observatory_origins:
-        warnings.append(
-            "no browser origin may read Runtime telemetry; add the Observatory "
-            "origin to SONDER_OBSERVATORY_ORIGINS (for example "
-            "http://127.0.0.1:4173)"
-        )
+    if export_enabled and not dedicated:
+        if observatory_origins:
+            warnings.append(
+                "no SONDER_OBSERVATORY_ORIGINS entry: only the global "
+                "SONDER_CORS_ORIGINS origins (%s) may read Runtime telemetry "
+                "in a browser; add the Observatory origin to "
+                "SONDER_OBSERVATORY_ORIGINS (for example http://127.0.0.1:4173)"
+                % ", ".join(observatory_origins)
+            )
+        else:
+            warnings.append(
+                "no browser origin may read Runtime telemetry; add the Observatory "
+                "origin to SONDER_OBSERVATORY_ORIGINS (for example "
+                "http://127.0.0.1:4173)"
+            )
     if not export_enabled:
         warnings.append(
             "live telemetry export is disabled (SONDER_OBSERVATORY_EXPORT=0)"
@@ -136,14 +159,17 @@ def ecosystem_warnings(
     if any(name and name != "ollama" for name in generation):
         warnings.append(
             "provider bindings apply to HTTP chat and A2A; REPL, MCP, autopilot "
-            "and fleet generation still use Ollama"
+            "and fleet generation still use Ollama, and so do these HTTP chat "
+            "dispatchers: natural-language work intents, ensemble and fanout "
+            "(developer surfaces), exact model pins and the strict sonder "
+            "alias; web research on a tier bound elsewhere is refused with 503"
         )
     return warnings
 
 
 def build_ecosystem_status(
     *,
-    generated_at: str,
+    generated_at: datetime | str,
     runtime: Mapping[str, object],
     bindings: object,
     gateway: object,
@@ -152,6 +178,7 @@ def build_ecosystem_status(
     stats: Mapping[str, object] | None,
     observatory_origins: Sequence[str],
     runtime_base_url: str,
+    dedicated_origins: Sequence[str] | None = None,
 ) -> dict[str, object] | None:
     """Return the ecosystem document, or None when there is nothing to report.
 
@@ -173,7 +200,10 @@ def build_ecosystem_status(
     stats = stats or {}
     return {
         "schema": ECOSYSTEM_SCHEMA,
-        "generated_at": generated_at,
+        "generated_at": (
+            rfc3339_millis(generated_at) if isinstance(generated_at, datetime)
+            else str(generated_at)
+        ),
         "runtime": {
             "version": str(runtime.get("version") or ""),
             "instance_id": runtime.get("instance_id"),
@@ -194,6 +224,7 @@ def build_ecosystem_status(
                 projection, statuses,
                 export_enabled=export_enabled,
                 observatory_origins=observatory_origins,
+                dedicated_origins=dedicated_origins,
             ),
         },
     }

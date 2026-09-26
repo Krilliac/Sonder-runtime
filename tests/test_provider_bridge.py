@@ -49,7 +49,8 @@ def _payload(**extra):
     ("general", "openai_compatible"),
     ("code", "sonder_inference"),
     ("fast", "ollama"),
-    ("sonder", "openai_compatible"),
+    # The resolved ``sonder`` label is the local Ollama alias (strict mode).
+    ("sonder", "ollama"),
     ("model:llama3:8b", "ollama"),
     ("cloud-code", "ollama"),
     ("", "ollama"),
@@ -111,7 +112,6 @@ def test_response_is_shaped_as_the_ollama_reply_legacy_callers_read():
         "model": "served-model",
         "message": {"role": "assistant", "content": "hello"},
         "done": True,
-        "done_reason": "stop",
         "prompt_eval_count": 11,
         "eval_count": 3,
     }

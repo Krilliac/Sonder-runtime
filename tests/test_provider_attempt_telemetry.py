@@ -123,3 +123,57 @@ def test_fallback_reports_reach_observers_that_opt_in(observer):
 def test_fallback_report_without_observer_is_a_no_op():
     attempts.clear_provider_attempt_observer()
     attempts.report_provider_fallback("a", "b", "c")
+
+
+class _KindedFailure(Exception):
+    """Duck-typed like the legacy ModelCallError (kind + status)."""
+
+    def __init__(self, kind, status=None):
+        super().__init__(kind)
+        self.kind = kind
+        self.status = status
+
+
+class _HttpStatusFailure(OSError):
+    """Duck-typed like urllib's HTTPError (an OSError with an int ``code``)."""
+
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
+
+
+class _WrappedTimeout(OSError):
+    """Duck-typed like URLError(reason=timeout)."""
+
+    def __init__(self):
+        super().__init__("timed out")
+        self.reason = TimeoutError("timed out")
+
+
+@pytest.mark.parametrize("error,code", [
+    (DependencyUnavailable("down"), "DEPENDENCY_UNAVAILABLE"),
+    (ConnectionRefusedError(111, "Connection refused"), "DEPENDENCY_UNAVAILABLE"),
+    (OSError("Connection refused"), "DEPENDENCY_UNAVAILABLE"),
+    (TimeoutError("timed out"), "DEADLINE_EXCEEDED"),
+    (_WrappedTimeout(), "DEADLINE_EXCEEDED"),
+    (_HttpStatusFailure(503), "DEPENDENCY_UNAVAILABLE"),
+    (_HttpStatusFailure(429), "CAPACITY_EXCEEDED"),
+    (_HttpStatusFailure(400), "INVALID_INPUT"),
+    (_KindedFailure("timeout"), "DEADLINE_EXCEEDED"),
+    (_KindedFailure("cancelled"), "CANCELLED"),
+    (_KindedFailure("provider_unavailable", 503), "DEPENDENCY_UNAVAILABLE"),
+    (_KindedFailure("request", 429), "CAPACITY_EXCEEDED"),
+    (KeyboardInterrupt(), "CANCELLED"),
+    (ValueError("bad json"), "INTERNAL_FAILURE"),
+])
+def test_transport_failures_are_classified_as_domain_codes(error, code):
+    assert attempts.telemetry_error_code(error) == code
+
+
+def test_route_error_codes_are_never_python_class_names(observer):
+    def send():
+        raise ConnectionRefusedError(111, "Connection refused")
+
+    with pytest.raises(ConnectionRefusedError):
+        attempts.dispatch_provider("ollama", "/api/chat", {"model": "q"}, send)
+    assert observer.finished == [(1, {"error_code": "DEPENDENCY_UNAVAILABLE"})]

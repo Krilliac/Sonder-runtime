@@ -325,9 +325,8 @@ def test_http_chat_turn_is_exported_with_the_correlation_id(monkeypatch, local_o
     assert status == 200, payload
     correlation = headers["x-sonder-correlation-id"]
     assert seen["ambient"].correlation_id == correlation
+    turn = _chat_turn_events(app, correlation)
     batch = app.producer.subscribe().next_batch(0.1, limit=100)
-    envelopes = [json.loads(event.line) for event in batch.events]
-    turn = [e for e in envelopes if e["request_id"] == correlation]
     assert [e["event_type"] for e in turn] == [
         "request.started", "route.selected", "request.completed",
     ]
@@ -410,3 +409,239 @@ def test_should_stop_ends_the_stream():
     subscription = _ScriptedSubscription([FeedBatch()] * 100)
     frames = list(stream.stream_frames(subscription, "sse", should_stop=lambda: True))
     assert frames == [b"retry: 2000\n\n"]
+
+
+def test_a_disconnected_idle_client_releases_its_slot_promptly(monkeypatch, local_open):
+    """EOF is detected without a heartbeat write, so the cap frees within ~1 s."""
+    import socket
+
+    app = _application(max_subscribers=1)
+    with _serve(monkeypatch, app) as port:
+        client = socket.create_connection(("127.0.0.1", port), timeout=10)
+        client.sendall(b"GET /v1/observability/events?since=now HTTP/1.1\r\n"
+                       b"Host: 127.0.0.1\r\nAccept: text/event-stream\r\n\r\n")
+        received = b""
+        while b"retry: 2000" not in received:
+            received += client.recv(4096)
+        assert app.producer.stats()["subscribers"] == 1
+        client.close()
+        started = time.monotonic()
+        while app.producer.stats()["subscribers"] and time.monotonic() - started < 5:
+            time.sleep(0.05)
+        assert app.producer.stats()["subscribers"] == 0
+        assert time.monotonic() - started < 5
+        with _open_stream(port, "/v1/observability/events") as response:
+            assert response.status == 200
+
+
+def test_rejected_origin_carries_the_forbidden_origin_code(monkeypatch, local_open):
+    with _serve(monkeypatch, _application()) as port:
+        status, _, body = _request(port, "GET", "/.well-known/sonder-telemetry",
+                                   headers={"Origin": "https://denied.example"})
+    assert status == 403
+    assert json.loads(body)["error"]["code"] == "forbidden_origin"
+
+
+def test_loopback_telemetry_routes_refuse_a_rebound_host(monkeypatch, local_open):
+    monkeypatch.setattr(ts, "HOST", "127.0.0.1")
+    monkeypatch.setattr(ts, "TLS_TERMINATED_BY_PROXY", False)
+    with _serve(monkeypatch, _application()) as port:
+        for path in ("/.well-known/sonder-telemetry", "/v1/sonder/ecosystem",
+                     "/v1/observability/events"):
+            status, _, body = _request(port, "GET", path,
+                                       headers={"Host": "evil.example:%d" % port})
+            assert status == 403, path
+            assert json.loads(body)["error"]["code"] == "forbidden_host"
+        for host in ("localhost:%d" % port, "127.0.0.1", "[::1]:%d" % port):
+            status, _, _ = _request(port, "GET", "/.well-known/sonder-telemetry",
+                                    headers={"Host": host})
+            assert status == 200, host
+
+
+def test_rebinding_check_is_off_behind_a_declared_tls_proxy(monkeypatch, local_open):
+    monkeypatch.setattr(ts, "HOST", "127.0.0.1")
+    monkeypatch.setattr(ts, "TLS_TERMINATED_BY_PROXY", True)
+    with _serve(monkeypatch, _application()) as port:
+        status, _, _ = _request(port, "GET", "/.well-known/sonder-telemetry",
+                                headers={"Host": "sonder.example.org"})
+    assert status == 200
+
+
+def test_lifecycle_drain_ends_streams_after_delivering_session_ended(monkeypatch, local_open):
+    """serve.main's drain hook, on a real coordinator and a composed graph."""
+    from sonder_runtime.bootstrap.app import _compose_live_telemetry
+    from sonder_runtime.platform.config import SonderConfig
+    from sonder_runtime.platform.service_state import ServiceStateTracker
+    from sonder_runtime.platform.shutdown import ShutdownCoordinator
+
+    live = _compose_live_telemetry(SonderConfig(), Redactor(),
+                                   ProviderBindings.uniform("ollama"))
+    app = SimpleNamespace(telemetry=live.telemetry, telemetry_feed=live.producer,
+                          close_telemetry=live.close, producer=live.producer,
+                          provider_bindings=ProviderBindings.uniform("ollama"),
+                          model_gateway=SimpleNamespace())
+    coordinator = ShutdownCoordinator(ServiceStateTracker(), drain_deadline_seconds=1)
+    assert ts._register_telemetry_drain(coordinator, app) is True
+    try:
+        with _serve(monkeypatch, app) as port:
+            with _open_stream(port, "/v1/observability/events?format=ndjson") as response:
+                first = json.loads(response.fp.readline())
+                assert first["event_type"] == "session.started"
+                started = time.monotonic()
+                threading.Thread(target=coordinator.drain, daemon=True).start()
+                rest = []
+                while True:
+                    line = response.fp.readline()
+                    if not line:
+                        break
+                    if line.strip():
+                        rest.append(json.loads(line))
+                assert time.monotonic() - started < 5
+    finally:
+        live.close()
+    assert [e["event_type"] for e in rest] == ["session.ended"]
+    assert live.producer.stats()["subscribers"] == 0
+
+
+def test_register_telemetry_drain_skips_a_disabled_export():
+    from sonder_runtime.platform.service_state import ServiceStateTracker
+    from sonder_runtime.platform.shutdown import ShutdownCoordinator
+
+    coordinator = ShutdownCoordinator(ServiceStateTracker())
+    assert ts._register_telemetry_drain(coordinator, SimpleNamespace(telemetry_feed=None)) is False
+    assert coordinator._flush_hooks == []
+
+
+def _chat_turn_events(app, correlation):
+    """The turn's events, once its terminal event exists.
+
+    The terminal request.* event is emitted when the handler unwinds, which
+    can be just after the client has read the response.
+    """
+    deadline = time.monotonic() + 5
+    while True:
+        subscription = app.producer.subscribe()
+        try:
+            batch = subscription.next_batch(0.1, limit=4096)
+        finally:
+            subscription.close()
+        envelopes = [json.loads(event.line) for event in batch.events]
+        turn = [e for e in envelopes if e["request_id"] == correlation]
+        if (turn and turn[-1]["event_type"] in TERMINAL) or time.monotonic() > deadline:
+            return turn
+        time.sleep(0.02)
+
+
+TERMINAL = {"request.completed", "request.failed", "request.cancelled"}
+
+
+def test_streamed_chat_turn_ends_with_one_terminal_event(monkeypatch, local_open):
+    app = _application()
+    _open_chat(monkeypatch, lambda prompt, history, **k: "streamed answer")
+    body = json.dumps({"model": "sonder", "stream": True,
+                       "messages": [{"role": "user", "content": "x"}]})
+    with _serve(monkeypatch, app) as port:
+        status, headers, payload = _request(port, "POST", "/v1/chat/completions", body=body,
+                                            headers={"Content-Type": "application/json"})
+    assert status == 200
+    assert b"data: [DONE]" in payload
+    turn = _chat_turn_events(app, headers["x-sonder-correlation-id"])
+    assert [e["event_type"] for e in turn] == ["request.started", "request.completed"]
+    assert turn[0]["attributes"]["stream"] is True
+    assert turn[1]["attributes"]["http_status"] == 200
+
+
+def test_a_legacy_error_answer_is_exported_as_a_failed_turn(monkeypatch, local_open):
+    """A 200 whose body is the legacy 'ERROR ...' answer never reads as completed."""
+    app = _application()
+    provider_attempts.install_provider_attempt_observer(app.telemetry)
+
+    def fake_answer(prompt, history, **kwargs):
+        def refused():
+            raise ConnectionRefusedError(111, "Connection refused")
+
+        with pytest.raises(ConnectionRefusedError):
+            provider_attempts.dispatch_provider(
+                "ollama", "/api/chat", {"model": "qwen"}, refused,
+            )
+        return "ERROR contacting local Ollama at http://127.0.0.1:19434: refused"
+
+    _open_chat(monkeypatch, fake_answer)
+    body = json.dumps({"model": "sonder", "messages": [{"role": "user", "content": "x"}]})
+    try:
+        with _serve(monkeypatch, app) as port:
+            status, headers, _ = _request(port, "POST", "/v1/chat/completions", body=body,
+                                          headers={"Content-Type": "application/json"})
+    finally:
+        provider_attempts.clear_provider_attempt_observer(app.telemetry)
+    assert status == 200
+    turn = _chat_turn_events(app, headers["x-sonder-correlation-id"])
+    assert [e["event_type"] for e in turn] == [
+        "request.started", "route.selected", "request.failed",
+    ]
+    assert turn[1]["attributes"]["error_code"] == "DEPENDENCY_UNAVAILABLE"
+    assert turn[2]["attributes"]["outcome"] == "failed"
+    assert turn[2]["attributes"]["http_status"] == 200
+    assert turn[2]["attributes"]["error_code"] == "DEPENDENCY_UNAVAILABLE"
+
+
+def test_model_call_failure_reports_its_kind_and_cancellation(monkeypatch, local_open):
+    app = _application()
+    kinds = iter(["provider_unavailable", "cancelled"])
+
+    def fake_answer(prompt, history, **kwargs):
+        kind = next(kinds)
+        raise ts.server.ModelCallError(kind, "provider openai_compatible is unavailable",
+                                       status=503)
+
+    _open_chat(monkeypatch, fake_answer)
+    body = json.dumps({"model": "sonder", "messages": [{"role": "user", "content": "x"}]})
+    terminals = []
+    with _serve(monkeypatch, app) as port:
+        for _ in range(2):
+            status, headers, _ = _request(port, "POST", "/v1/chat/completions", body=body,
+                                          headers={"Content-Type": "application/json"})
+            assert status == 503
+            terminals.append(_chat_turn_events(app, headers["x-sonder-correlation-id"])[-1])
+    assert terminals[0]["event_type"] == "request.failed"
+    assert terminals[0]["attributes"]["error_code"] == "DEPENDENCY_UNAVAILABLE"
+    assert terminals[1]["event_type"] == "request.cancelled"
+    assert terminals[1]["attributes"]["error_code"] == "CANCELLED"
+
+
+@pytest.mark.parametrize("result,kind,reply,attempt,expected", [
+    ("ok", None, False, None, ("completed", None)),
+    ("ok", None, True, None, ("failed", "ERROR_REPLY")),
+    ("ok", None, False, "DEADLINE_EXCEEDED", ("failed", "DEADLINE_EXCEEDED")),
+    ("model_error", "timeout", False, None, ("failed", "DEADLINE_EXCEEDED")),
+    ("model_error", "cancelled", False, None, ("cancelled", "CANCELLED")),
+    ("cancelled", None, False, None, ("cancelled", "CANCELLED")),
+    ("stream_error", None, False, None, ("failed", "stream_error")),
+    ("model_error", "configuration", False, None, ("failed", "INVALID_INPUT")),
+])
+def test_chat_turn_outcome_mapping(result, kind, reply, attempt, expected):
+    assert ts._chat_turn_outcome(result, kind, error_reply=reply,
+                                 failed_attempt_code=attempt) == expected
+
+
+def test_a_503_configuration_refusal_is_not_the_callers_error():
+    assert ts._chat_turn_outcome("model_error", "configuration", http_status=503) == (
+        "failed", "DEPENDENCY_UNAVAILABLE",
+    )
+    assert ts._chat_turn_outcome("model_error", "configuration", http_status=400) == (
+        "failed", "INVALID_INPUT",
+    )
+
+
+def test_a_draining_idle_stream_still_delivers_pending_events_first():
+    event = FeedEvent("rt-0123456789ab-3", 3, '{"sequence":3}')
+    subscription = _ScriptedSubscription([FeedBatch(events=(event,)), FeedBatch()])
+    frames = list(stream.stream_frames(subscription, "ndjson", should_stop=lambda: True))
+    assert frames == [b'{"sequence":3}\n']
+
+
+def test_legacy_error_reply_detection():
+    assert ts._is_legacy_error_reply("ERROR contacting Ollama at x")
+    assert ts._is_legacy_error_reply("ERROR: no model produced an answer.")
+    assert not ts._is_legacy_error_reply("ERRORS happen; here is why")
+    assert not ts._is_legacy_error_reply("The log said ERROR: x")

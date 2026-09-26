@@ -85,24 +85,107 @@ def test_operation_id_stands_in_for_run_id():
     assert _lines(producer.subscribe())[0]["run_id"] == "op-1"
 
 
-def test_hundred_thousand_emits_without_subscribers_stay_bounded():
+def test_emits_without_subscribers_stay_bounded_in_memory():
+    """Memory is bounded by the ring, not by the number of emits.
+
+    Measured with tracemalloc (which slows every allocation), so this test
+    makes no timing claim; the cost bound is the separate test below.
+    """
     producer = _producer(capacity=4096)
     tracemalloc.start()
     try:
-        started = time.monotonic()
-        for index in range(100_000):
+        for index in range(8192):  # fill the ring twice
             producer.emit(_event(n=index))
-        elapsed = time.monotonic() - started
-        _current, peak = tracemalloc.get_traced_memory()
+        filled, _peak = tracemalloc.get_traced_memory()
+        for index in range(20_000):
+            producer.emit(_event(n=index))
+        after, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
     stats = producer.stats()
-    assert stats["emitted_events"] == 100_000
+    assert stats["emitted_events"] == 28_192
     assert stats["retained_events"] == 4096
     assert stats["dropped_events"] == 0
-    # Bounded by the ring, not by the number of emits (4096 short lines).
+    # 20k further emits into a full ring retain nothing new.
+    assert after - filled < 512 * 1024
     assert peak < 16 * 1024 * 1024
-    assert elapsed < 30
+
+
+def test_hundred_thousand_emits_without_subscribers_are_cheap():
+    """Constant emit cost, with a generous bound that survives a loaded runner.
+
+    Measured without tracemalloc; typical cost is tens of microseconds.
+    """
+    producer = _producer(capacity=4096)
+    started = time.perf_counter()
+    for index in range(100_000):
+        producer.emit(_event(n=index))
+    elapsed = time.perf_counter() - started
+    assert producer.stats()["emitted_events"] == 100_000
+    assert elapsed / 100_000 < 0.001  # under 1 ms per emit on average
+
+
+def test_sequence_and_mono_ns_orderings_agree_under_concurrency():
+    """mono_ns is stamped under the lock that assigns sequence (replay order)."""
+    producer = _producer(capacity=65536)
+
+    def emit_many():
+        for index in range(2_000):
+            producer.emit(_event(n=index))
+
+    workers = [threading.Thread(target=emit_many) for _ in range(8)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(30)
+    subscription = producer.subscribe()
+    envelopes = []
+    while True:
+        batch = subscription.next_batch(0.05, limit=4096)
+        if not batch.events:
+            break
+        envelopes.extend(json.loads(event.line) for event in batch.events)
+    assert len(envelopes) == 16_000
+    by_sequence = [e["mono_ns"] for e in sorted(envelopes, key=lambda e: e["sequence"])]
+    assert by_sequence == sorted(by_sequence)
+
+
+def test_an_unreadable_clock_drops_the_event_before_it_is_numbered():
+    calls = iter([1, RuntimeError("clock"), 3, 4])
+
+    def clock():
+        value = next(calls)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    producer = _producer(monotonic_ns=clock)
+    producer.emit(_event())
+    producer.emit(_event())  # the clock fails: dropped, reported, never raised
+    envelopes = _lines(producer.subscribe())
+    assert [e["sequence"] for e in envelopes] == [0, 1]
+    assert envelopes[1]["event_type"] == "telemetry.dropped"
+    assert envelopes[1]["attributes"]["dropped_events"] == 1
+
+
+def test_closed_subscriptions_still_receive_events_sequenced_before_the_close():
+    producer = _producer()
+    subscription = producer.subscribe(since_now=True)
+    producer.emit(_event("session.ended"))
+    producer.close_subscribers()
+    producer.emit(_event("after.close"))
+    batch = subscription.next_batch(0.05)
+    assert [json.loads(e.line)["event_type"] for e in batch.events] == ["session.ended"]
+    assert subscription.next_batch(0.05).closed
+    assert producer.stats()["subscribers"] == 0
+
+
+def test_a_self_closed_subscription_drains_nothing():
+    producer = _producer()
+    subscription = producer.subscribe()
+    producer.emit(_event())
+    subscription.close()
+    assert subscription.next_batch(0.05).closed
 
 
 def test_a_stalled_subscriber_never_blocks_emit_and_learns_its_loss():

@@ -35,6 +35,7 @@ from ...application.ports.telemetry_feed import (
     FeedEvent,
     ResumeGap,
     SubscriberLimitReached,
+    rfc3339_millis,
 )
 from ...application.ports.telemetry_sink import TelemetryEvent
 
@@ -64,14 +65,6 @@ def clamp_buffer(value: object) -> int:
     return max(MIN_BUFFER, min(MAX_BUFFER, number))
 
 
-def rfc3339_millis(moment: datetime) -> str:
-    """RFC 3339 UTC with milliseconds and ``Z`` (envelope ``wall_time``)."""
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
-    utc = moment.astimezone(timezone.utc)
-    return utc.strftime("%Y-%m-%dT%H:%M:%S.") + "%03dZ" % (utc.microsecond // 1000)
-
-
 def parse_event_id(value: object) -> tuple[str, int] | None:
     """Split ``<instance_id>-<sequence>`` at the last ``-``."""
     if not isinstance(value, str) or "-" not in value:
@@ -91,6 +84,11 @@ class _Subscription:
         self._next = next_sequence
         self._gap = gap
         self._closed = False
+        # Set when the producer closes this subscription: events sequenced
+        # before that point are still delivered (session.ended and the final
+        # telemetry.dropped are emitted just before a close), then the batch
+        # reports ``closed``.  A subscriber that closes itself drains nothing.
+        self._close_at: int | None = None
 
     @property
     def resume_gap(self) -> ResumeGap | None:
@@ -100,26 +98,34 @@ class _Subscription:
     def closed(self) -> bool:
         return self._closed
 
+    def _end_locked(self) -> int:
+        end = self._producer._next_sequence
+        if self._closed:
+            end = min(end, self._close_at if self._close_at is not None else self._next)
+        return end
+
     def next_batch(self, timeout: float, *, limit: int = 256) -> FeedBatch:
         producer = self._producer
         limit = max(1, min(int(limit), 4096))
         deadline = time.monotonic() + max(0.0, float(timeout))
         with producer._cond:
-            while not self._closed and self._next >= producer._next_sequence:
+            while self._next >= self._end_locked():
+                if self._closed:
+                    return FeedBatch(closed=True)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return FeedBatch()
                 producer._cond.wait(remaining)
-            if self._closed:
-                return FeedBatch(closed=True)
+            end = self._end_locked()
             oldest = producer._oldest_locked()
             lost = 0
             if self._next < oldest:
                 lost = oldest - self._next
                 producer._subscriber_dropped += lost
                 self._next = oldest
+            count = max(0, min(limit, end - self._next))
             start = self._next - oldest
-            events = tuple(itertools.islice(producer._ring, start, start + limit))
+            events = tuple(itertools.islice(producer._ring, start, start + count))
             self._next += len(events)
         return FeedBatch(events=events, lost=lost)
 
@@ -204,7 +210,6 @@ class ObservatoryProducer:
             "schema": EVENT_SCHEMA,
             "event_type": event.event_code,
             "wall_time": rfc3339_millis(event.occurred_at),
-            "mono_ns": int(self._monotonic_ns()),
             "session_id": event.session_id or self._session_id,
             "run_id": run_id,
             "request_id": event.correlation_id,
@@ -228,17 +233,31 @@ class ObservatoryProducer:
         except Exception:
             self._record_drop()
             return
-        # Everything but the two ids is serialized outside the lock; the lock
-        # covers numbering and one append, so emission cost is constant.
+        # Everything but the ids and the clock is serialized outside the lock;
+        # the lock covers numbering, one clock read and one append, so the
+        # emission cost is constant.  ``mono_ns`` is read under the same lock
+        # that assigns ``sequence``, so ordering by (mono_ns, sequence) -- as
+        # Observatory replays -- always agrees with ordering by sequence.
         rest = body[1:]
         with self._cond:
-            sequence = self._next_sequence
-            self._next_sequence += 1
-            event_id = "%s-%d" % (self._instance_id, sequence)
-            line = '{"event_id":"%s","sequence":%d,%s' % (event_id, sequence, rest)
-            self._ring.append(FeedEvent(event_id, sequence, line))
-            if self._subscribers:
-                self._cond.notify_all()
+            try:
+                mono_ns = int(self._monotonic_ns())
+            except Exception:
+                mono_ns = None
+            else:
+                sequence = self._next_sequence
+                self._next_sequence += 1
+                event_id = "%s-%d" % (self._instance_id, sequence)
+                line = '{"event_id":"%s","sequence":%d,"mono_ns":%d,%s' % (
+                    event_id, sequence, mono_ns, rest,
+                )
+                self._ring.append(FeedEvent(event_id, sequence, line))
+                if self._subscribers:
+                    self._cond.notify_all()
+        if mono_ns is None:
+            # A clock that cannot be read drops the event before it is
+            # numbered (and counts it), like an unserializable envelope.
+            self._record_drop()
 
     def _record_drop(self, *, final: bool = False) -> None:
         with self._lock:
@@ -342,9 +361,17 @@ class ObservatoryProducer:
         }
 
     def close_subscribers(self) -> None:
-        """Close every open subscription (drain/shutdown); new ones still work."""
+        """Close every open subscription (drain/shutdown); new ones still work.
+
+        Each closed subscription first receives the events sequenced before
+        the close, so an event emitted just before it (``session.ended``)
+        reaches every connected subscriber.
+        """
         with self._cond:
             for subscription in list(self._subscribers):
+                # Everything sequenced so far (session.ended included) is
+                # still delivered; the stream ends after it.
+                subscription._close_at = self._next_sequence
                 subscription._closed = True
             self._subscribers.clear()
             self._cond.notify_all()

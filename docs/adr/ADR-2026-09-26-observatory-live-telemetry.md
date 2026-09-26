@@ -31,8 +31,17 @@
 5. The ring is bounded (default 4096, 256..65536), subscribers are capped
    (default 8, 429 beyond), emission never blocks or raises, and a slow
    subscriber loses only its own oldest events.
-6. `SONDER_OBSERVATORY_EXPORT=0` removes the routes (404) and composes no
-   producer or observer.
+6. `SONDER_OBSERVATORY_EXPORT=0` removes discovery and the stream (404) and
+   composes no producer or observer. The ecosystem route follows contract
+   section 9: it answers 404 only when the gateway also has no
+   `provider_status()`.
+7. On a loopback bind the three routes refuse a `Host` header that does not
+   name `127.0.0.1`, `localhost` or `[::1]` (403 `forbidden_host`), the same
+   DNS-rebinding defence Sonder-Inference applies (contract section 2.3). A
+   rebinding page is same-origin and sends no `Origin`, so CORS alone does
+   not stop it from reading the provider inventory or holding a stream open.
+   The check is off behind a declared TLS-terminating proxy
+   (`SONDER_TLS_TERMINATED_BY_PROXY`), which forwards its public name.
 
 ## Rationale
 
@@ -55,6 +64,9 @@
   observatory-telemetry.md; until it exists, token-bearing remote telemetry
   requires the admin key.
 - Provider sends outside an HTTP chat or A2A turn are not exported.
+- Other Runtime routes (including `/v1/observability/trace`) keep their
+  existing posture: no Host check. Extending the rebinding defence to them is
+  a separate decision for the owner.
 - This changes the security posture described in SECURITY.md. SECURITY.md
   is edited by the provider change in the same integration; the telemetry and
   ecosystem route rows belong there as well, and the owner reviews them with
