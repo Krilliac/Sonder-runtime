@@ -32,10 +32,11 @@ class _Pool:
 
     def snapshots(self):
         return (
-            SimpleNamespace(worker_id="127.0.0.1:11434", state="ready", healthy=True,
-                            models=(DENSE,)),
-            SimpleNamespace(worker_id="10.77.0.2:8443", state="ready", healthy=True,
-                            models=self._models),
+            SimpleNamespace(worker_id="127.0.0.1:11434", origin="http://127.0.0.1:11434",
+                            state="ready", healthy=True, models=(DENSE,)),
+            # A static roster worker's pool id is opaque; the notice names its origin.
+            SimpleNamespace(worker_id="static-" + "f1" * 32, origin="https://10.77.0.2:8443",
+                            state="ready", healthy=True, models=self._models),
         )
 
 

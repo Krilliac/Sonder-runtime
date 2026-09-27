@@ -450,7 +450,9 @@ class RuntimeTelemetry:
         target = turn.owner if isinstance(turn.owner, RuntimeTelemetry) else self
         with turn._lock:
             upcoming = len(turn.attempts) + 1
+        worker = bounded_label(fields.get("to_worker_id"))
         target._emit("route.changed", {
+            **({"to_worker_id": worker} if worker else {}),
             "from_provider": provider_id(fields.get("from_provider")),
             "from_model": bounded_label(fields.get("from_model")),
             "to_provider": provider_id(fields.get("to_provider")),

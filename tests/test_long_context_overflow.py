@@ -1,4 +1,5 @@
 """Opt-in long-context overflow: decision, notice, policy, availability, telemetry."""
+import hashlib
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -20,7 +21,8 @@ START = tier_escalation.Rung(tier="general", model=DENSE)
 
 
 def _available(model):
-    return overflow.Availability(overflow.AVAILABLE, worker="10.77.0.2:8443")
+    return overflow.Availability(overflow.AVAILABLE, worker="10.77.0.2:8443",
+                                 worker_id="static-" + "ab" * 32)
 
 
 def _decide(settings=ON, rung=START, tokens=41_234, provider="sonder_inference", **extra):
@@ -235,7 +237,12 @@ def test_invalid_environment_override_never_enables_or_names_cloud(policy_file, 
 # -- availability -----------------------------------------------------------------
 
 def _snapshot(worker, state="ready", models=(), healthy=True):
-    return SimpleNamespace(worker_id=worker, state=state, models=tuple(models), healthy=healthy)
+    # Shaped like the pool's real ``WorkerSnapshot``: a static roster worker's
+    # id is the opaque ``static-<sha256(origin)>``; its origin is the URL.
+    origin = ("http://" if worker.startswith("127.") else "https://") + worker
+    worker_id = "static-" + hashlib.sha256(origin.encode("ascii")).hexdigest()
+    return SimpleNamespace(worker_id=worker_id, origin=origin, state=state,
+                           models=tuple(models), healthy=healthy)
 
 
 class _Pool:
@@ -252,6 +259,22 @@ def test_pool_worker_advertising_the_model_is_named():
                  _snapshot("10.77.0.2:8443", models=(MOE,)))
     found = pool_model_availability(pool, MOE)
     assert (found.state, found.worker) == (overflow.AVAILABLE, "10.77.0.2:8443")
+    assert found.worker_id == _snapshot("10.77.0.2:8443").worker_id
+
+
+def test_switched_notice_names_the_worker_origin_never_its_opaque_id():
+    pool = _Pool(_snapshot("10.77.0.2:8443", models=(MOE,)))
+    decision = _decide(availability=lambda name: pool_model_availability(pool, name))
+    notice = decision.notice()
+    assert notice.startswith("long-context overflow: switched to qwen3.6:35b on 10.77.0.2:8443 — ")
+    assert "static-" not in notice and "static-" not in decision.receipt()["worker"]
+    assert decision.telemetry()["to_worker_id"] == _snapshot("10.77.0.2:8443").worker_id
+
+
+def test_several_serving_workers_are_named_by_origin():
+    pool = _Pool(_snapshot("10.77.0.2:8443", models=(MOE,)),
+                 _snapshot("10.77.0.3:8443", models=(MOE,)))
+    assert pool_model_availability(pool, MOE).worker == "10.77.0.2:8443 (+1 more)"
 
 
 def test_no_worker_advertising_the_model_is_unavailable_with_a_reason():
@@ -314,6 +337,7 @@ def test_overflow_emits_one_content_free_route_changed_before_the_send():
         "to_provider": "ollama", "to_model": MOE,
         "reason_code": "context_over_threshold",
         "estimated_tokens": 41_234, "threshold": 32_768, "attempt": 1,
+        "to_worker_id": "static-" + "ab" * 32,
     }
     assert sink.events[2].fields["model"] == MOE
 

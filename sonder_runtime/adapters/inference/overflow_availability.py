@@ -9,6 +9,7 @@ model while every worker has reported makes it ``unavailable`` with a reason.
 from __future__ import annotations
 
 from typing import Callable
+from urllib.parse import urlsplit
 
 from ...application.routing.long_context_overflow import (
     AVAILABLE,
@@ -24,6 +25,18 @@ _SERVING = frozenset({"ready", "stale", "saturated"})
 def _key(name) -> str:
     text = str(name or "").strip().casefold()
     return text if ":" in text or not text else text + ":latest"
+
+
+def _worker_label(snapshot) -> str:
+    """``host:port`` from the worker's origin; a static worker's id is opaque."""
+    origin = str(getattr(snapshot, "origin", "") or "")
+    try:
+        parts = urlsplit(origin)
+        if parts.hostname:
+            return "%s:%s" % (parts.hostname, parts.port or (443 if parts.scheme == "https" else 80))
+    except ValueError:
+        pass
+    return "an Ollama pool worker"
 
 
 def pool_model_availability(
@@ -52,15 +65,15 @@ def pool_model_availability(
     except Exception:
         return Availability(UNKNOWN, worker="the Ollama pool")
     serving = [
-        snapshot.worker_id for snapshot in snapshots
+        snapshot for snapshot in snapshots
         if snapshot.healthy and snapshot.state in _SERVING
         and any(_key(name) == wanted for name in snapshot.models)
     ]
     if serving:
-        worker = serving[0] if len(serving) == 1 else "%s (+%d more)" % (
-            serving[0], len(serving) - 1,
-        )
-        return Availability(AVAILABLE, worker=worker)
+        worker = _worker_label(serving[0])
+        if len(serving) > 1:
+            worker = "%s (+%d more)" % (worker, len(serving) - 1)
+        return Availability(AVAILABLE, worker=worker, worker_id=str(serving[0].worker_id or ""))
     if any(
         snapshot.healthy and snapshot.state in _UNREPORTED and not snapshot.models
         for snapshot in snapshots

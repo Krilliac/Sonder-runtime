@@ -62,11 +62,14 @@ class Availability:
 
     ``unknown`` means some worker has not reported its models yet; the rung
     is tried and falls back to the original route if the pool rejects it.
+    ``worker`` is for people (the worker's ``host:port``); ``worker_id`` is
+    the pool's opaque id, for telemetry correlation only.
     """
 
     state: str
     worker: str = ""
     reason: str = ""
+    worker_id: str = ""
 
 
 def _kilo(value: int) -> str:
@@ -87,6 +90,7 @@ class Decision:
     worker: str = ""
     reason: str = ""
     to_provider: str = TARGET_PROVIDER
+    worker_id: str = ""
 
     @property
     def switched(self) -> bool:
@@ -130,7 +134,7 @@ class Decision:
 
     def telemetry(self) -> dict:
         """``route.changed`` attributes (identifiers and counts only)."""
-        return {
+        fields = {
             "from_provider": self.from_provider,
             "from_model": self.from_model,
             "to_provider": self.to_provider,
@@ -139,6 +143,9 @@ class Decision:
             "estimated_tokens": int(self.estimated_tokens),
             "threshold": int(self.threshold_tokens),
         }
+        if self.worker_id:
+            fields["to_worker_id"] = self.worker_id
+        return fields
 
 
 def _message_text(content) -> str:
@@ -205,7 +212,7 @@ def decide(
         found = Availability(UNAVAILABLE, reason="worker availability check failed")
     if found.state == UNAVAILABLE:
         return replace(base, reason=found.reason or "no Ollama worker advertises %s" % target)
-    return replace(base, status="switched", worker=found.worker)
+    return replace(base, status="switched", worker=found.worker, worker_id=found.worker_id)
 
 
 def apply(plan: tier_escalation.Plan, decision: Decision | None) -> tier_escalation.Plan:
