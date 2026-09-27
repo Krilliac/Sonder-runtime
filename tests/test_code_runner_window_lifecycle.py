@@ -27,6 +27,12 @@ class _Proc:
     def poll(self):
         return self.returncode
 
+    def kill(self):
+        self.returncode = -1
+
+    def wait(self, timeout=None):
+        return self.returncode
+
 
 @pytest.fixture
 def windows(monkeypatch, tmp_path):
@@ -41,12 +47,14 @@ def windows(monkeypatch, tmp_path):
 
     def fake_job(proc, **kwargs):
         jobs.append(kwargs)
-        return None
+        return object()
 
     monkeypatch.setattr(code_runner.os, "name", "nt", raising=False)
     monkeypatch.setenv(code_runner.RUN_WINDOW_DIR_ENV, str(tmp_path / "runs"))
     monkeypatch.setattr(code_runner.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(code_runner, "_attach_windows_job", fake_job, raising=False)
+    monkeypatch.setattr(code_runner, "_resume_windows_process", lambda proc: None, raising=False)
+    monkeypatch.setattr(code_runner, "_close_windows_job", lambda job: None)
     registry = getattr(code_runner, "_WindowRegistry", None)
     if registry is not None:
         monkeypatch.setattr(code_runner, "_WINDOWS", registry())
@@ -101,6 +109,37 @@ def test_console_is_placed_in_a_process_capped_job(windows):
     assert jobs == [{"active_process_limit": code_runner.RUN_WINDOW_MAX_PROCESSES}]
 
 
+def test_console_is_suspended_until_after_job_assignment(windows, monkeypatch):
+    events = []
+    original_popen = code_runner.subprocess.Popen
+
+    def start(*args, **kwargs):
+        events.append(("start", kwargs["creationflags"]))
+        return original_popen(*args, **kwargs)
+
+    monkeypatch.setattr(code_runner.subprocess, "Popen", start)
+    monkeypatch.setattr(code_runner, "_attach_windows_job",
+                        lambda proc, **kwargs: events.append(("attach", proc.pid)) or object())
+    monkeypatch.setattr(code_runner, "_resume_windows_process",
+                        lambda proc: events.append(("resume", proc.pid)), raising=False)
+
+    assert _launch()["ok"]
+    assert events[0][1] & 0x00000004  # CREATE_SUSPENDED
+    assert [event[0] for event in events] == ["start", "attach", "resume"]
+
+
+def test_console_launch_fails_closed_without_job(windows, monkeypatch):
+    launched, _jobs = windows
+    monkeypatch.setattr(code_runner, "_attach_windows_job", lambda proc, **kwargs: None)
+
+    result = _launch()
+
+    assert result["ok"] is False
+    assert "job" in result["error"].lower()
+    assert launched[0].returncode == -1
+    assert code_runner._WINDOWS.live_count() == 0
+
+
 def test_generated_run_dirs_are_retained_up_to_a_bound(windows, monkeypatch, tmp_path):
     monkeypatch.setattr(code_runner, "RUN_WINDOW_MAX_RETAINED_DIRS", 3, raising=False)
     base = tmp_path / "runs"
@@ -122,6 +161,30 @@ def test_generated_run_dirs_are_retained_up_to_a_bound(windows, monkeypatch, tmp
     assert os.path.basename(out["run_dir"]) in remaining
     assert "sonder-window-old5" in remaining and "sonder-window-old4" in remaining
     assert foreign.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects")
+def test_suspended_windows_process_runs_only_after_job_attachment(tmp_path):
+    python = getattr(sys, "_base_executable", "") or sys.executable
+    marker = tmp_path / "started.txt"
+    proc = subprocess.Popen(
+        [python, "-c", "from pathlib import Path; Path(%r).write_text('started')" % str(marker)],
+        creationflags=0x00000004, cwd=str(tmp_path), close_fds=True,
+    )
+    job = None
+    try:
+        assert not marker.exists()
+        job = code_runner._attach_windows_job(proc, active_process_limit=1)
+        assert job, "job object was not created/assigned"
+        assert not marker.exists()
+        code_runner._resume_windows_process(proc)
+        assert proc.wait(timeout=30) == 0
+        assert marker.read_text() == "started"
+    finally:
+        code_runner._close_windows_job(job)
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects")

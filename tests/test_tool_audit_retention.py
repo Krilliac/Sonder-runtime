@@ -7,8 +7,12 @@ pruning off, a full retention quota fails the call closed instead.
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
+from sonder_runtime.adapters.persistence import tool_audit
 from sonder_runtime.adapters.persistence.tool_audit import (
     DurableToolAuditRepository,
     ToolAuditLimits,
@@ -91,6 +95,50 @@ def test_retention_quota_fails_closed_when_pruning_is_disabled(tmp_path):
         _append(repository, 1, start=3)
     assert repository.rotated_files() == before
     repository.verify()
+
+
+def test_pruning_does_not_delete_evidence_when_continuation_write_fails(
+    tmp_path, monkeypatch,
+):
+    repository = DurableToolAuditRepository(
+        tmp_path / "audit.jsonl",
+        limits=ToolAuditLimits(max_records=1, max_rotated_files=1),
+    )
+    _append(repository, 2)
+    oldest = repository.rotated_files()[0]
+
+    def fail_continuation(path):
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr(tool_audit, "prepare_private_file", fail_continuation)
+    with pytest.raises(OSError, match="simulated write failure"):
+        _append(repository, 1, start=2)
+
+    assert "request-0" in oldest.read_text(encoding="utf-8")
+
+
+def test_pruning_marker_exists_before_a_chain_is_deleted(tmp_path, monkeypatch):
+    repository = DurableToolAuditRepository(
+        tmp_path / "audit.jsonl",
+        limits=ToolAuditLimits(max_records=1, max_rotated_files=1),
+    )
+    _append(repository, 2)
+    oldest = repository.rotated_files()[0]
+    original_unlink = Path.unlink
+    observed = []
+
+    def check_marker(path, *args, **kwargs):
+        if path == oldest:
+            continuation = json.loads(repository.path.read_text(encoding="utf-8"))["rotated_from"]
+            assert oldest.name in continuation["pruned"]
+            observed.append(True)
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", check_marker)
+    _append(repository, 1, start=2)
+
+    assert observed == [True]
+    assert not oldest.exists()
 
 
 def test_retention_ignores_files_it_did_not_rotate(tmp_path):

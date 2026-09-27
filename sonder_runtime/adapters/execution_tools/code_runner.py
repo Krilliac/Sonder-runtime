@@ -451,6 +451,58 @@ def _close_windows_job(job):
             pass
 
 
+def _resume_windows_process(proc):
+    """Resume the initial thread of a process started with CREATE_SUSPENDED."""
+    kernel32 = ctypes.windll.kernel32
+
+    class ThreadEntry(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", ctypes.wintypes.DWORD),
+            ("cntUsage", ctypes.wintypes.DWORD),
+            ("th32ThreadID", ctypes.wintypes.DWORD),
+            ("th32OwnerProcessID", ctypes.wintypes.DWORD),
+            ("tpBasePri", ctypes.wintypes.LONG),
+            ("tpDeltaPri", ctypes.wintypes.LONG),
+            ("dwFlags", ctypes.wintypes.DWORD),
+        ]
+
+    kernel32.CreateToolhelp32Snapshot.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.DWORD]
+    kernel32.CreateToolhelp32Snapshot.restype = ctypes.wintypes.HANDLE
+    kernel32.Thread32First.argtypes = [ctypes.wintypes.HANDLE, ctypes.POINTER(ThreadEntry)]
+    kernel32.Thread32First.restype = ctypes.wintypes.BOOL
+    kernel32.Thread32Next.argtypes = [ctypes.wintypes.HANDLE, ctypes.POINTER(ThreadEntry)]
+    kernel32.Thread32Next.restype = ctypes.wintypes.BOOL
+    kernel32.OpenThread.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.BOOL,
+                                   ctypes.wintypes.DWORD]
+    kernel32.OpenThread.restype = ctypes.wintypes.HANDLE
+    kernel32.ResumeThread.argtypes = [ctypes.wintypes.HANDLE]
+    kernel32.ResumeThread.restype = ctypes.wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
+    kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000004, 0)  # TH32CS_SNAPTHREAD
+    if not snapshot or snapshot == ctypes.c_void_p(-1).value:
+        raise OSError("could not enumerate suspended console threads")
+    try:
+        entry = ThreadEntry()
+        entry.dwSize = ctypes.sizeof(ThreadEntry)
+        found = kernel32.Thread32First(snapshot, ctypes.byref(entry))
+        while found:
+            if entry.th32OwnerProcessID == proc.pid:
+                thread = kernel32.OpenThread(0x0002, False, entry.th32ThreadID)
+                if not thread:
+                    break
+                try:
+                    if kernel32.ResumeThread(thread) != 1:
+                        raise OSError("could not resume suspended console thread")
+                    return
+                finally:
+                    kernel32.CloseHandle(thread)
+            found = kernel32.Thread32Next(snapshot, ctypes.byref(entry))
+        raise OSError("could not find suspended console thread")
+    finally:
+        kernel32.CloseHandle(snapshot)
+
+
 def _decode_child_output(raw):
     """Decode a child's stdout/stderr without losing output to either encoding.
 
@@ -599,6 +651,24 @@ class _WindowRegistry:
                 return None
             proc = start()
             job = _attach_windows_job(proc, active_process_limit=RUN_WINDOW_MAX_PROCESSES)
+            if not job:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                except (OSError, subprocess.SubprocessError):
+                    logging.getLogger(__name__).warning(
+                        "could not terminate uncontained runwindow console", exc_info=True)
+                raise OSError("could not attach runwindow console to a bounded Windows job")
+            try:
+                _resume_windows_process(proc)
+            except Exception as exc:  # noqa: BLE001 - never leave a failed resume registered
+                _close_windows_job(job)
+                try:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                except (OSError, subprocess.SubprocessError):
+                    pass
+                raise OSError("could not resume contained runwindow console") from exc
             try:
                 proc._sonder_job_handle = job
             except AttributeError:
@@ -722,7 +792,8 @@ def _launch_console(launcher, cwd, language, timeout):
         return subprocess.Popen(
             ["cmd", "/k", launcher],
             cwd=cwd,
-            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+            creationflags=(getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+                           | getattr(subprocess, "CREATE_SUSPENDED", 0x00000004)),
             env=_child_environment(),
             # A detached window is still executing model-authored code.  It
             # has no legitimate reason to inherit the host's other handles.
