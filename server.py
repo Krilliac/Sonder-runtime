@@ -7086,7 +7086,7 @@ def _answer_with_history_impl(
             # which is not the route the request resolved to.
             _observe_target(model, tier_label, cloud)
             effective_system = _build_system("", trace, "", cloud=cloud, provider=bridged_provider, model=(
-                _served_models.served_prompt_model(model, tier_label, bridged_provider)))
+                _legacy_chat_bridge.prompt_identity_model(model, tier_label, bridged_provider, _APP_GRAPH)))
             # Honor LEARN_TIERS here too. Serve conversation memory is client-side (the app
             # resends history each request), so a non-learning model can skip capture entirely:
             # no interaction row, no footer, nothing distilled. This lets a user exclude e.g.
@@ -7380,7 +7380,7 @@ def structured_answer_with_history(
         else _auto_model_context(model)
     )
     system = _build_system("", False, "", cloud=cloud, provider=bridged_provider, model=(
-        _served_models.served_prompt_model(model, tier_label, bridged_provider)))
+        _legacy_chat_bridge.prompt_identity_model(model, tier_label, bridged_provider, _APP_GRAPH)))
     # A non-Ollama rung refuses decoder schemas with a 400 (the bridge
     # cannot carry ``format``) instead of reaching an absent Ollama.
     with _provider_bridge.bind_rung(bridged_provider, tier_label):

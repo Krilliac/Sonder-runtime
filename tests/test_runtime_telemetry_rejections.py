@@ -141,6 +141,25 @@ def test_admission_rejection_ends_the_started_turn_as_failed(monkeypatch, local_
     assert "rejected" not in events[1]["attributes"]
 
 
+def test_draining_rejection_exports_its_response_code(monkeypatch, local_open):
+    app = _application()
+    _open_chat(monkeypatch, lambda *a, **k: "never called")
+    lifecycle = ts.sonder_lifecycle.get()
+    monkeypatch.setattr(type(lifecycle.coordinator), "draining", property(lambda self: True))
+
+    status, correlation, body = _post_chat(monkeypatch, app, {
+        "model": "sonder", "messages": [{"role": "user", "content": "x"}],
+    })
+
+    assert status == 503
+    assert json.loads(body)["error"]["code"] == "DRAINING"
+    events = _chat_turn_events(app, correlation)
+    assert [event["event_type"] for event in events] == ["request.failed"]
+    assert events[0]["attributes"]["rejected"] is True
+    assert events[0]["attributes"]["http_status"] == 503
+    assert events[0]["attributes"]["error_code"] == "draining"
+
+
 def test_unauthenticated_rejections_emit_nothing(monkeypatch):
     monkeypatch.setattr(ts, "API_KEY", "deployment-key")
     monkeypatch.setattr(ts, "AUTH_MODE", "api-key")

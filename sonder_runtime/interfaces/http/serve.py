@@ -6937,6 +6937,7 @@ class Handler(BaseHTTPRequestHandler):
             lifecycle = sonder_lifecycle.get()
             if lifecycle.coordinator.draining:
                 _serve_logger.error(f"request rejected: runtime is draining for shutdown, correlation={self._correlation()!r}")
+                record_early_chat_metric("draining")
                 self._send_json_payload(
                     sonder_lifecycle.error_envelope(
                         "DRAINING",
