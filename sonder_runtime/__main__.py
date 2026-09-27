@@ -1220,10 +1220,10 @@ def cmd_serve(args) -> int:
     from sonder_runtime.domain.common.errors import MigrationRequired
 
     try:
-        require_epoch_2(runtime_paths.default_home())
-        # A fresh home passes the gate; stamp it before migrations create
-        # the stores, or the next serve of this home is refused.
+        # Stamp a truly fresh home before migrations create its stores, then
+        # gate both new and existing homes before opening the listener.
         stamp_fresh_home(runtime_paths.default_home())
+        require_epoch_2(runtime_paths.default_home())
     except MigrationRequired as exc:
         print(
             f"migration required before serve: {exc}; "

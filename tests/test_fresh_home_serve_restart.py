@@ -17,6 +17,7 @@ the explicit ``migrate --adopt-epoch2`` (see test_typed_home_entrypoint).
 from __future__ import annotations
 
 import argparse
+import sqlite3
 
 import pytest
 
@@ -73,3 +74,35 @@ def test_preflight_does_not_create_stores_on_a_fresh_home(fresh_home):
     _run_preflight(_load_config(args), check_ollama=False)
     assert not (fresh_home / "memory.db").exists()
     assert not any(path.suffix == ".db" for path in fresh_home.iterdir())
+
+
+def test_legacy_store_without_memory_refuses_serve(fresh_home, capsys):
+    legacy = fresh_home / "autopilot.db"
+    with sqlite3.connect(legacy) as conn:
+        conn.execute("CREATE TABLE legacy_state (value TEXT)")
+        conn.execute("INSERT INTO legacy_state VALUES ('preserve me')")
+
+    result = main(["serve", "--skip-ollama", "--skip-preflight", "--set",
+                   f"state.home={fresh_home}", "11447"])
+
+    assert result == 1
+    assert "migration required before serve" in capsys.readouterr().err
+    assert not (fresh_home / "memory.db").exists()
+    with sqlite3.connect(legacy) as conn:
+        assert conn.execute("SELECT value FROM legacy_state").fetchone() == ("preserve me",)
+
+
+def test_queued_actions_only_home_refuses_serve(fresh_home, capsys):
+    legacy = fresh_home / "queued_actions.db"
+    with sqlite3.connect(legacy) as conn:
+        conn.execute("CREATE TABLE legacy_actions (id TEXT)")
+        conn.execute("INSERT INTO legacy_actions VALUES ('pending')")
+
+    result = main(["serve", "--skip-ollama", "--skip-preflight", "--set",
+                   f"state.home={fresh_home}", "11447"])
+
+    assert result == 1
+    assert "migration required before serve" in capsys.readouterr().err
+    assert not (fresh_home / "epoch2_adoption_receipt.json").exists()
+    with sqlite3.connect(legacy) as conn:
+        assert conn.execute("SELECT id FROM legacy_actions").fetchone() == ("pending",)

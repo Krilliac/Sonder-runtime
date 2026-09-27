@@ -427,8 +427,11 @@ class _FileLock:
                 self._handle = None
 
 
-def migration_lock(timeout: float = 30.0) -> _FileLock:
-    lock_dir = platform_paths.ensure_home() / "locks"
+def migration_lock(
+    timeout: float = 30.0, *, sonder_home: Path | None = None,
+) -> _FileLock:
+    home = sonder_home if sonder_home is not None else platform_paths.ensure_home()
+    lock_dir = home / "locks"
     return _FileLock(lock_dir / "migrations.lock", timeout=timeout)
 
 
