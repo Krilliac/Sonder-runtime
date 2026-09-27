@@ -549,9 +549,9 @@ class ChatController extends ChangeNotifier {
 
   /// Delete [thread]. The result is what [restoreThread] needs to undo it.
   Future<DeletedThread> deleteThread(ChatThread thread) async {
-    if (sending && _turnThreadId == thread.id) cancel();
     final index = _threads.indexWhere((t) => t.id == thread.id);
     final stored = index < 0 ? thread : _threads[index];
+    if (sending && _turnThreadId == thread.id) cancel();
     final remaining = _threads.where((t) => t.id != thread.id).toList();
     final placeholder =
         remaining.isEmpty ? ChatThread.fresh(project: _project) : null;

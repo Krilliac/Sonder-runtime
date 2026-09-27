@@ -146,6 +146,28 @@ void main() {
     c.dispose();
   });
 
+  testWidgets('undo deleting an active first turn restores its prompt',
+      (tester) async {
+    final backend = FakeChatBackend();
+    final c = await _start(tester, backend);
+    final thread = c.currentThread;
+    final sent = c.send('Keep this prompt');
+    await tester.pump();
+    expect(
+        c.threads.firstWhere((t) => t.id == thread.id).messages.single.content,
+        'Keep this prompt');
+
+    final deleted = await c.deleteThread(thread);
+    await tester.pump();
+    await sent;
+    await c.restoreThread(deleted);
+    expect(
+        c.currentThread.messages.map((m) => m.content), ['Keep this prompt']);
+    expect((await ChatStore.load()).single.messages.map((m) => m.content),
+        ['Keep this prompt']);
+    c.dispose();
+  });
+
   testWidgets('cancelling the first turn rotates the session', (tester) async {
     final backend = FakeChatBackend();
     final c = await _start(tester, backend);

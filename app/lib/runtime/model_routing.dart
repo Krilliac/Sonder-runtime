@@ -17,7 +17,7 @@ import 'model_catalog.dart';
 /// The provider id of the local Ollama host.
 const ollamaProvider = 'ollama';
 
-/// The default HTTP route names; they follow the default generation binding.
+/// The default HTTP route names; their policy tier is resolved by the server.
 const _defaultRoutes = {'sonder', 'local'};
 
 /// `Sonder Inference`, `Ollama`, or the id as sent.
@@ -82,13 +82,26 @@ class ModelRouting {
   }
 
   /// The provider a route is bound to; null for an exact model or when the
-  /// runtime reported no binding. The ecosystem document wins; the
-  /// `/v1/models` row fills in what it does not name.
+  /// runtime reported no binding. Default routes use their resolved
+  /// `/v1/models` row, else the default binding only when every reported tier
+  /// shares it; named tiers use the ecosystem binding when present.
   String? routeProvider(String id) {
     final key = _key(id);
     final s = status;
+    if (_defaultRoutes.contains(key)) {
+      final origin = _origin(id);
+      if (origin != null && origin.isRoute) return origin.provider;
+      // Without a resolved row, the server's choice of policy tier is unknown;
+      // the default binding is only certain when every reported tier agrees.
+      if (s == null) return null;
+      final bound = s.tierProviders.values.toSet();
+      final fallback = s.defaultGenerationProvider;
+      if (bound.isEmpty || (bound.length == 1 && bound.single == fallback)) {
+        return fallback;
+      }
+      return null;
+    }
     if (s != null) {
-      if (_defaultRoutes.contains(key)) return s.defaultGenerationProvider;
       for (final entry in s.tierProviders.entries) {
         if (_key(entry.key) == key) return entry.value;
       }

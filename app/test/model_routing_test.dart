@@ -12,6 +12,14 @@ EcosystemStatus _status(Map<String, dynamic> json) =>
 EcosystemStatus allInference() => _status(ecosystemJson(
     inference: inferenceStatusJson()..['models'] = ['qwen3:14b']));
 
+ModelRouting allInferenceRouting() =>
+    ModelRouting.of(allInference(), origins: const {
+      'sonder': ModelOrigin(
+          kind: 'route',
+          provider: sonderInferenceProvider,
+          servedModel: 'qwen3:14b'),
+    });
+
 void main() {
   group('ModelRouting', () {
     test('no ecosystem document keeps today\'s labels', () {
@@ -36,7 +44,7 @@ void main() {
     });
 
     test('routes bound to Sonder Inference name the provider and model', () {
-      final routing = ModelRouting(allInference());
+      final routing = allInferenceRouting();
       expect(routing.bypassesBinding, isTrue);
       expect(routing.isRoute('general'), isTrue);
       expect(routing.isRoute('sonder'), isTrue);
@@ -68,8 +76,48 @@ void main() {
       expect(routing.modelsPanelText(), contains('the fast route'));
     });
 
+    test('default route follows the resolved row instead of ecosystem default',
+        () {
+      final json = ecosystemJson(inference: inferenceStatusJson());
+      (json['providers'] as Map)['default_generation_provider'] = 'ollama';
+      final routing = ModelRouting.of(_status(json), origins: const {
+        'sonder': ModelOrigin(
+            kind: 'route',
+            provider: 'sonder_inference',
+            servedModel: 'qwen3:14b'),
+        'local': ModelOrigin(
+            kind: 'route',
+            provider: 'sonder_inference',
+            servedModel: 'qwen3:14b'),
+        'cloud-code': ModelOrigin(
+            kind: 'route',
+            provider: 'ollama',
+            servedModel: 'qwen3-coder:480b-cloud'),
+      });
+      expect(routing.routeProvider('sonder'), sonderInferenceProvider);
+      expect(routing.routeProvider('local'), sonderInferenceProvider);
+      expect(routing.isRoute('cloud-code'), isTrue);
+      expect(routing.pickerLabel('cloud-code'), 'cloud-code');
+      expect(routing.pickerLabel('sonder'),
+          'sonder · Sonder Inference (qwen3:14b)');
+      expect(
+          routing.connectionSummary(
+              ['sonder', 'general', 'cloud-code', 'one:latest']),
+          'Sonder Inference serves 2 routes (qwen3:14b, mock:tiny); '
+          '1 exact model runs directly on Ollama.');
+    });
+
+    test('default route stays neutral without a resolved row', () {
+      final json = ecosystemJson(inference: inferenceStatusJson());
+      (json['providers'] as Map)['default_generation_provider'] = 'ollama';
+      final routing = ModelRouting(_status(json));
+      expect(routing.routeProvider('sonder'), isNull);
+      expect(routing.pickerLabel('sonder'), 'sonder (local route)');
+      expect(routing.chipLabel('sonder', 'local'), 'sonder - local');
+    });
+
     test('connection summary counts routes and exact Ollama models', () {
-      final routing = ModelRouting(allInference());
+      final routing = allInferenceRouting();
       expect(
           routing.connectionSummary(
               ['sonder', 'fast', 'general', 'qwen3:14b', 'llama3:8b']),
@@ -84,7 +132,7 @@ void main() {
 
   group('Models panel lists only offered routes', () {
     test('tiers missing from the offered routes are not claimed', () {
-      final routing = ModelRouting(allInference());
+      final routing = allInferenceRouting();
       final text = routing
           .modelsPanelText(offered: ['sonder', 'fast', 'general', 'code']);
       expect(
@@ -244,7 +292,7 @@ void main() {
       ];
       final diagnosis = diagnoseReachable('http://127.0.0.1:11435',
           modelCount: models.length,
-          routing: ModelRouting(allInference()),
+          routing: allInferenceRouting(),
           models: models);
       expect(diagnosis.ok, isTrue);
       expect(
