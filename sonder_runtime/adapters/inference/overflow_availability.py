@@ -70,10 +70,13 @@ def pool_model_availability(
         and any(_key(name) == wanted for name in snapshot.models)
     ]
     if serving:
-        worker = _worker_label(serving[0])
         if len(serving) > 1:
-            worker = "%s (+%d more)" % (worker, len(serving) - 1)
-        return Availability(AVAILABLE, worker=worker, worker_id=str(serving[0].worker_id or ""))
+            # Availability is not dispatch: the pool may choose any of these.
+            return Availability(AVAILABLE)
+        return Availability(
+            AVAILABLE, worker=_worker_label(serving[0]),
+            worker_id=str(serving[0].worker_id or ""),
+        )
     if any(
         snapshot.healthy and snapshot.state in _UNREPORTED and not snapshot.models
         for snapshot in snapshots

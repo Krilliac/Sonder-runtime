@@ -6,11 +6,15 @@ Sonder Inference provider, and the receipt says so.  When no pool worker
 advertises the model, or the overflow attempt fails, the turn keeps its
 route and the receipt says why.
 """
+import http.client
+import json
+import threading
 from types import SimpleNamespace
 
 import pytest
 
 import server
+import sonder_runtime.interfaces.http.serve as serve
 from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.application.routing import long_context_overflow as overflow
 
@@ -52,6 +56,9 @@ def long_context(monkeypatch):
     monkeypatch.setenv("SONDER_LONG_CONTEXT_MODEL", MOE)
     monkeypatch.setitem(server.TIERS, "general", DENSE)
     monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    # A live app graph left by an earlier test on this worker would win over
+    # the env bindings above (CI saw provider=None in the full suite).
+    monkeypatch.setattr(server, "_APP_GRAPH", None)
     monkeypatch.setattr(server, "OLLAMA_POOL", _Pool(MOE))
     return monkeypatch
 
@@ -140,6 +147,51 @@ def test_disabled_overflow_leaves_no_receipt(long_context):
     long_context.setenv("SONDER_LONG_CONTEXT_OVERFLOW", "0")
     reply, receipt, seen = _answer_with(long_context, lambda model: "answer from " + model)
     assert receipt is None and seen[0][0] == DENSE
+
+
+def test_responses_http_envelope_includes_the_overflow_receipt(monkeypatch):
+    monkeypatch.setattr(serve, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(serve, "API_KEY", "")
+    monkeypatch.setattr(serve, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(serve, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(serve, "_capture_live_session_turn", lambda **kwargs: None)
+
+    def answer(_self, *args, **kwargs):
+        overflow.record(overflow.Decision(
+            status="switched", from_model=DENSE, from_provider="sonder_inference",
+            to_model=MOE, estimated_tokens=41_234, threshold_tokens=32_768,
+        ))
+        return SimpleNamespace(
+            content="answer", iid="overflow-http", thinking="", cache="",
+            resolved_model=MOE, resolved_tier="general", provider_capture=None,
+        )
+
+    monkeypatch.setattr(serve.Handler, "_run_streamable_prompt", answer)
+    httpd = serve.ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=15)
+        try:
+            conn.request(
+                "POST", "/v1/responses",
+                body=json.dumps({"model": "sonder", "input": "hello"}),
+                headers={"Content-Type": "application/json"},
+            )
+            response = conn.getresponse()
+            payload = json.loads(response.read())
+        finally:
+            conn.close()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+
+    assert response.status == 200, payload
+    assert payload["object"] == "response"
+    assert payload["output_text"] == "answer"
+    assert payload["sonder_receipt"]["overflow"]["status"] == "switched"
+    assert payload["sonder_receipt"]["overflow"]["to_model"] == MOE
 
 
 def test_runtime_overflow_command_toggles_the_policy(monkeypatch, tmp_path):

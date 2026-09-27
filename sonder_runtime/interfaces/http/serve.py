@@ -7886,6 +7886,7 @@ class Handler(BaseHTTPRequestHandler):
                             model_operation,
                             content,
                             response_model or model,
+                            receipt=receipt,
                         ), elapsed_ms=elapsed_ms,
                     )
                 else:

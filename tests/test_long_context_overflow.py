@@ -271,10 +271,22 @@ def test_switched_notice_names_the_worker_origin_never_its_opaque_id():
     assert decision.telemetry()["to_worker_id"] == _snapshot("10.77.0.2:8443").worker_id
 
 
-def test_several_serving_workers_are_named_by_origin():
+def test_several_serving_workers_do_not_name_an_unselected_origin():
     pool = _Pool(_snapshot("10.77.0.2:8443", models=(MOE,)),
                  _snapshot("10.77.0.3:8443", models=(MOE,)))
-    assert pool_model_availability(pool, MOE).worker == "10.77.0.2:8443 (+1 more)"
+    assert pool_model_availability(pool, MOE).worker == ""
+
+
+def test_multiple_eligible_workers_do_not_claim_a_selected_worker():
+    pool = _Pool(_snapshot("10.77.0.2:8443", models=(MOE,)),
+                 _snapshot("10.77.0.3:8443", models=(MOE,)))
+    decision = _decide(availability=lambda name: pool_model_availability(pool, name))
+    assert decision.switched
+    assert decision.worker == ""
+    assert decision.worker_id == ""
+    assert " on the Ollama pool " in decision.notice()
+    assert "worker" not in decision.receipt()
+    assert "to_worker_id" not in decision.telemetry()
 
 
 def test_no_worker_advertising_the_model_is_unavailable_with_a_reason():
