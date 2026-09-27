@@ -88,6 +88,9 @@ def test_nightly_keeps_explicit_worker_env(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.setenv("SONDER_OLLAMA_WORKERS", "http://127.0.0.1:11435")
+    # A process-wide CA bundle would be adopted (and bound) as the Ollama CA.
+    for name in ("SONDER_OLLAMA_CA_BUNDLE", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
+        monkeypatch.delenv(name, raising=False)
 
     assert nightly_self_improve._bind_ollama_pool_from_config(cfg) == ()
     assert nightly_self_improve.os.environ["SONDER_OLLAMA_WORKERS"] == "http://127.0.0.1:11435"

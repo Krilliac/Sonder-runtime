@@ -481,7 +481,7 @@ from sonder_runtime.adapters.model_error_formatting import (
 from sonder_runtime.interfaces.http.serve_policy import (
     serve_temperature as _serve_temperature,
 )
-from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool
+from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool, prewarm_gate
 from sonder_runtime.domain import ollama_policy
 from sonder_runtime.domain.runtime_model_configuration import (
     RuntimeModelConfiguration,
@@ -5535,15 +5535,12 @@ def _post(
     if local_only or not OLLAMA_POOL.enabled:
         return send(BASE)
     model_hint = payload.get("model") if isinstance(payload, dict) else None
+    if path in {"/api/chat", "/api/generate"}:  # never fail behind our own prewarm
+        prewarm_gate.await_prewarm(model_hint, min(request_timeout, _PREWARM_LOAD_TIMEOUT))
     return OLLAMA_POOL.request(send, model=model_hint, idempotent=idempotent)
 
 
-_PREWARM_LOCK = threading.Lock()
-_PREWARM_INFLIGHT = set()
-# Bounds the background weight load so a wedged Ollama cannot hold the inflight
-# slot forever. Previously written as a globals() lookup for a name that was
-# never defined anywhere, so it always took the 60s fallback -- correct by
-# accident, and reported by ruff as an undefined name.
+# Bounds the background weight load so a wedged Ollama cannot hold the slot forever.
 _PREWARM_LOAD_TIMEOUT = 60
 
 
@@ -5572,24 +5569,20 @@ def prewarm_model(tier: str = "") -> bool:
             return False
     except ModelCallError:
         return False
-    with _PREWARM_LOCK:
-        if model in _PREWARM_INFLIGHT:
-            return False
-        _PREWARM_INFLIGHT.add(model)
+    if not prewarm_gate.begin(model):
+        return False
 
     def _load():
         try:
             # Empty prompt with keep_alive loads weights without generating.
-            _post(
-                "/api/generate",
-                {"model": model, "keep_alive": KEEP_ALIVE},
+            prewarm_gate.run_as_prewarm(lambda: _post(
+                "/api/generate", {"model": model, "keep_alive": KEEP_ALIVE},
                 timeout=_PREWARM_LOAD_TIMEOUT,
-            )
+            ))
         except Exception:
             pass
         finally:
-            with _PREWARM_LOCK:
-                _PREWARM_INFLIGHT.discard(model)
+            prewarm_gate.finish(model)
 
     owned_runtime_thread(
         target=_load, daemon=True, name="sonder-prewarm"
