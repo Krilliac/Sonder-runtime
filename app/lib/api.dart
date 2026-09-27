@@ -1098,6 +1098,7 @@ class SonderApi implements SonderApiPort {
   /// (an older runtime, or neither live export nor provider status
   /// available) is [EcosystemReading.unsupportedRuntime], not an error. A
   /// payload with another schema is an unsupported-schema reading.
+  @override
   Future<EcosystemReading> ecosystemStatus() async {
     final http.Response resp;
     try {

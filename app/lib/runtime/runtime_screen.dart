@@ -17,6 +17,7 @@ import '../workspace_ui.dart';
 import 'approvals_panel.dart';
 import 'host_tools_panel.dart';
 import 'jobs_panel.dart';
+import 'model_routing.dart';
 import 'overview.dart';
 import 'runtime_data.dart';
 import 'work_runs_panel.dart';
@@ -40,6 +41,29 @@ part 'panels/ecosystem_panel.dart';
 
 /// Former name, kept for existing call sites (`chat_screen.dart`, tests).
 typedef SystemScreen = RuntimeScreen;
+
+/// The Server actions "Local server" row: its text and whether it is ok.
+///
+/// [launcherDetected] requires the launcher's signed health identity
+/// (`defaultServerReachable`) and stays the only proof of a launcher-managed
+/// server. When the app is nonetheless connected and healthy on
+/// 127.0.0.1:11435, the row says so instead of "Not detected", without
+/// claiming the launcher manages it.
+(String, bool) localServerRow({
+  required bool launcherDetected,
+  required String serverUrl,
+  required bool connected,
+}) {
+  if (launcherDetected) return ('Reachable on 127.0.0.1:11435', true);
+  final uri = Uri.tryParse(serverUrl.trim());
+  final local = uri != null &&
+      (uri.host == '127.0.0.1' || uri.host == 'localhost') &&
+      uri.port == 11435;
+  if (connected && local) {
+    return ('Connected on 127.0.0.1:11435 (not launcher-managed)', true);
+  }
+  return ('Not detected on 127.0.0.1:11435', false);
+}
 
 class RuntimeScreen extends StatefulWidget {
   final Settings settings;
@@ -964,6 +988,12 @@ class _RuntimeScreenState extends State<RuntimeScreen>
   Widget build(BuildContext context) {
     final info = _info;
     final localInfo = _localInfo;
+    final routing = ModelRouting(_ecosystem?.status);
+    final localServer = localServerRow(
+      launcherDetected: localInfo?.defaultServerReachable ?? false,
+      serverUrl: widget.settings.serverUrl,
+      connected: info != null && !_offline && _serverError == null,
+    );
     final localRuntimeControls =
         LocalManager.canRunLocalTools && !widget.settings.hasHostLauncher;
     final canControlServer =
@@ -1276,21 +1306,21 @@ class _RuntimeScreenState extends State<RuntimeScreen>
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Text(
-                            'Sonder Runtime routes requests to these providers. '
-                            'Ollama hosts and runs the local model weights.',
-                          ),
+                          Text(routing.modelsPanelText),
                           const SizedBox(height: 10),
                           Wrap(
                             spacing: 8,
                             runSpacing: 8,
                             children: info.models
                                 .map((m) => Chip(
-                                      label: Text('${m.id} - ${m.ownedBy}'),
+                                      label: Text(
+                                          routing.chipLabel(m.id, m.ownedBy)),
                                       avatar: Icon(
-                                        m.ownedBy == 'cloud'
-                                            ? Icons.cloud_outlined
-                                            : Icons.memory_outlined,
+                                        routing.routeBinding(m.id) != null
+                                            ? Icons.hub_outlined
+                                            : m.ownedBy == 'cloud'
+                                                ? Icons.cloud_outlined
+                                                : Icons.memory_outlined,
                                         size: 18,
                                       ),
                                     ))
@@ -1482,14 +1512,8 @@ class _RuntimeScreenState extends State<RuntimeScreen>
                           ),
                           _StatusRow(
                             label: 'Local server',
-                            value: LocalManager.canRunLocalTools
-                                ? (localInfo.defaultServerReachable
-                                    ? 'Reachable on 127.0.0.1:11435'
-                                    : 'Not detected on 127.0.0.1:11435')
-                                : widget.settings.serverUrl,
-                            ok: LocalManager.canRunLocalTools
-                                ? localInfo.defaultServerReachable
-                                : _info != null,
+                            value: localServer.$1,
+                            ok: localServer.$2,
                           ),
                           _StatusRow(
                             label: 'Updater',

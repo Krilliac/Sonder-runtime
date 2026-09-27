@@ -17,6 +17,7 @@ import 'chat/permission_mode.dart';
 import 'chat/status_strip.dart';
 import 'chat/transcript.dart';
 import 'models.dart';
+import 'runtime/model_routing.dart';
 import 'settings.dart';
 import 'settings_screen.dart';
 import 'system_screen.dart';
@@ -502,6 +503,23 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 )),
       );
 
+  /// Deletes at once; a chat with messages gets an Undo that restores it.
+  Future<void> _deleteThread(ChatThread thread) async {
+    final hadMessages = thread.messages.isNotEmpty;
+    final messenger = ScaffoldMessenger.of(context);
+    final deleted = await _chat.deleteThread(thread);
+    if (!mounted || !hadMessages) return;
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+        content: const Text('Chat deleted.'),
+        action: SnackBarAction(
+          label: 'Undo',
+          onPressed: () => unawaited(_chat.restoreThread(deleted)),
+        ),
+      ));
+  }
+
   void _switchThread(ChatThread thread) {
     _chat.switchThread(thread);
     unawaited(Navigator.of(context).maybePop());
@@ -514,7 +532,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           currentThreadId: _chat.currentThreadId,
           onNew: _chat.newChat,
           onSelect: _switchThread,
-          onDelete: _chat.deleteThread,
+          onDelete: _deleteThread,
         );
     if (!desktop) {
       await showModalBottomSheet<void>(
@@ -531,7 +549,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     );
   }
 
-  String _modelLabel(String m) => m == 'sonder' ? 'sonder (local route)' : m;
+  String _modelLabel(String m) => _chat.routing.pickerLabel(m);
 
   TranscriptActions get _transcriptActions => TranscriptActions(
         onStop: _cancelSend,
@@ -584,7 +602,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           currentThreadId: _chat.currentThreadId,
           onNew: _chat.newChat,
           onSelect: _switchThread,
-          onDelete: _chat.deleteThread,
+          onDelete: _deleteThread,
           embedded: desktop,
           onNavigate: _navigateWorkspace,
           connection: _chat.connection,
@@ -661,7 +679,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                         label: _modelLabel(_chat.model),
                         models: _chat.models,
                         current: _chat.model,
-                        labelFor: _modelLabel,
+                        routing: _chat.routing,
                         onSelected: _selectModel,
                       )),
                   if (compact)
@@ -816,16 +834,53 @@ class _ModelPill extends StatelessWidget {
   final String label;
   final List<String> models;
   final String current;
-  final String Function(String) labelFor;
+
+  /// Labels routes with their bound provider. When a route is bound off
+  /// Ollama, exact models are grouped under "Ollama (direct)": they always
+  /// run on Ollama and bypass the binding.
+  final ModelRouting routing;
   final ValueChanged<String> onSelected;
 
   const _ModelPill({
     required this.label,
     required this.models,
     required this.current,
-    required this.labelFor,
+    required this.routing,
     required this.onSelected,
   });
+
+  List<PopupMenuEntry<String>> _items(SonderTokens tokens) {
+    PopupMenuItem<String> item(String m, String text) => PopupMenuItem<String>(
+          value: m,
+          child: Row(children: [
+            if (m == current)
+              Icon(Icons.check, size: 16, color: tokens.accent)
+            else
+              const SizedBox(width: 16),
+            const SizedBox(width: 10),
+            Flexible(child: Text(text, style: tokens.mono(13))),
+          ]),
+        );
+    if (!routing.bypassesBinding) {
+      return [for (final m in models) item(m, routing.pickerLabel(m))];
+    }
+    final exact = [for (final m in models) if (!routing.isRoute(m)) m];
+    return [
+      for (final m in models)
+        if (routing.isRoute(m)) item(m, routing.pickerLabel(m)),
+      if (exact.isNotEmpty) ...[
+        const PopupMenuDivider(),
+        PopupMenuItem<String>(
+          key: const Key('model-group-ollama-direct'),
+          enabled: false,
+          height: 32,
+          child: Text(ModelRouting.ollamaDirect,
+              style: tokens.mono(11, color: tokens.muted)),
+        ),
+        for (final m in exact) item(m, m),
+      ],
+    ];
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -834,19 +889,7 @@ class _ModelPill extends StatelessWidget {
       tooltip: 'Choose inference route or model',
       onSelected: onSelected,
       position: PopupMenuPosition.under,
-      itemBuilder: (_) => models
-          .map((m) => PopupMenuItem<String>(
-                value: m,
-                child: Row(children: [
-                  if (m == current)
-                    Icon(Icons.check, size: 16, color: tokens.accent)
-                  else
-                    const SizedBox(width: 16),
-                  const SizedBox(width: 10),
-                  Text(labelFor(m), style: tokens.mono(13)),
-                ]),
-              ))
-          .toList(),
+      itemBuilder: (_) => _items(tokens),
       child: Container(
         height: 30,
         constraints: const BoxConstraints(maxWidth: 260),

@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 
 import 'api.dart';
 import 'local_manager.dart';
+import 'runtime/model_routing.dart';
 import 'runtime/status_word.dart';
 import 'settings.dart';
 import 'theme.dart';
@@ -60,21 +61,29 @@ int? _statusOf(Object error) {
 }
 
 /// A successful probe of [serverUrl].
-ConnectionDiagnosis diagnoseReachable(String serverUrl, {int modelCount = 0}) {
+///
+/// With [routing] from the runtime's provider bindings, a route bound to
+/// Sonder Inference is not counted as an Ollama model: [models] are split
+/// into routes and exact models, which always run on Ollama.
+ConnectionDiagnosis diagnoseReachable(String serverUrl,
+    {int modelCount = 0,
+    ModelRouting routing = const ModelRouting(),
+    List<String> models = const []}) {
   final uri = Uri.tryParse(serverUrl.trim());
   final host = uri?.host ?? '';
-  final models = modelCount == 1 ? '1 model' : '$modelCount models';
+  final count = modelCount == 1 ? '1 model' : '$modelCount models';
   if (uri != null && uri.scheme == 'http' && !_isLoopback(host)) {
     return ConnectionDiagnosis(
       ServerReachability.needsHttps,
-      'Reachable at $host ($models), but sign-in needs HTTPS off this device.',
+      'Reachable at $host ($count), but sign-in needs HTTPS off this device.',
       detail: 'The API key works over this address. For accounts, serve the '
           'PC over HTTPS (Tailscale Serve or a TLS proxy that keeps the Host '
           'header).',
     );
   }
-  return ConnectionDiagnosis(
-      ServerReachability.reachable, 'Connected to $host. $models available.');
+  final summary = routing.connectionSummary(models);
+  return ConnectionDiagnosis(ServerReachability.reachable,
+      'Connected to $host. ${summary ?? '$count available.'}');
 }
 
 /// A failed probe or sign-in, turned into what the person can do next.
@@ -153,6 +162,21 @@ class SettingsConnection {
           String serverUrl, String apiKey, AccountSession? account) =>
       SonderApi(baseUrl: serverUrl, apiKey: apiKey, accountSession: account)
           .listModels();
+
+  /// The runtime's provider bindings, or null when it cannot say (older
+  /// runtime, non-administrator key, any failure). Only wording depends on
+  /// it, so a failure never fails the connection test.
+  Future<EcosystemStatus?> routingStatus(
+      String serverUrl, String apiKey, AccountSession? account) async {
+    try {
+      final reading = await SonderApi(
+              baseUrl: serverUrl, apiKey: apiKey, accountSession: account)
+          .ecosystemStatus();
+      return reading.status;
+    } catch (_) {
+      return null;
+    }
+  }
 
   Future<String> login(
           String serverUrl, String apiKey, String username, String password) =>
@@ -399,14 +423,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _connection = null;
     });
     try {
-      final models = await widget.connection.testServer(
-        _server.text,
-        _key.text,
-        _account?.matches(_server.text) == true ? _account : null,
-      );
+      final account = _account?.matches(_server.text) == true ? _account : null;
+      final models =
+          await widget.connection.testServer(_server.text, _key.text, account);
+      final routing = await widget.connection
+          .routingStatus(_server.text, _key.text, account);
       if (!mounted) return;
-      setState(() => _connection =
-          diagnoseReachable(_server.text, modelCount: models.length));
+      setState(() => _connection = diagnoseReachable(_server.text,
+          modelCount: models.length,
+          routing: ModelRouting(routing),
+          models: models));
     } catch (error) {
       if (!mounted) return;
       setState(

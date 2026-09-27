@@ -356,6 +356,74 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('Models panel names the provider each route is bound to',
+      (tester) async {
+    await pumpRuntime(tester,
+        info: healthySystemInfo(),
+        data: FakeRuntimeData(
+            ecosystemReading: EcosystemReading.parse(
+                ecosystemJson(inference: inferenceStatusJson()))));
+    await tester.tap(find.text('Models').first);
+    await tester.pumpAndSettle();
+    expect(find.text('code - Sonder Inference'), findsOneWidget);
+    expect(find.text('code - local'), findsNothing);
+    expect(find.textContaining('Sonder Inference serves'), findsOneWidget);
+    expect(find.textContaining('Ollama hosts and runs the local model weights'),
+        findsNothing);
+  });
+
+  testWidgets('Models panel keeps the old wording when all is on Ollama',
+      (tester) async {
+    await pumpRuntime(tester,
+        info: healthySystemInfo(),
+        data: FakeRuntimeData(
+            ecosystemReading: EcosystemReading.parse(ecosystemAllOllama())));
+    await tester.tap(find.text('Models').first);
+    await tester.pumpAndSettle();
+    expect(find.text('code - local'), findsOneWidget);
+    expect(find.textContaining('Ollama hosts and runs the local model weights'),
+        findsOneWidget);
+  });
+
+  group('local server row', () {
+    test('launcher-detected server reads Reachable', () {
+      expect(
+          localServerRow(
+              launcherDetected: true,
+              serverUrl: 'http://127.0.0.1:11435',
+              connected: true),
+          ('Reachable on 127.0.0.1:11435', true));
+    });
+    test('connected to 127.0.0.1:11435 without the launcher identity', () {
+      expect(
+          localServerRow(
+              launcherDetected: false,
+              serverUrl: 'http://127.0.0.1:11435',
+              connected: true),
+          ('Connected on 127.0.0.1:11435 (not launcher-managed)', true));
+      expect(
+          localServerRow(
+              launcherDetected: false,
+              serverUrl: 'http://localhost:11435/',
+              connected: true),
+          ('Connected on 127.0.0.1:11435 (not launcher-managed)', true));
+    });
+    test('not connected, or connected elsewhere, is Not detected', () {
+      for (final (url, connected) in [
+        ('http://127.0.0.1:11435', false),
+        ('http://192.168.1.20:11435', true),
+        ('http://127.0.0.1:8080', true),
+      ]) {
+        expect(
+            localServerRow(
+                launcherDetected: false,
+                serverUrl: url,
+                connected: connected),
+            ('Not detected on 127.0.0.1:11435', false));
+      }
+    });
+  });
+
   testWidgets('ecosystem 403 keeps the rest of Runtime working',
       (tester) async {
     await pumpRuntime(tester,

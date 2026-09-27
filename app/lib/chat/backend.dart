@@ -26,6 +26,10 @@ abstract class ChatBackend {
 
   Future<SystemInfo> systemInfo();
   Future<List<String>> listModels();
+
+  /// The runtime's provider bindings (`GET /v1/sonder/ecosystem`), used only
+  /// to label routes and exact models in the picker.
+  Future<EcosystemReading> ecosystemStatus();
   Future<CommandCatalog> fetchCommands();
   Future<PermissionMode?> fetchPermissionMode();
   Future<PermissionMode> setPermissionMode(String mode);
@@ -167,6 +171,9 @@ class SonderApiChatBackend implements ChatBackend {
 
   @override
   Future<List<String>> listModels() => api.listModels();
+
+  @override
+  Future<EcosystemReading> ecosystemStatus() => api.ecosystemStatus();
 
   @override
   Future<CommandCatalog> fetchCommands() => api.fetchCommands();

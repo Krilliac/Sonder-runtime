@@ -11,6 +11,8 @@ import 'package:sonder_runtime/settings_screen.dart';
 import 'package:sonder_runtime/theme.dart';
 import 'package:sonder_runtime/ui/status_row.dart';
 
+import 'runtime_fixtures.dart';
+
 class MemoryCredentials implements CredentialStore {
   final values = <String, String>{};
   @override
@@ -46,6 +48,14 @@ class FakeConnection extends SettingsConnection {
     if (testError != null) throw testError!;
     return models;
   }
+
+  /// The provider bindings the runtime reports; null reads as unknown.
+  EcosystemStatus? routing;
+
+  @override
+  Future<EcosystemStatus?> routingStatus(
+          String serverUrl, String apiKey, AccountSession? account) async =>
+      routing;
 
   @override
   Future<String> register(
@@ -174,6 +184,23 @@ void main() {
     await tester.tap(find.text('Copy server setting'));
     await tester.pump();
     expect(copied, 'SONDER_ALLOWED_HOSTS=mypc.local');
+  });
+
+  testWidgets('Test connection names routes served by Sonder Inference',
+      (tester) async {
+    final connection = FakeConnection()
+      ..models = const ['sonder', 'general', 'qwen3:14b', 'llama3:8b']
+      ..routing = EcosystemReading.parse(
+              ecosystemJson(inference: inferenceStatusJson()))
+          .status;
+    await pumpSettings(tester,
+        connection: connection, serverUrl: 'http://127.0.0.1:11435');
+    await tapTest(tester);
+    expect(
+        find.textContaining('Sonder Inference serves 2 routes (mock:tiny); '
+            '2 exact models run directly on Ollama.'),
+        findsOneWidget);
+    expect(find.textContaining('4 models available'), findsNothing);
   });
 
   testWidgets('connect card status words', (tester) async {
