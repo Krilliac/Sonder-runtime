@@ -21620,7 +21620,7 @@ def _agent_turn(
             # Retire a matching speculation: if the model committed to the
             # exact read-only call the host already ran during generation,
             # reuse its buffered observation instead of dispatching again.
-            _retired = _spec_engine.resolve(call_signature)
+            _retired = _spec_engine.resolve(call_signature, tool_name)
             if _retired is not None:
                 tool_dispatched = True
                 observation = _retired.observation
