@@ -24,6 +24,20 @@ def test_hard_exit_before_checks_is_a_failure():
     assert ok is False
 
 
+def test_candidate_cannot_forge_check_completion_from_its_source():
+    code = WRONG_ADD + (
+        "import os, pathlib, re, sys\n"
+        "source = pathlib.Path(__file__).read_text(encoding='utf-8')\n"
+        "token = re.search(r'__SONDER_CHECKS_DONE_[0-9a-f]{32}__', source)\n"
+        "if token:\n"
+        "    sys.__stdout__.write('\\n' + token.group(0) + '\\n')\n"
+        "    sys.__stdout__.flush()\n"
+        "os._exit(0)\n"
+    )
+    result = grounding.run_code_detail(code, extra="assert add(1, 2) == 3")
+    assert result["ok"] is False
+
+
 def test_python_exec_verifier_rejects_early_exit():
     code = WRONG_ADD + "raise SystemExit(0)\n"
     verdict = verifiers.python_exec(code, {"check": "assert add(1, 2) == 3"})
@@ -47,3 +61,18 @@ def test_code_without_checks_is_unchanged():
     ok, output = grounding.run_code("import sys\nprint('x')\nsys.exit(0)\n")
     assert ok is True
     assert output == "x"
+
+
+def test_checks_see_module_globals_used_by_candidate_functions():
+    code = "SCALE = 10\ndef scaled(x):\n    return x * SCALE\n"
+    result = grounding.run_code_detail(code, extra="assert scaled(2) == 20")
+    assert result["ok"] is True
+
+
+def test_check_suite_longer_than_a_command_line_still_runs():
+    checks = "\n".join("assert add(%d, 1) == %d" % (i, i + 1) for i in range(4000))
+    assert len(checks) > 40_000
+    code = "def add(a, b):\n    return a + b\n"
+    assert grounding.run_code_detail(code, extra=checks)["ok"] is True
+    wrong = "def add(a, b):\n    return a - b\n"
+    assert grounding.run_code_detail(wrong, extra=checks)["ok"] is False
