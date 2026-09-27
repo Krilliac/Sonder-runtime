@@ -78,13 +78,16 @@ _PARAMETER_CONTEXT_BANDS = (
 )
 
 
-def auto_context_plan(model_context=None, parameter_size=None) -> dict:
+def auto_context_plan(model_context=None, parameter_size=None, residency_ceiling=None) -> dict:
     """Explain a model-aware native context choice with clamp provenance.
 
     Returns a dict with the selected ``context`` plus the intermediate facts
     that produced it: the starting ``base`` and its ``source``, the parsed
     ``parameter_billions`` and ``advertised`` maximum, and the ordered list of
-    ``clamps`` that actually reduced (or raised) the value.  The physical
+    ``clamps`` that actually reduced (or raised) the value.  A
+    ``residency_ceiling`` is a window measured to fit (the model spilled to
+    system RAM at a larger one); like the parameter bands it bounds only
+    automatic selection, never an operator pin.  The physical
     limits — the model's advertised maximum, the native ceiling, and the
     minimum window — always apply.  The parameter-band ladder applies only
     when the operator has *not* pinned a size: an explicit
@@ -111,6 +114,10 @@ def auto_context_plan(model_context=None, parameter_size=None) -> dict:
                     chosen = ceiling
                     clamps.append(reason)
                 break
+    measured = parse_strict(residency_ceiling)
+    if measured is not None and not has_explicit_environment and measured < chosen:
+        chosen = measured
+        clamps.append("observed-spill")
     advertised = parse_strict(model_context)
     if advertised is not None and advertised < chosen:
         chosen = advertised
@@ -129,13 +136,14 @@ def auto_context_plan(model_context=None, parameter_size=None) -> dict:
         "source": source,
         "kv_cache_type": kv_type,
         "kv_cache_source": kv_source,
+        "residency_ceiling": measured,
         "parameter_billions": parameters,
         "advertised": advertised,
         "clamps": tuple(clamps),
     }
 
 
-def auto_context(model_context=None, parameter_size=None) -> int:
+def auto_context(model_context=None, parameter_size=None, residency_ceiling=None) -> int:
     """Choose a model-aware native context when the caller did not pin one.
 
     Ollama's server default is process-wide, but model weights and KV-cache
@@ -144,7 +152,7 @@ def auto_context(model_context=None, parameter_size=None) -> int:
     the selected model's advertised maximum. Operators can still override the
     result with ``SONDER_CONTEXT_SIZE`` or an explicit request value.
     """
-    return auto_context_plan(model_context, parameter_size)["context"]
+    return auto_context_plan(model_context, parameter_size, residency_ceiling)["context"]
 
 
 def parse_strict(value):

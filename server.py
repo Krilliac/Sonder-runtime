@@ -1164,6 +1164,8 @@ from sonder_runtime.adapters.runtime_readiness_formatting import (
     format_model_readiness as _runtime_model_readiness_lines,
 )
 from sonder_runtime.adapters.goal_formatting import format_goal as _format_goal
+from sonder_runtime.adapters.inference.residency_feedback import ResidencyFeedback as _ResidencyFeedback, record_dispatched_context as _record_residency_dispatch
+from sonder_runtime.domain import kv_budget as _kv_budget
 from sonder_runtime.adapters.learning_tier_formatting import (
     format_learning_tiers,
 )
@@ -1570,6 +1572,11 @@ _MODEL_CONTEXT_CACHE_TTL = 300.0
 # fallback; keep that verdict short-lived so a transient provider hiccup does
 # not undersize a large model's window for the full positive TTL.
 _MODEL_CONTEXT_CACHE_NEGATIVE_TTL = 30.0
+# Attention geometry parsed from the same /api/show response, guarded by
+# _MODEL_CONTEXT_CACHE_LOCK; None records "not modelled", not a failure.
+_MODEL_GEOMETRY_CACHE = {}
+_RESIDENCY_FEEDBACK = None
+_RESIDENCY_FEEDBACK_LOCK = threading.Lock()
 
 _MODEL_PROMPT_IDENTITY_CACHE = {}
 _MODEL_PROMPT_IDENTITY_CACHE_LOCK = threading.Lock()
@@ -1698,6 +1705,8 @@ def _model_context_metadata(model):
             count = info.get("general.parameter_count")
             if count:
                 parameter_size = float(count) / 1_000_000_000.0
+        with _MODEL_CONTEXT_CACHE_LOCK:
+            _MODEL_GEOMETRY_CACHE[key] = _kv_budget.geometry_from_model_info(info)
     except Exception:
         # Metadata is an optimization and cannot make an otherwise valid model
         # unavailable. The deterministic context-policy fallback remains safe.
@@ -1707,10 +1716,51 @@ def _model_context_metadata(model):
     return context_length, parameter_size
 
 
+def _residency_feedback():
+    """Return the process residency tracker, or ``None`` when unsound.
+
+    ``/api/ps`` describes one server.  Like reusable prompt prefixes, the
+    feedback is only attributable when exactly one Ollama origin is
+    configured; with a worker pool the probe could read a different host than
+    the one that served the request.  ``SONDER_RESIDENCY_FEEDBACK=0`` opts out.
+    """
+    global _RESIDENCY_FEEDBACK
+    if str(os.environ.get("SONDER_RESIDENCY_FEEDBACK", "1")).strip().lower() in (
+        "0", "false", "no", "off",
+    ):
+        return None
+    try:
+        primary = ollama_policy.normalize(BASE).rstrip("/")
+        if tuple(OLLAMA_POOL.configured_origins) != (primary,):
+            _RESIDENCY_FEEDBACK = None
+            return None
+    except Exception:
+        return None
+    with _RESIDENCY_FEEDBACK_LOCK:
+        if _RESIDENCY_FEEDBACK is None or _RESIDENCY_FEEDBACK.origin != primary:
+            _RESIDENCY_FEEDBACK = _ResidencyFeedback(
+                lambda: _get("/api/ps"), minimum_context=context_policy.MIN_CONTEXT, origin=primary,
+            )
+        return _RESIDENCY_FEEDBACK
+
+
 def _auto_model_context(model):
-    """Select a native window for the resolved model when no pin was supplied."""
+    """Select a native window for the resolved model when no pin was supplied.
+
+    Metadata and the declared KV cache type give the starting window; a
+    measured spill to system RAM (``/api/ps``) lowers it until the model is
+    GPU-resident again.  See ``adapters.inference.residency_feedback``.
+    """
     context_length, parameter_size = _model_context_metadata(model)
-    return context_policy.auto_context(context_length, parameter_size)
+    feedback = None if _is_cloud_model_name(model) else _residency_feedback()
+    if feedback is None:
+        return context_policy.auto_context(context_length, parameter_size)
+    with _MODEL_CONTEXT_CACHE_LOCK:
+        geometry = _MODEL_GEOMETRY_CACHE.get(str(model or "").strip().casefold())
+    feedback.refresh(model, geometry=geometry, kv_type=context_policy.kv_cache_type()[0])
+    return context_policy.auto_context(
+        context_length, parameter_size, feedback.ceiling(model),
+    )
 
 
 def _make_generate(
@@ -5469,6 +5519,7 @@ def _post(
         )
         def transport():
             with OLLAMA_POOL.open_url(req, timeout=remaining) as resp:
+                _record_residency_dispatch(path, json.loads(data), _residency_feedback, _is_cloud_model_name)
                 raw = _read_ollama_response_bytes(resp)
                 return json.loads(raw.decode("utf-8"))
 

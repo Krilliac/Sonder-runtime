@@ -277,7 +277,8 @@ Models/tiers: `SONDER_FAST`, `SONDER_CODE`, `SONDER_GENERAL`,
 `SONDER_EMBED_MODEL`, `SONDER_CONTEXT_SIZE`, `SONDER_SESSION_NUM_CTX`,
 `SONDER_NATIVE_CONTEXT_MAX`, `SONDER_VIRTUAL_CONTEXT_MAX`, `SONDER_LEARN_TIERS`
 (see [Context sizing](#context-sizing) below; `SONDER_KV_CACHE_TYPE`, or
-failing that `OLLAMA_KV_CACHE_TYPE`, also affects the default).
+failing that `OLLAMA_KV_CACHE_TYPE`, also affects the default, and
+`SONDER_RESIDENCY_FEEDBACK` controls measured spill correction).
 `SONDER_REASONING` / `SONDER_VISION` also accept `none` (or `off`) to leave
 that specialist tier unbound, in which case reasoning/vision work falls back
 to a base tier.
@@ -351,7 +352,20 @@ model's own advertised context window either way. Smaller models are
 unaffected by this cap. A request that *does* pin an explicit `num_ctx` (the
 REPL's `/contextsize <size>` / `/ctxsize <size>`, or the `set_context_size`
 tool) bypasses auto-sizing entirely and is used as given, subject only to the
-ceilings below. That pin is a process-wide default, not scoped to one
+ceilings below.
+
+Automatic sizing is also corrected by measurement. With exactly one Ollama
+origin configured, Sonder reads `/api/ps` (at most once a minute per model,
+never on a model's first request) and compares `size` with `size_vram`. A
+model split between VRAM and system RAM gets a smaller automatic window,
+computed from the measured overflow and the model's attention geometry, for
+30 minutes; the `observed-spill` clamp records it. Fully GPU- or CPU-resident
+models are never clamped, an explicit pin is never overridden, and
+`SONDER_RESIDENCY_FEEDBACK=0` disables the probe. If a spill is larger than
+the whole KV cache, the weights exceed VRAM and Sonder logs that a smaller
+model or quantization is needed instead.
+
+An explicit pin is a process-wide default, not scoped to one
 conversation — it applies to every session on this running server until
 changed again or reset with `/contextsize` with no argument.
 
