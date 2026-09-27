@@ -667,6 +667,11 @@ def test_entrypoint_legacy_requests_share_typed_membership_admission(
     monkeypatch.setattr(server.mcp, "run", run_interface)
     monkeypatch.setattr(server, "require_mcp_startup_safety", lambda: None)
     monkeypatch.setattr(repl, "main", run_interface)
+    # Long-lived entrypoints own and start static membership (covered live in
+    # test_ollama_pool_remote_membership). Record that ownership here and keep
+    # this admission-sharing check on its deterministic explicit refresh.
+    started = []
+    monkeypatch.setattr(bootstrap, "start_inference_membership", started.append)
     try:
         args = SimpleNamespace(skip_preflight=True, native=False, json=False)
         if command == "bound_direct":
@@ -676,6 +681,8 @@ def test_entrypoint_legacy_requests_share_typed_membership_admission(
         else:
             assert getattr(entrypoint, "cmd_" + command)(args) == 0
         assert checked == [True]
+        assert len(started) == (0 if command == "bound_direct" else 1)
+        assert all(type(owner).__name__ == "Application" for owner in started)
     finally:
         bootstrap.close_default_runtime_resources(timeout=2)
         ollama_pool.reset_typed_workers()
