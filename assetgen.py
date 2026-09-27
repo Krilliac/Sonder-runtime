@@ -609,6 +609,10 @@ def _mentions_term(text: str, terms) -> bool:
 def infer_request(brief: str, kinds: str = "auto", dimension: str = "auto",
                   theme: str = "auto", seed: int | None = None) -> dict:
     """Turn a free-form artifact request into deterministic generator settings."""
+    if isinstance(kinds, (list, tuple, set)):
+        # Tool-calling models often send kinds as a JSON array.
+        kinds = ", ".join(str(kind) for kind in kinds) or "auto"
+    kinds = kinds or "auto"
     text = (brief or "").strip()
     lowered = text.lower()
     if not text:
