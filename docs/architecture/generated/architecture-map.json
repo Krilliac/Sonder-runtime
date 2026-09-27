@@ -1125,7 +1125,7 @@
       ]
     },
     {
-      "file_count": 68,
+      "file_count": 69,
       "name": "interfaces",
       "python_files": [
         "sonder_runtime/interfaces/__init__.py",
@@ -1143,6 +1143,7 @@
         "sonder_runtime/interfaces/http/app_control.py",
         "sonder_runtime/interfaces/http/artifact_transfer.py",
         "sonder_runtime/interfaces/http/authority_contract.py",
+        "sonder_runtime/interfaces/http/connection_limit.py",
         "sonder_runtime/interfaces/http/facades/__init__.py",
         "sonder_runtime/interfaces/http/facades/a2a.py",
         "sonder_runtime/interfaces/http/facades/a2a_jsonrpc.py",
