@@ -3050,9 +3050,7 @@ def _selfmod_operator_lease(run_id):
 
     heartbeat_thread = None
     try:  # a refused heartbeat worker must still release the claimed lease
-        heartbeat_thread = owned_runtime_thread(
-            target=heartbeat_worker, name="sonder-selfmod-heartbeat", daemon=True,
-        )
+        heartbeat_thread = owned_runtime_thread(target=heartbeat_worker, name="sonder-selfmod-heartbeat", daemon=True)
         heartbeat_thread.start()
         yield owner
     finally:
@@ -5553,10 +5551,8 @@ def prewarm_model(tier: str = "") -> bool:
 
     Model cold-load dominates first-token latency (tens of seconds for a 7B
     on CPU). Firing an empty keep-alive load concurrently with the host's
-    DB/recall/augmentation work overlaps that cost, like a CPU prefetching a
-    line it predicts the pipeline will need. Local tiers only, best-effort,
-    one in-flight load per model, and never fatal: a failed prewarm just
-    means the real call pays the normal cost.
+    DB/recall/augmentation work overlaps that cost. Local tiers only,
+    best-effort, one in-flight load per model, and never fatal.
     """
     if not sonder_speculation.speculation_enabled():
         return False
@@ -21622,9 +21618,7 @@ def _agent_turn(
             )
         else:
             ensure_not_cancelled()
-            # Retire a matching speculation: if the model committed to the
-            # exact read-only call the host already ran during generation,
-            # reuse its buffered observation instead of dispatching again.
+            # Retire a matching speculation (a non-read-only commit drops them all).
             _retired = _spec_engine.resolve(call_signature, tool_name)
             if _retired is not None:
                 tool_dispatched = True
