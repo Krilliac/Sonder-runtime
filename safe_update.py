@@ -8,13 +8,30 @@ from datetime import datetime
 from pathlib import Path
 
 
+# Every git call is bounded: a hung credential prompt, network stall, or lock
+# wait must fail the update instead of blocking the GUI's updater forever.
+GIT_TIMEOUT_SECONDS = 120
+GIT_NETWORK_TIMEOUT_SECONDS = 300
+TIMEOUT_EXIT_CODE = 124
+
+
 def run(args, cwd):
-    proc = subprocess.run(
-        ["git", *args],
-        cwd=str(cwd),
-        text=True,
-        capture_output=True,
+    timeout = (
+        GIT_NETWORK_TIMEOUT_SECONDS if args and args[0] == "fetch"
+        else GIT_TIMEOUT_SECONDS
     )
+    try:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return TIMEOUT_EXIT_CODE, "git %s timed out after %ss" % (
+            args[0] if args else "", timeout,
+        )
     out = "\n".join(
         part.strip() for part in (proc.stdout, proc.stderr) if part and part.strip()
     )
@@ -61,9 +78,59 @@ def _stash_ref_for_sha(repo, sha):
     return None
 
 
+def _restore_after_failed_rebase(repo, pre_head, pre_branch, stash_sha):
+    """Abort a failed rebase and put the checkout back where it started.
+
+    Returns True only when HEAD (and the branch, if one was checked out) is
+    back at the pre-update commit with no rebase in progress, and the saved
+    local edits were re-applied cleanly (their stash entry is then dropped).
+    """
+    code, out = run(["rebase", "--abort"], repo)
+    if out:
+        print(out)
+    code, head = run(["rev-parse", "HEAD"], repo)
+    if code != 0 or head.strip() != pre_head:
+        print(
+            "ERROR: could not restore the checkout to %s after the failed "
+            "rebase. Run: git status" % pre_head
+        )
+        return False
+    if pre_branch:
+        code, branch = run(["symbolic-ref", "--quiet", "--short", "HEAD"], repo)
+        if code != 0 or branch.strip() != pre_branch:
+            print(
+                "ERROR: checkout is at %s but not on branch %s. Run: git status"
+                % (pre_head, pre_branch)
+            )
+            return False
+    if stash_sha:
+        code, out = run(["stash", "apply", stash_sha], repo)
+        if out:
+            print(out)
+        if code != 0:
+            print(
+                "ERROR: checkout restored to %s, but saved local edits could "
+                "not be re-applied cleanly. Your backup stash was kept. Run: "
+                "git stash list" % pre_head
+            )
+            return False
+        ref = _stash_ref_for_sha(repo, stash_sha)
+        if ref is not None:
+            run(["stash", "drop", ref], repo)
+    return True
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", default=".", help="Git checkout to update")
+    parser.add_argument(
+        "--keep-failed-rebase",
+        action="store_true",
+        help=(
+            "leave a conflicted rebase in progress for manual resolution "
+            "instead of aborting it and restoring the previous revision"
+        ),
+    )
     args = parser.parse_args(argv)
     repo = Path(args.repo).resolve()
 
@@ -76,6 +143,14 @@ def main(argv=None):
     if code != 0:
         print("ERROR: could not inspect local changes.\n%s" % status)
         return 1
+
+    code, pre_head = run(["rev-parse", "HEAD"], repo)
+    if code != 0:
+        print("ERROR: could not resolve the current revision.\n%s" % pre_head)
+        return 1
+    pre_head = pre_head.strip()
+    code, pre_branch = run(["symbolic-ref", "--quiet", "--short", "HEAD"], repo)
+    pre_branch = pre_branch.strip() if code == 0 else ""
 
     stash_sha = None
     if status.strip():
@@ -119,9 +194,16 @@ def main(argv=None):
     code, out = run(["rebase", "origin/main"], repo)
     print(out)
     if code != 0:
-        print("ERROR: update failed. If needed, run: git rebase --abort")
-        if stash_sha:
-            print("Your local edits are saved in git stash. Run: git stash list")
+        if args.keep_failed_rebase:
+            print(
+                "ERROR: update failed; the rebase was left in progress as "
+                "requested. Resolve it, or run: git rebase --abort"
+            )
+            if stash_sha:
+                print("Your local edits are saved in git stash. Run: git stash list")
+            return 1
+        if _restore_after_failed_rebase(repo, pre_head, pre_branch, stash_sha):
+            print("ERROR: update aborted; checkout restored to %s" % pre_head)
         return 1
 
     if stash_sha:
