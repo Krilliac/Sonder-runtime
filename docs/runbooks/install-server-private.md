@@ -33,7 +33,28 @@ sudo packaging/install_sonder.sh \
 
 The installer validates the version tag before constructing root-owned paths,
 verifies every manifest entry before copying it, ignores every unlisted file,
-and refuses to overwrite an existing release or staging directory.
+and refuses to overwrite an existing release or staging directory. The
+manifest verifier it runs is the one shipped beside `install_sonder.sh`
+(started with `python3 -I`), never code from `--package-source`, so a
+tampered package cannot execute anything as root before it is checked.
+
+### Dependency resolution (known gap)
+
+`requirements-runtime.txt` pins only the top-level runtime releases
+(`mcp`, `cryptography`, `pywin32` on Windows). Their transitive dependencies
+are resolved from PyPI at install time, without hashes, so two installs of
+the same tag can differ and may not match the set CI tested. There is no
+lock generator in the repository yet, so no hashed lock is shipped. Until
+one exists the installer:
+
+- runs `pip check` and aborts before the release becomes current if the
+  resolved set is inconsistent, and
+- writes the exact resolved set to
+  `/opt/sonder/releases/<tag>/INSTALLED-REQUIREMENTS.txt`.
+
+Compare that file between installs (or against the CI run for the same
+revision) before trusting a new host; install from an internal mirror or
+wheelhouse if you need a byte-identical closure.
 
 ## 3. Configuration and secrets
 

@@ -83,20 +83,46 @@ if [ -e "$STAGING" ]; then
 fi
 mkdir -p "$STAGING"
 
-# Import the verifier from the audited package and copy only files listed in
-# PACKAGE-MANIFEST.json.  Ignored/untracked checkout state and unlisted files
-# can never enter the privileged release directory through this path.
-PYTHONPATH="$PACKAGE_SOURCE" python3 - "$PACKAGE_SOURCE" "$STAGING" <<'PY'
+# Verify and copy only files listed in PACKAGE-MANIFEST.json, using the
+# installer's OWN verifier (the tree this script ships in), never the copy
+# inside --package-source: importing the package's module would execute its
+# code as root before a single byte had been checked.  `python3 -I` ignores
+# PYTHONPATH and user site-packages and running from / keeps the working
+# directory off sys.path, so nothing in the package can shadow the verifier.
+# Ignored/untracked checkout state and unlisted files can never enter the
+# privileged release directory through this path.
+TRUSTED_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+verify_and_stage_payload() {
+  local trusted_root="$1" package_source="$2" staging="$3"
+  if [ ! -f "$trusted_root/scripts/package_local_system.py" ]; then
+    echo "installer verifier missing: $trusted_root/scripts/package_local_system.py" >&2
+    return 1
+  fi
+  (cd / && python3 -I - "$trusted_root" "$package_source" "$staging" <<'PY'
+import importlib.util
 import sys
 from pathlib import Path
 
-from scripts import package_local_system
-
-package_local_system.copy_verified_payload(Path(sys.argv[1]), Path(sys.argv[2]))
+trusted_root, package_source, staging = (Path(arg) for arg in sys.argv[1:4])
+verifier_path = trusted_root / "scripts" / "package_local_system.py"
+spec = importlib.util.spec_from_file_location("sonder_package_verifier", verifier_path)
+verifier = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(verifier)
+verifier.copy_verified_payload(package_source, staging)
 PY
+  )
+}
+verify_and_stage_payload "$TRUSTED_ROOT" "$PACKAGE_SOURCE" "$STAGING"
 python3 -m venv "$STAGING/venv"
 "$STAGING/venv/bin/pip" install --quiet --upgrade pip
 "$STAGING/venv/bin/pip" install --quiet -r "$STAGING/requirements-runtime.txt"
+# requirements-runtime.txt pins the top-level releases only; pip resolves the
+# transitive closure at install time and there is no hash lock yet (see
+# docs/runbooks/install-server-private.md).  Refuse an inconsistent
+# resolution before the release becomes current, and record exactly what was
+# installed next to the release for audit and reproduction.
+"$STAGING/venv/bin/python" -m pip check
+"$STAGING/venv/bin/python" -m pip freeze --all > "$STAGING/INSTALLED-REQUIREMENTS.txt"
 mv "$STAGING" "$RELEASE_DIR"
 ln -sfn "$RELEASE_DIR" /opt/sonder/current
 
