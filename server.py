@@ -183,6 +183,7 @@ from sonder_runtime.adapters.model_inventory import inventory_rows as _inventory
 from sonder_runtime.domain.context import compaction as context_compaction
 from sonder_runtime.domain.context import overflow as context_overflow
 from sonder_runtime.application.routing import tier_escalation
+from sonder_runtime.application.routing import long_context_overflow as _overflow
 # The per-rung provider ContextVar lives in this package module, not here, so
 # a live reload of server.py cannot orphan an in-flight rung binding.
 from sonder_runtime.application.chat import provider_bridge as _provider_bridge
@@ -515,6 +516,7 @@ from sonder_runtime.domain.execution_route_formatting import (
     execution_route_header as _execution_route_header_impl,
 )
 from sonder_runtime.adapters.inference import served_tier_models as _served_models
+from sonder_runtime.adapters.inference import overflow_route as _overflow_route
 from sonder_runtime.domain.agent_observation_quality import (
     observation_ok as _agent_observation_ok,
 )
@@ -2536,24 +2538,6 @@ def _build_system(system, trace, persona, model="", cloud=False, provider=None):
     )
 
 
-def _resolve_model_and_system(system, trace, strict, persona):
-    """Shared prep for the Sonder Runtime tool and HTTP serve layer.
-
-    Returns (model, effective_system); model is None if the strict alias is missing.
-
-    NOTE: this helper currently has no callers -- the surfaces it was written
-    for resolve their own target through `_serve_target` and call
-    `_build_system` directly. It is kept only because it is the documented
-    shape of that prep; it no longer sets any process-wide state, so leaving it
-    uncalled cannot desynchronise anything.
-    """
-    strict_eff = _STRICT_DEFAULT if strict is None else strict
-    model = resolve_sonder_model(strict_eff)
-    if model is None:
-        return None, None
-    return model, _build_system(system, trace, persona, model=model, cloud=False)
-
-
 def _serve_target(tier, strict):
     """Resolve a serve/app request's OpenAI `model` field to a concrete target.
 
@@ -2832,6 +2816,10 @@ def _runtime_command(arg: str) -> str:
     rest = rest.strip()
     if action == "reset":
         return runtime_policy_update(reset=True)
+    if action == "overflow":
+        result = runtime_policy.overflow_command(rest)
+        _refresh_runtime_policy(create=False)
+        return result
     if action == "set":
         local_models = {}
         routing = {}
@@ -2877,6 +2865,7 @@ def _runtime_command(arg: str) -> str:
             "  /runtime set embedding=<installed-embedding-model>\n"
             "  /runtime set chat=<tier> router=<tier> workbench=<tier> "
             "autopilot=<tier> fleet=<tier> review=<tier>\n"
+            "  /runtime overflow [status|on|off|threshold <n>|model <m>]   (long-context overflow)\n"
             "  /runtime reset\n"
             "Only installed local models are accepted. Embedding changes affect "
             "future vectors only; use /embeddings apply to refresh stored memory. "
@@ -7067,6 +7056,8 @@ def _answer_with_history_impl(
         if _explicit_serve_selection(tier, "")
         else _default_route_plan(prompt, start_rung)
     )
+    escalation_plan, overflow = _overflow_route.plan(sys.modules[__name__], prompt, history, escalation_plan)
+    overflow_failure = ""
     temperature = _serve_temperature()
     pinned_ctx = (
         _platform_requested_context(context_size, default_value=SESSION_NUM_CTX)
@@ -7093,7 +7084,7 @@ def _answer_with_history_impl(
             following = escalation_plan.next_rung(attempt)
             detail = ""
             rung_scope.close()
-            bridged_provider = _bridge_provider_for_tier(tier_label, cloud)
+            bridged_provider = None if _overflow.is_overflow(rung) else _bridge_provider_for_tier(tier_label, cloud)
             rung_binding = rung_scope.enter_context(
                 _provider_bridge.bind_rung(bridged_provider, tier_label)
             )
@@ -7116,6 +7107,7 @@ def _answer_with_history_impl(
                 else None if bridged_provider is not None
                 else _auto_model_context(model)
             )
+            req_ctx = _overflow_route.rung_started(rung, overflow, req_ctx, pinned_ctx)
             try:
                 if learn:
                     # Augmentation policy controls what the model sees, not provenance.
@@ -7199,6 +7191,7 @@ def _answer_with_history_impl(
                             pass
                     iid, trace_ctx = None, None
             except ModelCallError as error:
+                detail = _overflow.error_detail(rung, error)
                 reason = (
                     tier_escalation.failure_reason(error=error)
                     if following is not None else None
@@ -7236,11 +7229,11 @@ def _answer_with_history_impl(
                 # The empty or unverified attempt was captured; it must not
                 # reach lessons.
                 _discard_interaction(iid)
-            _note_escalation(
-                tier_escalation.Step(attempt + 1, reason, rung, following, detail=detail),
-                "chat-api",
-            )
+            step = tier_escalation.Step(attempt + 1, reason, rung, following, detail=detail)
+            _note_escalation(step, "chat-api")
+            overflow_failure = overflow_failure or _overflow.failure_text(step)
             attempt += 1
+        _overflow_route.finished(overflow, rung, overflow_failure)
     except ModelCallError as error:
         if raise_model_errors:
             raise
@@ -22651,14 +22644,6 @@ def _autopilot_review_model(run: dict, issue: str) -> dict:
     )
 
 
-def _autopilot_evidence_has(output: str, tools) -> bool:
-    names = {str(name) for name in tools}
-    return any(
-        match.group(1) in names
-        for match in re.finditer(r"\btool=([A-Za-z0-9_]+)", str(output or ""))
-    )
-
-
 def _autopilot_work_model(
     run: dict, task: dict, prior: str, *, strategy_memory=None,
 ) -> autopilot_controller.HostTaskResult | str:
@@ -24377,12 +24362,6 @@ def _fanout_plan(scope, *, profile="", include_unhealthy=False):
             "hosted/cloud tiers are disabled. Set SONDER_ALLOW_CLOUD=1 to opt in; prompts sent to cloud tiers leave this machine.",
         )
     return {"scope": scope, "selected": selected, "skipped": skipped}, None
-
-
-def _fanout_models(scope):
-    """Compatibility selector retained for callers that only need targets."""
-    plan, error = _fanout_plan(scope)
-    return plan["selected"], error
 
 
 

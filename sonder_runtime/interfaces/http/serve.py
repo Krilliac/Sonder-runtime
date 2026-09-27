@@ -102,6 +102,7 @@ from sonder_runtime.application.extensions.facade import ExtensionAuthority
 from sonder_runtime.application.ports.model_gateway import ModelRequest
 from sonder_runtime.application.context import bind_operation_context
 from sonder_runtime.application.chat import provider_bridge as _provider_bridge
+from sonder_runtime.application.routing import long_context_overflow as _overflow
 from sonder_runtime.domain import launcher_health as sonder_health
 from sonder_runtime.domain.common.errors import (
     Conflict,
@@ -3097,6 +3098,10 @@ def _slash_system_operation(command, argument):
     parts = str(argument or "").strip().split(None, 1)
     action = parts[0].lower() if parts else ""
     if command in ("/runtime", "/models") and action in ("set", "reset"):
+        return "runtime_policy_change"
+    if command in ("/runtime", "/models") and action == "overflow" and (
+        parts[1:] and parts[1].split()[0].lower() not in ("status", "show", "help", "?")
+    ):
         return "runtime_policy_change"
     if command in ("/update", "/updatesource") and action in ("", "apply", "now"):
         return "selfmod_deploy"
@@ -7431,6 +7436,11 @@ class Handler(BaseHTTPRequestHandler):
         turn_degradations = self._turn_stack.enter_context(
             _provider_bridge.degradation_scope()
         ) if getattr(self, "_turn_stack", None) is not None else []
+        # The long-context overflow decision, stated in the receipt (never
+        # in the answer text): switched to the overflow model, or stayed.
+        turn_overflow = self._turn_stack.enter_context(
+            _overflow.notice_scope()
+        ) if getattr(self, "_turn_stack", None) is not None else []
         try:
             # SPEC-2 WP4 admission: bounded concurrency slot with queue
             # depth, admission deadline, drain and maintenance awareness,
@@ -7845,6 +7855,9 @@ class Handler(BaseHTTPRequestHandler):
             receipt["degraded"] = list(turn_degradations)
         if chat_work_receipt is not None:
             receipt["chat_work"] = chat_work_receipt
+        overflow_receipt = _overflow.receipt_entry(turn_overflow)
+        if overflow_receipt is not None:
+            receipt["overflow"] = overflow_receipt
         refusal = _turn_refusal_receipt(turn_refusals)
         if refusal is not None:
             receipt["refusal"] = refusal

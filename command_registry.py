@@ -79,7 +79,7 @@ COMMANDS = [
         "name": "/runtime",
         "category": "system",
         "risk": "ask",
-        "summary": "Inspect or guarded-edit shared local model mappings and execution-lane tiers; cloud remains separate.",
+        "summary": "Inspect or guarded-edit shared local model mappings, execution-lane tiers and the long-context overflow; cloud remains separate.",
     },
     {
         "name": "/updatecheck",

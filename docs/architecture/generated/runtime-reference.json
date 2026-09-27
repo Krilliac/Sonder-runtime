@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "1b178d9c0fa675b82c42f258b77e6f63627f182d894f2bdfc3cc0aa2821376f0",
+    "catalog_digest": "7dd813f853a4d6aa4955bcf1a0aea3ac29c8b2b0154a8fc4bf0987b7d28c5c97",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "1b178d9c0fa675b82c42f258b77e6f63627f182d894f2bdfc3cc0aa2821376f0",
+      "catalog_digest": "7dd813f853a4d6aa4955bcf1a0aea3ac29c8b2b0154a8fc4bf0987b7d28c5c97",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -14340,7 +14340,7 @@
       "native": true,
       "params": [],
       "risk": "dangerous",
-      "summary": "Inspect or guarded-edit shared local model mappings and execution-lane tiers; cloud remains separate.",
+      "summary": "Inspect or guarded-edit shared local model mappings, execution-lane tiers and the long-context overflow; cloud remains separate.",
       "tool": ""
     },
     {
@@ -18103,7 +18103,7 @@
     "schemas": 4,
     "tools": 216
   },
-  "digest": "20a5e63e854b604c04c90fbe900ad2b341fd8b1e45bbe9993d3587423558e80b",
+  "digest": "7def281b6dcf82c417093200d27bd05fe578fd727228250b5181c6571659470b",
   "events": [
     {
       "name": "session.started",
@@ -20714,9 +20714,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "1b178d9c0fa675b82c42f258b77e6f63627f182d894f2bdfc3cc0aa2821376f0",
+    "catalog_digest": "7dd813f853a4d6aa4955bcf1a0aea3ac29c8b2b0154a8fc4bf0987b7d28c5c97",
     "client": {
-      "digest": "1b178d9c0fa675b82c42f258b77e6f63627f182d894f2bdfc3cc0aa2821376f0",
+      "digest": "7dd813f853a4d6aa4955bcf1a0aea3ac29c8b2b0154a8fc4bf0987b7d28c5c97",
       "events": [
         {
           "name": "approval.denied",
@@ -46430,7 +46430,7 @@
   },
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "d6ea452fdef9671c3f4062a5db50633076df927804ecbbe559b342b28b8bc2f8",
+    "server.py": "5473bd92b20ee3fb8db3ac45ed50836e648c68a4eb41f929856a701e5e2fb281",
     "sonder_runtime/application/tools/generated_catalogs.py": "0cb58ae27e9f0e56102282b7e2a5b7b8a9d955a4322055e87d18d3970fe644d8",
     "sonder_runtime/bootstrap/native_mcp.py": "f88dcc1eb15ba75200359a06f9fb05b4673bbe5013dca64dfca3e158d873675d",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
