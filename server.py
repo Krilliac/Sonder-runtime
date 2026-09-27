@@ -3048,15 +3048,17 @@ def _selfmod_operator_lease(run_id):
             if not selfmod.heartbeat(run_id, owner):
                 return
 
-    heartbeat_thread = owned_runtime_thread(
-        target=heartbeat_worker, name="sonder-selfmod-heartbeat", daemon=True,
-    )
-    heartbeat_thread.start()
-    try:
+    heartbeat_thread = None
+    try:  # a refused heartbeat worker must still release the claimed lease
+        heartbeat_thread = owned_runtime_thread(
+            target=heartbeat_worker, name="sonder-selfmod-heartbeat", daemon=True,
+        )
+        heartbeat_thread.start()
         yield owner
     finally:
         heartbeat_stop.set()
-        heartbeat_thread.join(timeout=2)
+        if heartbeat_thread is not None and heartbeat_thread.is_alive():
+            heartbeat_thread.join(timeout=2)
         with contextlib.suppress(Exception):
             selfmod.release(run_id, owner)
 
@@ -5590,9 +5592,12 @@ def prewarm_model(tier: str = "") -> bool:
             with _PREWARM_LOCK:
                 _PREWARM_INFLIGHT.discard(model)
 
-    owned_runtime_thread(
-        target=_load, daemon=True, name="sonder-prewarm"
-    ).start()
+    try:  # a refused worker must not leave the model marked in flight forever
+        owned_runtime_thread(target=_load, daemon=True, name="sonder-prewarm").start()
+    except BaseException:
+        with _PREWARM_LOCK:
+            _PREWARM_INFLIGHT.discard(model)
+        return False
     return True
 
 
