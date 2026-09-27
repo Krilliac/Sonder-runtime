@@ -5585,8 +5585,7 @@ def prewarm_model(tier: str = "") -> bool:
     try:  # a refused worker must not leave the model marked in flight forever
         owned_runtime_thread(target=_load, daemon=True, name="sonder-prewarm").start()
     except BaseException:
-        with _PREWARM_LOCK:
-            _PREWARM_INFLIGHT.discard(model)
+        prewarm_gate.finish(model)
         return False
     return True
 
