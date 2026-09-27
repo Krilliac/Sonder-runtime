@@ -180,6 +180,19 @@ def test_preexisting_active_catalog_job_blocks_new_admissions(tmp_path):
     with pytest.raises(CapacityExceeded):
         registry.reserve_capacity(WorkerBudget('host', 100), 'new', 'a' * 64, 1)
 
+
+def test_controller_placement_rows_do_not_block_worker_capacity_but_worker_rows_do(tmp_path):
+    from sonder_runtime.application.compute_fabric.capacity import WorkerBudget
+    from sonder_runtime.application.ports.jobs import JobIdentity
+    registry = SQLiteDurableJobRegistry(tmp_path / 'jobs.db')
+    registry.start(JobIdentity('placement', 'compute-placement', 'op', 'placement'))
+    assert registry.reserve_capacity(WorkerBudget('host', 100), 'worker', 'a' * 64, 1).job_id == 'worker'
+
+    blocked = SQLiteDurableJobRegistry(tmp_path / 'blocked.db')
+    blocked.start(JobIdentity('worker-row', 'compute-test', 'op', 'worker-row'))
+    with pytest.raises(CapacityExceeded, match='unknown capacity ownership'):
+        blocked.reserve_capacity(WorkerBudget('host', 100), 'new', 'b' * 64, 1)
+
 def test_dynamic_budget_requires_fresh_local_ram_and_is_exclusive():
     from datetime import datetime, timedelta, timezone
     from types import SimpleNamespace
