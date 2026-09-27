@@ -2573,6 +2573,24 @@ def _validate_chat_messages(messages):
     return messages
 
 
+def _chat_facade_payload(req, operation):
+    """Apply the chat adapter's defaults before the provider-neutral facade.
+
+    Validation runs first to keep the adapter's error vocabulary.  An absent,
+    blank, or whitespace-only model is the default route (``_model_to_tier``),
+    and JSON null ``stream`` is the omitted non-streaming default.
+    """
+    payload = dict(req)
+    if operation == "chat.completions":
+        _validate_chat_messages(payload.get("messages"))
+    model = payload.get("model")
+    if "model" not in payload or (isinstance(model, str) and not model.strip()):
+        payload["model"] = "sonder"
+    if payload.get("stream", False) is None:
+        payload["stream"] = False
+    return payload
+
+
 def _last_user_message(messages):
     for msg in reversed(messages or []):
         if msg.get("role") == "user":
@@ -6981,19 +6999,7 @@ class Handler(BaseHTTPRequestHandler):
                 ),
             )
             try:
-                facade_payload = dict(req)
-                if model_route.operation == "chat.completions":
-                    # Preserve the established adapter validation vocabulary
-                    # before the provider-neutral facade normalizes the same
-                    # envelope.
-                    _validate_chat_messages(facade_payload.get("messages"))
-                if "model" not in facade_payload:
-                    facade_payload["model"] = "sonder"
-                # The established chat adapter treats JSON null as the
-                # omitted non-streaming default; preserve that compatibility
-                # while the provider-neutral facade accepts strict booleans.
-                if facade_payload.get("stream", False) is None:
-                    facade_payload["stream"] = False
+                facade_payload = _chat_facade_payload(req, model_route.operation)
                 normalized = facade.normalize(path, facade_payload)
             except HTTPRequestError as error:
                 record_early_chat_metric("invalid_messages")
