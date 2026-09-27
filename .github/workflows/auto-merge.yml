@@ -2,7 +2,10 @@ name: auto-merge
 
 on:
   pull_request:
-    types: [opened, reopened, ready_for_review]
+    # `edited` covers retargeting: when a stacked PR's base changes to main
+    # (its parent merged), auto-merge is queued then; if a PR is retargeted
+    # away from main, any queued auto-merge is withdrawn.
+    types: [opened, reopened, ready_for_review, edited]
 
 permissions:
   contents: write
@@ -12,7 +15,11 @@ jobs:
   enable-auto-merge:
     # Only PRs into main: a stacked PR's base branch has no required checks,
     # so auto-merge would merge it at once, before CI (as #563 was).
-    if: ${{ !github.event.pull_request.draft && github.event.pull_request.base.ref == 'main' }}
+    # On `edited`, act only when the base branch changed (not title/body edits).
+    if: >-
+      ${{ !github.event.pull_request.draft
+          && github.event.pull_request.base.ref == 'main'
+          && (github.event.action != 'edited' || github.event.changes.base != null) }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -20,3 +27,19 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh pr merge ${{ github.event.pull_request.number }} --auto --squash --repo ${{ github.repository }}
+
+  disable-auto-merge:
+    # Retargeted away from main: a queued auto-merge would otherwise merge the
+    # PR into an unprotected branch before CI runs.
+    if: >-
+      ${{ github.event.action == 'edited'
+          && github.event.changes.base != null
+          && github.event.pull_request.base.ref != 'main'
+          && github.event.pull_request.auto_merge != null }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Disable auto-merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr merge ${{ github.event.pull_request.number }} --disable-auto --repo ${{ github.repository }}
