@@ -26,9 +26,10 @@ def _clear_provider_env(monkeypatch):
 def _capture_prompt_model(monkeypatch):
     seen = {}
 
-    def fake_build_system(system, trace, persona, model="", cloud=False):
+    def fake_build_system(system, trace, persona, model="", cloud=False, provider=None):
         seen["model"] = model
-        seen["prompt"] = server._runtime_identity_block(model, cloud)
+        seen["provider"] = provider
+        seen["prompt"] = server._runtime_identity_block(model, cloud, provider)
         raise _Built()
 
     monkeypatch.setattr(server, "_build_system", fake_build_system)
@@ -57,6 +58,9 @@ def test_inference_bound_tier_names_the_served_model(monkeypatch, entry):
     assert seen["model"] == "qwen3:14b"
     assert "`qwen3:14b`" in seen["prompt"]
     assert "sonder:latest" not in seen["prompt"]
+    assert seen["provider"] == "sonder_inference"
+    assert "served through Sonder Inference" in seen["prompt"]
+    assert "Ollama" not in seen["prompt"]
 
 
 def test_inference_tier_model_map_wins_over_the_default(monkeypatch):

@@ -2497,7 +2497,7 @@ def _stable_system_context():
         _SYSTEM_CONTEXT.parts = None
 
 
-def _build_system(system, trace, persona, model="", cloud=False):
+def _build_system(system, trace, persona, model="", cloud=False, provider=None):
     """Compose the effective system prompt from a base `system`, optional trace
     instruction, optional persona, editable profile, and emotion vectors.
 
@@ -2531,7 +2531,7 @@ def _build_system(system, trace, persona, model="", cloud=False):
     parts = getattr(_SYSTEM_CONTEXT, "parts", None)
     profile, emotions, goal_block = parts or _read_system_context()
     return _join_system_parts(
-        _runtime_identity_block(model, cloud), profile, emotions, goal_block,
+        _runtime_identity_block(model, cloud, provider), profile, emotions, goal_block,
         effective_system,
     )
 
@@ -7101,7 +7101,7 @@ def _answer_with_history_impl(
             # model that answered -- including a pre-routed first attempt,
             # which is not the route the request resolved to.
             _observe_target(model, tier_label, cloud)
-            effective_system = _build_system("", trace, "", cloud=cloud, model=(
+            effective_system = _build_system("", trace, "", cloud=cloud, provider=bridged_provider, model=(
                 _served_models.served_prompt_model(model, tier_label, bridged_provider)))
             # Honor LEARN_TIERS here too. Serve conversation memory is client-side (the app
             # resends history each request), so a non-learning model can skip capture entirely:
@@ -7393,7 +7393,7 @@ def structured_answer_with_history(
         else None if bridged_provider is not None
         else _auto_model_context(model)
     )
-    system = _build_system("", False, "", cloud=cloud, model=(
+    system = _build_system("", False, "", cloud=cloud, provider=bridged_provider, model=(
         _served_models.served_prompt_model(model, tier_label, bridged_provider)))
     # A non-Ollama rung refuses decoder schemas with a 400 (the bridge
     # cannot carry ``format``) instead of reaching an absent Ollama.
