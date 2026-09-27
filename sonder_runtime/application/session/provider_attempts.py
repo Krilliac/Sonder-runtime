@@ -257,7 +257,7 @@ def dispatch_provider(provider, operation, payload, send):
     try:
         result = _observed(provider, operation, payload, send)
     except Exception as error:
-        code = error.code if isinstance(error, SonderError) else InternalFailure.code
+        code = telemetry_error_code(error)
         try:
             capture.finish_provider_attempt(pending, attempt, error_code=code)
         except Exception as capture_error:
