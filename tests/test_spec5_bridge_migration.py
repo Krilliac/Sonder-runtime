@@ -124,8 +124,6 @@ class TestRequireEpoch2:
 
 class TestBridgeMigration:
     def test_fresh_stamp_waits_for_process_shared_migration_lock(self, sonder_home):
-        from sonder_runtime.adapters.persistence.sqlite.bridge_migration import stamp_fresh_home
-
         child = None
         script = (
             "import sys; from pathlib import Path; "
