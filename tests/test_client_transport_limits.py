@@ -13,7 +13,6 @@ import threading
 import time
 from contextlib import contextmanager
 
-import pytest
 
 from sonder_runtime.adapters import client_transport
 
