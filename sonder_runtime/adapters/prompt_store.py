@@ -161,13 +161,13 @@ _WARNED: set[tuple] = set()
 
 
 def _read(path: Path) -> tuple[str | None, str, tuple]:
-    """Read one prompt file through the stat cache: (text, error, stat key)."""
+    """Read one prompt file through the stat cache: (text, error, stat stamp)."""
     stat = path.stat()
-    key = (stat.st_mtime_ns, stat.st_size)
+    stamp = (stat.st_mtime_ns, stat.st_size)
     with _LOCK:
         cached = _CACHE.get(str(path))
-        if cached is not None and cached[:2] == key:
-            return cached[2], cached[3], key
+        if cached is not None and cached[:2] == stamp:
+            return cached[2], cached[3], stamp
     text, error = None, ""
     if stat.st_size > MAX_BYTES:
         error = "larger than %d bytes" % MAX_BYTES
@@ -184,8 +184,8 @@ def _read(path: Path) -> tuple[str | None, str, tuple]:
         except OSError as exc:
             error = "unreadable (%s)" % type(exc).__name__
     with _LOCK:
-        _CACHE[str(path)] = (key[0], key[1], text, error)
-    return text, error, key
+        _CACHE[str(path)] = (stamp[0], stamp[1], text, error)
+    return text, error, stamp
 
 
 def _validate(name: str, text: str) -> str:
@@ -204,8 +204,8 @@ def _validate(name: str, text: str) -> str:
     return ""
 
 
-def _warn_once(name: str, path: Path, key: tuple, reason: str) -> None:
-    marker = (str(path), key, reason)
+def _warn_once(name: str, path: Path, stamp: tuple, reason: str) -> None:
+    marker = (str(path), stamp, reason)
     with _LOCK:
         if marker in _WARNED:
             return
@@ -219,7 +219,7 @@ def _warn_once(name: str, path: Path, key: tuple, reason: str) -> None:
 def _default(name: str) -> LoadedPrompt:
     path = repo_dir() / _relative(name)
     try:
-        text, error, _key = _read(path)
+        text, error, _stamp = _read(path)
     except OSError as exc:
         raise PromptUnavailable(
             "shipped default prompt %r is missing at %s (%s)" % (name, path, type(exc).__name__)
@@ -252,16 +252,16 @@ def _select(name: str) -> LoadedPrompt:
     note = ""
     if not (_inside(resolved, _canonical(directory)) or _inside(resolved, _canonical(repo_dir()))):
         note = "resolves outside its override directory"
-        key = ("escape",)
+        stamp = ("escape",)
     else:
         try:
-            text, error, key = _read(resolved)
+            text, error, stamp = _read(resolved)
         except OSError as exc:
-            text, error, key = None, "unreadable (%s)" % type(exc).__name__, ("oserror",)
+            text, error, stamp = None, "unreadable (%s)" % type(exc).__name__, ("oserror",)
         note = error or _validate(name, text or "")
         if not note:
             return LoadedPrompt(name, text, "override", prompt_templates.digest(text), str(resolved))
-    _warn_once(name, candidate, key, note)
+    _warn_once(name, candidate, stamp, note)
     default = _default(name)
     return LoadedPrompt(default.name, default.text, default.source, default.sha256,
                         default.path, note="override %s ignored: %s" % (candidate, note))
