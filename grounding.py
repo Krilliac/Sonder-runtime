@@ -7,6 +7,7 @@ own say-so.
 """
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -250,6 +251,17 @@ def run_code_detail(
     timeout = clamp_timeout(timeout)
     interp = interp or sys.executable
     src = code + (("\n\n" + extra) if extra else "")
+    # The checks are appended after the code and the file runs as __main__, so
+    # code that exits 0 first (a main guard calling sys.exit, unittest.main(),
+    # os._exit) would pass without one assertion running.  Only a sentinel
+    # printed after the checks proves they finished.
+    sentinel = "__SONDER_CHECKS_DONE_%s__" % secrets.token_hex(16) if extra else ""
+    if sentinel:
+        src += (
+            "\n\nimport sys as _sonder_sys\n"
+            "_sonder_sys.__stdout__.write(%r)\n"
+            "_sonder_sys.__stdout__.flush()\n" % ("\n" + sentinel + "\n")
+        )
     fd, path = tempfile.mkstemp(suffix=".py")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -284,11 +296,20 @@ def run_code_detail(
                 )
             finally:
                 shutil.rmtree(scratch, ignore_errors=True)
+            stdout, stderr = p.stdout or "", p.stderr or ""
+            checks_finished = not sentinel or sentinel in stdout
+            if sentinel:
+                stdout = stdout.replace("\n" + sentinel + "\n", "").replace(sentinel, "")
+                if not checks_finished:
+                    stderr += (
+                        "\nthe program exited before the appended checks "
+                        "finished; they did not run"
+                    )
             return {
-                "ok": p.returncode == 0,
+                "ok": p.returncode == 0 and checks_finished,
                 "returncode": p.returncode,
-                "stdout": (p.stdout or "").strip(),
-                "stderr": (p.stderr or "").strip(),
+                "stdout": stdout.strip(),
+                "stderr": stderr.strip(),
                 "timeout": timeout,
                 "timed_out": False,
                 "error": "",
