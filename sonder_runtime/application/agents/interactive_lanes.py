@@ -163,6 +163,12 @@ def _expensive_lane_tier(tier, gateway, context):
     resolve_route = getattr(gateway, "resolve_route", None)
     if callable(resolve_route):
         route = resolve_route(ModelRequest("Classify lane admission.", tier=tier), context)
+        if route is None:
+            # The gateway has no resolver for this tier (the Sonder Inference
+            # fallback wrapper, or a mixed-provider dispatcher whose bound
+            # provider exposes none): classify exactly as a gateway without
+            # ``resolve_route`` is classified, as the per-step request does.
+            return expensive
         if (
             not isinstance(route, ResolvedModelRoute)
             or route.tier != tier
