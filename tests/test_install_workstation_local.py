@@ -160,6 +160,7 @@ def _run_force(script_copy: Path, venv_path: str, cwd: Path):
             "-Force", "-SkipModelAlias",
         ],
         cwd=str(cwd), env=environment, capture_output=True, text=True, timeout=300,
+        check=False,
     )
 
 
@@ -203,7 +204,7 @@ def test_force_refuses_a_junction_even_to_a_venv(tmp_path):
     link = tmp_path / "link-venv"
     made = subprocess.run(
         ["cmd.exe", "/d", "/c", "mklink", "/J", str(link), str(real)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, check=False,
     )
     if made.returncode != 0:
         pytest.skip("junctions unavailable")

@@ -27,11 +27,11 @@ def run(args, cwd):
             text=True,
             capture_output=True,
             timeout=timeout,
+            check=False,
         )
     except subprocess.TimeoutExpired:
-        return TIMEOUT_EXIT_CODE, "git %s timed out after %ss" % (
-            args[0] if args else "", timeout,
-        )
+        command = args[0] if args else ""
+        return TIMEOUT_EXIT_CODE, f"git {command} timed out after {timeout}s"
     out = "\n".join(
         part.strip() for part in (proc.stdout, proc.stderr) if part and part.strip()
     )
@@ -91,16 +91,16 @@ def _restore_after_failed_rebase(repo, pre_head, pre_branch, stash_sha):
     code, head = run(["rev-parse", "HEAD"], repo)
     if code != 0 or head.strip() != pre_head:
         print(
-            "ERROR: could not restore the checkout to %s after the failed "
-            "rebase. Run: git status" % pre_head
+            f"ERROR: could not restore the checkout to {pre_head} after the "
+            "failed rebase. Run: git status"
         )
         return False
     if pre_branch:
         code, branch = run(["symbolic-ref", "--quiet", "--short", "HEAD"], repo)
         if code != 0 or branch.strip() != pre_branch:
             print(
-                "ERROR: checkout is at %s but not on branch %s. Run: git status"
-                % (pre_head, pre_branch)
+                f"ERROR: checkout is at {pre_head} but not on branch "
+                f"{pre_branch}. Run: git status"
             )
             return False
     if stash_sha:
@@ -109,9 +109,9 @@ def _restore_after_failed_rebase(repo, pre_head, pre_branch, stash_sha):
             print(out)
         if code != 0:
             print(
-                "ERROR: checkout restored to %s, but saved local edits could "
-                "not be re-applied cleanly. Your backup stash was kept. Run: "
-                "git stash list" % pre_head
+                f"ERROR: checkout restored to {pre_head}, but saved local edits "
+                "could not be re-applied cleanly. Your backup stash was kept. "
+                "Run: git stash list"
             )
             return False
         ref = _stash_ref_for_sha(repo, stash_sha)
@@ -146,7 +146,7 @@ def main(argv=None):
 
     code, pre_head = run(["rev-parse", "HEAD"], repo)
     if code != 0:
-        print("ERROR: could not resolve the current revision.\n%s" % pre_head)
+        print(f"ERROR: could not resolve the current revision.\n{pre_head}")
         return 1
     pre_head = pre_head.strip()
     code, pre_branch = run(["symbolic-ref", "--quiet", "--short", "HEAD"], repo)
@@ -203,7 +203,7 @@ def main(argv=None):
                 print("Your local edits are saved in git stash. Run: git stash list")
             return 1
         if _restore_after_failed_rebase(repo, pre_head, pre_branch, stash_sha):
-            print("ERROR: update aborted; checkout restored to %s" % pre_head)
+            print(f"ERROR: update aborted; checkout restored to {pre_head}")
         return 1
 
     if stash_sha:

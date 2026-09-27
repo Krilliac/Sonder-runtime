@@ -36,6 +36,6 @@ def test_example_worker_is_accepted_by_the_config_validator():
     from sonder_runtime.adapters.inference.ollama_pool import validate_worker_origin
 
     text = (ROOT / "packaging/sonder.toml.example").read_text(encoding="utf-8")
-    match = re.search(r'^# workers = \["([^"]+)"\]', text, flags=re.M)
+    match = re.search(r'^# workers = \["([^"]+)"\]', text, flags=re.MULTILINE)
     assert match, "example worker line missing"
     validate_worker_origin(match.group(1), allow_remote=True)

@@ -245,7 +245,7 @@ def test_windows_script_aborts_conflicting_rebase_and_restores(tmp_path):
 
     proc = subprocess.run(
         ["cmd.exe", "/d", "/c", str(clone / "sonder-safe-update.cmd")],
-        cwd=str(tmp_path), text=True, capture_output=True, timeout=300,
+        cwd=str(tmp_path), text=True, capture_output=True, timeout=300, check=False,
     )
 
     assert proc.returncode == 1, proc.stdout + proc.stderr
@@ -271,7 +271,7 @@ def test_windows_script_success_path_restores_edits_and_drops_only_its_stash(
 
     proc = subprocess.run(
         ["cmd.exe", "/d", "/c", str(clone / "sonder-safe-update.cmd")],
-        cwd=str(tmp_path), text=True, capture_output=True, timeout=300,
+        cwd=str(tmp_path), text=True, capture_output=True, timeout=300, check=False,
     )
 
     assert proc.returncode == 0, proc.stdout + proc.stderr

@@ -14,11 +14,21 @@ import pytest
 
 from sonder_runtime.application.updates import UpdateTarget
 from sonder_runtime.application.updates.release_evidence import (
-    ActivationRequest, ReleaseEvidencePackage, RollbackCompatibility,
-    SbomComponent, SignedReleaseManifest, TestEvidence,
+    ActivationRequest,
+    ReleaseEvidencePackage,
+    RollbackCompatibility,
+    SbomComponent,
+    SignedReleaseManifest,
+    TestEvidence,
 )
 from tests.test_update_application_service import (
-    Authority, Backup, Ports, digest, request, service, target,
+    Authority,
+    Backup,
+    Ports,
+    digest,
+    request,
+    service,
+    target,
 )
 
 NOW = datetime(2026, 8, 21, tzinfo=timezone.utc)
