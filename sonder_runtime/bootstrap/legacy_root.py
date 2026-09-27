@@ -126,22 +126,6 @@ def require_mcp_inference_binding(application, pool, *, primary_origin):
         raise ValueError("invalid legacy membership binding: primary differs from typed configuration")
 
 
-def bind_ollama_endpoint(legacy, url) -> None:
-    """Point the legacy runtime at ``url``: ``BASE`` and the display bound to it.
-
-    ``server._ollama_display`` is a partial over ``BASE`` taken at import, so
-    rebinding ``BASE`` alone left user-facing messages naming the import-time
-    endpoint (for example an unreachable test host) after a typed config set
-    another one.
-    """
-    import functools
-
-    from ..adapters.inference import ollama_endpoint
-
-    legacy.BASE = ollama_endpoint.normalize(url)
-    legacy._ollama_display = functools.partial(ollama_endpoint.safe_display, legacy.BASE)
-
-
 def configure_application(application) -> None:
     """Bind an entrypoint-owned typed graph without replacing caller ownership."""
     global _owned_application
@@ -164,12 +148,14 @@ def configure_application(application) -> None:
             # cleanup must still belong to exact trusted types and this pool.
             require_inference_application(current, expected_pool=previous_pool, allow_inactive=True)
             current.close_providers(timeout=5)
+        from ..adapters.inference import ollama_endpoint
+
         if previous_pool is not pool:
             # Preloaded legacy modules must not retain a second admission
             # path. Existing work finishes against its original pool.
             previous_pool.drain(timeout_seconds=0)
         legacy.OLLAMA_POOL = pool
-        bind_ollama_endpoint(legacy, application.config.ollama.url)
+        legacy.BASE = ollama_endpoint.normalize(application.config.ollama.url)
         if current is application:
             return
         legacy._APP_GRAPH = application
