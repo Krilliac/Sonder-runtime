@@ -276,9 +276,41 @@ def _neutralized_git_arguments(root, *, timeout, env):
     be read, so the caller refuses rather than running git with a driver left
     in place.
     """
-    return git_program_guard.neutralized_git_arguments(
+    overrides = git_program_guard.neutralized_git_arguments(
         lambda arguments: _run([_git()] + arguments, cwd=root, timeout=timeout, env=env),
     )
+    # ``git add`` (git_commit) inspects populated submodules with a child git
+    # that reads each submodule's own config; neutralize those drivers too.
+    return overrides + git_program_guard.submodule_driver_overrides(
+        lambda relative, arguments: _git_probe_at(
+            root, relative, arguments, timeout=timeout, env=env,
+        ),
+    )
+
+
+def _git_probe_at(root, relative, arguments, *, timeout, env):
+    """Run one guard probe in the repository checked out at ``relative``.
+
+    Unlike ``_run`` the output is not trimmed: the submodule listing is
+    parsed, not displayed.  ``None`` means no repository is checked out there.
+    """
+    directory = Path(root) / relative if relative else Path(root)
+    if relative and not (directory / ".git").exists():
+        return None
+    try:
+        proc = subprocess.run(
+            [_git(), *arguments], cwd=str(directory), timeout=timeout,
+            capture_output=True, stdin=subprocess.DEVNULL, env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return {"timed_out": True, "returncode": -1, "stdout": "", "stderr": ""}
+    except FileNotFoundError:
+        return {"returncode": -1, "stdout": "", "stderr": "git was not found"}
+    return {
+        "returncode": proc.returncode,
+        "stdout": proc.stdout.decode("utf-8", errors="surrogateescape"),
+        "stderr": proc.stderr.decode("utf-8", errors="replace"),
+    }
 
 
 def _run_git(root, args, *, timeout=10):
