@@ -864,8 +864,27 @@ class OllamaWorkerPool:
                 and state.membership_evidence.checked_at <= wall_now < state.membership_evidence.expires_at
                 and not self._capabilities_stale(state, now) and not state.capability_probe_failed)
 
-    def refresh_membership_capabilities(self) -> None:
-        self.refresh_capabilities(_membership=True)
+    @property
+    def capability_ttl_seconds(self) -> float:
+        return self._capability_ttl
+
+    def refresh_membership_capabilities(self, *, renew_within_seconds: float = 0.0) -> None:
+        """Probe membership workers that are stale or would expire soon.
+
+        Only the controller renews membership evidence, and admission requires
+        it to be unexpired. The controller passes its refresh interval, so a
+        member whose evidence would lapse before the next pass (allowing one
+        probe timeout of slack, capped at half the TTL) is renewed now instead
+        of going dark until then.
+        """
+        renew = float(renew_within_seconds)
+        if not math.isfinite(renew) or renew < 0:
+            raise ValueError("renew_within_seconds must be a finite non-negative number")
+        # Never renew evidence younger than half its TTL: an interval at or
+        # above the TTL cannot be rescued by renewal and must not turn every
+        # pass into a full reprobe.
+        window = min(renew + self._probe_timeout, self._capability_ttl / 2) if renew else 0.0
+        self._refresh_capabilities(_membership=True, _renew_within=window)
 
     def membership_evidence(self, roster: MembershipRoster) -> tuple[CapabilityEvidence, ...]:
         if type(roster) is not MembershipRoster:
@@ -934,6 +953,12 @@ class OllamaWorkerPool:
         return (
             state.capabilities is None
             or now - state.capabilities.observed_at >= self._capability_ttl
+        )
+
+    def _capabilities_renewal_due(self, state: _WorkerState, now: float, window: float) -> bool:
+        """True once cached capabilities would expire within ``window`` seconds."""
+        return self._capabilities_stale(state, now) or (
+            window > 0 and now - state.capabilities.observed_at >= self._capability_ttl - window
         )
 
     def _normalize_capabilities(
@@ -1088,7 +1113,7 @@ class OllamaWorkerPool:
     def _refresh_capabilities(
         self, *, force: bool = False, _membership: bool = False,
         _target: _WorkerState | None = None, _lock_owned: bool = False,
-        _targets: frozenset[int] | None = None,
+        _targets: frozenset[int] | None = None, _renew_within: float = 0.0,
     ) -> None:
         """Update cached capabilities using the configured bounded probe batch.
 
@@ -1127,7 +1152,7 @@ class OllamaWorkerPool:
                     if _membership and state.membership_state is None:
                         continue
                     if not (
-                        (force or self._capabilities_stale(state, now))
+                        (force or self._capabilities_renewal_due(state, now, _renew_within))
                         and (force or state.cooldown_until <= now)
                         and not state.half_open_inflight
                         and not state.capability_probe_inflight
