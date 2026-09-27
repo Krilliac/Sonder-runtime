@@ -395,7 +395,9 @@ def test_structured_validation_rejection_retains_provider_success_and_schema(tmp
         serve._run_structured_prompt("hello", [], "general", schema, session="http-session", capture_request_id="http-request", capture_turn_id="http-turn")
     events = repository.read_range("http-session")
     assert events[2].payload["payload"]["format"] == schema
-    assert events[-1].event_type == "provider.responded"
+    # The provider answered, but the turn failed validation: the request is
+    # closed as failed rather than left open (which repair reads as truncated).
+    assert [e.event_type for e in events][-2:] == ["provider.responded", "model.failed"]
     assert all(e.event_type != "model.response" for e in events)
 
 

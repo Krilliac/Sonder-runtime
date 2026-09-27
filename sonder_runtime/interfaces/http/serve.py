@@ -350,6 +350,11 @@ def _capture_live_session_turn(*, session_id, prompt, history, model, content,
     try:
         from sonder_runtime.bootstrap.app import default_app
 
+        if _is_legacy_error_reply(content):
+            # A legacy "ERROR ..." answer is a failed model call: never replay
+            # it as assistant history, but close an admitted request.
+            return _fail_live_session_request(provider_capture, session_id, request_id,
+                                              "DEPENDENCY_UNAVAILABLE")
         if provider_capture is not None:
             capture, pending = provider_capture
             if pending.session_id != session_id or pending.request_id != request_id:
@@ -373,6 +378,17 @@ def _capture_live_session_turn(*, session_id, prompt, history, model, content,
         )
     except Exception as error:
         _serve_logger.error(f"live session capture failed for session_id={session_id!r}, request_id={request_id!r}", exc_info=True)
+        raise _LiveSessionCaptureFailure from error
+
+
+def _fail_live_session_request(admission, session_id, request_id, error_code):
+    """Append ``model.failed`` for this HTTP turn's own admitted request, if any."""
+    capture, pending = admission if admission else (None, None)
+    if pending is None or (pending.session_id, pending.request_id) != (session_id, request_id):
+        return None  # nothing admitted, or an enclosing surface owns it
+    try:
+        return capture.fail_request(pending, error_code=error_code)
+    except Exception as error:
         raise _LiveSessionCaptureFailure from error
 _MAX_JOB_CANCEL_REASON = 256
 _MAX_JOB_ID_LENGTH = 128
@@ -4074,7 +4090,7 @@ def _capture_http_provider_request(function):
     @functools.wraps(function)
     def wrapped(*args, **kwargs):
         from sonder_runtime.application.session.provider_attempts import (
-            ProviderCaptureFailure, deferred_provider_request_scope,
+            ProviderCaptureFailure, deferred_provider_request_scope, telemetry_error_code,
         )
 
         bound = signature.bind(*args, **kwargs)
@@ -4108,7 +4124,16 @@ def _capture_http_provider_request(function):
 
         try:
             with deferred_provider_request_scope(admit if enabled else None) as scope:
-                result = function(*args, **kwargs)
+                try:
+                    result = function(*args, **kwargs)
+                except ProviderCaptureFailure:
+                    raise
+                except Exception as error:  # admitted then failed: close it
+                    if enabled:
+                        _fail_live_session_request(
+                            getattr(scope, "admission", None), values["session"],
+                            values["capture_request_id"], telemetry_error_code(error))
+                    raise
                 if enabled and isinstance(result, TurnResult):
                     result = replace(result, provider_capture=scope.admission)
                 return result
