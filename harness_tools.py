@@ -1039,10 +1039,10 @@ def _apply_staged_rewrites(staged):
             with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
                 handle.write(new_content)
             shutil.copymode(path, temp)
-        for (path, original, _new), temp in zip(staged, temps):
+        for (path, original, _new), temp in zip(staged, temps, strict=True):
             os.replace(temp, path)
             applied.append((path, original))
-    except BaseException:
+    except BaseException as error:
         for temp in temps:
             with contextlib.suppress(OSError):
                 os.unlink(temp)
@@ -1054,7 +1054,9 @@ def _apply_staged_rewrites(staged):
             except OSError:
                 unrestored.append(path)
         if unrestored:
-            raise OSError("rename rollback could not restore %d file(s)" % len(unrestored))
+            raise OSError(
+                "rename rollback could not restore %d file(s)" % len(unrestored)
+            ) from error
         raise
 
 
