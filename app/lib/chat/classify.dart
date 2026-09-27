@@ -46,7 +46,6 @@ class WorkRunRef {
 final RegExp _refusedHead =
     RegExp(r'^refused(?:\s+(/?[^\s:]+))?\s*:\s*', caseSensitive: true);
 final RegExp _modeTail = RegExp(r'\s*\(mode:\s*([A-Za-z]+)\)\s*\.?\s*$');
-final RegExp _approveId = RegExp(r'/approve\s+([0-9a-f]{8,})');
 final RegExp _workRunId = RegExp(r'\b(wr-[0-9a-f]{8,64})\b');
 final RegExp _workRunHandOff =
     RegExp(r'(work run wr-[0-9a-f]+|/v1/work-runs/wr-[0-9a-f]+)');
@@ -74,9 +73,20 @@ RefusalInfo? refusalOf(ChatMessage message) {
   // ChatRefusal); the text patterns are the fallback for older servers.
   final structured = message.responseMetadata?.refusal;
   if (head == null && status != 'refused' && structured == null) return null;
+  if (structured != null &&
+      (structured.tool.isNotEmpty || structured.callId.isNotEmpty)) {
+    // The server's receipt is the only authority for what was refused and
+    // which ledger call "Approve once" would approve. The reply text is
+    // model-authored and may name a different tool, reason or call id.
+    return RefusalInfo(
+      subject: structured.tool,
+      reason: structured.reason,
+      mode: structured.mode,
+      callId: structured.callId,
+    );
+  }
   var body = head == null ? text : text.substring(head.end);
   var mode = '';
-  final approve = _approveId.firstMatch(text);
   final firstLine = body.split('\n').first;
   final tail = _modeTail.firstMatch(firstLine);
   if (tail != null) {
@@ -84,13 +94,12 @@ RefusalInfo? refusalOf(ChatMessage message) {
     body =
         firstLine.substring(0, tail.start) + body.substring(firstLine.length);
   }
-  final structuredId = structured?.callId ?? '';
-  final structuredTool = structured?.tool ?? '';
+  // Text-only refusals (servers without S1) are shown as notices but never
+  // offer approval: a `/approve <id>` in model text is not authority.
   return RefusalInfo(
-    subject: head?.group(1) ?? structuredTool,
+    subject: head?.group(1) ?? '',
     reason: body.trim(),
     mode: mode,
-    callId: structuredId.isNotEmpty ? structuredId : approve?.group(1) ?? '',
   );
 }
 
