@@ -19,6 +19,7 @@ from pathlib import Path
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
 from sonder_runtime.application.testing.legacy_runs import retired_extra_args
+from sonder_runtime.adapters import git_program_guard
 from sonder_runtime.adapters.git_mutation_guard import (
     ConcurrentGitMutation,
     guard_git_mutation,
@@ -258,24 +259,6 @@ def _git():
     return shutil.which("git") or "git"
 
 
-# Repository config keys that name a program git runs during add, commit,
-# checkout, stash, merge or cherry-pick. The repository (``.git/config``, or
-# an untrusted checkout's own config) controls them, so they are replaced
-# with fixed built-in equivalents on every harness git call.
-_GIT_PROGRAM_KEYS = (
-    r"^(filter\..*\.(clean|smudge|process|required)"
-    r"|merge\..*\.driver|diff\..*\.textconv)$"
-)
-_GIT_PROGRAM_KEY_RE = re.compile(
-    r"^(?P<section>filter|merge|diff)\.(?P<name>.+)\."
-    r"(?P<key>clean|smudge|process|required|driver|textconv)$",
-    re.IGNORECASE,
-)
-# ``git merge-file`` is git's own three-way text merge: what the built-in
-# driver does, with none of the repository's configuration.
-_BUILTIN_MERGE_DRIVER = "git merge-file --marker-size=%L %A %O %B"
-
-
 def _git_env():
     env = _child_env()
     env["GIT_TERMINAL_PROMPT"] = "0"
@@ -286,56 +269,16 @@ def _neutralized_git_arguments(root, *, timeout, env):
     """``-c`` overrides that keep repository config from launching programs.
 
     ``acceptEdits`` lets these mutation-class git tools run unattended while
-    running host programs still asks. A hook, ``core.fsmonitor``, a
-    clean/smudge filter, a merge driver, a textconv or a signing program is a
-    host program chosen by whoever can write the repository, so each is
-    replaced here: hooks point at the null device, fsmonitor and signing are
-    off, and every configured driver gets a fixed built-in equivalent.
-    Raises ``ValueError`` when the driver configuration cannot be read, so the
-    caller refuses rather than running git with a driver left in place.
+    running host programs still asks. Hooks, ``core.fsmonitor``, filter,
+    merge and textconv drivers and signing programs are replaced by the
+    shared :mod:`git_program_guard` list (also used by the read-only
+    ``git_tools``). Raises ``ValueError`` when the driver configuration cannot
+    be read, so the caller refuses rather than running git with a driver left
+    in place.
     """
-    arguments = [
-        "-c", "core.hooksPath=" + os.devnull,
-        "-c", "core.fsmonitor=false",
-        "-c", "core.sshCommand=",
-        "-c", "commit.gpgSign=false",
-        "-c", "tag.gpgSign=false",
-        "-c", "tag.forceSignAnnotated=false",
-    ]
-    probe = _run(
-        [_git(), "config", "--null", "--name-only", "--get-regexp", _GIT_PROGRAM_KEYS],
-        cwd=root, timeout=timeout, env=env,
+    return git_program_guard.neutralized_git_arguments(
+        lambda arguments: _run([_git()] + arguments, cwd=root, timeout=timeout, env=env),
     )
-    if probe.get("timed_out") or probe.get("returncode") not in (0, 1):
-        raise ValueError(
-            "git driver configuration could not be read: %s"
-            % ((probe.get("stderr") or probe.get("stdout") or "").strip() or "no diagnostic")
-        )
-    seen = set()
-    for key in (probe.get("stdout") or "").split("\x00"):
-        key = key.strip()
-        if not key:
-            continue
-        match = _GIT_PROGRAM_KEY_RE.fullmatch(key)
-        if match is None:
-            raise ValueError("unexpected git driver configuration key: %s" % key)
-        section, name = match.group("section").lower(), match.group("name")
-        if (section, name) in seen:
-            continue
-        seen.add((section, name))
-        prefix = "%s.%s." % (section, name)
-        if section == "filter":
-            arguments.extend([
-                "-c", prefix + "process=",
-                "-c", prefix + "clean=cat",
-                "-c", prefix + "smudge=cat",
-                "-c", prefix + "required=false",
-            ])
-        elif section == "merge":
-            arguments.extend(["-c", prefix + "driver=" + _BUILTIN_MERGE_DRIVER])
-        else:
-            arguments.extend(["-c", prefix + "textconv=cat"])
-    return arguments
 
 
 def _run_git(root, args, *, timeout=10):

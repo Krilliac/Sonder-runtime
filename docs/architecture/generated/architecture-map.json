@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 359,
+      "file_count": 360,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -169,6 +169,7 @@
         "sonder_runtime/adapters/git/__init__.py",
         "sonder_runtime/adapters/git_discovery.py",
         "sonder_runtime/adapters/git_mutation_guard.py",
+        "sonder_runtime/adapters/git_program_guard.py",
         "sonder_runtime/adapters/goal_formatting.py",
         "sonder_runtime/adapters/host_terminal_projection.py",
         "sonder_runtime/adapters/host_terminal_result.py",
