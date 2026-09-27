@@ -389,6 +389,12 @@ NATIVE_MCP_WORK = {
     "compute_submit": "execution",
     "agent_lane": "execution",
     "compute_cancel": "mutation",
+    # Readers of an already placed job: its status, and one bounded,
+    # digest-verified artifact returned inline (nothing written, nothing
+    # launched). Graded so native MCP can put them through the same decision
+    # as submit/cancel instead of skipping it.
+    "compute_status": "safe",
+    "compute_artifact_fetch": "safe",
     # Developer tools (bootstrap/developer_tools.py). ``tool_inventory`` runs
     # only fixed read-only version switches of allowlisted host tools;
     # ``output_digest`` reads a guarded file window or the caller's own
