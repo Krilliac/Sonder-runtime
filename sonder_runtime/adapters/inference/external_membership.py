@@ -1,7 +1,8 @@
 """Configured private mTLS transport and Ed25519 membership authority.
 
 No proxy, redirect, enrollment, remote policy input, or implicit refresh.
-One bounded resolver task is owned until completion, including after timeout.
+One bounded resolver task per pinned endpoint is owned until completion,
+including after timeout; concurrent callers share it.
 """
 import base64
 import http.client
@@ -35,6 +36,16 @@ from .membership_high_water import _identity
 
 class MembershipSourceError(RuntimeError):
     pass
+
+
+class MembershipTransportUnavailable(MembershipSourceError, ConnectionError):
+    """No response byte arrived: resolve, connect, TLS or send failed.
+
+    It is a ``ConnectionError`` so the worker pool treats it like any other
+    pre-response transport failure: idempotent work fails over and the
+    member's circuit breaker counts it. Endpoint-policy refusals (DNS answer
+    outside the pinned CIDRs, SAN mismatch) stay plain ``MembershipSourceError``.
+    """
 
 
 def _capture_authority(path, maximum):
@@ -129,7 +140,8 @@ class _PinnedTransport:
         self._context = None
         self._context_lock = Lock()
         self._lock = Lock()
-        self._resolver_thread = None
+        self._resolvers = {}
+        self._resolver_thread = None  # most recently started task, for diagnostics
         self._closed = False
 
     def _tls_context(self):
@@ -167,19 +179,38 @@ class _PinnedTransport:
             return context
 
     def _resolve(self, host, port, deadline):
+        """Resolve through one owned task per configured (host, port).
+
+        Concurrent callers for the same endpoint join its in-flight task and
+        wait within their own deadline; callers for other endpoints are never
+        blocked by it. A task that outlives its callers stays owned until it
+        completes, and later callers join it rather than starting another, so
+        a hung resolver never builds a backlog. Keys come only from pinned
+        endpoint policies, which bounds the number of tasks.
+        """
+        key = (host, port)
         with self._lock:
-            if self._closed or (self._resolver_thread is not None and self._resolver_thread.is_alive()):
+            if self._closed:
                 raise TimeoutError
-            done, result = Event(), []
-            def resolve():
-                try:
-                    result.append(socket.getaddrinfo(host, port, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP))
-                except Exception:
-                    result.append(None)
-                finally:
-                    done.set()
-            self._resolver_thread = Thread(target=resolve, name="sonder-membership-resolver", daemon=True)
-            self._resolver_thread.start()
+            task = self._resolvers.get(key)
+            if task is None:
+                done, result = Event(), []
+                def resolve():
+                    try:
+                        result.append(socket.getaddrinfo(host, port, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP))
+                    except Exception:
+                        result.append(None)
+                    finally:
+                        with self._lock:
+                            if self._resolvers.get(key) is task:
+                                del self._resolvers[key]
+                        done.set()
+                thread = Thread(target=resolve, name="sonder-membership-resolver", daemon=True)
+                task = (thread, done, result)
+                self._resolvers[key] = task
+                self._resolver_thread = thread
+                thread.start()
+        _, done, result = task
         if not done.wait(_remaining(deadline)) or not result or not result[0]:
             raise TimeoutError
         answers = result[0]
@@ -267,7 +298,7 @@ class _PinnedTransport:
             if length is not None and size != int(length):
                 raise ValueError
             return b"".join(chunks)
-        except Exception:
+        except Exception as failure:
             if version_not_found:
                 # Only the informational version endpoint has this historical
                 # compatibility meaning. Do not attach URL, headers or body.
@@ -276,6 +307,8 @@ class _PinnedTransport:
             # reclassify it as a retryable pre-response connection failure.
             if reader is not None and reader.started:
                 raise ModelCallError("protocol", "private worker response rejected", status=0) from None
+            if isinstance(failure, OSError):  # includes TimeoutError and ssl.SSLError
+                raise MembershipTransportUnavailable("external membership unavailable") from None
             raise MembershipSourceError("external membership unavailable") from None
         finally:
             try:
@@ -291,12 +324,13 @@ class _PinnedTransport:
     def close(self, *, timeout):
         if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0 <= timeout <= 30:
             raise ValueError("close timeout must be within 0..30 seconds")
+        deadline = monotonic() + timeout
         with self._lock:
             self._closed = True
-            thread = self._resolver_thread
-        if thread is not None:
-            thread.join(timeout)
-        return thread is None or not thread.is_alive()
+            threads = [thread for thread, _, _ in self._resolvers.values()]
+        for thread in threads:
+            thread.join(max(0.0, deadline - monotonic()))
+        return not any(thread.is_alive() for thread in threads)
 
 
 class ExternalMembershipSource:
