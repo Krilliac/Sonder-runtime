@@ -1122,11 +1122,8 @@ def build_application(
                 item for item in WorkloadKind if item is not WorkloadKind.INFERENCE
             )
             mapping_names = {"default"}
-            mapping_names.update(
-                Path(root).name
-                for root in effective_config.state.workspace_roots
-                if Path(root).name
-            )
+            for root in effective_config.state.workspace_roots:
+                mapping_names.add(Path(root).resolve().name)
             local = ComputeNode(
                 node_id=effective_config.compute.node_id,
                 origin=None,
@@ -2293,6 +2290,27 @@ def _run_claimed_default_runtime_cleanup(claim, *, timeout):
                                 raise TimeoutError("inference membership refresh has not stopped")
     finally:
         _finish_default_runtime_cleanup()
+
+
+def start_inference_membership(application) -> bool:
+    """Start static worker membership for a long-lived owner surface.
+
+    Static configuration names its remote workers directly, and their
+    snapshot is signed in-process without any source I/O. Without this loop
+    a configured remote worker stays in probation forever, because only the
+    controller can admit it. Construction still starts nothing; the serving
+    entrypoints (serve, MCP, REPL) are the owners that opt in here. External
+    membership keeps its explicit, operator-driven lifecycle.
+    """
+    controller = getattr(application, "inference_membership", None)
+    pool = getattr(application, "inference_pool", None)
+    config = getattr(application, "config", None)
+    if controller is None or pool is None or config is None:
+        return False
+    if config.membership.mode == "external" or not pool.has_configured_remote_workers:
+        return False
+    controller.start(refresh_now=True)
+    return True
 
 
 def close_default_runtime_resources(timeout=5):

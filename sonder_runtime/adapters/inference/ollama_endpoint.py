@@ -140,6 +140,14 @@ def _ca_bundle() -> str | None:
     return str(path)
 
 
+def tls_trust_source() -> str:
+    """Name the trust anchor source for verified remote HTTPS, without paths."""
+    try:
+        return "configured-ca-bundle" if _ca_bundle() else "system-trust-store"
+    except ValueError:
+        return "invalid-ca-bundle"
+
+
 def remote_allowed() -> bool:
     return ollama_policy.remote_allowed(os.environ)
 
