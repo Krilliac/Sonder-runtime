@@ -334,6 +334,38 @@ class RuntimeTelemetry:
             level="INFO" if outcome == "completed" else "WARNING")
         return True
 
+    def reject_request(
+        self,
+        *,
+        request_id: object,
+        surface: str,
+        requested_model: object,
+        http_status: object,
+        error_code: object,
+        total_ms: object = None,
+    ) -> None:
+        """Emit one ``request.failed`` for a request refused before its turn began.
+
+        There is no ``request.started``: a rejection is an error, never an
+        open request span.  ``rejected: true`` tells it apart from a failed
+        turn; ``attempts`` is 0 because nothing reached a provider.  The
+        caller decides who may produce one (never an unauthenticated caller).
+        """
+        if surface not in SURFACES:
+            raise ValueError(f"unknown telemetry surface {surface!r}")
+        rid = sanitize_correlation_id(request_id) or "turn-" + uuid.uuid4().hex
+        self._emit("request.failed", {
+            "outcome": "failed",
+            "rejected": True,
+            "surface": surface,
+            "kind": "chat",
+            "http_status": http_status if type(http_status) is int else None,
+            "error_code": bounded_label(error_code) or "rejected",
+            "requested_model": bounded_label(requested_model),
+            "attempts": 0,
+            "total_ms": max(0, total_ms) if type(total_ms) is int else 0,
+        }, request_id=rid, run_id=rid, level="WARNING")
+
     # -- dispatch_provider observer ---------------------------------------------
 
     def provider_send_started(self, provider_label, operation, model):

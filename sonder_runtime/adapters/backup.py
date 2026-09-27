@@ -9,6 +9,8 @@ Layout of one backup:
         autopilot.db
         fleet.db
         operations.db
+        automation.db / selfmod.db / training.db   (epoch-2 domain stores)
+        epoch2_adoption_receipt.json
         runtime_policy.json
       checksums.sha256
 
@@ -38,11 +40,20 @@ import sonder_runtime.adapters.runtime_policy as runtime_policy
 import sonder_runtime.adapters.persistence.migrations as sonder_migrations
 from sonder_runtime.platform import version as sonder_version
 from sonder_runtime.adapters.persistence.operations_store import OperationsStore
+from ..platform import paths as platform_paths
+from .persistence.sqlite.bridge_migration import (
+    EPOCH,
+    EPOCH2_DATABASES,
+    check_epoch,
+    require_epoch_2,
+)
+from ..domain.common.errors import MigrationRequired
 
 MANIFEST_FORMAT_VERSION = 1
 MAX_MANIFEST_BYTES = 1 << 20
 MAX_MANIFEST_FILES = 64
 MAX_MANIFEST_PATH_CHARS = 256
+EPOCH2_RECEIPT_NAME = "epoch2_adoption_receipt.json"
 
 
 class BackupError(RuntimeError):
@@ -185,6 +196,32 @@ def create_backup(
                 continue
             destination = state_dir / f"{store}.db"
             _online_backup_sqlite(db_path, destination)
+            copied.append(destination)
+
+        # ``serve`` refuses a home unless every epoch-2 domain database is
+        # present and stamped (require_epoch_2), so a standard backup must
+        # carry all of them plus the adoption receipt; otherwise a restored
+        # home cannot start.  They live in the state home, not the
+        # migrations registry.
+        home = platform_paths.default_home()
+        captured = {path.name for path in copied}
+        for filename in EPOCH2_DATABASES:
+            if filename in captured:
+                continue
+            source = home / filename
+            if not source.exists():
+                continue
+            destination = state_dir / filename
+            _online_backup_sqlite(str(source), destination)
+            copied.append(destination)
+        receipt = home / EPOCH2_RECEIPT_NAME
+        if receipt.exists():
+            if _is_link_or_junction(receipt) or not receipt.is_file():
+                raise BackupError(
+                    f"{EPOCH2_RECEIPT_NAME} is not a regular file"
+                )
+            destination = state_dir / EPOCH2_RECEIPT_NAME
+            shutil.copy2(receipt, destination)
             copied.append(destination)
 
         policy_file = runtime_policy.policy_path()
@@ -426,6 +463,17 @@ def _verify_directory(backup_dir: Path) -> list[str]:
                         problems.append(
                             f"{rel_path.name}: manifest schema version mismatch"
                         )
+        elif rel_path.name == EPOCH2_RECEIPT_NAME:
+            try:
+                receipt = json.loads(member.read_text(encoding="utf-8"))
+                if not isinstance(receipt, dict):
+                    problems.append(
+                        f"{EPOCH2_RECEIPT_NAME} root must be an object"
+                    )
+            except (OSError, UnicodeError, ValueError) as exc:
+                problems.append(
+                    f"{EPOCH2_RECEIPT_NAME} unreadable: " + type(exc).__name__
+                )
         elif rel_path.name == "runtime_policy.json":
             try:
                 policy = json.loads(member.read_text(encoding="utf-8"))
@@ -841,7 +889,28 @@ def restore_smoke(backup_dir: str | os.PathLike) -> list[str]:
                     problems.append(
                         f"{db_file.name}: migration history modified"
                     )
+        problems.extend(_epoch2_serve_problems(dest))
     return problems
+
+
+def _epoch2_serve_problems(restored: Path) -> list[str]:
+    """Fail the smoke when ``serve`` would refuse the restored home.
+
+    A home whose memory.db was adopted at the SPEC-5 epoch must restore every
+    epoch-2 domain database, or ``serve`` exits with MigrationRequired.  A
+    wholly pre-epoch2 image is restorable data that still needs
+    ``migrate --adopt-epoch2`` (documented in the runbook), not a broken
+    backup, so it is not reported here.
+    """
+    try:
+        if check_epoch(restored / "memory.db") != EPOCH:
+            return []
+        require_epoch_2(restored)
+    except MigrationRequired as exc:
+        return [f"epoch: serve would refuse the restored home ({exc})"]
+    except (OSError, sqlite3.DatabaseError) as exc:
+        return [f"epoch: adoption state unreadable ({type(exc).__name__})"]
+    return []
 
 
 def restore_to_empty(

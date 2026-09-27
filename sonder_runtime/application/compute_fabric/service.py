@@ -315,11 +315,21 @@ class ComputeFabricService:
                 )
             if existing.placement.request_digest != profiled.digest():
                 raise Conflict("controller identity is already bound to another placement policy")
+            if existing.remote_job_id is None:
+                return self._resume_unacknowledged(existing, envelope)
             return self.status(request.request_id)
         placement = self._place(profiled)
         node_id = placement.selected_node_id
         if node_id is None:
-            scope = "eligible node" if request.local_only else "eligible remote node"
+            scope = (
+                "eligible node"
+                if request.local_only
+                or not request.allow_remote
+                or request.placement_policy is PlacementPolicy.LOCAL_ONLY
+                or request.placement_policy is PlacementPolicy.RANK_ALL
+                or request.allow_local_fallback
+                else "eligible remote node"
+            )
             raise DependencyUnavailable(f"no {scope} is available for this workload")
         node = self._registry.get_node(node_id)
         # Retain the digest-bound placement before any call whose outcome can
@@ -334,6 +344,9 @@ class ComputeFabricService:
         with self._lock:
             self._placements[request.request_id] = placed
         self._persist_placement(placed, create=True)
+        return self._dispatch(placed, node, envelope)
+
+    def _dispatch(self, placed: _PlacementRecord, node, envelope: RemoteJobEnvelope) -> ComputeSubmission:
         if node.local:
             receipt = self._local_worker.submit(envelope)
         else:
@@ -349,7 +362,7 @@ class ComputeFabricService:
                     raise
         validate_remote_job_receipt(
             receipt,
-            worker_id=node_id,
+            worker_id=placed.node_id,
             controller_job_id=envelope.controller_job_id,
             idempotency_key=envelope.idempotency_key,
             request_sha256=envelope.request_sha256,
@@ -358,7 +371,39 @@ class ComputeFabricService:
         observe_placement = getattr(self._metrics, "observe_compute_placement", None)
         if callable(observe_placement):
             observe_placement(route="local" if node.local else "remote")
-        return ComputeSubmission(node_id, placement, receipt)
+        return ComputeSubmission(placed.node_id, placed.placement, receipt)
+
+    def _resume_unacknowledged(
+        self, placed: _PlacementRecord, envelope: RemoteJobEnvelope,
+    ) -> ComputeSubmission:
+        """Retry a recorded placement whose node never acknowledged a job.
+
+        The node is asked first. When it definitively has no job for the key,
+        the identical envelope is re-sent to the same recorded node only if
+        replay is safe: the envelope is idempotent, or the node is the
+        in-process local worker, whose journal is authoritative and which
+        deduplicates by idempotency key. A non-idempotent remote dispatch
+        whose request may have reached the node stays fenced as ambiguous.
+        """
+        node = self._registry.get_node(placed.node_id)
+        receipt = (
+            self._local_worker.by_idempotency(placed.idempotency_key)
+            if node.local
+            else self._transport.by_idempotency(node, placed.idempotency_key)
+        )
+        if receipt is not None:
+            validate_remote_job_receipt(
+                receipt,
+                worker_id=placed.node_id,
+                controller_job_id=placed.controller_job_id,
+                idempotency_key=placed.idempotency_key,
+                request_sha256=placed.request_sha256,
+            )
+            self._record_receipt(placed, receipt)
+            return ComputeSubmission(placed.node_id, placed.placement, receipt)
+        if not (node.local or envelope.idempotent):
+            raise DependencyUnavailable("compute placement outcome remains ambiguous")
+        return self._dispatch(placed, node, envelope)
 
     def status(self, controller_job_id: str) -> ComputeSubmission:
         with self._lock:

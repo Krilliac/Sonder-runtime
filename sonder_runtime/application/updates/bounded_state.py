@@ -170,7 +170,14 @@ class UpdateTarget:
         _text(self.release_id, "release_id")
         _text(self.version, "version")
         _hash(self.artifact_digest, "artifact_digest")
-        if self.artifact_digest not in dict(self.evidence.manifest.artifact_hashes).values():
+        manifest = self.evidence.manifest
+        # One immutable release identity: the authority approves this target,
+        # so its release and version must be the ones the evidence signs.
+        if self.release_id != manifest.release_id:
+            raise ValueError("target release_id does not match signed release manifest")
+        if self.version != manifest.version:
+            raise ValueError("target version does not match signed release manifest")
+        if self.artifact_digest not in dict(manifest.artifact_hashes).values():
             raise ValueError("artifact digest is not present in signed release manifest")
 
 
@@ -260,6 +267,11 @@ class BoundedUpdateState:
     def activate(self, activator: AtomicReleaseActivator, request: ActivationRequest) -> UpdateSnapshot:
         if self.snapshot.phase is not UpdatePhase.HEALTH_CHECKED or not self.snapshot.health_ok:
             raise ValueError("activation requires a successful health gate")
+        target = self.snapshot.target
+        if request.target_release != target.release_id:
+            raise ValueError("activation target does not match the authorized update target")
+        if request.release_evidence_digest != target.evidence.package_digest:
+            raise ValueError("activation evidence does not match the authorized update target")
         self._move(UpdatePhase.ACTIVATING)
         try:
             activator.activate(request)

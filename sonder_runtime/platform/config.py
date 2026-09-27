@@ -1356,6 +1356,30 @@ def apply_observability_environment(
     )
 
 
+# Process-wide CA bundle conventions that OpenSSL and requests already honour.
+# Remote Ollama HTTPS adopts the first usable one when no Ollama-specific bundle
+# is configured. It is used *instead of* the merged OS store: on Windows a stale
+# same-subject certificate in the user's CA store otherwise makes verification
+# of a private-CA or self-signed worker fail even though this bundle trusts it.
+PROCESS_CA_BUNDLE_VARIABLES = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE")
+
+
+def process_ca_bundle(env) -> str:
+    """Return the first absolute, existing process CA bundle, else ``""``.
+
+    An unusable value is ignored, as OpenSSL ignores it, so verification keeps
+    the system trust store instead of failing configuration validation.
+    """
+    for name in PROCESS_CA_BUNDLE_VARIABLES:
+        raw = str(env.get(name, "") or "").strip()
+        if not raw:
+            continue
+        path = Path(raw).expanduser()
+        if path.is_absolute() and path.is_file():
+            return str(path)
+    return ""
+
+
 def _apply_environment(
     config: SonderConfig, env: dict[str, str], errors: list[str]
 ) -> SonderConfig:
@@ -1490,6 +1514,8 @@ def _apply_environment(
         )
     if env.get("SONDER_OLLAMA_CA_BUNDLE", "").strip():
         ollama = replace(ollama, ca_bundle=env["SONDER_OLLAMA_CA_BUNDLE"].strip())
+    elif not ollama.ca_bundle:
+        ollama = replace(ollama, ca_bundle=process_ca_bundle(env))
     ollama = replace(
         ollama,
         worker_pool_max_workers=_env_int(
@@ -1841,9 +1867,28 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         errors.append("[state].minimum_free_disk_bytes must be >= 0")
     if config.state.sqlite_busy_timeout_ms < 0:
         errors.append("[state].sqlite_busy_timeout_ms must be >= 0")
-    for root in config.state.workspace_roots:
-        if not Path(root).expanduser().is_absolute():
+    local_workspace_mappings = {"default"}
+    effective_workspace_roots: dict[str, Path] = {}
+    for index, root in enumerate(config.state.workspace_roots):
+        raw_path = Path(root)
+        if not raw_path.is_absolute():
             errors.append(f"[state].workspace_roots entry not absolute: {root!r}")
+            continue
+        try:
+            resolved = raw_path.resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            errors.append(f"[state].workspace_roots entry cannot be resolved: {root!r}")
+            continue
+        mapping = resolved.name
+        if not mapping:
+            errors.append(f"[state].workspace_roots entry has no mapping name: {root!r}")
+            continue
+        if mapping in effective_workspace_roots or (mapping == "default" and index > 0):
+            errors.append(
+                f"[state].workspace_roots has duplicate effective workspace mapping: {mapping!r}"
+            )
+        effective_workspace_roots[mapping] = resolved
+        local_workspace_mappings.add(mapping)
 
     for cidr in config.ollama.trusted_origins:
         try:
@@ -2105,6 +2150,16 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             for value in job.workspace_mappings
         ):
             errors.append(f"{where}.workspace_mappings contains an invalid workspace identity")
+        # compute.jobs is the local worker's catalog even when the controller
+        # is also allowed to place work on remote nodes.
+        unknown_local_mappings = sorted(
+            set(job.workspace_mappings) - local_workspace_mappings
+        )
+        if unknown_local_mappings:
+            errors.append(
+                f"{where}.workspace_mappings is not available locally: "
+                f"{unknown_local_mappings}; configure matching [state].workspace_roots"
+            )
         if job.argument_policy not in {
             "none",
             "bounded",
