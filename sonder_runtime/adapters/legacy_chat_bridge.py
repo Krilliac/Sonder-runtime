@@ -52,6 +52,18 @@ def provider_for_tier(tier_label: object, cloud: bool, graph: object) -> str | N
     return provider if provider_bridge.is_bridged(provider) else None
 
 
+def prompt_identity_model(model: str, tier_label: object, provider: str | None,
+                          graph: object) -> str:
+    """Only name a serving model when the bound provider cannot fall back."""
+    if (provider == "sonder_inference"
+            and provider_bindings(graph).fallbacks.get(provider) == "ollama"):
+        # The same prompt may be sent to local Ollama with a different model.
+        return ""
+    from .inference.served_tier_models import served_prompt_model
+
+    return served_prompt_model(model, tier_label, provider)
+
+
 class BridgeCancellation:
     """Cancellation for one bridged model step: the legacy ``cancel_check`` only.
 

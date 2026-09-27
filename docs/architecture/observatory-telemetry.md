@@ -245,6 +245,7 @@ is replaced with `[unsafe-label]`.
 | `route.selected` | `provider: "ollama" \| "openai_compatible" \| "sonder_inference"`, `operation: "chat" \| "generate"`, `model` (the provider-reported model when the reply names one), `attempt` (1-based in the turn), `status: "ok" \| "error"`, `error_code?` | once per provider send inside a turn, from the `dispatch_provider` observer, when the send completes (it carries the reply's model and usage, so a hung send shows no route until it ends) |
 | `route.changed` | `from_provider`, `to_provider`, `reason_code`, `attempt` | attempt k's provider differs from attempt k-1's, or a fallback wrapper reports a pre-send fallback |
 | `request.completed` \| `request.failed` \| `request.cancelled` | `outcome`, `total_ms`, `http_status`, `provider`, `model`, `attempts`, `prompt_tokens?`, `completion_tokens?`, `error_code?` | exactly once per started turn |
+| `request.failed` (`rejected: true`) | `outcome: "failed"`, `rejected: true`, `surface`, `kind: "chat"`, `http_status`, `error_code` (the HTTP metric label, e.g. `invalid_model`), `requested_model?`, `attempts: 0`, `total_ms` | a chat request from an authenticated caller refused before `request.started` (unknown model, invalid body, multimodal content, forbidden command, rate limit, drain); no `request.started` precedes it, so it never opens a request span |
 | `telemetry.dropped` | `dropped_events` (cumulative), `emitted_events`, `queue_capacity`, `final` | producer drops |
 
 A pre-send fallback (`SONDER_INFERENCE_FALLBACK=ollama` after a refusal from
@@ -278,8 +279,12 @@ Error codes are domain codes, never Python class names:
   HTTP metric label.
 
 Provider sends outside a turn (background distillation, REPL, MCP) are not
-exported in v1. A request rejected before `request.started` (origin,
-framing, authentication, validation) has no terminal event either.
+exported in v1. A chat request refused before `request.started` is exported
+as one `request.failed` with `rejected: true` (see the vocabulary) only after
+the caller authenticated: origin, framing, authentication and
+authentication-rate-limit refusals stay off the stream, so anonymous traffic
+cannot fill the bounded ring. The event carries the bounded model label and
+the metric label, never the body, the error message or the credentials.
 
 Bridged EventSink events: only `model.escalation.decided`,
 `model.escalation.outcome` and `agent.delegation.accepted` cross into the
