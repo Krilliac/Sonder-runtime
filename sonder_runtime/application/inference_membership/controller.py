@@ -50,6 +50,13 @@ class MembershipController:
         self._first_refresh_immediate = False
         self._admission_counts = None
         pool.configure_membership(cluster_id=cluster_id, issuer_id=issuer_id, clock=clock)
+        ttl = getattr(pool, "capability_ttl_seconds", None)
+        if isinstance(ttl, (int, float)) and self._interval >= ttl:
+            # Renewal happens only on a pass, so a pass interval at or above
+            # the capability TTL leaves members inadmissible between passes.
+            logger.warning("membership refresh interval %.0fs is not below the worker capability "
+                           "TTL %.0fs; members will be inadmissible between refreshes",
+                           self._interval, ttl)
 
     def start(self, *, refresh_now=False):
         """Start the periodic loop; ``refresh_now`` runs its first pass at once.
@@ -149,7 +156,8 @@ class MembershipController:
             self._pool.apply_membership(result)
             self._result = result
         if probe and result.roster is not None:
-            self._pool.refresh_membership_capabilities()
+            # Renew evidence that would lapse before the next scheduled pass.
+            self._pool.refresh_membership_capabilities(renew_within_seconds=self._interval)
             evidence = self._pool.membership_evidence(result.roster)
             result = reconcile_membership(None, **(options | dict(
                 previous=result.roster, high_water=result.high_water, capability_evidence=evidence)))
