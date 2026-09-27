@@ -5188,7 +5188,8 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _finish_chat_turn_telemetry(self):
-        observatory_routes.finish_chat_turn(self, log=_serve_logger)
+        observatory_routes.finish_chat_turn(
+            self, log=_serve_logger, application_for=_live_telemetry_application)
 
     def _handle_telemetry_get(self, path):
         observatory_routes.serve_get(
@@ -6547,11 +6548,7 @@ class Handler(BaseHTTPRequestHandler):
         # One turn scope per request: the ambient OperationContext and the
         # Observatory turn are bound inside it and always unwound, and a
         # started turn always gets exactly one terminal request.* event.
-        self._telemetry_turn = None
-        self._telemetry_result = None
-        self._telemetry_error_kind = None
-        self._telemetry_error_reply = False
-        self._last_response_status = None
+        observatory_routes.reset_chat_turn(self)
         with contextlib.ExitStack() as stack:
             self._turn_stack = stack
             try:
@@ -6928,6 +6925,7 @@ class Handler(BaseHTTPRequestHandler):
                     record_early_chat_metric("unauthenticated")
                 self._send_auth_error()
                 return
+            observatory_routes.admit_chat_caller(self, req)
             # Preserve the lifecycle admission precedence of the legacy
             # execution path: a draining runtime must answer DRAINING before
             # protocol normalization can report a client-side 400.
