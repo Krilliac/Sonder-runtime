@@ -286,11 +286,8 @@ jobs:
         # failure from hiding the lifecycle results above. clang-cl is not on
         # PATH on hosted images, so the clang-cl test reports a skip (-rs)
         # rather than counting as coverage.
-        # Observed, not gating: these suites were written on Linux and have
-        # not yet passed on a hosted windows-latest image. A failure shows as
-        # a failed step in this job without failing the required gate; the
-        # step becomes gating only after a green run here.
-        continue-on-error: true
+        # Gating since its first fully green hosted run (ci run 36278362464,
+        # 286 passed, 6 platform skips, 0 failed on windows-latest).
         timeout-minutes: 8
         run: >-
           & "$env:RUNNER_TEMP\sonder-ci-venv\Scripts\python.exe" -m pytest -q -rs
