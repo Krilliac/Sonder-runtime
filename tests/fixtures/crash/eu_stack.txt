@@ -1,0 +1,16 @@
+PID 26678 - core
+TID 26678:
+#0  0x0000555555555266     run_frame(Renderer*, int) - crasher
+    [7f88edf63075c22be1e95606caab3d580e468a9c]@0x555555554000+0x1266
+    /src/sparkmini/crasher.cpp:20:21
+#1  0x00005555555553a9 - 1 main - crasher
+    [7f88edf63075c22be1e95606caab3d580e468a9c]@0x555555554000+0x13a8
+    /src/sparkmini/crasher.cpp:47:18
+#2  0x00007ffff782a1ca - 1 __libc_start_call_main - libc.so.6
+    [8e9fd827446c24067541ac5390e6f527fb5947bb]@0x7ffff7800000+0x2a1c9
+    ../sysdeps/nptl/libc_start_call_main.h:58:16
+#3  0x00007ffff782a28b - 1 __libc_start_main_impl - libc.so.6
+    [8e9fd827446c24067541ac5390e6f527fb5947bb]@0x7ffff7800000+0x2a28a
+    ../csu/libc-start.c:360:3
+#4  0x0000555555555165 - 1 _start - crasher
+    [7f88edf63075c22be1e95606caab3d580e468a9c]@0x555555554000+0x1164

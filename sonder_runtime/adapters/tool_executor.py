@@ -11,7 +11,13 @@ import json
 
 from ..application.context import OperationContext
 from ..application.ports.tool_executor import ToolCall, ToolResult
+from ..application.ports.web import WebToolsDisabled
 from .filesystem.typed import GuardedFileSystemAdapter
+
+
+_NETWORK_REFUSAL_TOOLS = frozenset({
+    "web_fetch", "web_search", "weather_lookup", "approximate_location_lookup",
+})
 
 
 class ToolExecutorAdapter:
@@ -225,9 +231,36 @@ class ToolExecutorAdapter:
                     evidence=res,
                 )
             if call.tool == "run_script":
+                import sonder_runtime.adapters.artifact_risk as artifact_risk
                 import sonder_runtime.adapters.filesystem.workbench as workbench
 
-                res = workbench.run_script(**args)
+                # The same execution-risk gate as the script_run tool: the
+                # configured policy applies to every script launch surface.
+                path = args.pop("path")
+                risk_policy = args.pop("risk_policy", "")
+                trusted_roots = args.get("extra_roots", "") if args.get("bypass") else ""
+                try:
+                    risk, res = artifact_risk.run_script_under_policy(
+                        path,
+                        lambda sealed: workbench.run_script(
+                            path, sealed_script=sealed, **args
+                        ),
+                        requested=risk_policy,
+                        extra_roots=trusted_roots,
+                    )
+                except artifact_risk.ArtifactRiskDenied as exc:
+                    return ToolResult(
+                        ok=False,
+                        error_code="ArtifactRiskDenied",
+                        output="execution denied by effective policy %s: %s"
+                        % (
+                            exc.result.get("policy", "unknown"),
+                            artifact_risk.format_result(exc.result),
+                        ),
+                        evidence={"artifact_risk": exc.result},
+                    )
+                res = dict(res)
+                res["artifact_risk"] = risk
                 return ToolResult(
                     ok=bool(res.get("ok")),
                     output=str(res.get("stdout", "")),
@@ -279,6 +312,12 @@ class ToolExecutorAdapter:
             return ToolResult(
                 ok=False, error_code=type(exc).__name__, output=str(exc)
             )
+        except WebToolsDisabled as exc:
+            # The default-off egress gate is a refusal, not a fault: report it
+            # like any other guard so no surface turns it into an internal error.
+            return ToolResult(
+                ok=False, error_code="WebToolsDisabled", output=str(exc)
+            )
         except RuntimeError as exc:
             # The transactional primitives (batch write, JSON patch, text
             # patch) refuse with a structured report on their exception. The
@@ -287,6 +326,13 @@ class ToolExecutorAdapter:
             # real fault and propagates.
             report = getattr(exc, "report", None)
             if not isinstance(report, dict):
+                if call.tool in _NETWORK_REFUSAL_TOOLS:
+                    # The network adapters refuse with RuntimeError when web
+                    # tools are disabled or every provider failed: an
+                    # operator-visible outcome, not a runtime fault.
+                    return ToolResult(
+                        ok=False, error_code=type(exc).__name__, output=str(exc),
+                    )
                 raise
             return ToolResult(
                 ok=False, error_code=type(exc).__name__,

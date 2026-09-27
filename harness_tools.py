@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
+from sonder_runtime.application.testing.legacy_runs import retired_extra_args
 from sonder_runtime.adapters.git_mutation_guard import (
     ConcurrentGitMutation,
     guard_git_mutation,
@@ -52,7 +53,8 @@ def _resolve_root(root, extra_roots=""):
 
     Every tool in this module hands ``root`` straight to a child process as its
     working directory, and several of them report what they find there --
-    ``secret_scan`` prints the credentials it matches. Until now this function
+    ``secret_scan`` reports which files hold credentials (it once printed
+    the credentials themselves; its findings are now redacted). Until now this function
     resolved any absolute path and returned it, so the only thing standing
     between a caller and an arbitrary directory was whether a caller could
     reach these functions at all. ``fix/cloud-help-drift`` @ ``b8a15ef`` relied
@@ -386,9 +388,21 @@ def test_discover(root=".", framework="auto", extra_roots=""):
 
 def test_run(
     root=".", framework="auto", path="", pattern="", verbose=False,
-    coverage=False, timeout=120, extra_args_json="[]",
+    coverage=False, timeout=120, extra_args_json="",
     extra_roots="",
 ):
+    """Run a project's tests with a host-built command line.
+
+    ``extra_args_json`` is retired: raw argv let a caller hand pytest ``-p``,
+    ``-c`` or ``--rootdir`` and step around every host-owned template. It is
+    kept in the signature only so a caller that still passes it gets a clear
+    refusal instead of a silently dropped argument. Omitted, ``""`` and
+    ``"[]"`` keep working.
+    """
+    refusal = retired_extra_args(extra_args_json)
+    if refusal is not None:
+        refusal["framework"] = framework
+        return refusal
     root = _resolve_root(root, extra_roots)
     # Confine the argv-appended path too; see _resolve_target_path.
     path = _resolve_target_path(root, path)
@@ -437,13 +451,6 @@ def test_run(
             cmd.append("-v")
         if coverage:
             cmd.append("-cover")
-
-    try:
-        extra = json.loads(extra_args_json)
-        if isinstance(extra, list):
-            cmd.extend(str(a) for a in extra)
-    except (json.JSONDecodeError, TypeError):
-        pass
 
     result = _run(cmd, cwd=root, timeout=timeout)
     result["framework"] = framework
@@ -1051,6 +1058,9 @@ def apply_patch(root=".", patch_text="", check_only=False, timeout=10, extra_roo
 # Security scanning
 # ---------------------------------------------------------------------------
 
+_REDACTED_CREDENTIAL = "[REDACTED CREDENTIAL]"
+
+
 def secret_scan(root=".", timeout=30, extra_roots=""):
     root = _resolve_root(root, extra_roots)
     timeout = _bounded_int(timeout, 30, 5, MAX_TIMEOUT)
@@ -1067,7 +1077,17 @@ def secret_scan(root=".", timeout=30, extra_roots=""):
 
     findings = []
     scanned = 0
+    # ``timeout`` is a wall-clock budget for the whole walk, checked before
+    # each entry and between patterns: a large tree used to be walked to the
+    # end whatever the caller asked for. On expiry the partial result is
+    # returned and marked, as the packaged adapter (adapters/secret_scan.py)
+    # does, so a caller never mistakes a cut-short scan for a clean one.
+    deadline = time.monotonic() + timeout
+    timed_out = False
     for path in root.rglob("*"):
+        if time.monotonic() >= deadline:
+            timed_out = True
+            break
         if not path.is_file() or path.stat().st_size > 1_000_000:
             continue
         rel = str(path.relative_to(root))
@@ -1082,13 +1102,24 @@ def secret_scan(root=".", timeout=30, extra_roots=""):
         except OSError:
             continue
         for pattern_str, label in secret_patterns:
+            if time.monotonic() >= deadline:
+                timed_out = True
+                break
             for m in re.finditer(pattern_str, content):
                 line_no = content[:m.start()].count("\n") + 1
+                # Never echo the matched text: a 40-character prefix of a
+                # credential is usually the whole credential, and callers
+                # render and durably record this field. Same placeholder as
+                # the packaged scanner (adapters/secret_scan.py).
                 findings.append({
                     "file": rel, "line": line_no, "type": label,
-                    "match": m.group()[:40] + ("..." if len(m.group()) > 40 else ""),
+                    "match": _REDACTED_CREDENTIAL,
                 })
                 if len(findings) >= 100:
-                    return {"ok": True, "findings": findings, "files_scanned": scanned, "truncated": True}
+                    return {"ok": True, "findings": findings, "files_scanned": scanned,
+                            "truncated": True, "timed_out": False}
+        if timed_out:
+            break
 
-    return {"ok": True, "findings": findings, "files_scanned": scanned, "truncated": False}
+    return {"ok": True, "findings": findings, "files_scanned": scanned,
+            "truncated": timed_out, "timed_out": timed_out, "timeout": timeout}

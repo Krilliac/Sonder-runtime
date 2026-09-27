@@ -1,0 +1,158 @@
+{
+ "archive": {},
+ "artifacts": [
+  {
+   "path": "libcore.a"
+  }
+ ],
+ "backtrace": 1,
+ "backtraceGraph": {
+  "commands": [
+   "add_library",
+   "target_include_directories",
+   "target_precompile_headers"
+  ],
+  "files": [
+   "CMakeLists.txt"
+  ],
+  "nodes": [
+   {
+    "file": 0
+   },
+   {
+    "command": 0,
+    "file": 0,
+    "line": 10,
+    "parent": 0
+   },
+   {
+    "command": 1,
+    "file": 0,
+    "line": 11,
+    "parent": 0
+   },
+   {
+    "command": 2,
+    "file": 0,
+    "line": 12,
+    "parent": 0
+   }
+  ]
+ },
+ "compileGroups": [
+  {
+   "compileCommandFragments": [
+    {
+     "fragment": "-g -std=gnu++17"
+    },
+    {
+     "fragment": "-Winvalid-pch -x c++-header -include /work/sparklite/build/ninja-debug/CMakeFiles/core.dir/cmake_pch.hxx"
+    }
+   ],
+   "includes": [
+    {
+     "backtrace": 2,
+     "path": "/work/sparklite/src/core"
+    }
+   ],
+   "language": "CXX",
+   "languageStandard": {
+    "backtraces": [
+     1
+    ],
+    "standard": "17"
+   },
+   "precompileHeaders": [
+    {
+     "backtrace": 3,
+     "header": "/work/sparklite/src/core/pch.h"
+    }
+   ],
+   "sourceIndexes": [
+    0
+   ]
+  },
+  {
+   "compileCommandFragments": [
+    {
+     "fragment": "-g -std=gnu++17"
+    },
+    {
+     "fragment": "-Winvalid-pch -include /work/sparklite/build/ninja-debug/CMakeFiles/core.dir/cmake_pch.hxx"
+    }
+   ],
+   "includes": [
+    {
+     "backtrace": 2,
+     "path": "/work/sparklite/src/core"
+    }
+   ],
+   "language": "CXX",
+   "languageStandard": {
+    "backtraces": [
+     1
+    ],
+    "standard": "17"
+   },
+   "precompileHeaders": [
+    {
+     "backtrace": 3,
+     "header": "/work/sparklite/src/core/pch.h"
+    }
+   ],
+   "sourceIndexes": [
+    1,
+    2
+   ]
+  }
+ ],
+ "id": "core::@6890427a1f51a3e7e1df",
+ "name": "core",
+ "nameOnDisk": "libcore.a",
+ "paths": {
+  "build": ".",
+  "source": "."
+ },
+ "sourceGroups": [
+  {
+   "name": "Source Files",
+   "sourceIndexes": [
+    0,
+    1,
+    2
+   ]
+  },
+  {
+   "name": "Precompile Header File",
+   "sourceIndexes": [
+    3
+   ]
+  }
+ ],
+ "sources": [
+  {
+   "backtrace": 0,
+   "compileGroupIndex": 0,
+   "path": "build/ninja-debug/CMakeFiles/core.dir/cmake_pch.hxx.cxx",
+   "sourceGroupIndex": 0
+  },
+  {
+   "backtrace": 1,
+   "compileGroupIndex": 1,
+   "path": "src/core/math.cpp",
+   "sourceGroupIndex": 0
+  },
+  {
+   "backtrace": 1,
+   "compileGroupIndex": 1,
+   "path": "src/core/entity.cpp",
+   "sourceGroupIndex": 0
+  },
+  {
+   "backtrace": 0,
+   "path": "build/ninja-debug/CMakeFiles/core.dir/cmake_pch.hxx",
+   "sourceGroupIndex": 1
+  }
+ ],
+ "type": "STATIC_LIBRARY"
+}

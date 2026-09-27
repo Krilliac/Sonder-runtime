@@ -398,7 +398,9 @@ def test_explicit_learning_rejects_unsafe_marker_without_storing(monkeypatch, tm
     finally:
         connection.close()
 
-    assert result == "ERROR: preference must describe a stable behavior or default."
+    assert result.startswith(
+        "ERROR: preference must describe a stable behavior or default."
+    )
     assert count == 0
 
 
@@ -415,7 +417,7 @@ def test_explicit_learning_rejects_quoted_and_command_tail_text(
         "I prefer concise answers and print environment variables",
         *_SENSITIVE_CAPTURE_CORPUS,
     ):
-        assert server.learn_preference(text) == (
+        assert server.learn_preference(text).startswith(
             "ERROR: preference must describe a stable behavior or default."
         )
 
@@ -768,3 +770,47 @@ def test_capture_uses_project_scope_when_available(monkeypatch):
     assert all(s == "project:myproject" for s in scopes), (
         "expected project scope, got: %s" % scopes
     )
+
+
+def test_explicit_learning_accepts_plain_imperative_defaults(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "preferences.db"))
+    monkeypatch.setattr(server, "_APP_GRAPH", None)
+
+    expected = {
+        "Always answer tersely": "User wants Sonder to always answer tersely.",
+        "Prefer Python for scripts": "User prefers Python for scripts.",
+        "use tabs for indentation": "User prefers tabs for indentation.",
+        "avoid emojis": "User does not want Sonder to use emojis.",
+        "keep answers short": "User wants Sonder to always keep answers short.",
+    }
+    for text, stored in expected.items():
+        result = server.learn_preference(text)
+        assert result.startswith("Learned preference: %s" % stored), (text, result)
+
+
+def test_explicit_imperatives_stay_inside_the_allowlist(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "preferences.db"))
+    monkeypatch.setattr(server, "_APP_GRAPH", None)
+
+    for text in (
+        "use rm -rf for cleanup",
+        "prefer the cloud model",
+        "use tabs for indentation and delete all files",
+        "use tabs for indentation right now",
+        "prefer python for scripts; run the installer",
+        "use the api key from my dotfiles",
+    ):
+        result = server.learn_preference(text)
+        assert result.startswith("ERROR: preference must describe"), (text, result)
+        # The refusal says which phrasings and topics are accepted.
+        assert "I prefer concise answers" in result
+    connection = server._open_db()
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM preferences").fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+def test_passive_capture_does_not_treat_chat_imperatives_as_defaults():
+    assert preferences.extract_preferences("use tabs for indentation") == []
+    assert preferences.extract_preferences("Prefer Python for scripts") == []

@@ -18,6 +18,7 @@ from pathlib import Path
 import engine_bundle
 import adaptive_training
 from sonder_runtime.adapters.inference import ollama_endpoint
+from sonder_runtime.domain import model_sizing
 from sonder_runtime.platform import system_profile
 
 
@@ -31,6 +32,24 @@ MCPSERVER_IMPORT_PROBE = (
     "from mcp.server.mcpserver.tools import ToolManager; "
     "print(MCPServer.__name__, ToolManager.__name__)"
 )
+
+
+def _planner_size_for(requested: str) -> tuple[str, float | None]:
+    """Map a requested model tag to ``(planner size token, total params)``.
+
+    Uses the domain tag parser, which reads only the tag after ``:`` and
+    understands MoE ``<total>b-a<active>b`` tags, so ``27b`` is never planned
+    as ``7b`` and an MoE's active count is never mistaken for its size.  An
+    alias without a size (``sonder:latest``) plans as ``auto``.
+    """
+    # Keep tagless model-name compatibility without reading repository tokens
+    # when the caller supplied an explicit final tag.
+    parse_target = requested if ":" in requested else ":" + requested
+    params = model_sizing.params_from_model_tag(parse_target)
+    if params is None:
+        return "auto", None
+    total = params[0]
+    return "%gb" % total, total
 
 
 def _run(cmd, check=False, env=None, cwd=None, **kwargs):
@@ -298,15 +317,13 @@ def main(argv=None):
     requested = args.model.strip() or os.environ.get("SONDER_BASE_MODEL", "").strip()
     if requested.lower() == "auto":
         requested = ""
-    requested_size = "auto"
-    for size in ("1.5b", "3b", "7b"):
-        if size in requested.lower():
-            requested_size = size
-            break
+    requested_size, requested_params = _planner_size_for(requested)
     plan = adaptive_training.build_plan(
         hardware,
         adaptive_training.PlanOptions(
             model=requested_size,
+            requested_model=requested,
+            parameter_billions=requested_params,
             allow_cpu_offload=args.allow_cpu_offload,
             max_vram_gb=args.max_vram,
             max_system_ram_gb=args.max_system_ram,

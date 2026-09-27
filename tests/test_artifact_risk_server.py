@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 import sonder_runtime.adapters.artifact_risk as artifact_risk
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
 import server
@@ -74,10 +76,29 @@ def test_script_run_deny_high_prevents_execution(tmp_path, monkeypatch):
     assert calls == []
 
 
-def test_enforcing_policy_refuses_below_threshold_path_handoff(tmp_path, monkeypatch):
+@pytest.mark.parametrize("platform", ["win32", "darwin"])
+def test_enforcing_policy_refuses_below_threshold_path_handoff_off_linux(
+    tmp_path, monkeypatch, platform
+):
+    # Only Linux has the sealed-memfd exact handoff; every other host keeps
+    # refusing enforcing policies rather than launching by pathname.
     root = _root(tmp_path, monkeypatch)
     path = root / "safe.py"
     path.write_text("print('safe')", encoding="utf-8")
+    monkeypatch.setenv("SONDER_EXECUTION_RISK_POLICY", "deny-high")
+    monkeypatch.setattr(artifact_risk.sys, "platform", platform)
+    calls = []
+    monkeypatch.setattr(server.workbench, "run_script", lambda *a, **k: calls.append((a, k)))
+    output = server.script_run(str(path))
+    assert "exact_execution_handoff_unavailable" in output
+    assert '"risk":"none_detected"' in output
+    assert calls == []
+
+
+def test_enforcing_policy_refuses_runner_without_exact_handoff(tmp_path, monkeypatch):
+    root = _root(tmp_path, monkeypatch)
+    path = root / "safe.ps1"
+    path.write_text("Write-Output 'safe'", encoding="utf-8")
     monkeypatch.setenv("SONDER_EXECUTION_RISK_POLICY", "deny-high")
     calls = []
     monkeypatch.setattr(server.workbench, "run_script", lambda *a, **k: calls.append((a, k)))

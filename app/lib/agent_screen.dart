@@ -579,64 +579,66 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
               tooltip: 'Refresh conversations',
               onPressed: _refreshing ? null : () => _loadLanes(manual: true),
               icon: const Icon(Icons.refresh))),
-      Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          child: Column(children: [
-            TextField(
-                key: const Key('agent-search'),
-                controller: _search,
-                focusNode: _searchFocus,
-                decoration: InputDecoration(
-                    labelText: _hasMore
-                        ? 'Search loaded conversations'
-                        : 'Search conversations',
-                    prefixIcon: const Icon(Icons.search, size: 18),
-                    suffixIcon: _search.text.isEmpty
-                        ? null
-                        : IconButton(
-                            tooltip: 'Clear search',
-                            icon: const Icon(Icons.close, size: 18),
-                            onPressed: () {
-                              setState(() => _search.clear());
-                              _searchFocus.requestFocus();
-                            })),
-                onChanged: (_) => setState(() {})),
-            const SizedBox(height: 8),
-            Row(children: [
-              Expanded(
-                  child: PopupMenuButton<_AgentFilter>(
-                      tooltip: 'Filter agent status',
-                      onSelected: (value) => setState(() => _filter = value),
-                      itemBuilder: (_) => [
-                            for (final entry in _filterLabels.entries)
-                              PopupMenuItem(
-                                  value: entry.key, child: Text(entry.value))
-                          ],
-                      child: Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 10),
-                          child: Row(children: [
-                            const Icon(Icons.filter_list, size: 18),
-                            const SizedBox(width: 8),
-                            Flexible(
-                                child: Text(_filterLabels[_filter]!,
-                                    overflow: TextOverflow.ellipsis)),
-                            const Icon(Icons.arrow_drop_down, size: 18)
-                          ])))),
-              IconButton(
-                  tooltip:
-                      _groupByParent ? 'Show a flat list' : 'Group by parent',
-                  isSelected: _groupByParent,
-                  onPressed: () =>
-                      setState(() => _groupByParent = !_groupByParent),
-                  icon: const Icon(Icons.account_tree_outlined, size: 18)),
-            ]),
-            Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                    '${ordered.length} of ${_lanes.length} loaded${_hasMore ? ' · more available' : ''}',
-                    style: Theme.of(context).textTheme.labelSmall)),
-            const SizedBox(height: 8),
-          ])),
+      if (_lanes.isNotEmpty)
+        Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Column(children: [
+              TextField(
+                  key: const Key('agent-search'),
+                  controller: _search,
+                  focusNode: _searchFocus,
+                  decoration: InputDecoration(
+                      labelText: _hasMore
+                          ? 'Search loaded conversations'
+                          : 'Search conversations',
+                      prefixIcon: const Icon(Icons.search, size: 18),
+                      suffixIcon: _search.text.isEmpty
+                          ? null
+                          : IconButton(
+                              tooltip: 'Clear search',
+                              icon: const Icon(Icons.close, size: 18),
+                              onPressed: () {
+                                setState(() => _search.clear());
+                                _searchFocus.requestFocus();
+                              })),
+                  onChanged: (_) => setState(() {})),
+              const SizedBox(height: 8),
+              Row(children: [
+                Expanded(
+                    child: PopupMenuButton<_AgentFilter>(
+                        tooltip: 'Filter agent status',
+                        onSelected: (value) => setState(() => _filter = value),
+                        itemBuilder: (_) => [
+                              for (final entry in _filterLabels.entries)
+                                PopupMenuItem(
+                                    value: entry.key, child: Text(entry.value))
+                            ],
+                        child: ConstrainedBox(
+                            // ≥48 dp hit area; the row looks unchanged.
+                            constraints: const BoxConstraints(minHeight: 48),
+                            child: Row(children: [
+                              const Icon(Icons.filter_list, size: 18),
+                              const SizedBox(width: 8),
+                              Flexible(
+                                  child: Text(_filterLabels[_filter]!,
+                                      overflow: TextOverflow.ellipsis)),
+                              const Icon(Icons.arrow_drop_down, size: 18)
+                            ])))),
+                IconButton(
+                    tooltip:
+                        _groupByParent ? 'Show a flat list' : 'Group by parent',
+                    isSelected: _groupByParent,
+                    onPressed: () =>
+                        setState(() => _groupByParent = !_groupByParent),
+                    icon: const Icon(Icons.account_tree_outlined, size: 18)),
+              ]),
+              Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                      '${ordered.length} of ${_lanes.length} loaded${_hasMore ? ' · more available' : ''}',
+                      style: Theme.of(context).textTheme.labelSmall)),
+              const SizedBox(height: 8),
+            ])),
       if (_listError != null)
         Padding(
             padding: const EdgeInsets.all(12),
@@ -656,11 +658,7 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
           child: _loading
               ? const Center(child: CircularProgressIndicator())
               : _lanes.isEmpty
-                  ? const Center(
-                      child: Padding(
-                          padding: EdgeInsets.all(24),
-                          child: Text(
-                              'Delegated agents appear here. Their conversations remain available after work finishes.')))
+                  ? _emptyState()
                   : ListView(children: [
                       if (ordered.isEmpty)
                         Padding(
@@ -721,6 +719,41 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
                             child: const Text('Load more conversations')),
                     ])),
     ]);
+  }
+
+  /// No agents yet: say where they come from, at the top, with a way there
+  /// (plan P2-15).
+  Widget _emptyState() {
+    final tokens = SonderTokens.of(context);
+    return ListView(
+        key: const Key('agents-empty'),
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+        children: [
+          Text('Agents start from Chat with /delegate',
+              style: Theme.of(context).textTheme.titleSmall),
+          const SizedBox(height: 6),
+          Text(
+              'Ask Sonder to delegate a task, or type /delegate <task> in Chat. '
+              'Each agent gets its own conversation here, and it stays '
+              'available after the work finishes.',
+              style: Theme.of(context)
+                  .textTheme
+                  .bodyMedium
+                  ?.copyWith(color: tokens.text2)),
+          const SizedBox(height: 12),
+          Align(
+              alignment: Alignment.centerLeft,
+              child: FilledButton.tonalIcon(
+                  onPressed: () {
+                    if (widget.onNavigate != null) {
+                      _navigate(WorkspaceDestination.chat);
+                    } else {
+                      Navigator.of(context).maybePop();
+                    }
+                  },
+                  icon: const Icon(Icons.chat_bubble_outline, size: 18),
+                  label: const Text('Go to Chat'))),
+        ]);
   }
 
   Widget _readable(Widget child) => Align(
@@ -989,7 +1022,8 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
                                               onPressed: () => _navigate(
                                                   WorkspaceDestination.runtime),
                                               icon: const Icon(
-                                                  Icons.dashboard_customize_outlined,
+                                                  Icons
+                                                      .dashboard_customize_outlined,
                                                   size: 16),
                                               label:
                                                   const Text('Open Runtime'))),
@@ -1229,68 +1263,75 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
                     () => _moveSelection(-1),
                 const SingleActivator(LogicalKeyboardKey.arrowDown, alt: true):
                     () => _moveSelection(1),
-                const SingleActivator(LogicalKeyboardKey.escape):
-                    _handleEscape,
+                const SingleActivator(LogicalKeyboardKey.escape): _handleEscape,
               },
               child: Focus(
-                autofocus: true,
-                child: Scaffold(
-                appBar: AppBar(
-                  title: const Text('Agents'),
-                  actions: [
-                    IconButton(
-                        tooltip: 'Find conversation (Ctrl+Shift+F)',
-                        onPressed: focusSearch,
-                        icon: const Icon(Icons.search)),
-                    IconButton(
-                        tooltip: 'Agent conversation shortcuts',
-                        onPressed: _showKeyboardHelp,
-                        icon: const Icon(Icons.help_outline)),
-                    if (widget.onNavigate != null) ...[
-                      WorkspaceMenu(
-                          current: WorkspaceDestination.agents,
-                          onSelected: _navigate),
-                      TextButton.icon(
-                          onPressed: () => _navigate(WorkspaceDestination.chat),
-                          icon: const Icon(Icons.chat_bubble_outline, size: 18),
-                          label: const Text('Chat')),
-                    ],
-                  ],
-                  leading: !wide && _selected != null
-                      ? IconButton(
-                          tooltip: 'All agent conversations',
-                          icon: const Icon(Icons.arrow_back),
-                          onPressed: () {
-                            setState(() => _selected = null);
-                            _stopWatch();
-                          },
-                        )
-                      : Navigator.of(context).canPop()
-                          ? IconButton(
-                              tooltip: 'Back to chat',
-                              icon: const Icon(Icons.arrow_back),
+                  autofocus: true,
+                  child: Scaffold(
+                    appBar: AppBar(
+                      title: const Text('Agents'),
+                      actions: [
+                        // Wide layouts already show the list's search field;
+                        // one search control per screen.
+                        if (!wide && _lanes.isNotEmpty)
+                          IconButton(
+                              tooltip: 'Find conversation (Ctrl+Shift+F)',
+                              onPressed: focusSearch,
+                              icon: const Icon(Icons.search)),
+                        IconButton(
+                            tooltip: 'Agent conversation shortcuts',
+                            onPressed: _showKeyboardHelp,
+                            icon: const Icon(Icons.help_outline)),
+                        if (widget.onNavigate != null) ...[
+                          WorkspaceMenu(
+                              current: WorkspaceDestination.agents,
+                              onSelected: _navigate),
+                          TextButton.icon(
                               onPressed: () =>
-                                  _navigate(WorkspaceDestination.chat))
-                          : null,
-                ),
-                body: wide
-                    ? Row(
-                        children: [
-                          SizedBox(width: 272, child: _laneList()),
-                          const VerticalDivider(width: 1),
-                          Expanded(
-                            child: lane == null
-                                ? const Center(
-                                    child: Text('Select an agent conversation'),
-                                  )
-                                : _transcript(lane),
-                          ),
+                                  _navigate(WorkspaceDestination.chat),
+                              icon: const Icon(Icons.chat_bubble_outline,
+                                  size: 18),
+                              label: const Text('Chat')),
                         ],
-                      )
-                    : lane == null
-                        ? _laneList()
-                        : _transcript(lane),
-              )));
+                      ],
+                      leading: !wide && _selected != null
+                          ? IconButton(
+                              tooltip: 'All agent conversations',
+                              icon: const Icon(Icons.arrow_back),
+                              onPressed: () {
+                                setState(() => _selected = null);
+                                _stopWatch();
+                              },
+                            )
+                          : Navigator.of(context).canPop()
+                              ? IconButton(
+                                  tooltip: 'Back to chat',
+                                  icon: const Icon(Icons.arrow_back),
+                                  onPressed: () =>
+                                      _navigate(WorkspaceDestination.chat))
+                              : null,
+                    ),
+                    body: wide && !_loading && _lanes.isEmpty
+                        ? _readable(_laneList())
+                        : wide
+                            ? Row(
+                                children: [
+                                  SizedBox(width: 272, child: _laneList()),
+                                  const VerticalDivider(width: 1),
+                                  Expanded(
+                                    child: lane == null
+                                        ? const Center(
+                                            child: Text(
+                                                'Select an agent conversation'),
+                                          )
+                                        : _transcript(lane),
+                                  ),
+                                ],
+                              )
+                            : lane == null
+                                ? _laneList()
+                                : _transcript(lane),
+                  )));
         },
       );
 }

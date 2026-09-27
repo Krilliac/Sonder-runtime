@@ -138,6 +138,19 @@ class PublicationError(ValueError):
     """Raised when a publication cannot safely change active state."""
 
 
+class CatalogStorePort(Protocol):
+    """Durable catalog persistence seam owned by a host adapter.
+
+    ``save`` must replace the stored snapshot atomically or raise without
+    changing it.  ``load`` returns ``None`` for an empty store and must refuse
+    (raise) a snapshot whose integrity digest does not verify.
+    """
+
+    def load(self) -> CatalogSnapshot | None: ...
+
+    def save(self, snapshot: CatalogSnapshot) -> None: ...
+
+
 class DurableLastGoodCatalog:
     """Append-only version catalog with explicit active/last-good state.
 
@@ -312,10 +325,43 @@ class InMemoryActiveSkillPort:
 class ProceduralPublicationService:
     """Transactional bridge from memory/promotion evidence to active skills."""
 
-    def __init__(self, catalog: DurableLastGoodCatalog, active: ActiveSkillPort, events: PublicationEventPort | None = None) -> None:
+    def __init__(
+        self,
+        catalog: DurableLastGoodCatalog,
+        active: ActiveSkillPort,
+        events: PublicationEventPort | None = None,
+        store: CatalogStorePort | None = None,
+    ) -> None:
         self.catalog = catalog
         self.active = active
         self.events = events
+        self.store = store
+
+    def _persist(self, staged: DurableLastGoodCatalog) -> bool:
+        """Durably commit the staged catalog; return whether a save happened.
+
+        The save runs inside the catalog transaction, so a store failure
+        propagates into the caller's guarded failure path and leaves both the
+        in-memory catalog and the active-skill port at their prior state.
+        """
+        if self.store is None:
+            return False
+        self.store.save(staged.snapshot())
+        return True
+
+    def _undo_persist(self, catalog_before: CatalogSnapshot, persisted: bool) -> BaseException | None:
+        """Write the prior snapshot back when a later step failed after the save.
+
+        Returns the compensation failure, if any, so the caller can finish
+        its in-memory rollback before reporting that the store diverged.
+        """
+        if not persisted or self.store is None:
+            return None
+        try:
+            self.store.save(catalog_before)
+        except BaseException as exc:
+            return exc
+        return None
 
     def publish(
         self,
@@ -357,10 +403,14 @@ class ProceduralPublicationService:
         )
         catalog_before = self.catalog.snapshot()
         active_before = self.active.snapshot()
+        persisted = False
         try:
             with self.catalog.transaction() as staged:
                 published = staged.publish(candidate, revision, evidence)
                 self.active.activate(published)
+                persisted = self._persist(staged)
+                # The durable save is the commit point, so the committed event
+                # is emitted only after it; an emit failure is undone below.
                 if self.events is not None:
                     self.events.emit(
                         "procedural_skill_published",
@@ -375,10 +425,15 @@ class ProceduralPublicationService:
                     )
         except BaseException as exc:
             self.catalog.restore(catalog_before)
+            durable_error = self._undo_persist(catalog_before, persisted)
             try:
                 self.active.restore(active_before)
             except BaseException as restore_exc:
                 raise PublicationError("publication failed and active-skill rollback failed") from restore_exc
+            if durable_error is not None:
+                raise PublicationError(
+                    "publication failed and durable catalog rollback failed"
+                ) from durable_error
             if self.events is not None:
                 try:
                     self.events.emit(
@@ -397,21 +452,70 @@ class ProceduralPublicationService:
         """Restore last-good catalog and active skill as one guarded operation."""
         catalog_before = self.catalog.snapshot()
         active_before = self.active.snapshot()
+        persisted = False
         try:
             with self.catalog.transaction() as staged:
                 restored = staged.rollback(skill_id)
                 self.active.activate(restored)
+                persisted = self._persist(staged)
         except BaseException as exc:
             self.catalog.restore(catalog_before)
+            durable_error = self._undo_persist(catalog_before, persisted)
             self.active.restore(active_before)
+            if durable_error is not None:
+                raise PublicationError(
+                    "procedural skill rollback failed and durable catalog rollback failed"
+                ) from durable_error
             if isinstance(exc, PublicationError):
                 raise
             raise PublicationError("procedural skill rollback failed") from exc
         return restored
 
+    def disable(self, skill_id: str, reason: str) -> None:
+        """Quarantine a skill in the catalog and persist the decision.
+
+        ``ActiveSkillPort`` has no deactivation seam, so hosts must route
+        through ``catalog.current()``, which is ``None`` for a disabled skill.
+        """
+        catalog_before = self.catalog.snapshot()
+        persisted = False
+        try:
+            with self.catalog.transaction() as staged:
+                staged.disable(skill_id, reason)
+                persisted = self._persist(staged)
+        except BaseException as exc:
+            self.catalog.restore(catalog_before)
+            durable_error = self._undo_persist(catalog_before, persisted)
+            if durable_error is not None:
+                raise PublicationError(
+                    "procedural skill disable failed and durable catalog rollback failed"
+                ) from durable_error
+            if isinstance(exc, PublicationError):
+                raise
+            raise PublicationError("procedural skill disable failed") from exc
+
+    def enable(self, skill_id: str) -> None:
+        """Lift a persisted quarantine so publication or rollback may resume."""
+        catalog_before = self.catalog.snapshot()
+        persisted = False
+        try:
+            with self.catalog.transaction() as staged:
+                staged.enable(skill_id)
+                persisted = self._persist(staged)
+        except BaseException as exc:
+            self.catalog.restore(catalog_before)
+            durable_error = self._undo_persist(catalog_before, persisted)
+            if durable_error is not None:
+                raise PublicationError(
+                    "procedural skill enable failed and durable catalog rollback failed"
+                ) from durable_error
+            if isinstance(exc, PublicationError):
+                raise
+            raise PublicationError("procedural skill enable failed") from exc
+
 
 __all__ = [
-    "CatalogSnapshot", "DurableLastGoodCatalog", "HeldOutEvidence",
+    "CatalogSnapshot", "CatalogStorePort", "DurableLastGoodCatalog", "HeldOutEvidence",
     "ActiveSkillPort", "InMemoryActiveSkillPort", "ProceduralPublicationService",
     "PublicationError", "PublicationEventPort", "PublicationState", "SkillPublication",
 ]

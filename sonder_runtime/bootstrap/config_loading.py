@@ -47,10 +47,10 @@ def check_config():
         logger.error(f"config validation imports failed, doctor config check will be skipped", exc_info=True)
         logger.warning(f"config validation check unavailable, doctor will skip: {type(exc).__name__}")
         logger.debug(f"check_config: import failed, returning skipped: {exc}")
-        return lambda: {
-            "status": "skipped",
-            "detail": "sonder_config unavailable (%s)" % exc,
-        }
+        # Python unbinds ``exc`` when the except block exits, so the deferred
+        # check must close over the rendered detail rather than the exception.
+        detail = "sonder_config unavailable (%s)" % exc
+        return lambda: {"status": "skipped", "detail": detail}
 
     def check():
         logger.debug("check_config: executing config validation")

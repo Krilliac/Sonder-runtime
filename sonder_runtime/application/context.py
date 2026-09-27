@@ -9,9 +9,11 @@ REPL calls imply.
 from __future__ import annotations
 
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Iterator, Literal, Protocol
 
 
 class CancellationToken(Protocol):
@@ -104,3 +106,31 @@ def local_owner_context(
         remote_ollama_allowed=remote_ollama_allowed,
         session_id=session_id,
     )
+
+
+# The ambient context is the one a surface (HTTP chat, A2A) already built for
+# the current turn.  It is published, never manufactured: code that finds none
+# must build its own audited context rather than invent an identity.  A
+# ContextVar keeps concurrent handler threads isolated, and because it lives in
+# this package module a live reload of ``server.py`` cannot replace it while a
+# binding is in flight.
+_AMBIENT_OPERATION_CONTEXT: ContextVar[OperationContext | None] = ContextVar(
+    "sonder_ambient_operation_context", default=None,
+)
+
+
+@contextmanager
+def bind_operation_context(context: OperationContext) -> Iterator[OperationContext]:
+    """Publish ``context`` as the ambient operation for the enclosed block."""
+    if not isinstance(context, OperationContext):
+        raise TypeError("an OperationContext is required")
+    token = _AMBIENT_OPERATION_CONTEXT.set(context)
+    try:
+        yield context
+    finally:
+        _AMBIENT_OPERATION_CONTEXT.reset(token)
+
+
+def current_operation_context() -> OperationContext | None:
+    """Return the ambient operation context bound by the enclosing surface."""
+    return _AMBIENT_OPERATION_CONTEXT.get()

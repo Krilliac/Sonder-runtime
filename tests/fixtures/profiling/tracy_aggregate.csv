@@ -1,0 +1,6 @@
+name,src_file,src_line,total_ns,total_perc,counts,mean_ns,min_ns,max_ns,std_ns
+Frame,/work/spark/src/main.cpp,40,2000000000,100,120,16666666,16300000,40000000,4000000
+Physics::Integrate,/work/spark/src/physics.cpp,88,960000000,48,120,8000000,7800000,31000000,2100000
+Render,/work/spark/src/render.cpp,12,600000000,30,120,5000000,4900000,5200000,50000
+AI::Think,/work/spark/src/ai.cpp,7,200000000,10,120,1666666,1600000,1700000,20000
+"Audio::Mix, stereo",/work/spark/src/audio.cpp,19,90000000,4.5,240,375000,360000,390000,5000

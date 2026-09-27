@@ -246,7 +246,8 @@ def test_native_mcp_entrypoint_owns_the_full_graph_close(monkeypatch):
         ) or 17,
     )
 
-    assert entrypoint.cmd_mcp(SimpleNamespace(native=True)) == 17
+    # The frame count run_native_mcp returns is not an exit status.
+    assert entrypoint.cmd_mcp(SimpleNamespace(native=True)) == 0
     assert calls == [("run", application, False), ("close", 5)]
 
 

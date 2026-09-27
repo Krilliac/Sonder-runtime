@@ -10,7 +10,9 @@ import os
 from pathlib import Path
 import sqlite3
 from threading import RLock, current_thread
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
+
+from sonder_runtime.platform.private_files import prepare_private_sqlite
 
 
 @dataclass(frozen=True)
@@ -77,6 +79,9 @@ class OwnedSQLiteConnections:
             self._constructing += 1
         connection = None
         try:
+            # Only after namespace and capacity admission: a refused path is
+            # never created, not even as an empty private file.
+            _secure_database_file((database,), kwargs)
             connection = sqlite3.connect(database, factory=_OwnedConnection, **kwargs)
             with self._lock:
                 connection._owned_registry = self
@@ -147,9 +152,52 @@ def install_disposable_owner(owner):
     _PROCESS_OWNER = owner
 
 
+def _private_database_path(database, uri):
+    """The on-disk file a connect would open, and whether it may be created.
+
+    ``None`` for in-memory and temporary databases. A URI is honoured only in
+    its local ``file:`` form; ``mode=ro`` never creates a file here.
+    """
+    try:
+        value = os.fsdecode(database)
+    except TypeError:
+        return None, False
+    if not value or value == ":memory:":
+        return None, False
+    if not uri:
+        return value, True
+    parsed = urlsplit(value)
+    if parsed.scheme != "file" or parsed.netloc not in ("", "localhost"):
+        return None, False
+    options = parse_qs(parsed.query)
+    mode = (options.get("mode") or [""])[-1]
+    if mode == "memory" or not parsed.path:
+        return None, False
+    path = unquote(parsed.path)
+    if os.name == "nt" and len(path) > 3 and path[0] == "/" and path[2] == ":":
+        path = path[1:]
+    return path, mode in ("", "rwc")
+
+
+def _secure_database_file(args, kwargs):
+    """Owner-only modes for the database file and sidecars before opening.
+
+    Every SQLite store reaches the runtime through this factory, so this is
+    the one place a newly created store gets ``0600`` and an existing store
+    (or its WAL/SHM) left ``0644`` by an older build is tightened.
+    """
+    database = args[0] if args else kwargs.get("database")
+    if database is None:
+        return
+    path, create = _private_database_path(database, bool(kwargs.get("uri", False)))
+    if path is not None:
+        prepare_private_sqlite(path, create=create)
+
+
 def connect(*args, **kwargs):
     owner = _PROCESS_OWNER
     if owner is None:
+        _secure_database_file(args, kwargs)
         return sqlite3.connect(*args, **kwargs)
     return owner.connect(*args, **kwargs)
 

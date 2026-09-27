@@ -8,6 +8,9 @@
 # Pin the exact tested releases for release builds; a bump requires re-running
 # the adversarial acceptance suite (tests/production/test_tuf_publisher.py and
 # the archive-safety / rollback / freeze tests) before shipping (SPEC-4 §16).
+# CI's "tests" job installs this file after the full suite and runs
+# tests/production/test_tuf_publisher.py and tests/test_update_manifest_trust.py
+# with skips refused.
 tuf==7.0.0
 cryptography==50.0.0
 securesystemslib==1.4.0

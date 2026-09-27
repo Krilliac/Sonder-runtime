@@ -1,0 +1,37 @@
+{"app_name":"spark_game","timestamp":"2024-03-05 10:00:00.00 +0000","app_version":"1.2.3","slice_uuid":"0e5c3c6a-1111-3333-8888-0123456789ab","build_version":"1","platform":1,"bug_type":"309","os_version":"macOS 14.3 (23D56)","incident_id":"00000000-0000-4000-8000-000000000001","name":"spark_game"}
+{
+  "uptime": 1000,
+  "procRole": "Foreground",
+  "version": 2,
+  "userID": 501,
+  "procName": "spark_game",
+  "procPath": "/Users/dev/sparkmini/build/spark_game",
+  "pid": 4242,
+  "cpuType": "ARM-64",
+  "captureTime": "2024-03-05 10:00:00.0000 +0000",
+  "osVersion": {"train": "macOS 14.3", "build": "23D56", "releaseType": "User"},
+  "exception": {"codes": "0x0000000000000001, 0x0000000000000008", "rawCodes": [1, 8], "type": "EXC_BAD_ACCESS",
+                "signal": "SIGSEGV", "subtype": "KERN_INVALID_ADDRESS at 0x0000000000000008"},
+  "termination": {"flags": 0, "code": 11, "namespace": "SIGNAL", "indicator": "Segmentation fault: 11"},
+  "faultingThread": 0,
+  "threads": [
+    {"triggered": true, "id": 5001, "name": "MainThread", "queue": "com.apple.main-thread",
+     "frames": [
+       {"imageOffset": 4660, "symbol": "Renderer::Submit(int)", "symbolLocation": 20, "imageIndex": 0,
+        "sourceFile": "render.cpp", "sourceLine": 42},
+       {"imageOffset": 8192, "symbol": "Game::RunFrame()", "symbolLocation": 64, "imageIndex": 0,
+        "sourceFile": "game.cpp", "sourceLine": 118},
+       {"imageOffset": 24756, "symbol": "start", "symbolLocation": 2360, "imageIndex": 1}
+     ]},
+    {"id": 5002, "name": "worker",
+     "frames": [{"imageOffset": 12004, "symbol": "__psynch_cvwait", "symbolLocation": 8, "imageIndex": 2}]}
+  ],
+  "usedImages": [
+    {"source": "P", "arch": "arm64", "base": 4294967296, "size": 131072, "uuid": "0e5c3c6a-1111-3333-8888-0123456789ab",
+     "path": "/Users/dev/sparkmini/build/spark_game", "name": "spark_game"},
+    {"source": "P", "arch": "arm64e", "base": 6442450944, "size": 540000, "uuid": "11111111-2222-3333-4444-555555555555",
+     "path": "/usr/lib/dyld", "name": "dyld"},
+    {"source": "P", "arch": "arm64e", "base": 6710886400, "size": 240000, "uuid": "66666666-7777-8888-9999-000000000000",
+     "path": "/usr/lib/system/libsystem_pthread.dylib", "name": "libsystem_pthread.dylib"}
+  ]
+}

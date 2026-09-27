@@ -33,6 +33,7 @@ import importlib
 import os
 import re
 import shlex
+import unicodedata
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Mapping, Optional, Sequence
 
@@ -159,7 +160,14 @@ CATEGORIES = {
     "data": "Inspect, query, and convert structured data",
     "creative": "Artifacts, assets, images, and games",
     "web": "Search, fetch, weather, and location",
-    "system": "Host, hardware, runtime policy, and diagnostics",
+    # ``system`` used to hold 66 commands, which made ``/help system`` a wall
+    # and the group name say nothing.  The four groups below replace it; the
+    # older placement tables still write ``system`` and ``_split_system``
+    # refines that into one of these at catalog build time.
+    "diagnostics": "Health checks, activity, logs, and turn inspection",
+    "runtime": "Models, modes, hardware, host tools, and runtime policy",
+    "updates": "Source updates, self-modification, and live reload",
+    "admin": "Debug and administrator inspection",
     "persona": "Tone, emotion vectors, and preferences",
     "security": "Permissions, risk inspection, and accounts",
     "training": "Curriculum, evaluation, and weight training",
@@ -223,6 +231,13 @@ _CATEGORY_BY_TOOL = {
     "hardware_profile": "system",
     "environment_status": "system",
     "toolchain_status": "system",
+    "tool_inventory": "system",
+    "output_digest": "dev",
+    "crash_triage": "dev",
+    "crash_digest": "dev",
+    "profile_digest": "dev",
+    "profile_capture_digest": "dev",
+    "debug_run_result": "dev",
     "npu_status": "system",
     "cloud_opt_in": "security",
     "system_profile_text": "persona",
@@ -312,6 +327,8 @@ _CATEGORY_BY_SLASH = {
     "/accept": "memory", "/pass": "memory", "/fail": "memory",
     "/todo": "planning", "/plan": "planning",
     "/cot": "system", "/debug": "system", "/env": "system", "/toolstatus": "system",
+    "/tools": "system", "/test": "dev", "/digest": "dev",
+    "/crash": "dev", "/profile": "dev", "/build": "dev", "/fix-build": "dev",
     "/trace": "system", "/strict": "system", "/dump": "system",
     "/whoami": "security", "/admin": "security", "/accounts": "security",
     "/login": "security", "/register": "security", "/setaccount": "security",
@@ -383,6 +400,10 @@ _READ_ONLY = frozenset({
     "live_reload_status", "mcp_runtime_status", "reasoning_show",
     "sonder_sessions", "sonder_stats", "turn_inspect", "workflow_list",
     "memory_export", "policy_explain",
+    # Renders cached model readiness only; the live probe is the separate
+    # ``/runtime status refresh``. Verified by execution, not by reading:
+    # tests/test_runtime_policy_status_trap_check.py.
+    "runtime_policy_status",
     "runtime_source_update_status",
     "runtime_source_stash_status",
     "permission_approvals",
@@ -497,6 +518,43 @@ _UNREGISTERED_BRANCH_WORK = {
     # it is: a verdict is visible to `/permissions`, can be overridden by a
     # rule, and stays inside the map the floor checks.
     "/location": "location",
+    # The developer-tool console commands front the composed application
+    # services, not a registered MCP tool, so static discovery sees no work
+    # below them. ``/test`` launches the project's test runner and is graded
+    # by the execution-class ``test_run`` (ask in manual, refused in plan).
+    # ``/tools`` renders the composed host tool inventory (``refresh`` re-runs
+    # its fixed, bounded version probes), so it is graded by -- and fronts --
+    # ``tool_inventory``, the registered tool over that same inventory service
+    # (``/tools`` shows the operator the unredacted view, the tool returns the
+    # redacted one). ``/digest`` reads a guarded file or job output and is
+    # graded by the safe tool that does the same kind of work.
+    "/test": "test_run",
+    "/tools": "tool_inventory",
+    "/digest": "log_inspect",
+    # ``/crash`` and ``/profile`` front the composed debug digest service. Both
+    # can launch a host debugger or profiler (a durable ProcessJob), so each
+    # is graded by the execution-class typed tool doing the same work:
+    # ``crash_digest`` / ``profile_capture_digest`` (permission_modes
+    # EXECUTION_TOOLS). Their pure forms (triage, text formats) are reads, but
+    # the branch is graded by the strictest member it can reach.
+    "/crash": "crash_digest",
+    "/profile": "profile_capture_digest",
+}
+
+# Console branches that front *several* native typed tools, through the typed
+# gateway rather than a registered MCP tool, so static discovery sees none of
+# them. ``/build`` and ``/fix-build`` run the C++ build tools
+# (``interfaces/repl/facades/build_tools.BUILD_COMMAND_SPECS`` lists the same
+# members; a drift test pins the two together). The console gate grades each
+# by its strictest member -- ``build_job`` / ``build_fix`` are ``execution``
+# (``permission_modes.NATIVE_EXECUTION_TOOLS``), ``build_fix_restore`` a
+# mutation -- and ``narrow_branch_tools`` narrows the read forms (``/build
+# model``, ``/build status``, ``/fix-build status``) to the safe member they
+# reach. Approving ``/fix-build <target>`` is what lets the gateway mint the
+# fix's scoped grant for its own in-scope source edits.
+_NATIVE_TYPED_BRANCH_WORK = {
+    "/build": ("build_job", "build_job_result", "build_model"),
+    "/fix-build": ("build_fix", "build_fix_restore", "build_fix_result"),
 }
 
 
@@ -1005,6 +1063,8 @@ def _with_unregistered_work(mapped: dict) -> dict:
     out = dict(mapped)
     for slash, stand_in in _UNREGISTERED_BRANCH_WORK.items():
         out[slash] = tuple(sorted(set(out.get(slash, ())) | {stand_in}))
+    for slash, members in _NATIVE_TYPED_BRANCH_WORK.items():
+        out[slash] = tuple(sorted(set(out.get(slash, ())) | set(members)))
     return out
 
 
@@ -1040,8 +1100,16 @@ _SELFMOD_READ_ACTIONS = frozenset({
 _MCP_READ_ACTIONS = frozenset({"", "status", "show", "audit", "list", "help", "?"})
 # ``server._goal_command`` treats the bare form as ``show``; ``set``/``note``/
 # ``done``/``abandon``/``refresh``/``adopt``/``decline`` mutate, and these
-# only read.
-_GOAL_READ_ACTIONS = frozenset({"", "show", "status", "history", "proposals"})
+# only read (``help``/``?`` fall through to its static usage text).
+_GOAL_READ_ACTIONS = frozenset({
+    "", "show", "status", "history", "proposals", "help", "?",
+})
+# ``server._runtime_command`` renders the policy with cached model readiness
+# for the bare form and these and static usage for ``help``/``?``; ``set`` and
+# ``reset`` update it. Only the one-word form is the read: ``status refresh``
+# probes the model endpoint (an outbound socket ``runtime_policy_status`` was
+# verified never to open), so it keeps the branch's strictest grade.
+_RUNTIME_READ_ACTIONS = frozenset({"", "status", "show", "list", "help", "?"})
 # ``server._training_command`` renders the plan for the bare form and a plan
 # or a status for these; anything else (``start``, ``deploy``, ``rollback``)
 # reaches the attended lifecycle.
@@ -1090,7 +1158,11 @@ def narrow_branch_tools(cmd, argument, tools):
         return ("preferences_status",)
     if command in ("/contextsize", "/ctxsize") and action == "":
         return ("context_policy_status",)
-    if command in ("/runtime", "/models") and action in ("", "status"):
+    if (
+        command in ("/runtime", "/models")
+        and action in _RUNTIME_READ_ACTIONS
+        and len(words) < 2
+    ):
         return ("runtime_policy_status",)
     if command in ("/stash", "/runtime-stash") and action in ("", "status", "list"):
         return ("runtime_source_stash_status",)
@@ -1112,7 +1184,116 @@ def narrow_branch_tools(cmd, argument, tools):
     if command == "/fact" and action:
         narrowed = ("sonder_forget_fact",) if action == "forget" else ("sonder_remember_fact",)
         return narrowed if all(name in union for name in narrowed) else union
+    if command in _NATIVE_TYPED_BRANCH_WORK:
+        narrowed = _build_branch_member(command, _build_words(argument))
+        return narrowed if narrowed and all(name in union for name in narrowed) else union
+    if command in _DEVELOPER_READ_FORMS and union:
+        narrowed = _developer_read_member(command, argument)
+        return narrowed or union
     return union
+
+
+# Developer console/chat commands whose follow-up forms only read the
+# caller's own run. ``/test status|result <id>`` never starts a run (both
+# surfaces answer a usage line for a malformed id), ``/crash triage <path>``
+# runs the pure reader and launches nothing, and ``status|result <run_id>``
+# of ``/crash`` and ``/profile`` poll an existing run. Everything else --
+# including ``cancel`` and a capture path -- keeps the branch's strictest
+# member.
+_DEVELOPER_READ_FORMS = frozenset({"/test", "/crash", "/profile"})
+
+
+def _developer_read_member(command, argument):
+    """The safe typed tool a developer read form reaches, or ()."""
+    if command == "/test":
+        # Split exactly as the console and chat parsers do (``str.split``).
+        words = str(argument or "").split()
+        if len(words) == 2 and words[0].lower() in ("status", "result"):
+            return ("test_run_result",)
+        return ()
+    words = _debug_words(argument)
+    if not words:
+        return ()
+    action = words[0].lower()
+    if action in ("status", "result") and len(words) == 2:
+        return ("debug_run_result",)
+    if command == "/crash" and action == "triage":
+        return ("crash_triage",)
+    return ()
+
+
+def _debug_words(argument):
+    """Split a ``/crash``/``/profile`` line as their parser does, or None.
+
+    ``shlex.split(posix=False)`` with surrounding quotes stripped, the
+    console facade's own splitter: a separator that ``str.split`` honours
+    but this one keeps inside a word must not turn a capture path into a
+    read form here.
+    """
+    try:
+        words = shlex.split(str(argument or ""), posix=False)
+    except ValueError:
+        return None
+    return [w[1:-1] if len(w) >= 2 and w[0] == w[-1] and w[0] in "\"'" else w for w in words]
+
+
+_BUILD_JOB_ID = re.compile(r"^build-job-[0-9a-f]{16,32}$")
+_BUILD_FIX_ID = re.compile(r"^build-fix-[0-9a-f]{16,32}$")
+
+
+def _build_words(argument):
+    """Split a build line exactly as the facade's ``split_words`` does, or None.
+
+    The narrowing must see the same tokens the facade will parse. ``str.split``
+    also breaks on NO-BREAK SPACE, U+001C and other Unicode separators that the
+    facade's shell-like splitter keeps inside a word, so ``/fix-build
+    status<U+00A0>build-fix-<id>`` was graded as a read of a fix while the
+    facade ran it as ``build_fix`` on a target of that name. A line the
+    splitter rejects answers None and keeps the strictest member.
+    """
+    lexer = shlex.shlex(str(argument or ""), posix=True)
+    lexer.whitespace_split = True
+    lexer.escape = ""
+    lexer.commenters = ""
+    try:
+        return list(lexer)
+    except ValueError:
+        return None
+
+
+def _build_branch_member(command, words):
+    """The one build tool a ``/build`` or ``/fix-build`` line reaches, or ().
+
+    Literal to the facade's grammar (``parse_build``/``parse_fix``): the bare
+    ``/build`` and ``/build model`` read the build model; ``/build
+    status|result|cancel <build-job-id>`` reach only the caller's own job;
+    ``/build run`` and ``/build trace`` launch. ``/fix-build
+    status|result|cancel <build-fix-id>`` reach only the caller's own fix,
+    ``/fix-build restore <build-fix-id>`` writes pre-images back, and every
+    other ``/fix-build`` line names a target -- including a target that is
+    spelled ``status`` -- so it reaches ``build_fix``. A form this does not
+    recognise answers () and keeps the union.
+    """
+    if words is None:
+        return ()
+    action = words[0].lower() if words else ""
+    if command == "/build":
+        if action in ("", "model"):
+            return ("build_model",)
+        if action in ("status", "result", "cancel") and len(words) >= 2 \
+                and _BUILD_JOB_ID.fullmatch(words[1]):
+            return ("build_job_result",)
+        if action in ("run", "trace"):
+            return ("build_job",)
+        return ()
+    if not action:
+        return ()
+    if len(words) >= 2 and _BUILD_FIX_ID.fullmatch(words[1]):
+        if action in ("status", "result", "cancel"):
+            return ("build_fix_result",)
+        if action == "restore":
+            return ("build_fix_restore",)
+    return ("build_fix",)
 
 
 # Marker for a branch that is a one-line forward to ``server.control_command``.
@@ -1203,7 +1384,9 @@ def _help_summaries() -> dict:
                 break
     out: dict[str, str] = {}
     for line in block.splitlines():
-        match = re.match(r"^\s+(/[a-z]\w*)", line)
+        # Hyphenated names are commands too: ``/workspace-create`` must not be
+        # read as ``/workspace`` and lose its description to that entry.
+        match = re.match(r"^\s+(/[a-z][\w-]*)", line)
         if not match:
             continue
         # The block is column-aligned, but a long argument list can eat the
@@ -1214,6 +1397,43 @@ def _help_summaries() -> dict:
         if description and not description.startswith("/"):
             out.setdefault(match.group(1), description)
     return out
+
+
+# Refinement of the legacy ``system`` placement into the four groups above.
+# Checked in order; the first keyword contained in the command stem (or the
+# tool it fronts) wins, and anything unmatched is a diagnostic read.
+_SYSTEM_SPLIT = (
+    ("diagnostics", (
+        "activity", "calibration", "diagnostic", "dump", "log_inspect",
+        "policy_explain", "reasoning", "report", "turn_inspect", "why",
+        "commands", "improve", "capability_manifest", "local_service_probe",
+        "artifact-mobility",
+    )),
+    ("updates", (
+        "update", "stash", "selfmod", "self_heal", "live_reload", "mcp",
+        "fetch_artifact", "verify_artifact",
+    )),
+    ("admin", (
+        "cot", "debug", "access_request", "authoritative", "admin",
+        "process_list",
+    )),
+    ("runtime", (
+        "runtime", "cloud", "mode", "strict", "trace", "fanout", "status",
+        "hardware", "npu", "unload", "compiler_cache", "location", "env",
+        "tool", "lane", "recovery", "goal", "ensemble", "vision", "image",
+    )),
+)
+
+
+def _split_system(category: str, name: str, tool: str = "") -> str:
+    """Place a command the older tables put in ``system`` into its group."""
+    if category != "system":
+        return category
+    stems = [str(name or "").lstrip("/").lower(), str(tool or "").lower()]
+    for group, keywords in _SYSTEM_SPLIT:
+        if any(word in stem for stem in stems if stem for word in keywords):
+            return group
+    return "diagnostics"
 
 
 def _category_for(name: str) -> str:
@@ -1363,6 +1583,31 @@ def _native_risk(group, tool, hit, server, tools_by_name) -> str:
         _risk_for(name, server) for name in reached
         if name in tools_by_name and name not in disarmed
     ]
+    # The native typed tools a branch fronts through the typed gateway
+    # (``_NATIVE_TYPED_BRANCH_WORK``) are real tools with a declared class in
+    # ``permission_modes.NATIVE_MCP_WORK``; read it directly (``risk_of``
+    # would recurse into this catalog) so ``/build`` is published as the
+    # ``execution`` its ``build_job`` member is graded at the gate. A member
+    # the table does not know is published as ``dangerous``, never blank.
+    native_typed = {
+        member for name in group for member in _NATIVE_TYPED_BRANCH_WORK.get(name, ())
+    }
+    if native_typed:
+        declared_work = getattr(
+            importlib.import_module("permission_modes"), "NATIVE_MCP_WORK", {},
+        )
+        graded.extend(
+            declared_work.get(name, "dangerous") for name in sorted(native_typed & reached)
+        )
+    # A stand-in for work that fronts no registered tool but that the gate
+    # classes as starting a host process (``/crash`` -> ``crash_digest``,
+    # ``/profile`` -> ``profile_capture_digest``) is published as the
+    # ``execution`` the gate decides on. ``_is_execution`` reads only the
+    # permission sets, so this cannot recurse into the catalog.
+    graded.extend(
+        "execution" for name in sorted(reached - disarmed)
+        if name not in tools_by_name and _is_execution(name)
+    )
 
     # A branch whose only tool calls are disarmed is graded as what it can
     # actually do, not as what the tool could do if called differently. The
@@ -1452,6 +1697,7 @@ def catalog() -> tuple[CatalogCommand, ...]:
             category = _LEGACY_CATEGORY.get(raw, raw)
         if category not in CATEGORIES:
             category = _category_for(tool or stem)
+        category = _split_system(category, canonical, tool)
         schema_params = _params_from_schema(getattr(row, "parameters", {})) if row else ()
         if not schema_params:
             schema_params = _native_params(canonical)
@@ -1485,7 +1731,7 @@ def catalog() -> tuple[CatalogCommand, ...]:
             name=slash,
             aliases=(),
             tool=row.name,
-            category=_category_for(row.name),
+            category=_split_system(_category_for(row.name), slash, row.name),
             risk=_risk_for(row.name, server),
             summary=_summarize(row.description),
             params=_params_from_schema(row.parameters),
@@ -1726,18 +1972,46 @@ _RISK_MARK = {
 }
 
 
+# Risk as words (spec 2.3/2.9).  The one-character marks above collided with
+# the prompt ``>`` and with other surfaces, and a screen reader read them as
+# punctuation.  ``safe`` stays blank for the same reason it does above.
+RISK_WORD = {
+    "safe": "", "ask": "[asks]", "mutation": "[writes]",
+    "execution": "[runs]", "dangerous": "[danger]",
+}
+RISK_LEGEND = (
+    ("[asks]", "asks first"), ("[writes]", "changes files"),
+    ("[runs]", "runs a program"), ("[danger]", "destructive"),
+)
+
+
+def risk_word(risk: str) -> str:
+    """The bracketed word for a risk class; unknown classes read as danger.
+
+    An unrecognised class is unclassified, and rendering it blank would make
+    it look like a safe read -- the failure ``_RISK_MARK`` documents.
+    """
+    if not risk:
+        return ""
+    return RISK_WORD.get(str(risk), "[danger]")
+
+
 def _line(command: Command, width: int) -> str:
-    return "  %s %-*s  %s" % (
-        _RISK_MARK.get(command.risk, " "), width, command.name,
-        command.summary or "(no description)",
-    )
+    word = risk_word(command.risk)
+    return ("  %-*s  %s%s" % (
+        width, command.name, command.summary or "(no description)",
+        ("  " + word) if word else "",
+    )).rstrip()
 
 
 def help_overview() -> str:
+    """The full, plain overview (``/help all``, HTTP and app surfaces)."""
     grouped = categories()
     total = sum(len(v) for v in grouped.values())
+    legend = "   ".join("%s %s" % pair for pair in RISK_LEGEND)
     lines = [
         "sonder commands  (%d across %d categories)" % (total, len(grouped)),
+        "  legend: %s" % legend,
         "",
         "  /help <category>   list that category      /help <command>  full usage",
         "  /<text>            match commands as you type",
@@ -1753,9 +2027,201 @@ def help_overview() -> str:
         lines += ["", "most used"]
         pwidth = max(len(c.name) for c in popular)
         lines += [_line(c, pwidth) for c in popular]
-    lines += ["", "  legend: ? asks first   * changes files   "
-                  "> runs a program   ! destructive"]
     return "\n".join(lines)
+
+
+# The eight commands the compact ``/help`` leads with (spec 2.9).  Usage and
+# summary are curated for a first screen; the risk word is read from the
+# catalog for the command's *bare* form, so a command whose bare form only
+# reads (``/todo`` lists) is not marked for what its sub-commands can do.
+_CORE_HELP = (
+    ("/model [tier|name]", "switch model or tier", "/model"),
+    # /mode is the gate's own control and never prompts (GATE_EXEMPT_TOOLS).
+    ("/mode <name>", "plan, manual, acceptEdits or auto", ""),
+    ("/read <path>", "show a file", "/read"),
+    ("/run", "run the last answer's code block", "/run"),
+    ("/todo", "list tasks (add/done change them)", "/todo"),
+    ("/status", "session, model, endpoint, context", "/status"),
+    ("/pass  /fail", "rate the last answer (teaches Sonder)", ""),
+    ("/exit", "quit (or Ctrl-D)", ""),
+)
+
+
+def _bare_risk(name: str) -> str:
+    """Risk of a command's bare form, or "" when it fronts no graded tool."""
+    if not name:
+        return ""
+    command = by_name(name)
+    if command is None:
+        return ""
+    try:
+        tools = console_tools().get(command.name, ())
+        tools = narrow_branch_tools(command.name, "", tools) if tools else ()
+    except Exception:
+        tools = ()
+    if not tools:
+        return command.risk if command.risk != "safe" else ""
+    graded = [by_name("/" + tool) for tool in tools]
+    risks = [c.risk for c in graded if c is not None] or [command.risk]
+    return max(risks, key=lambda r: _RISK_SEVERITY.get(r, 4))
+
+
+def _group_examples(commands, limit: int = 2) -> str:
+    popular = {name: index for index, name in enumerate(POPULAR)}
+    ranked = sorted(
+        commands,
+        key=lambda c: (popular.get(c.name, len(POPULAR)), 0 if c.native else 1,
+                       len(c.name), c.name),
+    )
+    return ", ".join(c.name.lstrip("/") for c in ranked[:limit])
+
+
+def help_rows(mode: str = "manual") -> dict:
+    """Structured data for the compact ``/help`` (spec 2.9).
+
+    ``{"title", "legend", "core", "groups", "footer"}`` where ``core`` rows
+    are ``(usage, summary, risk_word)`` and ``groups`` rows are
+    ``(name, count, examples)``.  Layout belongs to the caller: the REPL
+    styles and fits these to the terminal (``format_help`` is the plain
+    renderer).  Raises ``CatalogUnavailable`` like the other readers.
+    """
+    grouped = categories()
+    total = sum(len(v) for v in grouped.values())
+    core = []
+    for usage, summary, name in _CORE_HELP:
+        core.append((usage, summary, risk_word(_bare_risk(name)) if name else ""))
+    groups = [
+        (key, len(grouped[key]), _group_examples(grouped[key]))
+        for key in sorted(grouped)
+    ]
+    return {
+        "title": ("sonder commands", "%d in %d groups" % (total, len(grouped))),
+        "legend": ("in %s:" % (mode or "manual"),) + tuple(
+            "%s %s" % pair for pair in RISK_LEGEND),
+        "core": tuple(core),
+        "groups": tuple(groups),
+        "footer": ("/help <group>", "/help all", "/help status"),
+    }
+
+
+def _cells(text: str) -> int:
+    return sum(
+        0 if unicodedata.combining(ch) else
+        2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+        for ch in str(text)
+    )
+
+
+def _fit(text: str, width: int, ellipsis: str = "...") -> str:
+    text = str(text)
+    if _cells(text) <= width:
+        return text
+    room = max(0, width - _cells(ellipsis))
+    out, used = [], 0
+    for ch in text:
+        if used + _cells(ch) > room:
+            break
+        out.append(ch)
+        used += _cells(ch)
+    return "".join(out) + ellipsis[:max(0, width - used)]
+
+
+def _wrap_items(items, width: int, sep: str, indent: str = "  ") -> list:
+    """Join ``items`` with ``sep``, breaking only between items."""
+    lines, current = [], indent
+    for item in items:
+        piece = item if current == indent else sep + item
+        if current != indent and _cells(current + piece) > width:
+            lines.append(current.rstrip())
+            current = indent + item
+        else:
+            current += piece
+    lines.append(current.rstrip())
+    return [_fit(line, width) for line in lines]
+
+
+def format_help(width: int = 80, mode: str = "manual", sep: str = " · ",
+                ellipsis: str = "…") -> str:
+    """Plain rendering of :func:`help_rows` that fits ``width - 1`` columns.
+
+    Groups sit in three columns from 80 columns, two from 60, else one.
+    Summaries are cut with ``ellipsis``.  At 80x24 the whole screen fits.
+    """
+    try:
+        data = help_rows(mode)
+    except CatalogUnavailable as exc:
+        return _UNAVAILABLE_TEXT % exc
+    limit = max(20, int(width)) - 1
+    lines = [_fit(sep.join(data["title"]), limit, ellipsis)]
+    lines += _wrap_items(
+        [data["legend"][0] + " " + data["legend"][1]] + list(data["legend"][2:]),
+        limit, sep,
+    )
+    usage_w = max(len(row[0]) for row in data["core"])
+    for usage, summary, word in data["core"]:
+        tail = ("  " + word) if word else ""
+        room = limit - 4 - usage_w - 2 - len(tail)
+        if room < 8:
+            lines.append(_fit("    %s%s" % (usage, tail), limit, ellipsis))
+            continue
+        lines.append(("    %-*s  %s%s" % (
+            usage_w, usage, _fit(summary, room, ellipsis), tail)).rstrip())
+    lines.append(_fit("  groups" + sep + sep.join(data["footer"]), limit, ellipsis))
+    key_w = max(len(row[0]) for row in data["groups"])
+    # Three columns from 80 up keep the whole screen inside 24 rows with the
+    # typed line, the status line and the prompt; examples show where they
+    # have room to say something.
+    columns = 3 if limit >= 79 else (2 if limit >= 59 else 1)
+    col_w = (limit - 4 - 2 * (columns - 1)) // columns
+    cells = []
+    for key, count, examples in data["groups"]:
+        head = "%-*s %3d  " % (key_w, key, count)
+        room = col_w - len(head)
+        shown = _fit(examples, room, ellipsis) if room >= 10 else ""
+        cells.append((head + shown).rstrip())
+    col_w = min(col_w, max(_cells(cell) for cell in cells) + 2)
+    rows = (len(cells) + columns - 1) // columns
+    for r in range(rows):
+        parts = [cells[r + k * rows] for k in range(columns) if r + k * rows < len(cells)]
+        line = "    " + "  ".join(
+            part.ljust(col_w) if k < len(parts) - 1 else part
+            for k, part in enumerate(parts))
+        lines.append(_fit(line.rstrip(), limit, ellipsis))
+    return "\n".join(lines)
+
+
+def unknown_command(cmd: str, width: int = 80, sep: str = " · ",
+                    ellipsis: str = "…") -> str:
+    """One line for a submitted miss (spec P2-1), suggestion first.
+
+    ``unknown command /hlep · did you mean /help? · /help lists all``.  A
+    typo gets the near-miss guesses; a real prefix gets up to five matches.
+    Suggestions leave from the right until the line fits ``width - 1``.
+    """
+    name = str(cmd or "").strip()
+    head = "unknown command %s" % name
+    tail = "/help lists all"
+    try:
+        guesses = near_misses(name, limit=5)
+        if guesses:
+            items = [g if g.startswith("/") else "%s (group)" % g for g in guesses]
+            label, closing = "did you mean ", "?"
+        else:
+            items = [c.name for c in complete(name, limit=5)] if name.strip("/") else []
+            label, closing = "matches: ", ""
+    except CatalogUnavailable:
+        items, label, closing = [], "", ""
+    limit = max(20, int(width)) - 1
+    # The suggestion outlives the "/help lists all" tail: it is the one
+    # thing on the line that saves a second attempt.
+    for with_tail in (True, False):
+        for count in range(len(items), 0, -1):
+            parts = [head, label + ", ".join(items[:count]) + closing]
+            line = sep.join(parts + ([tail] if with_tail else []))
+            if _cells(line) <= limit:
+                return line
+    line = sep.join([head, tail])
+    return line if _cells(line) <= limit else _fit(line, limit, ellipsis)
 
 
 def help_category(name: str) -> str:
@@ -1891,10 +2357,10 @@ class InvocationError(ValueError):
     message text.
 
     ``problem`` is one of ``"unknown-parameter"``, ``"conflicting-duplicate"``,
-    or ``"invalid-value"``; ``command`` is the catalogued slash name; and
-    ``details`` carries the problem-specific evidence (the unknown keys, the
-    duplicated key and both raw values, or the key/raw-value/expected-type
-    triple).
+    ``"invalid-value"``, or ``"unexpected-arguments"``; ``command`` is the
+    catalogued slash name; and ``details`` carries the problem-specific
+    evidence (the unknown keys, the duplicated key and both raw values, the
+    key/raw-value/expected-type triple, or the excess words and the usage).
     """
 
     def __init__(self, message, *, command="", problem="", details=None):
@@ -1962,6 +2428,9 @@ def parse_invocation(line: str):
       coercion used to fall back to the raw string, so ``dry_run=nope``
       reached the tool as a *truthy* string and a typo'd flag silently meant
       the opposite of what it said.
+
+    * more positional words than the open parameters can take -- the excess
+      used to be dropped, so ``/status detail`` ran plain ``/status``.
 
     Positional words keep the historical lenient coercion: they carry no
     stated key=type intent, and free-text parameters legitimately absorb
@@ -2041,16 +2510,34 @@ def parse_invocation(line: str):
         open_params = required or (
             [p for p in candidates if p.name not in _CONTEXT_PARAMS] or candidates
         )
-        if open_params:
-            try:
-                words = shlex.split(leftover)
-            except ValueError:
-                words = leftover.split()
-            # One free-text parameter takes the whole remainder rather than
-            # only its first whitespace-delimited word.
-            if len(open_params) == 1 and open_params[0].type == "str":
-                kwargs[open_params[0].name] = leftover
-            else:
-                for param, value in zip(open_params, words):
-                    kwargs[param.name] = _coerce(value, param.type)
+        try:
+            words = shlex.split(leftover)
+        except ValueError:
+            words = leftover.split()
+        # One free-text parameter takes the whole remainder rather than
+        # only its first whitespace-delimited word.
+        if len(open_params) == 1 and open_params[0].type == "str":
+            kwargs[open_params[0].name] = leftover
+        else:
+            extra = words[len(open_params):]
+            if extra:
+                # Excess positional words used to be dropped: ``/status
+                # detail`` ran plain ``/status`` while looking like it had
+                # honoured the word.  Refuse with the usage instead.
+                raise InvocationError(
+                    "%s: unexpected argument%s %s. usage: %s" % (
+                        command.name,
+                        "" if len(extra) == 1 else "s",
+                        " ".join(repr(word) for word in extra),
+                        command.usage(),
+                    ),
+                    command=command.name,
+                    problem="unexpected-arguments",
+                    details={
+                        "unexpected": list(extra),
+                        "usage": command.usage(),
+                    },
+                )
+            for param, value in zip(open_params, words):
+                kwargs[param.name] = _coerce(value, param.type)
     return command.tool, kwargs

@@ -142,35 +142,160 @@ def validated_config_check(config):
     return _validated_config_check(config)
 
 
-def _check_self_heal() -> dict:
+def _memory_db_target(config=None) -> tuple[str | None, str]:
+    """Resolve the memory database doctor inspects, without touching it.
+
+    ``SONDER_DB`` is the explicit override every runtime surface honours. When
+    it is unset the database is ``<state home>/memory.db`` -- the same file the
+    REPL and server use -- taken from the operator-selected configuration so
+    ``--config``/``--set`` select the same home the other checks inspect.
+    Unlike ``paths.memory_db_path`` this never creates the home or performs the
+    one-time legacy-database migration: doctor is read-only.
+    """
+    import os
+    from pathlib import Path
+
+    override = os.environ.get("SONDER_DB", "").strip()
+    if override:
+        return str(Path(override).expanduser()), "SONDER_DB"
+    cfg = config if config is not None else _load_config_or_none()
+    home = getattr(getattr(cfg, "state", None), "home", None) if cfg else None
+    if not home:
+        return None, "config unavailable to locate the state home"
+    return str(Path(home).expanduser() / "memory.db"), "state home"
+
+
+def _existing_memory_db(config=None) -> tuple[str | None, dict | None]:
+    """Return ``(path, None)`` for an existing DB, else ``(None, skip)``."""
+    import os
+
+    db_path, source = _memory_db_target(config)
+    if db_path is None:
+        return None, _skip(source)
+    if not os.path.isfile(db_path):
+        # Opening it would create an empty store; report instead of writing.
+        return None, _skip("no memory database yet (%s)" % source)
+    try:
+        import sonder_runtime.adapters.memory_store as memory_store
+
+        conn = memory_store.connect_read_only(db_path)
+        try:
+            initialized = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='lessons'"
+            ).fetchone() is not None
+        finally:
+            conn.close()
+    except Exception as exc:
+        return None, _skip(
+            "memory database unreadable (%s)" % exc.__class__.__name__
+        )
+    if not initialized:
+        # A store the runtime has not initialized yet has nothing to audit;
+        # initializing it here would break doctor's read-only contract.
+        return None, _skip("memory database not initialized yet (%s)" % source)
+    return db_path, None
+
+
+def _check_self_heal(config=None) -> dict:
     """Summarize self-heal findings without applying any repair (read-only)."""
     try:
         import self_heal
+        import sonder_runtime.adapters.memory_store as memory_store
     except Exception as exc:
         return _skip("self_heal unavailable (%s)" % exc)
-    import os
 
-    db_path = os.environ.get("SONDER_DB")
-    if not db_path:
-        return _skip("SONDER_DB not set")
-    return _summarize_self_heal(self_heal.check, db_path)
+    db_path, skipped = _existing_memory_db(config)
+    if skipped is not None:
+        return skipped
+
+    def inspect(path):
+        return self_heal.check(path, connect=memory_store.connect_read_only)
+
+    return _summarize_self_heal(inspect, db_path)
 
 
-def _check_memory_quality() -> dict:
+def _check_memory_quality(config=None) -> dict:
     """Compatibility delegate for the packaged memory-quality policy."""
-    import os
-
-    db_path = os.environ.get("SONDER_DB")
-    if not db_path:
-        return _skip("SONDER_DB not set")
+    db_path, skipped = _existing_memory_db(config)
+    if skipped is not None:
+        return skipped
     try:
         import memory_quality
         import sonder_runtime.adapters.memory_store as memory_store
     except Exception as exc:
         return _skip("memory quality surfaces unavailable (%s)" % exc)
     return _summarize_memory_quality(
-        memory_store.connect, memory_quality.audit, db_path
+        memory_store.connect_read_only, memory_quality.audit, db_path
     )
+
+
+def memory_checks(config) -> list[tuple[str, CheckCallable]]:
+    """Bind the memory-store checks to one already-validated configuration."""
+    return [
+        ("self_heal", lambda: _check_self_heal(config)),
+        ("memory_quality", lambda: _check_memory_quality(config)),
+    ]
+
+
+def schema_epoch_check(config=None):
+    """Bind a read-only check that ``serve`` would pass its epoch-2 gate.
+
+    ``serve`` refuses to start until ``migrate --adopt-epoch2`` has stamped
+    every SPEC-5 domain database at schema epoch 2, so an un-adopted home is a
+    FAIL here: a doctor that says WARN/rc 0 while serve refuses is lying about
+    whether the runtime can start. A home with no databases at all is also
+    un-adopted -- serve's own startup creates ``memory.db`` before the gate
+    and then refuses -- so it is reported the same way.
+    """
+    def check():
+        try:
+            from pathlib import Path
+
+            from sonder_runtime.adapters.persistence.sqlite.bridge_migration import (
+                EPOCH,
+                EPOCH2_DATABASES,
+                check_epoch,
+            )
+
+            cfg = config if config is not None else _load_config_or_none()
+            if cfg is None:
+                return _skip("config unavailable for schema-epoch inspection")
+            home = Path(cfg.state.home).expanduser()
+            # check_epoch returns None for a missing file without creating it.
+            epochs = {name: check_epoch(home / name) for name in EPOCH2_DATABASES}
+        except Exception as exc:
+            return {
+                "status": STATUS_FAIL,
+                "detail": "schema epoch inspection failed (%s)"
+                % exc.__class__.__name__,
+            }
+        future = sorted(
+            name for name, epoch in epochs.items()
+            if epoch is not None and epoch > EPOCH
+        )
+        if future:
+            return {
+                "status": STATUS_FAIL,
+                "detail": "future schema epoch in %s; this build cannot run it"
+                % ", ".join(future),
+            }
+        missing = sorted(name for name, epoch in epochs.items() if epoch != EPOCH)
+        if missing:
+            return {
+                "status": STATUS_FAIL,
+                "detail": (
+                    "schema epoch %d not adopted (%s); serve will refuse to "
+                    "start -- run `python -m sonder_runtime migrate "
+                    "--adopt-epoch2`" % (EPOCH, ", ".join(missing))
+                ),
+            }
+        return {
+            "status": STATUS_OK,
+            "detail": "schema epoch %d adopted (%d databases)"
+            % (EPOCH, len(epochs)),
+        }
+
+    return check
 
 
 def _check_runtime_policy() -> dict:
@@ -325,9 +450,9 @@ def backup_check(config=None, *, max_age_hours: float = 48.0):
     return check
 
 
-def _check_ollama(*, timeout: float = 5.0) -> dict:
+def _check_ollama(*, timeout: float = 5.0, config=None) -> dict:
     """Probe Ollama reachability read-only via GET /api/tags."""
-    config = _load_config_or_none()
+    config = config if config is not None else _load_config_or_none()
     if config is None:
         return _skip("config unavailable for Ollama endpoint")
     if getattr(getattr(config, "membership", None), "mode", "static") == "external":
@@ -379,7 +504,7 @@ def _check_ollama(*, timeout: float = 5.0) -> dict:
         return {"status": STATUS_FAIL, "detail": "%s: %s" % (host, exc)}
 
 
-def _check_ollama_workers(*, timeout: float = 5.0) -> dict:
+def _check_ollama_workers(*, timeout: float = 5.0, config=None) -> dict:
     """Probe every configured multi-PC Ollama worker independently.
 
     ``_check_ollama`` only verifies the primary endpoint. A remote worker
@@ -388,7 +513,7 @@ def _check_ollama_workers(*, timeout: float = 5.0) -> dict:
     doctor`` until a live request happens to fail over onto it -- an operator
     would not learn PC 2 or PC 3 is down until traffic actually needed it.
     """
-    config = _load_config_or_none()
+    config = config if config is not None else _load_config_or_none()
     if config is None:
         return _skip("config unavailable for Ollama worker endpoints")
     if getattr(getattr(config, "membership", None), "mode", "static") == "external":
@@ -428,7 +553,7 @@ def _check_ollama_workers(*, timeout: float = 5.0) -> dict:
     return _summarize_worker_probe(up, down, len(workers))
 
 
-def _check_ollama_residency(*, timeout: float = 5.0) -> dict:
+def _check_ollama_residency(*, timeout: float = 5.0, config=None) -> dict:
     """Detect Ollama models that outlived their ``keep_alive`` expiry.
 
     ``/api/ps`` reports each resident model's ``expires_at``. Ollama is
@@ -438,7 +563,7 @@ def _check_ollama_residency(*, timeout: float = 5.0) -> dict:
     still in use. This is a read-only observation, not a repair: it never
     unloads anything itself.
     """
-    config = _load_config_or_none()
+    config = config if config is not None else _load_config_or_none()
     if config is None:
         return _skip("config unavailable for Ollama residency check")
     if getattr(getattr(config, "membership", None), "mode", "static") == "external":
@@ -506,8 +631,127 @@ def _check_ollama_residency(*, timeout: float = 5.0) -> dict:
     }
 
 
-def storage_checks(config=None, *, throughput: bool = False):
-    """Build storage checks for a validated config without running them yet."""
+def _inference_binding(env=None):
+    """Return ``(bindings, None)`` or ``(None, fail entry)``; never raises."""
+    from sonder_runtime.adapters.provider_bindings import provider_bindings_from_env
+
+    try:
+        return provider_bindings_from_env(env), None
+    except ValueError as exc:
+        return None, {
+            "status": STATUS_FAIL,
+            "detail": "invalid provider bindings: %s" % exc,
+        }
+
+
+def _check_sonder_inference(*, env=None, gateway=None) -> dict:
+    """Probe the Sonder Inference provider when any binding uses it.
+
+    Read-only: one cached GET of ``/v1/sonder/health`` bounded to 2 seconds
+    of wall-clock time.  It never generates.  The verdict follows what a
+    request would meet right now (``SonderInferenceGateway.readiness``):
+
+    * skipped -- no tier, default or embedding binding names sonder_inference;
+    * ok      -- the server is ready and speaks API version 1;
+    * warn    -- the mock backend is served (synthetic output); the server is
+                 at its connection limit (transient); or it is unreachable or
+                 not ready and ``SONDER_INFERENCE_FALLBACK=ollama`` will carry
+                 the requests it never received;
+    * fail    -- unreachable without a fallback, or anything no fallback can
+                 help: invalid configuration, a remote endpoint without
+                 consent, rejected credentials or Host, or an API version
+                 mismatch (from health or from the ready file).
+    """
+    bindings, failure = _inference_binding(env)
+    if failure is not None:
+        return failure
+    if "sonder_inference" not in bindings.bound_providers:
+        return _skip("not configured (no provider binding uses sonder_inference)")
+    try:
+        from sonder_runtime.adapters.inference.sonder_inference_gateway import (
+            SonderInferenceGateway,
+        )
+    except Exception as exc:  # pragma: no cover - import guard
+        return _skip("Sonder Inference adapter unavailable (%s)" % exc)
+    gateway = gateway if gateway is not None else SonderInferenceGateway(env=env)
+    readiness = gateway.readiness()
+    fallback = bindings.fallbacks.get("sonder_inference")
+    detail = readiness.detail
+    if readiness.kind == "ready":
+        if readiness.synthetic:
+            return {
+                "status": STATUS_WARN,
+                "detail": detail + " -- MOCK backend: synthetic output, not a "
+                "quality or performance signal",
+            }
+        return {"status": STATUS_OK, "detail": detail}
+    if readiness.kind == "overloaded":
+        return {
+            "status": STATUS_WARN,
+            "detail": detail + " -- requests are refused as over capacity "
+            "until load drops",
+        }
+    if readiness.kind == "unreachable":
+        if fallback is not None:
+            return {
+                "status": STATUS_WARN,
+                "detail": detail + " -- requests it never receives fall back to %s"
+                % fallback,
+            }
+        return {
+            "status": STATUS_FAIL,
+            "detail": detail + " -- start `sonder-infer serve` or set "
+            "SONDER_INFERENCE_FALLBACK=ollama (and restart)",
+        }
+    return {
+        "status": STATUS_FAIL,
+        "detail": detail + " -- every request fails until this is fixed; "
+        "the fallback does not apply",
+    }
+
+
+def _check_sonder_inference_scope(*, env=None) -> dict:
+    """Say plainly which surfaces a sonder_inference binding does not reach.
+
+    Provider bindings are honoured by ModelGateway consumers only.  The REPL,
+    MCP, autopilot and fleet still generate through the legacy Ollama path, so
+    an operator who bound every tier to Sonder Inference must not assume
+    those surfaces stopped using Ollama.
+    """
+    bindings, failure = _inference_binding(env)
+    if failure is not None:
+        return failure
+    if "sonder_inference" not in bindings.bound_providers:
+        return _skip("not configured (no provider binding uses sonder_inference)")
+    return {
+        "status": STATUS_WARN,
+        "detail": (
+            "REPL, MCP, autopilot and fleet generate through the legacy "
+            "Ollama path regardless of provider bindings; only ModelGateway "
+            "consumers use sonder_inference"
+        ),
+    }
+
+
+def sonder_inference_checks(env=None) -> list[tuple[str, CheckCallable]]:
+    """Bind the Sonder Inference checks to one environment snapshot."""
+    return [
+        ("sonder_inference", lambda: _check_sonder_inference(env=env)),
+        ("sonder_inference_scope", lambda: _check_sonder_inference_scope(env=env)),
+    ]
+
+
+def storage_checks(
+    config=None, *, throughput: bool = False, discover_models: bool = True,
+):
+    """Build storage checks for a validated config without running them yet.
+
+    ``discover_models`` lets ``storage_models`` ask a loopback Ollama daemon
+    which model root it really uses (read-only ``/api/tags`` + ``/api/show``).
+    ``OLLAMA_MODELS`` is the daemon's setting; this process's copy of it is
+    often absent or different, so without discovery the reported root is an
+    assumption and is labelled as one.
+    """
     def loaded_config():
         if config is not None:
             return config
@@ -537,22 +781,77 @@ def storage_checks(config=None, *, throughput: bool = False):
     def models_check():
         from sonder_runtime.adapters import storage as sonder_storage
 
+        import os
+
         cfg = loaded_config()
+        process_root = os.environ.get("OLLAMA_MODELS", "").strip()
+        discovered = None
+        if discover_models and getattr(
+            getattr(cfg, "membership", None), "mode", "static"
+        ) != "external":
+            import sonder_runtime.adapters.inference.ollama_model_root as ollama_model_root
+
+            discovered = ollama_model_root.discover_daemon_model_root(
+                getattr(cfg.ollama, "url", ""),
+                allow_remote=getattr(cfg.ollama, "allow_remote", False) is True,
+            )
+        notes: list[str] = []
+        if discovered:
+            roots = (discovered,)
+            notes.append("reported by the local Ollama daemon")
+            if process_root and (
+                os.path.normcase(os.path.abspath(os.path.expanduser(process_root)))
+                != os.path.normcase(os.path.abspath(discovered))
+            ):
+                notes.append(
+                    "OLLAMA_MODELS in this process (%s) differs from the "
+                    "daemon's root" % process_root
+                )
+        else:
+            roots = sonder_storage.model_roots()
+            notes.append(
+                "from OLLAMA_MODELS in this process; daemon root not verified"
+                if process_root else
+                "assumed Ollama default: OLLAMA_MODELS is unset in this process "
+                "and the daemon's root was not discovered"
+            )
         records = [
             sonder_storage.inspect_root(
                 root,
                 minimum_free_bytes=cfg.state.minimum_free_disk_bytes,
                 role="models",
             )
-            for root in sonder_storage.model_roots()
+            for root in roots
         ]
-        status = STATUS_WARN if any(r["warnings"] for r in records) else STATUS_OK
+        mismatch = len(notes) > 1
+        status = (
+            STATUS_WARN
+            if mismatch or any(r["warnings"] for r in records)
+            else STATUS_OK
+        )
         return {
             "status": status,
-            "detail": " | ".join(sonder_storage.summarize(r) for r in records),
+            "detail": "%s [%s]" % (
+                " | ".join(sonder_storage.summarize(r) for r in records),
+                "; ".join(notes),
+            ),
         }
 
     return [("storage_state", state_check), ("storage_models", models_check)]
+
+
+def ollama_checks(config) -> list[tuple[str, CheckCallable]]:
+    """Bind the Ollama probes to one already-validated configuration.
+
+    The unbound defaults reload configuration from the environment, which
+    ignores ``--config``/``--set`` and probes a different endpoint than the
+    one the ``config`` line of the same report names.
+    """
+    return [
+        ("ollama", lambda: _check_ollama(config=config)),
+        ("ollama_workers", lambda: _check_ollama_workers(config=config)),
+        ("ollama_residency", lambda: _check_ollama_residency(config=config)),
+    ]
 
 
 def default_checks() -> list[tuple[str, CheckCallable]]:
@@ -566,6 +865,7 @@ def default_checks() -> list[tuple[str, CheckCallable]]:
         ("config", _check_config),
         *storage_checks(),
         ("schemas", schema_check()),
+        ("schema_epoch", schema_epoch_check()),
         ("backup", backup_check()),
         ("self_heal", _check_self_heal),
         ("memory_quality", _check_memory_quality),
@@ -573,6 +873,8 @@ def default_checks() -> list[tuple[str, CheckCallable]]:
         ("ollama", _check_ollama),
         ("ollama_workers", _check_ollama_workers),
         ("ollama_residency", _check_ollama_residency),
+        ("sonder_inference", _check_sonder_inference),
+        ("sonder_inference_scope", _check_sonder_inference_scope),
     ]
 
 

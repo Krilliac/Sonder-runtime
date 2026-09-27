@@ -56,6 +56,8 @@ backups, and a signed update path. It is not a foundation model.
 - [Natural-language capability queries](../NATURAL_LANGUAGE_CAPABILITY_QUERIES.md) —
   console phrasings for the read-only "what am I talking to" tools, the exact
   slash/MCP contracts behind them, and what deliberately does not dispatch.
+- [Structured test runs](../structured-test-runs.md) — `test_run`: host-owned
+  runner templates, selector grammars, typed reports and the job lifecycle.
 - [Runbooks](../runbooks/README.md) — contractor-executable operational procedures.
 - [Security review](../security/README.md) — read-only audit of the sensitive surfaces.
 - [Architecture decisions](../architecture/adr/) — ADR-001..008.

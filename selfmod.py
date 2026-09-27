@@ -27,6 +27,21 @@ from pathlib import Path, PurePosixPath
 import sonder_paths
 import sonder_logging
 from sonder_runtime.adapters.process_liveness import pid_alive as _process_pid_alive
+from sonder_runtime.application.selfmod.candidate_isolation import (
+    ISOLATION_KINDS,
+    IsolationAttestation,
+    IsolationAttestationError,
+)
+from sonder_runtime.application.selfmod.independent_oracle import (
+    ORACLE_PROBE_KIND,
+    OracleError,
+    OracleReceipt,
+    grade_frame,
+    ledger_command as oracle_ledger_command,
+    ledger_output as oracle_ledger_output,
+    payload_nonce,
+)
+from sonder_runtime.application.selfmod.stage_refusal import SelfmodStageNotApplied
 
 
 MODES = ("observe", "propose", "auto-low-risk")
@@ -64,11 +79,19 @@ SENSITIVE_PREFIXES = (
     "tests/test_control_plane", "tests/test_read_only_agent_policy",
     "tests/test_selfmod",
     "scripts/selfmod_low_integrity.py",
+    "scripts/selfmod_linux_isolation.py", "tests/test_linux_candidate_isolation",
+    "tests/test_517_linux_uid_separated_candidate_evaluator",
+    # The independent oracle: its channel, store and comparison rules.
+    "scripts/selfmod_oracle.py", "scripts/selfmod_host_grader.py",
+    "sonder_runtime/application/selfmod/", "tests/test_selfmod_independent_oracle",
 )
 SENSITIVE_PARTS = (
     ".env", "credential", "secret", "token", "account", "migration",
     "permissions.json", "selfmod_policy", "selfmod.db", "audit",
 )
+# Attestations a candidate supervisor may build.  Each is accepted only from
+# the supervisor that constructs it (see ``_record_command``).
+_ISOLATED_ATTESTATIONS = ISOLATION_KINDS
 DEFAULT_BUDGETS = {
     "max_files_inspected": 80,
     "max_files_changed": 8,
@@ -83,11 +106,27 @@ DEFAULT_BUDGETS = {
 DEFAULT_RETENTION_DAYS = 30
 DEFAULT_RETENTION_GB = 5.0
 LEASE_SECONDS = 180
-# Candidate functions execute in the same Python process as the current
-# challenge wrapper and can inspect its arguments/frame. Host comparison and
-# clean replay catch concrete cheats, but are not an independent hidden oracle.
-# Unattended promotion must remain disabled until that boundary is real.
-_UNATTENDED_ORACLE_INDEPENDENT = False
+# Candidate functions execute in the same Python process as every challenge
+# wrapper and write the stdout the parent grades, so a public-assertion host
+# grade and its clean replay catch concrete cheats but can be forged by a
+# candidate that reads the public tests.  Unattended promotion therefore also
+# requires an independent-oracle receipt (``record_oracle_grade``): raw
+# outputs for per-run, nonce-bound inputs compared by this process with
+# expected values the candidate uid was proven unable to read, bound to the
+# exact tested candidate bytes and baseline.  See ``_oracle_admission_refusal``
+# and docs/architecture/REMAINING-SELFMOD-517-LINUX-ISOLATION.md.
+
+# The fixed set of candidate checks that must each have run and passed before
+# ``review`` may auto-approve, whatever ``require_kinds`` the caller passes:
+# the low-integrity regression partitions and held-out suite the nightly runs
+# (``scripts/nightly_selfmod.py`` ``REGRESSION_KINDS``), the parent-scored
+# host grade over public assertions, and the independent oracle.  The
+# medium-integrity partition is never run against a candidate, and the
+# nightly reports it as not evaluated, which also blocks auto-approval.
+UNATTENDED_REQUIRED_KINDS = (
+    "syntax", "regression", "regression_heavy", "held_out",
+    "host_probe", "host_grade", "oracle_probe", "oracle_grade",
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS selfmod_settings (
@@ -140,6 +179,11 @@ CREATE TABLE IF NOT EXISTS selfmod_deployment_lock (
   owner_host TEXT, lease_until REAL, run_id TEXT
 );
 INSERT OR IGNORE INTO selfmod_deployment_lock(id) VALUES (1);
+CREATE TABLE IF NOT EXISTS selfmod_oracle_receipts (
+  run_id TEXT PRIMARY KEY, probe_id INTEGER NOT NULL, passed INTEGER NOT NULL,
+  independent INTEGER NOT NULL, receipt_json TEXT NOT NULL,
+  receipt_sha256 TEXT NOT NULL, created_ts REAL NOT NULL
+);
 """
 
 
@@ -691,12 +735,18 @@ def apply_candidate_changes(run_id, changes):
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
         encoded = str(content).encode("utf-8")
+        # mkstemp creates 0600.  Keep the replaced file's mode (0644 for a new
+        # file) so a candidate evaluated as a distinct uid can read, but not
+        # write, the bytes under test, and a deploy does not narrow the mode.
+        mode = stat.S_IMODE(target.stat().st_mode) if target.is_file() else 0o644
         fd, tmp_name = tempfile.mkstemp(prefix=target.name + ".selfmod-", dir=target.parent)
         try:
             with os.fdopen(fd, "wb") as stream:
                 stream.write(encoded)
                 stream.flush()
                 os.fsync(stream.fileno())
+            if os.name != "nt":
+                os.chmod(tmp_name, mode)
             os.replace(tmp_name, target)
         finally:
             with contextlib.suppress(OSError):
@@ -843,6 +893,14 @@ def begin_testing(run_id):
     return _phase(run_id, {"editing", "interrupted"}, "testing", "testing", "host-controlled validation started")
 
 
+def _auto_candidate(run) -> bool:
+    """Whether ``run`` is eligible for unattended low-risk evaluation."""
+    return (
+        run.get("mode") == "auto-low-risk" and run.get("risk") == "low"
+        and not run.get("approval_required", True)
+    )
+
+
 def _record_command(
     run, kind, command, cwd_path, seconds, expect_failure=False, receipt=None,
     protected_paths=(), low_integrity=None, isolation=None,
@@ -850,14 +908,12 @@ def _record_command(
     run_id = run["id"]
     isolation_failed = False
     attestation = "unverified"
+    typed_attestation = None
     # ``low_integrity`` is explicit for unattended candidate checks.  Keep the
     # environment fallback for older callers and operators that already opt in
     # through the process environment, but do not make nightly's choice a
     # process-global side effect.
-    auto_candidate = (
-        run.get("mode") == "auto-low-risk" and run.get("risk") == "low"
-        and not run.get("approval_required", True) and kind != "reproducer_before"
-    )
+    auto_candidate = _auto_candidate(run) and kind != "reproducer_before"
     if auto_candidate and low_integrity is False:
         raise PermissionError("auto-low-risk candidate tests require low-integrity isolation")
     use_low_integrity = auto_candidate or (
@@ -865,9 +921,14 @@ def _record_command(
         if low_integrity is None else bool(low_integrity)
     )
     if use_low_integrity:
-        from scripts.selfmod_low_integrity import run_isolated
         started = time.monotonic()
+        expected = "low"
         try:
+            # Windows low-integrity Job, or (once a dedicated candidate uid is
+            # configured on Linux) the uid-separated supervisor.  Only the
+            # attestation the selected supervisor builds is accepted.
+            from scripts.selfmod_linux_isolation import candidate_supervisor
+            run_isolated, expected = candidate_supervisor()
             isolated = run_isolated(
                 command, cwd=cwd_path, timeout=seconds,
                 protected_paths=protected_paths, **dict(isolation or {}),
@@ -875,27 +936,51 @@ def _record_command(
             code = int(isolated["exit_code"])
             output = str(isolated.get("output") or "")
             job = isolated.get("job")
-            # The low-integrity supervisor, not the candidate's stdout,
-            # constructs this report from the process handle and Job. A
+            # The selected supervisor, not the candidate's stdout, constructs
+            # this report from the kernel's view of the candidate.  A
             # missing/conflicting report is an isolation failure even if
-            # candidate-controlled output claims low integrity or exit 0.
-            if (not isinstance(job, dict) or job.get("integrity") != "low"
-                    or isolated.get("passed") is not (code == 0)):
+            # candidate-controlled output claims isolation or exit 0.  The
+            # typed attestation is re-derived here from the report; one the
+            # supervisor attached must agree with it.
+            try:
+                typed = IsolationAttestation.from_supervisor_result(
+                    isolated, expected_kind=expected,
+                    supervisor_uid=os.geteuid() if hasattr(os, "geteuid") else None,
+                )
+            except IsolationAttestationError:
+                raise RuntimeError("invalid supervisor attestation") from None
+            supplied = isolated.get("attestation")
+            if supplied is not None and supplied != typed:
                 raise RuntimeError("invalid supervisor attestation")
-            if isolated.get("integrity_failed"):
+            if typed.integrity_failed:
                 raise RuntimeError("evaluator integrity failed")
-            attestation = "low"
+            attestation = expected
+            typed_attestation = typed
             output = (output + "\nSELFMOD ISOLATION: %s\n" % _json(job))[-100_000:]
         except Exception as exc:
             # A missing token/ACL/Job capability rejects this check.  It
             # cannot accidentally count as a successful negative reproducer.
             code = 125
-            reason = "unsupported platform" if os.name != "nt" else (
-                str(exc) if type(exc) is RuntimeError and str(exc) in {
-                    "invalid supervisor attestation", "evaluator integrity failed",
-                } else type(exc).__name__
+            known = type(exc) is RuntimeError and str(exc) in {
+                "invalid supervisor attestation", "evaluator integrity failed",
+            }
+            if expected == "linux-uid":
+                # The Linux supervisor's fail-closed errors carry host facts
+                # (not root, uid in use, candidate-writable truth), never
+                # candidate output.
+                reason = str(exc)[:300] if isinstance(exc, RuntimeError) else type(exc).__name__
+            elif os.name != "nt":
+                reason = "unsupported platform"
+                if sys.platform.startswith("linux"):
+                    # The Windows supervisor is selected on Linux only when
+                    # no dedicated candidate uid is configured; say how to
+                    # configure the Linux boundary instead.
+                    reason += "; %s" % _linux_isolation_unconfigured()
+            else:
+                reason = str(exc) if known else type(exc).__name__
+            output = "%s isolation unavailable: %s" % (
+                "linux-uid" if expected == "linux-uid" else "low-integrity", reason,
             )
-            output = "low-integrity isolation unavailable: %s" % reason
             isolation_failed = True
         duration = int((time.monotonic() - started) * 1000)
     else:
@@ -913,16 +998,153 @@ def _record_command(
             "  expected: %s"
             % (output, str(kind).upper(), code, receipt)
         )[:100_000]
+    stored_command, stored_output = list(command), output
+    if kind == ORACLE_PROBE_KIND:
+        # The challenge names the held inputs and a passing output is the
+        # held expected values; the ledger (served by /selfmod tests) keeps
+        # only their nonce and digests.  The caller grades the in-memory
+        # result, which ``record_oracle_grade`` binds to this row.
+        stored_command, stored_output = oracle_ledger_command(command), oracle_ledger_output(output)
     with _tx() as conn:
         cursor = conn.execute(
             "INSERT INTO selfmod_tests(run_id,kind,command_json,exit_code,duration_ms,output,passed,created_ts,isolation) VALUES(?,?,?,?,?,?,?,?,?)",
-            (run_id, str(kind)[:80], _json(list(command)), code, duration, output, int(passed), time.time(), attestation),
+            (run_id, str(kind)[:80], _json(stored_command), code, duration, stored_output, int(passed), time.time(), attestation),
         )
         test_id = getattr(cursor, "lastrowid", None)
         _event(conn, run_id, "test", "%s exit=%s expected=%s duration_ms=%s" % (kind, code, "failure" if expect_failure else "success", duration))
     return {"kind": kind, "command": list(command), "exit_code": code,
             "duration_ms": duration, "output": output, "passed": passed,
-            "test_id": test_id, "isolation": attestation}
+            "test_id": test_id, "isolation": attestation,
+            "attestation": typed_attestation}
+
+
+def _linux_isolation_unconfigured() -> str:
+    """The actionable refusal for a Linux host without a candidate uid."""
+    try:
+        from scripts.selfmod_linux_isolation import UNCONFIGURED_GUIDANCE
+    except ImportError:
+        return "Linux candidate isolation is not configured"
+    return UNCONFIGURED_GUIDANCE
+
+
+class CandidateIsolationRefused(PermissionError):
+    """An operator-driven candidate check cannot run behind an isolation boundary.
+
+    Raised before any run, backup, workspace or candidate process exists when
+    this host has no usable candidate supervisor (on Linux: no dedicated
+    candidate uid, or a supervisor that is not root) and the caller has no
+    attended opt-in to run the candidate unisolated.  ``reason`` is the host
+    fact behind the refusal; it never quotes candidate output.
+    """
+
+    def __init__(self, message: str, *, reason: str):
+        super().__init__(message)
+        self.reason = reason
+
+
+# The explicit per-command flag an attended console operator adds to
+# ``/selfmod run`` to accept an unisolated candidate on a host that has no
+# candidate supervisor.  It is honoured only with a console operator attached
+# (``server.control_command(operator_approved=True)``, set only by the REPL).
+UNISOLATED_FLAG = "--unisolated"
+
+
+def candidate_isolation_refusal() -> str | None:
+    """Why this host cannot isolate candidate checks, else ``None``.
+
+    The same host facts every candidate-running driver consults before it
+    creates anything: the selected supervisor's preflight (Linux, a root
+    supervisor, ``no_new_privs``, a configured spare unprivileged uid; on
+    Windows the low-integrity supervisor proves its own boundary per command)
+    and, when the Linux uid supervisor is selected, that the selfmod ledger
+    (baseline, tested digests, decisions) and its directory chain are closed
+    to the candidate uid.  ``run_isolated`` re-checks the boundary for every
+    command, so ``None`` here never authorizes a launch by itself.
+    """
+    from scripts import selfmod_linux_isolation
+
+    refusal = selfmod_linux_isolation.candidate_isolation_preflight()
+    if refusal:
+        return refusal
+    _runner, kind = selfmod_linux_isolation.candidate_supervisor()
+    if kind == selfmod_linux_isolation.ATTESTATION:
+        try:
+            selfmod_linux_isolation.require_not_candidate_writable([database_path()])
+        except selfmod_linux_isolation.LinuxIsolationUnavailable as error:
+            return "selfmod ledger is exposed to the candidate uid: %s; see %s" % (
+                str(error)[:300], selfmod_linux_isolation.ISOLATION_DOC)
+    return None
+
+
+def operator_candidate_isolation(
+    *, unisolated_requested: bool, operator_attended: bool, run_id: str = "",
+) -> bool:
+    """Choose isolation for an operator-driven run: ``True`` isolated, ``False`` not.
+
+    A host with a candidate supervisor always isolates, whatever was asked.
+    Without one the run is refused (``CandidateIsolationRefused``) unless all
+    of these hold: the operator typed ``--unisolated`` for this command, a
+    console operator is attached (HTTP, MCP and piped callers never are),
+    ``SELFMOD_LOW_INTEGRITY=1`` is not demanding isolation for this process,
+    and the run is not an ``auto-low-risk`` candidate (those always require
+    isolation).  With ``run_id`` the decision is written to the run's audit
+    events.
+    """
+    refusal = candidate_isolation_refusal()
+    if refusal is None:
+        choice, detail = True, "candidate checks run under the selected candidate supervisor"
+    else:
+        remedy = (
+            "configure candidate isolation, or, at an attended console, rerun "
+            "/selfmod run with %s to accept an unisolated candidate" % UNISOLATED_FLAG
+        )
+        if not unisolated_requested:
+            raise CandidateIsolationRefused(
+                "candidate isolation unavailable, no candidate run started: %s; %s"
+                % (refusal, remedy), reason=refusal,
+            )
+        if not operator_attended:
+            raise CandidateIsolationRefused(
+                "candidate isolation unavailable and %s requires an attended console "
+                "operator; HTTP, MCP and unattended callers cannot run a candidate "
+                "unisolated: %s" % (UNISOLATED_FLAG, refusal), reason=refusal,
+            )
+        if os.environ.get("SELFMOD_LOW_INTEGRITY") == "1":
+            raise CandidateIsolationRefused(
+                "candidate isolation unavailable and SELFMOD_LOW_INTEGRITY=1 requires "
+                "isolated candidate checks in this process: %s" % refusal, reason=refusal,
+            )
+        if run_id and _auto_candidate(get_run(run_id)):
+            raise CandidateIsolationRefused(
+                "candidate isolation unavailable and auto-low-risk candidate tests "
+                "require isolation: %s" % refusal, reason=refusal,
+            )
+        choice = False
+        detail = "attended console operator accepted an unisolated candidate (%s): %s" % (
+            UNISOLATED_FLAG, refusal[:300])
+    if run_id:
+        with _tx() as conn:
+            _event(conn, run_id, "isolation", detail)
+    return choice
+
+
+def evaluator_truth_paths(run_id, extra=()) -> tuple[str, ...]:
+    """Evaluator truth every candidate check of ``run_id`` must leave untouched.
+
+    ``extra`` (for example a held-out snapshot) followed by the rollback point:
+    the sealed backup bundle and its manifest, which also records the baseline
+    hashes.  Supervisors refuse to launch when any of these is
+    candidate-writable (Linux) and re-digest them after each check.
+    """
+    paths = [str(path) for path in extra]
+    bundle = _backup_dir(run_id)
+    if bundle.is_dir():
+        paths.append(str(bundle))
+        # The Windows supervisor digests files only; name them explicitly.
+        for name in ("manifest.json", "manifest.sha256"):
+            if (bundle / name).is_file():
+                paths.append(str(bundle / name))
+    return tuple(dict.fromkeys(paths))
 
 
 def record_reproducer_before(run_id, command, timeout=None):
@@ -943,6 +1165,8 @@ def record_test(
         raise RuntimeError("tests may run only in testing phase")
     if kind == "host_grade":
         raise PermissionError("host grade can only be recorded by the parent scorer")
+    if kind == "oracle_grade":
+        raise PermissionError("oracle grade can only be recorded by the parent scorer")
     workspace = candidate_path(run_id)
     cwd_path = workspace if cwd is None else (workspace / _rel(workspace, cwd)).parent
     seconds = min(int(timeout or run["budgets"]["max_test_seconds"]), run["budgets"]["max_test_seconds"])
@@ -958,8 +1182,9 @@ def record_host_grade(run_id, probe_id, *, passed: bool, detail: str) -> dict:
 
     The host owns this comparison and the row it is linked to, rather than
     trusting a pytest exit status. The candidate still controls its reported
-    function output and can read public tests, so a passing grade needs human
-    review and cannot authorize unattended promotion.
+    function output and can read public tests, so a passing grade alone
+    cannot authorize unattended promotion; that also needs an independent
+    oracle receipt (``record_oracle_grade``).
     """
     run = get_run(run_id)
     if run["phase"] != "testing":
@@ -970,7 +1195,7 @@ def record_host_grade(run_id, probe_id, *, passed: bool, detail: str) -> dict:
             (run_id, probe_id),
         ).fetchone()
         if (probe is None or probe["kind"] != "host_probe" or not probe["passed"]
-                or probe["isolation"] != "low"):
+                or probe["isolation"] not in _ISOLATED_ATTESTATIONS):
             raise PermissionError("host grade requires a passing attested probe")
         prior = conn.execute(
             "SELECT id FROM selfmod_tests WHERE run_id=? AND kind='host_grade'", (run_id,),
@@ -980,10 +1205,145 @@ def record_host_grade(run_id, probe_id, *, passed: bool, detail: str) -> dict:
         conn.execute(
             "INSERT INTO selfmod_tests(run_id,kind,command_json,exit_code,duration_ms,output,passed,created_ts,isolation) VALUES(?,?,?,?,?,?,?,?,?)",
             (run_id, "host_grade", _json({"probe_id": probe_id}), 0 if passed else 1,
-             0, str(detail)[:100_000], int(bool(passed)), time.time(), "low"),
+             0, str(detail)[:100_000], int(bool(passed)), time.time(), probe["isolation"]),
         )
         _event(conn, run_id, "host_grade", "parent-scored challenge %s" % ("passed" if passed else "failed"))
     return {"kind": "host_grade", "passed": bool(passed), "detail": str(detail)[:100_000]}
+
+
+def _baseline_binding(run):
+    """The baseline a verdict is about: starting commit and sealed manifest."""
+    manifest = _load_manifest(run["id"])
+    if manifest.get("starting_commit") != run["starting_commit"]:
+        raise RuntimeError("backup manifest names a different starting commit")
+    return {"starting_commit": run["starting_commit"] or "",
+            "manifest_sha256": _sha(_backup_dir(run["id"]) / "manifest.json")}
+
+
+def record_oracle_grade(run_id, probe, *, challenge, loaded, attestation,
+                        confidential: bool, read_denied: bool) -> dict:
+    """Grade an oracle probe in this (evaluator) process and record the receipt.
+
+    ``probe`` is the in-memory result ``record_test`` returned for the
+    ``oracle_probe`` check, ``challenge`` the parent-held per-run challenge
+    and ``loaded`` the evaluator-held case set
+    (``scripts.selfmod_oracle.LoadedCaseSet``).  The ledger row of that
+    probe stores only the nonce and digests of the challenge and output, so
+    the in-memory argv and output must reproduce exactly those digests
+    (they are the attested run's), the argv must carry this challenge's
+    nonce, the case file must still have the digest it was loaded with, and
+    the tested candidate bytes must be unchanged.  The durable receipt binds
+    the verdict to those candidate digests, the baseline and the probe's
+    supervisor attestation.  Only a ``linux-uid`` probe with a proven read
+    denial yields an independent receipt; that is what ``review`` requires
+    for unattended promotion.
+    """
+    from scripts import selfmod_oracle
+
+    run = get_run(run_id)
+    if run["phase"] != "testing":
+        raise RuntimeError("oracle grade requires testing phase")
+    probe_id = probe.get("test_id") if isinstance(probe, dict) else None
+    command, output = (probe.get("command"), probe.get("output")) if isinstance(probe, dict) else (None, None)
+    if type(probe_id) is not int or not isinstance(command, list) or not isinstance(output, str):
+        raise PermissionError("oracle grade requires the recorded oracle probe result")
+    candidate = _candidate_snapshot(run_id)
+    if tested_digests(run_id) != candidate:
+        raise RuntimeError("oracle grade requires the tested candidate bytes")
+    baseline = _baseline_binding(run)
+    if selfmod_oracle.current_digest(loaded.path) != loaded.sha256:
+        raise RuntimeError("held oracle case set changed after it was loaded")
+    typed = attestation if isinstance(attestation, IsolationAttestation) else None
+    with _tx() as conn:
+        row = conn.execute(
+            "SELECT kind,passed,isolation,output,command_json FROM selfmod_tests WHERE run_id=? AND id=?",
+            (run_id, probe_id),
+        ).fetchone()
+        if (row is None or row["kind"] != ORACLE_PROBE_KIND
+                or row["isolation"] not in _ISOLATED_ATTESTATIONS
+                or typed is None or typed.kind != row["isolation"]):
+            raise PermissionError("oracle grade requires an attested oracle probe")
+        if (row["command_json"] != _json(oracle_ledger_command(command))
+                or row["output"] != oracle_ledger_output(output)
+                or bool(row["passed"]) is not bool(probe.get("passed"))):
+            raise PermissionError("oracle probe result does not match its ledger row")
+        if payload_nonce(command) != challenge.nonce:
+            raise PermissionError("oracle probe row was not issued for this challenge")
+        if conn.execute(
+            "SELECT 1 FROM selfmod_oracle_receipts WHERE run_id=?", (run_id,),
+        ).fetchone() is not None:
+            raise RuntimeError("oracle grade was already recorded")
+        probe_passed = bool(row["passed"])
+        verdict = grade_frame(output if probe_passed else "", challenge, loaded.case_set)
+        detail = verdict.detail if probe_passed else "oracle probe did not exit cleanly"
+        receipt = OracleReceipt(
+            run_id=run_id, probe_id=probe_id, attestation=typed.kind,
+            candidate_uid=typed.candidate_uid, supervisor_uid=typed.supervisor_uid,
+            case_set_sha256=loaded.sha256, case_count=verdict.case_count,
+            matched=verdict.matched, nonce=challenge.nonce,
+            outputs_sha256=verdict.outputs_sha256 if probe_passed else None,
+            confidential=bool(confidential), read_denied=bool(confidential and read_denied),
+            passed=bool(verdict.passed and probe_passed),
+            candidate=candidate, baseline=baseline,
+        )
+        text = receipt.to_json()
+        conn.execute(
+            "INSERT INTO selfmod_oracle_receipts VALUES(?,?,?,?,?,?,?)",
+            (run_id, probe_id, int(receipt.passed), int(receipt.independent), text,
+             receipt.digest(), time.time()),
+        )
+        summary = "%s; independent=%s; receipt sha256=%s" % (
+            detail, "yes" if receipt.independent else "no", receipt.digest())
+        conn.execute(
+            "INSERT INTO selfmod_tests(run_id,kind,command_json,exit_code,duration_ms,output,passed,created_ts,isolation) VALUES(?,?,?,?,?,?,?,?,?)",
+            (run_id, "oracle_grade", _json({"probe_id": probe_id}),
+             0 if receipt.passed else 1, 0, summary, int(receipt.passed), time.time(),
+             row["isolation"]),
+        )
+        _event(conn, run_id, "oracle_grade", "independent oracle %s (independent=%s)" % (
+            "passed" if receipt.passed else "failed", receipt.independent))
+    return {"kind": "oracle_grade", "passed": receipt.passed,
+            "independent": receipt.independent, "detail": detail,
+            "receipt_sha256": receipt.digest()}
+
+
+def oracle_receipt(run_id):
+    """The run's oracle receipt, or ``None``; an inconsistent row raises.
+
+    ``receipt_sha256`` is an unkeyed digest stored in the same row, so this
+    check proves only that the row is canonical and self-consistent (it
+    catches corruption and partial edits).  It is not a seal: a writer who
+    can edit the row can recompute it.  The receipt's integrity rests on the
+    ledger being closed to the candidate uid, which the nightly refuses to
+    run without (``scripts/nightly_selfmod.py`` ``_isolation_refusal``).
+    """
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT passed,independent,receipt_json,receipt_sha256 FROM selfmod_oracle_receipts WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    receipt = OracleReceipt.from_json(row["receipt_json"])
+    if (receipt.digest() != row["receipt_sha256"] or receipt.run_id != run_id
+            or bool(row["passed"]) is not receipt.passed
+            or bool(row["independent"]) is not receipt.independent):
+        raise OracleError("oracle receipt does not match its recorded digest")
+    return receipt
+
+
+def _oracle_admission_refusal(run_id, run):
+    """Why the independent oracle does not authorize unattended promotion, else ``None``."""
+    try:
+        receipt = oracle_receipt(run_id)
+        if receipt is None:
+            return "no independent oracle receipt"
+        tested = tested_digests(run_id)
+        if tested is None or tested != _candidate_snapshot(run_id):
+            return "candidate bytes changed after testing began"
+        return receipt.admission_refusal(candidate=tested, baseline=_baseline_binding(run))
+    except (OracleError, RuntimeError, OSError, ValueError) as exc:
+        return "oracle receipt could not be verified (%s)" % type(exc).__name__
 
 
 SMOKE_RECEIPT_PREFIX = "SELFMOD-SMOKE-RECEIPT"
@@ -1108,7 +1468,7 @@ def _smoke_receipt(workspace: Path, present, absent) -> str:
     )
 
 
-def record_smoke(run_id, *, timeout=None):
+def record_smoke(run_id, *, timeout=None, protected_paths=(), low_integrity=None, isolation=None):
     """Run the candidate, and require proof that it was the candidate that ran.
 
     `review()` will not approve a self-modification without a passing check of
@@ -1124,6 +1484,10 @@ def record_smoke(run_id, *, timeout=None):
     What runs instead is bounded and offline -- a stdlib child process, no
     network, no model, no operator -- and it writes nothing, so a failure cannot
     leave state behind. It fails by naming the module and the exception.
+
+    ``low_integrity``, ``protected_paths`` and ``isolation`` select the
+    candidate supervisor exactly as for ``record_test``: the probe imports the
+    candidate, so an operator-driven run isolates it like every other check.
     """
     run = get_run(run_id)
     if run["phase"] != "testing":
@@ -1143,7 +1507,8 @@ def record_smoke(run_id, *, timeout=None):
         )
         return _record_command(
             run, "smoke", [sys.executable, "-c", "raise SystemExit(%r)" % message],
-            workspace, seconds,
+            workspace, seconds, protected_paths=protected_paths,
+            low_integrity=low_integrity, isolation=isolation,
         )
 
     payload = _json({
@@ -1151,7 +1516,11 @@ def record_smoke(run_id, *, timeout=None):
     })
     command = [sys.executable, "-c", _SMOKE_PROBE, payload]
     receipt = _smoke_receipt(workspace, plan["present"], plan["absent"])
-    return _record_command(run, "smoke", command, workspace, seconds, receipt=receipt)
+    return _record_command(
+        run, "smoke", command, workspace, seconds, receipt=receipt,
+        protected_paths=protected_paths, low_integrity=low_integrity,
+        isolation=isolation,
+    )
 
 
 def test_results(run_id):
@@ -1241,20 +1610,35 @@ def review(run_id, *, require_kinds=None, unevaluated=()):
         failures.append("rollback rehearsal failed")
     candidate_results = [row for row in results if row["kind"] != "reproducer_before"]
     host_grades = [row for row in candidate_results if row["kind"] == "host_grade"]
+    oracle_grades = [row for row in candidate_results if row["kind"] == "oracle_grade"]
+    if any(not row["passed"] for row in oracle_grades):
+        failures.append("independent oracle failed")
+    # Unattended promotion needs every existing gate AND an independent
+    # oracle receipt bound to these tested bytes and this baseline.
+    oracle_refusal = _oracle_admission_refusal(run_id, run)
+    # ``require_kinds`` is the caller's acceptance set and may be narrow; the
+    # unattended floor is fixed so no caller can reach auto-approval without
+    # the regression partitions, the held-out suite and both parent-scored
+    # grades having run and passed against these bytes.
+    unattended_missing = sorted(set(UNATTENDED_REQUIRED_KINDS) - {
+        row["kind"] for row in candidate_results if row["passed"]})
     auto_eligible = bool(
-        _UNATTENDED_ORACLE_INDEPENDENT
+        oracle_refusal is None and len(oracle_grades) == 1 and not unattended_missing
         and not failures and not unevaluated and candidate_results
         and run["mode"] == "auto-low-risk" and run["risk"] == "low"
         and not run["approval_required"]
         and len(host_grades) == 1 and host_grades[0]["passed"]
-        and all(row["isolation"] == "low" for row in candidate_results)
+        and all(row["isolation"] in _ISOLATED_ATTESTATIONS for row in candidate_results)
     )
     target = "rejected" if failures else "reviewing"
     passed_note = "deterministic acceptance checks passed"
     if unevaluated:
         passed_note += "; NOT EVALUATED (human review required): " + "; ".join(unevaluated)
     elif run["mode"] == "auto-low-risk" and not auto_eligible and not failures:
-        passed_note += "; independent evaluator authority unverified (human review required)"
+        passed_note += "; independent evaluator authority unverified (%s; human review required)" % (
+            oracle_refusal
+            or ("unattended gates not passed: %s" % ", ".join(unattended_missing)
+                if unattended_missing else "an existing unattended gate is unmet"))
     _phase(
         run_id, {"testing"}, target, "review",
         "; ".join(failures) if failures else passed_note[:1000],
@@ -1280,6 +1664,10 @@ def approve(run_id, approver="user"):
         or run["approval_required"]
     ):
         raise PermissionError("host approval requires qualified low-integrity candidate checks")
+    if str(approver).startswith("host:"):
+        refusal = _oracle_admission_refusal(run_id, run)
+        if refusal:
+            raise PermissionError("host approval requires an independent oracle receipt: %s" % refusal)
     return _phase(run_id, {"reviewing"}, "approved", "approval", "approved by %s" % approver, approved_by=str(approver)[:200], approved_ts=time.time())
 
 
@@ -1336,7 +1724,10 @@ def deployment_lock(run_id, owner_id=None):
         row = conn.execute("SELECT * FROM selfmod_deployment_lock WHERE id=1").fetchone()
         stale = _deployment_owner_stale(row, now)
         if not stale:
-            raise RuntimeError("another deployment/rollback holds the process-safe lock")
+            # Refused before this caller changed anything: the stage journal
+            # settles it as not applied, so a retry after the holder finishes
+            # is admitted.
+            raise SelfmodStageNotApplied("another deployment/rollback holds the process-safe lock")
         conn.execute(
             "UPDATE selfmod_deployment_lock SET owner_id=?,owner_pid=?,owner_host=?,lease_until=?,run_id=? WHERE id=1",
             (owner_id, os.getpid(), socket.gethostname(), now + LEASE_SECONDS, run_id),
@@ -1685,28 +2076,41 @@ def deploy(run_id, *, health_command=None, commit=True, expected_digests=None):
     """
     run = get_run(run_id)
     if run["phase"] != "approved":
-        raise RuntimeError("deployment requires explicit/host approval")
+        raise SelfmodStageNotApplied("deployment requires explicit/host approval")
     with deployment_lock(run_id) as deployment_owner:
-        verify_backup(run_id)
-        ok, conflict = _current_source_matches(run)
-        if not ok:
-            raise RuntimeError(conflict)
-        diff = inspect_diff(run_id)
-        _renew_deployment_lock(deployment_owner)
-        if set(diff["changed_files"]) - set(run["files"]):
-            raise RuntimeError("candidate diff no longer matches approved scope")
-        root, workspace = Path(run["repository_root"]), candidate_path(run_id)
-        tested = tested_digests(run_id)
-        if tested is None:
-            raise RuntimeError("deployment requires a tested-bytes record; run was never bound")
-        if expected_digests is not None and dict(expected_digests) != tested["files"]:
-            raise RuntimeError("caller digests do not match the tested-bytes record")
-        expected_digests = tested["files"]
-        mismatched = _digest_mismatches(workspace, diff["changed_files"], expected_digests)
-        if mismatched:
-            raise RuntimeError(
-                "candidate bytes differ from tested bytes: %s" % ", ".join(mismatched)
-            )
+        # Every precondition below is checked before the first live byte is
+        # replaced, so a refusal here is ``SelfmodStageNotApplied``: nothing
+        # was deployed and the operator may fix the cause and retry.  Only
+        # failures inside the mutation block below can leave live source
+        # changed.
+        try:
+            verify_backup(run_id)
+            ok, conflict = _current_source_matches(run)
+            if not ok:
+                raise SelfmodStageNotApplied(conflict)
+            diff = inspect_diff(run_id)
+            _renew_deployment_lock(deployment_owner)
+            if set(diff["changed_files"]) - set(run["files"]):
+                raise SelfmodStageNotApplied("candidate diff no longer matches approved scope")
+            root, workspace = Path(run["repository_root"]), candidate_path(run_id)
+            tested = tested_digests(run_id)
+            if tested is None:
+                raise SelfmodStageNotApplied(
+                    "deployment requires a tested-bytes record; run was never bound")
+            if expected_digests is not None and dict(expected_digests) != tested["files"]:
+                raise SelfmodStageNotApplied("caller digests do not match the tested-bytes record")
+            expected_digests = tested["files"]
+            mismatched = _digest_mismatches(workspace, diff["changed_files"], expected_digests)
+            if mismatched:
+                raise SelfmodStageNotApplied(
+                    "candidate bytes differ from tested bytes: %s" % ", ".join(mismatched)
+                )
+        except SelfmodStageNotApplied:
+            raise
+        except RuntimeError as exc:
+            # verify_backup/inspect_diff/lease renewal refusals: still before
+            # any live byte changed.
+            raise SelfmodStageNotApplied(str(exc)) from exc
         try:
             for rel in diff["changed_files"]:
                 source, target = workspace / rel, root / rel
@@ -1853,11 +2257,13 @@ def restore(run_id, from_candidate_only=False):
 def rollback(run_id, reason="user requested rollback"):
     run = get_run(run_id)
     if run["phase"] != "deployed":
-        raise RuntimeError("only a deployed run can be rolled back")
+        raise SelfmodStageNotApplied("only a deployed run can be rolled back")
     with deployment_lock(run_id):
         conflicts = _deployed_file_mismatches(run_id)
         if conflicts:
-            raise RuntimeError(
+            # Refused before any byte is restored: the operator may reconcile
+            # the manual edit and retry the rollback.
+            raise SelfmodStageNotApplied(
                 "rollback conflict: deployed files changed after deployment; "
                 "preserving current bytes: %s" % ", ".join(conflicts)
             )

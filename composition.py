@@ -122,6 +122,29 @@ def mission_status(scope: str = "") -> dict:
     return result
 
 
+# Tier spellings that defer to the runtime policy, matching the placeholders
+# ``server._runtime_lane_tier`` accepts for ``autopilot_start``.
+_POLICY_TIER_PLACEHOLDERS = frozenset({"", "auto", "default", "policy"})
+
+
+def _autopilot_run_tier(tier: str) -> str:
+    """Resolve ``tier`` to the concrete local tier a stored run must carry.
+
+    The controller re-validates a run's stored tier before every model call and
+    fails the run on anything outside its local tiers, so a placeholder stored
+    here fails the run before its first cycle.  A placeholder resolves through
+    the runtime policy's ``autopilot`` lane, exactly as ``autopilot_start``
+    does; an unknown tier raises ``ValueError`` so no doomed run is created.
+    """
+    import autopilot_controller
+    from sonder_runtime.adapters import runtime_policy
+
+    requested = str(tier or "").strip().lower()
+    if requested in _POLICY_TIER_PLACEHOLDERS:
+        requested = runtime_policy.route_tier("autopilot", fallback="code")
+    return autopilot_controller.normalize_tier(requested)
+
+
 @_track_call
 def goal_to_autopilot(
     goal: dict,
@@ -142,6 +165,11 @@ def goal_to_autopilot(
     objective = goal.get("objective", "")
     if not objective:
         return {"error": "goal has no objective"}
+
+    try:
+        tier = _autopilot_run_tier(tier)
+    except ValueError as exc:
+        return {"error": "autopilot creation failed: %s" % exc}
 
     criteria = goal.get("criteria", [])
     if criteria:

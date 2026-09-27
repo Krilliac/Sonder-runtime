@@ -159,6 +159,11 @@ def configure_application(application) -> None:
         if current is application:
             return
         legacy._APP_GRAPH = application
+        # Typed build reports on the handed-over gateway feed the runtime's
+        # grounded-outcome ledger, exactly as on a graph it built itself.
+        install_feed = getattr(legacy, "_install_typed_build_feed", None)
+        if callable(install_feed):
+            install_feed(application)
         # ``server._application`` tracks only graphs it constructed itself.
         # A typed host handoff replaces that authority and must never be
         # retired by the legacy MCP adapter's local finalizer.

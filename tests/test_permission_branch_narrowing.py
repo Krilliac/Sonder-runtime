@@ -104,11 +104,23 @@ def test_fact_forget_and_remember_are_told_apart():
     ("/goal", "show", ("goal_status",)),
     ("/goal", "set ship it", ("goal",)),
     ("/goal", "note shipped the parser", ("goal",)),
+    ("/goal", "help", ("goal_status",)),
+    ("/goal", "?", ("goal_status",)),
+    ("/goal", "adopt prop-1", ("goal",)),
     ("/training", "", ("training_status",)),
     ("/training", "status", ("training_status",)),
     ("/training", "start --confirm", ("training",)),
     ("/runtime", "status", ("runtime_policy_status",)),
+    ("/runtime", "", ("runtime_policy_status",)),
+    ("/runtime", "show", ("runtime_policy_status",)),
+    ("/runtime", "list", ("runtime_policy_status",)),
+    ("/runtime", "help", ("runtime_policy_status",)),
+    ("/runtime", "?", ("runtime_policy_status",)),
     ("/runtime", "set fast=x", ("runtime_policy_status", "runtime_policy_update")),
+    ("/runtime", "reset", ("runtime_policy_status", "runtime_policy_update")),
+    # The live model probe is not the verified read: it keeps the union.
+    ("/runtime", "status refresh", ("runtime_policy_status", "runtime_policy_update")),
+    ("/runtime", "show refresh", ("runtime_policy_status", "runtime_policy_update")),
     ("/stash", "", ("runtime_source_stash_status",)),
     ("/stash", "save", ("runtime_source_stash", "runtime_source_stash_status")),
     ("/emotion", "status", ("emotion_vector_status",)),
@@ -123,6 +135,54 @@ def test_other_read_forms_narrow_and_writes_do_not(cmd, argument, expected):
         "/emotion": ("update_emotion_vectors",),
     }
     assert command_catalog.narrow_branch_tools(cmd, argument, unions[cmd]) == expected
+
+
+def test_the_help_forms_narrowed_here_change_nothing(monkeypatch):
+    """``/goal help`` and ``/runtime help`` print usage and write nothing.
+
+    They were graded at their branch's strictest member, so an attended
+    console asked "run /goal? ... mutation tools" before showing usage and a
+    piped one refused to show it at all.
+    """
+    import goal_store
+
+    monkeypatch.setattr(
+        server, "runtime_policy_update",
+        lambda **_k: pytest.fail("/runtime help must not update the policy"),
+    )
+    for name in ("set_goal", "add_note", "complete", "abandon", "adopt", "decline"):
+        monkeypatch.setattr(
+            goal_store, name,
+            lambda *_a, _name=name, **_k: pytest.fail("/goal help reached %s" % _name),
+        )
+    for argument in ("help", "?"):
+        assert "runtime policy commands" in server._runtime_command(argument)
+        assert server._goal_command(argument).startswith("usage: /goal")
+
+
+def test_runtime_status_is_a_read_and_its_refresh_is_graded_like_the_branch():
+    """``/runtime status`` renders cached readiness; ``refresh`` opens a socket."""
+    for command in ("/runtime", "/models"):
+        narrowed = command_catalog.narrow_branch_tools(
+            command, "status", ("runtime_policy_status", "runtime_policy_update"),
+        )
+        assert [pm.risk_of(tool) for tool in narrowed] == ["safe"]
+        refresh = command_catalog.narrow_branch_tools(
+            command, "status refresh", ("runtime_policy_status", "runtime_policy_update"),
+        )
+        assert "runtime_policy_update" in refresh
+        assert any(pm.risk_of(tool) != "safe" for tool in refresh)
+
+
+def test_runtime_status_never_calls_the_model_endpoint(monkeypatch):
+    monkeypatch.setattr(
+        server, "_runtime_installed_model_records",
+        lambda: pytest.fail("/runtime status must render cached readiness"),
+    )
+    monkeypatch.setattr(server, "_RUNTIME_READINESS_CACHE", {})
+    assert "readiness: not checked yet \u00b7 /runtime status refresh" in (
+        server._runtime_command("status")
+    )
 
 
 def test_an_unrecognised_command_keeps_its_union_unchanged():

@@ -116,3 +116,84 @@ def observation_prompt(
         return frame_observations(result, max_chars)
     # Preserve the recent window if header arithmetic changes in future edits.
     return frame_observations(result, max_chars)
+
+
+def fit_sectioned_text(text, limit, section_prefix, *, clip_hint=""):
+    """Fit a multi-section tool result into ``limit`` characters fairly.
+
+    A batch result (for example one ``context_pack`` holding several files)
+    is a preamble followed by sections that each start on a line beginning
+    with ``section_prefix``.  A plain head slice would show the first files
+    in full and silently drop every later one.  Instead, when the text is
+    over budget, every section keeps its header line and an equal share of
+    the budget (short sections stay whole and return their unused share),
+    each clipped section carries a host marker, and a leading host notice
+    says the view was fitted.  Text without sections, or a budget too small
+    for one header per section, falls back to :func:`clip_prompt_text`.  The
+    result never exceeds ``limit`` characters; the caller keeps the full text.
+    """
+    text = str(text or "")
+    limit = max(0, int(limit))
+    if len(text) <= limit:
+        return text
+    prefix = str(section_prefix or "")
+    starts = []
+    if prefix:
+        position = 0
+        while True:
+            found = text.find(prefix, position)
+            if found < 0:
+                break
+            if found == 0 or text[found - 1] == "\n":
+                starts.append(found)
+            position = found + len(prefix)
+    if not starts:
+        return clip_prompt_text(text, limit)
+    preamble = text[:starts[0]]
+    bounds = starts[1:] + [len(text)]
+    sections = [text[begin:end] for begin, end in zip(starts, bounds)]
+
+    hint = (" " + str(clip_hint).strip()) if str(clip_hint or "").strip() else ""
+    notice = (
+        "[HOST VIEW: this result has %d characters, over the %d-character "
+        "observation budget; each of its %d sections keeps an equal share and "
+        "clipped sections are marked. The host retains the full result.%s]\n"
+        % (len(text), limit, len(sections), hint)
+    )
+    marker_template = "\n...[host clipped this section: showed %d of %d characters]\n"
+    marker_reserve = len(marker_template % (len(text), len(text)))
+    preamble_budget = min(len(preamble), max(0, limit // 8))
+    shown_preamble = clip_prompt_text(preamble, preamble_budget)
+    budget = limit - len(notice) - len(shown_preamble)
+    headers = [section.split("\n", 1)[0] for section in sections]
+    if budget < sum(len(header) + marker_reserve + 1 for header in headers):
+        return clip_prompt_text(text, limit)
+
+    # Equal shares; sections shorter than their share return the remainder.
+    allotment = {}
+    pending = sorted(range(len(sections)), key=lambda index: len(sections[index]))
+    remaining = budget
+    while pending:
+        share = remaining // len(pending)
+        index = pending[0]
+        if len(sections[index]) <= share:
+            allotment[index] = len(sections[index])
+            remaining -= len(sections[index])
+            pending.pop(0)
+            continue
+        for index in pending:
+            allotment[index] = share
+        break
+
+    shown = []
+    for index, section in enumerate(sections):
+        allowed = allotment[index]
+        if len(section) <= allowed:
+            shown.append(section)
+            continue
+        head_room = max(len(headers[index]), allowed - marker_reserve)
+        head = section[:head_room]
+        marker = marker_template % (len(head), len(section))
+        shown.append(head + marker)
+    result = notice + shown_preamble + "".join(shown)
+    return result if len(result) <= limit else clip_prompt_text(result, limit)

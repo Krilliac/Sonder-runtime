@@ -135,3 +135,69 @@ def test_legacy_drain_surface_uses_production_bridge_and_stops_cleanly(
 
     assert lifecycle.drain("admin request") is True
     assert lifecycle.tracker.snapshot().process.value == "stopping"
+
+
+def test_expired_drain_still_stops_the_listener(tmp_path, monkeypatch):
+    # Live repro (2026-09-25): SIGTERM while a routed workbench request was
+    # still in flight left `serve` in DRAINING indefinitely.  Settling timed
+    # out at the drain deadline, the graceful coordinator then refused the
+    # flush barrier as "deadline expired", and that barrier is the only thing
+    # that stops the HTTP listener -- so the process never exited.  The
+    # legacy coordinator always ran its flush hooks after the deadline.
+    monkeypatch.setenv("SONDER_HOME", str(tmp_path))
+    lifecycle = RuntimeLifecycle(
+        startup_reconciler=lambda: 0, drain_deadline_seconds=0.2,
+    )
+    lifecycle.startup(run_migrations=False)
+    stopped = []
+    interrupted = []
+    lifecycle.coordinator.add_flush_hook(lambda: stopped.append("listener"))
+    lifecycle.coordinator.add_interrupted_hook(lambda: interrupted.append(True))
+    assert lifecycle.coordinator.begin_mutation()  # a request still running
+
+    assert lifecycle.drain("signal SIGTERM") is False
+
+    assert stopped == ["listener"]
+    assert interrupted == [True]
+    assert lifecycle.tracker.snapshot().process.value == "stopping"
+
+
+def test_clean_drain_runs_the_listener_flush_exactly_once(tmp_path, monkeypatch):
+    monkeypatch.setenv("SONDER_HOME", str(tmp_path))
+    lifecycle = RuntimeLifecycle(startup_reconciler=lambda: 0)
+    lifecycle.startup(run_migrations=False)
+    stopped = []
+    interrupted = []
+    lifecycle.coordinator.add_flush_hook(lambda: stopped.append("listener"))
+    lifecycle.coordinator.add_interrupted_hook(lambda: interrupted.append(True))
+
+    assert lifecycle.drain("admin request") is True
+
+    assert stopped == ["listener"]
+    assert interrupted == []
+
+
+def test_failed_flush_after_clean_settle_does_not_mark_work_interrupted(
+    tmp_path, monkeypatch,
+):
+    # Nothing was in flight, so the interrupted hooks must not run even though
+    # the flush barrier failed; the listener hook is still retried.
+    monkeypatch.setenv("SONDER_HOME", str(tmp_path))
+    lifecycle = RuntimeLifecycle(startup_reconciler=lambda: 0)
+    lifecycle.startup(run_migrations=False)
+    calls = []
+    interrupted = []
+
+    def flaky_listener_stop():
+        calls.append("listener")
+        if len(calls) == 1:
+            raise RuntimeError("first flush attempt failed")
+
+    lifecycle.coordinator.add_flush_hook(flaky_listener_stop)
+    lifecycle.coordinator.add_interrupted_hook(lambda: interrupted.append(True))
+
+    assert lifecycle.drain("admin request") is False
+
+    assert calls == ["listener", "listener"]
+    assert interrupted == []
+    assert lifecycle.tracker.snapshot().process.value == "stopping"

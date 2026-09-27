@@ -1,0 +1,2 @@
+hold on, what is RAII?
+◈ working · thinking · <t> · Ctrl-C cancels

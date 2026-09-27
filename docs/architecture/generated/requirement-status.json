@@ -180,9 +180,9 @@
     },
     {
       "checked": false,
-      "claim": "The transactional hierarchical resource/ownership/key admission implementation passed an actual owned PostgreSQL 18 primary and synchronous standby qualification at published code revision 6dcd99246a1a8dca5ae6aaff63bb94c7f2180a9d: 21 tests, no skips. SQLite multi-process races and the integrated Linux suite also pass.",
+      "claim": "The agent loop's batching/coalescing guard counts distinct successful single file_read targets per turn and, only where the dispatcher registers the read-only context_pack batch form and the run admits it, appends a typed advisory at 3 targets, refuses further new-target singles after 6 without dispatching them, and ends the run at the third refusal. Mutating and execution tools are never steered, results are never altered, thresholds are typed and bounded, and each decision emits an agent_guard activity event.",
       "requirement_id": "AGENT-007",
-      "revision": 8,
+      "revision": 9,
       "status": "implemented_unverified"
     },
     {
@@ -1027,9 +1027,9 @@
     },
     {
       "checked": false,
-      "claim": "The shared graceful-drain contract now rejects non-finite, non-numeric, boolean and non-positive deadline values before starting shutdown barriers, preserving finite timeout semantics. Existing lifecycle admission and receipt-backed cleanup contracts remain unchanged.",
+      "claim": "Graceful drain rejects invalid or non-finite deadlines. Process wait preserves an already recorded cancellation through cleanup instead of ordinary exit classification, retaining owned resources while cleanup is incomplete. A reaped POSIX root can complete cancellation only when its recorded root-owned group is observed absent without sending termination signals. Raw Windows taskkill success no longer asserts tree cleanup; native Job Object proof remains authoritative. Deadline retries preserve pending cancellation after root exit, including restored owners.",
       "requirement_id": "OPS-005",
-      "revision": 3,
+      "revision": 5,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "6d62c6acb23d426748dd6071c1119f7877948c7829e588b62a0a7a1b8e99586e",
+    "ledger_sha256": "c19eceb94eb754a14089cdb9f7b65a8fd07454f194c3411012b1102a7cb546a3",
     "spec_sha256": "1d7da49c5910bcf0bd5099ef1858312a8491a0429a4df33895d8088942278e33"
   }
 }

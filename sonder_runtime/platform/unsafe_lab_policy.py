@@ -38,6 +38,14 @@ def _ollama_policy_error(value=None) -> str:
     scheme = scheme.lower()
     if scheme not in {"http", "https"}:
         return "OLLAMA_HOST must use http or https"
+    # The configuration loader accepts an origin whose path is exactly "/"
+    # (``http://localhost:11434/``); accept that single trailing slash here
+    # too so the gate never refuses a URL config validated. Anything more
+    # (``//``, a real path, a query or fragment marker) is still refused.
+    if authority.endswith("/") and not any(
+        marker in authority[:-1] for marker in ("/", "?", "#")
+    ):
+        authority = authority[:-1]
     if any(marker in authority for marker in ("/", "?", "#")):
         return "OLLAMA_HOST must be an origin without a path, query, or fragment"
     if "@" in authority:

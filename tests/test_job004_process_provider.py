@@ -989,6 +989,9 @@ def test_wait_publishes_terminal_truth_after_process_exit():
     assert waited.timed_out is False
     assert waited.record.status is JobStatus.FAILED
     assert waited.record.error == "process exited with a non-zero status"
+    # The exit code is durable for failures too, not only for success.
+    assert waited.record.result == {"exit_code": 3}
+    assert provider.poll("job-process").result == {"exit_code": 3}
 
 
 def test_running_process_publishes_incremental_output_before_wait(tmp_path):
@@ -997,24 +1000,36 @@ def test_running_process_publishes_incremental_output_before_wait(tmp_path):
         SQLiteDurableJobRegistry(tmp_path / "jobs.db"),
         process_cleanup=cleanup,
     )
+    # The child blocks after "first" until the test has observed that line in
+    # the registry, so "second" can never race into the first page (the child
+    # gives up after 30s so a broken provider cannot hang the suite).
+    release = tmp_path / "release"
+    child = (
+        "import os,sys,time\n"
+        "print('first', flush=True)\n"
+        "deadline = time.monotonic() + 30\n"
+        "while not os.path.exists(sys.argv[1]) and time.monotonic() < deadline:\n"
+        "    time.sleep(.01)\n"
+        "print('second', flush=True)\n"
+    )
     request = ProcessJobRequest(
         JobIdentity("job-live-output", "process", "execute", "idem-live-output"),
-        (
-            sys.executable, "-u", "-c",
-            "import sys,time; print('first', flush=True); time.sleep(.25); print('second', flush=True)",
-        ),
+        (sys.executable, "-u", "-c", child, str(release)),
         max_descendants=4,
     )
 
     started = provider.start(request)
-    deadline = time.monotonic() + 5
-    page = provider._registry.stream(started.record.identity.job_id)
-    while not page.events and time.monotonic() < deadline:
-        time.sleep(.02)
+    try:
+        deadline = time.monotonic() + 5
         page = provider._registry.stream(started.record.identity.job_id)
+        while not page.events and time.monotonic() < deadline:
+            time.sleep(.02)
+            page = provider._registry.stream(started.record.identity.job_id)
 
-    assert [event.data for event in page.events] == ["first\n"]
-    assert provider._registry.poll("job-live-output").is_terminal is False
+        assert [event.data for event in page.events] == ["first\n"]
+        assert provider._registry.poll("job-live-output").is_terminal is False
+    finally:
+        release.write_text("go", encoding="utf-8")
 
     waited = provider.wait("job-live-output", timeout=5)
     assert waited.record.status is JobStatus.SUCCEEDED
@@ -1054,6 +1069,7 @@ def test_worker_enforces_deadline_without_controller_polling(tmp_path):
         cwd=tmp_path,
         deadline_seconds=1,
         max_descendants=4,
+        require_job_scope=os.name == "nt",
     ))
     process = provider._processes[job_id]
 
@@ -1138,21 +1154,33 @@ def test_provider_rehydrates_persisted_deadline_after_owner_restart(tmp_path):
         process_cleanup=cleanup,
         platform_name=os.name,
     )
-    deadline = time.monotonic() + 9
-    while (
-        (
-            reopened.poll(job_id).status is not JobStatus.CANCELLED
-            or process.poll() is None
-            or job_id in second._deadline_timers
-        )
-        and time.monotonic() < deadline
-    ):
-        time.sleep(.05)
+    expected = JobStatus.CANCELLATION_REQUESTED if os.name == "nt" else JobStatus.CANCELLED
+    try:
+        deadline = time.monotonic() + 9
+        while (
+            (reopened.poll(job_id).status is not expected or process.poll() is None)
+            and time.monotonic() < deadline
+        ):
+            time.sleep(.05)
 
-    assert reopened.poll(job_id).status is JobStatus.CANCELLED
-    assert "deadline" in reopened.poll(job_id).error
-    assert process.poll() is not None
-    assert job_id not in second._deadline_timers
+        assert reopened.poll(job_id).status is expected
+        assert "deadline" in reopened.poll(job_id).error
+        assert process.poll() is not None
+        if os.name == "nt":
+            # A raw taskkill return code cannot prove the tree empty. Repeat
+            # recovery after root exit: pending cleanup must not be discarded.
+            second._discard_deadline(job_id)
+            second._expire_deadline_owned(job_id)
+            assert reopened.poll(job_id).status is JobStatus.CANCELLATION_REQUESTED
+            assert job_id in second._deadline_timers
+        else:
+            assert job_id not in second._deadline_timers
+    finally:
+        first._discard_deadline(job_id)
+        second._discard_deadline(job_id)
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=3)
 
 
 def test_deadline_reaps_an_already_completed_process_instead_of_cancelling(tmp_path):
@@ -1175,6 +1203,108 @@ def test_deadline_reaps_an_already_completed_process_instead_of_cancelling(tmp_p
         time.sleep(.05)
 
     assert registry.poll(job_id).status is JobStatus.SUCCEEDED
+
+
+class _KilledOnTerminateProcess(_Process):
+    """A root that blocks until its job object is terminated, then exits 1."""
+
+    def __init__(self) -> None:
+        super().__init__(exit_code=1)
+        import threading
+
+        self.exited = threading.Event()
+
+    def poll(self):
+        return self.exit_code if self.exited.is_set() else None
+
+    def wait(self, timeout=None):
+        self.wait_calls.append(timeout)
+        if not self.exited.wait(timeout):
+            raise subprocess.TimeoutExpired("fixture", timeout)
+        return self.exit_code
+
+
+class _TerminateJobToken(_ScopedToken):
+    """Model Windows TerminateJobObject: the kill makes the root exit nonzero,
+    and the controller's blocked ``wait`` publishes that exit before the
+    cancelling thread gets to record anything after the kill."""
+
+    def __init__(self, process: _KilledOnTerminateProcess) -> None:
+        super().__init__()
+        self.process = process
+        self.waiter = None
+
+    def quiesce(self, *, force: bool) -> ProcessContainmentResult:
+        self.calls.append(force)
+        if force and not self.process.exited.is_set():
+            self.process.exited.set()
+            assert self.waiter is not None
+            self.waiter.join(timeout=10)
+            assert not self.waiter.is_alive()
+            return ProcessContainmentResult(True, forced=True)
+        return ProcessContainmentResult(True)
+
+
+@pytest.mark.parametrize("durable", [False, True])
+def test_deadline_kill_is_cancelled_even_when_the_waiter_sees_the_exit_first(
+    tmp_path, durable,
+):
+    """Regression (windows-latest): a deadline tree kill was published FAILED.
+
+    On Windows terminating the job object makes the root exit 1 at once; the
+    controller's ``wait`` observed that exit and published an ordinary
+    non-zero FAILED before the deadline's cancellation was recorded, so the
+    debug launcher reported ``failed`` instead of ``timed_out``.  The ordering
+    is forced here so the race is deterministic on any host.
+    """
+    import threading
+    from dataclasses import replace
+
+    class Timer:
+        def __init__(self, delay, callback, args=()):
+            self.daemon = False
+
+        def start(self):
+            return None
+
+        def cancel(self):
+            return None
+
+    registry = (
+        SQLiteDurableJobRegistry(tmp_path / "deadline-kill.db")
+        if durable
+        else DurableJobRegistry()
+    )
+    process = _KilledOnTerminateProcess()
+    token = _TerminateJobToken(process)
+    provider = SubprocessJobProvider(
+        registry,
+        process_cleanup=_Cleanup(complete=True),
+        launcher=lambda *a, **k: process,
+        platform_name="posix",
+        memory_limiter=_ScopedLimiter(token),
+        timer_factory=Timer,
+        process_identity_resolver=lambda _pid: "deadline-kill-instance",
+    )
+    job_id = "deadline-kill"
+    provider.start(replace(
+        _request(job_id), require_job_scope=True, deadline_seconds=2,
+    ))
+    waited = []
+    token.waiter = threading.Thread(
+        target=lambda: waited.append(provider.wait(job_id, timeout=10)),
+        daemon=True,
+    )
+    token.waiter.start()
+
+    provider._expire_deadline(job_id)
+
+    record = registry.poll(job_id)
+    assert record.status is JobStatus.CANCELLED, record
+    assert "deadline" in record.error
+    assert waited and waited[0].exit_code == 1
+    assert waited[0].record.status is JobStatus.CANCELLED
+    assert token.closed and job_id not in provider._processes
 
 
 def test_restarted_deadline_never_signals_a_reused_process_identity(tmp_path):

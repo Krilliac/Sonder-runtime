@@ -198,6 +198,30 @@ def _sanitize_value(
     return text
 
 
+def sanitize_event_detail(detail, redactor: Redactor) -> dict:
+    """Apply this sink's field rules to one EventSink ``detail`` mapping.
+
+    Public so an exporter can reuse exactly the local inspection rules
+    (blocked field names, bounded depth/size, value redaction) on the same
+    free-form input.  It is meant for ``detail`` only: the blocked-name list
+    would also redact deliberate identifiers such as ``request_id``.
+    """
+    accounting = {
+        "redacted_fields": 0,
+        "redaction_failures": 0,
+        "truncated_fields": 0,
+        "rejected_values": 0,
+        "budget_exhaustions": 0,
+        "nodes": 0,
+        "bytes": 0,
+    }
+    raw = detail if type(detail) is dict else {}
+    sanitized = _sanitize_value(
+        raw, redactor, accounting, skip_keys=frozenset(("category",)),
+    )
+    return sanitized if type(sanitized) is dict else {}
+
+
 _percentile = percentile
 
 

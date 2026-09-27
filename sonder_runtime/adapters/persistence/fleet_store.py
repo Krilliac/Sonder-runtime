@@ -43,6 +43,12 @@ TERMINAL_STATUSES = _sm.FLEET_TERMINAL
 DEFAULT_STALE_SECONDS = 60
 DEFAULT_STALE_GRACE_SECONDS = 10
 DEFAULT_PROGRESS_DEADLINE_SECONDS = 120
+# The per-call model timeout (``SONDER_TIMEOUT``) and its default, read the
+# same way the model gateway reads them.  A lane inside one model call does
+# not touch its row until the call returns, so its progress deadline must
+# exceed that call's own timeout plus this margin.
+DEFAULT_MODEL_CALL_TIMEOUT_SECONDS = 300
+MODEL_CALL_PROGRESS_MARGIN_SECONDS = 60
 DEFAULT_FINISHED_RETENTION = 500
 DEFAULT_EVENT_RETENTION = 2000
 MAX_TASK_CHARS = 32_000
@@ -480,22 +486,70 @@ def _row_dict(row) -> dict | None:
     return data
 
 
+def model_call_timeout_seconds() -> float:
+    """The configured per-call model timeout (``SONDER_TIMEOUT``, default 300s)."""
+    raw = os.environ.get(
+        "SONDER_TIMEOUT", str(DEFAULT_MODEL_CALL_TIMEOUT_SECONDS),
+    ).strip()
+    try:
+        value = float(int(raw))
+    except (TypeError, ValueError):
+        value = float(DEFAULT_MODEL_CALL_TIMEOUT_SECONDS)
+    return max(1.0, min(value, 24 * 60 * 60))
+
+
+def model_call_progress_deadline_seconds() -> float:
+    """The least progress deadline for a lane inside one model call."""
+    return model_call_timeout_seconds() + MODEL_CALL_PROGRESS_MARGIN_SECONDS
+
+
 def progress_deadline_seconds() -> float:
     """Return the independent worker-progress deadline.
 
     This is deliberately separate from the owner heartbeat lease: a healthy
     coordinator can keep heartbeating while one of its model/tool calls is
-    wedged.  Operators may shorten it for tests or a latency-sensitive host.
+    wedged.
+
+    The default is derived from the per-call model timeout: a fixed 120s was
+    shorter than the 300s ``SONDER_TIMEOUT`` default, so on a CPU host every
+    fleet whose model calls took more than two minutes was declared stalled
+    while each call was still inside its own timeout, and the late results
+    were discarded.  An explicit ``SONDER_FLEET_PROGRESS_DEADLINE_SECONDS``
+    is honoured as given (tests and latency-sensitive hosts shorten it), and
+    ``lane_progress_deadline`` still never declares a lane stalled while it
+    is inside a model call that has not reached its own timeout.
     """
-    raw = os.environ.get(
-        "SONDER_FLEET_PROGRESS_DEADLINE_SECONDS",
-        str(DEFAULT_PROGRESS_DEADLINE_SECONDS),
-    ).strip()
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        value = float(DEFAULT_PROGRESS_DEADLINE_SECONDS)
+    raw = os.environ.get("SONDER_FLEET_PROGRESS_DEADLINE_SECONDS", "").strip()
+    if not raw:
+        value = max(
+            float(DEFAULT_PROGRESS_DEADLINE_SECONDS),
+            model_call_progress_deadline_seconds(),
+        )
+    else:
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = max(
+                float(DEFAULT_PROGRESS_DEADLINE_SECONDS),
+                model_call_progress_deadline_seconds(),
+            )
     return max(0.1, min(value, 24 * 60 * 60))
+
+
+def lane_progress_deadline(row, deadline: float) -> float:
+    """The progress deadline that applies to one fleet row right now.
+
+    A lane inside a model call (``in_model_call``) does not touch its row
+    until the call returns; it is live until the call's own timeout plus a
+    margin has passed, whatever shorter general deadline is configured.
+    """
+    try:
+        in_call = bool(row and row.get("in_model_call"))
+    except Exception:
+        in_call = False
+    if in_call:
+        return max(float(deadline), model_call_progress_deadline_seconds())
+    return float(deadline)
 
 
 def _annotate_progress(row: dict, *, now: float, deadline: float) -> dict:
@@ -507,6 +561,7 @@ def _annotate_progress(row: dict, *, now: float, deadline: float) -> dict:
         return row
     updated = float(row.get("updated_ts") or now)
     age = max(0.0, now - updated)
+    deadline = lane_progress_deadline(row, deadline)
     stalled = age >= deadline
     row["progress_age_seconds"] = round(age, 3)
     row["stalled"] = stalled
@@ -1622,8 +1677,13 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
         ).fetchall()
         stalled_total = conn.execute(
             "SELECT COUNT(*) FROM fleet_agents "
-            "WHERE status IN ('queued','running') AND updated_ts <= ?",
-            (captured_at - deadline,),
+            "WHERE status IN ('queued','running') AND ("
+            "(in_model_call=0 AND updated_ts <= ?) OR "
+            "(in_model_call=1 AND updated_ts <= ?))",
+            (
+                captured_at - deadline,
+                captured_at - lane_progress_deadline({"in_model_call": 1}, deadline),
+            ),
         ).fetchone()[0]
         public_rows = [
             _annotate_progress(_row_dict(row), now=captured_at, deadline=deadline)

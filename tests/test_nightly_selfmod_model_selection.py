@@ -1,6 +1,7 @@
 """Focused contract tests for the bounded selfmod worker's model pin."""
 
 import json
+import os
 import sys
 import subprocess
 import hashlib
@@ -9,6 +10,30 @@ from pathlib import Path
 import pytest
 
 from scripts import nightly_selfmod, selfmod_host_grader
+from sonder_runtime.application.selfmod.candidate_isolation import IsolationAttestation
+
+
+class _DirectStages:
+    """Stage-journal double: these unit seams fake every selfmod stage.
+
+    The real bootstrap-composed journal and host isolation preflight are
+    exercised end to end in tests/test_wiring_selfmod_linux_nightly.py.
+    """
+
+    def __init__(self):
+        self.stages = []
+
+    def journaled_stage(self, run_id, stage, request, invoke):
+        self.stages.append(stage)
+        return invoke()
+
+
+@pytest.fixture(autouse=True)
+def _unit_seam_host(monkeypatch):
+    stages = _DirectStages()
+    monkeypatch.setattr(nightly_selfmod, "_isolation_refusal", lambda: None)
+    monkeypatch.setattr(nightly_selfmod, "_compose_stage_journal", lambda: stages)
+    return stages
 
 
 def test_parent_grader_extracts_only_literal_assertions_from_trusted_suite(tmp_path):
@@ -165,7 +190,12 @@ def test_nightly_parent_grader_requires_clean_replay(tmp_path, monkeypatch, repl
         result = subprocess.run(command, cwd=candidate, capture_output=True,
                                 text=True, timeout=10, check=False)
         return {"passed": result.returncode == 0, "output": result.stdout,
-                "isolation": "low", "test_id": 7}
+                "isolation": "low", "test_id": 7,
+                "attestation": IsolationAttestation(
+                    "low", result.returncode, result.returncode == 0)}
+
+    from scripts import selfmod_linux_isolation
+    monkeypatch.delenv(selfmod_linux_isolation.CANDIDATE_UID_ENV, raising=False)
 
     monkeypatch.setattr(nightly_selfmod, "_test_python", lambda: sys.executable)
     monkeypatch.setattr(nightly_selfmod, "_record_candidate_test", low_probe)
@@ -580,7 +610,7 @@ def test_nightly_rejects_a_candidate_that_fails_parent_scored_grade(tmp_path, mo
         "cleanup": None, "protected_paths": (),
         "host_cases": ({"args": [], "kwargs": {}, "expected": 42},),
     })
-    monkeypatch.setattr(nightly_selfmod, "_parent_scored_gate", lambda *_args: {
+    monkeypatch.setattr(nightly_selfmod, "_parent_scored_gate", lambda *_args, **_kwargs: {
         "passed": False, "detail": "candidate printed a fake pytest report",
     })
 
@@ -746,8 +776,15 @@ def test_held_out_snapshot_rejects_candidate_mutation(tmp_path, monkeypatch):
             prepared["command"], cwd=candidate, text=True,
             capture_output=True, timeout=60,
         )
-        assert result.returncode == 0, result.stdout + result.stderr
-        assert Path(snapshot_test).read_text(encoding="utf-8").startswith("from reflection")
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            # A superuser bypasses the snapshot's 0o444 mode, so the write
+            # lands; the evaluator's digest re-check must then fail closed
+            # instead of reporting the tampered suite as a pass.
+            assert result.returncode == 2, result.stdout + result.stderr
+            assert "SELFMOD HELD-OUT CANARY FAILED: after changed" in result.stdout
+        else:
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert Path(snapshot_test).read_text(encoding="utf-8").startswith("from reflection")
     finally:
         if prepared["cleanup"] is not None:
             prepared["cleanup"].cleanup()

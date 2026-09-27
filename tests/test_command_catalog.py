@@ -332,6 +332,31 @@ def test_unknown_key_value_is_rejected_not_dropped():
         assert param.name in message
 
 
+def test_extra_positional_words_are_rejected_with_usage_not_dropped():
+    # /status takes no parameters: the word used to be silently ignored.
+    with pytest.raises(ValueError) as excinfo:
+        parse_invocation("/status detail")
+    assert excinfo.value.problem == "unexpected-arguments"
+    assert excinfo.value.details["unexpected"] == ["detail"]
+    assert "usage: /status" in str(excinfo.value)
+
+    # Two required positionals: a third word was dropped.
+    command = by_name("/file_copy")
+    with pytest.raises(ValueError) as excinfo:
+        parse_invocation("/file_copy a.txt b.txt c.txt")
+    assert excinfo.value.details["unexpected"] == ["c.txt"]
+    assert command.usage() in str(excinfo.value)
+
+
+def test_positional_words_that_fit_still_bind():
+    assert parse_invocation("/status") == ("status", {})
+    tool, kwargs = parse_invocation("/file_copy a.txt b.txt")
+    assert tool == "file_copy"
+    assert (kwargs["source"], kwargs["destination"]) == ("a.txt", "b.txt")
+    # A single free-text parameter still absorbs the whole remainder.
+    assert parse_invocation("/file_read my notes.txt")[1]["path"] == "my notes.txt"
+
+
 def test_native_command_with_no_backing_tool_returns_none():
     assert by_name("/todo") is not None
     assert by_name("/todo").tool == ""

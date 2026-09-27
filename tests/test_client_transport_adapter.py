@@ -25,13 +25,13 @@ def test_client_transport_adapter_owns_send_prompt(monkeypatch):
         seen.append((server, api_key, prompt))
         return "http://host/v1/chat/completions", {"X-Test": "yes"}, b"{}"
 
-    def fake_urlopen(request):
+    def fake_open(request):
         assert request.full_url == "http://host/v1/chat/completions"
         assert request.get_header("X-test") == "yes"
         assert request.data == b"{}"
         return _Response({"choices": [{"message": {"content": "reply"}}]})
 
-    monkeypatch.setattr(client_transport.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(client_transport, "_open", fake_open)
 
     assert sonder_client._send_chat_prompt is client_transport.send_chat_prompt
     assert client_transport.send_chat_prompt(
@@ -49,8 +49,8 @@ def test_root_send_prompt_preserves_request_builder_compatibility(monkeypatch):
 
     monkeypatch.setattr(sonder_client, "build_request", fake_builder)
     monkeypatch.setattr(
-        client_transport.urllib.request,
-        "urlopen",
+        client_transport,
+        "_open",
         lambda request: _Response(
             {"choices": [{"message": {"content": "delegated"}}]}
         ),

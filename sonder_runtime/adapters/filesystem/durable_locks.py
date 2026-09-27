@@ -32,12 +32,15 @@ file.
 """
 import contextlib
 import json
+import logging
 import math
 import os
 import socket
 import tempfile
 import time
 import uuid
+
+_LOG = logging.getLogger(__name__)
 
 
 class LockTimeout(TimeoutError):
@@ -133,6 +136,39 @@ def _clear_owner(path, owner, *, directory_fd=None):
         os.unlink(sidecar if directory_fd is None else os.path.basename(sidecar), dir_fd=directory_fd)
     except FileNotFoundError:
         pass
+    except OSError as error:
+        # The record is diagnostic only. A Windows reader holding it open
+        # (sharing violation) must not turn a completed critical section into
+        # a failure; the next holder replaces it, and its token is ours alone.
+        _LOG.warning(
+            "lock owner record was not cleared: path=%s error_type=%s",
+            sidecar, type(error).__name__,
+        )
+
+
+def _publish_owner(path, purpose, *, directory_fd=None):
+    """Best-effort diagnostic owner record for a lock that is already held.
+
+    Returns ``None`` when the record cannot be published. The lock itself is
+    authoritative; an unwritable or momentarily shared sidecar must not deny
+    or break the guarded operation. Any older record then names a holder that
+    is provably gone (this caller holds the lock), so it is removed rather
+    than left to misattribute the lock in a waiter's timeout diagnostic.
+    """
+    try:
+        return _write_owner(path, purpose, directory_fd=directory_fd)
+    except OSError as error:
+        _LOG.warning(
+            "lock owner record was not published: path=%s error_type=%s",
+            owner_path(path), type(error).__name__,
+        )
+    sidecar = owner_path(path)
+    try:
+        # unlink removes a planted link itself and never follows it.
+        os.unlink(sidecar if directory_fd is None else os.path.basename(sidecar), dir_fd=directory_fd)
+    except OSError:
+        pass  # Absent, or still shared: waiters then see a stale record at worst.
+    return None
 
 
 def _open_lock_descriptor(path):
@@ -201,7 +237,7 @@ def exclusive_descriptor_lock(descriptor, path, *, timeout=30.0, poll_interval=0
         while True:
             if _try_lock(descriptor):
                 acquired = True
-                owner = _write_owner(path, purpose, directory_fd=directory_fd)
+                owner = _publish_owner(path, purpose, directory_fd=directory_fd)
                 break
             remaining = deadline - time.monotonic()
             if remaining <= 0:

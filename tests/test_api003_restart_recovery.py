@@ -41,11 +41,23 @@ def test_provider_job_reopens_and_reconciles_after_owner_restart(tmp_path):
             max_process_descendants=4,
         )
 
-        assert report.interrupted_job_ids == (job_id,)
         assert report.cleanup_receipts[0].requested is True
-        assert report.cleanup_receipts[0].complete is True
-        assert reopened.poll(job_id).status is JobStatus.INTERRUPTED
+        if os.name == "nt":
+            # Raw taskkill has no retained Job Object proof. Reaping the root
+            # must not turn that incomplete receipt into a tree-clean claim.
+            provider._processes[job_id].wait(timeout=3)
+            assert report.interrupted_job_ids == ()
+            assert report.cleanup_receipts[0].complete is False
+            assert "unproven" in report.cleanup_receipts[0].detail
+            assert reopened.poll(job_id).status is JobStatus.RUNNING
+            assert "orphan process tree cleaned" not in reopened.poll(job_id).error
+        else:
+            assert report.interrupted_job_ids == (job_id,)
+            assert report.cleanup_receipts[0].complete is True
+            assert reopened.poll(job_id).status is JobStatus.INTERRUPTED
     finally:
         process = provider._processes.get(job_id)
-        if process is not None and process.poll() is None:
-            provider.cancel(job_id, reason="test cleanup")
+        if process is not None:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=3)

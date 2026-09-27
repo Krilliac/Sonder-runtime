@@ -7,6 +7,9 @@ replay verifies the complete durable chain before returning replay metadata.
 """
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 from dataclasses import dataclass
 from typing import Mapping
 
@@ -91,6 +94,63 @@ class HttpSessionFacade:
             "schema": "sonder.http-session-export.v1",
             **exported.to_dict(),
         })
+
+    TITLE_CHARS = 80
+    _TITLE_SCAN_EVENTS = 16
+
+    def list_sessions(self, *, limit: int = 20, after: str | None = None) -> HttpSessionResult:
+        """One page of sessions, newest activity first, each with a redacted title.
+
+        The title is the first user message of the session, through the same
+        redaction as reads, collapsed to one line and cut to ``TITLE_CHARS``.
+        ``after`` is the opaque ``next_cursor`` of the previous page.
+        """
+        lister = getattr(self._repository, "list_sessions", None)
+        if not callable(lister):
+            return self._error(501, "session_list_unavailable")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            return self._error(400, "invalid_session_query")
+        position = None
+        if after:
+            position = _decode_list_cursor(after)
+            if position is None:
+                return self._error(400, "invalid_session_query")
+        try:
+            rows = lister(limit=limit, after=position)
+        except ValueError:
+            return self._error(400, "invalid_session_query")
+        sessions = []
+        for row in rows:
+            sessions.append({
+                "id": row.session_id,
+                "title": self._title(row.session_id),
+                "turns": row.user_turns,
+                "events": row.events,
+                "created": row.first_at_utc,
+                "updated": row.updated_at_utc,
+            })
+        next_cursor = None
+        if len(rows) == limit and rows:
+            last = rows[-1]
+            next_cursor = _encode_list_cursor(last.updated_at_utc, last.session_id)
+        return self._ok({
+            "schema": "sonder.http-session-list.v1",
+            "sessions": sessions,
+            "next_cursor": next_cursor,
+        })
+
+    def _title(self, session_id: str) -> str:
+        try:
+            transcript = self._query.export_transcript(session_id, max_events=self._TITLE_SCAN_EVENTS)
+        except (IntegrityFailure, InvalidInput, QueryExportError, ValueError):
+            return ""
+        for item in transcript:
+            if item.role == "user" and isinstance(item.content, str) and item.content.strip():
+                text = " ".join(item.content.split())
+                if len(text) > self.TITLE_CHARS:
+                    text = text[: self.TITLE_CHARS - 1].rstrip() + "\u2026"
+                return text
+        return ""
 
     def replay(self, session_id: str, *, max_events: int | None = None) -> HttpSessionResult:
         """Verify and project a privacy-safe replay result."""
@@ -188,6 +248,25 @@ class HttpSessionFacade:
             "projection": dict(checkpoint.projection) if isinstance(checkpoint.projection, Mapping)
             else {name: getattr(checkpoint.projection, name) for name in checkpoint.projection.__dataclass_fields__},
         })
+
+
+def _encode_list_cursor(updated: str, session_id: str) -> str:
+    raw = json.dumps([updated, session_id], separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_list_cursor(cursor: str) -> tuple[str, str] | None:
+    if not isinstance(cursor, str) or len(cursor) > 2048:
+        return None
+    try:
+        raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
+        value = json.loads(raw.decode("utf-8"))
+    except (binascii.Error, ValueError, UnicodeDecodeError):
+        return None
+    if (not isinstance(value, list) or len(value) != 2
+            or not all(isinstance(part, str) and part for part in value)):
+        return None
+    return value[0], value[1]
 
 
 __all__ = ["HttpSessionResult", "HttpSessionFacade"]

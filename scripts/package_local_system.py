@@ -220,7 +220,13 @@ HOME_PATH_PATTERNS = (
         r"(?i)(?<![A-Za-z0-9_])[A-Z]:[\\/]+Users[\\/]+"
         r"[A-Za-z0-9._-]+(?:[\\/]|$)"
     ),
-    re.compile(r"(?<![A-Za-z0-9_])/(?:home|Users)/[A-Za-z0-9._-]+(?:/|$)"),
+    # Homebrew-on-Linux installs under the linuxbrew system account's fixed
+    # ``.linuxbrew`` prefix (not a person's home), and the host tool inventory
+    # names it.  Only that exact prefix is exempt.
+    re.compile(
+        r"(?<![A-Za-z0-9_])/(?:home|Users)/"
+        r"(?!linuxbrew/\.linuxbrew(?:/|$))[A-Za-z0-9._-]+(?:/|$)"
+    ),
 )
 
 

@@ -29,3 +29,12 @@ def test_one_word_required_arguments_preserve_path_like_tokens():
     assert cr.resolve("inspect artifactcheck ~/report.json") == \
         "/artifactcheck ~/report.json"
     assert cr.resolve("inspect artifactcheck report.json and summarize it") is None
+
+
+def test_bare_weather_and_forecast_route_to_the_weather_usage_command():
+    # The bare rule carries no ``arg`` group; it used to raise IndexError
+    # and take the REPL down with it.
+    for phrase in ("weather", "forecast", "weather?", "forecast.", "Weather!"):
+        assert cr.resolve(phrase) == "/weather", phrase
+    assert cr.resolve("weather in Chicago") == "/weather Chicago"
+    assert cr.resolve("forecast for 60601") == "/weather 60601"

@@ -51,8 +51,14 @@ import json
 import re
 import textwrap
 
+from sonder_runtime.domain.diagnostics.parsers import (
+    DEFAULT_ERROR_LINE_PATTERN,
+    error_lines as _error_lines,
+)
+
 SHRINK_FLOOR = 0.75
-DEFAULT_ERROR_RE = r"(?i)\b(?:error|fatal)\b"
+# The one diagnostics module owns this pattern; re-exported for callers.
+DEFAULT_ERROR_RE = DEFAULT_ERROR_LINE_PATTERN
 
 # --- Masking errors: the ones that make the error COUNT itself a lie ----------
 #
@@ -282,17 +288,12 @@ def strip_code(text: str) -> str:
 
 
 def count_errors(output: str, error_regex: str = DEFAULT_ERROR_RE) -> list:
-    """Distinct error lines in build output, order preserved."""
-    pattern = re.compile(error_regex)
-    seen, out = set(), []
-    for line in output.split("\n"):
-        line = line.strip()
-        if not line or not pattern.search(line):
-            continue
-        if line not in seen:
-            seen.add(line)
-            out.append(line)
-    return out
+    """Distinct error lines in build output, order preserved.
+
+    Delegates to ``sonder_runtime.domain.diagnostics.parsers.error_lines`` so
+    the repository has one diagnostics parser; the semantics are unchanged.
+    """
+    return _error_lines(output, error_regex)
 
 
 def parse_blocked(errors: list, parse_regex: str = DEFAULT_PARSE_ERROR_RE) -> int:

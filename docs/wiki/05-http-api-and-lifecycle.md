@@ -15,14 +15,91 @@ production lifecycle and admission layer (`sonder_lifecycle.py`).
 | `POST /v1/chat/completions` | key | OpenAI-compatible chat. |
 | `GET /v1/models` | key | Route IDs plus exact chat-capable catalog models. |
 | `POST /v1/admin/drain` | admin | Begin graceful drain (idempotent). |
+| `GET /v1/tools/inventory` | admin | Redacted host developer-tool inventory; optional `category` and `name` filters. See [Host tool inventory](../host-tool-inventory.md). |
+| `POST /v1/tools/inventory/refresh` | admin | Force host tool rediscovery (`{}` or `{"full": true}`); returns the same view. |
+| `POST /v1/tools/test-run`, `GET /v1/tools/test-run/<id>` | admin (own runs only) | Structured test run through the typed `test_run` / `test_run_result` tools, graded unattended by the permission modes (`test_run` is execution). `202` with the status while running, `200` with the report. Cancel with `POST /v1/jobs/<id>/cancel`. See [Structured test runs](../structured-test-runs.md#over-http). |
+| `POST /v1/tools/output-digest` | admin | Typed `output_digest` of exactly one of an owned test-run `job_id` or a guarded `path`. |
 | `GET /v1/admin/updates/status` | admin | Durable update state (System page). |
 | `POST /v1/memory/replication/batches` | fixed configured peer only | Disabled unless the typed fact-only receiver is enabled; accepts one bounded authenticated replication batch and returns its durable receipt. It is not an operator send, takeover, or failback endpoint. |
 | `GET /v1/sonder/status` | admin/owner | Rich host-wide runtime/stats snapshot, including the configured deployment profile and honest capability availability. Ordinary hosted accounts receive only their account and the model catalog. |
+| `GET /v1/work-runs`, `GET /v1/work-runs/<id>` | developer/admin (own runs only) | Routed-work runs started by this principal: status (`running`, `returned`, `unknown`, `refused`, `cancelled`, `budget_exceeded`, `interrupted`, `failed`) and, for one run, its persisted answer. |
+| `POST /v1/work-runs/<id>/cancel` | developer/admin (own runs only) | Cancel a routed-work run: its effect fence stops holding, so every further file change, host program, or destructive tool is refused. |
+| `GET /v1/approvals` | developer/admin | Calls refused unattended that can be approved once (`pending`: call id, tool, redacted preview, count) and open approvals (`approvals`); `?limit=1..200`, `?include_spent=1` adds spent, revoked and expired ones. |
+| `POST /v1/approvals/<call_id>` | developer/admin | Approve exactly one refused, still-pending call once (body `{}` or `{"ttl_seconds": 60..86400}`, default 900; optional `tool`/`digest` must match). `201` with the approval. See [One-shot approvals over HTTP](#one-shot-approvals-over-http). |
+| `POST /v1/approvals/revoke/<nonce>` | developer/admin | Withdraw one open approval (body `{}`). |
+| `GET /v1/sessions` | admin | Durable sessions, newest activity first: `id`, redacted `title` (first user message, one line, at most 80 characters), `turns`, `events`, `created`, `updated`; `?limit=1..100` (default 20) and `?after=<next_cursor>`. Ids are storage ids, the same ones `/v1/sessions/<id>/{events,export,replay}` take. |
+| `POST /v1/sonder/register` | bootstrap secret, or admin when additional registration is enabled | Create an account; `201 {"ok": true, "account": {...}, "message": "Account <u> created (role <r>)."}`. |
 | `GET /v1/sonder/feed` | any authorized caller | Owner-scoped live execution feed: the caller's own active and recently completed responses (category/name, state, elapsed, redacted summary, current operation). Never exposes prompts, tool arguments, paths, outputs, reasoning, or another principal's work. |
+| `GET /v1/client/schema` | any authorized caller | API-008 client/SDK schema envelope (`{"type":"client_schema","version":1,"schema":{...,"digest"},"streams":[{"stream_id","event_types"}]}`). `schema` is derived from the served typed tool catalog; clients cache it and advertise its `digest` on reconnect. `streams` lists the stream ids this server instance serves; they are outside the digest and change on every restart. |
+| `POST /v1/client/reconnect` | any authorized caller | API-007 reconnect plan for a `{"type":"reconnect","version":1,...}` body: a stale or missing `schema_digest` returns `refresh_schema` (a malformed one is a 400), a known stream resumes from its watermark in batches of at most `batch_limit` with `has_more`, and an unknown stream or out-of-range watermark is `rejected`. The only stream is the in-memory `control.<instance>` stream of `control.snapshot` permission-mode events. It gets a new id and restarts at sequence 1 with the process, so a cursor from before a restart is `rejected` as an unknown stream and the client refetches the schema for the new id. A malformed body is a 400. |
+| `GET /.well-known/sonder-telemetry` | admin | Observatory discovery document (`sonder.telemetry.producer/1`): producer identity, stream URLs, resume window, auth. |
+| `GET /v1/observability/events` | admin | Content-free live telemetry stream: SSE by default, NDJSON with `?format=ndjson` or `Accept: application/x-ndjson`; resumes from `Last-Event-ID`. |
+| `GET /v1/sonder/ecosystem` | admin | `sonder.runtime.ecosystem/1`: provider bindings, per-provider status, Observatory stream URLs and connect URLs. |
+
+With `SONDER_OBSERVATORY_EXPORT=0` discovery and the event stream answer
+404; the ecosystem route also answers 404 unless the model gateway reports
+`provider_status()`, in which case it still reports providers with
+`export_enabled: false`. Browsers reach the three routes through the
+route-scoped `SONDER_OBSERVATORY_ORIGINS` allowlist, which grants nothing
+else; on a loopback bind they refuse a `Host` that is not `127.0.0.1`,
+`localhost` or `[::1]` (403 `forbidden_host`, the DNS-rebinding defence).
+Stream subscribers are capped (429 with `Retry-After`), never hold a chat
+admission slot, and release their slot within about a second of the client
+disconnecting. The event vocabulary,
+resume rules and Observatory setup are in
+[observatory-telemetry.md](../architecture/observatory-telemetry.md).
+
+When a tier is bound to a provider other than Ollama (`SONDER_MODEL_BACKEND`,
+`SONDER_<TIER>_PROVIDER`), the model path of `POST /v1/chat/completions`
+serves that tier through the model gateway: Ollama-only features
+(`response_format`, thinking, native tools) return 400, a provider outage
+returns 503 without escalating, a drain that starts mid-turn lets the turn
+finish, and `sonder_receipt.degraded` names any Ollama-only step the turn ran
+without. The default model (`sonder`) follows the chat policy tier's binding;
+exact model pins and the strict `sonder` alias stay on Ollama. Dispatchers
+that run before the model path keep their own route: web research (with
+`SONDER_WEB_TOOLS`) needs Ollama's tool calls and returns 503 naming the
+binding when its tier (`code` by default) is bound elsewhere; natural-language
+work intents, ensemble and fanout (developer only) stay on Ollama. A rejected
+`Origin` gets 403 with `"code": "forbidden_origin"`.
 
 `/live` may be unauthenticated so an external check never needs the key;
 everything else requires the bearer key unless the peer is loopback (the
 reverse proxy restricts those paths to loopback upstream).
+
+**Host allowlist (DNS-rebinding defence).** Before any routing, the `Host`
+header is checked. DNS rebinding needs a hostname the attacker controls and a
+listener that answers without credentials, so:
+
+- any IP literal is accepted on any port (`10.0.2.2` from the Android
+  emulator, LAN and Tailscale addresses, `127.0.0.1:<forwarded port>`), except
+  the unspecified `0.0.0.0` / `[::]`;
+- `localhost`, `*.localhost` and this machine's own names are accepted on any
+  port. The machine names are the host name, its FQDN and `<hostname>.local`,
+  computed once at startup from `gethostname`/`getfqdn` (the FQDN lookup is
+  bounded to one second and dropped if it does not finish);
+- `[server].allowed_hosts` / `SONDER_ALLOWED_HOSTS` entries are accepted
+  (`name` on any port, `name:port` on that port only);
+- any other well-formed name is accepted when the listener requires
+  credentials (`api-key`, `account`, `both` or `either`), because a rebinding
+  page holds none; in the unauthenticated `local-open` mode it is refused.
+
+A refusal is `421` with `error.code = "HOST_NOT_ALLOWED"` and an
+`error.remedy` naming `[server].allowed_hosts` / `SONDER_ALLOWED_HOSTS`, and
+the connection is closed. The server logs a WARNING with the refused name, at
+most once a minute per name. Malformed or repeated `Host` headers are always
+refused; a request with no `Host` header (HTTP/1.0 tooling; browsers always
+send one) is accepted. A name accepted only because credentials are required
+does not earn the loopback-peer conveniences: through it, `/ready`, `/health`,
+`/version` and `/metrics` need the key even from a local browser, and the
+local log page is not served.
+
+**Client address.** `X-Forwarded-For` is consulted only when
+`tls_terminated_by_proxy = true` *and* the socket peer is inside
+`trusted_proxy_cidrs`; it is then read right to left and the first hop outside
+those networks is the client. Otherwise the socket peer is the client, so a
+local process cannot rotate the header to escape the authentication-failure
+limiter or spend another address's budget.
 
 `GET /v1/models` always includes the `sonder` runtime route and configured
 tier IDs. It also includes exact installed/discovered models that declare a
@@ -57,7 +134,10 @@ POST /v1/chat/completions
 A full chat UI owns conversation state (resends the transcript). A thin
 client that names a `session` but sends only the current message gets
 server-side history rebuilt from the stored session — so both contracts
-work. `choices[0].message.content` contains only the answer; bounded
+work. A client that owns its transcript and must never have server history
+injected (for example after it cancelled a thread's first turn) sends
+`"history": "client"`; the default is `"auto"`, and any other value is a
+`400`. `choices[0].message.content` contains only the answer; bounded
 observable execution metadata is returned separately as `sonder_activity`.
 
 The administrator-only `/v1/sonder/status` snapshot also contains
@@ -86,7 +166,8 @@ There is no public HTTP endpoint that invokes `replicate_once()`. The batch
 route above is only the inbound fixed-peer receiver.
 
 The supported chat subset currently includes `model`, `messages`, `stream`,
-`session`, `project`, `context_size`, and the consented location fields.
+`session`, `project`, `history`, `context_size`, and the consented location
+fields.
 `project` scopes durable facts, which the served route namespaces per
 principal. When the value names an existing directory inside the
 deployment's configured file roots (`SONDER_FILE_ROOTS` and the roots
@@ -106,6 +187,115 @@ terminal usage chunk with:
 
 That final chunk has an empty `choices` array and a `usage` object. It appears
 immediately before `[DONE]`; ordinary streams remain unchanged.
+
+For an ordinary model turn with `stream: true`, the response commits to SSE
+as soon as generation starts: the `200` headers and an SSE comment
+(`: keep-alive`) are sent immediately and repeated every
+`[server].stream_heartbeat_seconds` (default 15, `SONDER_STREAM_HEARTBEAT_SECONDS`)
+until the answer is ready, so client and proxy idle timeouts no longer expire
+during a slow CPU generation. The answer itself still arrives as one content
+chunk: the generation pipeline (retrieval, critic and retry passes,
+escalation) produces it only when the turn completes, so it is not
+token-streamed. `X-Sonder-Elapsed-Ms` on such a stream is the time to the
+headers; the final chunk's `sonder_elapsed_ms` is the full duration. Because
+the status is already `200`, a model or capture failure after that point is
+delivered as one terminal SSE event with `"object": "error"` and an
+`error.code` (`MODEL_CALL_<status>`, `SESSION_CAPTURE_UNAVAILABLE`,
+`INTERNAL_ERROR`), followed by `[DONE]`. Slash, web, work, structured, and
+multi-sample (Spanda) turns keep the previous framing, and non-streaming
+responses are unchanged.
+
+`context_size` must be absent, `null`, `""`, or a positive token count
+(`8192`, `"32k"`, `"1m"`); anything else is `400 invalid_request` instead of
+silently selecting the default window. Surrounding whitespace in `model` is
+ignored and not echoed back. On the default `sonder` route, a message that is
+only one unknown `/word` is answered with a short "no command with that name"
+reply instead of a model call; a sentence that merely starts with `/` still
+reaches the model.
+
+## Routed work runs
+
+A chat turn that the host routes to an execution lane (workbench, fleet, or
+autopilot) runs as a **work run** with id `wr-…`:
+
+- The request waits at most `[server].work_wait_seconds` (default 240,
+  `SONDER_HTTP_WORK_WAIT_SECONDS`). A run that finishes in time answers
+  inline; otherwise the reply names the run id and `sonder_receipt.chat_work`
+  carries `status: "running"`, `work_run_id`, and the routes as data
+  (`get_url`, `cancel_url`); the reply text itself names no HTTP routes. The
+  answer is persisted and returned by `GET /v1/work-runs/<id>` (bounded to
+  256 KiB, retained 7 days).
+- `[server].work_budget_seconds` (default 1800,
+  `SONDER_HTTP_WORK_BUDGET_SECONDS`) is a wall-clock budget. After it, or
+  after `POST /v1/work-runs/<id>/cancel`, the run's effect fence no longer
+  holds: the permission gate refuses every further file change, host program,
+  or destructive tool, and the run ends as `budget_exceeded` or `cancelled`.
+  A model step already in flight cannot be preempted from the HTTP layer; the
+  lane's remaining steps run to their step bound without effects. The fence
+  covers effects on the run's own thread (the workbench lane). Fleet workers
+  and autopilot runs execute on their own threads under their own fences, so
+  cancelling the work run does not stop them; use their cancel surfaces
+  (`/master_cancel`, `/autopilot cancel`).
+- A shutdown drain also fences every work run: once the runtime is draining,
+  further effects are refused and the run ends as `interrupted`. A run that
+  outlived its request still counts as an in-flight mutation, so the drain
+  waits its bounded deadline for the current effect to finish.
+- At most `[server].work_max_running` (default 2,
+  `SONDER_HTTP_WORK_MAX_RUNNING`) runs execute at once; another routed turn
+  is refused with `429 WORK_CAPACITY_EXHAUSTED` and `Retry-After`.
+- A run left `running` by a stopped process is reported `interrupted` after
+  restart.
+
+## One-shot approvals over HTTP
+
+When the permission gate refuses a file change, host program or destructive
+tool because nobody is present to answer the mode's ask, and the call carried
+arguments, the refusal names the call (`/approve <call id>` in the text) and
+notes it as pending in the approval ledger. The chat response then also
+carries it as data, in `sonder_receipt.refusal`:
+
+```json
+{ "kind": "refused", "tool": "file_write", "call_id": "3f9a12c0d4e5b6a7",
+  "risk": "mutation", "mode": "manual", "mode_label": "manual",
+  "reason": "file_write changes files and nobody is here to answer ...",
+  "remedies": [
+    {"kind": "approve_once", "call_id": "3f9a12c0d4e5b6a7", "method": "POST",
+     "path": "/v1/approvals/3f9a12c0d4e5b6a7", "console": "/approve 3f9a12c0d4e5b6a7"},
+    {"kind": "switch_mode", "modes": ["acceptEdits", "auto"]},
+    {"kind": "allow_rule", "console": "/permissions"},
+    {"kind": "console", "detail": "run it from the console and answer the prompt"} ] }
+```
+
+The text is unchanged. `/write`, `/append` and `/edit` typed in chat name
+their call the same way the catalogued `/file_write path=… content=… mode=…`
+spelling does, so either spelling is approved by the same id. When a turn
+refuses several calls, the last is described and `refusals_in_turn` counts
+them.
+
+`POST /v1/approvals/<call_id>` is the attended answer to that ask. The
+security decision: an authenticated developer or administrator POST is an
+attended approval surface, the same precedent as `POST /v1/permission-mode`.
+The person holding the credential approves one exact call:
+
+- only a call that was refused and is still pending can be approved; there is
+  no approve-in-advance over HTTP (the console's `/approve call` keeps that);
+- the path takes the 16-character call id or the full 64-character digest,
+  never a shorter prefix, and a body `digest` or `tool` that differs from the
+  pending call is refused with `409 CALL_DIGEST_MISMATCH`. Changing any
+  argument makes a new call that needs its own approval;
+- a call has at most one open approval: a second POST answers
+  `409 APPROVAL_ALREADY_OPEN` with the existing one. An `Idempotency-Key`
+  retry replays the first response, with the refusal codes listed below;
+- the ledger spends the approval atomically on the next unchanged call from
+  any surface and it expires after `ttl_seconds`; the mode is not changed;
+- the approver is recorded as `developer:<username>`, `admin-key` (the
+  deployment API key) or `local-open`, with surface `http`, and the action is
+  audited on the direct-tool path as `permission_approve`.
+
+Errors: `401` without credentials, `403 FORBIDDEN` for an ordinary account,
+`400 INVALID_CALL_ID` / `INVALID_TTL` / `INVALID_REQUEST`,
+`404 CALL_NOT_PENDING` (already approved and run, aged out, or never refused),
+`404 APPROVAL_NOT_OPEN` on revoke, and `503 APPROVALS_UNAVAILABLE`.
 
 `response_format` is available only for an isolated direct-model turn:
 
@@ -173,7 +363,9 @@ STARTING → MIGRATING → READY ⇄ DEGRADED → DRAINING → STOPPING
 5. Header/body-size limits.
 6. Bounded concurrency slot; queue-depth cap; admission deadline.
 7. Parse/validate; resolve privilege.
-8. Execute under a deadline + cancellation token.
+8. Execute. Model turns are bounded by the provider timeout; routed work runs
+   by the wall-clock budget and cancel surface above, which fence effects but
+   cannot preempt a model call already in flight.
 9. Structured completion + metrics.
 
 Rejections use one standard envelope:
@@ -198,6 +390,29 @@ framed body off the socket and keeps the connection usable, or answers with
 body (413) and on any request whose framing was rejected — a duplicated or
 non-numeric `Content-Length`, or a transfer coding, neither of which is
 supported. Nothing beyond the accepted request-size limit is ever read.
+
+An optional `Idempotency-Key` header on a POST makes a served action (slash
+work controls, permission-mode changes, approvals, fanout controls, drain) replay-safe
+for that principal and action. A key longer than 512 characters, or a repeated
+`Idempotency-Key` header, is rejected with `400 invalid_request` before
+dispatch rather than running the action without replay protection.
+
+One key names one request. Reusing a key for a *different* request (another
+action, mode, fanout model, or session) is refused and nothing runs. On
+`/v1/permission-mode`, `/v1/approvals/…` and
+`/v1/fanout/<id>/{cancel,resume,synthesize}` a
+refusal is never a `200`; it answers with `error.code`:
+
+| Code | Status | Meaning |
+|---|---|---|
+| `IDEMPOTENCY_KEY_REUSED` | 422 | The key already names a different request. |
+| `IDEMPOTENT_ACTION_COMPLETED` | 409 | It completed before this server process; not re-run. |
+| `IDEMPOTENT_ACTION_UNCERTAIN` | 409 | An interrupted process left its outcome uncertain; not re-run. |
+| `IDEMPOTENCY_CAPACITY_EXHAUSTED` | 429 | Receipt budget full; retry later (`Retry-After`). |
+| `IDEMPOTENCY_RECEIPT_UNAVAILABLE` | 503 | Receipt store unavailable; nothing started. |
+
+Chat-routed actions (slash work controls, natural work) keep answering with
+the refusal text as the assistant reply.
 
 ## Graceful drain
 

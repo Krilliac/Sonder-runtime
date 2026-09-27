@@ -150,3 +150,27 @@ def test_scrubbed_lessons_never_exports_arbitrary_local_identifier():
 
     assert len(result) == 1
     assert private_id not in repr(result)
+
+
+def test_privacy_rules_cover_bare_bearer_sts_and_vendor_secret_forms():
+    # Planted-secret sweep: each of these was classified as shareable.
+    leaks = [
+        "Call the API with Bearer abcdef1234567890abcdef to authenticate.",
+        # Vendor-shaped fixtures are assembled at runtime so the checked-in
+        # source never contains a literal that secret scanners flag.
+        "Use key " + "ASIA" + "IOSFODNN7EXAMPLE for the S3 client.",
+        "Charge with " + "sk_" + "live_" + "4eC39HqLyjWDarjtT1zdp7dc today.",
+        "Refund with " + "rk_" + "test_" + "51H8abcdefGHIJKLmnopqrST.",
+        "client secret " + "GOCSPX" + "-abcdefghijklmnopqrstuvwxyz12",
+        "DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=abc123==;",
+    ]
+    for text in leaks:
+        assert contribute.private_reasons(text), text
+        assert not contribute.is_shareable(text), text
+    # Ordinary guidance that merely names the concepts stays shareable.
+    for text in [
+        "Send the bearer token in the Authorization header, never in the URL.",
+        "Rotate AWS access keys regularly and prefer short-lived STS credentials.",
+        "Use Stripe test keys in CI and live keys only in production.",
+    ]:
+        assert contribute.is_shareable(text), text

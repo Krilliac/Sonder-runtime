@@ -38,6 +38,13 @@ class A2AJsonRpcLimits:
 
 A2ARequestHandler = Callable[[str, Mapping[str, Any]], Mapping[str, Any]]
 
+#: A2A ``TaskNotFoundError``: the addressed task does not exist.
+A2A_TASK_NOT_FOUND = -32001
+
+
+class A2ATaskNotFound(Exception):
+    """Raised by a handler when the addressed task does not exist."""
+
 
 class A2AJsonRpcTransport:
     """Validate and dispatch one bounded A2A JSON-RPC request."""
@@ -71,6 +78,8 @@ class A2AJsonRpcTransport:
             return self._error(request_id, -32601, "method not found")
         try:
             result = self._handler(method, params)
+        except A2ATaskNotFound:
+            return self._error(request_id, A2A_TASK_NOT_FOUND, "task not found")
         except (KeyError, TypeError, ValueError):
             return self._error(request_id, -32602, "invalid params")
         except Exception:
@@ -120,4 +129,10 @@ class A2AJsonRpcTransport:
         return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
 
-__all__ = ["A2AJsonRpcLimits", "A2AJsonRpcTransport", "SUPPORTED_METHODS"]
+__all__ = [
+    "A2A_TASK_NOT_FOUND",
+    "A2AJsonRpcLimits",
+    "A2AJsonRpcTransport",
+    "A2ATaskNotFound",
+    "SUPPORTED_METHODS",
+]

@@ -1,0 +1,104 @@
+{
+ "configurations": [
+  {
+   "directories": [
+    {
+     "build": ".",
+     "jsonFile": "directory-.-Debug-f5ebdc15457944623624.json",
+     "minimumCMakeVersion": {
+      "string": "3.20"
+     },
+     "projectIndex": 0,
+     "source": ".",
+     "targetIndexes": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    }
+   ],
+   "name": "Debug",
+   "projects": [
+    {
+     "directoryIndexes": [
+      0
+     ],
+     "name": "SparkLite",
+     "targetIndexes": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    }
+   ],
+   "targets": [
+    {
+     "directoryIndex": 0,
+     "id": "core::@6890427a1f51a3e7e1df",
+     "jsonFile": "target-core-Debug-04400fb467fb38381a04.json",
+     "name": "core",
+     "projectIndex": 0
+    },
+    {
+     "directoryIndex": 0,
+     "id": "crash_test::@6890427a1f51a3e7e1df",
+     "jsonFile": "target-crash_test-Debug-d2c1cd47194b18494f32.json",
+     "name": "crash_test",
+     "projectIndex": 0
+    },
+    {
+     "directoryIndex": 0,
+     "id": "deploy::@6890427a1f51a3e7e1df",
+     "jsonFile": "target-deploy-Debug-3ee8f53a4483657a604a.json",
+     "name": "deploy",
+     "projectIndex": 0
+    },
+    {
+     "directoryIndex": 0,
+     "id": "game::@6890427a1f51a3e7e1df",
+     "jsonFile": "target-game-Debug-921062cc89b2a0ad1723.json",
+     "name": "game",
+     "projectIndex": 0
+    },
+    {
+     "directoryIndex": 0,
+     "id": "shadergen::@6890427a1f51a3e7e1df",
+     "jsonFile": "target-shadergen-Debug-d9d8802a19389139e3f3.json",
+     "name": "shadergen",
+     "projectIndex": 0
+    },
+    {
+     "directoryIndex": 0,
+     "id": "shaders::@6890427a1f51a3e7e1df",
+     "jsonFile": "target-shaders-Debug-2c2ea3934b16b5cea449.json",
+     "name": "shaders",
+     "projectIndex": 0
+    },
+    {
+     "directoryIndex": 0,
+     "id": "slow::@6890427a1f51a3e7e1df",
+     "jsonFile": "target-slow-Debug-18b7808cb4728ab91de4.json",
+     "name": "slow",
+     "projectIndex": 0
+    }
+   ]
+  }
+ ],
+ "kind": "codemodel",
+ "paths": {
+  "build": "/work/sparklite/build/vscode",
+  "source": "/work/sparklite"
+ },
+ "version": {
+  "major": 2,
+  "minor": 6
+ }
+}

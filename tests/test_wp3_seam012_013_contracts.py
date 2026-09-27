@@ -74,3 +74,28 @@ def test_telemetry_event_snapshots_fields_and_validates_identity():
     with pytest.raises(ValueError):
         TelemetryEvent("", datetime.now(timezone.utc))
     assert "emit" in vars(TelemetrySink)
+
+
+def test_telemetry_event_envelope_identities_are_optional_strings():
+    event = TelemetryEvent("request.started", datetime.now(timezone.utc))
+    assert (event.session_id, event.run_id, event.agent_id, event.task_id, event.level) == (
+        None, None, None, None, None,
+    )
+    tagged = TelemetryEvent(
+        "request.started", datetime.now(timezone.utc),
+        session_id="rts-1", run_id="req-1", agent_id="agent", task_id="task", level="INFO",
+    )
+    assert tagged.run_id == "req-1" and tagged.level == "INFO"
+    with pytest.raises(TypeError):
+        TelemetryEvent("request.started", datetime.now(timezone.utc), run_id=7)
+
+
+def test_redaction_keeps_envelope_identities():
+    delegate = _Export()
+    RedactingTelemetrySink(delegate, _Redactor()).emit(TelemetryEvent(
+        "request.started", datetime.now(timezone.utc), {"note": "secret value"},
+        session_id="rts-1", run_id="req-1",
+    ))
+    exported = delegate.events[0]
+    assert (exported.session_id, exported.run_id) == ("rts-1", "req-1")
+    assert exported.fields["note"] == "[REDACTED] value"

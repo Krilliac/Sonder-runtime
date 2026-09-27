@@ -1,0 +1,28 @@
+{
+ "inputs": [
+  {
+   "path": "CMakeLists.txt"
+  },
+  {
+   "isGenerated": true,
+   "path": "build/ninja-debug/CMakeFiles/3.28.3/CMakeSystem.cmake"
+  },
+  {
+   "isGenerated": true,
+   "path": "build/ninja-debug/CMakeFiles/3.28.3/CMakeCXXCompiler.cmake"
+  },
+  {
+   "isGenerated": true,
+   "path": "build/ninja-debug/CMakeFiles/3.28.3/CMakeCXXCompiler.cmake"
+  }
+ ],
+ "kind": "cmakeFiles",
+ "paths": {
+  "build": "/work/sparklite/build/ninja-debug",
+  "source": "/work/sparklite"
+ },
+ "version": {
+  "major": 1,
+  "minor": 0
+ }
+}

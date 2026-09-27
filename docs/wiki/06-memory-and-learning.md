@@ -71,6 +71,22 @@ would spend prompt budget on a repeat forever. The duplicate check never
 looks across projects: project scope is a privacy boundary, and a match
 against another project's facts would leak them.
 
+## Preferences
+
+`learn_preference` (`/prefer <text>`) stores a standing default that is
+injected into later prompts. Preferences reach the prompt, so the grammar
+is an allowlist (`preference_learning.py`): response style, code and shell
+conventions, UI theme, workflow confirmations, units/dates/time, answer
+language, and the user's name. An explicit request can be first person
+(`I prefer concise answers`, `always answer tersely`, `never use emojis`)
+or a short imperative (`prefer Python for scripts`, `use tabs for
+indentation`, `avoid emojis`, `keep answers short`). The imperative is
+rewritten to first person, and both the typed text and the rewrite must
+pass the same allowlist and safety filters. A refusal lists the accepted
+forms and topics. Passive capture from ordinary chat turns accepts only
+the first-person forms, because a chat imperative is usually a one-off
+instruction.
+
 ## Observability & hygiene
 
 - `/stats` — lessons, interactions, outcomes, token ledgers by tier.

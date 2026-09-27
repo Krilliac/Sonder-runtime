@@ -432,3 +432,30 @@ def test_diagnostics_manifest_and_improvement_expose_autopilot(monkeypatch, tmp_
     assert "/autopilot" in server.command_registry_list("agents")
     report = server.improvement_report_data()
     assert "autopilot" in report
+
+
+def test_cancel_of_an_active_run_acknowledges_the_pending_request():
+    # Live repro: `/autopilot cancel <id>` during a task echoed the run as
+    # "status/phase: running / execute" with no acknowledgment, which reads
+    # as if the cancel was ignored; the terminal state arrives only at the
+    # next host checkpoint.
+    import os
+
+    run = autopilot_store.create_run("cancel ack drill")
+    assert autopilot_store.claim_run(run["id"], "owner-a", owner_pid=os.getpid())
+    output = server._autopilot_cancel(run["id"])
+    assert output.startswith("autopilot cancellation requested")
+    assert "next host checkpoint" in output
+    assert "id: %s" % run["id"] in output
+
+
+def test_cancel_of_an_idle_run_reports_it_cancelled():
+    run = autopilot_store.create_run("idle cancel drill")
+    output = server._autopilot_cancel(run["id"])
+    assert output.startswith("autopilot cancelled")
+    assert "cancelled / cancelled" in output
+
+
+def test_cancel_of_a_missing_run_is_rejected():
+    output = server._autopilot_cancel("auto-missing")
+    assert output.startswith("autopilot request rejected")

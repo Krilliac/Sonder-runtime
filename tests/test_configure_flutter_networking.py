@@ -27,9 +27,9 @@ def test_configures_generated_android_and_apple_projects(tmp_path):
 
     assert manifest in changed
     assert 'android:usesCleartextTraffic="true"' in manifest.read_text(encoding="utf-8")
-    assert 'android:label="Sonder Runtime"' in manifest.read_text(encoding="utf-8")
+    assert 'android:label="Sonder"' in manifest.read_text(encoding="utf-8")
     assert "NSLocalNetworkUsageDescription" in plist.read_text(encoding="utf-8")
-    assert "Sonder Runtime" in plist.read_text(encoding="utf-8")
+    assert "<string>Sonder</string>" in plist.read_text(encoding="utf-8")
 
 
 def test_configures_exact_native_identity_and_desktop_executable(tmp_path):
@@ -111,22 +111,22 @@ def test_configures_exact_native_identity_and_desktop_executable(tmp_path):
     assert 'set(BINARY_NAME "sonder")' in windows_cmake.read_text(
         encoding="utf-8"
     )
-    assert 'window.Create(L"Sonder Runtime"' in windows_main.read_text(
+    assert 'window.Create(L"Sonder"' in windows_main.read_text(
         encoding="utf-8"
     )
     resource_text = windows_resources.read_text(encoding="utf-8")
-    assert 'VALUE "FileDescription", "Sonder Runtime"' in resource_text
+    assert 'VALUE "FileDescription", "Sonder"' in resource_text
     assert 'VALUE "OriginalFilename", "sonder.exe"' in resource_text
     linux_text = linux_runner.read_text(encoding="utf-8")
     assert 'g_application_new("com.sonder.runtime"' in linux_text
-    assert 'gtk_window_set_title(window, "Sonder Runtime")' in linux_text
+    assert 'gtk_window_set_title(window, "Sonder")' in linux_text
     project_text = apple_project.read_text(encoding="utf-8")
     assert "PRODUCT_BUNDLE_IDENTIFIER = com.sonder.runtime;" in project_text
     assert (
         "PRODUCT_BUNDLE_IDENTIFIER = com.sonder.runtime.RunnerTests;"
         in project_text
     )
-    assert "PRODUCT_NAME = Sonder Runtime" in app_info.read_text(encoding="utf-8")
+    assert "PRODUCT_NAME = Sonder\n" in app_info.read_text(encoding="utf-8")
     assert "PRODUCT_BUNDLE_IDENTIFIER = com.sonder.runtime" in app_info.read_text(
         encoding="utf-8"
     )

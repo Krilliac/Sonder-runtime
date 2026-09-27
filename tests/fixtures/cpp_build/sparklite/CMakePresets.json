@@ -1,0 +1,32 @@
+{
+  "version": 6,
+  "include": ["presets/common.json"],
+  "configurePresets": [
+    {
+      "name": "ninja-debug",
+      "inherits": "base",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/ninja-debug",
+      "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug"}
+    },
+    {
+      "name": "make-debug",
+      "inherits": "base",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/make-debug",
+      "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug"}
+    },
+    {
+      "name": "ninja-unity",
+      "inherits": "base",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/ninja-unity",
+      "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug", "CMAKE_UNITY_BUILD": "ON"}
+    }
+  ],
+  "buildPresets": [
+    {"name": "ninja-debug", "configurePreset": "ninja-debug"},
+    {"name": "make-debug", "configurePreset": "make-debug"},
+    {"name": "ninja-unity", "configurePreset": "ninja-unity"}
+  ]
+}
