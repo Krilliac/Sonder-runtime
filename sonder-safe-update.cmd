@@ -21,15 +21,21 @@ if not defined PRE_HEAD (
 )
 set "PRE_BRANCH="
 for /f "delims=" %%B in ('git symbolic-ref --quiet --short HEAD 2^>nul') do set "PRE_BRANCH=%%B"
-set "STAMP=%DATE:/=-%-%TIME::=-%"
-set "STAMP=%STAMP: =0%"
+set "STASH_TAG="
+for /f "delims=" %%G in ('powershell -NoProfile -Command "[guid]::NewGuid().ToString('N')"') do set "STASH_TAG=sonder gui update backup %%G"
 git status --porcelain > "%TEMP%\sonder-git-status.txt"
 for %%A in ("%TEMP%\sonder-git-status.txt") do set "STATUS_SIZE=%%~zA"
 set "STASHED=0"
 set "STASH_SHA="
 if not "%STATUS_SIZE%"=="0" (
+  if not defined STASH_TAG (
+    echo ERROR: could not create a unique stash tag. Refusing to update.
+    del "%TEMP%\sonder-git-status.txt" >nul 2>nul
+    popd >nul
+    exit /b 1
+  )
   echo [sonder] saving local edits before update...
-  git stash push --include-untracked -m "sonder gui update backup %STAMP%"
+  git stash push --include-untracked -m "%STASH_TAG%"
   if errorlevel 1 (
     echo ERROR: could not save local edits. Commit or move them, then retry.
     del "%TEMP%\sonder-git-status.txt" >nul 2>nul
@@ -37,7 +43,7 @@ if not "%STATUS_SIZE%"=="0" (
     exit /b 1
   )
   set "STASHED=1"
-  for /f "delims=" %%S in ('git rev-parse -q --verify refs/stash') do set "STASH_SHA=%%S"
+  for /f "tokens=1 delims=:" %%S in ('git stash list --format^=%%H:%%gs ^| findstr /C:"%STASH_TAG%"') do set "STASH_SHA=%%S"
 )
 del "%TEMP%\sonder-git-status.txt" >nul 2>nul
 rem Address our stash entry by SHA, never the positional stash@{0}: the stash

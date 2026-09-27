@@ -1,6 +1,9 @@
+import os
 import shutil
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -10,6 +13,13 @@ import safe_update
 # create a directory in the global object namespace), so these tests run in
 # the separately reported medium-integrity selfmod gate.
 pytestmark = pytest.mark.requires_medium_integrity
+
+
+@pytest.fixture
+def checkout_tmp_path():
+    """Keep the Windows updater integration case inside this checkout."""
+    with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as root:
+        yield Path(root)
 
 
 def git(cwd, *args):
@@ -280,3 +290,75 @@ def test_windows_script_success_path_restores_edits_and_drops_only_its_stash(
     stashes = git(clone, "stash", "list").stdout
     assert "other session backup" in stashes
     assert "sonder gui update backup" not in stashes
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="cmd.exe script")
+def test_windows_script_identifies_own_stash_after_concurrent_push(checkout_tmp_path):
+    """A foreign stash pushed before lookup must stay untouched."""
+    tmp_path = checkout_tmp_path
+    script = Path(safe_update.__file__).with_name("sonder-safe-update.cmd")
+    # A batch script must use CALL when its Git executable is a test .cmd shim.
+    (tmp_path / script.name).write_text(
+        script.read_text(encoding="utf-8").replace("git ", "call git "),
+        encoding="utf-8",
+    )
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    (shim / "git.cmd").write_text(
+        "@echo off\n"
+        "echo %*>> calls.log\n"
+        'if "%1 %2"=="rev-parse --is-inside-work-tree" goto inside\n'
+        'if "%1 %2"=="rev-parse HEAD" goto head\n'
+        'if "%1 %2"=="symbolic-ref --quiet" goto branch\n'
+        'if "%1 %2"=="status --porcelain" goto status\n'
+        'if "%1 %2"=="stash push" goto push\n'
+        'if "%1 %2 %3 %4"=="rev-parse -q --verify refs/stash" goto foreign\n'
+        'if "%1 %2"=="stash list" goto list\n'
+        "exit /b 0\n"
+        ":inside\n"
+        "echo true\n"
+        "exit /b 0\n"
+        ":head\n"
+        "echo prehead\n"
+        "exit /b 0\n"
+        ":branch\n"
+        "echo main\n"
+        "exit /b 0\n"
+        ":status\n"
+        "echo M local.txt\n"
+        "exit /b 0\n"
+        ":push\n"
+        "echo %5> stash-message.txt\n"
+        "exit /b 0\n"
+        ":foreign\n"
+        "echo FOREIGN\n"
+        "exit /b 0\n"
+        ":list\n"
+        "if exist listed-once.txt goto hashes\n"
+        "echo yes> listed-once.txt\n"
+        "set /p STASH_MSG=< stash-message.txt\n"
+        "echo FOREIGN:On main: other session backup\n"
+        "echo OURS:On main: %STASH_MSG%\n"
+        "exit /b 0\n"
+        ":hashes\n"
+        "echo FOREIGN\n"
+        "echo OURS\n"
+        "exit /b 0\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["PATH"] = str(shim) + os.pathsep + env["PATH"]
+    env["TEMP"] = str(tmp_path)
+    env["TMP"] = str(tmp_path)
+    proc = subprocess.run(
+        ["cmd.exe", "/d", "/c", str(tmp_path / script.name)],
+        cwd=str(tmp_path), env=env, text=True, capture_output=True,
+        timeout=300, check=False,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "stash apply OURS" in calls
+    assert "stash apply FOREIGN" not in calls
+    assert 'stash drop "stash@{1}"' in calls
+    assert 'stash drop "stash@{0}"' not in calls
