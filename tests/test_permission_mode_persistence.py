@@ -72,14 +72,21 @@ def test_lowering_that_cannot_be_written_is_reported_and_never_restores_higher(
     assert [p.name for p in state_file.parent.iterdir() if ".tmp-" in p.name] == []
 
 
-def test_lowering_with_an_unwritable_stale_file_is_reported(state_file):
+def test_lowering_with_an_unwritable_stale_file_is_reported(state_file, monkeypatch):
     pm.set_mode(pm.AUTO)
-    os.chmod(state_file, stat.S_IREAD)
-    if os.access(state_file, os.W_OK) and os.name != "nt":
-        pytest.skip("filesystem ignores the read-only bit for this user")
+
+    def refuse(*_args, **_kwargs):
+        # Portable stand-in for a state file that cannot be replaced: on POSIX
+        # a read-only file is still replaceable (rename needs directory write).
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(pm.os, "replace", refuse)
     with pytest.raises(pm.ModePersistenceError):
         pm.set_mode(pm.MANUAL)
     assert pm.current_mode() == pm.MANUAL
+    monkeypatch.undo()
+    # The stale higher mode was removed, so a restart falls back to the default.
+    assert _restart() == pm.DEFAULT_MODE
 
 
 def test_raise_that_cannot_be_written_is_refused_and_rolled_back(state_file, monkeypatch):
