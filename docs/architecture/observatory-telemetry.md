@@ -119,8 +119,12 @@ EventSink -> LocalObservabilitySink -> TeeEventSink(OperationsEventSink,
   would give two events the same `event_id`. Consumers treat a new instance
   like a restart (contract section 14).
 - `event_id` is `<instance_id>-<sequence>`; sequences are contiguous from 0.
-  `mono_ns` is `time.monotonic_ns()` (Linux `CLOCK_MONOTONIC`, shared with
-  Sonder-Inference on the same host), read under the same lock that assigns
+  `mono_ns` is the host-monotonic clock shared with Sonder-Inference on the
+  same host: `time.monotonic_ns()` (`CLOCK_MONOTONIC`) on Linux and
+  `time.perf_counter_ns()` (QueryPerformanceCounter, what MSVC
+  `steady_clock` reads) on Windows, where CPython before 3.13 backs
+  `time.monotonic_ns()` with the coarser, offset `GetTickCount64`. It is
+  read under the same lock that assigns
   `sequence`, so ordering by `(mono_ns, sequence)` (Observatory's replay
   order) agrees with ordering by `sequence`.
   `wall_time` is RFC 3339 UTC with milliseconds and `Z`. `node_id` is the
