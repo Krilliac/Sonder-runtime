@@ -210,6 +210,28 @@ def test_an_unattended_refusal_names_the_call_and_notes_it_as_pending(ledger, si
     assert "hello" not in json.dumps(detail) and "notes.txt" not in json.dumps(detail)
 
 
+def test_compute_submit_pending_preview_hides_job_environment_and_arguments(ledger):
+    arguments = {
+        "request_id": "private-build",
+        "workload": "build",
+        "environment": {"LICENSE_VALUE": "private-abcdef"},
+        "arguments": ["--license=private-ghijkl"],
+    }
+    refused = pm.decide("compute_submit", interactive=False, surface="native-mcp",
+                        arguments=arguments)
+    assert refused.action == pm.DENY
+    assert refused.call_id == pm.call_id(pm.call_digest("compute_submit", arguments))
+
+    pending = ledger.pending()
+    assert len(pending) == 1
+    assert pending[0].preview == (
+        "arguments=<1 items> environment=<1 items> request_id=private-build workload=build"
+    )
+    assert pm.call_digest("compute_submit", {
+        **arguments, "environment": {"LICENSE_VALUE": "private-changed"},
+    }) != pm.call_digest("compute_submit", arguments)
+
+
 def test_an_approval_answers_the_next_unchanged_call_once(ledger):
     refused = pm.decide("file_write", interactive=False, surface="mcp", arguments=CALL)
     assert refused.action == pm.DENY

@@ -222,6 +222,67 @@ def test_windows_token_requires_observed_empty_job_before_close(monkeypatch):
     assert calls == ["terminate", "close"]
 
 
+def test_windows_forced_cleanup_reports_bounded_owned_pids(monkeypatch):
+    from sonder_runtime.adapters.extensions.memory_limits import _WindowsJobToken
+
+    calls = []
+    observations = iter([(2, (258,)), (0, (0,))])
+    token = _WindowsJobToken(
+        123,
+        lambda handle: True,
+        terminate=lambda handle: calls.append("terminate") or True,
+    )
+
+    def observe():
+        token._last_member_pids = (111, 222)
+        token._last_member_images = ((111, "cmake.exe"), (222, "msbuild.exe"))
+        return next(observations)
+
+    monkeypatch.setattr(token, "_observe", observe)
+    proof = token.quiesce(force=True)
+    assert proof.complete and proof.forced
+    assert proof.detail == "observed before forced cleanup: 111=cmake.exe,222=msbuild.exe"
+    assert calls == ["terminate"]
+
+
+def test_windows_forced_cleanup_diagnostic_is_bounded_and_unknown_safe(monkeypatch):
+    from sonder_runtime.adapters.extensions.memory_limits import _WindowsJobToken
+
+    observations = iter([(1, (258,)), (0, (0,))])
+    token = _WindowsJobToken(123, lambda handle: True, terminate=lambda handle: True)
+
+    def observe():
+        token._last_member_pids = (7,)
+        token._last_member_images = ((7, "?" * 512),)
+        return next(observations)
+
+    monkeypatch.setattr(token, "_observe", observe)
+    proof = token.quiesce(force=True)
+    assert proof.complete and proof.forced
+    assert proof.detail.startswith("observed before forced cleanup: 7=")
+    assert len(proof.detail) <= 4096
+    assert len(proof.detail.split("=", 1)[1]) <= 128
+
+
+def test_windows_repeated_observation_preserves_verified_member_image():
+    from sonder_runtime.adapters.extensions.memory_limits import _WindowsJobToken
+
+    token = _WindowsJobToken(123, lambda handle: True)
+    calls = []
+    lookup = lambda pid: calls.append(pid) or "cmake.exe"
+    token._remember_member_images((111,), lookup)
+    token._remember_member_images((111,), lookup)
+    assert calls == [111]
+    assert token._last_member_images == ((111, "cmake.exe"),)
+
+
+def test_windows_forced_cleanup_diagnostic_reduces_injected_path_to_basename():
+    from sonder_runtime.adapters.extensions.memory_limits import _WindowsJobToken
+
+    detail = _WindowsJobToken._forced_cleanup_detail(((7, r"C:\\build\\cmake.exe"),))
+    assert detail == "observed before forced cleanup: 7=cmake.exe"
+
+
 def test_windows_token_query_failure_does_not_claim_empty_or_drop_handle(monkeypatch):
     from sonder_runtime.adapters.extensions.memory_limits import _WindowsJobToken
 
