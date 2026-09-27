@@ -86,6 +86,25 @@ def require_epoch_2(sonder_home: Path) -> None:
         )
 
 
+# Every store a pre-SPEC-5 home could hold; none of them means nothing to adopt.
+_LEGACY_STATE = EPOCH2_DATABASES + ("autopilot.db", "fleet.db", "updates.db")
+
+
+def stamp_fresh_home(sonder_home: Path, version: str = "fresh-install") -> bool:
+    """Create a brand-new home at epoch 2; ``False`` when any state exists.
+
+    ``require_epoch_2`` lets a home without ``memory.db`` through as a fresh
+    install, so the caller must stamp it before creating any store: a store
+    created without the marker makes the next start refuse the home.  This
+    is the bridge's fresh-install path (no legacy data, nothing to back up).
+    """
+    if any((sonder_home / name).exists() for name in _LEGACY_STATE):
+        return False
+    sonder_home.mkdir(parents=True, exist_ok=True)
+    run_bridge_migration(sonder_home, version=version)
+    return True
+
+
 def _sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:

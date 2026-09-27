@@ -509,4 +509,10 @@ def migrate_all(*, busy_timeout_ms: int = 5000) -> dict[str, StoreStatus]:
 
 
 def status_all() -> dict[str, StoreStatus]:
-    return {store: status(store, path) for store, path in store_db_paths().items()}
+    # Read-only: preflight, diagnostics and health call this before (or
+    # instead of) migrating.  Opening each store read-write created a
+    # marker-less memory.db on a fresh home ahead of the epoch gate.
+    return {
+        store: status_read_only(store, path)
+        for store, path in store_db_paths().items()
+    }
