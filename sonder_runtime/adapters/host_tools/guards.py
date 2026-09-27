@@ -97,20 +97,27 @@ _OPEN_FLAGS = 0x02000000 | 0x00200000
 def _windows_can_open(path: str, access: int) -> bool:
     """Whether this token is granted *access* on *path*; errors count as yes."""
     try:
-        import pywintypes
-        import win32file
-    except ImportError:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    except (ImportError, OSError, AttributeError):
         return True
-    try:
-        handle = win32file.CreateFile(
-            path, access, _SHARE_ALL, None, _OPEN_EXISTING, _OPEN_FLAGS, None,
-        )
-    except pywintypes.error as error:
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel32.CreateFileW(
+        path, access, _SHARE_ALL, None, _OPEN_EXISTING, _OPEN_FLAGS, None,
+    )
+    if handle is None or handle == wintypes.HANDLE(-1).value:
         # Access is checked before sharing, so any other refusal (a sharing
         # violation on a running image included) does not show the right is
         # missing -- fail closed.
-        return error.winerror != _ERROR_ACCESS_DENIED
-    handle.Close()
+        return ctypes.get_last_error() != _ERROR_ACCESS_DENIED
+    kernel32.CloseHandle(handle)
     return True
 
 
