@@ -21,6 +21,9 @@ def _clear_provider_env(monkeypatch):
                  "SONDER_CODE_PROVIDER", "SONDER_REASONING_PROVIDER", "SONDER_VISION_PROVIDER",
                  "SONDER_INFERENCE_MODEL", "SONDER_INFERENCE_TIER_MODELS"):
         monkeypatch.delenv(name, raising=False)
+    # A live app graph (built by any earlier test) carries its own provider
+    # bindings, which win over the environment these tests set.
+    monkeypatch.setattr(server, "_APP_GRAPH", None)
 
 
 def _capture_prompt_model(monkeypatch):
