@@ -10,12 +10,19 @@ it continues from, so the operator remedy for a full audit is nothing --
 the repository rotates itself -- and an unbounded audit can never grow
 silently.  Rotation can be switched off, in which case a full audit fails
 the call closed, as the audit boundary promises.
+
+Rotated chains share an aggregate retention quota (a file count and a byte
+total).  By default the oldest rotated chains are pruned to make room and
+the next chain's first record names what was pruned, so the deletion is
+itself on the record; with ``prune_rotated`` off, a full quota fails the
+call closed instead of deleting evidence.
 """
 from __future__ import annotations
 
 import hashlib
 import itertools
 import json
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -36,6 +43,10 @@ class ToolAuditLimits:
     max_records: int = 4096
     max_bytes: int = 8 * 1024 * 1024
     rotate: bool = True
+    # Aggregate bound over rotated chains: 32 x 8 MiB by default.
+    max_rotated_files: int = 32
+    max_rotated_bytes: int = 256 * 1024 * 1024
+    prune_rotated: bool = True
 
 
 def _digest(value: dict[str, Any]) -> str:
@@ -71,6 +82,13 @@ class DurableToolAuditRepository:
         self.limits = limits or ToolAuditLimits()
         if self.limits.max_records < 1 or self.limits.max_bytes < 256:
             raise ValueError("tool audit limits must be positive and usable")
+        if (self.limits.max_rotated_files < 1
+                or self.limits.max_rotated_bytes < self.limits.max_bytes):
+            raise ValueError(
+                "tool audit retention must keep at least one full rotated file")
+        self._rotated_name = re.compile(
+            r"%s\.\d{8}T\d{6}Z(?:\.\d+)?%s\Z"
+            % (re.escape(self.path.stem), re.escape(self.path.suffix)))
         self._lock = threading.Lock()
 
     def append(self, request: ToolGatewayRequest, receipt: ToolReceipt) -> None:
@@ -83,8 +101,11 @@ class DurableToolAuditRepository:
                     raise
                 # A file this repository cannot read is not evidence it can
                 # extend; set it aside and start a chain it can vouch for.
+                pruned = self._make_room()
                 rotated_from = {"path": self._rotate(), "audit_digest": "",
                                 "records": None, "reason": "unreadable"}
+                if pruned:
+                    rotated_from["pruned"] = pruned
                 entries = []
             previous = entries[-1]["audit_digest"] if entries else ""
             line = self._line(request, receipt, previous, rotated_from)
@@ -96,9 +117,12 @@ class DurableToolAuditRepository:
                     raise ToolAuditError(
                         "tool audit record bound exceeded" if over_records
                         else "tool audit byte bound exceeded")
+                pruned = self._make_room()
                 rotated_from = {"path": self._rotate(), "audit_digest": previous,
                                 "records": len(entries),
                                 "reason": "records" if over_records else "bytes"}
+                if pruned:
+                    rotated_from["pruned"] = pruned
                 line = self._line(request, receipt, "", rotated_from)
                 current = b""
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -153,6 +177,44 @@ class DurableToolAuditRepository:
         return (json.dumps(safe, sort_keys=True, ensure_ascii=False,
                            separators=(",", ":")) + "\n").encode("utf-8")
 
+    def _make_room(self) -> list[str]:
+        """Keep the rotated chains within quota once the current file joins them.
+
+        Returns the names pruned (oldest first).  With pruning disabled a
+        full quota raises instead, before anything is rotated or deleted.
+        """
+        incoming = self.path.stat().st_size if self.path.exists() else 0
+        if not incoming:
+            return []
+        rotated = []
+        for candidate in self.rotated_files():
+            try:
+                stat = candidate.stat()
+            except OSError:
+                continue
+            rotated.append((stat.st_mtime_ns, candidate.name, candidate, stat.st_size))
+        rotated.sort()
+        count = len(rotated) + 1
+        total = sum(item[3] for item in rotated) + incoming
+        pruned: list[str] = []
+        while rotated and (count > self.limits.max_rotated_files
+                           or total > self.limits.max_rotated_bytes):
+            if not self.limits.prune_rotated:
+                raise ToolAuditError(
+                    "tool audit retention quota exhausted (%d rotated files, "
+                    "%d bytes); pruning is disabled" % (len(rotated), total - incoming))
+            _mtime, name, candidate, size = rotated.pop(0)
+            try:
+                candidate.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                raise ToolAuditError("tool audit retention could not prune %s" % name) from exc
+            pruned.append(name)
+            count -= 1
+            total -= size
+        return pruned
+
     def _rotate(self) -> str:
         """Move the current file aside under a UTC stamp; return its new name."""
         if not self.path.exists():
@@ -192,7 +254,7 @@ class DurableToolAuditRepository:
         pattern = "%s.*%s" % (self.path.stem, self.path.suffix)
         return tuple(sorted(
             candidate for candidate in self.path.parent.glob(pattern)
-            if candidate != self.path
+            if candidate != self.path and self._rotated_name.match(candidate.name)
         )) if self.path.parent.exists() else ()
 
     def verify(self) -> None:
