@@ -28,6 +28,12 @@ COMMANDS = [
         "summary": "Show context, summary, memory, and session health.",
     },
     {
+        "name": "/prompts",
+        "category": "inspect",
+        "risk": "safe",
+        "summary": "List, show, or locate the editable system/agent prompt files; reload re-reads them.",
+    },
+    {
         "name": "/contextsize",
         "category": "context",
         "risk": "safe",

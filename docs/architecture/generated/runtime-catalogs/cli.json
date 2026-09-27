@@ -1297,6 +1297,12 @@
       "summary": "Inventory guarded project manifests and evidence-backed command candidates."
     },
     {
+      "category": "persona",
+      "name": "/prompts",
+      "risk": "safe",
+      "summary": "List, show, or locate the editable system/agent prompt files; reload re-reads them."
+    },
+    {
       "category": "memory",
       "name": "/quality",
       "risk": "safe",
