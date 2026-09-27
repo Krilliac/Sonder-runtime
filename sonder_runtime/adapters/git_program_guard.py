@@ -52,7 +52,17 @@ class GitProgramConfigError(ValueError):
 
 
 def static_overrides() -> list[str]:
-    """Overrides that apply whatever the repository configures."""
+    """Overrides that apply whatever the repository configures.
+
+    Command-line ``-c`` values reach child git processes that run inside
+    submodules (through ``GIT_CONFIG_PARAMETERS``), so these also hold there.
+    The submodule settings stop ``status``/``diff``/``checkout``/``merge``/
+    ``fetch`` from descending into submodules at all: a child git in a
+    submodule reads the SUBMODULE's own config, whose drivers the
+    superproject probe never sees.  ``git add`` still inspects populated
+    submodules; callers that run it also apply
+    :func:`submodule_driver_overrides`.
+    """
     return [
         "-c", "core.hooksPath=" + os.devnull,
         "-c", "core.fsmonitor=false",
@@ -60,6 +70,11 @@ def static_overrides() -> list[str]:
         "-c", "commit.gpgSign=false",
         "-c", "tag.gpgSign=false",
         "-c", "tag.forceSignAnnotated=false",
+        "-c", "submodule.recurse=false",
+        "-c", "diff.ignoreSubmodules=all",
+        "-c", "diff.submodule=short",
+        "-c", "status.submoduleSummary=false",
+        "-c", "fetch.recurseSubmodules=false",
     ]
 
 
@@ -118,3 +133,73 @@ def neutralized_git_arguments(
         raise GitProgramConfigError("git driver configuration is too large to neutralize safely")
     stdout = str(probe.get("stdout") or "")
     return static_overrides() + driver_overrides(stdout.split("\x00"))
+
+
+# Arguments (after ``git`` and :func:`static_overrides`) that list index
+# entries; gitlinks (mode 160000) are the submodules git may descend into.
+GITLINK_PROBE_ARGUMENTS = ("ls-files", "-z", "--stage")
+MAX_SUBMODULES = 64
+MAX_SUBMODULE_DEPTH = 8
+
+
+def gitlink_paths(listing: str) -> list[str]:
+    """Paths of gitlink entries in ``git ls-files -z --stage`` output."""
+    paths = []
+    for record in listing.split("\x00"):
+        meta, tab, path = record.partition("\t")
+        if tab and meta.split(" ", 1)[0] == "160000":
+            paths.append(path)
+    return paths
+
+
+def _checked_probe(probe, what: str, *, accept=(0,)) -> str:
+    if probe.get("timed_out"):
+        raise GitProgramConfigError("git %s probe timed out" % what)
+    if probe.get("returncode") not in accept:
+        detail = str(probe.get("stderr") or probe.get("stdout") or "").strip()
+        raise GitProgramConfigError(
+            "git %s could not be read: %s" % (what, detail or "no diagnostic")
+        )
+    if probe.get("truncated"):
+        raise GitProgramConfigError("git %s is too large to neutralize safely" % what)
+    return str(probe.get("stdout") or "")
+
+
+def submodule_driver_overrides(
+    run_probe_at: Callable[[str, list[str]], Mapping[str, object] | None],
+) -> list[str]:
+    """Built-in replacements for drivers configured inside populated submodules.
+
+    ``git add`` runs ``git status`` inside every populated submodule whatever
+    the ignore settings say, and that child reads the submodule's own
+    ``.git/config``.  Command-line overrides propagate into the child, so
+    neutralizing the submodules' driver names here covers it.
+
+    ``run_probe_at(relative_path, arguments)`` runs git in the repository
+    checked out at ``relative_path`` (``""`` is the root repository) and
+    returns the same mapping as ``neutralized_git_arguments``'s probe, or
+    ``None`` when no repository is checked out there.  Nested submodules are
+    followed; more than :data:`MAX_SUBMODULES` or deeper than
+    :data:`MAX_SUBMODULE_DEPTH` raises :class:`GitProgramConfigError`.
+    """
+    keys: list[str] = []
+    pending = [("", 0)]
+    visited = 0
+    while pending:
+        relative, depth = pending.pop()
+        listing = run_probe_at(relative, [*static_overrides(), *GITLINK_PROBE_ARGUMENTS])
+        if listing is None:
+            continue
+        for path in gitlink_paths(_checked_probe(listing, "submodule list")):
+            child = "%s/%s" % (relative, path) if relative else path
+            visited += 1
+            if visited > MAX_SUBMODULES or depth + 1 > MAX_SUBMODULE_DEPTH:
+                raise GitProgramConfigError("too many nested submodules to neutralize safely")
+            probe = run_probe_at(child, list(CONFIG_PROBE_ARGUMENTS))
+            if probe is None:
+                continue
+            keys.extend(_checked_probe(
+                probe, "submodule driver configuration", accept=(0, 1),
+            ).split("\x00"))
+            pending.append((child, depth + 1))
+    return driver_overrides(keys)

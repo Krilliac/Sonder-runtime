@@ -1193,17 +1193,24 @@ class SubprocessJobProvider:
         )
         with self._timer_lock:
             self._output_batchers[job_id] = batcher
-        persister.start()
+        try:
+            persister.start()
+        except BaseException:
+            with self._timer_lock:
+                self._output_batchers.pop(job_id, None)
+            raise
         threads: list[threading.Thread] = [persister]
         try:
             for index, (stream_name, stream) in enumerate(pipes):
-                reader = owned_runtime_thread(
-                    target=self._read_output,
-                    args=(job_id, stream_name, stream, batcher),
-                    name=f"sonder-job-output-{job_id}-{stream_name.value}",
-                    daemon=True,
-                )
                 try:
+                    # Creation can refuse as well as start(): either way the
+                    # persister must not wait for writers that will never run.
+                    reader = owned_runtime_thread(
+                        target=self._read_output,
+                        args=(job_id, stream_name, stream, batcher),
+                        name=f"sonder-job-output-{job_id}-{stream_name.value}",
+                        daemon=True,
+                    )
                     reader.start()
                 except BaseException:
                     # Readers that never started cannot report end of file.
