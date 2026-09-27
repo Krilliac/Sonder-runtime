@@ -1,0 +1,26 @@
+[1/11] Building CXX object CMakeFiles/crash_test.dir/tests/crash_test.cpp.o
+[2/11] Linking CXX executable crash_test
+[3/11] Building CXX object CMakeFiles/core.dir/cmake_pch.hxx.pch
+[4/11] Building CXX object CMakeFiles/shadergen.dir/tools/shadergen.cpp.o
+[5/11] Building CXX object CMakeFiles/core.dir/src/core/entity.cpp.o
+[6/11] Linking CXX executable shadergen
+[7/11] Generating shaders.h
+[8/11] Building CXX object CMakeFiles/game.dir/src/game/main.cpp.o
+FAILED: CMakeFiles/game.dir/src/game/main.cpp.o 
+/usr/bin/clang++  -I/work/sparklite/build/clang/generated -I/work/sparklite/src/core -g -std=gnu++17 -MD -MT CMakeFiles/game.dir/src/game/main.cpp.o -MF CMakeFiles/game.dir/src/game/main.cpp.o.d -o CMakeFiles/game.dir/src/game/main.cpp.o -c /work/sparklite/src/game/main.cpp
+/work/sparklite/src/game/main.cpp:10:60: error: no member named 'pos' in 'Entity'
+   10 |     std::printf("%s %f\n", kBasicShaderName, length(player.pos));
+      |                                                     ~~~~~~ ^
+1 error generated.
+[9/11] Building CXX object CMakeFiles/core.dir/src/core/math.cpp.o
+FAILED: CMakeFiles/core.dir/src/core/math.cpp.o 
+/usr/bin/clang++  -I/work/sparklite/src/core -g -std=gnu++17 -Winvalid-pch -Xclang -include-pch -Xclang /work/sparklite/build/clang/CMakeFiles/core.dir/cmake_pch.hxx.pch -Xclang -include -Xclang /work/sparklite/build/clang/CMakeFiles/core.dir/cmake_pch.hxx -MD -MT CMakeFiles/core.dir/src/core/math.cpp.o -MF CMakeFiles/core.dir/src/core/math.cpp.o.d -o CMakeFiles/core.dir/src/core/math.cpp.o -c /work/sparklite/src/core/math.cpp
+/work/sparklite/src/core/math.cpp:19:15: error: use of undeclared identifier 'lenght'; did you mean 'length'?
+   19 |     float l = lenght(v);
+      |               ^~~~~~
+      |               length
+/work/sparklite/src/core/math.cpp:14:7: note: 'length' declared here
+   14 | float length(const Vec3& v) {
+      |       ^
+1 error generated.
+ninja: build stopped: cannot make progress due to previous errors.

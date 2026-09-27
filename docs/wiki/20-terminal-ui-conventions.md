@@ -96,6 +96,72 @@ versioned and additive-only. Interactive terminals ignore the flag.
 - Raw composer history (Up/Down, Ctrl+R) is process-local and never
   persisted; credential-bearing lines are excluded (`_history_safe()`).
 
+## Usage errors before the permission gate
+
+- A line a command can only answer with its usage text (`/register` with
+  no password, `/todo bogus`, `/fact forget` without `<id> confirm`,
+  `/mcp bogus`, `/run abc`, a bare `/read`) prints that usage without
+  reaching the permission gate, so nobody is asked to approve, or is
+  refused, a command that would not have run anything
+  (`_branch_usage_error()` in `interfaces/repl/repl.py`). Well-formed
+  lines are gated exactly as before.
+- Catalogued `/tool` lines reject positional words beyond what the
+  command's parameters take (`/status detail` answers
+  `/status: unexpected argument 'detail'. usage: /status`). The excess
+  words used to be dropped silently. A single free-text parameter still
+  takes the whole remainder.
+
+- `/help <command>` shows a `policy:` line when a standing permission
+  rule refuses a tool the command reaches. For example, `/delete` is a
+  hard-coded dry run and is graded `risk: safe`, but the shipped
+  `file_delete` deny rule refuses it in every mode, and help now says so.
+  The rule is not relaxed for the dry run.
+
+## Workspace scope for file commands
+
+- With a `/workspace` selected, `/files`, `/read`, `/write`, `/append`,
+  `/edit`, `/mkdir`, and `/delete` resolve relative paths against that
+  directory instead of the process cwd, and refuse any path whose
+  canonical form (symlinks followed) leaves it. The file layer also caps
+  its roots at the workspace for the command
+  (`file_ops.managed_root_scope`), so a path swapped for a link between
+  the two checks still cannot escape.
+- Selecting a workspace never grants file authority. A workspace outside
+  Sonder's file roots (`SONDER_FILE_ROOTS` or the roots file) is refused
+  for file commands with a message naming both. `/workspace clear`
+  returns the commands to the default roots.
+- `/work <task>` and `/agent <task>` run managed work only inside the
+  selected workspace. With none selected they print the same folder
+  question as a natural-language work request, hold the task, and run
+  it once `/workspace` or `/workspace-create` selects a directory. The
+  memory project name is never used as a directory.
+- When managed work raises a `PermissionError` or `ValueError`, the
+  console prints `ERROR: work refused: <reason>` and keeps running. The
+  reason is the exception's own message. Managed work uses these types for
+  its refusals, both before it starts (no selected project, an incomplete
+  workspace inventory or provenance, a malformed recovery identity) and
+  during the run (a grant, selection or inventory that changed under it).
+  The catch covers the whole managed call, though, so any exception of
+  those two types escaping the run is reported the same way. That includes
+  an `OSError` with `EACCES` and a `JSONDecodeError`, which may be faults
+  rather than refusals. Exceptions of any other type are not caught here.
+
+## Interrupting a turn
+
+- Ctrl-C while a turn runs cancels that turn and returns to the prompt;
+  the session keeps going. Each turn runs in its own scope of the
+  foreground cancellation tree
+  (`sonder_runtime/application/foreground_turns.py`); the SIGINT handler
+  cancels that scope before unwinding, so model requests and agent steps
+  for the turn are refused from then on even if a layer swallowed the
+  interrupt. Detached background work (autopilot runs, fleets) is not in
+  the turn's scope and keeps running; use `/autopilot cancel` or
+  `/agentcancel` for it.
+- A cancelled turn clears the per-turn handles: feedback, `/run`, and the
+  latest-answer views no longer point at the previous answer. The
+  activity feed records the turn as `cancelled`.
+- Ctrl-C (or Ctrl-D, or `/exit`) at the idle prompt ends the session.
+
 ## Observability surfaces (read-only)
 
 - `activity_tracker` (adapters/observability) is the response/tool

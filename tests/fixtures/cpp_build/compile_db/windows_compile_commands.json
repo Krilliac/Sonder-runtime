@@ -1,0 +1,25 @@
+[
+{
+  "directory": "C:\\src\\SparkLite\\build",
+  "command": "C:\\PROGRA~1\\MICROS~1\\2022\\COMMUN~1\\VC\\Tools\\MSVC\\1440~1.338\\bin\\Hostx64\\x64\\cl.exe  /nologo /TP -IC:\\src\\SparkLite\\src\\core /DWIN32 /D_WINDOWS /EHsc /Zi /Ob0 /Od /RTC1 -std:c++17 -MDd /YuC:/src/SparkLite/build/CMakeFiles/core.dir/cmake_pch.hxx /FpCMakeFiles\\core.dir\\cmake_pch.pch /FIC:/src/SparkLite/build/CMakeFiles/core.dir/cmake_pch.hxx /FoCMakeFiles\\core.dir\\src\\core\\math.cpp.obj /FdCMakeFiles\\core.dir\\core.pdb /FS -c C:\\src\\SparkLite\\src\\core\\math.cpp",
+  "file": "C:\\src\\SparkLite\\src\\core\\math.cpp",
+  "output": "CMakeFiles\\core.dir\\src\\core\\math.cpp.obj"
+},
+{
+  "directory": "C:\\src\\SparkLite\\build",
+  "command": "C:\\Users\\dev\\.cargo\\bin\\sccache.exe C:\\PROGRA~1\\MICROS~1\\2022\\COMMUN~1\\VC\\Tools\\MSVC\\1440~1.338\\bin\\Hostx64\\x64\\cl.exe  /nologo /TP -IC:\\src\\SparkLite\\src\\core -IC:\\src\\SparkLite\\build\\generated /DWIN32 \"/DSPARK_TITLE=\\\"Spark Lite\\\"\" /EHsc -std:c++20 /FIC:\\src\\SparkLite\\src\\core\\forced.h /B1C:\\evil\\c1.dll /d1reportAllClassLayout /FoCMakeFiles\\game.dir\\src\\game\\main.cpp.obj -c C:\\src\\SparkLite\\src\\game\\main.cpp",
+  "file": "C:\\src\\SparkLite\\src\\game\\main.cpp",
+  "output": "CMakeFiles\\game.dir\\src\\game\\main.cpp.obj"
+},
+{
+  "directory": "C:\\src\\SparkLite\\build",
+  "command": "C:\\PROGRA~1\\MICROS~1\\2022\\COMMUN~1\\VC\\Tools\\MSVC\\1440~1.338\\bin\\Hostx64\\x64\\cl.exe @CMakeFiles\\gen.dir\\gen.cpp.obj.rsp /FoCMakeFiles\\gen.dir\\gen.cpp.obj -c \"C:\\src\\SparkLite\\tools\\gen tool\\gen.cpp\"",
+  "file": "C:\\src\\SparkLite\\tools\\gen tool\\gen.cpp",
+  "output": "CMakeFiles\\gen.dir\\gen.cpp.obj"
+},
+{
+  "directory": "C:\\src\\SparkLite\\build",
+  "arguments": ["C:\\LLVM\\bin\\clang-cl.exe", "/nologo", "/TP", "/IC:\\src\\SparkLite\\src\\core", "/std:c++17", "/EHsc", "/Zc:__cplusplus", "/permissive-", "-Xclang", "-load", "-Xclang", "C:\\evil\\plugin.dll", "/B2C:\\evil\\c2.dll", "/c", "C:\\src\\SparkLite\\src\\core\\entity.cpp"],
+  "file": "C:\\src\\SparkLite\\src\\core\\entity.cpp"
+}
+]

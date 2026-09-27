@@ -27,6 +27,18 @@ def _backup_file(path):
     return backup
 
 
+def _config_source_path(module):
+    # Emotion vectors are read from the state-home copy or, failing that, the
+    # bundled default: report the file that was actually unreadable.
+    active = getattr(module, "active_path", None)
+    if callable(active):
+        try:
+            return active()
+        except Exception:
+            pass
+    return module.default_path()
+
+
 def _check_file_backed_config():
     issues = []
     for name, module, default_obj in (
@@ -44,7 +56,7 @@ def _check_file_backed_config():
         except Exception as exc:
             issues.append(Issue(
                 "%s_invalid" % name,
-                module.default_path(),
+                _config_source_path(module),
                 "%s: %s" % (exc.__class__.__name__, exc),
                 default_obj is not None,
             ))
@@ -89,14 +101,20 @@ def _check_venv():
     return issues
 
 
-def check(db_path, module_names=None):
+def check(db_path, module_names=None, *, connect=None):
+    """Report issues without repairing them.
+
+    ``connect`` opens the memory store; it defaults to ``memory_store.connect``
+    (which creates/migrates the schema). Strictly read-only callers such as
+    ``doctor`` pass ``memory_store.connect_read_only``.
+    """
     issues = []
     issues.extend(_check_file_backed_config())
     issues.extend(_check_venv())
     if module_names:
         issues.extend(_check_live_reload(module_names))
     try:
-        conn = memory_store.connect(db_path)
+        conn = (connect or memory_store.connect)(db_path)
         try:
             ok, store_issues = store_integrity.check_store(conn)
         finally:
@@ -121,7 +139,9 @@ def check(db_path, module_names=None):
 
 def _repair_file_backed_config(issue):
     if issue.code == "emotion_vectors_invalid":
-        path = emotion_vectors.default_path()
+        # Repair writes the live copy (state home or configured override),
+        # never the tracked bundled default, and backs up only that copy.
+        path = emotion_vectors._resolve_path(emotion_vectors.default_path())
         backup = _backup_file(path)
         emotion_vectors.write_vectors(emotion_vectors.DEFAULT_VECTORS)
         return "rewrote emotion vectors defaults%s" % ((" after backup %s" % backup) if backup else "")

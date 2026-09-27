@@ -7,10 +7,12 @@ and presentation live here so callers have one packaged implementation.
 from __future__ import annotations
 
 import importlib
+import math
 import re
 import urllib.parse
 
 from ..application.context import OperationContext
+from ..application.ports.web import WebToolsDisabled
 
 
 OPEN_METEO_GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
@@ -58,16 +60,19 @@ def _json_request(url, timeout=10):
 def _weather_condition(code):
     try:
         value = int(code)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return "Unknown conditions"
     return _WEATHER_CODES.get(value, "Weather code %d" % value)
 
 
 def _wind_direction(degrees):
     try:
-        value = float(degrees) % 360
+        value = float(degrees)
     except (TypeError, ValueError):
         return ""
+    if not math.isfinite(value):
+        return ""
+    value %= 360
     points = ("N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
               "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW")
     return points[int((value + 11.25) // 22.5) % len(points)]
@@ -84,7 +89,12 @@ def _weather_place(location, timeout):
             "name": query, "count": 10, "language": "en", "format": "json",
         }))
         geocode = _json_request(geocode_url, timeout=timeout)
-        matches = [match for match in (geocode.get("results") or []) if isinstance(match, dict)]
+        results = geocode.get("results")
+        if results is None:
+            results = []
+        if not isinstance(results, list):
+            raise ValueError("weather geocoder returned malformed results")
+        matches = [match for match in results if isinstance(match, dict)]
         if not matches:
             continue
 
@@ -98,9 +108,29 @@ def _weather_place(location, timeout):
     raise ValueError("no weather location matched %r" % location)
 
 
+_FORECAST_SECTIONS = ("current", "current_units", "daily", "daily_units")
+
+
+def _validate_forecast(forecast):
+    """Refuse a forecast whose sections do not have the documented shape.
+
+    Open-Meteo returns objects for each section and, under ``daily``, one
+    list per requested variable.  Anything else would otherwise fail later
+    as an unrelated ``TypeError``/``AttributeError`` while formatting.
+    """
+    for section in _FORECAST_SECTIONS:
+        value = forecast.get(section)
+        if value is not None and not isinstance(value, dict):
+            raise ValueError("weather service returned a malformed %s section" % section)
+    for key, values in (forecast.get("daily") or {}).items():
+        if values is not None and not isinstance(values, list):
+            raise ValueError("weather service returned a malformed daily %s series" % key)
+    return forecast
+
+
 def weather_lookup(location, forecast_days=3, units="auto", timeout=10):
     if not _web_tools().enabled():
-        raise RuntimeError("web tools disabled by SONDER_WEB_TOOLS")
+        raise WebToolsDisabled()
     location = re.sub(r"\s+", " ", str(location or "")).strip()
     if len(location) < 2:
         raise ValueError("location must be a city/region or postal code")
@@ -128,7 +158,7 @@ def weather_lookup(location, forecast_days=3, units="auto", timeout=10):
         params.update({"temperature_unit": "fahrenheit", "wind_speed_unit": "mph", "precipitation_unit": "inch"})
     forecast_url = "%s?%s" % (OPEN_METEO_FORECAST_URL, urllib.parse.urlencode(params))
     return {"query": location, "place": place, "units": resolved_units,
-            "forecast": _json_request(forecast_url, timeout=timeout),
+            "forecast": _validate_forecast(_json_request(forecast_url, timeout=timeout)),
             "forecast_url": forecast_url, "source_url": OPEN_METEO_DOCS_URL}
 
 
@@ -147,7 +177,7 @@ def format_weather(result):
              "Updated: %s (%s)" % (current.get("time", "unknown"), forecast.get("timezone", "local time")),
              "Now: %s, %s%s (feels like %s%s); humidity %s%%; wind %s; precipitation %s %s." % (_weather_condition(current.get("weather_code")), current.get("temperature_2m", "?"), temp_unit, current.get("apparent_temperature", "?"), temp_unit, current.get("relative_humidity_2m", "?"), wind, current.get("precipitation", "?"), precip_unit), "", "Forecast:"]
     for index, date in enumerate(daily.get("time") or []):
-        def value(key, fallback="?"):
+        def value(key, fallback="?", index=index):
             values = daily.get(key) or []
             return values[index] if index < len(values) else fallback
         lines.append("- %s: %s; high %s%s, low %s%s; precipitation %s%% (%s %s); wind up to %s %s." % (date, _weather_condition(value("weather_code", None)), value("temperature_2m_max"), daily_units.get("temperature_2m_max", ""), value("temperature_2m_min"), daily_units.get("temperature_2m_min", ""), value("precipitation_probability_max"), value("precipitation_sum"), daily_units.get("precipitation_sum", ""), value("wind_speed_10m_max"), daily_units.get("wind_speed_10m_max", "")))

@@ -1,0 +1,23 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 456  of event 'cpu-clock'
+# Event count (approx.): 114000000
+#
+# Overhead  Shared Object         Symbol                               
+# ........  ....................  .....................................
+#
+    94.52%  hot                   [.] integrate_physics(int)
+94.52% _start;__libc_start_main@@GLIBC_2.34;__libc_start_call_main;integrate_physics(int)
+     2.41%  hot                   [.] light_work(int)
+2.41% _start;__libc_start_main@@GLIBC_2.34;__libc_start_call_main;light_work(int)
+     0.66%  [kernel.kallsyms]     [k] finish_task_switch.isra.0
+     0.66%  ld-linux-x86-64.so.2  [.] intel_check_word.constprop.0
+0.66% _dl_start_user;_dl_start;_dl_sysdep_start;init_cpu_features.constprop.0;handle_intel.constprop.0;intel_check_word.constprop.0
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

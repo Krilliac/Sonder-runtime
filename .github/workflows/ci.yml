@@ -17,16 +17,17 @@ jobs:
     # The required tests context is the merge gate for the native Windows
     # boundary too. Keep this job present after an upstream failure so a
     # skipped/cancelled Windows job cannot look like a passing required check.
-    needs: [windows-focused, container-qualification]
+    needs: [windows-focused, container-qualification, linux-selfmod-isolation]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
       - name: Require native Windows gate
-        if: ${{ needs.windows-focused.result != 'success' || needs.container-qualification.result != 'success' }}
+        if: ${{ needs.windows-focused.result != 'success' || needs.container-qualification.result != 'success' || needs.linux-selfmod-isolation.result != 'success' }}
         run: |
           echo "windows-focused result: ${{ needs.windows-focused.result }}"
           echo "container-qualification result: ${{ needs.container-qualification.result }}"
+          echo "linux-selfmod-isolation result: ${{ needs.linux-selfmod-isolation.result }}"
           exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -39,8 +40,13 @@ jobs:
           cache-dependency-path: |
             requirements-dev.txt
             requirements-runtime.txt
+      # uv installs the same requirement file into setup-python's interpreter
+      # (--system), where the pip install used to land, several times faster.
+      # uv itself is pinned like the actions above; bump it deliberately.
       - name: Install deps (stdlib core + mcp for server import)
-        run: python -m pip install -r requirements-dev.txt
+        run: |
+          python -m pip install uv==0.12.19
+          uv pip install -r requirements-dev.txt --system
       # The release workflow calls this same job at the tag's exact SHA. A
       # broken runtime smoke or mismatched version triad must block publication.
       - name: Run tag-time runtime smoke
@@ -67,6 +73,11 @@ jobs:
           --base-ref "$REQUIREMENT_EVIDENCE_BASE_REF"
       - name: Enforce legacy error-signal ratchet
         run: python scripts/check_error_signals.py
+      # Blocking rules (undefined names, shadowed definitions, loop-variable
+      # closures) are zero-tolerance outside tests; all other findings and
+      # legacy module sizes are shrink-only against scripts/lint_baseline.json.
+      - name: Enforce lint gate and shrink-only ratchets
+        run: python scripts/check_lint_ratchet.py
       - name: Prevent new Git-history privacy debt
         run: python scripts/check_history_privacy.py --json
       - name: Check operator/developer doc links
@@ -95,6 +106,30 @@ jobs:
         run: >-
           python -m pytest -q -n auto --dist load --durations=25
           --junitxml=pytest-report.xml
+      # The SPEC-4 TUF update-trust path needs requirements-update.txt, which
+      # the runtime and dev requirements deliberately leave out, so the full
+      # suite above skips it. Install the pinned TUF stack after that suite
+      # has run and require every update-trust test to run: a skip here means
+      # the verification path went unexercised, which is a failure.
+      - name: Run the TUF update-trust suites (no skips allowed)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv pip install -r requirements-dev.txt -r requirements-update.txt --system
+          python -m pytest -q -rs -p no:cacheprovider \
+            tests/production/test_tuf_publisher.py tests/test_update_manifest_trust.py \
+            --junitxml="$RUNNER_TEMP/update-trust.xml"
+          python - "$RUNNER_TEMP/update-trust.xml" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+          suites = list(ET.parse(sys.argv[1]).getroot().iter("testsuite"))
+          assert suites, "no junit test suites were written"
+          totals = {key: sum(int(suite.get(key, "0")) for suite in suites)
+                    for key in ("tests", "skipped", "errors", "failures")}
+          assert totals["tests"] > 0, totals
+          assert totals["skipped"] == totals["errors"] == totals["failures"] == 0, totals
+          PY
       - name: Upload test report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -118,12 +153,56 @@ jobs:
   container-qualification:
     uses: ./.github/workflows/codegen-container-qualification.yml
 
+  # The Linux uid-separated selfmod supervisor (#517) must run as root: it
+  # switches to the candidate uid and creates the candidate's network
+  # namespace. The "tests" job runs as the unprivileged runner user, where
+  # these canaries skip, so this job runs them under sudo with the same
+  # interpreter and refuses any skip.
+  linux-selfmod-isolation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+      # uv installs the same requirement file into setup-python's interpreter
+      # (--system), where the pip install used to land, several times faster.
+      # uv itself is pinned like the actions above; bump it deliberately.
+      - name: Install test dependencies
+        run: |
+          python -m pip install uv==0.12.19
+          uv pip install -r requirements-dev.txt --system
+      - name: Prove the root-only candidate boundary and refuse any skipped test
+        shell: bash
+        # -B keeps root-owned bytecode out of the checkout. The candidate uid
+        # reads the setup-python interpreter and its site-packages, which the
+        # hosted toolcache keeps world-readable.
+        run: |
+          set -euo pipefail
+          python_bin="$(command -v python)"
+          sudo "$python_bin" -B -m pytest -q -rs -p no:cacheprovider \
+            tests/test_linux_candidate_isolation.py \
+            tests/test_wiring_selfmod_linux_nightly.py \
+            --junitxml="$RUNNER_TEMP/selfmod-linux-isolation.xml"
+          python - "$RUNNER_TEMP/selfmod-linux-isolation.xml" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+          suites = list(ET.parse(sys.argv[1]).getroot().iter("testsuite"))
+          assert len(suites) == 1, suites
+          suite = suites[0]
+          assert int(suite.get("tests", "0")) > 0, suite.attrib
+          assert all(int(suite.get(key, "0")) == 0 for key in ("skipped", "errors", "failures")), suite.attrib
+          PY
+
   # Native Windows boundaries are invisible to the required Ubuntu "tests"
   # context. The release workflow reuses this workflow at the tagged SHA, so
   # this focused job also blocks release when those boundaries regress.
   windows-focused:
     runs-on: windows-latest
-    timeout-minutes: 25
+    # The lifecycle step takes about 12 minutes; the devtools step is capped
+    # at 8 of its own.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
@@ -131,9 +210,15 @@ jobs:
           python-version: "3.12"
       - name: Install dependencies in a fresh Windows venv
         id: install-focused-venv
+        # The stdlib still creates the venv (so it keeps its own pip); uv only
+        # performs the requirement install, into that venv's interpreter.
+        # pwsh does not stop on a failing native command; check each one.
         run: |
           python -m venv "$env:RUNNER_TEMP\sonder-ci-venv"
-          & "$env:RUNNER_TEMP\sonder-ci-venv\Scripts\python.exe" -m pip install -r requirements-dev.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pip install uv==0.12.19
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv pip install -r requirements-dev.txt --python "$env:RUNNER_TEMP\sonder-ci-venv\Scripts\python.exe"
       - name: Exercise managed owner, artifact verifier, and lifecycle regressions
         run: >-
           & "$env:RUNNER_TEMP\sonder-ci-venv\Scripts\python.exe" -m pytest -q
@@ -153,6 +238,14 @@ jobs:
           tests/test_control_plane_inventory.py
           tests/test_control_plane_deleted_paths.py
           tests/test_process_wait_hardening.py
+          tests/test_job004_process_provider.py
+          tests/test_process_cancellation_reaping.py
+          tests/test_process_completion_race.py
+          tests/test_process_group_absence.py
+          tests/test_process_tree_supervisor.py
+          tests/test_api003_subprocess_provider.py
+          tests/test_api003_restart_recovery.py
+          tests/test_runtime_owner_windows_containment.py
           tests/test_start_selfmod_launcher.py
           tests/test_command_recovery.py
           tests/test_curriculum_store_durability.py
@@ -185,6 +278,29 @@ jobs:
           & "$env:RUNNER_TEMP\sonder-ci-venv\Scripts\python.exe" -m pytest -q
           tests/test_selfmod_low_integrity.py
           -k 'not test_git_bash_cannot_start_at_low_integrity'
+      - name: Exercise the build, debug and host-tool Windows branches
+        if: ${{ !cancelled() && steps.install-focused-venv.outcome == 'success' }}
+        # The build/debug/host-tool adapters carry Windows-only branches
+        # (registry, vcvars, symbol paths, key handling) that the Ubuntu job
+        # only reaches through fakes. A separate step keeps a devtools
+        # failure from hiding the lifecycle results above. clang-cl is not on
+        # PATH on hosted images, so the clang-cl test reports a skip (-rs)
+        # rather than counting as coverage.
+        # Gating since its first fully green hosted run (ci run 36278362464,
+        # 286 passed, 6 platform skips, 0 failed on windows-latest).
+        timeout-minutes: 8
+        run: >-
+          & "$env:RUNNER_TEMP\sonder-ci-venv\Scripts\python.exe" -m pytest -q -rs
+          tests/test_build_environment_windows_fakes.py
+          tests/test_debug_windows_fakes.py
+          tests/test_host_tool_discovery_windows.py
+          tests/test_slash_menu_windows_keys.py
+          tests/test_build_executor.py
+          tests/test_build_tree_reader.py
+          tests/test_build_preimages.py
+          tests/test_debug_launcher.py
+          tests/test_debug_templates_symbol_path.py
+          tests/test_build_clang_cl_real.py
       - name: Observe native Codegen isolation feasibility (diagnostic only)
         if: ${{ !cancelled() && steps.install-focused-venv.outcome == 'success' }}
         # These probes record host-specific results and skip reasons. They do

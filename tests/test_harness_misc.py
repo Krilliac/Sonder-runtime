@@ -278,6 +278,25 @@ class TestSecretScan:
         assert result["findings"] == []
         assert result["files_scanned"] >= 1
 
+    def test_findings_never_carry_credential_material(self, tmp_path):
+        # The direct `secret_scan` MCP tool and the agent dispatch render and
+        # durably record `match`; the first 40 characters of a credential are
+        # usually the whole credential.
+        (tmp_path / "config.py").write_text(
+            'password = "hunter2-real-credential-value"\n'
+            "token_header = 'Bearer abcdefghijklmnopqrstuvwxyz0123'\n"
+            "gh = 'ghp_" + "A1b2C3d4E5" * 4 + "'\n",
+            encoding="utf-8",
+        )
+        result = harness_tools.secret_scan(root=str(tmp_path))
+        assert {f["type"] for f in result["findings"]} >= {
+            "Secret/password", "Bearer token", "GitHub PAT",
+        }
+        rendered = json.dumps(result)
+        for fragment in ("hunter2", "abcdefghij", "A1b2C3d4E5"):
+            assert fragment not in rendered
+        assert all(f["match"] == "[REDACTED CREDENTIAL]" for f in result["findings"])
+
     def test_skips_binary_extensions(self, tmp_path):
         (tmp_path / "image.png").write_bytes(b"\x89PNG\r\n")
         (tmp_path / "secret.py").write_text(

@@ -19,6 +19,17 @@ class WebPolicyError(ValueError):
     """Raised when a web request or policy is malformed or too broad."""
 
 
+class WebToolsDisabled(RuntimeError):
+    """Raised when outbound web access is off by the ``SONDER_WEB_TOOLS`` gate.
+
+    It stays a ``RuntimeError`` for existing callers; tool surfaces catch this
+    type to report the refusal as a structured result, never as a fault.
+    """
+
+    def __init__(self, message: str = "web tools disabled by SONDER_WEB_TOOLS") -> None:
+        super().__init__(message)
+
+
 _URL_RE = re.compile(r"^(?P<scheme>https?)://(?P<authority>[^/?#]+)(?P<path>/[^?#]*)?(?:\?(?P<query>[^#]*))?(?:#(?P<fragment>.*))?$")
 
 
@@ -194,5 +205,5 @@ def redact(text: str, secrets: tuple[str, ...]) -> str:
 __all__ = [
     "CredentialLease", "CredentialProvider", "CredentialRequest", "CredentialScope",
     "EgressPolicy", "ProviderHealth", "ProviderHealthSnapshot", "WebPolicyError",
-    "WebProvider", "WebRequest", "WebResponse", "redact",
+    "WebProvider", "WebRequest", "WebResponse", "WebToolsDisabled", "redact",
 ]

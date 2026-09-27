@@ -149,9 +149,19 @@ def test_replayed_idempotent_work_does_not_claim_a_second_lane_return(tmp_path, 
         assert first == cached
         assert calls == ["lane"]
         assert len(repository.read_complete("owned-id")) == 2
-        other_session = _work(
+        # The same key for another session is a different request: refused,
+        # never run and never answered with the first session's receipt.
+        reused = _work(
             session_id="other-owned-id", session_ref="other-client-name", context=context,
             idempotency_key="one-action",
+        )
+        assert reused.status == "refused"
+        assert reused.text.startswith("idempotency key reused")
+        assert "admission_event_id" not in reused.public_receipt()
+        assert calls == ["lane"]
+        other_session = _work(
+            session_id="other-owned-id", session_ref="other-client-name", context=context,
+            idempotency_key="another-action",
         )
         assert other_session.status == "returned"
         assert other_session.session_ref == "other-client-name"

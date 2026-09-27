@@ -39,6 +39,11 @@ adapter must leave the tree in place rather than delete beyond that bound.
 These are rehearsal limits, not a claim about disaster-recovery throughput or
 live high-availability behavior.
 
+Operators run it with `python -m sonder_runtime restore rehearse <backup>
+[--workspace DIR] [--source-revision REV] [--target-revision REV] [--json]`
+(see `docs/runbooks/backup-restore.md`); `tests/production/test_restore_rehearse_cli.py`
+drives that command against a real `backup create` output.
+
 Focused coverage is in `tests/test_offline_recovery_rehearsal.py`.  Existing
 `tests/production/test_backup.py` and update-engine suites remain the
 authoritative checks for live backup creation, update installation, and

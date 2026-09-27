@@ -57,7 +57,11 @@ class PreferenceService:
 
     def learn(self, text: str, scope: str = "global") -> ToolResult:
         try:
-            extracted = self._codec.extract(text)
+            # An explicit learn request may be a short imperative ("use tabs
+            # for indentation"); codecs that know the explicit grammar accept
+            # it, still through the same allowlist and safety filters.
+            extract = getattr(self._codec, "extract_explicit", None) or self._codec.extract
+            extracted = extract(text)
             normalized = extracted[0] if extracted else self._codec.normalize(text)
             key = self._codec.key(normalized) if normalized else ""
             stable = self._codec.is_stable(normalized, source_text=text)
@@ -66,10 +70,15 @@ class PreferenceService:
         if not normalized:
             return _failure("INVALID_INPUT", "preference text is empty.")
         if not stable:
-            return _failure(
-                "INVALID_INPUT",
-                "preference must describe a stable behavior or default.",
-            )
+            message = "preference must describe a stable behavior or default."
+            try:
+                hint = getattr(self._codec, "explicit_forms_hint", None)
+                hint = hint() if callable(hint) else ""
+            except Exception:
+                hint = ""
+            if hint:
+                message = "%s %s." % (message, hint)
+            return _failure("INVALID_INPUT", message)
         selected_scope = scope or "global"
         try:
             rows = self._repository.upsert_and_list(

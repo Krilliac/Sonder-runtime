@@ -12,16 +12,16 @@ compatibility surfaces and delegate here.
 | `mcp` | Run the MCP adapter (tool surface for MCP clients). |
 | `repl` | Interactive REPL with slash commands. |
 | `preflight` | Run startup checks and report; opens no listener. |
-| `doctor` | Consolidated health report for config, state/model storage, schema migrations, backup freshness, self-heal, memory quality, runtime policy, and Ollama reachability. Storage inspection is read-only unless the explicit probe flag is supplied. |
+| `doctor` | Consolidated health report for config, state/model storage, schema migrations, schema-epoch adoption, backup freshness, self-heal, memory quality, runtime policy, and Ollama reachability. `schema_epoch` is FAIL (exit 1) until `migrate --adopt-epoch2` has run, because `serve` refuses to start before that. Self-heal and memory quality inspect `SONDER_DB` when set, otherwise `<state home>/memory.db` of the selected configuration; a missing or not-yet-initialized database is reported as skipped. Doctor never creates, initializes or migrates a database (the memory database is opened `mode=ro`, which may leave SQLite `-wal`/`-shm` sidecar files); storage inspection writes only when the explicit probe flag is supplied. |
 | `status` | Local build / config / schema status. |
 | `diagnostics` | Redacted diagnostic bundle (config, schemas, preflight). |
 | `config` | Print the effective, redacted configuration. |
-| `migrate` | Apply pending schema migrations (all stores or `--store`). |
+| `migrate` | Apply pending schema migrations (all stores or `--store`). `--adopt-epoch2` runs the crash-safe SPEC-5 epoch-2 adoption that `serve` requires; it backs the databases up to `backups/pre-epoch2-*` first, is a verified no-op (no new copy) when the home is already adopted, and rejects `--store` (exit 2) because adoption always covers every domain database. |
 | `backup` | `create` / `verify` / `list` / `prune`. |
-| `restore` | `verify` / `smoke` / `apply` a backup. |
+| `restore` | `verify` / `smoke` / `apply` a backup, or `rehearse` the offline recovery rehearsal against one in a disposable workspace. |
 | `smoke` | Minimal end-to-end check (config, migrate, ops roundtrip). |
 | `drain` | Request graceful drain of a running server. |
-| `rotate-key` | Rotate `SONDER_API_KEY` with an overlap window. |
+| `rotate-key` | Rotate `SONDER_API_KEY` with an overlap window. The secrets file is `--secrets`, else `SONDER_SECRETS`, else `sonder.env` in the state home. `--config`/`--set` choose the state home that receives `secrets/rotation.json` and the `API_KEY_ROTATED` audit event; the configuration is validated as `serve` validates it, and an invalid one exits 2 before anything is rotated. |
 | `update` | `status` / `build` / `import` / `install` / `rollback` / `cancel` (see [Update Manager](13-update-manager.md)). |
 
 Common flags: `--config <toml>`, `--secrets <env>`, `--set section.key=value`
@@ -68,6 +68,12 @@ data, or probe every mounted volume.
 - `0` success; `1` operational failure (e.g. preflight/migration/backup
   failed); `2` configuration/usage error (fails before any side effect);
   `130` interrupted.
+- Exception by design: `status` and `diagnostics` are always-available
+  reports for collecting evidence from a broken install. On an invalid or
+  missing `--config`/`--secrets` they still exit `0` and emit their payload,
+  with the problems under `config_errors` and a `WARNING: configuration is
+  invalid` line on stderr. Gate scripts on `config`, `doctor` or `preflight`,
+  which exit `2` for the same input.
 
 `serve` startup order is **preflight → MIGRATING → migrations → READY →
 bind**. A failed required check or a failed migration means no socket ever
@@ -104,3 +110,43 @@ The flag never changes interactive terminals, and the flagless piped
 default never changes. Known failure shapes additionally get a one-line
 `hint:` under the interactive error panel only — piped output stays
 byte-stable.
+
+## REPL logs
+
+`python -m sonder_runtime repl` writes its log records to
+`SONDER_HOME/logs/repl.log` (JSON, owner-only `0600`, rotating 5 x 1 MB) at
+`SONDER_REPL_LOG_LEVEL` (default `INFO`), so no JSON line lands on the
+terminal. On a terminal, WARNING and above are also queued and shown between
+turns as one short notice; piped and `--json` runs print only ERROR records
+to stderr, as text. `SONDER_REPL_LOG_STDERR=1` restores the old behaviour:
+JSON on stderr at `SONDER_REPL_LOG_LEVEL` (default `WARNING`). `serve` and
+`mcp` logging is unchanged. `/logs [n]` shows the last `n` records (default
+20), with control characters escaped.
+
+## REPL terminal behaviour
+
+- **Terminal detection:** colour, glyphs and motion are decided once at start
+  (`sonder_runtime/interfaces/repl/style.py`). `NO_COLOR` removes colour,
+  `TERM=dumb` or `SONDER_PLAIN=1` also switch to ASCII glyphs and no
+  redrawing, and `SONDER_GLYPHS` / `SONDER_THEME` override the guesses.
+- **Piped output:** when stdout is not a terminal there is no prompt and no
+  status line, and the banner goes to stderr as one line. With
+  `SONDER_REPL_NDJSON=1`, every stdout line is JSON. Model answers, file
+  contents and errors are shown with control characters escaped, on a
+  terminal and on a pipe alike.
+- **Approval prompts:** keys typed before the prompt appears are discarded.
+  The prompt accepts `y`, `yes`, `n`, `no` or Enter (no). A `[danger]`
+  command needs the whole word `yes`. A slash command typed as the answer
+  counts as no, and it is saved to history so Up recalls it.
+- **Line editing:** on Linux and macOS terminals, readline provides history,
+  editing and Tab completion. Leftover arrow-key escape sequences are
+  removed before a line is used.
+- **History:** a terminal session saves its history to
+  `SONDER_HOME/repl_history` (`0600`, newest 200 lines, credential lines
+  excluded). `SONDER_REPL_HISTORY=0` keeps history in memory only.
+- **Commands:** `/about` shows the source revisions, endpoint, session and
+  mode. `/status` shows the full status line plus the Ollama pool in plain
+  words, and `/status pool` shows the pool detail. `/help status` explains
+  each status-line field.
+- **Ctrl-C:** at the prompt, the first press clears the line and a second
+  press within 2 s quits. During a turn, Ctrl-C cancels only that turn.

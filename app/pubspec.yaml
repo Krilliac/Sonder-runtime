@@ -47,3 +47,10 @@ flutter:
           weight: 500
         - asset: fonts/IBMPlexMono-SemiBold.ttf
           weight: 600
+    # The status-vocabulary glyphs IBM Plex lacks (❯ ◈ ⊘ ✗ ▸ ● …): a
+    # 21-glyph DejaVu Sans Mono subset, renamed as its Bitstream Vera license
+    # requires (assets/fonts/SonderSymbols-LICENSE.txt). Every Plex style
+    # names it in fontFamilyFallback, so an offline build never shows tofu.
+    - family: SonderSymbols
+      fonts:
+        - asset: assets/fonts/SonderSymbols.ttf

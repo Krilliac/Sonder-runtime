@@ -355,6 +355,24 @@ def test_privacy_scan_distinguishes_prose_from_an_actual_home_path(tmp_path):
         package._privacy_scan(document)
 
 
+def test_privacy_scan_exempts_only_the_linuxbrew_system_prefix(tmp_path):
+    document = tmp_path / "linux.py"
+    # Homebrew-on-Linux's fixed prefix belongs to a system account.
+    document.write_text('PREFIX = "/home/linuxbrew/.linuxbrew/bin"\n', encoding="utf-8")
+    package._privacy_scan(document)
+    # Any other home under /home, including the linuxbrew account's other
+    # files and a lookalike prefix, is still refused.
+    for leaked in (
+        "/home/alice/projects",
+        "/home/linuxbrew/notes.txt",
+        "/home/linuxbrew/.linuxbrewx/bin",
+        "/Users/alice/Library",
+    ):
+        document.write_text(f'PATH = "{leaked}"\n', encoding="utf-8")
+        with pytest.raises(ValueError, match="absolute user-home"):
+            package._privacy_scan(document)
+
+
 def test_zip_rejects_noncanonical_source_and_archive_paths(monkeypatch, tmp_path):
     root = _fake_repo(tmp_path, monkeypatch)
     dest = root / "app" / "build" / "local-system"

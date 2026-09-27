@@ -1,0 +1,46 @@
+# callgrind format
+version: 1
+creator: callgrind-3.22.0
+pid: 4242
+cmd: ./spark --frames=3
+part: 1
+
+positions: instr line
+events: Ir Dr
+summary: 910 50
+
+ob=(1) /work/spark/build/spark
+fl=(1) /work/spark/src/game.cpp
+fn=(1) main
+0x1000 10 5 1
++4 * 5
+cfl=(2) /work/spark/src/physics.cpp
+cfn=(2) Physics::Integrate
+calls=1 0x2000 20
++2 +1 690 10
+-2 -1 10
+cfn=(3) fib
+calls=1 0x3000 30
+* * 200
+cfn=(9)
+calls=1 0x4000 1
+* * 7
+
+fl=(2)
+fn=(2)
+0x2000 20 600 40
+jump=5 0x2000 20
++8 +2
++8 * 90
+
+fl=(1)
+fn=(3)
+0x3000 30 50
+cfn=(4) fib'2
+calls=4 0x3000 30
+* * 150
+
+fn=(4)
+0x3000 30 150
+
+totals: 910 50

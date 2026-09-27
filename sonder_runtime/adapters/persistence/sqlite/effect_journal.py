@@ -44,6 +44,8 @@ CREATE INDEX IF NOT EXISTS ix_effect_journal_run_sequence
     ON effect_journal(run_id, sequence);
 CREATE INDEX IF NOT EXISTS ix_effect_journal_run_state
     ON effect_journal(run_id, state);
+CREATE INDEX IF NOT EXISTS ix_effect_journal_state_run_sequence
+    ON effect_journal(state, run_id, sequence);
 CREATE TABLE IF NOT EXISTS effect_checkpoint (
     run_id TEXT NOT NULL,
     generation INTEGER NOT NULL,
@@ -658,6 +660,33 @@ class SQLiteEffectJournal:
             run_id, after_sequence, records, high_water, settled,
             truncated=len(rows) > limit,
         )
+
+    def unresolved_page(
+        self, *, after_run_id: str = "", after_sequence: int = 0, limit: int = 100,
+    ) -> tuple[tuple[EffectIntent, ...], bool]:
+        """Return unresolved intents across runs, ordered by (run, sequence).
+
+        Keyset-paged and read-only: startup reconciliation walks it in bounded
+        pages without claiming owners or changing a fence.  The boolean is
+        true when more unresolved intents follow the returned page.
+        """
+        if not isinstance(after_run_id, str):
+            raise EffectJournalError("after_run_id must be text")
+        if type(after_sequence) is not int or after_sequence < 0:
+            raise EffectJournalError("after_sequence must be a non-negative integer")
+        if type(limit) is not int or not 1 <= limit <= 10_000:
+            raise EffectJournalError("limit must be within 1..10000")
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT intent_id,run_id,worker_id,operation_id,scope,owner_epoch,"
+                "idempotency_key,request_digest,reconciliation,sequence,state,"
+                "outcome_digest,receipt_key,detail FROM effect_journal "
+                "WHERE state IN (?,?) AND (run_id>? OR (run_id=? AND sequence>?)) "
+                "ORDER BY run_id,sequence LIMIT ?",
+                (EffectState.INTENT.value, EffectState.UNCERTAIN.value,
+                 after_run_id, after_run_id, after_sequence, limit + 1),
+            ).fetchall()
+        return tuple(self._row(row) for row in rows[:limit]), len(rows) > limit
 
     @staticmethod
     def _encode_state(state: object) -> tuple[str, str]:

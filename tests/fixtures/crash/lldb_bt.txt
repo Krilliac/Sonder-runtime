@@ -1,0 +1,22 @@
+(lldb) settings set prompt (SONDER_0123456789abcdef) 
+(SONDER_0123456789abcdef)settings set symbols.enable-external-lookup false
+(SONDER_0123456789abcdef)settings clear plugin.symbol-locator.debuginfod.server-urls
+(SONDER_0123456789abcdef)settings set target.load-script-from-symbol-file false
+(SONDER_0123456789abcdef)settings set target.load-cwd-lldbinit false
+(SONDER_0123456789abcdef)target create "/src/sparkmini/crasher" --core "/src/sparkmini/core.null"
+Core file '/src/sparkmini/core.null' (x86_64) was loaded.
+(SONDER_0123456789abcdef)thread backtrace all -c 32
+* thread #1, name = 'crasher', stop reason = signal SIGSEGV: address not mapped to object
+  * frame #0: 0x0000555555555266 crasher`run_frame(renderer=0x0000000000000000, value=2) at crasher.cpp:20:21
+    frame #1: 0x00005555555553a9 crasher`main(argc=2, argv=0x00007fffffffcac8) at crasher.cpp:47:18
+    frame #2: 0x00007ffff782a1ca libc.so.6`___lldb_unnamed_symbol3278 + 122
+    frame #3: 0x00007ffff782a28b libc.so.6`__libc_start_main + 139
+    frame #4: 0x0000555555555165 crasher`_start + 37
+(SONDER_0123456789abcdef)image list
+[  0] 7F88EDF6-3075-C22B-E1E9-5606CAAB3D58-0E468A9C 0x0000555555554000 /src/sparkmini/crasher 
+[  1] 8B40E57E-B8C5-DDAE-8160-BF3D97F242A6-AE591B6B 0x00007ffff7fc3000 [vdso] (0x00007ffff7fc3000)
+[  2] 753C6C86-08B6-1D4E-67BE-8F0C890E03E0-AA046B8B 0x00007ffff7c00000 /lib/x86_64-linux-gnu/libstdc++.so.6 
+[  3] 8E9FD827-446C-2406-7541-AC5390E6F527-FB5947BB 0x00007ffff7800000 /lib/x86_64-linux-gnu/libc.so.6 
+[  4] 05CB3207-0167-9843-B285-3ACF5B62DAA3-06EA930F 0x00007ffff7ec9000 /lib/x86_64-linux-gnu/libm.so.6 
+[  5] DA07864E-B4C1-B065-04B8-688D25D7E847-59FE708D 0x00007ffff7fc5000 /lib64/ld-linux-x86-64.so.2 
+[  6] 58736497-CBA1-173F-EC6A-D05C75E996DA-CEFD1DEF 0x00007ffff7e9b000 /lib/x86_64-linux-gnu/libgcc_s.so.1 

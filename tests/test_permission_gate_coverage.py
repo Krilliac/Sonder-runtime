@@ -186,6 +186,8 @@ _DISPLAY_ONLY_BRANCHES = {
     "/lessons": "prints stored lessons",
     "/report": "formats activity_tracker.latest(); no writer beneath it",
     "/endreport": "alias of /report",
+    "/about": "renders cached source provenance, the endpoint probe and mode; no writer",
+    "/logs": "tails this session's own repl.log read-only, re-sanitized; no writer",
 }
 
 # NOT here, deliberately: `/location`. It carried

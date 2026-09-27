@@ -42,14 +42,40 @@ def install(h):
     return service
 
 
+def settled_status(h, method, path, body=None, *, headers=None, wait_seconds=90):
+    """Status once app-control admission is not transiently busy.
+
+    ``429 APP_CONTROL_BUSY`` is a documented transient answer (per-peer
+    in-flight cap, global slots, or the per-minute budget), and on a loaded
+    host an earlier recovery callback can still hold a slot. Retry it within a
+    bound; any other status is returned unchanged for the caller to assert.
+    """
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        if body is None:
+            status = h.request(method, path, custom_headers=headers)[0]
+        else:
+            status = h.request(method, path, body, custom_headers=headers)[0]
+        if status != 429 or time.monotonic() >= deadline:
+            return status
+        time.sleep(2.0)
+
+
 def observed(h, path, *, headers=None):
     deadline = time.monotonic() + 180
+    # Back off between observations so the callback has time to progress, but
+    # start small: a fixed 10 s pause made every busy observation cost 10 s
+    # even when the callback finished in well under a second. The doubling
+    # keeps the poll count inside app-control's 30-requests-per-minute peer
+    # budget, which a fixed short interval would exhaust (429 BUSY).
+    pause = 0.5
     while time.monotonic() < deadline:
         status, _, body = h.request("GET", path, custom_headers=headers)
         assert status == 200, body
         if not body["recovery"]["busy"]:
             return body["recovery"]
-        time.sleep(10)  # Bounded observation leaves the callback time to progress.
+        time.sleep(pause)
+        pause = min(pause * 2, 10.0)
     pytest.fail("bounded recovery callback has not completed")
 
 
@@ -240,8 +266,8 @@ def test_http_original_pending_new_login_and_two_separate_approvals(
             admin_auth.revoke_session(conn, token)
         finally:
             conn.close()
-        assert h.request("GET", path, custom_headers=headers)[0] == 401
-        assert h.request("POST", path + "/resume", {}, custom_headers=headers)[0] == 401
+        assert settled_status(h, "GET", path, headers=headers) == 401
+        assert settled_status(h, "POST", path + "/resume", {}, headers=headers) == 401
         assert len(completions) == 1 and verified[0][1].calls == 1
     finally:
         recovery.registry.close()

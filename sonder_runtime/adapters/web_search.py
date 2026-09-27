@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib
 
 from ..application.context import OperationContext
+from ..application.ports.web import WebToolsDisabled
 
 
 def _web_tools():
@@ -20,7 +21,7 @@ def search_raw(query: str, *, limit=5, timeout=10):
     """
     tools = _web_tools()
     if not tools.enabled():
-        raise RuntimeError("web tools disabled by SONDER_WEB_TOOLS")
+        raise WebToolsDisabled()
     query = (query or "").strip()
     if not query:
         raise ValueError("empty search query")
@@ -108,7 +109,7 @@ def search(query: str, *, limit=5, context: OperationContext):
     if not context.cloud_allowed:
         raise PermissionError("web search requires explicit cloud consent")
     if not _web_tools().enabled():
-        raise RuntimeError("web tools disabled by SONDER_WEB_TOOLS")
+        raise WebToolsDisabled()
     rows = search_raw(query, limit=max(1, min(int(limit or 5), 20)))
     return {"ok": True, "query": str(query), "results": rows}
 

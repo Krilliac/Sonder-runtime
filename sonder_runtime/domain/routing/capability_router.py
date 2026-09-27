@@ -136,8 +136,10 @@ def classify_task(
     best = max(scores, key=lambda c: scores[c])
     top = scores[best]
     if top == 0:
-        logger.warning(f"task classification has no keyword signal, defaulting to simple with low confidence (0.4), prompt_len={len(prompt or '')}")
-        logger.debug("classify_task: no keyword hits, defaulting to simple (confidence=0.4)")
+        # Routine: most chat prompts carry no routing keyword. DEBUG keeps the
+        # interactive REPL quiet; the record still reaches the REPL log file
+        # when SONDER_REPL_LOG_LEVEL=DEBUG.
+        logger.debug(f"classify_task: no keyword signal, defaulting to simple (confidence=0.4), prompt_len={len(prompt or '')}")
         return "simple", 0.4
     total = sum(scores.values()) or 1
     # Confidence: share of hits going to the winner, floored so a lone strong

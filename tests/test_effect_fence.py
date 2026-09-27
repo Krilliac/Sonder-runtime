@@ -169,6 +169,30 @@ def test_the_worker_installs_the_fence_around_its_task(monkeypatch, autopilot_db
     assert effect_fence.current() is None
 
 
+def test_the_worker_stops_its_agent_loop_when_the_run_is_cancelled(monkeypatch, autopilot_db):
+    # Live repro (2026-09-25): `/autopilot cancel` during an inspect task took
+    # ~5 minutes to reach `cancelled` on a CPU host because the task's agent
+    # loop kept spending model steps; only effects were fenced. Fleet workers
+    # already hand the agent a cancel_check that stops before the next model
+    # or tool action; the autopilot worker handed it none.
+    run = _claimed()
+    seen = {}
+
+    def fake_agent(prompt, **kwargs):
+        check = kwargs.get("cancel_check")
+        seen["before"] = bool(check and check())
+        autopilot_store.request_cancel(run["id"])
+        seen["after"] = bool(check and check())
+        return "stopped"
+
+    monkeypatch.setattr(server, "_agent_impl", fake_agent)
+    monkeypatch.setattr(server, "_autopilot_allowed_tools", lambda _run: frozenset({"file_read"}))
+    monkeypatch.setattr(server, "_autopilot_tool_policy", lambda _run: None)
+    task = {"id": "t1", "kind": "inspect", "title": "look", "instruction": "look"}
+    assert server._autopilot_work_model(run, task, "") == "stopped"
+    assert seen == {"before": False, "after": True}
+
+
 # --- the fleet and selfmod fences ---------------------------------------------------
 
 
@@ -206,7 +230,17 @@ def test_the_fleet_fence_holds_for_the_owner_and_breaks_on_reassignment_or_cance
     assert "cancelled" in effect_fence.reason_lost(fence)
 
 
-def test_the_fleet_fence_breaks_when_the_owner_heartbeat_expires(fleet_db):
+def test_the_fleet_fence_breaks_when_the_owner_heartbeat_expires(fleet_db, monkeypatch):
+    # Reconcile only reclaims an owner whose process probe reads dead. PID 101
+    # may be a live process on the runner, so pin the synthetic owner as dead.
+    real_probe = fleet_db.probe_process
+    monkeypatch.setattr(
+        fleet_db, "probe_process",
+        lambda pid, identity=None: (
+            (fleet_db.PROCESS_DEAD, None) if int(pid) == 101
+            else real_probe(pid, identity)
+        ),
+    )
     fleet_db.register_owner("owner-a", 101, 100.0)
     fleet_db.create_agent(_fleet_row("agent-2"), "owner-a", 101)
     fleet_db.start_agent("agent-2", "owner-a", "running", in_model_call=False, tool_calls=0)
@@ -282,6 +316,15 @@ def test_the_selfmod_editor_runs_under_the_run_fence(monkeypatch):
     monkeypatch.setattr(server.selfmod, "reject", lambda run_id, reason: None)
     monkeypatch.setattr(server, "_selfmod_test_commands", lambda run, explicit: [("a", ["x"]), ("b", ["y"])])
     monkeypatch.setattr(server, "_selfmod_agent_policy", lambda run: None)
+    # Isolation selection and the stage journal are covered by
+    # tests/test_selfmod_operator_isolation.py; this test is about the fence.
+    monkeypatch.setattr(server.selfmod, "operator_candidate_isolation", lambda **_k: True)
+
+    class _PassThroughStages:
+        def journaled_stage(self, run_id, stage, request, invoke):
+            return invoke()
+
+    monkeypatch.setattr(server, "_selfmod_stage_journal", _PassThroughStages)
     out = server._execute_selfmod_run("run-9")
     assert out.startswith("ERROR: selfmod run failed closed: stop here")
     assert seen["fence"].label == "selfmod:run-9"

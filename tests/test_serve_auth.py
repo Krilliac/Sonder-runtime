@@ -3438,3 +3438,106 @@ def test_admin_drain_rejects_ambiguous_framing_before_dispatch(monkeypatch):
     assert response.startswith(b"HTTP/1.0 400"), response
     assert b"multiple Content-Length headers are not supported" in response
     assert called == []
+
+
+@pytest.mark.parametrize("key_headers", [
+    [("Idempotency-Key", "k" * 513)],
+    [("Idempotency-Key", "first"), ("Idempotency-Key", "second")],
+])
+def test_unusable_idempotency_key_is_rejected_not_silently_ignored(monkeypatch, key_headers):
+    """An over-long or repeated Idempotency-Key must not run the action unguarded.
+
+    The replay helper cannot bind a key longer than its bound, and a repeated
+    header lets a proxy and this server disagree on which key applies.  Either
+    used to execute the mutation without replay protection, so a client retry
+    re-applied an action it had been promised would run once.
+    """
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.Handler, "_auth_rate_limited", lambda self: False)
+    applied = []
+    monkeypatch.setattr(ts.permission_policy, "set_mode", lambda mode: applied.append(mode))
+    body = b'{"mode":"plan"}'
+    with _http_server(monkeypatch) as port:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            conn.putrequest("POST", "/v1/permission-mode")
+            conn.putheader("Content-Type", "application/json")
+            conn.putheader("Content-Length", str(len(body)))
+            for name, value in key_headers:
+                conn.putheader(name, value)
+            conn.endheaders(body)
+            response = conn.getresponse()
+            status, payload = response.status, response.read()
+        finally:
+            conn.close()
+    assert status == 400, payload
+    assert b"Idempotency-Key" in payload
+    assert applied == []
+
+
+def test_bounded_idempotency_key_still_replays(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.Handler, "_auth_rate_limited", lambda self: False)
+    monkeypatch.setattr(ts.served_action_receipts, "claim", lambda *a, **k: "claimed")
+    monkeypatch.setattr(ts.served_action_receipts, "finish", lambda *a, **k: None)
+    applied = []
+    monkeypatch.setattr(ts.permission_policy, "set_mode", lambda mode: applied.append(mode))
+    headers = {"Content-Type": "application/json", "Idempotency-Key": "b" * 512}
+    with _http_server(monkeypatch) as port:
+        for _ in range(2):
+            status, _, payload = _request(port, "POST", "/v1/permission-mode",
+                                          body='{"mode":"plan"}', headers=headers)
+            assert status == 200, payload
+    assert applied == ["plan"]
+
+
+def test_http_register_forwards_hosted_bootstrap_policy(monkeypatch, tmp_path):
+    """POST /v1/sonder/register must reach the engine's hosted policy.
+
+    The HTTP route passes the hosted-registration policy as keyword-only
+    arguments (``trusted_local=False`` plus the bootstrap secret, the
+    additional-registration opt-in and the acting account). The account
+    provider once accepted only ``(conn, username, password)``, so every
+    registration raised TypeError and answered 500.
+    """
+    import admin_auth
+    import memory_store
+    secret = "bootstrap-secret-123456"
+    monkeypatch.setenv("SONDER_BOOTSTRAP_SECRET", secret)
+    path = str(tmp_path / "register.sqlite")
+    monkeypatch.setattr(ts.server, "_open_db", lambda: memory_store.connect(path))
+    monkeypatch.setattr(ts, "AUTH_MODE", "account")
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts, "ALLOW_REGISTRATION", False)
+    monkeypatch.setattr(ts.Handler, "_auth_rate_limited", lambda self: False)
+    body = json.dumps({"username": "owner", "password": "password123"})
+    headers = {"Content-Type": "application/json"}
+    with _http_server(monkeypatch) as port:
+        # Without the one-use secret the hosted bootstrap is refused, which
+        # proves trusted_local=False reached the engine (a trusted local
+        # caller would have been admitted).
+        status, _, payload = _request(port, "POST", "/v1/sonder/register",
+                                      body=body, headers=headers)
+        assert status == 403, payload
+        status, _, payload = _request(
+            port, "POST", "/v1/sonder/register", body=body,
+            headers={**headers, "X-Sonder-Bootstrap-Secret": secret})
+        assert status == 201, payload
+        assert json.loads(payload)["account"]["role"] == "admin"
+        # The secret is spent and additional registration is not enabled.
+        other = json.dumps({"username": "second", "password": "password123"})
+        status, _, payload = _request(
+            port, "POST", "/v1/sonder/register", body=other,
+            headers={**headers, "X-Sonder-Bootstrap-Secret": secret})
+        assert status == 403, payload
+    conn = memory_store.connect(path)
+    try:
+        assert admin_auth.login(conn, "owner", "password123")[0]
+        assert conn.execute("SELECT COUNT(*) FROM accounts").fetchone()[0] == 1
+    finally:
+        conn.close()

@@ -17,6 +17,8 @@ import time
 import uuid
 from pathlib import Path
 
+from sonder_runtime.platform.private_files import ensure_private_dir, tighten_existing_stores
+
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:$")
 _LEGACY_DB_MIGRATION_POLL_SECONDS = 0.02
 _LEGACY_DB_MIGRATION_STALE_LOCK_SECONDS = 30.0
@@ -56,6 +58,17 @@ def _configured_home() -> Path | None:
     """Return an atomic snapshot of the process-local home override."""
     with _HOME_OVERRIDE_LOCK:
         return _HOME_OVERRIDE
+
+
+def configured_home() -> Path | None:
+    """The process-local typed state home, or ``None`` when none is set.
+
+    Callers whose path must agree with another process that may not share
+    this process-local override (for example an operator CLI and the
+    nightly) use this to detect that the environment alone no longer
+    determines ``state_path``.
+    """
+    return _configured_home()
 
 
 def windows_system_drive(env=None) -> str:
@@ -172,16 +185,27 @@ def default_home() -> Path:
     return Path.home() / ".local" / "share" / "sonder"
 
 
+def _home_needs_candidate_traverse() -> bool:
+    """A uid-separated selfmod candidate must traverse the home (0711)."""
+    return bool(os.environ.get("SONDER_SELFMOD_CANDIDATE_UID", "").strip())
+
+
+def _ensure_state_home(home: Path) -> Path:
+    # The state home holds credentials, sessions and conversations; it is
+    # owner-only on POSIX (see ``private_files`` for the exact rules).
+    secured = ensure_private_dir(home, traverse=_home_needs_candidate_traverse())
+    tighten_existing_stores(secured)
+    return secured
+
+
 def ensure_home() -> Path:
-    home = default_home()
-    home.mkdir(parents=True, exist_ok=True)
-    return home
+    return _ensure_state_home(default_home())
 
 
 def state_path(name: str, env_var: str = "") -> str:
     configured = _configured_home()
     if configured is not None:
-        configured.mkdir(parents=True, exist_ok=True)
+        _ensure_state_home(configured)
         return str(configured / name)
     if env_var:
         override = os.environ.get(env_var, "").strip()

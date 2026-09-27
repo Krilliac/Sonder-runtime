@@ -25,6 +25,7 @@ from ...application.ports.subagents import (
     SubagentStatus,
     TERMINAL_SUBAGENT_STATUSES,
 )
+from ...application.subagents.continuable import provenance_subject_error
 from ...application.subagents.continuation_codec import decode_call, session_from_data
 from .postgres_continuation_transport import PostgresContinuationTransport
 
@@ -39,6 +40,23 @@ CREATE INDEX IF NOT EXISTS intent_child_position ON sonder_child.intent(child_id
 CREATE TABLE IF NOT EXISTS sonder_child.receipt(operation_id text PRIMARY KEY REFERENCES sonder_child.intent(operation_id),disposition text NOT NULL,result bytea NOT NULL,revision bigint);
 """
 _OWNER_KEY = (1397706308, 1128810828)  # Fixed aggregate identity, never caller input.
+
+
+def encode_child_snapshot(record):
+    """Canonical snapshot bytes; checkpoint provenance travels inside them.
+
+    The child row is a single snapshot updated under the aggregate lock, so a
+    checkpoint's host-stamped provenance commits atomically with its
+    compare-and-set by construction.
+    """
+    if not isinstance(record, DurableChildSession):
+        raise InvalidSubagentRequest("child session snapshot required")
+    return canonical(asdict(record))
+
+
+def decode_child_snapshot(raw):
+    """Decode a snapshot; checkpoints written before provenance read as absent."""
+    return session_from_data(json.loads(bytes(raw)))
 
 
 def _prepared(row):
@@ -257,12 +275,12 @@ class PostgreSQLDurableContinuationRepository:
         row = connection.execute(
             "SELECT snapshot FROM sonder_child.child WHERE child_id=%s", (child_id,)
         ).fetchone()
-        return session_from_data(json.loads(bytes(row[0]))) if row else None
+        return decode_child_snapshot(row[0]) if row else None
 
     @staticmethod
     def _admission_records(connection):
         rows = connection.execute("SELECT snapshot FROM sonder_child.child").fetchall()
-        return tuple(session_from_data(json.loads(bytes(row[0]))) for row in rows)
+        return tuple(decode_child_snapshot(row[0]) for row in rows)
 
     @staticmethod
     def _check_active_keys(candidate, existing):
@@ -429,7 +447,7 @@ class PostgreSQLDurableContinuationRepository:
                 )
             self._capacity(connection, len(outcome.result_bytes))
             if next_record is not None:
-                snapshot = canonical(asdict(next_record))
+                snapshot = encode_child_snapshot(next_record)
                 if current is None:
                     connection.execute(
                         "INSERT INTO sonder_child.child(child_id,status,revision,snapshot) VALUES(%s,%s,%s,%s)",
@@ -507,7 +525,7 @@ class PostgreSQLDurableContinuationRepository:
             ).fetchall()
             if len(rows) > 1:
                 raise InvalidSubagentRequest("ambiguous durable worker key requires explicit recovery")
-            return session_from_data(json.loads(bytes(rows[0][0]))) if rows else None
+            return decode_child_snapshot(rows[0][0]) if rows else None
 
         return self._read(lookup)
 
@@ -570,7 +588,7 @@ class PostgreSQLDurableContinuationRepository:
     def list_active(self):
         return self._read(
             lambda connection: tuple(
-                session_from_data(json.loads(bytes(row[0])))
+                decode_child_snapshot(row[0])
                 for row in connection.execute(
                     "SELECT snapshot FROM sonder_child.child WHERE status NOT IN ('succeeded','failed','timed_out','cancelled') ORDER BY child_id"
                 ).fetchall()
@@ -582,7 +600,7 @@ class PostgreSQLDurableContinuationRepository:
             raise InvalidSubagentRequest("limit must be a positive bounded integer")
         return self._read(
             lambda connection: tuple(
-                session_from_data(json.loads(bytes(row[0])))
+                decode_child_snapshot(row[0])
                 for row in connection.execute(
                     "SELECT snapshot FROM sonder_child.child ORDER BY position LIMIT %s",
                     (limit,),
@@ -747,6 +765,9 @@ def _apply(kind, current, args, kwargs):
         expected = current.checkpoint.sequence if current.checkpoint else -1
         if expected != kwargs["expected_sequence"] or args[0].sequence != expected + 1:
             return None, None
+        subject_error = provenance_subject_error(args[0])
+        if subject_error is not None:
+            raise InvalidSubagentRequest(subject_error)
         result = replace(current, checkpoint=args[0], revision=current.revision + 1)
     elif kind == "claim_resume":
         if (

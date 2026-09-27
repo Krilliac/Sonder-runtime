@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'account_session.dart';
+import 'local_manager_models.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -31,6 +32,40 @@ class PlatformCredentialStore implements CredentialStore {
   Future<void> delete(String key) => _storage.delete(key: key);
 }
 
+/// What [Settings.save] could do with the bearer credentials.
+///
+/// Non-sensitive preferences are always written. Credentials go only to the
+/// platform keyring; when that fails, or on the web (memory-only by
+/// default), the key stays usable in memory for this run and is never
+/// written anywhere in plaintext (plan P2-20).
+class SettingsSaveResult {
+  /// Every credential that needed persisting reached the keyring.
+  final bool credentialsStored;
+
+  /// The platform keeps credentials in memory only (web default).
+  final bool memoryOnly;
+
+  const SettingsSaveResult({
+    this.credentialsStored = true,
+    this.memoryOnly = false,
+  });
+
+  bool get keyringUnavailable => !credentialsStored && !memoryOnly;
+
+  /// The warning a settings surface shows, or null when all was stored.
+  String? get warning {
+    if (keyringUnavailable) {
+      return 'System keyring unavailable: key not saved. It stays in memory '
+          'until the app closes; save again once the keyring works.';
+    }
+    if (!credentialsStored && memoryOnly) {
+      return 'Keys stay in memory in the browser and are not saved. Enter '
+          'them again after reloading the page.';
+    }
+    return null;
+  }
+}
+
 /// Persisted connection settings (server URL, API key, theme).
 class Settings {
   static const _kServer = 'sonder_server_url';
@@ -45,12 +80,22 @@ class Settings {
   static const _kAllowApproximateLocation = 'sonder_allow_approximate_location';
   static const _kLauncherUrl = 'sonder_launcher_url';
   static const _kLauncherToken = 'sonder_launcher_token';
+  static const _kObservatoryExecutable = 'sonder_observatory_executable';
+  static const _kObservatoryWebUrl = 'sonder_observatory_web_url';
   static const _credentials = PlatformCredentialStore();
 
   /// Test-only override: widget tests do not load desktop/mobile plugins, and
   /// must never wait indefinitely on an unimplemented credential channel.
   @visibleForTesting
   static CredentialStore? testingCredentialStore;
+
+  /// Test-only override for the web credential policy; null means "web".
+  @visibleForTesting
+  static bool? debugMemoryOnlyCredentials;
+
+  /// On the web, bearer keys are kept in memory only by default: browser
+  /// storage is readable by any script on the origin (plan P2-20).
+  static bool get memoryOnlyCredentials => debugMemoryOnlyCredentials ?? kIsWeb;
 
   static const defaultModel = 'sonder';
 
@@ -70,6 +115,16 @@ class Settings {
   String launcherUrl;
   String launcherToken;
 
+  /// Path of the Sonder Observatory executable (desktop). Empty means
+  /// "use SONDER_OBSERVATORY_BIN, then sonder-observatory on PATH". Not a
+  /// secret: kept in shared preferences.
+  String observatoryExecutable;
+
+  /// Observatory web URL opened when no executable is found. Empty by
+  /// default: the Vite dev port is shared by every Vite project, so the app
+  /// never guesses one.
+  String observatoryWebUrl;
+
   Settings({
     this.serverUrl = 'http://127.0.0.1:11435',
     this.apiKey = '',
@@ -82,6 +137,8 @@ class Settings {
     this.allowApproximateLocation = false,
     this.launcherUrl = '',
     this.launcherToken = '',
+    this.observatoryExecutable = '',
+    this.observatoryWebUrl = '',
   });
 
   bool get isConfigured => serverUrl.trim().isNotEmpty;
@@ -121,6 +178,10 @@ class Settings {
     return null;
   }
 
+  /// Why [observatoryWebUrl] cannot be used, or null.
+  String? get observatoryConfigurationError =>
+      observatoryWebUrlError(observatoryWebUrl);
+
   bool get usesHostLauncher =>
       hasHostLauncher && launcherConfigurationError == null;
 
@@ -150,7 +211,6 @@ class Settings {
         final data = jsonDecode(raw) as Map<String, dynamic>;
         account = AccountSession(
             token: data['token'] as String, origin: data['origin'] as String);
-
       }
     } catch (_) {
       account = null;
@@ -167,6 +227,8 @@ class Settings {
       allowApproximateLocation: p.getBool(_kAllowApproximateLocation) ?? false,
       launcherUrl: p.getString(_kLauncherUrl) ?? '',
       launcherToken: launcherToken,
+      observatoryExecutable: p.getString(_kObservatoryExecutable) ?? '',
+      observatoryWebUrl: p.getString(_kObservatoryWebUrl) ?? '',
     );
   }
 
@@ -180,42 +242,76 @@ class Settings {
   }
 
   /// Writes bearer credentials only to the platform credential store.
-  Future<void> save({CredentialStore? credentialStore}) async {
+  ///
+  /// Preferences are written even when the keyring fails; the result says
+  /// whether credentials were stored so the UI can say so instead of
+  /// discarding every other change.
+  Future<SettingsSaveResult> save({CredentialStore? credentialStore}) async {
     if (accountSession != null && !accountSession!.matches(serverUrl)) {
-      throw StateError('Handle the existing account session before switching servers');
+      throw StateError(
+          'Handle the existing account session before switching servers');
     }
     final p = await SharedPreferences.getInstance();
     final credentials =
         credentialStore ?? testingCredentialStore ?? _credentials;
+    final memoryOnly = memoryOnlyCredentials;
+    var stored = true;
+    var needed = false;
+    Future<void> guarded(String key, Future<void> Function() write) async {
+      needed = true;
+      if (memoryOnly) {
+        stored = false;
+        // Memory only means nothing at rest: drop a legacy plaintext copy
+        // and any value an older build put in browser storage, so a reload
+        // cannot bring back a key the person has since replaced.
+        await p.remove(key);
+        try {
+          await credentials.delete(key);
+        } catch (_) {}
+        return;
+      }
+      try {
+        await write();
+      } catch (_) {
+        stored = false;
+      }
+    }
+
     // Empty fields are not enough evidence that an existing credential should
     // be erased: Settings is also constructed for first-run preferences and
     // platform/test environments that do not have a credential provider.
     // The UI uses the explicit clear methods below when a user removes a
     // previously saved credential or signs out.
     if (apiKey.trim().isNotEmpty) {
-      await _writeCredential(
-        credentials: credentials,
-        preferences: p,
-        key: _kKey,
-        value: apiKey,
-      );
+      await guarded(
+          _kKey,
+          () => _writeCredential(
+                credentials: credentials,
+                preferences: p,
+                key: _kKey,
+                value: apiKey,
+              ));
     } else {
       await p.remove(_kKey);
     }
     if (launcherToken.trim().isNotEmpty) {
-      await _writeCredential(
-        credentials: credentials,
-        preferences: p,
-        key: _kLauncherToken,
-        value: launcherToken,
-      );
+      await guarded(
+          _kLauncherToken,
+          () => _writeCredential(
+                credentials: credentials,
+                preferences: p,
+                key: _kLauncherToken,
+                value: launcherToken,
+              ));
     } else {
       await p.remove(_kLauncherToken);
     }
     final account = accountSession;
     if (account != null && account.matches(serverUrl)) {
-      await credentials.write(_kAccount,
-          jsonEncode({'token': account.token, 'origin': account.origin}));
+      await guarded(
+          _kAccount,
+          () => credentials.write(_kAccount,
+              jsonEncode({'token': account.token, 'origin': account.origin})));
     }
     await p.remove(_kAccount);
     await p.setString(_kServer, serverUrl.trim());
@@ -232,6 +328,12 @@ class Settings {
     await p.setBool(_kKeepServerRunning, keepServerRunning);
     await p.setBool(_kAllowApproximateLocation, allowApproximateLocation);
     await p.setString(_kLauncherUrl, launcherUrl.trim());
+    await p.setString(_kObservatoryExecutable, observatoryExecutable.trim());
+    await p.setString(_kObservatoryWebUrl, observatoryWebUrl.trim());
+    return SettingsSaveResult(
+      credentialsStored: stored || !needed,
+      memoryOnly: memoryOnly && needed,
+    );
   }
 
   static Future<void> clearAccountSession({CredentialStore? credentialStore}) =>

@@ -223,6 +223,18 @@ def _content(body: str) -> str:
     return body
 
 
+# Handler error replies: the catalogued dispatcher's ``<tool> failed: ...`` and
+# ``<tool> is catalogued but not callable here.``, and branch errors such as
+# ``task operation failed: ...`` or ``autopilot request failed: ...`` (a short
+# subject of up to four words).  Matched only at the start of the reply,
+# because a report may legitimately quote those words in prose
+# (``/system_profile_text`` says "when /run reports ... a traceback").
+_HANDLER_FAILURE = re.compile(
+    r"/?[\w.-]+(?: [\w.-]+){0,3} (?:failed: |is catalogued but not callable)",
+    re.IGNORECASE,
+)
+
+
 def classify(status: int, body: str) -> str:
     if status == 401:
         return "auth_failure"
@@ -240,7 +252,7 @@ def classify(status: int, body: str) -> str:
         match = re.search(r"model calls:\s*(\d+)", lowered)
         if match and int(match.group(1)) > 0:
             return "model_fallthrough"
-    if any(token in lowered for token in ("failed:", "not callable", "traceback")):
+    if _HANDLER_FAILURE.match(text) or "traceback (most recent call last)" in lowered:
         return "handler_failure"
     if (lowered.startswith("refused ") or lowered.startswith("permission denied")
             or "permission gate refused" in lowered

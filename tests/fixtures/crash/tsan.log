@@ -1,0 +1,24 @@
+==================
+WARNING: ThreadSanitizer: data race (pid=27223)
+  Read of size 4 at 0x55555555901c by main thread:
+    #0 main /src/sparkmini/race.cpp:6 (race+0x13c7) (BuildId: d694d557eb2a5a606044d240d4a0a54d98cb96e9)
+
+  Previous write of size 4 at 0x55555555901c by thread T1:
+    #0 bump() /src/sparkmini/race.cpp:3 (race+0x1368) (BuildId: d694d557eb2a5a606044d240d4a0a54d98cb96e9)
+    #1 void std::__invoke_impl<void, void (*)()>(std::__invoke_other, void (*&&)()) /usr/include/c++/13/bits/invoke.h:61 (race+0x2100) (BuildId: d694d557eb2a5a606044d240d4a0a54d98cb96e9)
+    #2 std::__invoke_result<void (*)()>::type std::__invoke<void (*)()>(void (*&&)()) /usr/include/c++/13/bits/invoke.h:96 (race+0x2055) (BuildId: d694d557eb2a5a606044d240d4a0a54d98cb96e9)
+    #3 void std::thread::_Invoker<std::tuple<void (*)()> >::_M_invoke<0ul>(std::_Index_tuple<0ul>) /usr/include/c++/13/bits/std_thread.h:292 (race+0x1faa) (BuildId: d694d557eb2a5a606044d240d4a0a54d98cb96e9)
+    #4 std::thread::_Invoker<std::tuple<void (*)()> >::operator()() /usr/include/c++/13/bits/std_thread.h:299 (race+0x1f4c) (BuildId: d694d557eb2a5a606044d240d4a0a54d98cb96e9)
+    #5 std::thread::_State_impl<std::thread::_Invoker<std::tuple<void (*)()> > >::_M_run() /usr/include/c++/13/bits/std_thread.h:244 (race+0x1efe) (BuildId: d694d557eb2a5a606044d240d4a0a54d98cb96e9)
+    #6 <null> <null> (libstdc++.so.6+0xecdb3) (BuildId: 753c6c8608b61d4e67be8f0c890e03e0aa046b8b)
+
+  Location is global 'counter' of size 4 at 0x55555555901c (race+0x501c)
+
+  Thread T1 (tid=27225, finished) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022 (libtsan.so.2+0x5ac1a) (BuildId: 2a13a7710e361d06f7babbea53065ca2be93f738)
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) <null> (libstdc++.so.6+0xeceb0) (BuildId: 753c6c8608b61d4e67be8f0c890e03e0aa046b8b)
+    #2 main /src/sparkmini/race.cpp:5 (race+0x13b8) (BuildId: d694d557eb2a5a606044d240d4a0a54d98cb96e9)
+
+SUMMARY: ThreadSanitizer: data race /src/sparkmini/race.cpp:6 in main
+==================
+ThreadSanitizer: reported 1 warnings

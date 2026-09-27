@@ -12,6 +12,9 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 GENERATED = ROOT / "docs" / "architecture" / "generated"
+# The six GeneratedCatalogs projections plus their SHA-256 manifest, rendered
+# by application.tools.catalog_artifacts from the native typed tool registry.
+RUNTIME_CATALOGS = GENERATED / "runtime-catalogs"
 PACKAGE = ROOT / "sonder_runtime"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -61,6 +64,7 @@ def _source_hashes() -> dict[str, str]:
         ROOT / "server.py",
         PACKAGE / "domain" / "operational_capabilities.py",
         PACKAGE / "interfaces" / "sdk" / "discovery.py",
+        PACKAGE / "bootstrap" / "native_mcp.py",
     )
     return {path.relative_to(ROOT).as_posix(): _sha(path) for path in paths if path.is_file()}
 
@@ -114,6 +118,20 @@ def _runtime_reference() -> dict[str, Any]:
     except Exception as exc:
         raise RuntimeError("runtime tool source unavailable") from exc
     result["tool_source"] = "server.mcp._tool_manager.list_tools"
+    # The opt-in ``mcp --native`` surface has its own, much smaller catalog.
+    # Hand-written migration notes drifted from it (they kept saying a tool
+    # was absent after it shipped), so it is projected here like the legacy
+    # one and the notes point at this table instead of enumerating names.
+    native_mcp = importlib.import_module("sonder_runtime.bootstrap.native_mcp")
+    result["native_tools"] = sorted(({
+        "description": descriptor.description or "",
+        "name": descriptor.name,
+        "parameters": _jsonable(dict(descriptor.input_schema or {})),
+    } for descriptor in native_mcp.native_tool_registry().list_all()),
+        key=lambda item: item["name"])
+    result["native_tool_source"] = (
+        "sonder_runtime.bootstrap.native_mcp.native_tool_registry"
+    )
 
     events = importlib.import_module("sonder_runtime.domain.common.events")
     result["events"] = [{
@@ -195,7 +213,7 @@ def _runtime_reference() -> dict[str, Any]:
     }
     result["counts"] = {
         name: len(result[name])
-        for name in ("commands", "tools", "events", "configuration")
+        for name in ("commands", "tools", "native_tools", "events", "configuration")
     } | {
         "schemas": 4,
         "capabilities": len(result["capabilities"]["sdk"]["tools"]),
@@ -256,6 +274,7 @@ def _markdown_reference(reference: dict[str, Any]) -> str:
         "", f"Digest: `{reference['digest']}`", "",
         "| Reference | Count | Source |", "|---|---:|---|",
         f"| Tools | {reference['counts']['tools']} | `{reference['tool_source'] if isinstance(reference['tool_source'], str) else 'unavailable'}` |",
+        f"| Native MCP tools | {reference['counts']['native_tools']} | `{reference['native_tool_source']}` |",
         f"| Commands | {reference['counts']['commands']} | `command_catalog.catalog()` |",
         f"| Events | {reference['counts']['events']} | `EventKind` and `payload_schema()` |",
         f"| Configuration fields | {reference['counts']['configuration']} | `{reference['configuration_source']}` |",
@@ -265,6 +284,12 @@ def _markdown_reference(reference: dict[str, Any]) -> str:
     ]
     for item in reference["tools"]:
         description = str(item["description"]).splitlines()[0].replace("|", "\\|")
+        lines.append(f"| `{item['name']}` | {description} |")
+    lines += ["", "## Native MCP tools", "",
+              "Served by `python -m sonder_runtime mcp --native`; the table above is the legacy default surface.",
+              "", "| Name | Description |", "|---|---|"]
+    for item in reference["native_tools"]:
+        description = (str(item["description"]).splitlines() or [""])[0].replace("|", "\\|")
         lines.append(f"| `{item['name']}` | {description} |")
     lines += ["", "## Commands", "", "| Name | Category | Risk | Tool |", "|---|---|---|---|"]
     for item in reference["commands"]:
@@ -308,9 +333,52 @@ def _inventory_markdown(value: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def runtime_catalog_bundle() -> Any:
+    """The catalog bundle of the live typed sources.
+
+    Tools come from the native typed registry (``mcp --native``), the only
+    registry whose descriptors carry effects and an execution class, so the
+    permissions projection is real. Commands come from the slash-command
+    catalog and events from ``EventKind``.
+    """
+    from sonder_runtime.application.tools.generated_catalogs import CatalogLimits, GeneratedCatalogs
+
+    native_mcp = importlib.import_module("sonder_runtime.bootstrap.native_mcp")
+    command_catalog = importlib.import_module(
+        "sonder_runtime.adapters.command_catalog"
+    ).command_catalog
+    events = importlib.import_module("sonder_runtime.domain.common.events")
+    registry = native_mcp.native_tool_registry()
+    commands = tuple(command_catalog.catalog())
+    return GeneratedCatalogs.generate(
+        registry,
+        commands=commands,
+        event_kinds=events.EventKind,
+        limits=CatalogLimits(
+            max_tools=max(256, len(registry.list_all())),
+            max_events=max(128, len(events.EventKind)),
+            max_commands=max(512, len(commands)),
+            max_bytes=2_000_000,
+        ),
+    )
+
+
+def _runtime_catalog_files() -> dict[Path, str]:
+    from sonder_runtime.application.tools.catalog_artifacts import (
+        render_catalog_artifacts, render_manifest,
+    )
+
+    bundle = runtime_catalog_bundle()
+    artifacts = render_catalog_artifacts(bundle)
+    files = {RUNTIME_CATALOGS / name: content for name, content in artifacts.items()}
+    files[RUNTIME_CATALOGS / "manifest.json"] = render_manifest(bundle, artifacts)
+    return files
+
+
 def expected() -> dict[Path, str]:
     reference, architecture, inventory = _runtime_reference(), _architecture_map(), _inventory()
     return {
+        **_runtime_catalog_files(),
         GENERATED / "runtime-reference.json": _dump(reference),
         GENERATED / "runtime-reference.md": _markdown_reference(reference),
         GENERATED / "architecture-map.json": _dump(architecture),

@@ -18,6 +18,7 @@ proxy for remote access) unless it says otherwise.
 - [publish-release.md](publish-release.md) — TUF signing ceremony
 - [release-version-policy.md](release-version-policy.md) — version/tag compatibility gate
 - [ollama-outage.md](ollama-outage.md)
+- [sonder-inference.md](sonder-inference.md) — run tiers on `sonder-infer serve`, doctor, fallback
 - [database-lock-or-corruption.md](database-lock-or-corruption.md)
 - [fault-injection-testing.md](fault-injection-testing.md) — deterministic offline reliability fixtures and contracts
 - [autopilot-interruption.md](autopilot-interruption.md)

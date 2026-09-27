@@ -1,0 +1,8 @@
+# Pixel goldens (test/goldens/**) carry the `golden` tag. They are generated
+# and compared on Linux only (each golden test skips elsewhere), because
+# other platforms rasterise the bundled fonts slightly differently.
+#   flutter test --tags golden                   # compare
+#   flutter test --update-goldens --tags golden  # regenerate (owning lane only)
+tags:
+  golden:
+    description: Pixel goldens with the bundled fonts; Linux only.

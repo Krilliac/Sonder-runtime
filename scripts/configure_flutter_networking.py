@@ -16,7 +16,9 @@ from pathlib import Path
 LOCAL_NETWORK_DESCRIPTION = (
     "Sonder Runtime connects to and controls the server you configure on your local network."
 )
-PRODUCT_NAME = "Sonder Runtime"
+# The user-facing app name; scripts/install_app_branding.py uses the same
+# value (its tests pin the two together) and macOS names the bundle after it.
+PRODUCT_NAME = "Sonder"
 APPLICATION_ID = "com.sonder.runtime"
 EXECUTABLE_NAME = "sonder"
 

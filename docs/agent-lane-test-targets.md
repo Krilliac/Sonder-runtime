@@ -80,3 +80,11 @@ initial failing pytest run, an exact file edit, passing tests, and a reviewable
 diff. A separate subprocess exits after recording a model-returned test request;
 reopening the service consumes the saved request once. These checks establish
 runner mechanics, not the coding quality of a live model or distributed recovery.
+
+Lanes still offer only their fixed file-tool set plus `run_tests`. The lane
+tool graph can execute and grade the developer tools of
+[structured test runs](structured-test-runs.md): its executor falls back to
+the developer executor, and its evaluator binds `test_run` approvals to the
+resolved command. A lane does not offer `test_run` to its model unless the
+lane tool allowlist is extended. If it is, the lane's workspace grant
+confines the project.

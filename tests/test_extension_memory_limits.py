@@ -277,3 +277,95 @@ def test_isolated_scope_rejects_unsupported_environment_without_values_in_argv(k
     with pytest.raises(ExtensionMemoryLimitUnsupported, match="unsupported keys"):
         limiter.isolated_process_environment(prepared, argv, {key: "secret-must-never-enter-argv"})
     assert "secret-must-never-enter-argv" not in " ".join(prepared.argv)
+
+
+class NprocResource:
+    RLIMIT_AS = 9
+    RLIMIT_NPROC = 6
+    RLIM_INFINITY = -1
+
+    def __init__(self, current=(-1, -1)):
+        self.current = current
+        self.set = []
+
+    def getrlimit(self, which):
+        assert which == self.RLIMIT_NPROC
+        return self.current
+
+    def setrlimit(self, which, limits):
+        self.set.append((which, limits))
+
+
+def _proc_tree(root, processes):
+    (root / "self" / "task").mkdir(parents=True)
+    for pid, (uid, threads) in processes.items():
+        (root / str(pid)).mkdir()
+        (root / str(pid) / "status").write_text(
+            "Name:\tx\nUid:\t%d\t%d\t%d\t%d\nThreads:\t%d\n" % (uid, uid, uid, uid, threads))
+    (root / "not-a-pid").mkdir()
+
+
+def _nproc_limiter(resource, uid=1000, **kwargs):
+    return NativeExtensionMemoryLimiter(
+        os_module=SimpleNamespace(name="posix", getuid=lambda: uid),
+        resource_module=resource, platform_name="posix", **kwargs)
+
+
+def test_posix_nproc_is_counted_from_the_uids_tasks_not_set_to_the_bare_descendant_cap(
+        tmp_path, monkeypatch):
+    # RLIMIT_NPROC is charged per real uid (threads included on Linux). A
+    # bare descendant cap starved every fork whenever the runtime's uid
+    # already ran that many tasks, as on a CI runner whose agent shares it.
+    import sonder_runtime.adapters.extensions.memory_limits as memory_limits
+
+    _proc_tree(tmp_path, {10: (1000, 30), 11: (1000, 1), 12: (0, 90), 13: (1001, 5)})
+    monkeypatch.setattr(memory_limits, "_PROC_ROOT", str(tmp_path))
+    resource = NprocResource()
+    options = _nproc_limiter(resource).launch_options(4 << 30, 9)
+    options["preexec_fn"]()
+    # 31 tasks of uid 1000: room for the uid's own growth plus the 9 the job may add.
+    assert resource.set == [(9, (4 << 30, 4 << 30)), (6, (2 * 31 + 9, 2 * 31 + 9))]
+
+
+def test_posix_nproc_never_exceeds_the_runtimes_own_limits(tmp_path, monkeypatch):
+    import sonder_runtime.adapters.extensions.memory_limits as memory_limits
+
+    _proc_tree(tmp_path, {10: (1000, 30)})
+    monkeypatch.setattr(memory_limits, "_PROC_ROOT", str(tmp_path))
+    resource = NprocResource(current=(50, 80))
+    _nproc_limiter(resource).launch_options(None, 9)["preexec_fn"]()
+    assert resource.set == [(6, (50, 50))]
+
+
+def test_posix_nproc_counts_processes_with_ps_without_proc(tmp_path, monkeypatch):
+    # BSD and macOS charge processes, not threads, and have no /proc.
+    import sonder_runtime.adapters.extensions.memory_limits as memory_limits
+
+    monkeypatch.setattr(memory_limits, "_PROC_ROOT", str(tmp_path / "absent"))
+    runs = []
+
+    def runner(argv, **kwargs):
+        runs.append(tuple(argv))
+        return SimpleNamespace(returncode=0, stdout="  0\n1000\n 1000\n1001\n1000\n", stderr="")
+
+    resource = NprocResource()
+    _nproc_limiter(resource, which=lambda name: "/bin/ps", command_runner=runner).launch_options(
+        None, 5)["preexec_fn"]()
+    assert runs == [("/bin/ps", "-A", "-o", "ruid=")]
+    assert resource.set == [(6, (2 * 3 + 5, 2 * 3 + 5))]
+
+
+def test_posix_nproc_refuses_when_the_uid_task_count_is_unknown(tmp_path, monkeypatch):
+    import sonder_runtime.adapters.extensions.memory_limits as memory_limits
+
+    monkeypatch.setattr(memory_limits, "_PROC_ROOT", str(tmp_path / "absent"))
+    failing = SimpleNamespace(returncode=1, stdout="", stderr="no ps")
+    for limiter in (
+        _nproc_limiter(NprocResource(), which=lambda name: None),
+        _nproc_limiter(NprocResource(), which=lambda name: "/bin/ps",
+                       command_runner=lambda *args, **kwargs: failing),
+        NativeExtensionMemoryLimiter(os_module=SimpleNamespace(name="posix"),
+                                     resource_module=NprocResource(), platform_name="posix"),
+    ):
+        with pytest.raises(ExtensionMemoryLimitUnsupported, match="per-uid task count"):
+            limiter.launch_options(None, 5)

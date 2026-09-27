@@ -18,6 +18,11 @@ from ...application.tools.generated_catalogs import GeneratedCatalogs
 from ...application.ports.tool_registry import ToolDescriptor
 
 
+# Capabilities this transport serves only when the client advertised them too:
+# the Tasks methods below are gated on the negotiated overlap.
+_CLIENT_OPT_IN_CAPABILITIES = frozenset({"tasks"})
+
+
 @dataclass(frozen=True)
 class McpTransportLimits:
     max_frame_bytes: int = 256_000
@@ -35,6 +40,10 @@ class McpTransportLimits:
 
 class McpTransportError(ValueError):
     """A bounded transport or protocol violation."""
+
+
+class _MethodNotFound(KeyError):
+    """The request named a JSON-RPC method this transport does not serve."""
 
 
 class McpProvider(Protocol):
@@ -103,6 +112,7 @@ class StdioMcpTransport:
         legacy_contract: LegacyMcpContract | None = None,
         notifications: SubscriptionNotificationRouter | None = None,
         connection_id: str = "stdio", limits: McpTransportLimits | None = None,
+        server_info_version: str | None = None,
     ) -> None:
         if not connection_id or not callable(getattr(input_stream, "readline", None)):
             raise ValueError("MCP transport requires an input stream and connection id")
@@ -118,6 +128,13 @@ class StdioMcpTransport:
         self._legacy_contract = legacy_contract
         self._router, self._connection_id = notifications, connection_id
         self._limits = limits or McpTransportLimits()
+        if server_info_version is not None and (
+            not isinstance(server_info_version, str) or not server_info_version.strip()
+        ):
+            raise ValueError("MCP serverInfo version must be a non-empty string")
+        # ``serverInfo.version`` names the implementation build. Callers that
+        # predate this argument keep the historical negotiated contract label.
+        self._server_info_version = server_info_version
         self._negotiation: McpNegotiation | None = None
         self._write_lock = threading.Lock()
         self._catalog = self._build_catalog(tool_catalog)
@@ -182,6 +199,11 @@ class StdioMcpTransport:
                 continue
             count += 1
             try:
+                if self._oversized(raw):
+                    # readline stopped mid-line: discard the rest of this line
+                    # so its tail is never read back as a separate frame.
+                    self._discard_rest_of_line()
+                    raise McpTransportError("MCP frame exceeds max_frame_bytes")
                 response = self._dispatch(self._decode_frame(raw))
             except McpTransportError as exc:
                 logger.error(
@@ -190,12 +212,38 @@ class StdioMcpTransport:
                 )
                 response = self._error(None, -32700, str(exc))
             if response is not None:
-                self._write(response)
+                try:
+                    self._write(response)
+                except McpTransportError as exc:
+                    # An oversized result must not end the session; answer
+                    # the request with a bounded error instead.
+                    logger.error(
+                        f"MCP response dropped connection_id={self._connection_id!r}: {exc}"
+                    )
+                    error = self._error(response.get("id"), -32603, str(exc))
+                    try:
+                        self._write(error)
+                    except McpTransportError:
+                        # The echoed id alone can fill a frame (ids are
+                        # unbounded strings); answer without it rather than
+                        # letting the error escape and end the session.
+                        self._write(self._error(None, -32603, str(exc)))
         if self._router is not None:
             self._router.unsubscribe(self._connection_id)
         logger.debug(f"serve loop ended connection_id={self._connection_id!r} frames_processed={count}")
         logger.info(f"MCP serve loop ended connection_id={self._connection_id!r}, frames_processed={count}")
         return count
+
+    def _oversized(self, raw: str | bytes) -> bool:
+        """Whether readline hit the frame bound before the line ended."""
+        newline = b"\n" if isinstance(raw, bytes) else "\n"
+        return len(raw) > self._limits.max_frame_bytes and not raw.endswith(newline)
+
+    def _discard_rest_of_line(self) -> None:
+        while True:
+            chunk = self._input.readline(self._limits.max_frame_bytes + 1)
+            if chunk in (b"", "") or chunk.endswith(b"\n" if isinstance(chunk, bytes) else "\n"):
+                return
 
     def _decode_frame(self, raw: str | bytes) -> dict[str, Any]:
         if isinstance(raw, bytes):
@@ -237,6 +285,8 @@ class StdioMcpTransport:
             return self._error(request_id, -32602, str(exc))
         except McpTaskNotFound as exc:
             return self._error(request_id, -32601, str(exc))
+        except _MethodNotFound as exc:
+            return self._error(request_id, -32601, "method not found: %s" % exc.args[0])
         except KeyError as exc:
             return self._error(request_id, -32601, str(exc))
         except Exception:
@@ -257,6 +307,9 @@ class StdioMcpTransport:
 
     def _call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         logger.debug(f"_call method={method!r}")
+        if method == "ping":
+            # MCP liveness check: valid in any session state, empty result.
+            return {}
         if method == "initialize":
             versions = params.get("protocolVersions", params.get("protocolVersion"))
             if isinstance(versions, str):
@@ -279,9 +332,25 @@ class StdioMcpTransport:
                 f"MCP session negotiated version={self._negotiation.agreed_version!r}, "
                 f"capabilities={sorted(self._negotiation.capabilities)}"
             )
+            # Advertise what this server supports, not the intersection with
+            # the client's own capability keys: MCP capabilities are declared
+            # per side, and a client that sent ``{}`` would otherwise be told
+            # this server has no tools. A capability this session serves only
+            # on the client's opt-in (MCP Tasks) is advertised only once
+            # negotiated, so the result never promises a method that the
+            # session would then refuse.
+            negotiated = set(self._negotiation.capabilities)
+            advertised = [
+                name for name in self._negotiation.server_capabilities
+                if name not in _CLIENT_OPT_IN_CAPABILITIES or name in negotiated
+            ]
             return {"protocolVersion": self._negotiation.agreed_version,
-                    "capabilities": {name: {} for name in self._negotiation.capabilities},
-                    "serverInfo": {"name": "sonder-runtime", "version": self._negotiation.server_version}}
+                    "capabilities": {name: {} for name in advertised},
+                    "serverInfo": {
+                        "name": "sonder-runtime",
+                        "version": self._server_info_version
+                        or self._negotiation.server_version,
+                    }}
         if self._negotiation is None:
             raise McpTransportError("initialize is required")
         if method == "notifications/initialized":
@@ -323,7 +392,7 @@ class StdioMcpTransport:
             if self._router is not None:
                 self._router.unsubscribe(self._connection_id, event if isinstance(event, str) else None)
             return {"unsubscribed": event}
-        raise KeyError(method)
+        raise _MethodNotFound(method)
 
     @staticmethod
     def _valid_id(value: Any) -> bool:

@@ -635,19 +635,27 @@ def test_parent_cannot_report_success_after_its_child_reserves_remaining_wall(tm
     service = DurableContinuationService(repository)
     service.register_root("root", _root_budget(width=3, wall=20))
     started, release = Event(), Event()
+    # The proof is arithmetic, not timing: the grandchild reserves all but
+    # `slack` of the parent's wall, and the parent then measurably spends more
+    # than `slack` (it sleeps `spent`), so billing its success would overdraw
+    # the parent envelope. The budget used to be 0.15 s, which also armed the
+    # parent's own 0.15 s deadline -- under load that deadline fired first and
+    # the parent settled as deadline_exceeded, never reaching the refusal this
+    # test exists to prove. A 10 s wall keeps the same margins with no race.
+    wall, slack, spent = 10.0, .01, .04
     def parent_runner(*_):
         started.set()
         assert release.wait(3)
-        Event().wait(.04)
+        Event().wait(spent)
         return "done"
 
     parent = service.spawn(
-        _child("parent", width=2, wall=.15, steps=8, tokens=8), _context("parent"), parent_runner,
+        _child("parent", width=2, wall=wall, steps=8, tokens=8), _context("parent"), parent_runner,
     )
     try:
         assert started.wait(2)
         repository.create(DurableChildSession(
-            _child("grandchild", parent="parent", wall=.14, steps=1, tokens=1),
+            _child("grandchild", parent="parent", wall=wall - slack, steps=1, tokens=1),
             ChildSessionLineage("parent", ("root",)),
         ))
     finally:
@@ -655,7 +663,7 @@ def test_parent_cannot_report_success_after_its_child_reserves_remaining_wall(tm
     result = parent.result(3)
     assert result.status is SubagentStatus.TIMED_OUT
     assert result.error.code == "budget_exhausted"
-    assert result.usage.wall_seconds >= .04
+    assert result.usage.wall_seconds >= spent > slack
     with pytest.raises(InvalidSubagentRequest, match="max_wall_seconds"):
         repository.create(DurableChildSession(
             _child("later-grandchild", parent="parent", wall=.1, steps=1, tokens=1),

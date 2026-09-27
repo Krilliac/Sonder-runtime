@@ -1,0 +1,12 @@
+
+=================================================================
+==26976==ERROR: LeakSanitizer: detected memory leaks
+
+Direct leak of 64 byte(s) in 1 object(s) allocated from:
+    #0 0x7f329eafd9c7 in malloc ../../../../src/libsanitizer/asan/asan_malloc_linux.cpp:69
+    #1 0x55570e2c3710 in main /src/sparkmini/crasher.cpp:57
+    #2 0x7f329e22a1c9 in __libc_start_call_main ../sysdeps/nptl/libc_start_call_main.h:58
+    #3 0x7f329e22a28a in __libc_start_main_impl ../csu/libc-start.c:360
+    #4 0x55570e2c3284 in _start (/src/sparkmini/crasher_asan+0x1284) (BuildId: ab04d0cdfd1061ff0d5bee054862f8a4219e7232)
+
+SUMMARY: AddressSanitizer: 64 byte(s) leaked in 1 allocation(s).

@@ -50,8 +50,12 @@ def test_public_remote_examples_require_https_and_never_promote_direct_bind():
 def test_app_remote_host_hint_requires_https():
     settings_screen = _text("app/lib/settings_screen.dart")
 
-    assert "hintText: 'https://your-host.example'" in settings_screen
-    assert "hintText: 'http://your-host" not in settings_screen
+    # Settings builds its fields through a ``_field(label, hint: ...)`` helper;
+    # the promise is the same either way: the server URL hint is HTTPS and no
+    # field suggests plain HTTP for a remote host.
+    assert "hint: 'https://your-host.example'" in settings_screen
+    assert "hint: 'http://" not in settings_screen
+    assert "hintText: 'http://" not in settings_screen
     assert "HTTPS is required off-device" in settings_screen
 
     api = _text("app/lib/api.dart")

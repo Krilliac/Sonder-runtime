@@ -1,0 +1,48 @@
+{
+  "object": "tool_inventory",
+  "snapshot_digest": "865330bf698bd2b5d807de28920bbf3db32a0fe5158eec1a04a10bde98c79e44",
+  "created_at": 1790334000.0,
+  "age_seconds": 754,
+  "stale": false,
+  "os": "Linux",
+  "machine": "x86_64",
+  "counts": {
+    "compiler": 2,
+    "build_system": 2,
+    "test_runner": 1,
+    "debugger_profiler": 1,
+    "runtime": 1,
+    "vcs": 1
+  },
+  "tools": [
+    {
+      "name": "clang",
+      "category": "compiler",
+      "version": "",
+      "version_status": "timeout",
+      "source": "path",
+      "on_path": true,
+      "path": "/usr/bin/clang",
+      "alternatives": [],
+      "details": {}
+    },
+    {
+      "name": "gcc",
+      "category": "compiler",
+      "version": "13.2.0",
+      "version_status": "ok",
+      "source": "path",
+      "on_path": true,
+      "path": "/usr/bin/gcc",
+      "alternatives": [
+        "/usr/local/bin/gcc"
+      ],
+      "details": {}
+    }
+  ],
+  "filtered_by": "category=compiler",
+  "notes": [
+    "skipped 1 relative or invalid PATH entries"
+  ],
+  "truncated": false
+}

@@ -26,6 +26,7 @@ from collections.abc import Mapping
 from sonder_runtime.application.tools.audit import ToolAuditError
 from sonder_runtime.application.tools.gateway_contract import ToolGatewayRequest, ToolReceipt
 from sonder_runtime.platform.logging import REDACTION_FAILED, Redactor
+from sonder_runtime.platform.private_files import prepare_private_file
 
 RECORD_SCHEMA = "tool-audit-record-v2"
 
@@ -101,6 +102,8 @@ class DurableToolAuditRepository:
                 line = self._line(request, receipt, "", rotated_from)
                 current = b""
             self.path.parent.mkdir(parents=True, exist_ok=True)
+            # Owner-only audit file: created 0600, an older 0644 tightened.
+            prepare_private_file(self.path)
             self.path.write_bytes(current + line)
 
     def _line(self, request: ToolGatewayRequest, receipt: ToolReceipt,

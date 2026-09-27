@@ -190,8 +190,24 @@ the gate. Sonder's *own* agent and loop paths get no exemption -- a model
 Sonder is running must not be able to lift its own restraint, and
 ``_agent_dispatch`` cannot reach the tool at all. But an external model
 driving Sonder over MCP reaches ``reloadable_mcp`` and therefore *can* lift
-``plan``. That is the accepted price of not trapping an operator whose only
-client is an MCP one; it is not an accident, and it is not "console-only".
+``plan`` -- back to ``manual``, and no further.
+
+Raising autonomy is attended-only
+---------------------------------
+The exemption lets a caller *out* of ``plan``; it must not let one *up* the
+dial. An unattended caller (an MCP client, the HTTP chat's ``/permission_mode``
+fall-through, ``control_command``) that asks ``permission_mode`` for a mode
+more autonomous than both the current mode and ``manual`` -- ``acceptEdits``
+or ``auto`` from ``manual``, ``auto`` from ``acceptEdits`` -- is refused with
+the remedy named (``unattended_escalation_refusal``). Otherwise the mode, which
+persists in ``SONDER_HOME`` and governs every surface sharing that home, could
+be switched to ``auto`` by any MCP client and then used to run host programs.
+Lowering the mode, and returning from ``plan`` to ``manual``, stay allowed
+everywhere. The attended surfaces are the console's ``/mode`` and Shift+Tab
+(which run inside ``attended_mode_change()``) and the administrator-authorized
+``POST /v1/permission-mode`` endpoint, which sets the mode directly. A new
+surface is unattended until it says otherwise: that is the fail-closed
+default.
 
 Rules and modes compose; they do not race
 -------------------------------------------
@@ -296,6 +312,12 @@ AUTO = "auto"
 MODES = (PLAN, MANUAL, ACCEPT_EDITS, AUTO)
 DEFAULT_MODE = MANUAL
 
+# Set only by surfaces where a person is present to make a mode change
+# (the console). Default False: every other caller is unattended.
+_ATTENDED_MODE_CHANGE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "sonder_attended_mode_change", default=False,
+)
+
 ALLOW, ASK, DENY = "allow", "ask", "deny"
 
 MODE_LABELS = {
@@ -366,7 +388,49 @@ NATIVE_MCP_WORK = {
     "compute_submit": "execution",
     "agent_lane": "execution",
     "compute_cancel": "mutation",
+    # Developer tools (bootstrap/developer_tools.py). ``tool_inventory`` runs
+    # only fixed read-only version switches of allowlisted host tools;
+    # ``output_digest`` reads a guarded file window or the caller's own
+    # test-run job; ``test_run_result`` polls the caller's own job. The
+    # launching tool, ``test_run``, is graded by ``EXECUTION_TOOLS``.
+    "tool_inventory": "safe",
+    "output_digest": "safe",
+    "test_run_result": "safe",
+    # C++ build tools (bootstrap/build_tools.py). The two readers of the
+    # caller's own jobs and the model reader never write or launch;
+    # ``build_fix_restore`` writes pre-images back, so it is a mutation.
+    "build_model": "safe",
+    "build_job_result": "safe",
+    "build_fix_result": "safe",
+    "build_fix_restore": "mutation",
+    # ``build_job`` and ``build_fix`` launch host processes (the build, and
+    # through it the project's own custom commands). They are execution by
+    # ``NATIVE_EXECUTION_TOOLS`` below; they are native-only names, so they
+    # cannot sit in ``EXECUTION_TOOLS``, whose drift test pins it to the
+    # legacy MCP registry.
+    "build_job": "execution",
+    "build_fix": "execution",
+    # Not a tool: the separate decision a build asking for network access
+    # needs (``allow_network=true``). Graded like the build itself, but on its
+    # own name, so an operator can deny network builds with one rule while
+    # still allowing builds, and an approval of one never covers the other.
+    "build_network": "execution",
+    # Crash and profile digests (bootstrap/debug_tools.py). ``crash_triage``
+    # and ``profile_digest`` run pure readers over guarded files and launch
+    # nothing; ``debug_run_result`` polls the caller's own run and cannot
+    # cancel it. ``crash_digest`` and ``profile_capture_digest`` launch host
+    # debuggers/profilers and are graded by ``EXECUTION_TOOLS``.
+    "crash_triage": "safe",
+    "profile_digest": "safe",
+    "debug_run_result": "safe",
 }
+
+# Native-only tools that start a host process. ``risk_of`` grades them
+# ``execution`` exactly like ``EXECUTION_TOOLS``; they live apart only because
+# ``EXECUTION_TOOLS`` is pinned to the legacy registry by a drift test and
+# these names (``build_job``/``build_fix``) deliberately do not exist there --
+# the legacy ``build_run`` keeps its own name and meaning.
+NATIVE_EXECUTION_TOOLS = frozenset({"build_job", "build_fix"})
 
 # Risk classes an unattended caller is refused for when the mode says ``ask``.
 # ``safe`` never reaches the ask branch; ``ask`` proceeds on the record (see
@@ -509,6 +573,7 @@ EXECUTION_TOOLS = frozenset({
     "game_generate_and_test", "game_generation_campaign", "game_reference_suite",
     "campaign_generate_compile_execute_record", "campaign_repo_repair",
     "self_heal_repair", "scaffold_project", "compiler_cache_status",
+    "crash_digest", "profile_capture_digest",
 })
 
 # The same class, for work that no *registered tool* fronts. ``EXECUTION_TOOLS``
@@ -785,9 +850,59 @@ def current_mode() -> str:
         return _STATE["mode"]
 
 
-def set_mode(name: str) -> str:
-    """Set the mode by exact name or unambiguous prefix. Returns the new mode."""
-    _load()
+class attended_mode_change:
+    """Context in which a mode change is made by a person who is present.
+
+    Only the console enters it (``/mode`` and the Shift+Tab keybinding).
+    Protocol and HTTP callers never do, so they cannot raise autonomy.
+    """
+
+    def __enter__(self):
+        self._token = _ATTENDED_MODE_CHANGE.set(True)
+        return self
+
+    def __exit__(self, *exc):
+        _ATTENDED_MODE_CHANGE.reset(self._token)
+        return False
+
+
+def mode_change_attended() -> bool:
+    return bool(_ATTENDED_MODE_CHANGE.get())
+
+
+def is_unattended_escalation(current: str, target: str) -> bool:
+    """True when *target* is more autonomous than both *current* and manual.
+
+    That is the change an unattended caller may not make: it can always lower
+    the mode, and can always get from ``plan`` back to the ``manual`` default.
+    """
+    order = {mode: index for index, mode in enumerate(MODES)}
+    if current not in order or target not in order:
+        return True
+    return order[target] > max(order[current], order[DEFAULT_MODE])
+
+
+def unattended_escalation_refusal(target_name: str) -> str:
+    """"" when an unattended caller may select *target_name*, else the refusal.
+
+    Raises ``ValueError`` for an unknown mode, like ``set_mode``.
+    """
+    target = resolve_mode(target_name)
+    current = current_mode()
+    if mode_change_attended() or not is_unattended_escalation(current, target):
+        return ""
+    return (
+        "refused: raising the permission mode from %s to %s needs a person to "
+        "confirm it, and this caller is unattended (an MCP client, the HTTP "
+        "chat, or a control command). Run /mode %s at the Sonder console, or "
+        "have an administrator use the app's permission-mode control "
+        "(POST /v1/permission-mode). Lowering the mode, or returning from plan "
+        "to manual, is allowed here." % (current, target, target)
+    )
+
+
+def resolve_mode(name: str) -> str:
+    """The mode *name* selects (exact name or unambiguous prefix)."""
     wanted = str(name or "").strip().lower().replace(" ", "").replace("-", "")
     if not wanted:
         raise ValueError("mode name is required")
@@ -804,6 +919,18 @@ def set_mode(name: str) -> str:
         raise ValueError(
             "unknown mode '%s'. modes: %s" % (name, ", ".join(MODES))
         )
+    return match
+
+
+def set_mode(name: str) -> str:
+    """Set the mode by exact name or unambiguous prefix. Returns the new mode.
+
+    This is the storage primitive; it does not ask who is changing the mode.
+    The ``permission_mode`` tool consults ``unattended_escalation_refusal``
+    first, which is where unattended callers are held to lowering only.
+    """
+    _load()
+    match = resolve_mode(name)
     with _LOCK:
         _STATE["mode"] = match
     _save()
@@ -921,7 +1048,7 @@ def risk_of(tool_name: str) -> str:
         catalogued = command.risk
     if catalogued == "dangerous":
         return "dangerous"
-    if name in EXECUTION_TOOLS or name in EXECUTION_COMMANDS:
+    if name in EXECUTION_TOOLS or name in EXECUTION_COMMANDS or name in NATIVE_EXECUTION_TOOLS:
         return "execution"
     if catalogued:
         return catalogued
@@ -1371,13 +1498,33 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
             name,
             source="non-interactive", call_id=call,
         )
-    reasons = {
-        ALLOW: "%s allows %s tools" % (MODE_LABELS.get(active, active), risk),
-        ASK: "%s asks before %s tools" % (MODE_LABELS.get(active, active), risk),
-        DENY: "%s forbids %s tools" % (MODE_LABELS.get(active, active), risk),
-    }
-    return Decision(action, active, risk, reasons[action], name, source="mode",
-                    call_id=call)
+    return Decision(action, active, risk, mode_reason(action, active, risk), name,
+                    source="mode", call_id=call)
+
+
+# Plain words for each risk class, used in the reason an operator reads at an
+# approval prompt. Never the class name itself ("ask tools" means nothing to
+# a person deciding whether to type y).
+RISK_PLAIN = {
+    "safe": "commands that only read",
+    "ask": "commands that contact services or touch the workspace",
+    "mutation": "commands that change files",
+    "execution": "commands that run programs",
+    "dangerous": "destructive or administrative commands",
+    UNCLASSIFIED: "commands it cannot classify",
+}
+
+
+def mode_reason(action: str, mode: str, risk: str) -> str:
+    """Plain reason for a mode decision: which mode, what it does, to what.
+
+    ``manual mode asks before commands that contact services or touch the
+    workspace``. Always names the mode and the effect in words.
+    """
+    label = "%s mode" % MODE_LABELS.get(mode, mode)
+    what = RISK_PLAIN.get(risk, "%s commands" % risk)
+    verb = {ALLOW: "allows", ASK: "asks before", DENY: "blocks"}.get(action, action)
+    return "%s %s %s" % (label, verb, what)
 
 
 # --- presentation ---------------------------------------------------------

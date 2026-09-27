@@ -529,7 +529,8 @@ def test_decide_strips_a_leading_slash():
 def test_decision_reason_names_the_mode_and_the_risk():
     decision = pm.decide("file_write", mode=pm.MANUAL)
     assert pm.MODE_LABELS[pm.MANUAL] in decision.reason
-    assert decision.risk in decision.reason
+    # The risk is named in plain words (spec: never "ask tools").
+    assert pm.RISK_PLAIN[decision.risk] in decision.reason
     # to_dict mirrors the dataclass exactly, ``source`` included: /permissions
     # branches on it to say whether the rule or the mode governs a tool, so a
     # field present on the object but missing from its dict form is a trap.
@@ -618,7 +619,7 @@ def test_rule_allow_is_moot_and_unattributed_when_the_mode_already_allows(monkey
     # The mode decided this on its own; the reason must say so, not credit a
     # rule that had nothing to do with the outcome.
     assert "rule" not in decision.reason.lower()
-    assert "auto allows" in decision.reason
+    assert "auto mode allows" in decision.reason
 
 
 def test_no_matching_rule_falls_through_to_mode_behaviour_unchanged():
@@ -795,7 +796,13 @@ def test_partial_policy_cannot_relax_an_omitted_deny(tmp_path, monkeypatch):
 
 
 def test_every_execution_tool_is_a_real_registered_tool(registered_tools):
-    stale = sorted(name for name in pm.EXECUTION_TOOLS if name not in registered_tools)
+    # The crash/profile digest host tools exist only on the typed gateway and
+    # the native MCP catalog (the legacy server registry is not extended).
+    from sonder_runtime.bootstrap.native_mcp import _DEBUG_TOOLS
+
+    typed_only = {descriptor.name for descriptor in _DEBUG_TOOLS}
+    stale = sorted(name for name in pm.EXECUTION_TOOLS
+                   if name not in registered_tools and name not in typed_only)
     assert not stale, (
         "permission_modes.EXECUTION_TOOLS names tools that no longer exist, so "
         "they silently classify nothing: %s" % ", ".join(stale)

@@ -208,7 +208,12 @@ drift as files change. Anchor on the named function, not just the integer.
   `sonder_runtime/platform/config.py` reads `SONDER_ALLOW_REMOTE_COMPUTE`,
   rejects configured remote nodes without that global gate, HTTPS, and a
   strong API key, while `WorkloadRequest.allow_remote` independently gates
-  each whole-job placement; cloud — `sonder_config.py:331` `SONDER_ALLOW_CLOUD`
+  each whole-job placement; remote Sonder Inference —
+  `sonder_runtime/adapters/inference/sonder_inference_gateway.py` refuses a
+  non-loopback `SONDER_INFERENCE_BASE_URL` before any byte is sent unless
+  `SONDER_ALLOW_REMOTE_INFERENCE=1`, an `https://` URL, a
+  `SONDER_INFERENCE_API_KEY` and a cloud-allowed operation context all hold;
+  cloud — `sonder_config.py:331` `SONDER_ALLOW_CLOUD`
   feature flag, enforced at the operation-context gate (`server.py:743`);
   private chain-of-thought — `server.py:309` `private_cot_opt_in_enabled`
   (`SONDER_ALLOW_PRIVATE_COT`, off by default) **and** `server.py:326`

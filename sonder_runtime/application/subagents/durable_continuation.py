@@ -29,7 +29,12 @@ from ..ports.subagents import (
     SubagentRequest, SubagentResult, SubagentSnapshot, SubagentStatus,
     SubagentUsage, TERMINAL_SUBAGENT_STATUSES,
 )
-from .continuable import ContinuableCheckpoint
+from .continuable import (
+    ContinuableCheckpoint, checkpoint_state_digest, provenance_subject_error,
+)
+from .checkpoint_provenance import (
+    CheckpointProvenanceError, CheckpointProvenanceHook, ProvenanceSubject,
+)
 from sonder_runtime.domain.agents.roles import AgentRole, role_budget
 from sonder_runtime.application.owner_process import recorded_owner_is_dead
 
@@ -109,8 +114,16 @@ class DurableCancellation:
 class DurableContinuationService:
     """Worker supervision over a repository-backed child-session record."""
 
-    def __init__(self, repository: DurableContinuationRepository) -> None:
+    def __init__(self, repository: DurableContinuationRepository, *,
+                 checkpoint_provenance: CheckpointProvenanceHook | None = None) -> None:
+        if checkpoint_provenance is not None and not callable(checkpoint_provenance):
+            raise TypeError("checkpoint provenance hook must be callable")
         self._repository = repository
+        # Host-owned provenance source.  Runner code only supplies state and a
+        # cursor; the service stamps provenance after the journal read and
+        # before the child compare-and-set.  Without a hook every checkpoint
+        # is stored provenance-absent and cannot authorize resume-from-state.
+        self._checkpoint_provenance = checkpoint_provenance
         self._controls: dict[str, DurableCancellation] = {}
         self._threads: dict[str, Thread] = {}
         self._lock = Lock()
@@ -403,9 +416,11 @@ class DurableContinuationService:
             validate_child_budget(budget, parent.request.budget)
 
     def _start(self, child_id: str, context: OperationContext, runner: Runner, *,
-               resuming: bool = False) -> SubagentHandle:
+               resuming: bool = False, expected_revision: int | None = None) -> SubagentHandle:
         self._require_storage_settled(child_id)
         record = self._require(child_id)
+        if expected_revision is not None and record.revision != expected_revision:
+            raise InvalidSubagentRequest("child session changed after resume validation")
         if resuming and (
             not record.recovery_required
             or record.status not in {SubagentStatus.FAILED, SubagentStatus.TIMED_OUT}
@@ -522,7 +537,9 @@ class DurableContinuationService:
             nonlocal expected, state
             if child_id in self._storage_failures:
                 raise self._storage_failures[child_id]
-            candidate = ContinuableCheckpoint(child_id, expected + 1, next_state, cursor)
+            candidate = self._stamp_checkpoint(
+                ContinuableCheckpoint(child_id, expected + 1, next_state, cursor)
+            )
             try:
                 saved = self._write("save_checkpoint", candidate, expected_sequence=expected)
             except ContinuationStorageFailure as error:
@@ -594,11 +611,90 @@ class DurableContinuationService:
                                     usage=usage())
             self._write("update", child_id, status=result.status, usage=result.usage, result=result, recovery_required=True)
 
-    def resume(self, child_id: str, context: OperationContext, runner: Runner) -> SubagentHandle:
+    def _stamp_checkpoint(self, candidate: ContinuableCheckpoint) -> ContinuableCheckpoint:
+        """Attach host provenance to a runner-proposed checkpoint.
+
+        The hook reads the effect journal before the child compare-and-set, so
+        the stamped position only names receipts that already committed.  A
+        hook failure or a record for a different subject fails the save; the
+        child keeps its previous checkpoint.
+        """
+        hook = self._checkpoint_provenance
+        if hook is None:
+            return candidate
+        subject = ProvenanceSubject(
+            candidate.child_id, candidate.sequence,
+            checkpoint_state_digest(candidate.state), candidate.cursor,
+        )
+        provenance = hook(subject)
+        stamped = ContinuableCheckpoint(
+            candidate.child_id, candidate.sequence, candidate.state,
+            candidate.cursor, provenance,
+        )
+        if provenance is None or provenance_subject_error(stamped) is not None:
+            raise CheckpointProvenanceError("checkpoint provenance hook returned a foreign record")
+        return stamped
+
+    def resume(self, child_id: str, context: OperationContext, runner: Runner, *,
+               expected_revision: int | None = None) -> SubagentHandle:
+        """Claim a recoverable child and start ``runner`` from its checkpoint.
+
+        ``expected_revision`` pins the exact durable record a caller validated
+        (checkpoint saves advance the revision), so a checkpoint cannot change
+        between validation and the claim.
+        """
         record = self._require(child_id)
         parent = self._repository.get(record.request.parent_id)
         self._admit(record.request, record.lineage, parent)
-        return self._start(child_id, context, runner, resuming=True)
+        return self._start(child_id, context, runner, resuming=True,
+                           expected_revision=expected_revision)
+
+    def record(self, child_id: str) -> DurableChildSession | None:
+        """Return the durable child record, or ``None`` when it does not exist."""
+        return self._repository.get(child_id)
+
+    def runner_alive(self, child_id: str) -> bool:
+        with self._lock:
+            thread = self._threads.get(child_id)
+        return thread is not None and thread.is_alive()
+
+    def release_dead_owner(self, child_id: str) -> DurableChildSession:
+        """Mark a RUNNING child whose recorded owner process is dead as recoverable.
+
+        Only a worker-registry reservation records the owner's pid and host.
+        The owner must be another service instance and must be proven dead;
+        anything unprovable raises ``ContinuationCleanupRequired`` so the child
+        stays fenced.  The transition is a revision-checked durable update to
+        FAILED with ``recovery_required``; it never starts a runner.
+        """
+        record = self._require(child_id)
+        if record.status is not SubagentStatus.RUNNING:
+            return record
+        if self.runner_alive(child_id):
+            raise InvalidSubagentRequest("child runner is live in this service")
+        metadata = self._metadata(record.request)
+        owner_nonce = metadata.get("owner_nonce", "")
+        if (
+            metadata.get("worker_registry_admitted") != "true"
+            or not owner_nonce or owner_nonce == self._owner_nonce
+            or not recorded_owner_is_dead(metadata)
+        ):
+            raise ContinuationCleanupRequired(child_id)
+        self._require_storage_settled(child_id)
+        result = SubagentResult(
+            child_id, record.request.parent_id, SubagentStatus.FAILED,
+            error=SubagentError("owner_lost", "child owner process exited before completion", True),
+            usage=record.usage,
+        )
+        updated = self._write(
+            "update", child_id, status=SubagentStatus.FAILED,
+            expected_revision=record.revision, usage=record.usage, result=result,
+            recovery_required=True,
+        )
+        if (updated is None or updated.status is not SubagentStatus.FAILED
+                or not updated.recovery_required):
+            raise ContinuationCleanupRequired(child_id)
+        return updated
 
     def recover_after_restart(self) -> tuple[str, ...]:
         if self._storage_failures:

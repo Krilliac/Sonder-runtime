@@ -64,7 +64,7 @@ def _zip(path: Path, *, license_file: bool = True, app_file: bool = True,
             for name, data in files.items():
                 archive.writestr("local-system/" + name, data)
         else:
-            prefix = "Sonder Runtime.app/Contents/"
+            prefix = release.MACOS_APP_BUNDLE + "/Contents/"
             if app_file:
                 archive.writestr(prefix + "MacOS/sonder", b"app")
             archive.writestr(prefix + "Info.plist", b"plist")
@@ -191,7 +191,7 @@ def test_rejects_mac_framework_symlink_escape(tmp_path):
     _artifacts(tmp_path)
     path = tmp_path / "macos" / "sonder-runtime-macos.zip"
     with zipfile.ZipFile(path, "a") as archive:
-        link = zipfile.ZipInfo("Sonder Runtime.app/Contents/Frameworks/escape")
+        link = zipfile.ZipInfo(release.MACOS_APP_BUNDLE + "/Contents/Frameworks/escape")
         link.create_system = 3
         link.external_attr = (stat.S_IFLNK | 0o777) << 16
         archive.writestr(link, "../../../../outside")
@@ -289,8 +289,105 @@ def test_release_workflow_stamps_and_gates_artifacts():
     assert "Run tag-time runtime smoke" in ci
     assert "scripts/release_smoke.sh --tag" in ci
     assert "  windows-focused:\n    runs-on: windows-latest" in ci
+    # The root-only Linux selfmod candidate boundary (#517) is part of the
+    # same required gate: its job runs the canaries under sudo, refuses any
+    # skip, and the "tests" context fails unless it succeeded.
+    assert "needs: [windows-focused, container-qualification, linux-selfmod-isolation]" in ci
+    assert "needs.linux-selfmod-isolation.result != 'success'" in ci
+    linux_isolation = ci.split("\n  linux-selfmod-isolation:\n", 1)[1].split("\n  windows-focused:\n", 1)[0]
+    assert 'sudo "$python_bin" -B -m pytest' in linux_isolation
+    assert "tests/test_linux_candidate_isolation.py" in linux_isolation
+    assert "tests/test_wiring_selfmod_linux_nightly.py" in linux_isolation
+    assert '("skipped", "errors", "failures")' in linux_isolation
     assert "python -m venv" in ci
     assert "tests/test_managed_runtime_payload.py" in ci
     assert "tests/test_managed_runtime_owner.py" in ci
     assert "tests/test_artifact_fetch.py" in ci
     assert "tests/test_selfmod_low_integrity.py" in ci
+
+
+WORKFLOWS = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+
+
+def _job_block(workflow: str, job: str) -> str:
+    """The text of one top-level job, up to the next job or the end."""
+    marker = "\n  %s:\n" % job
+    assert marker in workflow, job
+    rest = workflow.split(marker, 1)[1]
+    lines = []
+    for line in rest.splitlines():
+        if line.startswith("  ") and not line.startswith("   ") and line.rstrip().endswith(":"):
+            break
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _step_block(job_text: str, name: str) -> str:
+    """The text of one ``- name:`` step inside a job, up to the next step."""
+    marker = "      - name: %s\n" % name
+    assert marker in job_text, name
+    rest = job_text.split(marker, 1)[1]
+    return rest.split("\n      - ", 1)[0]
+
+
+def test_ci_runs_the_tuf_update_trust_suites_and_refuses_skips():
+    ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+    step = _step_block(_job_block(ci, "tests"), "Run the TUF update-trust suites (no skips allowed)")
+    assert "if: ${{ !cancelled() }}" in step
+    assert "uv pip install -r requirements-dev.txt -r requirements-update.txt --system" in step
+    assert "tests/production/test_tuf_publisher.py" in step
+    assert "tests/test_update_manifest_trust.py" in step
+    assert '--junitxml="$RUNNER_TEMP/update-trust.xml"' in step
+    assert 'assert totals["tests"] > 0' in step
+    assert 'assert totals["skipped"] == totals["errors"] == totals["failures"] == 0' in step
+    # The trust suites must stay importorskip-guarded on tuf only: the default
+    # dev install leaves the TUF stack out, and this step is what runs them.
+    assert "tuf" not in (Path(__file__).resolve().parents[1] / "requirements-dev.txt").read_text(
+        encoding="utf-8")
+
+
+WINDOWS_DEVTOOLS_SUITES = (
+    "tests/test_build_environment_windows_fakes.py",
+    "tests/test_debug_windows_fakes.py",
+    "tests/test_host_tool_discovery_windows.py",
+    "tests/test_slash_menu_windows_keys.py",
+    "tests/test_build_executor.py",
+    "tests/test_build_tree_reader.py",
+    "tests/test_build_preimages.py",
+    "tests/test_debug_launcher.py",
+    "tests/test_debug_templates_symbol_path.py",
+    "tests/test_build_clang_cl_real.py",
+)
+
+
+def test_windows_focused_runs_the_devtools_suites_in_their_own_step():
+    ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+    job = _job_block(ci, "windows-focused")
+    step = _step_block(job, "Exercise the build, debug and host-tool Windows branches")
+    assert "if: ${{ !cancelled() && steps.install-focused-venv.outcome == 'success' }}" in step
+    assert "timeout-minutes: 8" in step
+    # Gating since its first fully green hosted windows-latest run: a failure
+    # here must fail the required job, never be downgraded to a warning.
+    assert "continue-on-error" not in step
+    assert "Gating since its first fully green hosted run" in step
+    assert "-m pytest -q -rs" in step
+    for suite in WINDOWS_DEVTOOLS_SUITES:
+        assert suite in step, suite
+        assert (WORKFLOWS.parents[1] / suite).is_file(), suite
+
+
+def test_linux_golden_failures_are_uploaded_and_other_desktops_skip_goldens():
+    apps = (WORKFLOWS / "build-apps.yml").read_text(encoding="utf-8")
+    analyze = _job_block(apps, "analyze")
+    assert "      - run: flutter test\n" in analyze
+    step = _step_block(analyze, "Upload golden failure images")
+    assert analyze.index("      - run: flutter test\n") < analyze.index("Upload golden failure images")
+    assert "if: failure()" in step
+    assert "uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7" in step
+    # uses: steps ignore defaults.run.working-directory, so the path is from the repo root.
+    assert "path: app/test/goldens/failures/" in step
+    assert "if-no-files-found: ignore" in step
+    assert "/test/goldens/failures/" in (WORKFLOWS.parents[1] / "app" / ".gitignore").read_text(
+        encoding="utf-8")
+    for job in ("windows", "macos"):
+        assert "flutter test --exclude-tags golden" in _job_block(apps, job), job

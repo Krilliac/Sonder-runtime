@@ -1,0 +1,41 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 456  of event 'cpu-clock'
+# Event count (approx.): 114000000
+#
+# Children      Self  Shared Object         Symbol                               
+# ........  ........  ....................  .....................................
+#
+    98.25%     0.00%  hot                   [.] _start
+    98.25%     0.00%  libc.so.6             [.] __libc_start_call_main
+    98.25%     0.00%  libc.so.6             [.] __libc_start_main@@GLIBC_2.34
+    95.61%    94.52%  hot                   [.] integrate_physics(int)
+     2.41%     2.41%  hot                   [.] light_work(int)
+     1.75%     0.00%  ld-linux-x86-64.so.2  [.] _dl_start
+     1.75%     0.00%  ld-linux-x86-64.so.2  [.] _dl_start_user
+     1.75%     0.00%  ld-linux-x86-64.so.2  [.] _dl_sysdep_start
+     1.32%     0.22%  ld-linux-x86-64.so.2  [.] init_cpu_features.constprop.0
+     0.88%     0.22%  [kernel.kallsyms]     [k] irqentry_exit_to_user_mode
+     0.88%     0.00%  [kernel.kallsyms]     [k] irqentry_exit
+     0.66%     0.66%  [kernel.kallsyms]     [k] finish_task_switch.isra.0
+     0.66%     0.66%  ld-linux-x86-64.so.2  [.] intel_check_word.constprop.0
+     0.66%     0.00%  [kernel.kallsyms]     [k] __schedule
+     0.66%     0.00%  [kernel.kallsyms]     [k] schedule
+     0.66%     0.00%  ld-linux-x86-64.so.2  [.] handle_intel.constprop.0
+     0.44%     0.00%  [kernel.kallsyms]     [k] __split_vma
+     0.44%     0.00%  [kernel.kallsyms]     [k] asm_common_interrupt
+     0.44%     0.00%  [kernel.kallsyms]     [k] asm_sysvec_apic_timer_interrupt
+     0.44%     0.00%  [kernel.kallsyms]     [k] common_interrupt
+     0.44%     0.00%  [kernel.kallsyms]     [k] do_syscall_64
+     0.44%     0.00%  [kernel.kallsyms]     [k] entry_SYSCALL_64_after_hwframe
+     0.44%     0.00%  [kernel.kallsyms]     [k] sysvec_apic_timer_interrupt
+     0.44%     0.00%  [kernel.kallsyms]     [k] x64_sys_call
+     0.44%     0.00%  ld-linux-x86-64.so.2  [.] dl_main
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

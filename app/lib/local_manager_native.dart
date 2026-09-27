@@ -339,8 +339,7 @@ class LocalManager {
       );
     }
     final system = bundledSystemDirectory();
-    final managedReachable =
-        managedReachabilityProbe ?? defaultServerReachable;
+    final managedReachable = managedReachabilityProbe ?? defaultServerReachable;
     if (await managedReachable()) {
       return const LocalActionResult(
         true,
@@ -352,8 +351,8 @@ class LocalManager {
       return const LocalActionResult(
         false,
         'A service is already listening on 127.0.0.1:11435, but it is not '
-            'verified as this app-managed Sonder server. Stop that service '
-            'before starting a managed local server.',
+        'verified as this app-managed Sonder server. Stop that service '
+        'before starting a managed local server.',
       );
     }
     if (!await system.exists()) {
@@ -912,6 +911,234 @@ class LocalManager {
     return const LocalActionResult(
       true,
       'Updated local-system from Git. Restart any running server window to use the new files.',
+    );
+  }
+
+  /// Environment names never handed to the Observatory process: it asks for
+  /// its own credentials, so none of the app's may leak into it. Desktop
+  /// session variables (DBUS_SESSION_BUS_ADDRESS, XAUTHORITY) are kept: a
+  /// GUI process needs them.
+  static final RegExp _secretEnvName = RegExp(
+      r'(TOKEN|API_?KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL)',
+      caseSensitive: false);
+
+  /// [environment] without any variable whose name looks like a credential.
+  static Map<String, String> observatoryEnvironment(
+          Map<String, String> environment) =>
+      {
+        for (final entry in environment.entries)
+          if (!_secretEnvName.hasMatch(entry.key)) entry.key: entry.value,
+      };
+
+  static Future<void> _startDetached(String executable, List<String> arguments,
+      Map<String, String> environment) async {
+    await Process.start(
+      executable,
+      arguments,
+      environment: environment,
+      includeParentEnvironment: false,
+      mode: ProcessStartMode.detached,
+    );
+  }
+
+  /// Opens [url] with the OS opener ([observatoryOpenerCommand]).
+  static Future<bool> _openUrl(
+      String url, Map<String, String> environment) async {
+    final (program, arguments) = observatoryOpenerCommand(url,
+        operatingSystem: Platform.operatingSystem);
+    try {
+      await Process.start(
+        program,
+        arguments,
+        environment: environment,
+        includeParentEnvironment: false,
+        mode: ProcessStartMode.detached,
+      );
+      return true;
+    } on ProcessException {
+      return false;
+    }
+  }
+
+  static bool _isFile(String path) => File(path).existsSync();
+
+  /// True when [path] can be launched as the Observatory on
+  /// [operatingSystem]: an existing file, or on macOS an existing `.app`
+  /// bundle directory.
+  static bool observatoryPathExists(String path, {String? operatingSystem}) {
+    if (_isFile(path)) return true;
+    return (operatingSystem ?? Platform.operatingSystem) == 'macos' &&
+        isMacAppBundle(path) &&
+        Directory(path).existsSync();
+  }
+
+  /// The first `PATH` entry holding [name] (with a `PATHEXT` suffix on
+  /// Windows), or null. [fileExists] and [operatingSystem] default to the
+  /// real file system and host; tests inject them.
+  static String? findExecutableOnPath(
+      String name, Map<String, String> environment,
+      {bool Function(String path)? fileExists, String? operatingSystem}) {
+    final exists = fileExists ?? _isFile;
+    final windows = (operatingSystem ?? Platform.operatingSystem) == 'windows';
+    final path = environment['PATH'] ?? environment['Path'] ?? '';
+    final separator = windows ? ';' : ':';
+    final directorySeparator = windows ? r'\' : '/';
+    final suffixes = windows
+        ? [
+            '',
+            ...(environment['PATHEXT'] ?? '.EXE;.CMD;.BAT')
+                .split(';')
+                .where((suffix) => suffix.isNotEmpty),
+          ]
+        : const [''];
+    for (final directory in path.split(separator)) {
+      if (directory.trim().isEmpty) continue;
+      for (final suffix in suffixes) {
+        final base = directory.endsWith(directorySeparator)
+            ? directory
+            : '$directory$directorySeparator';
+        final candidate = '$base$name${suffix.toLowerCase()}';
+        if (exists(candidate)) return candidate;
+      }
+    }
+    return null;
+  }
+
+  /// Opens Sonder Observatory connected to [connectUrls] (contract
+  /// section 10).
+  ///
+  /// The executable comes from, in order: [executable] (the Settings value),
+  /// the `SONDER_OBSERVATORY_BIN` environment variable, then
+  /// `sonder-observatory` on `PATH`. It is started detached with one
+  /// `--connect <url>` per URL. Without an executable, a configured
+  /// [webUrl] is opened as `<webUrl>?fixture=0&connect=<url>&…` with the OS
+  /// opener; otherwise the result carries guidance.
+  ///
+  /// Launching is disabled when [runtimeUrl] is not loopback: producer
+  /// telemetry is loopback on the runtime host. No token or API key is ever
+  /// passed, in arguments, URL or environment.
+  ///
+  /// On macOS a `.app` bundle path is accepted and started with
+  /// `open -n -a <bundle> --args …` ([observatoryProcessCommand]).
+  ///
+  /// [environment], [start], [fileExists], [findOnPath], [open] and
+  /// [operatingSystem] are injectable for tests; they default to this
+  /// process's environment, the real process, file and opener calls, and
+  /// the host OS.
+  static Future<ObservatoryLaunchResult> launchObservatory(
+    List<String> connectUrls, {
+    String runtimeUrl = '',
+    String executable = '',
+    String webUrl = '',
+    Map<String, String>? environment,
+    Future<void> Function(String executable, List<String> arguments,
+            Map<String, String> environment)?
+        start,
+    bool Function(String path)? fileExists,
+    String? Function(String name, Map<String, String> environment)? findOnPath,
+    Future<bool> Function(String url, Map<String, String> environment)? open,
+    String? operatingSystem,
+  }) async {
+    final os = operatingSystem ?? Platform.operatingSystem;
+    final urls = observatoryConnectUrls(connectUrls);
+    final blocked =
+        observatoryLaunchBlocked(runtimeUrl: runtimeUrl, connectUrls: urls);
+    if (blocked != null) return blocked;
+    if (!canRunLocalTools) {
+      // Android and iOS cannot start the desktop Observatory: offer the
+      // link, as a browser build does.
+      final url = observatoryWebLaunchUrl(webUrl, urls) ?? '';
+      return ObservatoryLaunchResult(
+        ok: false,
+        mode: ObservatoryLaunchMode.unavailable,
+        message: url.isEmpty
+            ? 'This device cannot start the Observatory. Copy the connect '
+                'URLs and open them in the Observatory on the runtime host.'
+            : 'This device cannot start the Observatory. Copy this link.',
+        url: url,
+      );
+    }
+    final env = environment ?? Platform.environment;
+    final childEnv = observatoryEnvironment(env);
+    final exists = fileExists ??
+        (String path) => observatoryPathExists(path, operatingSystem: os);
+
+    String resolved = '';
+    final configured = executable.trim();
+    final fromEnv = (env[observatoryBinEnv] ?? '').trim();
+    if (configured.isNotEmpty) {
+      if (!exists(configured)) {
+        return ObservatoryLaunchResult(
+          ok: false,
+          mode: ObservatoryLaunchMode.unavailable,
+          message: 'The Observatory executable set in Settings was not '
+              'found: $configured',
+        );
+      }
+      resolved = configured;
+    } else if (fromEnv.isNotEmpty) {
+      if (!exists(fromEnv)) {
+        return ObservatoryLaunchResult(
+          ok: false,
+          mode: ObservatoryLaunchMode.unavailable,
+          message: '$observatoryBinEnv names an executable that was not '
+              'found: $fromEnv',
+        );
+      }
+      resolved = fromEnv;
+    } else {
+      resolved = (findOnPath ??
+              (name, environment) => findExecutableOnPath(name, environment,
+                  fileExists: exists,
+                  operatingSystem: os))(observatoryExecutableName, env) ??
+          '';
+    }
+
+    if (resolved.isNotEmpty) {
+      final arguments = [
+        for (final url in urls) ...['--connect', url],
+      ];
+      final (program, programArguments) =
+          observatoryProcessCommand(resolved, arguments, operatingSystem: os);
+      try {
+        await (start ?? _startDetached)(program, programArguments, childEnv);
+      } on ProcessException catch (error) {
+        return ObservatoryLaunchResult(
+          ok: false,
+          mode: ObservatoryLaunchMode.executable,
+          message: 'Could not start the Observatory: ${error.message}',
+          executable: resolved,
+          arguments: arguments,
+        );
+      }
+      return ObservatoryLaunchResult(
+        ok: true,
+        mode: ObservatoryLaunchMode.executable,
+        message: 'Opened the Observatory with ${urls.length} '
+            '${urls.length == 1 ? 'producer' : 'producers'}.',
+        executable: resolved,
+        arguments: arguments,
+      );
+    }
+
+    final url = observatoryWebLaunchUrl(webUrl, urls);
+    if (url != null) {
+      final opened = await (open ?? _openUrl)(url, childEnv);
+      return ObservatoryLaunchResult(
+        ok: opened,
+        mode: opened
+            ? ObservatoryLaunchMode.webUrl
+            : ObservatoryLaunchMode.unavailable,
+        message: opened
+            ? 'Opened the Observatory in the browser.'
+            : 'Could not open a browser. Copy this link instead.',
+        url: url,
+      );
+    }
+    return const ObservatoryLaunchResult(
+      ok: false,
+      mode: ObservatoryLaunchMode.unavailable,
+      message: observatoryGuidance,
     );
   }
 }

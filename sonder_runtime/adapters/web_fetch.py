@@ -14,6 +14,7 @@ from email.message import Message
 from html.parser import HTMLParser
 
 from ..application.context import OperationContext
+from ..application.ports.web import WebToolsDisabled
 
 MAX_CHARS = 30_000
 _MEDIA_TYPE = re.compile(r"^[A-Za-z0-9!#$&^_.+\-]+/[A-Za-z0-9!#$&^_.+\-]+$")
@@ -171,7 +172,7 @@ def fetch_raw(url: str, *, max_chars=8000, timeout=10):
     """Fetch and decode bounded text through the compatibility transport."""
     tools = _web_tools()
     if not tools.enabled():
-        raise RuntimeError("web tools disabled by SONDER_WEB_TOOLS")
+        raise WebToolsDisabled()
     bounded_chars = max(1000, min(int(max_chars or 8000), MAX_CHARS))
     raw, content_type = tools._request(url, timeout=timeout)
     return _decode_web_document(raw, content_type)[:bounded_chars]

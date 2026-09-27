@@ -21,6 +21,7 @@ network, filesystem, credential, or cloud permissions.
 from __future__ import annotations
 
 import ipaddress
+import logging
 import math
 import os
 import re
@@ -112,6 +113,15 @@ _SECRET_TOML_KEYS = frozenset(
 
 MIN_API_KEY_LENGTH = 24
 
+# Backups carry no encryption or key-based authentication. The environment
+# variable is still scrubbed from child processes (``SECRET_ENV_KEYS``) but a
+# non-empty value fails configuration instead of being silently ignored.
+BACKUP_KEY_FILE_UNSUPPORTED = (
+    "SONDER_BACKUP_KEY_FILE is not supported: backups are not encrypted or "
+    "key-authenticated; unset it and protect the backup target with "
+    "filesystem permissions or an encrypted volume"
+)
+
 # Auth modes that mint/verify account session tokens (as opposed to the plain
 # API-key or local-open profiles).  These key an HMAC with the auth secret.
 ACCOUNT_BEARING_AUTH_MODES = ("account", "both", "either")
@@ -145,6 +155,19 @@ class ServerConfig:
     # non-loopback exposure.  Loopback binding never needs it; non-loopback
     # binding is rejected without it.
     tls_terminated_by_proxy: bool = False
+    # Public names (``host`` or ``host:port``) clients or a proxy may put in
+    # the Host header besides loopback names.  Everything else is refused
+    # with 421 before routing (DNS-rebinding defence).
+    allowed_hosts: tuple[str, ...] = ()
+    # Routed HTTP work (workbench/fleet/autopilot chat turns): how long the
+    # request waits before answering with a work-run id, the wall-clock budget
+    # after which the run may no longer change anything, and how many such
+    # runs may execute at once.
+    work_wait_seconds: int = 240
+    work_budget_seconds: int = 1800
+    work_max_running: int = 2
+    # SSE keep-alive comment interval while a streamed chat turn generates.
+    stream_heartbeat_seconds: int = 15
 
 
 @dataclass(frozen=True)
@@ -386,6 +409,14 @@ class ObservabilityConfig:
     metrics_enabled: bool = True
     metrics_path: str = "/metrics"
     audit_retention_days: int = 90
+    # Observatory live producer (docs/architecture/observatory-telemetry.md).
+    # Export is content-free and admin-gated; ``live_export_origins`` is the
+    # route-scoped browser allowlist for the three telemetry GET routes only,
+    # so granting Observatory never widens the global admin CORS list.
+    live_export: bool = True
+    live_export_buffer: int = 4096
+    live_export_max_subscribers: int = 8
+    live_export_origins: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -403,6 +434,10 @@ class Secrets:
 
     api_key: str = field(default="", repr=False)
     auth_secret: str = field(default="", repr=False)
+    # Reserved positional slot only: no loader populates it and no backup code
+    # reads it (SONDER_BACKUP_KEY_FILE is refused by the loader). It stays so
+    # positional ``Secrets(api_key, auth_secret, ...)`` callers keep binding
+    # later fields correctly.
     backup_key_file: str = field(default="", repr=False)
     artifact_transfer_key: str = field(default="", repr=False)
     memory_replication_key: str = field(default="", repr=False)
@@ -431,6 +466,132 @@ class Secrets:
             "auth_secret": redact_presence(self.auth_secret),
             "backup_key_file": redact_presence(self.backup_key_file),
         }
+
+
+# --- C++ build tools (bootstrap/build_tools.py) ---------------------------------
+#
+# The SONDER_BUILD_* keys. Everything here is operator configuration: a model
+# never reaches any of it. Unset keys keep the conservative defaults; a
+# malformed value is a configuration error, never a silent widening.
+BUILD_NETWORK_MODES = ("enforce", "default", "advisory")
+# The only world a build fix runs in. ``container`` is refused, never mapped
+# to the host: no container build path exists for the fix loop's CMake jobs.
+BUILD_FIX_WORLDS = ("host",)
+BUILD_MAX_TIMEOUT_CAP_SECONDS = 86_400
+BUILD_DEFAULT_MAX_TIMEOUT_SECONDS = 7_200
+BUILD_DEFAULT_FIX_MODEL_ROUTE = "codegen"
+_BUILD_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_().]{0,127}$")
+_BUILD_TARGET_RE = re.compile(r"^[A-Za-z0-9_.+-]{1,128}$")
+_BUILD_ROUTE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$")
+_BUILD_MAX_NAMES = 64
+
+
+@dataclass(frozen=True)
+class BuildToolsConfig:
+    """Operator settings for build_model/build_job/build_fix (SONDER_BUILD_*)."""
+
+    # SONDER_BUILD_PROFILES: path of the operator profile file (0600 on POSIX).
+    profiles_file: str = ""
+    # SONDER_BUILD_ENV_PASSTHROUGH: extra variable names a job may inherit;
+    # the adapter's denylist (proxies, symbol servers, secrets) still applies.
+    env_passthrough: tuple[str, ...] = ()
+    # SONDER_BUILD_NETWORK: enforce | default | advisory.
+    network: str = "default"
+    # SONDER_BUILD_MAX_TIMEOUT_SECONDS: operator cap on a job's deadline.
+    max_timeout_seconds: int = BUILD_DEFAULT_MAX_TIMEOUT_SECONDS
+    # SONDER_BUILD_UTILITY_TARGETS: utility/custom targets the operator allows.
+    utility_targets: tuple[str, ...] = ()
+    # SONDER_BUILD_USER_PRESETS: read CMakeUserPresets.json (default on).
+    user_presets: bool = True
+    # SONDER_BUILD_CLANGD_CONFIG: let clangd read a project .clangd (default off).
+    clangd_config: bool = False
+    # SONDER_BUILD_FIX_MODEL_ROUTE: the model route build_fix proposes with.
+    fix_model_route: str = BUILD_DEFAULT_FIX_MODEL_ROUTE
+    # SONDER_BUILD_FIX_PROPOSE_ONLY_OK: allow build_fix apply=false.
+    fix_propose_only_ok: bool = False
+
+
+def _build_names(raw: str, key: str, pattern: re.Pattern, errors: list[str]) -> tuple[str, ...]:
+    names: list[str] = []
+    for part in raw.replace(";", ",").split(","):
+        name = part.strip()
+        if not name:
+            continue
+        if not pattern.fullmatch(name):
+            errors.append(f"{key} entry {name[:40]!r} is not a valid name")
+            continue
+        if name not in names:
+            names.append(name)
+    if len(names) > _BUILD_MAX_NAMES:
+        errors.append(f"{key} lists more than {_BUILD_MAX_NAMES} names")
+        names = names[:_BUILD_MAX_NAMES]
+    return tuple(names)
+
+
+def build_tools_config_from_env(env, errors: list[str] | None = None) -> BuildToolsConfig:
+    """Parse the SONDER_BUILD_* keys of ``env``; problems go to ``errors``.
+
+    A bad value keeps the default for that key (which is always the narrower
+    choice) and is reported, so a typo never widens what a build may do.
+    """
+    problems = errors if errors is not None else []
+    config = BuildToolsConfig()
+    text = {key: str(value) for key, value in dict(env or {}).items()
+            if isinstance(key, str) and key.startswith("SONDER_BUILD_")}
+    profiles = text.get("SONDER_BUILD_PROFILES", "").strip()
+    if profiles:
+        if "\x00" in profiles or len(profiles) > 4096:
+            problems.append("SONDER_BUILD_PROFILES is not a usable path")
+        else:
+            config = replace(config, profiles_file=profiles)
+    passthrough = text.get("SONDER_BUILD_ENV_PASSTHROUGH", "")
+    if passthrough.strip():
+        config = replace(config, env_passthrough=_build_names(
+            passthrough, "SONDER_BUILD_ENV_PASSTHROUGH", _BUILD_NAME_RE, problems))
+    network = text.get("SONDER_BUILD_NETWORK", "").strip().lower()
+    if network:
+        if network in BUILD_NETWORK_MODES:
+            config = replace(config, network=network)
+        else:
+            problems.append("SONDER_BUILD_NETWORK must be one of %s" % ", ".join(BUILD_NETWORK_MODES))
+    timeout = text.get("SONDER_BUILD_MAX_TIMEOUT_SECONDS", "").strip()
+    if timeout:
+        try:
+            value = int(timeout)
+        except ValueError:
+            problems.append("SONDER_BUILD_MAX_TIMEOUT_SECONDS is not an integer")
+        else:
+            if 30 <= value <= BUILD_MAX_TIMEOUT_CAP_SECONDS:
+                config = replace(config, max_timeout_seconds=value)
+            else:
+                problems.append("SONDER_BUILD_MAX_TIMEOUT_SECONDS must be within 30..%d"
+                                % BUILD_MAX_TIMEOUT_CAP_SECONDS)
+    world = text.get("SONDER_BUILD_FIX_WORLD", "").strip().lower()
+    if world == "container":
+        # Refused, not narrowed: a fix asked to run in a container must never
+        # run on the host instead.
+        problems.append("SONDER_BUILD_FIX_WORLD=container is not supported; build jobs and "
+                        "fixes run only in the host world (unset it or set host)")
+    elif world and world not in BUILD_FIX_WORLDS:
+        problems.append("SONDER_BUILD_FIX_WORLD must be host")
+    utility = text.get("SONDER_BUILD_UTILITY_TARGETS", "")
+    if utility.strip():
+        config = replace(config, utility_targets=_build_names(
+            utility, "SONDER_BUILD_UTILITY_TARGETS", _BUILD_TARGET_RE, problems))
+    if "SONDER_BUILD_USER_PRESETS" in text and text["SONDER_BUILD_USER_PRESETS"].strip():
+        config = replace(config, user_presets=env_bool(text["SONDER_BUILD_USER_PRESETS"]))
+    if "SONDER_BUILD_CLANGD_CONFIG" in text and text["SONDER_BUILD_CLANGD_CONFIG"].strip():
+        config = replace(config, clangd_config=env_bool(text["SONDER_BUILD_CLANGD_CONFIG"]))
+    route = text.get("SONDER_BUILD_FIX_MODEL_ROUTE", "").strip()
+    if route:
+        if _BUILD_ROUTE_RE.fullmatch(route):
+            config = replace(config, fix_model_route=route)
+        else:
+            problems.append("SONDER_BUILD_FIX_MODEL_ROUTE is not a valid route name")
+    if text.get("SONDER_BUILD_FIX_PROPOSE_ONLY_OK", "").strip():
+        config = replace(config, fix_propose_only_ok=env_bool(
+            text["SONDER_BUILD_FIX_PROPOSE_ONLY_OK"]))
+    return config
 
 
 @dataclass(frozen=True)
@@ -468,6 +629,7 @@ class SonderConfig:
         default_factory=ControlStateRehearsalConfig
     )
     spanda: SpandaConfig = field(default_factory=SpandaConfig)
+    build_tools: BuildToolsConfig = field(default_factory=BuildToolsConfig)
 
     def as_redacted_dict(self) -> dict:
         out: dict = {
@@ -611,6 +773,41 @@ def _is_exact_string(value: object) -> bool:
 
 def _has_minimum_api_key(value: object) -> bool:
     return _is_exact_string(value) and len(value) >= MIN_API_KEY_LENGTH
+
+
+_ALLOWED_HOST_NAME = re.compile(
+    r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*"
+)
+
+
+def _valid_allowed_host(entry: object) -> bool:
+    """``name``, ``name:port``, ``ip:port`` or ``[v6]:port`` (case-insensitive)."""
+    if not _is_exact_string(entry) or not 1 <= len(entry) <= 260:
+        return False
+    entry = entry.lower()
+    port = ""
+    if entry.startswith("["):
+        name, sep, rest = entry[1:].partition("]")
+        if not sep or (rest and not rest.startswith(":")):
+            return False
+        port = rest[1:] if rest else ""
+        try:
+            if ipaddress.ip_address(name).version != 6:
+                return False
+        except ValueError:
+            return False
+    else:
+        name, sep, port = entry.partition(":")
+        if sep and not port:
+            return False
+        try:
+            ipaddress.ip_address(name)
+        except ValueError:
+            if len(name) > 253 or not _ALLOWED_HOST_NAME.fullmatch(name):
+                return False
+    if port and not (port.isdigit() and len(port) <= 5 and 1 <= int(port) <= 65535):
+        return False
+    return True
 
 
 def _is_loopback_host(host: object) -> bool:
@@ -1060,6 +1257,105 @@ _env_bool = env_bool
 _env_int = env_int
 
 
+_config_logger = logging.getLogger("sonder.config")
+_DEFAULT_PORTS = {"http": "80", "https": "443"}
+
+
+def normalize_origin(value: str) -> str:
+    """Return the browser's spelling of an origin, or ``value`` unchanged.
+
+    Browsers send ``Origin`` with a lower-case scheme and host, no trailing
+    slash and no default port.  An allowlist entry written as
+    ``HTTP://127.0.0.1:4173/`` means the same origin; this spells it the way
+    the exact-match comparison sees it.  Anything that is not an origin (a
+    path, a query, ``*``) is returned unchanged so validation still rejects it.
+    """
+    text = str(value or "").strip()
+    match = re.fullmatch(r"([A-Za-z][A-Za-z0-9+.-]*)://([^/\s?#]+)/?", text)
+    if not match:
+        return text
+    scheme = match.group(1).lower()
+    authority = match.group(2)
+    if "@" in authority:
+        return text
+    if authority.startswith("["):
+        end = authority.find("]")
+        if end < 0:
+            return text
+        host, rest = authority[: end + 1], authority[end + 1:]
+        if rest and not rest.startswith(":"):
+            return text
+        port = rest[1:]
+    else:
+        host, _sep, port = authority.partition(":")
+        if ":" in port:
+            return text
+    if port and not port.isdigit():
+        return text
+    if port and _DEFAULT_PORTS.get(scheme) == port:
+        port = ""
+    host = host.lower()
+    return "%s://%s%s" % (scheme, host, ":" + port if port else "")
+
+
+def normalize_origins(values, *, setting: str) -> tuple[str, ...]:
+    """Normalize allowlist entries, warning once per rewritten entry."""
+    normalized: list[str] = []
+    for value in values:
+        spelled = normalize_origin(value)
+        if spelled != value:
+            _config_logger.warning(
+                "%s entry %r normalized to %r (the exact-match origin a browser "
+                "sends)", setting, value, spelled,
+            )
+        if spelled not in normalized:
+            normalized.append(spelled)
+    return tuple(normalized)
+
+
+LIVE_EXPORT_BUFFER_MIN = 256
+LIVE_EXPORT_BUFFER_MAX = 65536
+LIVE_EXPORT_MAX_SUBSCRIBERS_LIMIT = 64
+
+
+def apply_observability_environment(
+    observability: ObservabilityConfig, env: dict[str, str], errors: list[str],
+) -> ObservabilityConfig:
+    """Fold the Observatory live-export variables into ``[observability]``.
+
+    The ring size is clamped to 256..65536 rather than rejected, matching the
+    documented contract; a malformed integer is still a configuration error.
+    """
+    obs = observability
+    if env.get("SONDER_OBSERVATORY_EXPORT", "").strip():
+        obs = replace(obs, live_export=_env_bool(env["SONDER_OBSERVATORY_EXPORT"]))
+    obs = replace(
+        obs,
+        live_export_buffer=_env_int(
+            "SONDER_OBSERVATORY_BUFFER", env, obs.live_export_buffer, errors,
+        ),
+        live_export_max_subscribers=_env_int(
+            "SONDER_OBSERVATORY_MAX_SUBSCRIBERS", env,
+            obs.live_export_max_subscribers, errors,
+        ),
+    )
+    if "SONDER_OBSERVATORY_ORIGINS" in env:
+        obs = replace(
+            obs,
+            live_export_origins=tuple(
+                part.strip() for part in env["SONDER_OBSERVATORY_ORIGINS"].split(",")
+                if part.strip()
+            ),
+        )
+    return replace(
+        obs,
+        live_export_buffer=max(
+            LIVE_EXPORT_BUFFER_MIN,
+            min(LIVE_EXPORT_BUFFER_MAX, obs.live_export_buffer),
+        ),
+    )
+
+
 def _apply_environment(
     config: SonderConfig, env: dict[str, str], errors: list[str]
 ) -> SonderConfig:
@@ -1112,12 +1408,32 @@ def _apply_environment(
             server.session_state_owner_limit, errors,
         ),
         train_max_n=_env_int("SONDER_TRAIN_MAX_N", env, server.train_max_n, errors),
+        work_wait_seconds=_env_int(
+            "SONDER_HTTP_WORK_WAIT_SECONDS", env, server.work_wait_seconds, errors,
+        ),
+        work_budget_seconds=_env_int(
+            "SONDER_HTTP_WORK_BUDGET_SECONDS", env, server.work_budget_seconds, errors,
+        ),
+        work_max_running=_env_int(
+            "SONDER_HTTP_WORK_MAX_RUNNING", env, server.work_max_running, errors,
+        ),
+        stream_heartbeat_seconds=_env_int(
+            "SONDER_STREAM_HEARTBEAT_SECONDS", env, server.stream_heartbeat_seconds, errors,
+        ),
     )
     if "SONDER_CORS_ORIGINS" in env:
         server = replace(
             server,
             cors_origins=tuple(
                 part.strip() for part in env["SONDER_CORS_ORIGINS"].split(",")
+                if part.strip()
+            ),
+        )
+    if "SONDER_ALLOWED_HOSTS" in env:
+        server = replace(
+            server,
+            allowed_hosts=tuple(
+                part.strip() for part in env["SONDER_ALLOWED_HOSTS"].split(",")
                 if part.strip()
             ),
         )
@@ -1303,13 +1619,19 @@ def _apply_environment(
         )
     if env.get("SONDER_AUTH_SECRET", "").strip():
         secrets = replace(secrets, auth_secret=env["SONDER_AUTH_SECRET"].strip())
-    if env.get("SONDER_BACKUP_KEY_FILE", "").strip():
-        secrets = replace(
-            secrets, backup_key_file=env["SONDER_BACKUP_KEY_FILE"].strip()
-        )
+    backup_key_file = env.get("SONDER_BACKUP_KEY_FILE", "")
+    if not isinstance(backup_key_file, str) or backup_key_file.strip():
+        # Backups are neither encrypted nor authenticated with a key. Loading
+        # the path into Secrets made config report a key as present while
+        # every backup was still written in plaintext, so refuse it instead.
+        errors.append(BACKUP_KEY_FILE_UNSUPPORTED)
+    observability = apply_observability_environment(
+        config.observability, env, errors,
+    )
 
     return replace(
         config,
+        observability=observability,
         server=server,
         state=state,
         ollama=ollama,
@@ -1317,6 +1639,7 @@ def _apply_environment(
         features=features,
         secrets=secrets,
         child_storage=apply_child_storage_environment(config.child_storage, env, errors),
+        build_tools=build_tools_config_from_env(env, errors),
     )
 
 
@@ -1459,6 +1782,19 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             ipaddress.ip_network(cidr)
         except ValueError:
             errors.append(f"[server].trusted_proxy_cidrs entry invalid: {cidr!r}")
+    if not 30 <= server.work_budget_seconds <= 86_400:
+        errors.append("[server].work_budget_seconds must be within 30..86400")
+    if not 1 <= server.work_wait_seconds <= server.work_budget_seconds:
+        errors.append("[server].work_wait_seconds must be within 1..work_budget_seconds")
+    if not 1 <= server.work_max_running <= 64:
+        errors.append("[server].work_max_running must be within 1..64")
+    if not 1 <= server.stream_heartbeat_seconds <= 300:
+        errors.append("[server].stream_heartbeat_seconds must be within 1..300")
+    if len(server.allowed_hosts) > 64:
+        errors.append("[server].allowed_hosts accepts at most 64 entries")
+    for entry in server.allowed_hosts:
+        if not _valid_allowed_host(entry):
+            errors.append(f"[server].allowed_hosts entry invalid: {entry!r}")
 
     api_key = getattr(config.secrets, "api_key", None)
     loopback = _is_loopback_host(server_host) if host_is_exact_string else False
@@ -1836,6 +2172,17 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         errors.append("[observability].audit_retention_days must be >= 1")
     if not obs.metrics_path.startswith("/"):
         errors.append("[observability].metrics_path must start with '/'")
+    if not 1 <= obs.live_export_max_subscribers <= LIVE_EXPORT_MAX_SUBSCRIBERS_LIMIT:
+        errors.append(
+            "[observability].live_export_max_subscribers must be within 1..%d"
+            % LIVE_EXPORT_MAX_SUBSCRIBERS_LIMIT
+        )
+    for origin in obs.live_export_origins:
+        if origin == "*" or not re.fullmatch(r"[a-z][a-z0-9+.-]*://[^/\s]+", origin):
+            errors.append(
+                "[observability].live_export_origins entries must be exact "
+                "origins (scheme://host[:port]), not %r" % origin
+            )
 
     if config.backup.enabled and config.backup.target:
         if not Path(config.backup.target).expanduser().is_absolute():
@@ -1874,6 +2221,14 @@ def load_config(
             raise ConfigError([f"configuration file not found: {path}"]) from None
         except tomllib.TOMLDecodeError as exc:
             raise ConfigError([f"{path}: TOML parse error: {exc}"]) from None
+        except UnicodeDecodeError:
+            raise ConfigError([f"{path}: TOML parse error: not valid UTF-8"]) from None
+        except IsADirectoryError:
+            raise ConfigError([f"configuration path is a directory: {path}"]) from None
+        except OSError as exc:
+            raise ConfigError([
+                f"configuration file unreadable: {path} ({exc.strerror or type(exc).__name__})"
+            ]) from None
         _walk_toml_for_secrets(raw, "", errors)
         sources.append(str(path))
         for key, value in raw.items():
@@ -1926,6 +2281,8 @@ def load_config(
         private_source_paths.append(str(spath.resolve()))
         if not spath.exists():
             errors.append(f"secrets file not found: {spath}")
+        elif not spath.is_file():
+            errors.append(f"secrets path is not a regular file: {spath}")
         else:
             if os.name == "posix":
                 mode = spath.stat().st_mode & 0o777
@@ -1939,6 +2296,11 @@ def load_config(
                 sources.append(str(spath))
             except ConfigError as exc:
                 errors.extend(exc.errors)
+            except OSError as exc:
+                errors.append(
+                    f"secrets file unreadable: {spath} "
+                    f"({exc.strerror or type(exc).__name__})"
+                )
 
     process_env = dict(os.environ) if env is None else dict(env)
     merged_env.update(process_env)
@@ -1954,6 +2316,19 @@ def load_config(
     # CLI overrides. Otherwise an exact unsafe acknowledgement plus
     # --host=0.0.0.0 could evade the lab's stricter loopback-only rule.
     lab_error = unsafe_lab_policy.validation_error(merged_env, host=config.server.host)
+    if not lab_error:
+        # The raw environment is not the whole story: a config file or a
+        # command-line override can enable cloud models or point [ollama].url
+        # at a remote host, and the runtime exports those *effective* values
+        # as SONDER_ALLOW_CLOUD/OLLAMA_HOST only after validation.  Judge the
+        # resolved settings too, so this check can only add refusals.
+        effective_env = dict(merged_env)
+        if config.features.cloud:
+            effective_env["SONDER_ALLOW_CLOUD"] = "1"
+        effective_env["OLLAMA_HOST"] = config.ollama.url
+        lab_error = unsafe_lab_policy.validation_error(
+            effective_env, host=config.server.host
+        )
     if lab_error:
         errors.append(lab_error)
 
@@ -1962,6 +2337,15 @@ def load_config(
             config, state=replace(config.state, home=str(sonder_paths.default_home()))
         )
 
+    # A trailing '/' or an upper-case scheme/host is the same origin; spell
+    # it the browser's way (with a WARNING) instead of refusing to start.
+    config = replace(config, observability=replace(
+        config.observability,
+        live_export_origins=normalize_origins(
+            config.observability.live_export_origins,
+            setting="[observability].live_export_origins",
+        ),
+    ))
     _validate(config, errors)
     if errors:
         raise ConfigError(errors)
@@ -1975,6 +2359,17 @@ def load_config(
 
 
 _OVERRIDE_PATTERN = re.compile(r"^[a-z_]+\.[a-z_]+$")
+_OVERRIDE_TRUE = frozenset({"1", "true", "yes", "on"})
+_OVERRIDE_FALSE = frozenset({"0", "false", "no", "off"})
+
+
+def _override_bool(raw_value: str) -> bool:
+    normalized = raw_value.strip().lower()
+    if normalized in _OVERRIDE_TRUE:
+        return True
+    if normalized in _OVERRIDE_FALSE:
+        return False
+    raise ValueError("not a boolean")
 
 
 def _apply_overrides(
@@ -1995,9 +2390,15 @@ def _apply_overrides(
         current = getattr(section, key)
         try:
             if isinstance(current, bool):
-                value: object = _env_bool(raw_value)
+                # Explicit operator input is exact: the lenient environment
+                # reading turned any typo (``maybe``) into ``false``.
+                value: object = _override_bool(raw_value)
             elif isinstance(current, int):
                 value = int(raw_value)
+            elif isinstance(current, float):
+                value = float(raw_value)
+                if not math.isfinite(value):
+                    raise ValueError("non-finite float")
             elif isinstance(current, tuple):
                 value = tuple(
                     part.strip() for part in raw_value.split(",") if part.strip()

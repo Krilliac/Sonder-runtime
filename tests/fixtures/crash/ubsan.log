@@ -1,0 +1,7 @@
+crasher.cpp:40:18: runtime error: signed integer overflow: 2147483647 + 2 cannot be represented in type 'int'
+    #0 0x5583ea53f96e in int_overflow(int) /src/sparkmini/crasher.cpp:40
+    #1 0x5583ea53fb17 in main /src/sparkmini/crasher.cpp:53
+    #2 0x7fcd8002a1c9 in __libc_start_call_main ../sysdeps/nptl/libc_start_call_main.h:58
+    #3 0x7fcd8002a28a in __libc_start_main_impl ../csu/libc-start.c:360
+    #4 0x5583ea53f204 in _start (/src/sparkmini/crasher_ubsan+0x2204) (BuildId: 90367ddc6eb04ab5a50e32f9c50923ee3ceb6a72)
+

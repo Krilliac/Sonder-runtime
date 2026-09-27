@@ -19,6 +19,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 import sonder_runtime.adapters.memory_store as memory_store  # noqa
+import sonder_paths  # noqa
+from sonder_runtime.domain.security import credential_formats  # noqa
 
 MAX_LEN = 300
 
@@ -103,6 +105,7 @@ PRIVATE_RULES = [
             r"(?i)(?<![\w-])[\"']?(?:[a-z0-9]{1,24}[_-]){0,6}(?:api[_-]?key|secret|password|passwd|token|"
             r"access[_-]?key|aws[_-]?(?:access[_-]?key[_-]?id|secret[_-]?access[_-]?key)|"
             r"client[_-]?secret|private[_-]?token|auth[_-]?token|refresh[_-]?token|"
+            r"account[_-]?key|shared[_-]?access[_-]?key|"
             r"session[_-]?(?:id|token)|sessionid)"
             r"[\"']?\s*[:=]\s*[\"']?[^\s,;\"']+"
         ),
@@ -119,21 +122,17 @@ PRIVATE_RULES = [
     (
         "authorization_header",
         re.compile(
-            r"(?im)\b(?:proxy-)?authorization\b\s*:\s*[^\r\n]+"
+            r"(?im)\b(?:proxy-)?authorization\b\s*:\s*[^\r\n]+|"
+            # A bare bearer credential outside a header line; the digit
+            # lookahead keeps prose such as "bearer token" shareable.
+            r"\bbearer\s+(?=[A-Za-z0-9._~+/-]*[0-9])[A-Za-z0-9._~+/-]{16,}=*"
         ),
         "<authorization>",
     ),
     (
         "known_credential",
-        re.compile(
-            r"(?<![A-Za-z0-9])(?:sk-(?:proj-)?[A-Za-z0-9_-]{12,}|"
-            r"github_pat_[A-Za-z0-9_]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|"
-            r"glpat-[A-Za-z0-9_-]{12,}|hf_[A-Za-z0-9]{12,}|"
-            r"npm_[A-Za-z0-9]{12,}|pypi-[A-Za-z0-9_-]{16,}|"
-            r"ya29\.[A-Za-z0-9_-]{12,}|"
-            r"AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|"
-            r"xox[baprs]-[A-Za-z0-9-]{10,})"
-        ),
+        # Shared with the log/session Redactor; one list for both boundaries.
+        credential_formats.KNOWN_CREDENTIAL,
         "<known-credential>",
     ),
     (
@@ -172,10 +171,7 @@ PRIVATE_RULES = [
     ),
     (
         "jwt",
-        re.compile(
-            r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\."
-            r"[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
-        ),
+        credential_formats.JWT,
         "<jwt>",
     ),
 ]
@@ -229,7 +225,10 @@ def scrubbed_lessons(conn):
 
 
 def main(out="contrib/lessons_contrib.jsonl", db=None):
-    db = db or os.path.join(os.path.dirname(__file__), "memory.db")
+    # The state home's store (SONDER_DB/SONDER_HOME), never a checkout-relative
+    # file: that default silently created an empty database beside this module
+    # and "exported" nothing while the real lessons sat in the state home.
+    db = db or sonder_paths.memory_db_path()
     conn = memory_store.connect(db)
     try:
         lessons = scrubbed_lessons(conn)

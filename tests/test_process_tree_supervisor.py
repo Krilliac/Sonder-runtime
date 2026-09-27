@@ -43,7 +43,8 @@ def test_posix_treats_an_already_exited_group_as_complete() -> None:
     assert "already exited" in receipt.detail
 
 
-def test_windows_uses_os_tree_operation_and_reports_failure() -> None:
+@pytest.mark.parametrize("returncode", [0, 1])
+def test_windows_taskkill_never_proves_tree_absence(returncode: int) -> None:
     calls: list[list[str]] = []
 
     class FakeSubprocess:
@@ -54,7 +55,7 @@ def test_windows_uses_os_tree_operation_and_reports_failure() -> None:
         def run(argv, **kwargs):
             calls.append(argv)
             assert kwargs["shell"] is False
-            return SimpleNamespace(returncode=1)
+            return SimpleNamespace(returncode=returncode)
 
     supervisor = ProcessTreeSupervisor(
         os_module=SimpleNamespace(name="nt"),
@@ -64,6 +65,28 @@ def test_windows_uses_os_tree_operation_and_reports_failure() -> None:
     receipt = supervisor.cleanup(_request())
     assert calls == [["taskkill", "/PID", "11", "/T", "/F"]]
     assert receipt.requested and not receipt.complete
+    if returncode == 0:
+        assert "absence remains unproven" in receipt.detail
+
+
+def test_windows_taskkill_timeout_stays_incomplete() -> None:
+    class FakeSubprocess:
+        DEVNULL = object()
+        SubprocessError = TimeoutError
+        TimeoutExpired = TimeoutError
+
+        @staticmethod
+        def run(_argv, **_kwargs):
+            raise TimeoutError("bounded taskkill timeout")
+
+    supervisor = ProcessTreeSupervisor(
+        os_module=SimpleNamespace(name="nt"),
+        subprocess_module=FakeSubprocess,
+        platform_name="nt",
+    )
+    receipt = supervisor.cleanup(_request())
+    assert receipt.requested and not receipt.complete
+    assert "taskkill failed" in receipt.detail
 
 
 def test_unsupported_platform_fails_closed() -> None:

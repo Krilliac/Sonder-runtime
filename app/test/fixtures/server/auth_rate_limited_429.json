@@ -1,0 +1,1 @@
+{"error": {"code": "AUTH_RATE_LIMITED", "message": "too many failed authentication attempts; retry later", "correlation_id": "req_1f0c2b7e9a4d4c1b8e3f6a5d2c1b0a99", "retryable": true, "type": "rate_limit_error"}}

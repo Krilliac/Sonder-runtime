@@ -12,13 +12,15 @@ import atexit
 import importlib
 import logging
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
 from threading import RLock
 from time import monotonic, time_ns
+from typing import NoReturn
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,7 @@ from ..adapters.inspection_executor import InspectionExecutorAdapter
 from ..adapters.local_observability import LocalObservabilitySink
 from ..adapters.model_gateway_factory import build_model_gateway
 from ..adapters.operations_event_sink import OperationsEventSink
+from ..adapters.observability.event_bridge import TeeEventSink
 from ..adapters.persistence.autopilot_repository import AutopilotRepository
 from ..adapters.persistence.durable_continuation import (
     SQLiteDurableContinuationRepository,
@@ -60,7 +63,6 @@ from ..adapters.provider_bindings import ProviderBindings, provider_bindings_fro
 from ..adapters.recall_gateway import LegacyRecallGateway
 from ..adapters.runtime_policy_repository import RuntimePolicyRepository
 from ..adapters.security import permission_receipts
-from ..adapters.security.permission_evaluator import PermissionModesEvaluator
 from ..adapters.subagents import LocalSubagentProvider
 from ..adapters.system_clock import SystemClock
 from ..adapters.tool_executor import ToolExecutorAdapter
@@ -148,6 +150,7 @@ from ..application.session import (
     SessionCheckpointPrivacyService,
     SessionContinuityService,
 )
+from ..application.protocol.facade import ProtocolApplicationFacade
 from ..application.session.http_facade import HttpSessionFacade
 from ..application.subagents.durable_continuation import DurableContinuationService
 from ..application.tools.facade import (
@@ -170,6 +173,9 @@ from ..domain.provider_override_policy import ProviderOverridePolicy
 from ..platform import paths as runtime_paths
 from ..platform.config import SonderConfig
 from .artifact_mobility_source import ArtifactMobilitySourceBinding
+from .build_tools import build_permission_resolvers, build_tool_executor
+from .debug_tools import debug_permission_resolvers, debug_tool_executor
+from .developer_tools import DeveloperToolPermissionEvaluator, developer_tool_executor
 from .typed_tools import POLICY_NAMES, typed_tool_policy, typed_tool_registry
 
 PROFILES = ("workstation-local", "server-private")
@@ -218,6 +224,276 @@ def compose_memory_unit_of_work(
 
 # Compatibility name for callers that used the bootstrap-private selector.
 _build_model_gateway = build_model_gateway
+
+
+def _compose_developer_tools(config, runtime_redactor, get_job_registry, get_process_job_provider):
+    """Compose the developer-tool services, or None when this build lacks them.
+
+    The inventory (host_tools) and digest (diagnostics) packages are optional
+    at this seam: a runtime without them keeps every other tool and reports
+    the developer tools as unavailable. Composition itself is lazy.
+    """
+    try:
+        from .developer_tools import compose_developer_tools
+        from .diagnostics import compose_output_digest_service
+        from .host_tools import compose_host_tool_inventory, install_agent_brief_summary
+    except ImportError:
+        logger.warning("developer tools are not composed: a required package is missing",
+                       exc_info=True)
+        return None
+    try:
+        inventory = compose_host_tool_inventory(config, redactor=runtime_redactor)
+        install_agent_brief_summary(inventory)
+        digest = compose_output_digest_service(get_job_registry, redactor=runtime_redactor)
+        return compose_developer_tools(
+            config=config, inventory=inventory, digest=digest,
+            process_job_provider=get_process_job_provider,
+            job_registry=get_job_registry, redactor=runtime_redactor,
+        )
+    except Exception:
+        logger.error("developer tools could not be composed; they will report unavailable",
+                     exc_info=True)
+        return None
+
+
+def _compose_build_tools(config, runtime_redactor, developer_tools, get_job_registry,
+                         get_process_job_provider, grants, *, tools_getter, model_gateway_getter,
+                         effect_binding_factory=None):
+    """Compose the C++ build tools, or None when this build lacks them.
+
+    They sit on the developer tools' inventory and digest; without those, or
+    without the build packages, the build tools report unavailable and every
+    other tool is unaffected. Composition itself is lazy (no probes, reads or
+    launches), and a failure here never blocks the runtime.
+    """
+    if developer_tools is None:
+        return None
+    try:
+        from .build_tools import compose_build_tools, install_build_brief
+    except ImportError:
+        logger.warning("build tools are not composed: a required package is missing",
+                       exc_info=True)
+        return None
+    try:
+        services = compose_build_tools(
+            config=config, inventory=developer_tools.inventory, digest=developer_tools.digest,
+            process_job_provider=get_process_job_provider, job_registry=get_job_registry,
+            redactor=runtime_redactor, grants=grants, tools_getter=tools_getter,
+            model_gateway_getter=model_gateway_getter,
+            effect_binding_factory=effect_binding_factory,
+        )
+        if services is not None:
+            install_build_brief(services, developer_tools.inventory)
+        return services
+    except Exception:
+        logger.error("build tools could not be composed; they will report unavailable",
+                     exc_info=True)
+        return None
+
+
+def _recover_interrupted_build_fixes(build_tools, *, peer_hosts_live) -> tuple[str, ...]:
+    """Mark build fixes a crash left unfinished as interrupted, once, at startup.
+
+    Runs after the worker effect journal's startup reconciliation, so every
+    journaled fix edit is already proven or fenced; ``recover()`` only
+    rewrites the stale pre-image manifest status and the registry job, and
+    never retries or reverts an edit. A failure is logged by exception type
+    and never blocks composition: the fix then keeps reporting its stored
+    status until the next start, and ``build_fix_restore`` still works.
+
+    ``recover()`` can tell only this process's own runs from a crashed
+    predecessor's, and the manifests and job registry are shared by every
+    runtime process on the node. So, like the journal pass, the step is
+    deferred (fail closed) while ``peer_hosts_live()`` reports another live
+    runtime process or cannot tell (it raises): a live peer's fix is never
+    marked interrupted under it. ``peer_hosts_live`` also registers this
+    process's own host lease first, so a later peer sees this one.
+    """
+    fix = getattr(build_tools, "fix", None)
+    if fix is None:
+        return ()
+    try:
+        deferred = bool(peer_hosts_live())
+    except Exception as exc:  # noqa: BLE001 - cannot tell: a peer may be live
+        logger.info("startup build-fix recovery deferred: runtime peers could not be "
+                    "checked: %s", type(exc).__name__)
+        return ()
+    if deferred:
+        logger.info("startup build-fix recovery deferred: another runtime process is live")
+        return ()
+    try:
+        interrupted = tuple(fix.recover())
+    except Exception as exc:  # noqa: BLE001 - startup continues; restore still works
+        logger.warning("startup build-fix recovery failed; unfinished fixes keep their stored "
+                       "status: %s", type(exc).__name__)
+        return ()
+    if interrupted:
+        logger.info("startup build-fix recovery marked %d unfinished fix(es) interrupted",
+                    len(interrupted))
+    return interrupted
+
+
+def _build_fix_peer_hosts_live() -> bool:
+    """Whether another runtime process holds a worker-effects host lease.
+
+    Takes this process's own lease first (a process that can run a fix must be
+    visible to a peer's startup recovery). Raises ``OSError`` when the leases
+    cannot be read; the caller treats that as "a peer may be live".
+    """
+    from ..adapters.persistence.worker_effect_hosts import host_lease
+    from ..platform.paths import state_path
+
+    lease = host_lease(state_path("worker-effects.db", "SONDER_WORKER_EFFECTS_DB"))
+    return lease.live_peers() > 0
+
+
+def _compose_debug_tools(config, runtime_redactor, developer_tools, get_job_registry,
+                         get_process_job_provider):
+    """Compose the crash/profile digest tools, or None when this build lacks them.
+
+    They need the host tool inventory (from the developer tools) and the
+    pure crash/profile readers; a runtime without either keeps every other
+    tool and reports the debug tools as unavailable. Composition is lazy.
+    """
+    inventory = getattr(developer_tools, "inventory", None)
+    if inventory is None:
+        return None
+    try:
+        from .debug_tools import compose_debug_tools
+        from .diagnostics import job_output_reader
+    except ImportError:
+        logger.warning("debug tools are not composed: a required package is missing",
+                       exc_info=True)
+        return None
+    try:
+        return compose_debug_tools(
+            config=config, inventory=inventory,
+            digest_output_reader=job_output_reader(get_job_registry),
+            test_runs=getattr(developer_tools, "test_runs", None),
+            process_job_provider=get_process_job_provider,
+            job_registry=get_job_registry, redactor=runtime_redactor,
+        )
+    except Exception:
+        logger.error("debug tools could not be composed; they will report unavailable",
+                     exc_info=True)
+        return None
+
+
+def _build_grant_registry():
+    """The in-process build-fix grant registry (never persisted)."""
+    from ..adapters.security.permission_policy import permission_policy
+    from .build_tools import BuildFixGrantRegistry
+
+    return BuildFixGrantRegistry(current_mode=lambda: permission_policy.current_mode())
+
+
+def _debug_executor_chain(debug_tools, developer_tools):
+    """Debug -> Developer -> Packaged: each serves its own names, then delegates.
+
+    The build tools' executor sits in front of this chain (``build_tool_executor``).
+    """
+    return debug_tool_executor(
+        debug_tools, developer_tool_executor(developer_tools, PackagedToolExecutor()))
+
+
+def _report_provider_fallback(from_provider, to_provider, reason_code, _context) -> None:
+    """``PreSendFallbackGateway`` observer: announce the fallback as ``route.changed``.
+
+    A pre-send refusal (cached health not ready) never reaches
+    ``dispatch_provider``, so without this the Runtime stream would show the
+    fallback's Ollama attempt with no route change.  It forwards to whichever
+    telemetry observer is installed; with export disabled it does nothing.
+    """
+    from ..application.session.provider_attempts import report_provider_fallback
+
+    report_provider_fallback(from_provider, to_provider, reason_code)
+
+
+@dataclass(frozen=True)
+class _LiveTelemetry:
+    """The composed Observatory export chain, or all-None when disabled."""
+
+    telemetry: object | None = None
+    producer: object | None = None
+    event_bridge: object | None = None
+    close: Callable[[], None] | None = None
+
+
+def _observability_settings(config: SonderConfig | None):
+    """Typed ``[observability]`` for this graph, env-folded when untyped."""
+    if config is not None:
+        return config.observability
+    from ..domain.common.errors import InvalidInput
+    from ..platform.config import ObservabilityConfig, apply_observability_environment
+
+    errors: list[str] = []
+    settings = apply_observability_environment(
+        ObservabilityConfig(), dict(os.environ), errors,
+    )
+    if errors:
+        raise InvalidInput("; ".join(errors))
+    return settings
+
+
+def _compose_live_telemetry(
+    config: SonderConfig | None, redactor, provider_bindings: ProviderBindings,
+) -> _LiveTelemetry:
+    """Compose producer -> redacting sink -> vocabulary, and its observer.
+
+    Nothing here performs I/O or starts a thread: the producer is an
+    in-memory ring read only by the admin-gated HTTP stream routes.
+    """
+    settings = _observability_settings(config)
+    if not settings.live_export:
+        logger.info("Observatory live telemetry export disabled")
+        return _LiveTelemetry()
+    from ..adapters.observability.event_bridge import EventSinkTelemetryBridge
+    from ..adapters.observability.observatory_producer import ObservatoryProducer
+    from ..application.capabilities.observability import RedactingTelemetrySink
+    from ..application.observability.runtime_telemetry import RuntimeTelemetry
+    from ..application.session.provider_attempts import (
+        clear_provider_attempt_observer,
+        install_provider_attempt_observer,
+    )
+    from ..platform.version import VERSION
+
+    producer = ObservatoryProducer(
+        version=VERSION,
+        capacity=settings.live_export_buffer,
+        max_subscribers=settings.live_export_max_subscribers,
+    )
+    sink = RedactingTelemetrySink(producer, redactor)
+    telemetry = RuntimeTelemetry(sink, session_id=producer.session_id, version=VERSION)
+    projection = provider_bindings.status_projection()
+    projection.setdefault("fallbacks", dict(getattr(provider_bindings, "fallbacks", {}) or {}))
+    telemetry.session_started(projection)
+    install_provider_attempt_observer(telemetry)
+    closed = False
+
+    def close() -> None:
+        nonlocal closed
+        if closed:
+            return
+        closed = True
+        clear_provider_attempt_observer(telemetry)
+        stats = producer.stats()
+        telemetry.session_ended(
+            emitted_events=stats["emitted_events"],
+            dropped_events=stats["dropped_events"],
+        )
+        producer.report_final()
+        producer.close_subscribers()
+
+    logger.info(
+        f"Observatory live telemetry export enabled, instance={producer.instance_id!r}, "
+        f"buffer={producer.capacity}"
+    )
+    return _LiveTelemetry(
+        telemetry=telemetry,
+        producer=producer,
+        event_bridge=EventSinkTelemetryBridge(sink, redactor),
+        close=close,
+    )
 
 
 def build_application(
@@ -357,7 +633,8 @@ def build_application(
     # wrapped by the typed lifecycle shell so cancellation/deadline and
     # publication health are visible before it reaches the model gateway.
     if embedding_provider is None:
-        logger.warning("no embedding provider supplied, falling back to local legacy adapter")
+        # The local adapter is the default, so this is an INFO startup fact.
+        logger.info("no embedding provider supplied, falling back to local legacy adapter")
         import sonder_runtime.adapters.embeddings as legacy_embeddings
 
         def embedding_provider(request, context):
@@ -411,6 +688,7 @@ def build_application(
         target_resolver=target_resolver,
         generate_factory=generate_factory,
         embedding_provider=embedding_adapter,
+        fallback_observer=_report_provider_fallback,
     )
     logger.info("model gateway built")
     logger.debug("composing vision service and context planning facade")
@@ -469,30 +747,199 @@ def build_application(
         nonlocal worker_effect_journal
         if worker_effect_journal is None:
             from ..adapters.execution.compute_effect_verifier import (
+                DurableComputeCancelVerifier,
                 DurableComputeSubmitVerifier,
                 DurableLocalProcessStartVerifier,
+            )
+            from ..adapters.execution.subagent_dispatch_verifier import (
+                DurableSubagentDispatchVerifier,
             )
             from ..adapters.persistence.sqlite.effect_journal import SQLiteEffectJournal
             from ..platform.paths import state_path
 
+            from ..adapters.persistence.worker_effect_hosts import host_lease
+
+            verifiers = {
+                "process-start": DurableLocalProcessStartVerifier(get_job_registry),
+                "compute-submit": DurableComputeSubmitVerifier(get_job_registry),
+                # A cancel is proven only by a terminal cancelled, cleaned
+                # record carrying the exact journaled cancel-request binding.
+                "compute-cancel": DurableComputeCancelVerifier(get_job_registry),
+                "subagent-dispatch": DurableSubagentDispatchVerifier(
+                    get_continuation_repository
+                ),
+            }
+            try:
+                from ..adapters.build.fix_effect_verifier import BuildFixEditVerifier
+            except ImportError:
+                # Without the build package no fix can journal an edit.
+                pass
+            else:
+                # A build-fix edit is proven from the edited file's current
+                # SHA-256 against the journaled before/after digests.
+                verifiers["build-fix"] = BuildFixEditVerifier()
+            journal_path = state_path("worker-effects.db", "SONDER_WORKER_EFFECTS_DB")
+            # Register this process as a live journal host before any intent
+            # can be admitted, so a peer's startup reconciliation never claims
+            # this process's in-flight effects.  Failure refuses the journal.
+            host_lease(journal_path)
             worker_effect_journal = SQLiteEffectJournal(
-                state_path("worker-effects.db", "SONDER_WORKER_EFFECTS_DB"),
-                reconciliation_verifiers={
-                    "process-start": DurableLocalProcessStartVerifier(get_job_registry),
-                    "compute-submit": DurableComputeSubmitVerifier(get_job_registry),
-                },
+                journal_path, reconciliation_verifiers=verifiers,
             )
         return worker_effect_journal
 
+    # Worker families this composition owns.  Startup reconciliation only
+    # claims unresolved intents admitted by one of these identities.
+    worker_families = ("process", "compute", "subagent", "selfmod", "build-fix")
+
+    def worker_id_for(family: str) -> str:
+        return f"{family}:{effective_config.compute.node_id}"
+
+    # Runs every runtime process on this node shares.  Their owner row holds
+    # one epoch, so a process claims one only while holding its run lease.
+    node_shared_runs = frozenset({"runtime:process-jobs", "runtime:compute-jobs"})
+
+    def claim_node_shared_run(run_id: str, worker_id: str) -> None:
+        """Take the per-run lease before this process claims a shared run.
+
+        Raises ``PeerWorkerLive`` while another live local runtime process
+        holds it (it composed that worker first), so the peer's owner epoch
+        and in-flight intents are never touched.  Other runs need no lease.
+        """
+        if run_id not in node_shared_runs:
+            return
+        from ..adapters.persistence.worker_effect_hosts import acquire_run_lease
+        from ..application.execution.worker_bindings import PeerWorkerLive
+        from ..platform.paths import state_path
+
+        journal_path = state_path("worker-effects.db", "SONDER_WORKER_EFFECTS_DB")
+        try:
+            held = acquire_run_lease(journal_path, run_id, worker_id)
+        except OSError as exc:
+            # The lease cannot be proven free: fail closed.
+            raise PeerWorkerLive(run_id, worker_id) from exc
+        if not held:
+            refuse_peer_owned_run(run_id, worker_id)
+
+    def refuse_peer_owned_run(run_id: str, worker_id: str) -> NoReturn:
+        from ..application.execution.worker_bindings import PeerWorkerLive
+
+        events.emit(
+            "worker.effects.peer_owned",
+            summary="worker run is owned by a live peer runtime process",
+            detail={"run_id": run_id, "worker_id": worker_id},
+            severity="WARNING",
+        )
+        raise PeerWorkerLive(run_id, worker_id)
+
+    @contextmanager
+    def reconcile_node_shared_run(run_id: str, worker_id: str) -> Iterator[None]:
+        """Hold a shared run's lease only while the startup pass reconciles it.
+
+        The pass binds the run transiently and leaves no in-flight intent, so
+        the lease is released afterwards (unless a worker composition in this
+        process took it meanwhile).  Holding it for the process lifetime would
+        keep every peer from composing that worker, and could split the
+        process and compute leases between two processes so that neither can
+        compose the compute worker.  Refused like ``claim_node_shared_run``.
+        """
+        if run_id not in node_shared_runs:
+            yield
+            return
+        from ..adapters.persistence.worker_effect_hosts import transient_run_lease
+        from ..application.execution.worker_bindings import PeerWorkerLive
+        from ..platform.paths import state_path
+
+        journal_path = state_path("worker-effects.db", "SONDER_WORKER_EFFECTS_DB")
+        with ExitStack() as stack:
+            try:
+                held = stack.enter_context(
+                    transient_run_lease(journal_path, run_id, worker_id)
+                )
+            except OSError as exc:
+                raise PeerWorkerLive(run_id, worker_id) from exc
+            if not held:
+                refuse_peer_owned_run(run_id, worker_id)
+            yield
+
     def worker_binding(*, family: str, scope: str, run_id: str):
-        """Compose an authenticated binding from host-owned worker metadata."""
+        """Compose an authenticated binding from host-owned worker metadata.
+
+        ``auto_reconcile`` makes every restart of a production worker offer
+        unresolved intents to the journal's trusted verifiers (bounded) before
+        refusing; unprovable intents stay fenced.  A node-shared run is bound
+        only after this process holds its run lease (``PeerWorkerLive``
+        otherwise), because the provider claims the owner in its constructor.
+        """
         from ..application.execution.worker_bindings import AuthenticatedWorkerBinding
 
-        worker_id = f"{family}:{effective_config.compute.node_id}"
+        if family not in worker_families:
+            raise ValueError(f"unknown worker family: {family!r}")
+        journal = get_worker_effect_journal()
+        worker_id = worker_id_for(family)
+        claim_node_shared_run(run_id, worker_id)
         return AuthenticatedWorkerBinding(
-            get_worker_effect_journal(), run_id, worker_id,
-            worker_owner_epoch, scope,
+            journal, run_id, worker_id,
+            worker_owner_epoch, scope, auto_reconcile=True,
         )
+
+    worker_effect_reconciliation_report = None
+
+    def reconcile_worker_effects(**limits):
+        """Bounded verifier reconciliation of unresolved worker effects.
+
+        Called once at composition and available to operators.  It reads the
+        journal only when the durable file already exists (a fresh install
+        has nothing to reconcile), never executes an effect, and leaves every
+        unprovable intent fenced.  The durable receipt of a proof is the
+        journal's ``verified:`` detail; the pass also emits a content-free
+        ``worker.effects.reconciled`` operations event.
+        """
+        nonlocal worker_effect_reconciliation_report
+        from ..application.execution.effect_reconciliation import (
+            StartupReconciliationReport,
+            reconcile_unresolved_effects,
+        )
+        from ..platform.paths import state_path
+
+        if worker_effect_journal is None and not Path(
+            state_path("worker-effects.db", "SONDER_WORKER_EFFECTS_DB")
+        ).is_file():
+            worker_effect_reconciliation_report = StartupReconciliationReport()
+            return worker_effect_reconciliation_report
+        journal = get_worker_effect_journal()
+        from ..adapters.persistence.worker_effect_hosts import host_lease
+
+        lease = host_lease(state_path("worker-effects.db", "SONDER_WORKER_EFFECTS_DB"))
+
+        def peer_hosts_live():
+            # Worker identities are per node, not per process: while another
+            # local runtime process holds its lease, its in-flight intents are
+            # indistinguishable from a crashed predecessor's, so the pass is
+            # deferred (fail closed) to that worker's own pre-restart path.
+            return lease.live_peers() > 0
+
+        owned = frozenset(worker_id_for(family) for family in worker_families)
+        pending, _more = journal.unresolved_page(limit=100)
+        if any(intent.operation_id.startswith("subagent-dispatch:") for intent in pending):
+            # Compose the durable child store on this thread first; the
+            # verifier later reads it from its bounded worker thread.
+            get_continuation_repository()
+
+        def emit(code, detail):
+            events.emit(
+                code, summary="worker effect reconciliation", detail=detail,
+                severity="WARNING" if (
+                    detail.get("fenced") or detail.get("failed_runs") or detail.get("deferred")
+                ) else "INFO",
+            )
+
+        worker_effect_reconciliation_report = reconcile_unresolved_effects(
+            journal, owner_epoch=worker_owner_epoch, owns_worker=owned.__contains__,
+            emit=emit, peer_hosts_live=peer_hosts_live,
+            claim_guard=reconcile_node_shared_run, **limits,
+        )
+        return worker_effect_reconciliation_report
 
     def _compose_subagent_binding(run_id: str):
         binding = worker_binding(
@@ -502,6 +949,12 @@ def build_application(
         )
         binding.recover_before_restart()
         return binding
+
+    def get_continuation_repository():
+        """Lazy durable child store read by the subagent-dispatch verifier."""
+        if continuation_repository is None:
+            get_delegation_service()
+        return continuation_repository
 
     def _compose_selfmod_binding(run_id: str):
         binding = worker_binding(
@@ -572,7 +1025,14 @@ def build_application(
         nonlocal canonical_session_capture
         if canonical_session_capture is None:
             logger.debug("lazy-init session capture service")
-            canonical_session_capture = SessionCaptureService(get_session_repository())
+            from ..platform.logging import redactor_for_config as _session_redactor
+
+            # Durable session events are redacted by the same redactor the
+            # logs and tool audit use (known secret values + shapes).
+            canonical_session_capture = SessionCaptureService(
+                get_session_repository(),
+                redact=_session_redactor(config or SonderConfig()).redact,
+            )
         return canonical_session_capture
 
     def get_compaction_service() -> SessionCompactionService:
@@ -923,6 +1383,14 @@ def build_application(
                 lane_test_catalog = LaneTestCatalog.load(catalog_path)
                 lane_tools = compose_lane_test_tools(
                     tools, lane_test_catalog, get_process_job_provider(), audit=tool_audit,
+                    files=build_tool_executor(
+                        build_tools, _debug_executor_chain(debug_tools, developer_tools),
+                        grants=build_grants,
+                    ),
+                    developer_tools=developer_tools,
+                    resolvers={**build_permission_resolvers(build_tools, grants=build_grants),
+                               **debug_permission_resolvers(debug_tools)},
+                    grant_authorities=(build_grants,),
                 )
             def authorize_lane_grant(lane, context):
                 from ..adapters.filesystem.file_ops import allowed_roots
@@ -977,7 +1445,34 @@ def build_application(
                     if not isinstance(child_repository_factory, HostChildRepositoryFactory):
                         raise TypeError("child repository factory requires trusted host composition")
                     continuation_repository = child_repository_factory(config or SonderConfig())
-                continuation_service = DurableContinuationService(continuation_repository)
+                from ..adapters.persistence.durable_continuation import (
+                    SQLiteJournalProvenanceSource,
+                )
+                from ..application.subagents.checkpoint_provenance import (
+                    JournalProvenanceStamp,
+                    ProvenanceBinding,
+                )
+                # Every durable child checkpoint is stamped with the effect
+                # journal position it relies on.  The journal identity is
+                # minted here, by trusted composition, and nowhere else.
+                provenance_journal = SQLiteJournalProvenanceSource(
+                    get_worker_effect_journal(), create_identity=True,
+                )
+
+                def child_provenance_binding(subject):
+                    # Same run, worker and epoch as _compose_subagent_binding;
+                    # the stamp refuses unless that epoch is the current owner.
+                    return ProvenanceBinding(
+                        f"subagent:{subject.child_id}", worker_id_for("subagent"),
+                        worker_owner_epoch,
+                    )
+
+                continuation_service = DurableContinuationService(
+                    continuation_repository,
+                    checkpoint_provenance=JournalProvenanceStamp(
+                        provenance_journal, child_provenance_binding,
+                    ),
+                )
                 from ..application.worker_registry.continuation import (
                     ContinuationWorkerRegistry,
                 )
@@ -990,6 +1485,9 @@ def build_application(
                 from ..adapters.conversational_subagents import (
                     conversational_runner_factory,
                 )
+                from ..adapters.execution.subagent_dispatch_verifier import (
+                    DurableSubagentDispatchVerifier,
+                )
                 subagent_provider = LocalSubagentProvider(
                     continuation_service,
                     runner_factory=conversational_runner_factory(
@@ -1000,6 +1498,10 @@ def build_application(
                             request.child_id or request.parent_id
                         )
                     ),
+                    dispatch_verifier=DurableSubagentDispatchVerifier(
+                        lambda: continuation_repository
+                    ),
+                    provenance_journal=provenance_journal,
                 )
                 from ..application.ports.subagents import SubagentBudget
 
@@ -1426,8 +1928,17 @@ def build_application(
     from ..platform.logging import redactor_for_config
 
     runtime_redactor = redactor_for_config(config or SonderConfig())
+    live_telemetry = _compose_live_telemetry(
+        config, runtime_redactor, provider_bindings,
+    )
+    # The export bridge is a sibling of the durable sink inside the local
+    # inspection decorator: LocalObservabilitySink itself still has no
+    # exporter, and operations.db still receives every event first.
     events = LocalObservabilitySink(
-        OperationsEventSink(redactor=runtime_redactor),
+        TeeEventSink(
+            OperationsEventSink(redactor=runtime_redactor),
+            live_telemetry.event_bridge,
+        ),
         redactor=runtime_redactor,
     )
     permission_receipts.install(lambda: events)
@@ -1446,15 +1957,60 @@ def build_application(
         limits=ToolAuditLimits(),
     )
 
+    # Developer tools: host tool inventory, structured test runs and the
+    # output digest. Composition is lazy -- nothing probes, reads a project or
+    # launches here -- and a runtime that cannot compose them still serves
+    # every other tool; their surfaces then report them as unavailable.
+    developer_tools = _compose_developer_tools(
+        config, runtime_redactor, get_job_registry, get_process_job_provider,
+    )
+    # Crash and profile digests (bootstrap/debug_tools.py), over the same
+    # inventory, job registry and process provider; None when unavailable.
+    debug_tools = _compose_debug_tools(
+        config, runtime_redactor, developer_tools, get_job_registry, get_process_job_provider,
+    )
+
+    # C++ build tools (bootstrap/build_tools.py): build model, build jobs and
+    # the bounded build-fix loop, in front of the developer tools. The grant
+    # registry holds the narrow authority a build_fix approval mints for its
+    # own in-scope writes; the fix loop's typed writes reach this facade
+    # through the getter once it exists.
+    typed_tools_ref: dict = {}
+    build_grants = _build_grant_registry()
+    build_tools = _compose_build_tools(
+        config, runtime_redactor, developer_tools, get_job_registry, get_process_job_provider,
+        build_grants, tools_getter=lambda: typed_tools_ref.get("tools"),
+        model_gateway_getter=lambda: gateway,
+        # Every fix edit is a ``build-fix`` effect in the worker effect
+        # journal, under this host's worker identity and owner epoch.
+        effect_binding_factory=lambda run_id, scope: worker_binding(
+            family="build-fix", scope=scope, run_id=run_id,
+        ),
+    )
+
     tools = ToolApplicationFacade.compose(
         typed_tool_registry(),
-        PackagedToolExecutor(),
+        build_tool_executor(
+            build_tools, _debug_executor_chain(debug_tools, developer_tools),
+            grants=build_grants,
+        ),
         policy=typed_tool_policy(),
         redactor=PatternOutputRedactor(runtime_redactor.redact),
         receipts=ReceiptStore(),
         audit=tool_audit,
-        permissions=(PermissionModesEvaluator(policy_names=POLICY_NAMES),),
+        permissions=(DeveloperToolPermissionEvaluator(
+            developer_tools, policy_names=POLICY_NAMES,
+            resolvers={**build_permission_resolvers(build_tools, grants=build_grants),
+                       **debug_permission_resolvers(debug_tools)},
+            grant_authorities=(build_grants,),
+        ),),
     )
+    typed_tools_ref["tools"] = tools
+    # The portable client/SDK schema (API-007/008) is derived from the same
+    # served tool catalog, so its digest changes exactly when that catalog
+    # does.  The facade is deny-by-default: the hosting interface supplies
+    # authorization and owns any stream it opens on it.
+    protocol = ProtocolApplicationFacade.compose(tools.catalogs)
 
     from .artifact_mobility import compose_artifact_mobility
     mobility_binding, mobility_status, mobility_list, mobility_available, mobility_close = (
@@ -1491,6 +2047,7 @@ def build_application(
         unit_of_work=memory_unit_of_work,
         tool_executor=ToolExecutorAdapter(),
         tools=tools,
+        protocol=protocol,
         tool_audit=tool_audit,
         process_probe=ProcessProbeAdapter(),
         events=events,
@@ -1520,6 +2077,7 @@ def build_application(
         memory_replication=memory_replication_service,
         process_job_provider=get_process_job_provider,
         job_recovery=recover_jobs,
+        worker_effect_reconciliation=reconcile_worker_effects,
         workflow_engine=get_workflow_engine,
         agent_registry=get_agent_registry,
         config=config,
@@ -1555,6 +2113,11 @@ def build_application(
             ContainerWorldConfig(world_id="default-container", image="sonder-sandbox:latest"),
         ),
         remote_world_provider=None,
+        developer_tools=developer_tools,
+        debug_tools=debug_tools,
+        telemetry=live_telemetry.telemetry,
+        telemetry_feed=live_telemetry.producer,
+        close_telemetry=live_telemetry.close,
     )
     if config is not None and config.child_storage.backend == 'postgresql':
         try:
@@ -1562,6 +2125,20 @@ def build_application(
         except Exception:
             application.close_providers(timeout=5)
             raise
+    try:
+        # Runtime startup: resolve what the host can prove about effects a
+        # crashed predecessor left unresolved.  Failure is logged and leaves
+        # every fence in place (fail closed); it does not block composition.
+        reconcile_worker_effects()
+    except Exception as exc:  # noqa: BLE001 - fences remain; restart path retries
+        logger.warning(
+            "startup worker effect reconciliation failed; unresolved effects stay fenced: %s",
+            type(exc).__name__,
+        )
+    # After the journal proof: mark build fixes a crashed predecessor left
+    # "running"/"planned" as interrupted (never retried, never reverted), but
+    # only while no other runtime process is live on this state.
+    _recover_interrupted_build_fixes(build_tools, peer_hosts_live=_build_fix_peer_hosts_live)
     if inference_pool is not None:
         ollama_pool.configure_typed_pool(inference_pool)
     return application
@@ -1779,6 +2356,16 @@ def stop_owned_application(application: Application) -> None:
     from .legacy_interfaces import detach_owned_application
 
     detach_owned_application(application)
+
+
+def built_default_app() -> Application | None:
+    """The default graph if one is already built; never composes one.
+
+    Observability paths use this so describing a request can never be the
+    reason a whole application graph gets constructed.
+    """
+    application = _application_lifecycle.current()
+    return application if type(application) is Application else None
 
 
 def default_app(*, config: SonderConfig | None = None) -> Application:

@@ -66,7 +66,13 @@ assert REASON_EMPTY in capability_router.ESCALATION_REASONS
 
 # Model-call failure kinds that never step up: a cancellation is a caller's
 # control signal and an exhausted budget is a ceiling, not a weaker model.
-NON_ESCALATING_KINDS = frozenset({"cancelled", "budget"})
+# ``provider_unavailable`` and ``unsupported_feature`` come from the HTTP chat
+# bridge to a non-Ollama provider (application/chat/provider_bridge.py): a
+# provider that is down, or a feature it cannot carry, is not a weak answer
+# and must end the turn with its own status instead of stepping up a rung.
+NON_ESCALATING_KINDS = frozenset({
+    "cancelled", "budget", "provider_unavailable", "unsupported_feature",
+})
 
 # Strength by tier role, the only ordering the runtime has without measuring
 # the bound models: the quick tier sits below the working tiers, the reasoning

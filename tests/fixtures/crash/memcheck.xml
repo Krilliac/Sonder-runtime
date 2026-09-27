@@ -1,0 +1,107 @@
+<?xml version="1.0"?>
+
+<valgrindoutput>
+
+<protocolversion>4</protocolversion>
+<protocoltool>memcheck</protocoltool>
+
+<preamble>
+  <line>Memcheck, a memory error detector</line>
+  <line>Copyright (C) 2002-2022, and GNU GPL'd, by Julian Seward et al.</line>
+  <line>Using Valgrind-3.22.0 and LibVEX; rerun with -h for copyright info</line>
+  <line>Command: ./crasher null</line>
+</preamble>
+
+<pid>27204</pid>
+<ppid>27194</ppid>
+<tool>memcheck</tool>
+
+<args>
+  <vargv>
+    <exe>/usr/bin/valgrind.bin</exe>
+    <arg>--tool=memcheck</arg>
+    <arg>--xml=yes</arg>
+    <arg>--xml-file=memcheck.xml</arg>
+  </vargv>
+  <argv>
+    <exe>./crasher</exe>
+    <arg>null</arg>
+  </argv>
+</args>
+
+<status>
+  <state>RUNNING</state>
+  <time>00:00:00:00.032 </time>
+</status>
+
+<error>
+  <unique>0x0</unique>
+  <tid>1</tid>
+  <kind>InvalidRead</kind>
+  <what>Invalid read of size 8</what>
+  <stack>
+    <frame>
+      <ip>0x109266</ip>
+      <obj>/src/sparkmini/crasher</obj>
+      <fn>run_frame(Renderer*, int)</fn>
+      <dir>/src/sparkmini</dir>
+      <file>crasher.cpp</file>
+      <line>20</line>
+    </frame>
+    <frame>
+      <ip>0x1093A8</ip>
+      <obj>/src/sparkmini/crasher</obj>
+      <fn>main</fn>
+      <dir>/src/sparkmini</dir>
+      <file>crasher.cpp</file>
+      <line>47</line>
+    </frame>
+  </stack>
+  <auxwhat>Address 0x0 is not stack'd, malloc'd or (recently) free'd</auxwhat>
+</error>
+
+<fatal_signal>
+  <tid>1</tid>
+  <signo>11</signo>
+  <signame>SIGSEGV</signame>
+  <sicode>1</sicode>
+  <event>Access not within mapped region</event>
+  <siaddr>0x0</siaddr>
+  <stack>
+    <frame>
+      <ip>0x109266</ip>
+      <obj>/src/sparkmini/crasher</obj>
+      <fn>run_frame(Renderer*, int)</fn>
+      <dir>/src/sparkmini</dir>
+      <file>crasher.cpp</file>
+      <line>20</line>
+    </frame>
+    <frame>
+      <ip>0x1093A8</ip>
+      <obj>/src/sparkmini/crasher</obj>
+      <fn>main</fn>
+      <dir>/src/sparkmini</dir>
+      <file>crasher.cpp</file>
+      <line>47</line>
+    </frame>
+  </stack>
+</fatal_signal>
+
+
+<status>
+  <state>FINISHED</state>
+  <time>00:00:00:00.975 </time>
+</status>
+
+<errorcounts>
+  <pair>
+    <count>1</count>
+    <unique>0x0</unique>
+  </pair>
+</errorcounts>
+
+<suppcounts>
+</suppcounts>
+
+</valgrindoutput>
+

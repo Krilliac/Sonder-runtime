@@ -21,6 +21,7 @@ STATE_DATABASES = (
     ("extensions.db", "SONDER_EXTENSIONS_DB"),
     ("queued_actions.db", "SONDER_QUEUED_ACTION_DB"),
     ("served_action_receipts.db", "SONDER_SERVED_ACTION_RECEIPTS_DB"),
+    ("http_work_runs.db", "SONDER_HTTP_WORK_RUNS_DB"),
     ("operations.db", "SONDER_OPERATIONS_DB"),
     ("autopilot.db", "SONDER_AUTOPILOT_DB"),
     ("composition.db", "SONDER_COMPOSITION_DB"),
@@ -333,6 +334,9 @@ def live_control_plane_inventory(*, additional=None):
             _canonical(Path(override).absolute()) if override else home / name
         )
     atomic.append(home / "workflows.json")
+    # Live emotion-vector tuning is saved beside it (the bundled default in
+    # the checkout is covered by the workspace entry above).
+    atomic.append(home / "emotion_vectors.json")
     from .unsafe_lab import _audit_path
 
     catalog = os.environ.get("SONDER_LANE_TEST_TARGETS_FILE", "").strip()

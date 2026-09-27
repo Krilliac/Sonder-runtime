@@ -1,0 +1,38 @@
+[
+{
+  "directory": "/work/sparklite/build/ninja-debug",
+  "command": "/usr/bin/c++ -I/work/sparklite/src/core -g -std=gnu++17 -Winvalid-pch -x c++-header -include /work/sparklite/build/ninja-debug/CMakeFiles/core.dir/cmake_pch.hxx -o CMakeFiles/core.dir/cmake_pch.hxx.gch -c /work/sparklite/build/ninja-debug/CMakeFiles/core.dir/cmake_pch.hxx.cxx",
+  "file": "/work/sparklite/build/ninja-debug/CMakeFiles/core.dir/cmake_pch.hxx.cxx",
+  "output": "CMakeFiles/core.dir/cmake_pch.hxx.gch"
+},
+{
+  "directory": "/work/sparklite/build/ninja-debug",
+  "command": "/usr/bin/c++ -I/work/sparklite/src/core -g -std=gnu++17 -Winvalid-pch -include /work/sparklite/build/ninja-debug/CMakeFiles/core.dir/cmake_pch.hxx -o CMakeFiles/core.dir/src/core/math.cpp.o -c /work/sparklite/src/core/math.cpp",
+  "file": "/work/sparklite/src/core/math.cpp",
+  "output": "CMakeFiles/core.dir/src/core/math.cpp.o"
+},
+{
+  "directory": "/work/sparklite/build/ninja-debug",
+  "command": "/usr/bin/c++ -I/work/sparklite/src/core -g -std=gnu++17 -Winvalid-pch -include /work/sparklite/build/ninja-debug/CMakeFiles/core.dir/cmake_pch.hxx -o CMakeFiles/core.dir/src/core/entity.cpp.o -c /work/sparklite/src/core/entity.cpp",
+  "file": "/work/sparklite/src/core/entity.cpp",
+  "output": "CMakeFiles/core.dir/src/core/entity.cpp.o"
+},
+{
+  "directory": "/work/sparklite/build/ninja-debug",
+  "command": "/usr/bin/c++ -g -std=gnu++17 -o CMakeFiles/shadergen.dir/tools/shadergen.cpp.o -c /work/sparklite/tools/shadergen.cpp",
+  "file": "/work/sparklite/tools/shadergen.cpp",
+  "output": "CMakeFiles/shadergen.dir/tools/shadergen.cpp.o"
+},
+{
+  "directory": "/work/sparklite/build/ninja-debug",
+  "command": "/usr/bin/c++ -I/work/sparklite/build/ninja-debug/generated -I/work/sparklite/src/core -g -std=gnu++17 -o CMakeFiles/game.dir/src/game/main.cpp.o -c /work/sparklite/src/game/main.cpp",
+  "file": "/work/sparklite/src/game/main.cpp",
+  "output": "CMakeFiles/game.dir/src/game/main.cpp.o"
+},
+{
+  "directory": "/work/sparklite/build/ninja-debug",
+  "command": "/usr/bin/c++ -g -std=gnu++17 -o CMakeFiles/crash_test.dir/tests/crash_test.cpp.o -c /work/sparklite/tests/crash_test.cpp",
+  "file": "/work/sparklite/tests/crash_test.cpp",
+  "output": "CMakeFiles/crash_test.dir/tests/crash_test.cpp.o"
+}
+]
