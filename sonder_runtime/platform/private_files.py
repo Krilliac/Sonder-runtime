@@ -266,11 +266,12 @@ def _is_regular(path: str) -> bool:
 
 
 def state_secret_files(home: str | os.PathLike[str]) -> list[str]:
-    """Secret-bearing files of a state home (bounded; never follows links).
+    """Secret-bearing files of a state home (cap plus one; never follows links).
 
     Store files (``_STORE_SUFFIXES``) and credential files directly in the
     home, plus every regular file below its ``secrets``/``certs``/``audit``
     directories. Candidate workspaces, logs and other state are not listed.
+    One file beyond the cap signals an incomplete inventory to callers.
     """
     directory = os.fspath(home)
     found: list[str] = []
@@ -288,6 +289,8 @@ def state_secret_files(home: str | os.PathLike[str]) -> list[str]:
             or lowered == ".env"
         ) and _is_regular(path):
             found.append(path)
+            if len(found) > _MAX_SECRET_FILES:
+                return found
     for child in _SECRET_DIRECTORIES:
         root = os.path.join(directory, child)
         if _is_reparse_point(root) or not os.path.isdir(root):
@@ -298,7 +301,7 @@ def state_secret_files(home: str | os.PathLike[str]) -> list[str]:
                 path = os.path.join(current, name)
                 if _is_regular(path):
                     found.append(path)
-                if len(found) >= _MAX_SECRET_FILES:
+                if len(found) > _MAX_SECRET_FILES:
                     return found
     return found
 
@@ -309,9 +312,13 @@ def protect_state_from_low_integrity(home: str | os.PathLike[str]) -> list[str]:
     Called before a low-integrity candidate runs. An empty result is the only
     passing outcome: anything returned is still readable at low integrity
     (another account's file, a failed ACL write) and the caller must refuse.
+    An inventory beyond the scan limit raises so the caller refuses it too.
     """
+    files = state_secret_files(home)
+    if len(files) > _MAX_SECRET_FILES:
+        raise RuntimeError("Sonder state secret scan limit exceeded")
     remaining: list[str] = []
-    for path in state_secret_files(home):
+    for path in files:
         if low_integrity_readable(path):
             _windows_restrict(path, directory=False, label=True)
         if low_integrity_readable(path):
@@ -325,8 +332,10 @@ def low_integrity_readable_state_files(home: str | os.PathLike[str]) -> list[str
 
 
 def _windows_tighten_state_home(directory: str) -> int:
+    if _never_tighten_windows(directory):
+        return 0
     changed = 0
-    if os.path.isdir(directory) and not _never_tighten_windows(directory):
+    if os.path.isdir(directory):
         changed += int(_windows_restrict(directory, directory=True, label=False))
     for root in _SECRET_DIRECTORIES:
         path = os.path.join(directory, root)
