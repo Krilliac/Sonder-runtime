@@ -350,6 +350,16 @@ class SQLiteSessionRepository:
         issues: list[IntegrityIssue] = []
         expected = start_sequence
         previous_hash = None
+        if start_sequence > 1 and events:
+            # A ranged inspection proves its slice and the link to the stored
+            # predecessor; the predecessor's own history is outside the range.
+            predecessor = self.read_range(session_id, start_sequence=start_sequence - 1,
+                                          end_sequence=start_sequence - 1, limit=1)
+            if not predecessor:
+                issues.append(IntegrityIssue(start_sequence, "missing_predecessor",
+                                             "ranged inspection has no stored predecessor"))
+            else:
+                previous_hash = predecessor[0].event_hash
         for event in events:
             if event.sequence != expected:
                 issues.append(IntegrityIssue(event.sequence, "sequence_gap", f"expected {expected}"))
