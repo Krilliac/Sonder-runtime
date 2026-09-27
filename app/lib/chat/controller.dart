@@ -412,6 +412,9 @@ class ChatController extends ChangeNotifier {
       if (_mode != null) _lastKnownMode = _mode;
       return (ModeChangeOutcome.changed, '');
     } on SonderException catch (e) {
+      if (_disposed || generation != _backendGeneration) {
+        return (ModeChangeOutcome.changed, '');
+      }
       final err = normalizeModeError(e);
       if (err.httpStatus == 403 || err.code == 'FORBIDDEN') {
         _modeReadOnly = true;
@@ -425,6 +428,9 @@ class ChatController extends ChangeNotifier {
         'Could not change mode: ${err.message}'
       );
     } catch (e) {
+      if (_disposed || generation != _backendGeneration) {
+        return (ModeChangeOutcome.changed, '');
+      }
       _mode = null;
       unawaited(refreshPermissionMode());
       return (ModeChangeOutcome.failed, 'Could not change mode.');

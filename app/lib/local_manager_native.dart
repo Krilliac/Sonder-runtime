@@ -911,12 +911,42 @@ class LocalManager {
     required Duration timeout,
     Future<void> Function(int pid)? onKillTree,
   }) async {
-    final process = await Process.start(
-      executable,
-      args,
-      workingDirectory: workingDirectory,
-      environment: environment,
-    );
+    // On Unix, give each bounded command its own session so a timeout can
+    // signal its whole process group, including any git subprocesses. The
+    // setsid shim needs python3; a machine without it (a first install) runs
+    // the command directly and a timeout kills only that process.
+    Process process;
+    var grouped = false;
+    if (Platform.isWindows) {
+      process = await Process.start(
+        executable,
+        args,
+        workingDirectory: workingDirectory,
+        environment: environment,
+      );
+    } else {
+      try {
+        process = await Process.start(
+          'python3',
+          [
+            '-c',
+            'import os,sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])',
+            executable,
+            ...args,
+          ],
+          workingDirectory: workingDirectory,
+          environment: environment,
+        );
+        grouped = true;
+      } on ProcessException {
+        process = await Process.start(
+          executable,
+          args,
+          workingDirectory: workingDirectory,
+          environment: environment,
+        );
+      }
+    }
     try {
       await process.stdin.close();
     } catch (_) {}
@@ -937,7 +967,11 @@ class LocalManager {
     } on TimeoutException {
       timedOut = true;
       try {
-        await (onKillTree ?? killProcessTree)(process.pid);
+        await (onKillTree ??
+            (Platform.isWindows || grouped
+                ? killProcessTree
+                : (int pid) async =>
+                    Process.killPid(pid, ProcessSignal.sigkill)))(process.pid);
       } catch (_) {}
       process.kill(ProcessSignal.sigkill);
       exitCode = await process.exitCode
@@ -953,14 +987,17 @@ class LocalManager {
     );
   }
 
-  /// Kills [pid] and its children: `taskkill /T /F` on Windows (cmd.exe,
-  /// python and git are separate processes there); elsewhere the process.
+  /// Kills [pid] and its children: `taskkill /T /F` on Windows; on Unix,
+  /// [pid] is the process-group leader created by [runBoundedProcess].
   static Future<void> killProcessTree(int pid) async {
     if (Platform.isWindows) {
       await Process.run('taskkill', ['/T', '/F', '/PID', '$pid'])
           .timeout(const Duration(seconds: 10));
     } else {
-      Process.killPid(pid, ProcessSignal.sigkill);
+      // A negative pid signals the whole group; fall back to the leader alone.
+      if (!Process.killPid(-pid, ProcessSignal.sigkill)) {
+        Process.killPid(pid, ProcessSignal.sigkill);
+      }
     }
   }
 

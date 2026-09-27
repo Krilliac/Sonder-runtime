@@ -86,6 +86,26 @@ void main() {
         lessThan(const Duration(seconds: 15)));
   });
 
+  test('a timed-out Unix updater cannot leave a child running', () async {
+    final marker = File('${tmp.path}${Platform.pathSeparator}orphan.txt');
+    const child = 'import sys,time; time.sleep(2); '
+        'open(sys.argv[1], "w").write("orphaned")';
+    const parent = 'import subprocess,sys,time; '
+        'subprocess.Popen([sys.executable, "-c", sys.argv[2], sys.argv[1]]); '
+        'print("child started", flush=True); '
+        'time.sleep(30)';
+    final result = await LocalManager.runBoundedProcess(
+      'python3',
+      ['-c', parent, marker.path, child],
+      workingDirectory: tmp.path,
+      timeout: const Duration(milliseconds: 500),
+    );
+    expect(result.timedOut, isTrue);
+    expect(result.stdout, contains('child started'));
+    await Future<void>.delayed(const Duration(seconds: 3));
+    expect(await marker.exists(), isFalse);
+  }, skip: Platform.isWindows);
+
   test('a process that finishes in time reports its output and exit code',
       () async {
     final result = await LocalManager.runBoundedProcess(

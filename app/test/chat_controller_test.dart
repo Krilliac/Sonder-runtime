@@ -242,6 +242,34 @@ void main() {
     c.dispose();
   });
 
+  testWidgets('a stale mode write error cannot change the new backend mode',
+      (tester) async {
+    for (final error in <Object>[
+      SonderException('{message: denied, code: FORBIDDEN}'),
+      SonderException('old backend failed'),
+      StateError('old backend failed'),
+    ]) {
+      final old = _DelayedModeWriteBackend()
+        ..mode = permissionModeFor('manual');
+      final c = await _start(tester, old);
+      final write = c.requestModeChange('auto', confirm: (_, __) async => true);
+      await tester.pump();
+
+      final next = FakeChatBackend(serverUrl: 'http://new-host:11435')
+        ..mode = permissionModeFor('plan');
+      c.updateBackend(next, identityChanged: true);
+      await tester.pump();
+      expect(c.permissionMode?.mode, 'plan');
+
+      old.modeWrite.completeError(error);
+      await write;
+      await tester.pump();
+      expect(c.permissionMode?.mode, 'plan');
+      expect(c.modeReadOnly, isFalse);
+      c.dispose();
+    }
+  });
+
   testWidgets('raising asks first; lowering does not', (tester) async {
     final backend = FakeChatBackend()..mode = permissionModeFor('manual');
     final c = await _start(tester, backend);
@@ -337,6 +365,16 @@ void main() {
     await second;
     c.dispose();
   });
+}
+
+class _DelayedModeWriteBackend extends FakeChatBackend {
+  final modeWrite = Completer<PermissionMode>();
+
+  @override
+  Future<PermissionMode> setPermissionMode(String next) {
+    modePosts.add(next);
+    return modeWrite.future;
+  }
 }
 
 /// A backend whose status, mode and model reads wait until completed.
