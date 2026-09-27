@@ -1,6 +1,6 @@
 # Issue 510 execution ledger
 
-Updated 2026-09-25. This is an implementation and verification work ledger for
+Updated 2026-09-27. This is an implementation and verification work ledger for
 [#510](https://github.com/Krilliac/Sonder-runtime/issues/510), including the
 2026-09-24 strategy/recovery program, the associated ten-item defect audit, and the 2026-09-25 cross-provider agent/connector delta.
 Original baseline: `a6a082859d4d3d4ec80cf6497bd37d6052bba5e9`.
@@ -308,6 +308,154 @@ MODEL-001/002/004/005/007/008/009, CTX-001/010, TOOL-001/003/007, OPS-001/004,
 SEC-001/002 and API-001/006. This ledger entry does not mark any of those master
 requirements complete. Live connectors remain disabled until their focused
 implementation and provider-specific qualification evidence land.
+
+## Hardware perception + isolated HID execution bridge
+
+Status: **proposed / experimental**. Added 2026-09-27 after reviewing the
+Violoop hardware-agent pattern. Violoop is an architectural reference only;
+Sonder must not depend on that vendor, its cloud relay, or its local model.
+
+Goal: add a provider-neutral physical-computer control path for targets that
+lack a trustworthy API, CLI, MCP, accessibility surface or native Sonder
+adapter. A human-visible UI should be operable through bounded perception and
+isolated HID execution without allowing the perception/model layer to mint
+execution authority.
+
+### Proposed architecture
+
+```text
+display/capture -> VisualObservationProvider -> Sonder planner/policy
+                                              |
+                                              v
+                                      guarded ActionProposal
+                                              |
+                          HardwareApprovalProvider (when required)
+                                              |
+                                              v
+                                     HidExecutionProvider
+                                              |
+                                              v
+                                  keyboard / mouse / target
+                                              |
+                                      observe + verify
+```
+
+- Add provider-neutral `VisualObservationProvider`, `HidExecutionProvider`
+  and `HardwareApprovalProvider` contracts rather than coupling orchestration
+  to one appliance.
+- Prefer a simple capture device plus isolated USB HID microcontroller where
+  practical. If a smart external appliance is supported, treat its model and
+  firmware as an untrusted tool/provider boundary; it cannot authorize itself.
+- Keep serious planning, routing, memory, policy and verification in Sonder.
+  Edge inference may perform bounded perception or proposal generation only.
+- Native APIs, typed tools, MCP, CLI and accessibility integrations remain the
+  preferred execution routes because they expose stronger semantic identity,
+  journaling and effect verification. Visual/HID control is a fallback, not the
+  default path.
+- Support optional local/LAN operation without a required vendor cloud path.
+  Any external relay is a separate egress/trust profile and must be explicitly
+  admitted by policy.
+
+### Action authority and hardware approval
+
+Classify proposed GUI/HID actions before dispatch:
+
+1. **OBSERVE** - capture/inspect only; no HID authority.
+2. **NAVIGATE** - bounded pointer movement, focus and reversible navigation.
+3. **INPUT** - text/key/button input with target/focus verification.
+4. **PRIVILEGED** - installs, account/security changes, shell elevation,
+   destructive file operations or other high-impact actions; require explicit
+   operator approval according to policy.
+5. **CRITICAL** - actions whose policy requires hardware-backed operator
+   presence/authorization. Support a dedicated confirmation MCU or a standard
+   hardware authenticator flow where technically appropriate; do not assume a
+   specific YubiKey/FIDO/PIV mechanism until an adapter is implemented and
+   threat-modeled.
+
+The isolated HID device is an execution actuator, not an authority source.
+Software on the target machine and models on either side cannot bypass the
+approval policy by directly commanding the actuator.
+
+### Durable action receipt
+
+Every physical action should bind at least:
+
+- operation/root/worker identity and inherited budget;
+- capture-source/device identity, display topology and target display;
+- pre-action frame digest, monotonic timestamp and freshness bound;
+- semantic target when available plus coordinates/keys actually dispatched;
+- active-window/process identity when the platform can attest it;
+- policy classification and the exact approval requirement;
+- hardware-approval receipt/nonce when required;
+- HID device identity and bounded action sequence;
+- post-action observation digest and verifier outcome;
+- cancellation/effect-uncertainty state.
+
+A stale frame, changed display topology, focus/window drift, unknown HID state,
+missing required approval, mismatched action receipt or unverifiable target must
+fail closed before further mutation.
+
+### Recovery and safety constraints
+
+- Never blindly replay an uncertain physical mutation after crash/restart.
+  Re-observe the target, reconcile the prior receipt, then choose resume,
+  compensate or stop.
+- Coordinate clicks alone are weak evidence. Prefer semantic/vision target
+  identity and require a fresh observation immediately before high-impact input.
+- Bound action rate, pointer/key sequence length, observation age, retry count
+  and no-progress loops under the same root resource authority as other tools.
+- Focus stealing, resolution/DPI changes, multi-monitor reconfiguration,
+  lock-screen transitions and secure-desktop/UAC boundaries invalidate the
+  current action proposal.
+- Do not attempt to bypass OS secure desktops or other intentional isolation
+  boundaries. Require an explicitly supported operator-mediated path instead.
+- The target machine must not be able to forge a successful approval receipt
+  merely by drawing a confirmation UI on screen.
+- Treat capture/HID firmware updates and device identity as supply-chain
+  surfaces subject to pinned provenance/attestation where available.
+
+### Initial implementation slices
+
+| Slice | Work | Exit gate |
+|---|---|---|
+| HID-1 Contracts | Add typed observation, action, approval and execution-receipt contracts plus provider capability declarations. | Pure validation/serialization tests; no hardware required. |
+| HID-2 Virtual bridge | Implement deterministic virtual capture/HID adapters for CI, including focus, DPI, topology and stale-frame fixtures. | Replayable canaries prove policy and receipt semantics without real input devices. |
+| HID-3 Guarded dispatcher | Route physical actions through existing policy, budget, cancellation, effect-journal and approval boundaries. | No model/provider can dispatch HID directly or widen its own authority. |
+| HID-4 Real isolated actuator | Add one supported USB HID microcontroller/bridge with pinned device identity and bounded commands. | Physical canaries prove only admitted commands reach the target; disconnect/reset fails closed. |
+| HID-5 Hardware approval | Add attended confirmation through a dedicated hardware gate and/or supported hardware-authenticator adapter. | Approval is nonce/action-bound, non-replayable and cannot be forged by the target UI. |
+| HID-6 Vision targeting | Add bounded screen perception/targeting with pre/post-action verification. | DPI, scaling, occlusion, moved controls and stale screenshots produce refusal or re-plan rather than blind input. |
+| HID-7 Appliance adapter | Optionally integrate Violoop-like devices when they expose a stable supported local interface. | Vendor/cloud dependence is optional; device-local models remain subordinate to Sonder authority and receipts. |
+| HID-8 Operator surface | Show live frame source, proposed action, authority tier, approval requirement, execution receipt and effect uncertainty. | Operator can understand and stop the physical-control lane without exposing secrets. |
+
+### Acceptance canaries
+
+Before physical computer control is production-capable, prove at least:
+
+1. a model cannot send raw HID outside the guarded dispatcher;
+2. a stale/mismatched frame cannot authorize a click or key sequence;
+3. focus/window or display-topology drift invalidates the proposal;
+4. crash after dispatch never causes a blind duplicate mutation;
+5. cancellation distinguishes request stop from proven actuator quiescence;
+6. privileged/critical actions cannot proceed without their required approval;
+7. a screen-drawn fake confirmation cannot forge the hardware approval receipt;
+8. approval receipts are bound to the exact action and cannot be replayed;
+9. device disconnect/reset or unknown HID state fails closed;
+10. action/no-progress retries remain bounded and charged to the root budget;
+11. native semantic tools remain preferred when an equally capable trusted
+    adapter exists;
+12. an external smart appliance cannot expand egress, credentials, provider
+    routing or execution authority on its own;
+13. target-side malware cannot directly command an isolated actuator through
+    Sonder's control channel;
+14. pre/post observations and action receipts are sufficient to reconstruct why
+    an action was admitted and whether its effect is known;
+15. secure-desktop/lock-screen boundaries are refused unless a separately
+    supported operator-mediated mechanism is explicitly configured.
+
+This slice advances TOOL-001/003/007, AGENT-009, OPS-001/004, SEC-001/002 and
+the effect/recovery program, but does not mark any master requirement complete.
+It also provides a future path for BIOS/installer/legacy/proprietary GUI control
+where no stronger programmable interface exists.
 
 ## Admission and recovery policy
 
