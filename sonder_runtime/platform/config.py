@@ -1356,6 +1356,30 @@ def apply_observability_environment(
     )
 
 
+# Process-wide CA bundle conventions that OpenSSL and requests already honour.
+# Remote Ollama HTTPS adopts the first usable one when no Ollama-specific bundle
+# is configured. It is used *instead of* the merged OS store: on Windows a stale
+# same-subject certificate in the user's CA store otherwise makes verification
+# of a private-CA or self-signed worker fail even though this bundle trusts it.
+PROCESS_CA_BUNDLE_VARIABLES = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE")
+
+
+def process_ca_bundle(env) -> str:
+    """Return the first absolute, existing process CA bundle, else ``""``.
+
+    An unusable value is ignored, as OpenSSL ignores it, so verification keeps
+    the system trust store instead of failing configuration validation.
+    """
+    for name in PROCESS_CA_BUNDLE_VARIABLES:
+        raw = str(env.get(name, "") or "").strip()
+        if not raw:
+            continue
+        path = Path(raw).expanduser()
+        if path.is_absolute() and path.is_file():
+            return str(path)
+    return ""
+
+
 def _apply_environment(
     config: SonderConfig, env: dict[str, str], errors: list[str]
 ) -> SonderConfig:
@@ -1490,6 +1514,8 @@ def _apply_environment(
         )
     if env.get("SONDER_OLLAMA_CA_BUNDLE", "").strip():
         ollama = replace(ollama, ca_bundle=env["SONDER_OLLAMA_CA_BUNDLE"].strip())
+    elif not ollama.ca_bundle:
+        ollama = replace(ollama, ca_bundle=process_ca_bundle(env))
     ollama = replace(
         ollama,
         worker_pool_max_workers=_env_int(

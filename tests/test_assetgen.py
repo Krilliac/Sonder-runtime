@@ -74,6 +74,19 @@ def test_infer_request_accepts_documented_format_synonyms():
     assert result["kinds"] == ["data", "document", "texture", "vector", "web"]
 
 
+def test_infer_request_accepts_kinds_as_a_list():
+    # Models calling the artifact_generate tool often pass kinds as a JSON
+    # array; that used to raise AttributeError ('list' has no 'strip') and
+    # fail the whole chat turn with a 500.
+    as_list = assetgen.infer_request("brief", kinds=["markdown", "json", "svg"])
+    as_text = assetgen.infer_request("brief", kinds="markdown, json, svg")
+    assert as_list["kinds"] == as_text["kinds"] == ["data", "document", "vector"]
+    assert assetgen.infer_request("fiery logo", kinds=["auto"])["kinds"] == (
+        assetgen.infer_request("fiery logo", kinds="auto")["kinds"])
+    assert assetgen.infer_request("brief", kinds=[])["kinds"] == (
+        assetgen.infer_request("brief", kinds="auto")["kinds"])
+
+
 def test_infer_request_still_rejects_unknown_kinds():
     with pytest.raises(ValueError):
         assetgen.infer_request("brief", kinds="totally-not-a-kind")

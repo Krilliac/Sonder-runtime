@@ -47,15 +47,34 @@ class MembershipController:
         self._ticket = self._completed = 0
         self._result = None
         self._failure = None
+        self._first_refresh_immediate = False
+        self._admission_counts = None
         pool.configure_membership(cluster_id=cluster_id, issuer_id=issuer_id, clock=clock)
+        ttl = getattr(pool, "capability_ttl_seconds", None)
+        if isinstance(ttl, (int, float)) and self._interval >= ttl:
+            # Renewal happens only on a pass, so a pass interval at or above
+            # the capability TTL leaves members inadmissible between passes.
+            logger.warning("membership refresh interval %.0fs is not below the worker capability "
+                           "TTL %.0fs; members will be inadmissible between refreshes",
+                           self._interval, ttl)
 
-    def start(self):
+    def start(self, *, refresh_now=False):
+        """Start the periodic loop; ``refresh_now`` runs its first pass at once.
+
+        Long-lived owner surfaces pass ``refresh_now=True`` so configured
+        workers are admitted at startup rather than one interval later.
+        """
+        if type(refresh_now) is not bool:
+            raise ValueError("refresh_now must be a boolean")
         with self._condition:
             if self._closed:
                 raise RuntimeError("membership controller is closed")
             if self._thread is None:
+                self._first_refresh_immediate = refresh_now
                 self._thread = Thread(target=self._run, name="sonder-inference-membership", daemon=True)
                 self._thread.start()
+                logger.info("inference membership refresh loop started, interval=%.0fs, immediate=%s",
+                            self._interval, refresh_now)
 
     def refresh(self, *, timeout_seconds=30, probe=True):
         timeout = _timeout(timeout_seconds, 30)
@@ -84,7 +103,7 @@ class MembershipController:
             return self._result
 
     def _run(self):
-        next_refresh = monotonic() + self._interval
+        next_refresh = monotonic() + (0 if self._first_refresh_immediate else self._interval)
         while True:
             with self._condition:
                 while not self._closed and self._pending is None and monotonic() < next_refresh:
@@ -137,7 +156,8 @@ class MembershipController:
             self._pool.apply_membership(result)
             self._result = result
         if probe and result.roster is not None:
-            self._pool.refresh_membership_capabilities()
+            # Renew evidence that would lapse before the next scheduled pass.
+            self._pool.refresh_membership_capabilities(renew_within_seconds=self._interval)
             evidence = self._pool.membership_evidence(result.roster)
             result = reconcile_membership(None, **(options | dict(
                 previous=result.roster, high_water=result.high_water, capability_evidence=evidence)))
@@ -145,6 +165,20 @@ class MembershipController:
                 if not self._closed:
                     self._pool.apply_membership(result)
                     self._result = result
+        self._log_admission(result)
+
+    def _log_admission(self, result):
+        """Log bounded lifecycle counts when they change; never origins or models."""
+        members = result.roster.members if result.roster is not None else ()
+        counts = tuple(sum(member.lifecycle_state == name for member in members)
+                       for name in ("active", "probation", "unhealthy", "expired"))
+        if counts == self._admission_counts:
+            return
+        self._admission_counts = counts
+        active, probation, unhealthy, expired = counts
+        level = logging.WARNING if members and not active else logging.INFO
+        logger.log(level, "inference membership: members=%d active=%d probation=%d unhealthy=%d expired=%d",
+                   len(members), active, probation, unhealthy, expired)
 
     def close(self, timeout=5):
         timeout = 5 if timeout is None else timeout

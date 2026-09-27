@@ -20,6 +20,7 @@ import time
 from typing import Any, Callable, Mapping, Sequence
 
 from ....application.observability.ecosystem_status import build_ecosystem_status
+from ....application.observability.runtime_telemetry import bounded_label
 from ....application.ports.telemetry_feed import SubscriberLimitReached
 from .observability_stream import (
     DISCOVERY_ROUTE,
@@ -176,12 +177,64 @@ def begin_chat_turn(handler: Any, *, application: Any, bind_operation_context: C
     handler._telemetry_turn = (telemetry, turn)
 
 
-def finish_chat_turn(handler: Any, *, log: Any) -> None:
-    """Emit the single terminal request.* event for a started turn."""
+def reset_chat_turn(handler: Any) -> None:
+    """Clear the per-request turn state (keep-alive reuses the handler)."""
+    handler._telemetry_turn = None
+    handler._telemetry_result = None
+    handler._telemetry_error_kind = None
+    handler._telemetry_error_reply = False
+    handler._telemetry_rejectable = None
+    handler._last_response_status = None
+
+
+def admit_chat_caller(handler: Any, request: Any) -> None:
+    """Mark an authenticated chat caller whose refusal may be exported.
+
+    Only the bounded model label is kept, never the body.  Requests refused
+    before this point (origin, framing, authentication, the auth-failure
+    limiter) stay off the stream, so anonymous traffic cannot flood it.
+    """
+    model = request.get("model", "sonder") if isinstance(request, Mapping) else None
+    handler._telemetry_rejectable = (
+        bounded_label(model) if isinstance(model, str) else None,
+    )
+
+
+def _export_rejection(handler: Any, application: Any, log: Any) -> None:
+    """One ``request.failed`` (``rejected: true``) for a refused, never-started turn."""
+    admitted = getattr(handler, "_telemetry_rejectable", None)
+    handler._telemetry_rejectable = None
+    status = getattr(handler, "_last_response_status", None)
+    telemetry = getattr(application, "telemetry", None)
+    if admitted is None or telemetry is None or type(status) is not int or status < 400:
+        return
+    started = getattr(handler, "_request_started", None)
+    elapsed = time.monotonic() - started if isinstance(started, float) else 0.0
+    try:
+        telemetry.reject_request(
+            request_id=handler._correlation(), surface="http.chat_completions",
+            requested_model=admitted[0], http_status=status,
+            error_code=getattr(handler, "_telemetry_result", None) or "rejected",
+            total_ms=max(0, int(elapsed * 1000)),
+        )
+    except Exception:
+        log.warning("live telemetry rejection could not be exported", exc_info=True)
+
+
+def finish_chat_turn(handler: Any, *, log: Any,
+                     application_for: Callable[[], Any] | None = None) -> None:
+    """Emit the single terminal request.* event for a started turn.
+
+    A chat request refused before its turn started is exported as a lone
+    ``request.failed`` instead, when an authenticated caller sent it.
+    """
     started = getattr(handler, "_telemetry_turn", None)
     handler._telemetry_turn = None
     if started is None:
+        if getattr(handler, "_telemetry_rejectable", None) is not None and application_for:
+            _export_rejection(handler, application_for(), log)
         return
+    handler._telemetry_rejectable = None
     telemetry, turn = started
     result = getattr(handler, "_telemetry_result", None) or "unrecorded"
     status = getattr(handler, "_last_response_status", None)
@@ -338,6 +391,7 @@ def stream_telemetry(handler: Any, feed: Any, *, query: Mapping[str, Sequence[st
 
 __all__ = [
     "STREAM_DRAIN_BACKSTOP_SECONDS",
+    "admit_chat_caller",
     "begin_chat_turn",
     "chat_turn_outcome",
     "ecosystem_document",
@@ -346,6 +400,7 @@ __all__ = [
     "loopback_base_url",
     "register_telemetry_drain",
     "reject_rebound_host",
+    "reset_chat_turn",
     "serve_get",
     "stream_telemetry",
     "telemetry_host_allowed",

@@ -41,6 +41,8 @@ Do not treat a local result as evidence that remote admission succeeded.
 The embedding owner must explicitly start the composed membership controller
 or call `application.inference_membership.refresh(timeout_seconds=30)`; ordinary
 status, CLI entry and inference do not enroll members or start this lifecycle.
+(`serve`, MCP and the REPL start only the static-configuration controller
+automatically; an external source is never started implicitly.)
 The administrator cache refresh is not a membership source refresh.
 Default embeddings remain unavailable while an external source is owned;
 this procedure tests pool inference, not an embedding bypass.
