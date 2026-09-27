@@ -514,9 +514,7 @@ from sonder_runtime.domain.runtime_update_parsing import (
 from sonder_runtime.domain.execution_route_formatting import (
     execution_route_header as _execution_route_header_impl,
 )
-from sonder_runtime.adapters.inference.served_tier_models import (
-    served_tier_models as _served_tier_models_impl,
-)
+from sonder_runtime.adapters.inference import served_tier_models as _served_models
 from sonder_runtime.domain.agent_observation_quality import (
     observation_ok as _agent_observation_ok,
 )
@@ -7103,7 +7101,8 @@ def _answer_with_history_impl(
             # model that answered -- including a pre-routed first attempt,
             # which is not the route the request resolved to.
             _observe_target(model, tier_label, cloud)
-            effective_system = _build_system("", trace, "", model=model, cloud=cloud)
+            effective_system = _build_system("", trace, "", cloud=cloud, model=(
+                _served_models.served_prompt_model(model, tier_label, bridged_provider)))
             # Honor LEARN_TIERS here too. Serve conversation memory is client-side (the app
             # resends history each request), so a non-learning model can skip capture entirely:
             # no interaction row, no footer, nothing distilled. This lets a user exclude e.g.
@@ -7394,7 +7393,8 @@ def structured_answer_with_history(
         else None if bridged_provider is not None
         else _auto_model_context(model)
     )
-    system = _build_system("", False, "", model=model, cloud=cloud)
+    system = _build_system("", False, "", cloud=cloud, model=(
+        _served_models.served_prompt_model(model, tier_label, bridged_provider)))
     # A non-Ollama rung refuses decoder schemas with a 400 (the bridge
     # cannot carry ``format``) instead of reaching an absent Ollama.
     with _provider_bridge.bind_rung(bridged_provider, tier_label):
@@ -23233,7 +23233,7 @@ def _execution_route_header(
 ) -> str:
     return _execution_route_header_impl(
         mode, source, reason, confidence, tier,
-        tiers_map=_served_tier_models_impl(TIERS), local_tiers=runtime_policy.LOCAL_TIERS,
+        tiers_map=_served_models.served_tier_models(TIERS), local_tiers=runtime_policy.LOCAL_TIERS,
     )
 
 
