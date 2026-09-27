@@ -23285,7 +23285,7 @@ def route_work_request(
     turn: the execution-mode router and the lane it chooses each build their
     own system prompt, and both go to a model. See _stable_system_context.
     """
-    with _stable_system_context():
+    with _stable_system_context(), _served_models.observation_scope():
         return _route_work_request(
             prompt, project=project, _classified_intent=_classified_intent,
             _admitted_decision=_admitted_decision,
