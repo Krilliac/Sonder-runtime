@@ -155,6 +155,9 @@ class _RuntimeScreenState extends State<RuntimeScreen>
   ApprovalsPage? _approvals;
   Object? _approvalsError;
   EcosystemReading? _ecosystem;
+
+  /// `/v1/models` rows: routing labels when the ecosystem read is refused.
+  ModelCatalog? _modelCatalog;
   Object? _ecosystemError;
   bool _loadingExtras = false;
 
@@ -207,6 +210,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
       _approvals = null;
       _approvalsError = null;
       _ecosystem = null;
+      _modelCatalog = null;
       _ecosystemError = null;
       unawaited(_loadExtras());
     }
@@ -296,6 +300,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
     Object? approvalsError;
     EcosystemReading? ecosystem;
     Object? ecosystemError;
+    ModelCatalog? catalog;
     Future<void> readRuns() async {
       try {
         runs = await _data.workRuns();
@@ -320,7 +325,16 @@ class _RuntimeScreenState extends State<RuntimeScreen>
       }
     }
 
-    await Future.wait([readRuns(), readApprovals(), readEcosystem()]);
+    Future<void> readCatalog() async {
+      try {
+        catalog = await _data.modelCatalog();
+      } catch (_) {
+        // Only labels depend on it; a failed read keeps the last one.
+      }
+    }
+
+    await Future.wait(
+        [readRuns(), readApprovals(), readEcosystem(), readCatalog()]);
     if (!mounted) return;
     setState(() {
       _loadingExtras = false;
@@ -338,6 +352,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
           const {401, 403}
               .contains((ecosystemError as SonderException).httpStatus);
       _ecosystem = ecosystem ?? (refused ? null : _ecosystem);
+      _modelCatalog = catalog ?? _modelCatalog;
       _ecosystemError = ecosystemError;
     });
   }
@@ -988,7 +1003,8 @@ class _RuntimeScreenState extends State<RuntimeScreen>
   Widget build(BuildContext context) {
     final info = _info;
     final localInfo = _localInfo;
-    final routing = ModelRouting(_ecosystem?.status);
+    final routing = ModelRouting.of(_ecosystem?.status,
+        origins: _modelCatalog?.origins ?? const {});
     final localServer = localServerRow(
       launcherDetected: localInfo?.defaultServerReachable ?? false,
       serverUrl: widget.settings.serverUrl,
@@ -1306,7 +1322,8 @@ class _RuntimeScreenState extends State<RuntimeScreen>
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(routing.modelsPanelText),
+                          Text(routing.modelsPanelText(
+                              offered: info.models.map((m) => m.id))),
                           const SizedBox(height: 10),
                           Wrap(
                             spacing: 8,

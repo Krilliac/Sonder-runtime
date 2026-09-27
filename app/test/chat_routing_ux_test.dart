@@ -59,6 +59,31 @@ void main() {
       await unmountChat(tester);
     });
 
+    testWidgets('a non-admin still sees routing from /v1/models rows',
+        (tester) async {
+      final backend = FakeChatBackend()
+        ..models = const ['sonder', 'general', 'llama3:8b']
+        ..origins = const {
+          'sonder': ModelOrigin(
+              kind: 'route',
+              provider: 'sonder_inference',
+              servedModel: 'qwen3:14b'),
+          'general': ModelOrigin(
+              kind: 'route',
+              provider: 'sonder_inference',
+              servedModel: 'qwen3:14b'),
+          'llama3:8b': ModelOrigin(kind: 'model', provider: 'ollama'),
+        }
+        ..ecosystemError = SonderException('forbidden', httpStatus: 403);
+      await pumpChat(tester, backend);
+      await tester.pump();
+      await _openPicker(tester);
+      expect(
+          find.text('general · Sonder Inference (qwen3:14b)'), findsOneWidget);
+      expect(find.text('Ollama (direct)'), findsOneWidget);
+      await unmountChat(tester);
+    });
+
     testWidgets('an unreadable ecosystem document keeps today\'s look',
         (tester) async {
       final backend = FakeChatBackend()

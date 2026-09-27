@@ -160,6 +160,10 @@ abstract interface class RuntimeDataSource {
   /// `GET /v1/sonder/ecosystem` (admin). A 404 is an unsupported-runtime
   /// reading; 401/403 throw [SonderApi.adminRequiredMessage].
   Future<EcosystemReading> ecosystem();
+
+  /// `GET /v1/models` (any key): ids and each row's routing field, the
+  /// Models panel's fallback when [ecosystem] is refused.
+  Future<ModelCatalog> modelCatalog();
 }
 
 /// Direct HTTP reads bound to the configured server only (no fallback).
@@ -313,4 +317,11 @@ class HttpRuntimeDataSource implements RuntimeDataSource {
         apiKey: apiKey,
         accountSession: accountSession,
       ).ecosystemStatus();
+
+  @override
+  Future<ModelCatalog> modelCatalog() => SonderApi(
+        baseUrl: baseUrl,
+        apiKey: apiKey,
+        accountSession: accountSession,
+      ).modelCatalog();
 }

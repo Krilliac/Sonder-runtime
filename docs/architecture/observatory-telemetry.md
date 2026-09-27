@@ -311,6 +311,8 @@ for the request carry `run_id = R` and `attributes.parent_request_id = R`.
 
 - `providers.status` comes from the model gateway's `provider_status()`; a
   gateway or provider without it reports `{"provider": id, "state": "unknown"}`.
+  Sonder Inference's entry includes `tier_models` (`{tier: model}`), the
+  model each tier bound to it is served with (additive).
 - URLs use the loopback listener address (`127.0.0.1` for a `0.0.0.0` bind).
 - `connect_urls` lists the Runtime base URL (when export is on) and the base
   URL of every provider whose status names telemetry URLs.

@@ -15,6 +15,7 @@ import 'api/transport.dart';
 import 'api/work_runs.dart';
 import 'models.dart';
 import 'runtime/ecosystem.dart';
+import 'runtime/model_catalog.dart';
 
 // The API layer is split by domain under lib/api/; this file stays the
 // barrel so every `import 'api.dart'` keeps working.
@@ -35,6 +36,7 @@ export 'api/transport.dart'
 export 'api/tools_inventory.dart';
 export 'api/work_runs.dart';
 export 'runtime/ecosystem.dart';
+export 'runtime/model_catalog.dart';
 
 /// Return the catalog spelling of a saved model selector when it still exists.
 ///
@@ -1042,7 +1044,12 @@ class SonderApi implements SonderApiPort {
   /// advertises (typically just ["sonder"]). Throws [SonderException]
   /// on any failure so the UI can show a precise reason.
   @override
-  Future<List<String>> listModels() async {
+  Future<List<String>> listModels() async => (await modelCatalog()).ids;
+
+  /// `GET /v1/models`: the ids and each row's routing field (any key may
+  /// read it, unlike [ecosystemStatus]).
+  @override
+  Future<ModelCatalog> modelCatalog() async {
     final resp = await _get(_uri('/v1/models'), const Duration(seconds: 15));
     if (resp.statusCode != 200) {
       throw _failure(
@@ -1052,12 +1059,8 @@ class SonderApi implements SonderApiPort {
       );
     }
     try {
-      final obj = jsonDecode(resp.body) as Map<String, dynamic>;
-      final data = (obj['data'] as List?) ?? const [];
-      return data
-          .map((m) => (m as Map<String, dynamic>)['id']?.toString() ?? '')
-          .where((s) => s.isNotEmpty)
-          .toList();
+      return ModelCatalog.fromJson(
+          jsonDecode(resp.body) as Map<String, dynamic>);
     } catch (_) {
       throw SonderException('Unexpected response from server.');
     }

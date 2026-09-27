@@ -158,10 +158,11 @@ class BootstrapSecretRequired implements Exception {
 class SettingsConnection {
   const SettingsConnection();
 
-  Future<List<String>> testServer(
+  /// `GET /v1/models`: ids plus each row's routing field.
+  Future<ModelCatalog> testServer(
           String serverUrl, String apiKey, AccountSession? account) =>
       SonderApi(baseUrl: serverUrl, apiKey: apiKey, accountSession: account)
-          .listModels();
+          .modelCatalog();
 
   /// The runtime's provider bindings, or null when it cannot say (older
   /// runtime, non-administrator key, any failure). Only wording depends on
@@ -424,15 +425,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
     });
     try {
       final account = _account?.matches(_server.text) == true ? _account : null;
-      final models =
+      final catalog =
           await widget.connection.testServer(_server.text, _key.text, account);
       final routing = await widget.connection
           .routingStatus(_server.text, _key.text, account);
       if (!mounted) return;
       setState(() => _connection = diagnoseReachable(_server.text,
-          modelCount: models.length,
-          routing: ModelRouting(routing),
-          models: models));
+          modelCount: catalog.ids.length,
+          routing: ModelRouting.of(routing, origins: catalog.origins),
+          models: catalog.ids));
     } catch (error) {
       if (!mounted) return;
       setState(

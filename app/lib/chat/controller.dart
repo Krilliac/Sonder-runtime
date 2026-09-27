@@ -161,6 +161,9 @@ class ChatController extends ChangeNotifier {
   /// Provider bindings for picker labels; empty when the runtime cannot say.
   ModelRouting _routing = const ModelRouting();
   ModelRouting get routing => _routing;
+
+  /// `/v1/models` row origins, the routing fallback for non-administrators.
+  Map<String, ModelOrigin> _origins = const {};
   CommandCatalog catalog = fallbackCatalog;
   bool catalogFromServer = false;
 
@@ -207,6 +210,7 @@ class ChatController extends ChangeNotifier {
       _mode = null;
       _lastKnownMode = null;
       _routing = const ModelRouting();
+      _origins = const {};
       connection.value = ConnectionStatus.connecting(next.serverUrl);
       status.value = null;
       _notify();
@@ -297,8 +301,12 @@ class ChatController extends ChangeNotifier {
 
   Future<void> refreshModels() async {
     try {
-      final models = await _backend.listModels();
-      if (_disposed || models.isEmpty) return;
+      final backend = _backend;
+      final catalog = await backend.modelCatalog();
+      if (_disposed) return;
+      if (identical(backend, _backend)) _origins = catalog.origins;
+      final models = catalog.ids;
+      if (models.isEmpty) return;
       _models = models;
       _model = resolveCatalogModel(_models, _model);
       _notify();
@@ -308,16 +316,19 @@ class ChatController extends ChangeNotifier {
     await refreshRouting();
   }
 
-  /// Re-read the provider bindings. Any failure (older runtime, 403 for a
-  /// non-administrator) leaves the picker's plain labels.
+  /// Re-read the provider bindings. The ecosystem document is preferred;
+  /// when it cannot be read (older runtime, 403 for a non-administrator)
+  /// the `/v1/models` row origins label the picker, and with neither the
+  /// labels stay plain.
   Future<void> refreshRouting() async {
     final backend = _backend;
-    ModelRouting next;
+    EcosystemStatus? status;
     try {
-      next = ModelRouting((await backend.ecosystemStatus()).status);
+      status = (await backend.ecosystemStatus()).status;
     } catch (_) {
-      next = const ModelRouting();
+      status = null;
     }
+    final next = ModelRouting.of(status, origins: _origins);
     if (_disposed || !identical(backend, _backend)) return;
     _routing = next;
     _notify();

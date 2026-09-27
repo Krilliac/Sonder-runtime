@@ -372,6 +372,54 @@ void main() {
         findsNothing);
   });
 
+  testWidgets('Models panel claims only the routes the runtime offers',
+      (tester) async {
+    // healthySystemInfo offers the `code` route only; every tier is bound.
+    await pumpRuntime(tester,
+        info: healthySystemInfo(),
+        data: FakeRuntimeData(
+            ecosystemReading: EcosystemReading.parse(
+                ecosystemJson(inference: inferenceStatusJson()))));
+    await tester.tap(find.text('Models').first);
+    await tester.pumpAndSettle();
+    expect(
+        find.textContaining(
+            'Sonder Inference serves the code route with mock:tiny.'),
+        findsOneWidget);
+    // The Sonder Inference panel still lists every configured binding; the
+    // Models explanation claims only the offered routes.
+    final panel = tester
+        .widget<Text>(find.textContaining('Sonder Runtime routes requests'));
+    expect(panel.data, isNot(contains('reasoning')));
+    expect(panel.data, isNot(contains('vision')));
+  });
+
+  testWidgets('Models panel falls back to /v1/models rows for non-admins',
+      (tester) async {
+    await pumpRuntime(tester,
+        info: healthySystemInfo(),
+        data: FakeRuntimeData(
+            ecosystemError: SonderException(
+                SonderApi.adminRequiredMessage,
+                httpStatus: 403))
+          ..catalog = const ModelCatalog(ids: [
+            'sonder',
+            'code'
+          ], origins: {
+            'code': ModelOrigin(
+                kind: 'route',
+                provider: 'sonder_inference',
+                servedModel: 'qwen3:14b'),
+          }));
+    await tester.tap(find.text('Models').first);
+    await tester.pumpAndSettle();
+    expect(find.text('code - Sonder Inference'), findsOneWidget);
+    expect(
+        find.textContaining(
+            'Sonder Inference serves the code route with qwen3:14b.'),
+        findsOneWidget);
+  });
+
   testWidgets('Models panel keeps the old wording when all is on Ollama',
       (tester) async {
     await pumpRuntime(tester,

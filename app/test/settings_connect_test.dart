@@ -42,11 +42,14 @@ class FakeConnection extends SettingsConnection {
 
   FakeConnection({this.testError});
 
+  /// Per-row routing fields of `/v1/models`.
+  Map<String, ModelOrigin> origins = const {};
+
   @override
-  Future<List<String>> testServer(
+  Future<ModelCatalog> testServer(
       String serverUrl, String apiKey, AccountSession? account) async {
     if (testError != null) throw testError!;
-    return models;
+    return ModelCatalog(ids: models, origins: origins);
   }
 
   /// The provider bindings the runtime reports; null reads as unknown.
@@ -201,6 +204,30 @@ void main() {
             '2 exact models run directly on Ollama.'),
         findsOneWidget);
     expect(find.textContaining('4 models available'), findsNothing);
+  });
+
+  testWidgets('Test connection uses /v1/models routing without admin',
+      (tester) async {
+    final connection = FakeConnection()
+      ..models = const ['sonder', 'general', 'llama3:8b']
+      ..origins = const {
+        'sonder': ModelOrigin(
+            kind: 'route',
+            provider: 'sonder_inference',
+            servedModel: 'qwen3:14b'),
+        'general': ModelOrigin(
+            kind: 'route',
+            provider: 'sonder_inference',
+            servedModel: 'qwen3:14b'),
+        'llama3:8b': ModelOrigin(kind: 'model', provider: 'ollama'),
+      };
+    await pumpSettings(tester,
+        connection: connection, serverUrl: 'http://127.0.0.1:11435');
+    await tapTest(tester);
+    expect(
+        find.textContaining('Sonder Inference serves 2 routes (qwen3:14b); '
+            '1 exact model runs directly on Ollama.'),
+        findsOneWidget);
   });
 
   testWidgets('connect card status words', (tester) async {

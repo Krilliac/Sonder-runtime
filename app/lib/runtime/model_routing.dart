@@ -1,5 +1,7 @@
 /// Which provider serves a model id the app offers, read from the runtime's
-/// provider bindings (`GET /v1/sonder/ecosystem`).
+/// provider bindings (`GET /v1/sonder/ecosystem`, administrator-only) or,
+/// when that cannot be read, from the per-row routing field of
+/// `GET /v1/models` ([ModelOrigin]).
 ///
 /// Runtime contract (`provider_bridge.provider_for_tier`): a route name
 /// (`sonder` or a tier such as `general`) follows the tier binding, but an
@@ -10,6 +12,7 @@
 library;
 
 import 'ecosystem.dart';
+import 'model_catalog.dart';
 
 /// The provider id of the local Ollama host.
 const ollamaProvider = 'ollama';
@@ -34,7 +37,13 @@ String _list(List<String> items) => items.length <= 1
 class ModelRouting {
   final EcosystemStatus? status;
 
-  const ModelRouting([this.status]);
+  /// `/v1/models` row origins keyed by lower-case id: the fallback when
+  /// [status] (the admin-only ecosystem document) is unavailable.
+  final Map<String, ModelOrigin> origins;
+
+  const ModelRouting([this.status]) : origins = const {};
+
+  const ModelRouting.of(this.status, {this.origins = const {}});
 
   /// The Models panel text when every route runs on Ollama.
   static const ollamaOnlyText =
@@ -44,31 +53,48 @@ class ModelRouting {
   /// The heading exact models sit under when a route is bound elsewhere.
   static const ollamaDirect = 'Ollama (direct)';
 
+  static String _key(String id) => id.trim().toLowerCase();
+
+  ModelOrigin? _origin(String id) => origins[_key(id)];
+
+  /// Route origins reported by `/v1/models`, in the runtime's order.
+  Iterable<MapEntry<String, ModelOrigin>> get _routeOrigins =>
+      origins.entries.where((e) => e.value.isRoute);
+
   /// True when a generation binding names a provider other than Ollama, so
   /// an exact model pin bypasses that binding.
-  bool get bypassesBinding =>
-      status?.generationProviders.any((p) => p != ollamaProvider) ?? false;
+  bool get bypassesBinding {
+    final s = status;
+    if (s != null) return s.generationProviders.any((p) => p != ollamaProvider);
+    return _routeOrigins.any(
+        (e) => e.value.provider != null && e.value.provider != ollamaProvider);
+  }
 
-  String _key(String id) => id.trim().toLowerCase();
-
-  /// True for `sonder`/`local` and every tier the bindings name.
+  /// True for `sonder`/`local`, every tier the bindings name, and every row
+  /// `/v1/models` reports as a route.
   bool isRoute(String id) {
     final key = _key(id);
     if (_defaultRoutes.contains(key)) return true;
-    return status?.tierProviders.keys.any((t) => _key(t) == key) ?? false;
+    if (status?.tierProviders.keys.any((t) => _key(t) == key) ?? false) {
+      return true;
+    }
+    return _origin(id)?.isRoute ?? false;
   }
 
   /// The provider a route is bound to; null for an exact model or when the
-  /// runtime reported no binding.
+  /// runtime reported no binding. The ecosystem document wins; the
+  /// `/v1/models` row fills in what it does not name.
   String? routeProvider(String id) {
-    final s = status;
-    if (s == null) return null;
     final key = _key(id);
-    if (_defaultRoutes.contains(key)) return s.defaultGenerationProvider;
-    for (final entry in s.tierProviders.entries) {
-      if (_key(entry.key) == key) return entry.value;
+    final s = status;
+    if (s != null) {
+      if (_defaultRoutes.contains(key)) return s.defaultGenerationProvider;
+      for (final entry in s.tierProviders.entries) {
+        if (_key(entry.key) == key) return entry.value;
+      }
     }
-    return null;
+    final origin = _origin(id);
+    return origin != null && origin.isRoute ? origin.provider : null;
   }
 
   /// The one model [provider] reports serving, if it names exactly one.
@@ -77,11 +103,27 @@ class ModelRouting {
     return models.length == 1 ? models.single : null;
   }
 
+  /// The model route [id] is served with: the bound provider's per-tier
+  /// model from the ecosystem document, else the `/v1/models` row's
+  /// `served_model` for that provider, else the provider's only model.
+  String? routeServedModel(String id) {
+    final provider = routeProvider(id);
+    if (provider == null) return null;
+    final tierModel = status?.providers[provider]?.tierModels[_key(id)];
+    if (tierModel != null) return tierModel;
+    final origin = _origin(id);
+    if (origin != null && origin.provider == provider) {
+      final served = origin.servedModel;
+      if (served != null) return served;
+    }
+    return servedModel(provider);
+  }
+
   /// `Sonder Inference (qwen3:14b)` for a route bound off Ollama, else null.
   String? routeBinding(String id) {
     final provider = routeProvider(id);
     if (provider == null || provider == ollamaProvider) return null;
-    final served = servedModel(provider);
+    final served = routeServedModel(id);
     final name = providerDisplayName(provider);
     return served == null ? name : '$name ($served)';
   }
@@ -103,36 +145,64 @@ class ModelRouting {
     return '$id - $ownedBy';
   }
 
-  /// Tiers per non-Ollama provider, and the tiers left on Ollama.
-  (Map<String, List<String>>, List<String>) _tiersByProvider() {
-    final bound = <String, List<String>>{};
-    final onOllama = <String>[];
-    for (final entry in status?.tierProviders.entries ??
-        const <MapEntry<String, String>>[]) {
-      if (entry.value == ollamaProvider) {
-        onOllama.add(entry.key);
-      } else {
-        (bound[entry.value] ??= []).add(entry.key);
-      }
-    }
-    return (bound, onOllama);
+  /// The tier routes to describe, with their provider: the ecosystem
+  /// bindings, else the `/v1/models` route rows (default routes excluded).
+  /// With [offered], only tiers the runtime actually offers are kept: a
+  /// tier the local policy leaves unset is dropped from `/v1/models` and is
+  /// not available, whatever it is bound to.
+  List<(String, String)> _tierRoutes(Iterable<String>? offered) {
+    final keep = offered?.map(_key).toSet();
+    final s = status;
+    final routes = s != null
+        ? [for (final e in s.tierProviders.entries) (e.key, e.value)]
+        : [
+            for (final e in _routeOrigins)
+              if (!_defaultRoutes.contains(e.key) && e.value.provider != null)
+                (e.key, e.value.provider!),
+          ];
+    return [
+      for (final route in routes)
+        if (keep == null || keep.contains(_key(route.$1))) route,
+    ];
   }
 
-  /// The Runtime → Models explanation, from the actual bindings.
-  String get modelsPanelText {
+  /// `the fast and general routes with qwen3:14b and the reasoning route
+  /// with deepseek-r1:14b`, grouping [tiers] by their served model.
+  String _servedPhrase(List<String> tiers) {
+    final byModel = <String?, List<String>>{};
+    for (final tier in tiers) {
+      (byModel[routeServedModel(tier)] ??= []).add(tier);
+    }
+    return _list([
+      for (final entry in byModel.entries)
+        'the ${_list(entry.value)} '
+            '${_plural(entry.value.length, 'route', 'routes')}'
+            '${entry.key == null ? '' : ' with ${entry.key}'}',
+    ]);
+  }
+
+  /// The Runtime → Models explanation, from the actual bindings. Pass the
+  /// route ids the runtime offers ([offered], e.g. the status `models`) so
+  /// a tier with no model is not claimed.
+  String modelsPanelText({Iterable<String>? offered}) {
     if (!bypassesBinding) return ollamaOnlyText;
-    final (bound, onOllama) = _tiersByProvider();
+    final bound = <String, List<String>>{};
+    final onOllama = <String>[];
+    for (final (tier, provider) in _tierRoutes(offered)) {
+      if (provider == ollamaProvider) {
+        onOllama.add(tier);
+      } else {
+        (bound[provider] ??= []).add(tier);
+      }
+    }
     final parts = <String>[
       'Sonder Runtime routes requests to these providers.'
     ];
-    final defaultProvider = status?.defaultGenerationProvider;
     for (final entry in bound.entries) {
-      final served = servedModel(entry.key);
-      parts.add('${providerDisplayName(entry.key)} serves the '
-          '${_list(entry.value)} '
-          '${_plural(entry.value.length, 'route', 'routes')}'
-          '${served == null ? '' : ' with $served'}.');
+      parts.add('${providerDisplayName(entry.key)} serves '
+          '${_servedPhrase(entry.value)}.');
     }
+    final defaultProvider = routeProvider('sonder');
     if (defaultProvider != null &&
         defaultProvider != ollamaProvider &&
         !bound.containsKey(defaultProvider)) {
@@ -154,6 +224,7 @@ class ModelRouting {
   String? connectionSummary(List<String> models) {
     if (!bypassesBinding) return null;
     final routes = <String, int>{};
+    final served = <String, Set<String>>{};
     var exact = 0;
     for (final id in models) {
       if (!isRoute(id)) {
@@ -163,16 +234,18 @@ class ModelRouting {
       final provider = routeProvider(id);
       if (provider != null && provider != ollamaProvider) {
         routes[provider] = (routes[provider] ?? 0) + 1;
+        final model = routeServedModel(id);
+        if (model != null) (served[provider] ??= {}).add(model);
       }
     }
-    final served = [
+    final summary = [
       for (final entry in routes.entries)
         '${providerDisplayName(entry.key)} serves ${entry.value} '
             '${_plural(entry.value, 'route', 'routes')}'
-            '${servedModel(entry.key) == null ? '' : ' (${servedModel(entry.key)})'}',
+            '${served[entry.key] == null ? '' : ' (${served[entry.key]!.join(', ')})'}',
     ];
     final direct = '$exact exact ${_plural(exact, 'model runs', 'models run')} '
         'directly on Ollama.';
-    return served.isEmpty ? direct : '${served.join('; ')}; $direct';
+    return summary.isEmpty ? direct : '${summary.join('; ')}; $direct';
   }
 }

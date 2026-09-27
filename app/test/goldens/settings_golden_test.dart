@@ -16,7 +16,7 @@ import 'golden_fonts.dart';
 class _RefusingConnection extends SettingsConnection {
   const _RefusingConnection();
   @override
-  Future<List<String>> testServer(
+  Future<ModelCatalog> testServer(
           String serverUrl, String apiKey, AccountSession? account) async =>
       throw SonderException('host is not allowed for this listener',
           httpStatus: 421, code: 'HOST_NOT_ALLOWED');

@@ -1613,6 +1613,53 @@ def test_models_response_hides_tier_bound_to_declared_embedding_model(monkeypatc
     assert [row["id"] for row in json.loads(body)["data"]] == ["sonder"]
 
 
+def test_models_rows_say_which_provider_serves_each_route(monkeypatch):
+    """Non-admin routing labels: provider and served model ids per row only."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.server, "cloud_allowed", lambda: False)
+    monkeypatch.setattr(ts.server, "available_tiers", lambda: {
+        "general": "qwen3:14b", "code": "gemma3:12b",
+    })
+    monkeypatch.setattr(ts.server, "discovered_model_records", lambda: [
+        ("gemma3:12b", {"name": "gemma3:12b", "capabilities": ["chat"]}),
+    ])
+    targets = {"sonder": ("qwen3:14b", False, True, "general"),
+               "general": ("qwen3:14b", False, False, "general"),
+               "code": ("gemma3:12b", False, True, "code")}
+    monkeypatch.setattr(ts.server, "_serve_target", lambda tier, _strict: targets[tier])
+    monkeypatch.setattr(
+        ts.server, "_bridge_provider_for_tier",
+        lambda label, cloud=False: "sonder_inference" if label == "general" else None,
+    )
+    gateway = SimpleNamespace(served_tier_models=lambda: {
+        "sonder_inference": {"general": "qwen3:14b-si", "code": "qwen3:14b-si"},
+    })
+    monkeypatch.setattr(
+        ts, "_live_telemetry_application",
+        lambda **_kw: SimpleNamespace(model_gateway=gateway),
+    )
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(port, "GET", "/v1/models")
+
+    assert status == 200
+    rows = {row["id"]: row for row in json.loads(body)["data"]}
+    assert list(rows) == ["sonder", "general", "code", "gemma3:12b"]
+    assert rows["sonder"]["sonder"] == {
+        "kind": "route", "provider": "sonder_inference", "served_model": "qwen3:14b-si"}
+    assert rows["general"]["sonder"] == {
+        "kind": "route", "provider": "sonder_inference", "served_model": "qwen3:14b-si"}
+    assert rows["code"]["sonder"] == {
+        "kind": "route", "provider": "ollama", "served_model": "gemma3:12b"}
+    assert rows["gemma3:12b"]["sonder"] == {"kind": "model", "provider": "ollama"}
+    assert rows["general"]["owned_by"] == "local"
+    assert b"http" not in body
+
+
 @pytest.mark.parametrize(
     ("selector", "record", "expected"),
     [

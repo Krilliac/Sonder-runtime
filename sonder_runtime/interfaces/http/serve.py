@@ -127,6 +127,7 @@ from sonder_runtime.interfaces.http.facades.a2a_jsonrpc import (
 from sonder_runtime.interfaces.http.facades.control_plane import ControlPlaneFacade
 from sonder_runtime.interfaces.http.facades.approvals import refusal_receipt
 from sonder_runtime.interfaces.http.facades.extensions import dispatch_extension_route
+from sonder_runtime.interfaces.http.facades.model_catalog import annotate_model_rows
 from sonder_runtime.interfaces.http.facades.model_request import (
     ModelFacadeError,
     ModelRequestFacade,
@@ -4021,6 +4022,7 @@ def _openai_model_rows():
     # capability-less metadata remains listed rather than converting a catalog
     # outage into a false claim that the whole runtime has no model routes.
     add("sonder", "local")
+    routes = {"sonder"}
     for tier_name, model in server.available_tiers().items():
         cloud = server._is_cloud_tier(tier_name, model)
         if not cloud and server._runtime_model_capability_error(
@@ -4028,6 +4030,7 @@ def _openai_model_rows():
         ):
             continue
         add(tier_name, "cloud" if cloud else "local")
+        routes.add(tier_name)
     for name, record in records:
         if server._fanout_nonchat_reason(record):
             continue
@@ -4035,7 +4038,12 @@ def _openai_model_rows():
         if cloud and not server.cloud_allowed():
             continue
         add(name, "cloud" if cloud else "local")
-    return rows
+    # Additive per-row provider/served-model ids for non-admin clients.
+    return annotate_model_rows(
+        rows, routes, serve_target=server._serve_target,
+        bridge_provider=server._bridge_provider_for_tier,
+        gateway=getattr(_live_telemetry_application(), "model_gateway", None),
+    )
 
 
 def _reasoning_audience():
