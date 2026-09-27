@@ -10,7 +10,9 @@ permissions:
 
 jobs:
   enable-auto-merge:
-    if: ${{ !github.event.pull_request.draft }}
+    # Only PRs into main: a stacked PR's base branch has no required checks,
+    # so auto-merge would merge it at once, before CI (as #563 was).
+    if: ${{ !github.event.pull_request.draft && github.event.pull_request.base.ref == 'main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
