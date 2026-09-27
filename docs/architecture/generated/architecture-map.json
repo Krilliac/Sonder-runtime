@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 362,
+      "file_count": 363,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -197,6 +197,7 @@
         "sonder_runtime/adapters/inference/openai_protocol_probe.py",
         "sonder_runtime/adapters/inference/overflow_availability.py",
         "sonder_runtime/adapters/inference/overflow_route.py",
+        "sonder_runtime/adapters/inference/prewarm_gate.py",
         "sonder_runtime/adapters/inference/residency_feedback.py",
         "sonder_runtime/adapters/inference/served_tier_models.py",
         "sonder_runtime/adapters/inference/sonder_inference_gateway.py",
