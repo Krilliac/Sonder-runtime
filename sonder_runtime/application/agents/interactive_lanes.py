@@ -57,6 +57,33 @@ _LANE_TOOLS = frozenset(
     }
 )
 
+# Lane tools that only read. Every other lane tool changes the workspace.
+_LANE_READ_TOOLS = frozenset(
+    {"read_file", "file_read_range", "directory_tree", "file_find", "text_search"}
+)
+# Workspace files the live context producer reloads as "Authoritative project
+# context" in the system prompt of every later turn (instruction_discovery's
+# known files). A lane rewriting one would promote whatever steered it --
+# fetched web text, a tool result -- to system-level instructions, so lane
+# tools may not modify them; the operator owns them.
+_INSTRUCTION_FILE_NAMES = frozenset({"agents.md", "zero.md"})
+_INSTRUCTION_DIRECTORIES = frozenset({".zero"})
+
+
+def _instruction_path(path, root):
+    """Whether *path* (resolved, inside *root*) is a project instruction file."""
+    try:
+        parts = path.relative_to(root).parts
+    except ValueError:
+        return False
+    if not parts:
+        return False
+    first = parts[0].casefold()
+    return first in _INSTRUCTION_DIRECTORIES or (
+        len(parts) == 1 and first in _INSTRUCTION_FILE_NAMES
+    )
+
+
 _WAIT_LOCK = threading.Lock()
 _WAIT_OWNERS = {}
 
@@ -1877,6 +1904,13 @@ class AgentLaneService:
                 )
                 if not _inside(resolved, root):
                     raise PermissionError("tool path exceeds assigned lane workspace")
+                modifies = name not in _LANE_READ_TOOLS and not (
+                    name == "file_copy" and key == "source"
+                )
+                if modifies and _instruction_path(resolved, root):
+                    raise PermissionError(
+                        "lane tools cannot modify project instruction files"
+                    )
                 args[key] = str(resolved)
         descriptor = self.tools.graph.registry.get(name)
         effects = frozenset(
