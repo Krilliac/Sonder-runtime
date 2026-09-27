@@ -19,7 +19,8 @@ class _Built(Exception):
 def _clear_provider_env(monkeypatch):
     for name in ("SONDER_MODEL_BACKEND", "SONDER_FAST_PROVIDER", "SONDER_GENERAL_PROVIDER",
                  "SONDER_CODE_PROVIDER", "SONDER_REASONING_PROVIDER", "SONDER_VISION_PROVIDER",
-                 "SONDER_INFERENCE_MODEL", "SONDER_INFERENCE_TIER_MODELS"):
+                 "SONDER_INFERENCE_MODEL", "SONDER_INFERENCE_TIER_MODELS",
+                 "SONDER_INFERENCE_FALLBACK"):
         monkeypatch.delenv(name, raising=False)
     # A live app graph (built by any earlier test) carries its own provider
     # bindings, which win over the environment these tests set.
@@ -75,6 +76,21 @@ def test_inference_tier_model_map_wins_over_the_default(monkeypatch):
     seen = _capture_prompt_model(monkeypatch)
     _chat("code")
     assert seen["model"] == "qwen2.5-coder:14b"
+
+
+@pytest.mark.parametrize("entry", [_chat, _structured])
+def test_inference_fallback_does_not_claim_the_primary_model(monkeypatch, entry):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setitem(server.TIERS, "general", "sonder:latest")
+    monkeypatch.setenv("SONDER_MODEL_BACKEND", "sonder-inference")
+    monkeypatch.setenv("SONDER_INFERENCE_MODEL", "qwen3:14b")
+    monkeypatch.setenv("SONDER_INFERENCE_FALLBACK", "ollama")
+    seen = _capture_prompt_model(monkeypatch)
+
+    entry("general")
+
+    assert seen["model"] == ""
+    assert seen["prompt"] == ""
 
 
 @pytest.mark.parametrize("entry", [_chat, _structured])
