@@ -131,3 +131,92 @@ def test_installer_rejects_a_directory_that_is_not_a_sonder_checkout(tmp_path):
     assert result.returncode != 0
     assert "must run from packaging" in (result.stdout + result.stderr)
     assert not (tmp_path / "venv").exists()
+
+
+def _fake_checkout(root: Path) -> tuple[Path, Path]:
+    """A minimal checkout the installer accepts, holding a sentinel file."""
+    packaging = root / "packaging"
+    packaging.mkdir(parents=True)
+    script_copy = packaging / "install_workstation_local.ps1"
+    script_copy.write_text(_text(), encoding="utf-8")
+    (root / "requirements-runtime.txt").write_text("", encoding="utf-8")
+    (root / "sonder_version.py").write_text("", encoding="utf-8")
+    sentinel = root / "irreplaceable.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    return script_copy, sentinel
+
+
+def _run_force(script_copy: Path, venv_path: str, cwd: Path):
+    import sys
+
+    environment = os.environ.copy()
+    # Any accidental dependency install must fail fast and offline.
+    environment["PIP_INDEX_URL"] = "http://127.0.0.1:1/simple"
+    environment["PIP_NO_INPUT"] = "1"
+    return subprocess.run(
+        [
+            "powershell", "-NoProfile", "-File", str(script_copy),
+            "-Python", sys.executable, "-VenvPath", venv_path,
+            "-Force", "-SkipModelAlias",
+        ],
+        cwd=str(cwd), env=environment, capture_output=True, text=True, timeout=300,
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="PowerShell installer for Windows checkouts")
+def test_force_refuses_a_venv_path_that_is_not_a_virtual_environment(tmp_path):
+    script_copy, _ = _fake_checkout(tmp_path / "repo")
+    victim = tmp_path / "documents"
+    victim.mkdir()
+    (victim / "thesis.docx").write_text("years of work", encoding="utf-8")
+
+    result = _run_force(script_copy, str(victim), tmp_path)
+
+    assert result.returncode != 0
+    assert "pyvenv.cfg" in (result.stdout + result.stderr)
+    assert (victim / "thesis.docx").read_text(encoding="utf-8") == "years of work"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="PowerShell installer for Windows checkouts")
+@pytest.mark.parametrize("which", ["dot", "repo", "parent"])
+def test_force_refuses_the_checkout_or_a_folder_containing_it(tmp_path, which):
+    repo = tmp_path / "repo"
+    script_copy, sentinel = _fake_checkout(repo)
+    target = {"dot": ".", "repo": str(repo), "parent": str(tmp_path)}[which]
+    # Even a planted venv marker must not make the checkout deletable.
+    marker_dir = tmp_path if which == "parent" else repo
+    (marker_dir / "pyvenv.cfg").write_text("home = x\n", encoding="utf-8")
+
+    result = _run_force(script_copy, target, tmp_path)
+
+    assert result.returncode != 0
+    assert "refusing to delete" in (result.stdout + result.stderr)
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="PowerShell installer for Windows checkouts")
+def test_force_refuses_a_junction_even_to_a_venv(tmp_path):
+    script_copy, _ = _fake_checkout(tmp_path / "repo")
+    real = tmp_path / "real-venv"
+    real.mkdir()
+    (real / "pyvenv.cfg").write_text("home = x\n", encoding="utf-8")
+    link = tmp_path / "link-venv"
+    made = subprocess.run(
+        ["cmd.exe", "/d", "/c", "mklink", "/J", str(link), str(real)],
+        capture_output=True, text=True,
+    )
+    if made.returncode != 0:
+        pytest.skip("junctions unavailable")
+
+    result = _run_force(script_copy, str(link), tmp_path)
+
+    assert result.returncode != 0
+    assert "junction" in (result.stdout + result.stderr)
+    assert (real / "pyvenv.cfg").is_file()
+
+
+def test_installers_verify_the_resolved_dependency_set():
+    text = _text()
+    assert "'-m', 'pip', 'check'" in text
+    check = text.index("'verifying managed runtime dependencies'")
+    assert check < text.index("'sonder_runtime.adapters.execution.runtime_profile', 'seal'")
