@@ -208,3 +208,14 @@ def test_auto_context_plan_and_status_report_kv_provenance(monkeypatch):
     assert plan["kv_cache_type"] == "bf16"
     assert plan["kv_cache_source"] == "declared"
     assert "  kv cache: bf16 (declared)" in context_policy.format_policy().splitlines()
+
+
+def test_residency_ceiling_never_overrides_an_operator_pin(monkeypatch):
+    monkeypatch.setenv("SONDER_CONTEXT_SIZE", "32k")
+    plan = context_policy.auto_context_plan(262144, "7B", residency_ceiling=4096)
+    assert plan["context"] == 32000
+    monkeypatch.delenv("SONDER_CONTEXT_SIZE")
+    monkeypatch.delenv("SONDER_SESSION_NUM_CTX", raising=False)
+    plan = context_policy.auto_context_plan(262144, "7B", residency_ceiling=4096)
+    assert plan["context"] == 4096
+    assert "observed-spill" in plan["clamps"]

@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 358,
+      "file_count": 359,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -195,6 +195,7 @@
         "sonder_runtime/adapters/inference/openai_compat.py",
         "sonder_runtime/adapters/inference/openai_compat_gateway.py",
         "sonder_runtime/adapters/inference/openai_protocol_probe.py",
+        "sonder_runtime/adapters/inference/residency_feedback.py",
         "sonder_runtime/adapters/inference/sonder_inference_gateway.py",
         "sonder_runtime/adapters/inference/sonder_inference_probe.py",
         "sonder_runtime/adapters/inference/static_membership.py",
@@ -863,7 +864,7 @@
       ]
     },
     {
-      "file_count": 254,
+      "file_count": 255,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1005,6 +1006,7 @@
         "sonder_runtime/domain/inference_membership.py",
         "sonder_runtime/domain/inference_profiles.py",
         "sonder_runtime/domain/interaction_footer.py",
+        "sonder_runtime/domain/kv_budget.py",
         "sonder_runtime/domain/launcher_health.py",
         "sonder_runtime/domain/learning_tier.py",
         "sonder_runtime/domain/login_output.py",
