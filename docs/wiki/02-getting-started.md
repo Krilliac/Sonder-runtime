@@ -110,8 +110,9 @@ node as a remote Ollama worker in a multi-machine pool.
 
 A single coordinator can route inference across Ollama instances on
 multiple machines.  Add remote workers in `[ollama].workers` with
-`allow_remote = true`.  On private LANs, `trusted_origins` accepts
-CIDRs where HTTP (non-TLS) workers are allowed.
+`allow_remote = true`.  Remote workers must use HTTPS (an authenticated
+TLS proxy in front of the worker, never its raw `:11434` port), even on a
+private LAN; `trusted_origins` is legacy metadata and never permits HTTP.
 
 Full walkthrough: [multi-node-ollama](../runbooks/multi-node-ollama.md).
 

@@ -10,7 +10,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
+import stat
 from typing import Any, Iterable, Mapping
 from uuid import UUID, uuid4
 
@@ -196,6 +198,71 @@ def _document_kind(path: str) -> str:
     return Path(path).suffix.lower().lstrip(".")
 
 
+_READ_FLAGS = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+_CREATE_FLAGS = (
+    os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+)
+
+
+def _same_file(opened: os.stat_result, path: Path) -> bool:
+    try:
+        current = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return False
+    return (current.st_dev, current.st_ino) == (opened.st_dev, opened.st_ino)
+
+
+def _contained(path: Path, root_path: Path) -> Path:
+    """Resolve ``path`` strictly and require it to stay below ``root_path``."""
+    try:
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(root_path)
+    except (OSError, ValueError) as exc:
+        raise EditorInteropError("document is missing or outside root") from exc
+    return resolved
+
+
+def _read_bounded(path: Path, root_path: Path) -> str:
+    """Read at most MAX_CONTENT_LENGTH bytes from the validated file.
+
+    The descriptor is bound to the checked path: after opening, the path is
+    re-resolved inside the root and must still name the very file that was
+    opened, so a component swapped between check and open is refused.
+    """
+    try:
+        fd = os.open(path, _READ_FLAGS)
+    except OSError as exc:
+        raise EditorInteropError("document could not be opened") from exc
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise EditorInteropError("document is not a regular file")
+        if not _same_file(opened, _contained(path, root_path)):
+            raise EditorInteropError("document changed during import")
+        if opened.st_size > MAX_CONTENT_LENGTH:
+            raise EditorInteropError(
+                f"content exceeds {MAX_CONTENT_LENGTH}-byte limit"
+            )
+        chunks: list[bytes] = []
+        remaining = MAX_CONTENT_LENGTH + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(remaining, 64 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    finally:
+        os.close(fd)
+    data = b"".join(chunks)
+    if len(data) > MAX_CONTENT_LENGTH:
+        raise EditorInteropError(f"content exceeds {MAX_CONTENT_LENGTH}-byte limit")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise EditorInteropError("document is not valid UTF-8") from exc
+
+
 def import_documents(root: str | Path, paths: Iterable[str]) -> tuple[RuleDocument, ...]:
     """Safely import bounded rule files below ``root``."""
     root_path = Path(root).resolve()
@@ -205,19 +272,52 @@ def import_documents(root: str | Path, paths: Iterable[str]) -> tuple[RuleDocume
     result: list[RuleDocument] = []
     for raw_path in requested:
         relative = _safe_relative_path(raw_path)
-        path = root_path / relative
-        try:
-            resolved = path.resolve(strict=True)
-            resolved.relative_to(root_path)
-        except (OSError, ValueError) as exc:
-            raise EditorInteropError("document is missing or outside root") from exc
+        resolved = _contained(root_path / relative, root_path)
         if resolved.name not in _ALLOWED_NAMES and resolved.suffix.lower() not in _ALLOWED_SUFFIXES:
             raise EditorInteropError("unsupported rule file format")
-        if not resolved.is_file():
-            raise EditorInteropError("document is not a regular file")
-        content = resolved.read_text(encoding="utf-8")
+        content = _read_bounded(resolved, root_path)
         result.append(RuleDocument(relative, content, _document_kind(relative)))
     return tuple(result)
+
+
+def _write_contained(destination: Path, content: str, root_path: Path) -> None:
+    """Write ``content`` to ``destination`` without following a swapped path.
+
+    The bytes go to a fresh exclusive temp file in the destination directory;
+    before any content is written, that directory must still resolve inside
+    the root and still contain the very file that was created.  The final
+    rename replaces the name itself and never writes through a symlink.
+    """
+    parent = _contained(destination.parent, root_path)
+    temp = parent / f".{destination.name}.{os.getpid()}.{uuid4().hex}.tmp"
+    try:
+        fd = os.open(temp, _CREATE_FLAGS, 0o666)
+    except OSError as exc:
+        raise EditorInteropError("document could not be written") from exc
+    published = False
+    try:
+        try:
+            created = os.fstat(fd)
+            if not _same_file(created, _contained(destination.parent, root_path) / temp.name):
+                raise EditorInteropError("document is outside root")
+            view = memoryview(content.encode("utf-8"))
+            while view:
+                written = os.write(fd, view)
+                view = view[written:]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        final_parent = _contained(destination.parent, root_path)
+        if final_parent != parent:
+            raise EditorInteropError("document is outside root")
+        os.replace(final_parent / temp.name, final_parent / destination.name)
+        published = True
+    finally:
+        if not published:
+            try:
+                os.unlink(temp)
+            except OSError:
+                pass
 
 
 def export_documents(root: str | Path, documents: Iterable[RuleDocument]) -> tuple[str, ...]:
@@ -240,6 +340,6 @@ def export_documents(root: str | Path, documents: Iterable[RuleDocument]) -> tup
         except ValueError as exc:
             raise EditorInteropError("document is outside root") from exc
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(document.content, encoding="utf-8", newline="")
+        _write_contained(destination, document.content, root_path)
         written.append(relative)
     return tuple(written)
