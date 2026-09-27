@@ -188,7 +188,9 @@ class HttpRuntimeDataSource implements RuntimeDataSource {
 
   Map<String, String> get _headers {
     final headers = <String, String>{'Accept': 'application/json'};
-    if (apiKey.trim().isNotEmpty) {
+    // Same rule as SonderEndpoint: no key in cleartext off this device
+    // unless the person allowed this host in Settings.
+    if (apiKey.trim().isNotEmpty && CleartextKeyPolicy.allows(baseUrl)) {
       headers['Authorization'] = 'Bearer ${apiKey.trim()}';
     }
     final account = accountSession;
