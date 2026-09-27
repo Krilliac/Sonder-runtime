@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from threading import RLock
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Callable, Iterable, Mapping, Protocol
 
 from ..execution.world_control import (
     BoundedOutputBuffer,
@@ -36,6 +36,38 @@ from ..ports.jobs import (
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# Upper bound on the entries one ``append_outputs`` call may carry, so one
+# registry transaction stays bounded whatever a producer hands it.
+MAX_OUTPUT_APPEND_BATCH = 4096
+
+
+@dataclass(frozen=True, slots=True)
+class OutputAppend:
+    """One output line for ``append_outputs``, validated like ``append_output``."""
+
+    stream: OutputStream
+    data: str
+    spill: SpillReference | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.stream, OutputStream) or not isinstance(self.data, str):
+            raise TypeError("stream and data are required")
+        if self.spill is not None and not isinstance(self.spill, SpillReference):
+            raise TypeError("spill must be a SpillReference")
+
+
+def validated_output_batch(entries: Iterable[OutputAppend]) -> tuple[OutputAppend, ...]:
+    """Validate a whole batch before any of it is published."""
+    if isinstance(entries, (str, bytes)):
+        raise TypeError("output entries must be OutputAppend values")
+    batch = tuple(entries)
+    if len(batch) > MAX_OUTPUT_APPEND_BATCH:
+        raise ValueError(f"output batch exceeds {MAX_OUTPUT_APPEND_BATCH} entries")
+    if not all(isinstance(entry, OutputAppend) for entry in batch):
+        raise TypeError("output entries must be OutputAppend values")
+    return batch
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,6 +269,23 @@ class DurableJobRegistry:
             self._records[job_id] = updated
             return updated
 
+    def bind_cancel_request(
+        self, job_id: str, *, idempotency_key: str, request_digest: str,
+    ) -> None:
+        """Durably bind one journaled cancellation request to this job.
+
+        The record revision is unchanged: revision-bound cleanup evidence
+        published earlier must stay valid, and the binding is not a lifecycle
+        transition.
+        """
+        with self._lock:
+            record = self.poll(job_id)
+            updated = _bind_cancel_request_metadata(
+                self._metadata.get(job_id), idempotency_key, request_digest, record,
+            )
+            if updated is not None:
+                self._metadata[job_id] = updated
+
     def list(
         self,
         *,
@@ -321,6 +370,21 @@ class DurableJobRegistry:
             self.poll(job_id)
             self._outputs[job_id].append(stream, data, spill=spill)
 
+    def append_outputs(self, job_id: str, entries: Iterable[OutputAppend]) -> None:
+        """Publish several output lines atomically, in order.
+
+        Every entry is validated before the first is appended, and the
+        registry lock is held for the whole batch, so a reader observes
+        either none or all of it.  Each entry goes through ``append_output``:
+        sequence numbers, retention and any per-line override behave exactly
+        as if the lines had been appended one at a time.
+        """
+        batch = validated_output_batch(entries)
+        with self._lock:
+            self.poll(job_id)
+            for entry in batch:
+                self.append_output(job_id, entry.stream, entry.data, spill=entry.spill)
+
     def transition(
         self,
         job_id: str,
@@ -328,12 +392,19 @@ class DurableJobRegistry:
         *,
         result: Any = None,
         error: str = "",
+        expected_revision: int | None = None,
+        expected_status: JobStatus | None = None,
     ) -> JobRecord:
         """Publish a monotonic state transition for an adapter/worker."""
         if not isinstance(status, JobStatus):
             raise TypeError("status must be a JobStatus")
         with self._lock:
             current = self.poll(job_id)
+            if (
+                (expected_revision is not None and current.revision != expected_revision)
+                or (expected_status is not None and current.status is not expected_status)
+            ):
+                return current
             if current.is_terminal:
                 return current
             if status is JobStatus.SUCCEEDED and error:
@@ -485,8 +556,10 @@ class DurableJobRegistry:
 
 
 __all__ = [
-    "DurableJobRegistry", "DurableJobView", "JobRecoveryReport", "ProcessTreeCleanupContract",
-    "ProcessTreeCleanupReceipt", "ProcessTreeCleanupRequest",
+    "CANCEL_REQUEST_BOUND_STATES", "CANCEL_REQUEST_DIGESTS", "DurableJobRegistry", "DurableJobView", "JobRecoveryReport",
+    "MAX_CANCEL_REQUEST_BINDINGS", "MAX_OUTPUT_APPEND_BATCH", "OutputAppend",
+    "ProcessTreeCleanupContract",
+    "ProcessTreeCleanupReceipt", "ProcessTreeCleanupRequest", "validated_output_batch",
 ]
 
 
@@ -505,3 +578,79 @@ def _validate_cleanup_evidence(record, proof):
         raise ValueError(
             "process cleanup evidence does not match terminal job identity"
         )
+
+
+# Metadata key holding durable cancellation-request bindings for one job:
+# ``{idempotency_key: request_sha256}``.  A worker writes the binding after its
+# cancel intent is journaled and before it asks the provider to cancel, so a
+# host verifier can later tie a terminal ``cancelled`` record to the exact
+# journaled request.  The key names no worker family; bindings are write-once.
+CANCEL_REQUEST_DIGESTS = "cancel_request_digests"
+# Companion metadata key, written in the same update as each binding:
+# ``{idempotency_key: {"revision": int, "status": str}}`` records the job
+# record's revision and lifecycle status at the moment the request was bound.
+# Terminal statuses are absorbing, so a binding made while the record was not
+# terminal orders any later terminal transition after the binding; a binding
+# made on an already-terminal record cannot show that this request caused (or
+# was even admitted before) that outcome.
+CANCEL_REQUEST_BOUND_STATES = "cancel_request_bound_states"
+MAX_CANCEL_REQUEST_BINDINGS = 32
+_CANCEL_KEY_MAX = 256
+
+
+def _bind_cancel_request_metadata(
+    metadata: Mapping[str, Any] | None,
+    idempotency_key: str,
+    request_digest: str,
+    record: JobRecord,
+) -> dict[str, Any] | None:
+    """Return metadata with one new cancel binding, or ``None`` if unchanged.
+
+    Rebinding a key to the same digest is an idempotent no-op that keeps the
+    originally bound record state.  Rebinding it to another digest, malformed
+    stored bindings, or exceeding the bound are refused, so the durable
+    evidence can only ever name one request per key.  Each new binding also
+    records ``record``'s revision and status at bind time under
+    ``CANCEL_REQUEST_BOUND_STATES``.
+    """
+    if (
+        not isinstance(idempotency_key, str)
+        or not idempotency_key.strip()
+        or len(idempotency_key) > _CANCEL_KEY_MAX
+    ):
+        raise ValueError("cancel binding idempotency key must be non-empty and bounded")
+    if (
+        not isinstance(request_digest, str)
+        or len(request_digest) != 64
+        or any(char not in "0123456789abcdef" for char in request_digest)
+    ):
+        raise ValueError("cancel binding request digest must be lowercase SHA-256 hex")
+    current = dict(metadata or {})
+    bindings = current.get(CANCEL_REQUEST_DIGESTS, {})
+    if not isinstance(bindings, dict) or not all(
+        isinstance(key, str) and isinstance(value, str)
+        for key, value in bindings.items()
+    ):
+        raise ValueError("stored cancel request bindings are malformed")
+    bound_states = current.get(CANCEL_REQUEST_BOUND_STATES, {})
+    if not isinstance(bound_states, dict) or not all(
+        isinstance(key, str) and isinstance(value, dict)
+        for key, value in bound_states.items()
+    ):
+        raise ValueError("stored cancel request bound states are malformed")
+    prior = bindings.get(idempotency_key)
+    if prior is not None:
+        if prior != request_digest:
+            raise ValueError("cancel request binding conflicts with a prior request")
+        return None
+    if len(bindings) >= MAX_CANCEL_REQUEST_BINDINGS:
+        raise ValueError("cancel request bindings are exhausted for this job")
+    revision = record.revision
+    if type(revision) is not int or revision < 1:
+        raise ValueError("cancel binding requires a positive record revision")
+    current[CANCEL_REQUEST_DIGESTS] = {**bindings, idempotency_key: request_digest}
+    current[CANCEL_REQUEST_BOUND_STATES] = {
+        **bound_states,
+        idempotency_key: {"revision": revision, "status": record.status.value},
+    }
+    return current

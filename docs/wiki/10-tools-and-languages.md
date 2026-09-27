@@ -4,6 +4,47 @@ Sonder exposes a guarded tool surface to the model (and to MCP clients).
 Everything is host-policed: workspace containment, permission rules,
 bounded output, and activity evidence apply to every call.
 
+## MCP client contract
+
+Both MCP surfaces (`python -m sonder_runtime mcp`, the default, and
+`mcp --native`) follow the same call contract:
+
+- **Failures are tool errors.** A refused or failed call returns a
+  `CallToolResult` with `isError: true` and the reason as its text. On the
+  default surface this covers every tool reply that starts with `ERROR:`
+  (for example a path outside the allowed roots, web tools disabled by
+  `SONDER_WEB_TOOLS`, an agent that ran out of steps) as well as permission
+  gate refusals. Clients that treated `ERROR:` text as success must check
+  `isError` instead; the text is unchanged.
+- **Unknown arguments are refused.** An argument name the tool's
+  `inputSchema` does not list is rejected (`isError: true`, naming the
+  accepted arguments) before the permission gate and before anything runs.
+  A misspelt option no longer silently falls back to its default.
+- **Frames are bounded and always answered.** The default surface refuses a
+  stdio frame over 12,449,536 bytes (room for the largest call a tool accepts, a
+  4 MB `file_batch_write`, however the client escapes it)
+  and answers every malformed frame (invalid JSON or UTF-8, a batch array,
+  `"jsonrpc": "1.0"`, an `id` that is not a string or integer, an unpaired
+  surrogate escape) with a JSON-RPC `-32700`/`-32600` error, echoing the
+  request `id` when it can be read. The native surface bounds frames at
+  256,000 bytes.
+- **`initialize`** reports the server's own capabilities (a client that sends
+  `capabilities: {}` still sees `tools`) and the runtime build version as
+  `serverInfo.version`. MCP Tasks on the native surface still require the
+  client to advertise `tasks`; until it does, `tasks` is not advertised back.
+- The native tool list is generated in
+  [`runtime-reference.md`](../architecture/generated/runtime-reference.md#native-mcp-tools).
+- **`agent_lane` needs a configured runtime.** Registering the bare
+  loopback `python server.py` as the MCP server composes an application
+  graph with no typed configuration, so it has no configured workspace
+  grants to scope a lane to. There `agent_lane` refuses every action with a
+  typed `DependencyUnavailable` ("agent conversations require a configured
+  runtime") before the permission gate. The same graph also backs the
+  `agent` and `workbench_agent` tools there, so when the model itself calls
+  `agent_lane` inside that run it gets an `ERROR: HOST POLICY: standalone
+  lane control requires a configured runtime` answer rather than a crash.
+  Use `python -m sonder_runtime mcp` for agent conversations.
+
 ## Code execution — `run_code` / `/run`
 
 Runs a bounded snippet and returns `{ok, returncode, stdout, stderr,
@@ -27,7 +68,9 @@ block from the previous response.
 Related: `run_project` (bounded multi-file temp project with optional
 build), `parallel_run_code` (many snippets concurrently), `script_run` /
 `workspace_run` (argv-only execution of a real script/program). `script_run`
-first applies the operator's static artifact-risk policy to its exact file.
+(and the native MCP `run_script` tool) first applies the operator's static
+artifact-risk policy to its exact file; `workspace_run`/`run_program` launch an
+argv and are not gated by it.
 
 ## Formal proofs — Lean 4 / Mathlib
 
@@ -76,6 +119,53 @@ This is intentionally different from `run_code`: `run_code` executes source
 snippets, so a command such as `cargo --version` must not be passed to it.
 `toolchain_status` is local-only and returns a bounded, redacted result. It is
 not a general shell or command-execution feature.
+
+## Host tool inventory
+
+The host tool inventory is a categorized, cached registry of the developer tools
+installed on this host. It covers 14 categories: compilers, build systems, test
+runners, linters/formatters, debuggers/profilers, package managers, runtimes,
+containers/VMs, version control, database clients, media and document tools,
+cloud CLIs, editors/IDEs, and shells.
+
+It searches beyond `PATH`:
+
+- on Windows: vswhere, the Windows SDK, App Paths, `py -0p`, scoop, Chocolatey
+  and winget
+- on macOS: Homebrew, the Xcode command line tools, and app bundles
+- on Linux: common install prefixes
+
+Each tool's version comes from the fixed probe listed in the registry, or from
+installer metadata. The snapshot is kept for 24 hours.
+
+Once a snapshot exists, agents receive a one-line, path-free capability summary
+in their environment brief. Administrators can read the inventory with
+`GET /v1/tools/inventory` and force a rediscovery with
+`POST /v1/tools/inventory/refresh`.
+
+Discovery never executes:
+
+- GUI launchers
+- tools whose version query goes to the network
+- project-local binaries
+- Store aliases
+
+See [Host tool inventory](../host-tool-inventory.md) for the sources, bounds,
+redaction rules and limitations.
+
+## Test runs — `test_run` / `test_run_result`
+
+`test_run` runs a project's test suite with a host-owned command for the
+detected runner (pytest, unittest, ctest, cargo, go, dotnet, npm/pnpm/yarn,
+gradle, maven, make). The model picks only the runner and an optional
+grammar-checked selector such as `test_mod.py::test_bad`, `k:fast` or
+`run:TestX`. The run is a permission-gated durable background job with a hard
+deadline.
+
+It returns a typed report: totals, failures with `file:line`, the runner's
+summary line and an output digest. A still-running job returns its id;
+`test_run_result` waits for it. See
+[Structured test runs](../structured-test-runs.md).
 
 ## Structured data — `data_inspect`
 
@@ -170,12 +260,21 @@ is explicit. A high-risk result means the file contains suspicious static
 evidence; it is not a proof of malware, and no-finding is not a guarantee of
 safety.
 
-For exact script execution, `SONDER_EXECUTION_RISK_POLICY` selects `off`,
+For exact script execution (`script_run`, and the native MCP `run_script`
+tool through the same gate), `SONDER_EXECUTION_RISK_POLICY` selects `off`,
 `report` (default), `deny-high`, `deny-medium`, or `deny-unknown`. Per-call
 `risk_policy` can make enforcement stricter but never weaker than the operator
-setting. Current `deny-*` modes conservatively refuse every launch, including a
-below-threshold file, because the runner cannot portably guarantee that an
-interpreter opens the same file handle that was inspected. `report` is advisory.
+setting. Under a `deny-*` mode on Linux, `.py` and `.sh` scripts are copied
+into a sealed memfd, inspected from that copy, and executed from the same
+descriptor, so swapping the entry script after the scan cannot change the
+entry script's bytes that run (Python keeps its usual `__file__`, `argv[0]`
+and `sys.path[0]`; bash sees `$0` as `/proc/self/fd/N`). Only the entry
+script is covered: modules it imports and files it sources are neither
+inspected nor sealed, and a shell script that finds siblings through `$0` or
+`BASH_SOURCE` will not find them under `/proc/self/fd/`. Other runners, and every launch on Windows and macOS,
+still refuse enforcing modes, including a below-threshold file, because the
+runner cannot guarantee that the interpreter reads the inspected bytes.
+`report` is advisory.
 Program execution without an exact inspectable file remains outside this static
 gate and should be isolated separately.
 
@@ -210,6 +309,102 @@ levels, and sources; the result summarizes error/warning clusters, repeated
 messages, and bounded first/last-failure context. Prefix or tail inspection is
 available under file, scan-byte, line, per-line, result, output, and time caps.
 Callers cannot supply regular expressions or executable parsing rules.
+
+## Build/test output digest — `output_digest` / `/digest`
+
+`output_digest` summarizes one guarded log file, or the caller's own test-run
+job output, into:
+- the final line (`tail -1`)
+- the recognized run summary, for pytest, unittest, cargo, go, ctest, jest,
+  vitest, dotnet, maven, gradle and make
+- the `FAILED`/`ERROR` lines
+- the first compiler or test errors, parsed into typed diagnostics: gcc,
+  clang, ld, MSVC, dotnet, rustc, tsc, eslint, go, Python tracebacks and
+  pytest
+- repeated-error groups
+- a short tail
+
+It is the structured form of `pytest ... > out.txt; tail -1 out.txt; grep -E
+"^(FAILED|ERROR) " out.txt`. Everything is redacted before parsing and is
+bounded.
+
+- Files go through the same guarded no-follow window as `log_inspect`, and
+  credential stores are refused.
+- For a model, a job digest is limited to that principal's own `test_run` and
+  lane-test jobs.
+
+The legacy `test_run`, `build_run`, `lint_run` and `typecheck_run` renderings
+end with a bounded `digest:` block. The legacy `test_run` runs pytest through
+the structured runner. Its raw `extra_args_json` argv is retired and refused.
+See [the legacy `test_run`](../structured-test-runs.md#the-legacy-test_run).
+
+In the REPL:
+- `/digest <job|path>` digests a job or a log.
+- `/tools` shows the categorized host tool inventory.
+- `/test [runner] [selector]` starts a structured test run.
+
+`/tools` no longer aliases `/activity`.
+
+The details are in [Build diagnostics and output digest](../build-diagnostics-digest.md).
+
+## C/C++ builds — `build_model` / `build_job` / `build_fix`
+
+These three tools let an agent inspect, build and repair a C/C++ project.
+
+- **`build_model`** describes the build without running anything. It reads the
+  CMake File API reply, `compile_commands.json` or `.sln`/`.vcxproj`, and
+  returns targets, configs, platforms, toolchains, compile units, PCH and
+  presets as labels.
+- **`build_job`** runs `configure`, `build`, `compile_one` or `include_trace`
+  as a permission-gated background job. `build_job_result` waits for the
+  typed, attributed report.
+- **`build_fix`** repairs a failing target. It runs a bounded loop that edits
+  only project sources: never build scripts, generated files or the sources of
+  build-time tools. Each attempt is verified with `compile_one`, then with a
+  target build. `build_fix_restore` writes the stored originals back.
+
+The host builds every command from closed templates. The model only names
+things the parsed model contains. Utility and custom targets such as `deploy`
+are refused unless the operator allows them.
+
+Under the default `manual` mode, a build from the console is asked once. The
+same build from HTTP or native MCP is refused and the refusal names the
+remedies. Approving a `build_fix` lets that fix's own in-scope writes proceed
+without further prompts, until the fix job ends.
+
+The REPL facade provides `/build`, `/fix-build` and `/fix-build-restore`. See
+[C++ build model, build jobs and the build-fix loop](../architecture/CPP-BUILD-FIX.md)
+and [Build tools security](../security/BUILD-TOOLS.md).
+
+## Crash and profile digests — `/crash` / `/profile`
+
+Crash captures and profiler output from native builds become two small typed
+results, a crash report and a profile digest. Raw debugger output and capture
+bytes never reach the model; strings copied from a capture are labelled
+untrusted.
+
+- Pure readers (no process launched): Windows/Breakpad/Crashpad minidumps,
+  ELF cores, sanitizer logs, valgrind XML, macOS `.ips`; callgrind, Chrome
+  trace JSON, Tracy/WPA/PIX/Superluminal CSV, `heaptrack_print` and
+  `perf report` text.
+- Host engines, as permission-gated jobs from host-owned argv templates: cdb,
+  gdb, lldb, eu-stack, rust `minidump-stackwalk`, `llvm-symbolizer`, `perf`,
+  `heaptrack_print`, `tracy-csvexport`, xperf.
+- Symbol-server downloads happen only from the attended console after
+  consent and a y/N on the exact command; model, MCP and HTTP requests for
+  them are refused.
+
+In the REPL:
+- `/crash <dump|core|log>` digests a crash; `/crash triage <dir>` buckets a
+  folder of dumps by signature.
+- `/crash fix last` prints fatal diagnostics in compiler form, a local source
+  excerpt and a repro test.
+- `/profile <capture>` summarizes hot paths and frame spikes.
+
+Admin HTTP routes live under `/v1/tools/crash-*`, `/v1/tools/profile-*` and
+`/v1/tools/debug-runs/<id>`.
+
+The details are in [Crash and profile digests](../crash-profile-digest.md).
 
 ## Other tool families
 

@@ -102,13 +102,31 @@ Enforced by `scripts/check_architecture.py`.
 | Crash-injection matrix      | PASS     | Deadline enforcement, error pickling  |
 | Backup/restore             | PASS     | Service contract verified             |
 | Signed update/rollback     | PASS     | Phase transitions, can_activate gate  |
-| Container isolation        | SKIPPED  | Requires SONDER_CONTAINER_TEST=1      |
+| Container isolation        | NOT HERE | Not asserted by this suite; see the isolation suites below |
 | Capability matrix          | PASS     | Auth level coverage                   |
 | Selfmod recovery           | PASS     | Phase lifecycle verified              |
 | Training smoke             | PASS     | Phase lifecycle, identity immutability|
 | MCP v2 clients             | PASS     | Handler classes exist and importable  |
 | Static arch mutations      | PASS     | 3 mutation tests (domain/interface/app)|
 | Clean install + bridge     | PASS     | Both composition roots build          |
+
+The container-isolation row used to be a test that always skipped and
+asserted nothing, so it was removed rather than counted. Isolation is
+checked by:
+
+- `tests/test_codegen_container_native_linux.py`: real Docker boundary
+  probes, run with zero skips allowed by the `container-qualification` job
+  (`.github/workflows/codegen-container-qualification.yml`) that the required
+  `tests` gate depends on.
+- `tests/test_codegen_container_build.py`: input grants and fail-closed host
+  result checks, without a container engine.
+- `tests/test_linux_candidate_isolation.py`: the OS uid boundary for selfmod
+  candidates. It needs Linux and euid 0, so ordinary non-root CI skips it.
+- `tests/test_build_network_isolation.py`: build-job network policy,
+  including a real namespace probe where `unshare` works.
+
+`tests/test_codegen_isolation_probes_native_windows.py` records native
+Windows feasibility on the `windows-focused` job but is diagnostic only.
 
 ### Verification commands
 

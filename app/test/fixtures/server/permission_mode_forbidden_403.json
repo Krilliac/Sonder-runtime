@@ -1,0 +1,1 @@
+{"error": {"code": "FORBIDDEN", "message": "administrator authorization is required to change permission mode", "correlation_id": "req_0a7d3c9e5b1f4e2a8c6d4b2f0e8a6c41", "retryable": false, "type": "server_error"}}

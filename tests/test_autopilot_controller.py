@@ -715,3 +715,26 @@ def test_strategy_private_key_preserves_windows_control_bytes(tmp_path, monkeypa
     path = tmp_path / "strategy-private" / "checkpoint.key"
     assert strategy_bootstrap._private_key(path) == expected
     assert strategy_bootstrap._private_key(path) == expected
+
+
+def test_controller_failure_report_names_the_error_not_the_reviewer():
+    # Live repro (2026-09-25): a planner model call timed out on a busy CPU
+    # host and the failed run's end report read "reviewer: <urlopen error
+    # timed out>" although no reviewer ever ran, and the run card showed no
+    # error at all.
+    run = autopilot_store.create_run("Inspect under a slow planner")
+
+    def slow_planner(_run):
+        raise TimeoutError("<urlopen error timed out>")
+
+    result = autopilot_controller.execute_run(
+        run["id"], "owner", owner_pid=os.getpid(),
+        plan_fn=slow_planner,
+        work_fn=lambda _run, task, _prior: _task_evidence(task),
+        review_fn=_complete, max_cycles=1,
+    )
+    assert result["status"] == "failed"
+    assert "reviewer:" not in result["final_report"]
+    assert "error: TimeoutError: <urlopen error timed out>" in result["final_report"]
+    assert result["last_error"] == "TimeoutError: <urlopen error timed out>"
+    assert "last error: TimeoutError" in autopilot_controller.format_run(result, include_report=False)

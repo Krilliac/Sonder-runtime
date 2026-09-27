@@ -1,0 +1,15 @@
+y
+build_fix  running
+  job_id   build-fix-0123456789abcdef
+  object   build_fix_status
+  target   game
+  config   Debug
+  world    local
+  network  off
+  command  cmake --build [BUILD] --target game
+  next: /fix-build status
+    build-fix-0123456789abcdef
+  done <t> · 1 tool
+
+code · sonder:latest · manual · ctx 0/8.2k
+❯

@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -167,7 +168,7 @@ def test_audit_write_failure_blocks_mcp_startup(monkeypatch, tmp_path):
     [("true", False, "exactly match"), (ACK, True, "root or elevated")],
 )
 def test_mcp_startup_refuses_invalid_gate_before_adapter(
-    monkeypatch, ack, privileged, match
+    monkeypatch, capsys, ack, privileged, match
 ):
     from sonder_runtime.__main__ import cmd_mcp
 
@@ -178,8 +179,13 @@ def test_mcp_startup_refuses_invalid_gate_before_adapter(
     monkeypatch.setattr(unsafe_lab, "is_privileged", lambda: privileged)
     monkeypatch.setattr(server.mcp, "run", lambda: calls.append("mcp"))
 
-    with pytest.raises(unsafe_lab.UnsafeLabError, match=match):
-        cmd_mcp(object())
+    # A refusal is a clean usage-class exit (2) with the reason on stderr,
+    # matching --native, and the adapter never starts.
+    assert cmd_mcp(object()) == 2
+    err = capsys.readouterr().err
+    assert "MCP startup refused" in err
+    assert re.search(match, err)
+    assert "Traceback" not in err
     assert calls == []
 
 
@@ -198,7 +204,7 @@ def test_mcp_startup_refuses_invalid_gate_before_adapter(
     ],
 )
 def test_mcp_startup_refuses_nonlocal_model_transport_before_adapter(
-    monkeypatch, environment, match
+    monkeypatch, capsys, environment, match
 ):
     from sonder_runtime.__main__ import cmd_mcp
 
@@ -213,8 +219,13 @@ def test_mcp_startup_refuses_nonlocal_model_transport_before_adapter(
     monkeypatch.setattr(unsafe_lab, "is_privileged", lambda: False)
     monkeypatch.setattr(server.mcp, "run", lambda: calls.append("mcp"))
 
-    with pytest.raises(unsafe_lab.UnsafeLabError, match=match):
-        cmd_mcp(object())
+    # A refusal is a clean usage-class exit (2) with the reason on stderr,
+    # matching --native, and the adapter never starts.
+    assert cmd_mcp(object()) == 2
+    err = capsys.readouterr().err
+    assert "MCP startup refused" in err
+    assert re.search(match, err)
+    assert "Traceback" not in err
     assert calls == []
 
 
@@ -245,6 +256,45 @@ def test_production_config_checks_final_command_line_host_override(monkeypatch):
             env={unsafe_lab.ACK_ENV: ACK},
             overrides={"server.host": "0.0.0.0"},
         )
+
+
+@pytest.mark.parametrize("source", ["override", "toml"])
+def test_production_config_refuses_cloud_enabled_outside_the_environment(source, tmp_path):
+    # The runtime exports the *effective* features.cloud as SONDER_ALLOW_CLOUD
+    # only after validation, so the lab check must judge the resolved value.
+    toml_path = None
+    overrides = None
+    if source == "toml":
+        toml_path = tmp_path / "sonder.toml"
+        toml_path.write_text("[features]\ncloud = true\n", encoding="utf-8")
+    else:
+        overrides = {"features.cloud": "true"}
+    with pytest.raises(sonder_config.ConfigError, match="hosted/cloud"):
+        sonder_config.load_config(
+            toml_path, env={unsafe_lab.ACK_ENV: ACK}, overrides=overrides,
+        )
+
+
+def test_production_config_refuses_remote_ollama_from_config_file(tmp_path):
+    toml_path = tmp_path / "sonder.toml"
+    toml_path.write_text(
+        '[ollama]\nurl = "https://10.1.2.3:11434"\nallow_remote = true\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(sonder_config.ConfigError, match="loopback OLLAMA_HOST"):
+        sonder_config.load_config(toml_path, env={unsafe_lab.ACK_ENV: ACK})
+
+
+def test_production_config_effective_check_only_adds_refusals():
+    # A truthy environment opt-in is still refused even when a later
+    # override turns the effective value off: the check never relaxes.
+    with pytest.raises(sonder_config.ConfigError, match="hosted/cloud"):
+        sonder_config.load_config(
+            env={unsafe_lab.ACK_ENV: ACK, "SONDER_ALLOW_CLOUD": "1"},
+            overrides={"features.cloud": "false"},
+        )
+    config = sonder_config.load_config(env={unsafe_lab.ACK_ENV: ACK})
+    assert config.features.cloud is False
 
 
 def test_served_unsafe_mode_refuses_remote_even_with_strong_auth(monkeypatch):
@@ -322,13 +372,37 @@ def test_unsafe_mode_preserves_artifact_and_process_operator_gates(
     monkeypatch.delenv(server.process_risk_module.OPT_IN_ENV, raising=False)
     assert json.loads(server.process_list())["status"] == "opt_in_required"
 
-    script = tmp_path / "harmless.py"
-    script.write_text("print('not launched')\n", encoding="utf-8")
+    marker = tmp_path / "payload-ran"
+    risky = tmp_path / "risky.py"
+    risky.write_text(
+        "# powershell -EncodedCommand AAAA\n"
+        "open(%r, 'w').write('ran')\n" % str(marker),
+        encoding="utf-8",
+    )
     output = server.script_run(
-        str(script), risk_policy="deny-high", extra_roots=str(tmp_path),
+        str(risky), risk_policy="deny-high", extra_roots=str(tmp_path),
     )
     assert "execution denied by effective policy deny-high" in output
-    assert "not launched" not in output
+    assert '"risk":"high"' in output
+    assert not marker.exists()
+
+    # A below-threshold script still passes through the enforcing gate: on
+    # Linux it runs only as the sealed inspected copy, elsewhere the missing
+    # exact handoff refuses it.
+    harmless = tmp_path / "harmless.py"
+    harmless.write_text("print('launched')\n", encoding="utf-8")
+    output = server.script_run(
+        str(harmless), risk_policy="deny-high", extra_roots=str(tmp_path),
+    )
+    if sys.platform.startswith("linux"):
+        assert '"exact_handoff":"linux-memfd-sealed"' in output
+        assert "execution allowed by effective policy deny-high" in output
+        # The sealed copy actually ran to completion, not just got admitted.
+        assert "  returncode: 0" in output
+        assert "stdout:\nlaunched" in output
+    else:
+        assert "exact_execution_handoff_unavailable" in output
+        assert "launched" not in output
 
 
 def test_unsafe_child_environment_scrubs_secret_and_control_names(monkeypatch):
@@ -542,3 +616,34 @@ def test_root_bypass_requires_exact_active_unsafe_gate(monkeypatch, tmp_path):
     unsafe_lab._audited_processes.discard(os.getpid())
     allowed = server.file_read(str(outside))
     assert "outside-root-evidence" in allowed
+
+
+@pytest.mark.parametrize(
+    "url", ["http://localhost:11434/", "http://127.0.0.1:11434/", "http://[::1]:11434/"]
+)
+def test_unsafe_lab_gate_accepts_single_trailing_slash_like_config(
+    monkeypatch, url
+):
+    from sonder_runtime.platform import unsafe_lab_policy
+
+    env = {unsafe_lab.ACK_ENV: ACK, "SONDER_HOST": "127.0.0.1", "OLLAMA_HOST": url}
+    assert unsafe_lab_policy.validation_error(env) == ""
+    # The configuration loader accepts the same value with the same ack.
+    monkeypatch.setattr(unsafe_lab, "is_privileged", lambda: False)
+    sonder_config.load_config(None, env=env)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost:11434//",
+        "http://localhost:11434/api",
+        "http://localhost:11434/?x=1",
+        "http://localhost:11434/#frag",
+    ],
+)
+def test_unsafe_lab_gate_still_refuses_real_paths(url):
+    from sonder_runtime.platform import unsafe_lab_policy
+
+    env = {unsafe_lab.ACK_ENV: ACK, "SONDER_HOST": "127.0.0.1", "OLLAMA_HOST": url}
+    assert "without a path" in unsafe_lab_policy.validation_error(env)

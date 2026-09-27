@@ -114,3 +114,17 @@ def test_audit_detects_tampering_and_enforces_bounds(tmp_path):
 def test_scope_identifiers_reject_blank_values():
     with pytest.raises(InvalidInput):
         _request(session=" ")
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "geteuid"), reason="POSIX modes")
+def test_audit_file_is_owner_only(tmp_path):
+    import os
+    import stat
+
+    previous = os.umask(0o022)
+    try:
+        repository = DurableToolAuditRepository(tmp_path / "tool-audit.jsonl")
+        _gateway(repository, _Receipts()).execute(_request())
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE(os.stat(repository.path).st_mode) == 0o600

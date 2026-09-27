@@ -57,6 +57,32 @@ def _isolate_runtime_home():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_emotion_vectors_state(_isolate_runtime_home):
+    """Drop the live emotion-vector copy from the shared test state home.
+
+    Live tuning writes ``<state home>/emotion_vectors.json``, which then
+    shadows the bundled default for every later prompt build.  Remove it on
+    both sides of each test so no test inherits another's tone vectors.
+    """
+    from sonder_runtime.platform import paths
+
+    # Resolve once, before the test runs: platform-simulation tests patch
+    # ``os.name``/path flavours, and re-resolving the home under those patches
+    # at teardown tried to build a WindowsPath on POSIX.
+    live_copy = paths.default_home() / "emotion_vectors.json"
+
+    def remove():
+        try:
+            live_copy.unlink()
+        except (FileNotFoundError, OSError):
+            pass
+
+    remove()
+    yield
+    remove()
+
+
+@pytest.fixture(autouse=True)
 def _isolate_routing_environment(monkeypatch):
     """Restore deployment routing variables after every test.
 

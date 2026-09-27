@@ -365,3 +365,22 @@ def test_trace_projection_filters_by_category_and_severity():
 
     assert body["span_count"] == 1
     assert body["spans"][0]["attributes"]["sonder.event_code"] == "WORK_FAIL"
+
+
+def test_sanitize_event_detail_applies_the_local_field_rules():
+    from sonder_runtime.adapters.local_observability import sanitize_event_detail
+
+    detail = {
+        "category": "inference",
+        "tier": "general",
+        "prompt": "never exported",
+        "api_key": "sk-secret",
+        "long": "y" * 500,
+    }
+    clean = sanitize_event_detail(detail, Redactor())
+    assert "category" not in clean
+    assert clean["tier"] == "general"
+    assert "never exported" not in json.dumps(clean)
+    assert "sk-secret" not in json.dumps(clean)
+    assert clean["long"] == "[TRUNCATED_VALUE]"
+    assert sanitize_event_detail("not a mapping", Redactor()) == {}

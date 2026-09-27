@@ -1,0 +1,5 @@
+◈ sonder · coder · sonder:latest (code) · manual · 127.0.0.1:1 not listening
+  /help commands · /mode to switch · /about details · Ctrl-D quits
+
+code · sonder:latest · manual · ctx 0/8.2k
+❯

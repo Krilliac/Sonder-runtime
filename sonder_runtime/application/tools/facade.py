@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import threading
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Mapping
@@ -26,6 +28,8 @@ from .gateway_contract import (
 )
 from .generated_catalogs import CatalogBundle, GeneratedCatalogs
 from .resource_policy import ResourcePolicy, ResourceRequest
+
+logger = logging.getLogger(__name__)
 
 
 def _effect_name(effect: Any) -> str:
@@ -191,6 +195,26 @@ class ToolApplicationFacade:
         if not isinstance(graph, ToolGraph):
             raise TypeError("graph must be a ToolGraph")
         self._graph = graph
+        self._observers: tuple[Any, ...] = ()
+        self._observers_lock = threading.Lock()
+
+    def add_receipt_observer(self, observer: Any) -> None:
+        """Call ``observer(request, receipt)`` after every executed request.
+
+        Observers read; they never change the receipt the caller gets. One
+        that raises is logged by exception type and skipped, so an observer
+        can never turn a finished call into a failure. Adding the same
+        observer twice is a no-op.
+        """
+        if not callable(observer):
+            raise TypeError("observer must be callable")
+        with self._observers_lock:
+            if observer not in self._observers:
+                self._observers = self._observers + (observer,)
+
+    def remove_receipt_observer(self, observer: Any) -> None:
+        with self._observers_lock:
+            self._observers = tuple(item for item in self._observers if item != observer)
 
     @property
     def graph(self) -> ToolGraph:
@@ -238,7 +262,14 @@ class ToolApplicationFacade:
         return tuple(self.catalogs_for(selection).client.get("tools", ()))
 
     def execute(self, request: ToolGatewayRequest) -> ToolReceipt:
-        return self._graph.gateway.execute(request)
+        receipt = self._graph.gateway.execute(request)
+        for observer in self._observers:
+            try:
+                observer(request, receipt)
+            except Exception as exc:  # noqa: BLE001 - an observer never fails the call
+                logger.warning("tool receipt observer failed for %s: %s",
+                               request.tool_name, type(exc).__name__)
+        return receipt
 
     @classmethod
     def compose(

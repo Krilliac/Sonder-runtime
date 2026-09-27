@@ -91,6 +91,19 @@ prints a warning before the reply. Set `SONDER_FALLBACK_LOCAL=0` to disable
 that fallback. HTTP errors from the hosted server, such as bad API keys or
 account bans, do not fall back.
 
+If the server answers `421 HOST_NOT_ALLOWED`, it is an unauthenticated
+`local-open` server that does not know the name in your URL. Use its IP
+address, or add the name to `[server].allowed_hosts` / `SONDER_ALLOWED_HOSTS`
+on the server. A server that requires an API key or accounts accepts any
+name.
+
+A reply that begins `refused /write:` (or another tool) was stopped by the
+server's permission mode because nobody was at its console to answer the
+prompt. The response's `sonder_receipt.refusal.call_id` names the call; a
+developer or administrator can approve it once with
+`POST /v1/approvals/<call_id>` and then resend the same request. See
+[HTTP API & lifecycle](docs/wiki/05-http-api-and-lifecycle.md#one-shot-approvals-over-http).
+
 `--server`/`--key` argv flags also work and override the env vars:
 
 ```bash
@@ -127,7 +140,12 @@ surface and consume host resources. Treat the key like a privileged password:
 - Keep it out of shell history / dotfiles committed to git.
 - Rotate it in `/etc/sonder/sonder.env` and restart `sonder` if it leaks.
 - Never send the key over plaintext HTTP except to a loopback address. Remote
-  clients must use HTTPS through the documented reverse proxy.
+  clients must use HTTPS through the documented reverse proxy. The thin client
+  enforces this: with a key set it refuses a non-loopback `http://` server,
+  refuses to follow any redirect, and connects to a loopback `http://` server
+  directly even when `http_proxy` is set, so the key cannot be forwarded to
+  another origin or sent in plaintext to a proxy. Keyed `https://` requests
+  still honour `https_proxy`, which tunnels the header inside TLS.
 - Never expose or port-forward the runtime's loopback port. Restrict the TLS
   endpoint at the firewall or security-group layer as well.
 
@@ -143,5 +161,8 @@ implementation work is tracked only in the
 | Copying `sonder_client.py` alone to another machine | Unsupported | The file imports `sonder_runtime` client adapters and fails with `ModuleNotFoundError` outside a checkout. |
 | Automatic retry against the local server when the hosted server is unreachable | Implemented | `SONDER_FALLBACK_LOCAL=0` disables it; HTTP errors from the hosted server never fall back. |
 | Direct execution without Python or a wrapper | Unsupported | `sonder_client.py` has no shebang line; invoke it with Python or the wrapper above. |
-| Sending the API key over plaintext HTTP to a non-loopback host | Unsupported | Not a supported deployment; the client itself does not refuse it, so use HTTPS. |
+| Sending the API key over plaintext HTTP to a non-loopback host | Unsupported | The client refuses before any network I/O: with a key set, `SONDER_SERVER` must be `https://`, or `http://` to a loopback host (`localhost`, `127.0.0.0/8`, `::1`); other schemes are refused too. Without a key the URL is not restricted. |
+| Following HTTP redirects with the API key attached | Unsupported | A request carrying the key never follows a redirect (301/302/303/307/308); the client reports it as an HTTP error naming the `Location` and does not fall back to the local server. Point `SONDER_SERVER` at the final HTTPS URL. Requests without a key keep standard redirect handling. |
 | Resumable streams with sequence numbers and resume watermarks | Proposed | API-002; protocol-boundary validation exists, but the thin client does not resume streams. |
+| Observatory live telemetry stream (`/v1/observability/events`) | Experimental | A read-only admin stream for Observatory, resumable by `Last-Event-ID`; the thin client does not consume it. |
+| `sonder_receipt.degraded` on chat responses | Experimental | Present only when a turn served by a non-Ollama provider ran without an Ollama-only step; values are step names, never content. |

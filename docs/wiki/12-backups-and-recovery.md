@@ -15,12 +15,19 @@ consistent because SQLite databases are copied with the online-backup API.
   checksums.sha256
 ```
 
+Backups are plaintext copies of private state: the checksums detect
+corruption, not tampering, and there is no encryption or key-based
+authentication (`SONDER_BACKUP_KEY_FILE` is refused at config load). Keep
+the backup target private (the server installer creates `/var/backups/sonder`
+with mode `0700`) or on an encrypted volume.
+
 ## Create / verify / list / prune
 
 ```bash
 python -m sonder_runtime backup create --json     # -> backup_id, path, files, bytes
 python -m sonder_runtime backup verify <dir>      # hashes + SQLite/schema/policy integrity
 python -m sonder_runtime backup list --json
+python -m sonder_runtime backup latest            # path of the newest dated backup
 python -m sonder_runtime backup prune             # tiered retention (default)
 python -m sonder_runtime backup prune --keep 7    # simple keep-N
 ```
@@ -36,7 +43,9 @@ never prunes the last verified one.
 
 **Tiered retention (GFS):** keeps the newest of each of the last N days,
 weeks, and months (`[backup].retention_daily/weekly/monthly`), and always
-the newest verified backup.
+the newest verified backup. A backup whose manifest has no parseable
+`created_at_utc` (`created_at_valid: false` in `backup list --json`) is
+listed last and belongs to no retention window.
 
 ## Restore
 
@@ -58,11 +67,22 @@ full `PRAGMA integrity_check` against the copied result.
 Swapping the restored directory into place is a stopped-service operator
 step ([backup-restore](../runbooks/backup-restore.md)).
 
+`python -m sonder_runtime restore rehearse <backup-dir>` runs the offline
+recovery rehearsal against a verified backup in a disposable workspace. It
+never opens the live state home, stops the service or switches `current`;
+flags, exit codes and output are in the runbook's
+[offline recovery rehearsal](../runbooks/backup-restore.md#offline-recovery-rehearsal)
+section.
+
 ## Automation (server profile)
 
 `packaging/systemd/` ships timers: `sonder-backup.timer` (daily create +
 prune) and `sonder-restore-smoke.timer` (weekly restore-smoke on a
 disposable directory) — so backups are proven restorable, not just taken.
+The smoke targets the newest backup with a valid `created_at_utc`, selected
+by `backup latest` (raw pre-epoch2 copies are skipped; the run fails when no
+standard backup is dated); if that backup no longer verifies, the smoke fails
+rather than silently picking an older one.
 
 ## Recovery scenarios
 

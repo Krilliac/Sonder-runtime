@@ -156,3 +156,37 @@ def test_dispatch_rejects_caller_route_options_before_provider_call():
             _context(),
         )
     assert ollama.generated == []
+
+
+class StatusGateway(RecordingGateway):
+    def __init__(self, name, entry):
+        super().__init__(name)
+        self.entry = entry
+        self.health_calls = 0
+
+    def provider_status(self):
+        return {self.entry["provider"]: dict(self.entry)}
+
+    def capability_health(self):
+        self.health_calls += 1
+        return ("health", self.name)
+
+
+def test_provider_status_aggregates_and_marks_silent_providers_unknown():
+    reporting = StatusGateway("prism", {"provider": "openai_compatible", "state": "ready"})
+    gateway = _gateway(RecordingGateway("ollama"), reporting)
+    assert gateway.provider_status() == {
+        "ollama": {"provider": "ollama", "state": "unknown"},
+        "openai_compatible": {"provider": "openai_compatible", "state": "ready"},
+    }
+
+
+def test_capability_health_passes_through_to_one_provider():
+    reporting = StatusGateway("prism", {"provider": "openai_compatible", "state": "ready"})
+    gateway = _gateway(RecordingGateway("ollama"), reporting)
+    assert gateway.capability_health("openai_compatible") == ("health", "prism")
+    with pytest.raises(InvalidInput, match="does not report capability health"):
+        gateway.capability_health()  # the default (ollama) reports none
+    with pytest.raises(InvalidInput, match="not configured"):
+        gateway.capability_health("vllm")
+    assert reporting.generated == []

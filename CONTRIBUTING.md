@@ -26,6 +26,12 @@ For iterating on a change, `scripts/select_regression_tests.py` picks the
 test files your diff actually touches, and
 [docs/wiki/20-test-suite-performance.md](docs/wiki/20-test-suite-performance.md)
 covers timing captures, slow-test ranking, and bounded parallel runs.
+`scripts/test-fast.sh` (or `scripts\test-fast.cmd`, both wrapping
+`scripts/test_fast.py`) runs that selection in one step: the files your change
+since the merge-base with `origin/main` touches, under
+`-n auto --dist worksteal --ff`, followed by the list of changed identifiers
+no test mentions. `--working-tree` selects from uncommitted edits only,
+`--all` runs the full suite, and anything after `--` goes to pytest.
 
 A green suite is expected, not impressive — say what you *verified*, not what
 you believe. "Reproduced the failure, fixed it, the new test fails without the
@@ -38,7 +44,7 @@ information, not a failure.
 ### Reproducing CI exactly
 
 `.github/workflows/ci.yml`'s `tests` job runs, in order: the MCP compatibility
-import check, four `scripts/check_*.py` gate scripts, then the full suite. To
+import check, the `scripts/check_*.py` gate scripts, then the full suite. To
 reproduce the same run locally:
 
 ```bash
@@ -46,9 +52,24 @@ python -m pip install -r requirements-dev.txt
 python scripts/check_architecture.py
 python scripts/check_requirement_evidence.py
 python scripts/check_error_signals.py
+python scripts/check_lint_ratchet.py
 python scripts/check_history_privacy.py --json
 python -m pytest -q -n auto --dist load --durations=25
 ```
+
+After the full suite, the same job installs `requirements-update.txt` and runs
+the SPEC-4 TUF update-trust suites (`tests/production/test_tuf_publisher.py`,
+`tests/test_update_manifest_trust.py`); any skip there fails the job. Locally:
+
+```bash
+python -m pip install -r requirements-dev.txt -r requirements-update.txt
+python -m pytest -q -rs tests/production/test_tuf_publisher.py tests/test_update_manifest_trust.py
+```
+
+`requirements-dev.txt` also pins `pexpect` and `pyte` on every non-Windows
+platform: the REPL screen tests under `tests/repl` drive the real REPL in a
+pseudo-terminal and fail (rather than skip) if either is missing. On Windows
+they skip as a platform decision; the piped REPL contracts still run there.
 
 `-n auto` picks worker count from local CPU count, same as `pytest-xdist` does
 on the runner; it will differ from CI's if your machine doesn't have 4 cores,
@@ -87,7 +108,7 @@ or renaming it changes the reported context name and silently strands every
 PR that can never satisfy the now-vanished required check — fix that in the
 repo's branch protection settings first if it's ever genuinely needed, not by
 editing the workflow alone.
-CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs five
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs six
 additional gates before the test suite, none of which `pytest` alone
 exercises. Run them locally if your change touches `sonder_runtime/`, error
 strings, Git history, or the operator docs — a change that only fails one of
@@ -97,12 +118,28 @@ these can otherwise look green all the way to the PR:
 venv/Scripts/python scripts/check_architecture.py         # layer/import boundaries inside sonder_runtime/
 venv/Scripts/python scripts/check_requirement_evidence.py # master-spec requirement IDs vs the evidence ledger
 venv/Scripts/python scripts/check_error_signals.py         # shrink-only ratchet on legacy "ERROR:"-prefixed returns
+venv/Scripts/python scripts/check_lint_ratchet.py          # ruff blocking rules + shrink-only lint and module-size ratchets
 venv/Scripts/python scripts/check_history_privacy.py --json # no new sensitive Git-history debt
 venv/Scripts/python scripts/check_doc_links.py              # relative links in README/wiki/runbooks resolve
 ```
 
 Each is silent and exits `0` on success; a nonzero exit lists exactly what it
-found. `check_architecture.py` is the one most contributors hit first — it
+found. `check_lint_ratchet.py` needs the exact `ruff` pinned in
+`requirements-dev.txt`: outside `tests/` it allows no undefined names or
+`__all__` exports, shadowed definitions, pylint errors, or closures over loop
+variables; every other F/B/PLE finding count per file and rule, and the line
+count of the listed legacy modules (`server.py`, `serve.py` and others), may
+only shrink against `scripts/lint_baseline.json`. After fixing findings or
+shrinking a module, `python scripts/check_lint_ratchet.py --update` records the
+lower counts; it refuses to raise any of them. Branches measured against the
+same older base can each pass and still exceed the baseline once merged
+together; after such an integration merge, run
+`python scripts/check_lint_ratchet.py --rebaseline` on the merged tree. It
+records the higher counts, prints every bucket and module limit it raised so
+the rise is reviewed with the merge, and still refuses while any blocking
+finding exists. Prefer shrinking the growth instead (move new `server.py` code
+into `sonder_runtime/`, fix the new findings). `check_architecture.py` is the
+one most contributors hit first — it
 rejects, for example, a new `sqlite3.connect` or `subprocess` call outside
 `sonder_runtime/adapters/`, or a domain module importing anything outside
 `sonder_runtime/domain/` plus the standard library.

@@ -47,6 +47,9 @@ _PLAN_PERMITTED = frozenset({
     "learn_tiers", "live_reload_status", "mcp_runtime_status",
     "reasoning_show", "sonder_sessions", "sonder_stats",
     "turn_inspect", "workflow_list", "memory_export",
+    # Re-verified after its live model probe moved to `/runtime status
+    # refresh`; the trap check is tests/test_runtime_policy_status_trap_check.py.
+    "runtime_policy_status",
 })
 
 # Refused, each for a reason observed by running it.
@@ -54,7 +57,6 @@ _PLAN_REFUSED = {
     "debug_inspect": "spawns nvidia-smi and powershell, and calls the model endpoint",
     "npu_status": "spawns powershell Get-CimInstance",
     "apply_learned": "three outbound model calls and INSERT OR REPLACE INTO vectors",
-    "runtime_policy_status": "outbound call to the local model endpoint",
     "admin_accounts": "returns 'login required'; the success path could not be exercised",
     "permission_mode": "with a mode argument it rewrites the saved mode and leaves plan",
     "artifact_verify": "a grounded_outcomes VERIFIER: a run can write an outcome row",

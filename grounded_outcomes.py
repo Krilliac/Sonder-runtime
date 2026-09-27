@@ -13,8 +13,8 @@ more readily than failure. Asking harder does not fix a reporting bias; removing
 the human from the report does.
 
 Sonder already runs tools that know the truth. ``test_run`` knows whether tests
-passed. ``build_run`` knows whether it compiled. ``lint_run``, ``typecheck_run``
-and ``run_code`` all return a verdict. When one of those runs shortly after a
+passed. ``build_run`` and a typed ``build_job`` report know whether it
+compiled. ``lint_run``, ``typecheck_run`` and ``run_code`` all return a verdict. When one of those runs shortly after a
 generation, its result *is* the outcome of that generation -- execution-grounded
 evidence, which the reward table already weights highest, obtained without
 anyone remembering to file it.
@@ -67,7 +67,25 @@ VERIFIERS = {
     "artifact_verify": ("compiled", "failed"),
     "ground_artifact": ("compiled", "failed"),
     "artifact_ground": ("compiled", "failed"),
+    # The typed C/C++ build tools. Read only through ``typed_build_verdict``:
+    # their executor sets ``ok`` on every report it returns, a failed build
+    # included, so the verdict comes from the report's own terminal status.
+    "build_job": ("compiled", "failed"),
+    "build_job_result": ("compiled", "failed"),
 }
+
+# Verifiers whose evidence is a typed build report (a JSON object), judged by
+# ``typed_build_verdict`` and never by the caller's ``ok``. ``build_fix`` and
+# ``build_fix_result`` are deliberately absent: a fix report grades the fix's
+# OWN edits (``fixed`` means the build compiles after the fix changed it), so
+# filing it against an earlier generation would record a pass for work that
+# needed repairing.
+TYPED_BUILD_VERIFIERS = frozenset({"build_job", "build_job_result"})
+
+# Only these build actions run the compiler over the sources; a ``configure``
+# or ``include_trace`` job that succeeded says nothing about whether the work
+# compiles.
+_BUILD_VERDICT_ACTIONS = frozenset({"build", "compile_one"})
 
 # code_runner uses an ``error`` field both for infrastructure failures and for
 # a process that ran but rejected the generated program.  Its evidence must be
@@ -204,6 +222,35 @@ def code_runner_infrastructure_error(evidence) -> str:
     if isinstance(returncode, int) and not isinstance(returncode, bool):
         return ""
     return error
+
+
+def typed_build_verdict(evidence):
+    """The verdict of a typed build report and, when there is none, why.
+
+    Returns ``(True, "")`` or ``(False, "")`` when a finished compile ran,
+    and ``(None, reason)`` when nothing was measured. Only a
+    ``build_job_report`` of a ``build``/``compile_one`` action whose status is
+    ``succeeded`` or ``failed`` and that carries the process exit code is a
+    verdict. A status view (the job is still running, or the call only asked
+    to cancel), a job that was cancelled, timed out or never ran, and a
+    failure with no exit code (the build could not start) all measured
+    nothing, so they must not consume a pending generation.
+    """
+    if not isinstance(evidence, dict):
+        return None, "no typed build report to read"
+    if evidence.get("object") != "build_job_report":
+        return None, "the build has not finished; there is no report yet"
+    action = str(evidence.get("action") or "")
+    if action not in _BUILD_VERDICT_ACTIONS:
+        return None, "a %s job compiles nothing" % (action or "non-build")
+    status = str(evidence.get("status") or "")
+    exit_code = evidence.get("exit_code")
+    exited = isinstance(exit_code, int) and not isinstance(exit_code, bool)
+    if status == "succeeded" and exited:
+        return True, ""
+    if status == "failed" and exited:
+        return False, ""
+    return None, "the build ended %s without a compiler verdict" % (status or "with no status")
 
 
 def rendered_infrastructure_error(observation) -> str:
@@ -407,7 +454,13 @@ def attribute(tool: str, ok: bool, project: str = "", record_fn=None,
     # generation once, so a run that measured nothing must not consume the one
     # chance that generation had to be judged for real -- measured, an
     # infrastructure blip permanently displaced the later genuine verdict.
-    if isinstance(evidence, dict):
+    if name in TYPED_BUILD_VERIFIERS:
+        # The report's own terminal status is the verdict; ``ok`` is always
+        # true on this wire and is ignored.
+        typed_verdict, infrastructure_error = typed_build_verdict(evidence)
+        if typed_verdict is not None:
+            ok = typed_verdict
+    elif isinstance(evidence, dict):
         infrastructure_error = (
             code_runner_infrastructure_error(evidence)
             if name in CODE_RUNNER_VERIFIERS

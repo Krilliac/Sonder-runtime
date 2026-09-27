@@ -160,5 +160,21 @@ class CancellationNode:
         with self._lock:
             yield from tuple(self._children.values())
 
+    def detach(self) -> None:
+        """Remove this finished scope from its parent.
+
+        Long-lived roots (one interactive session) create a child per unit of
+        work; detaching finished children keeps the tree bounded.  A detached
+        scope keeps its own state, so late lease holders still observe it.
+        """
+        parent = self._parent
+        if parent is None:
+            return
+        with parent._condition:
+            if parent._children.get(self.node_id) is self:
+                del parent._children[self.node_id]
+            parent._condition.notify_all()
+        parent._refresh_quiescence()
+
 
 __all__ = ["CancellationLease", "CancellationNode", "CancellationSnapshot", "CancellationStatus"]

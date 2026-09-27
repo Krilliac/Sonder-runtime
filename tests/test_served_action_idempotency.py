@@ -83,10 +83,11 @@ def test_work_retry_is_idempotent_per_principal_and_exact_action(monkeypatch):
         idempotency_key="lost-connection-1",
     )
 
-    assert (first, retry, changed_action) == (
-        "work complete", "work complete", "work complete",
-    )
-    assert len(calls) == 2
+    assert (first, retry) == ("work complete", "work complete")
+    # Reusing the key for a different request is refused, never run as new.
+    assert changed_action.startswith("idempotency key reused")
+    assert changed_action.code == "IDEMPOTENCY_KEY_REUSED"
+    assert len(calls) == 1
     sonder_lifecycle.reset_for_tests()
 
 
@@ -187,11 +188,16 @@ def test_direct_fanout_synthesis_retry_runs_once_and_binds_model(monkeypatch):
         {"synth_model": "local-b"},
         _authorized_account("alice"),
     )
-    assert calls == [("fan-1", "local-a"), ("fan-1", "local-b")]
+    # Same Idempotency-Key, different model: a key-reuse conflict, not a run.
+    assert calls == [("fan-1", "local-a")]
+    payload, status, _headers = sent[-1]
+    assert status == 422
+    assert payload["error"]["code"] == "IDEMPOTENCY_KEY_REUSED"
     sonder_lifecycle.reset_for_tests()
 
 
-def test_direct_fanout_resume_and_cancel_retries_do_not_repeat_actions(monkeypatch):
+def test_direct_fanout_resume_and_cancel_retries_do_not_repeat_actions(monkeypatch, tmp_path):
+    _receipt_store(monkeypatch, tmp_path)
     sonder_lifecycle.reset_for_tests()
     calls = []
     handler, _sent = _fanout_handler(monkeypatch, {"id": "fan-2"})
@@ -206,9 +212,12 @@ def test_direct_fanout_resume_and_cancel_retries_do_not_repeat_actions(monkeypat
     monkeypatch.setattr(serve.server, "_fanout_receipt", lambda _run_id: {"ok": True})
 
     for _ in range(2):
+        # One Idempotency-Key names one request; each action has its own.
+        handler.headers = {"Idempotency-Key": "cancel-retry"}
         assert serve.Handler._handle_fanout_post(
             handler, "/v1/fanout/fan-2/cancel", {}, _authorized_account("alice"),
         )
+        handler.headers = {"Idempotency-Key": "resume-retry"}
         assert serve.Handler._handle_fanout_post(
             handler,
             "/v1/fanout/fan-2/resume",
@@ -327,7 +336,7 @@ def test_permission_mode_retry_runs_once_and_binds_requested_mode(monkeypatch):
     sent = []
     handler = SimpleNamespace(
         headers={"Idempotency-Key": "mode-retry"},
-        _send_json_payload=lambda payload, status=200: sent.append((payload, status)),
+        _send_json_payload=lambda payload, status=200, headers=None: sent.append((payload, status)),
     )
     monkeypatch.setattr(
         serve.permission_modes,
@@ -343,6 +352,75 @@ def test_permission_mode_retry_runs_once_and_binds_requested_mode(monkeypatch):
     serve.Handler._handle_permission_mode_post(
         handler, {"mode": "manual"}, context=_account("alice"),
     )
-    assert calls == ["auto", "manual"]
-    assert sent == [({"mode": "auto"}, 200)] * 3
+    assert calls == ["auto"]
+    assert sent[:2] == [({"mode": "auto"}, 200)] * 2
+    payload, status = sent[2]
+    assert status == 422
+    assert payload["error"]["code"] == "IDEMPOTENCY_KEY_REUSED"
     sonder_lifecycle.reset_for_tests()
+
+
+def test_permission_mode_refusal_is_not_reported_as_success(monkeypatch, tmp_path):
+    """A completed-before-restart receipt must answer 409, not 200 + old mode."""
+    _receipt_store(monkeypatch, tmp_path)
+    sonder_lifecycle.reset_for_tests()
+    calls, sent = [], []
+    handler = SimpleNamespace(
+        headers={"Idempotency-Key": "mode-restart"},
+        _send_json_payload=lambda payload, status=200, headers=None: sent.append((payload, status)),
+    )
+    monkeypatch.setattr(serve.permission_modes, "set_mode", lambda wanted: calls.append(wanted))
+    monkeypatch.setattr(server, "permission_mode_data", lambda: {"mode": "auto"})
+    serve.Handler._handle_permission_mode_post(handler, {"mode": "auto"}, context=_account("alice"))
+    sonder_lifecycle.reset_for_tests()  # a new server process
+    serve.Handler._handle_permission_mode_post(handler, {"mode": "auto"}, context=_account("alice"))
+    assert calls == ["auto"]
+    assert sent[0] == ({"mode": "auto"}, 200)
+    payload, status = sent[1]
+    assert status == 409
+    assert payload["error"]["code"] == "IDEMPOTENT_ACTION_COMPLETED"
+    sonder_lifecycle.reset_for_tests()
+
+
+def test_fanout_resume_and_cancel_refusals_are_not_success(monkeypatch, tmp_path):
+    _receipt_store(monkeypatch, tmp_path)
+    sonder_lifecycle.reset_for_tests()
+    calls = []
+    handler, sent = _fanout_handler(monkeypatch, {"id": "fan-3"})
+    monkeypatch.setattr(
+        serve.server, "fanout_store",
+        SimpleNamespace(
+            request_cancel=lambda run_id: calls.append(("cancel", run_id)) or {},
+            resume_run=lambda run_id, **kwargs: calls.append(("resume", run_id)) or {},
+        ),
+    )
+    monkeypatch.setattr(serve.server, "_execute_fanout_run", lambda run_id: None)
+    monkeypatch.setattr(serve.server, "_fanout_receipt", lambda _run_id: {"ok": True})
+    context = _authorized_account("alice")
+    # An interrupted earlier process left both receipts uncertain.
+    for action in ("cancel", "resume\0include_failed=0\0retry_unknown=0"):
+        key = serve._http_action_idempotency_key(
+            context, "direct-retry", "fanout\0fan-3\0%s" % action,
+        )
+        assert served_action_receipts.claim(key) == "claimed"
+    serve.Handler._handle_fanout_post(handler, "/v1/fanout/fan-3/cancel", {}, context)
+    serve.Handler._handle_fanout_post(handler, "/v1/fanout/fan-3/resume", {}, context)
+    assert calls == []
+    assert [(p["error"]["code"], status) for p, status, _h in sent] == [
+        ("IDEMPOTENT_ACTION_UNCERTAIN", 409), ("IDEMPOTENT_ACTION_UNCERTAIN", 409),
+    ]
+    sonder_lifecycle.reset_for_tests()
+
+
+def test_receipt_store_refuses_key_reuse_for_a_different_request(monkeypatch, tmp_path):
+    _receipt_store(monkeypatch, tmp_path)
+    assert served_action_receipts.claim(
+        "act-a", binding_key="bind-1", action_digest="d-a") == "claimed"
+    assert served_action_receipts.claim(
+        "act-b", binding_key="bind-1", action_digest="d-b") == served_action_receipts.CONFLICT
+    # The original request still replays by its own receipt.
+    assert served_action_receipts.claim(
+        "act-a", binding_key="bind-1", action_digest="d-a") == "started"
+    # Another principal's binding is independent.
+    assert served_action_receipts.claim(
+        "act-c", binding_key="bind-2", action_digest="d-b") == "claimed"

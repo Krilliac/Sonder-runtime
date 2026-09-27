@@ -36,6 +36,34 @@ python -m sonder_runtime backup prune --keep 7
 
 Prune never removes the newest verified backup, regardless of `--keep`.
 
+`backup list` orders entries newest first by the parsed `created_at_utc`
+instant. An entry whose manifest has no parseable timestamp reports
+`"created_at_valid": false` and is listed after every dated backup,
+pre-epoch2 copies included, so both prune modes treat it as the oldest: it
+never takes a retention slot from a dated backup, and it is removed unless it
+is the newest verified backup.
+
+```bash
+python -m sonder_runtime backup latest          # bare path of the newest dated backup
+python -m sonder_runtime backup latest --json   # {"backup": {...list entry...}}
+```
+
+`backup latest` selects the first `created_at_valid` standard entry of that
+listing (raw pre-epoch2 copies, described below, have no manifest to restore
+and are skipped) and exits 1 when the target holds no dated standard backup.
+The weekly `sonder-restore-smoke` unit passes its output to `restore smoke`.
+
+The raw safety copies that `migrate --adopt-epoch2` writes to
+`<state home>/backups/pre-epoch2-<UTC time>/` have no manifest, so they never
+verify as restorable backups. They are listed with `"kind": "pre-epoch2"` and
+take part in `--keep` and tiered retention, ranked by their timestamp among
+all entries, with two guards. A pre-epoch2 copy is kept until a verified
+standard backup newer than it exists, because until then it is the only copy
+of the pre-adoption state. And a pre-epoch2 copy never takes a `--keep` slot
+or a daily/weekly/monthly bucket away from a standard backup: standard
+backups are retained exactly as if no pre-epoch2 copies existed. Re-running `migrate --adopt-epoch2` on a home that is already adopted
+and verified is a no-op (`"already_adopted": true`) and takes no new copy.
+
 ## Monitoring backup health
 
 ```bash
@@ -86,6 +114,24 @@ verified for as long as your incident policy requires.
 Run the disposable rehearsal against a verified backup before an upgrade or
 recovery exercise.  This is a local/test-only contract: it does not stop the
 service, switch `current`, contact a provider, or provide live failover.
+
+```bash
+sudo -u sonder /opt/sonder/current/venv/bin/python -m sonder_runtime restore rehearse \
+    /var/backups/sonder/<verified-backup> \
+    --workspace /var/tmp/sonder-recovery-rehearsal \
+    --source-revision "<release revision recorded before the upgrade>" --json
+```
+
+`--workspace` must be an existing regular directory (a symlink is refused);
+without it the command uses a fresh temporary directory and removes it when
+empty.  `--source-revision` makes the drill refuse a backup that records a
+different revision; without it the backup's own recorded revision is used.
+The candidate upgrade is labelled `<source>+rehearsal` unless
+`--target-revision` names one.  The command exits 0 with the report below,
+1 when the rehearsal refuses the backup (the JSON names the error and the
+steps completed before it), and 2 for an unusable workspace or request.
+
+The same drill from Python, for a caller composing its own port:
 
 ```python
 from pathlib import Path

@@ -11,6 +11,10 @@ name: build-apps
 # The native project scaffolding (android/, linux/, windows/, macos/) is
 # generated on the fly with `flutter create`, so there is no generated native
 # code to maintain in git.
+#
+# Every job installs the exact Flutter release pinned in app/.flutter-version
+# and resolves packages with --enforce-lockfile against the committed
+# app/pubspec.lock, so CI builds what developers tested.
 
 on:
   push:
@@ -42,18 +46,37 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
+      - name: Read pinned Flutter version
+        shell: bash
+        run: echo "FLUTTER_VERSION=$(tr -d '[:space:]' < .flutter-version)" >> "$GITHUB_ENV"
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           channel: ${{ env.FLUTTER_CHANNEL }}
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
       - run: flutter create --org $APP_ORG --project-name sonder_runtime --platforms=android .
+      - name: Install Sonder app branding
+        run: python ../scripts/install_app_branding.py . --platforms android
       - name: Configure production networking
         run: python ../scripts/configure_flutter_networking.py .
       - name: Bundle local system
         run: python ../scripts/package_local_system.py --out app/build/local-system --zip app/assets/local-system.zip
-      - run: flutter pub get
+      - run: flutter pub get --enforce-lockfile
       - run: flutter analyze
+      # Linux runs every test, including the pixel goldens (tag `golden`).
       - run: flutter test
+      # A golden mismatch writes the master, test and diff images under
+      # test/goldens/failures/ (gitignored). Keep them so the mismatch can be
+      # inspected. `uses:` steps ignore the job's working-directory default,
+      # so the path is relative to the workspace root.
+      - name: Upload golden failure images
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: flutter-golden-failures
+          path: app/test/goldens/failures/
+          if-no-files-found: ignore
+          retention-days: 7
 
   android:
     runs-on: ubuntu-latest
@@ -75,16 +98,22 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      - name: Read pinned Flutter version
+        shell: bash
+        run: echo "FLUTTER_VERSION=$(tr -d '[:space:]' < .flutter-version)" >> "$GITHUB_ENV"
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           channel: ${{ env.FLUTTER_CHANNEL }}
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
       - run: flutter create --org $APP_ORG --project-name sonder_runtime --platforms=android .
+      - name: Install Sonder app branding
+        run: python ../scripts/install_app_branding.py . --platforms android
       - name: Configure production networking
         run: python ../scripts/configure_flutter_networking.py .
       - name: Bundle local system
         run: python ../scripts/package_local_system.py --out app/build/local-system --zip app/assets/local-system.zip
-      - run: flutter pub get
+      - run: flutter pub get --enforce-lockfile
       - name: Build APK (release, debug-signed so it installs directly)
         shell: bash
         run: |
@@ -134,17 +163,23 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang cmake ninja-build pkg-config \
             libgtk-3-dev liblzma-dev libsecret-1-dev libstdc++-12-dev
+      - name: Read pinned Flutter version
+        shell: bash
+        run: echo "FLUTTER_VERSION=$(tr -d '[:space:]' < .flutter-version)" >> "$GITHUB_ENV"
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           channel: ${{ env.FLUTTER_CHANNEL }}
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
       - run: flutter config --enable-linux-desktop
       - run: flutter create --org $APP_ORG --project-name sonder_runtime --platforms=linux .
+      - name: Install Sonder app branding
+        run: python ../scripts/install_app_branding.py . --platforms linux
       - name: Configure Sonder Runtime identity
         run: python ../scripts/configure_flutter_networking.py .
       - name: Bundle local system
         run: python ../scripts/package_local_system.py --out app/build/local-system --zip app/assets/local-system.zip
-      - run: flutter pub get
+      - run: flutter pub get --enforce-lockfile
       - run: flutter build linux --release
       - name: Add local system to Linux app
         run: cp -a build/local-system build/linux/x64/release/bundle/local-system
@@ -172,17 +207,25 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
+      - name: Read pinned Flutter version
+        shell: bash
+        run: echo "FLUTTER_VERSION=$(tr -d '[:space:]' < .flutter-version)" >> "$GITHUB_ENV"
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           channel: ${{ env.FLUTTER_CHANNEL }}
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
       - run: flutter config --enable-windows-desktop
       - run: flutter create --org $env:APP_ORG --project-name sonder_runtime --platforms=windows .
+      - name: Install Sonder app branding
+        run: python ../scripts/install_app_branding.py . --platforms windows
       - name: Configure Sonder Runtime identity
         run: python ../scripts/configure_flutter_networking.py .
       - name: Bundle local system
         run: python ../scripts/package_local_system.py --out app/build/local-system --zip app/assets/local-system.zip
-      - run: flutter pub get
+      - run: flutter pub get --enforce-lockfile
+      # Goldens are Linux-only (font rasterisation differs per platform).
+      - run: flutter test --exclude-tags golden
       - run: flutter build windows --release
       - name: Add local system to Windows app
         run: Copy-Item -Recurse -Force build/local-system build/windows/x64/runner/Release/local-system
@@ -208,30 +251,64 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
+      - name: Read pinned Flutter version
+        shell: bash
+        run: echo "FLUTTER_VERSION=$(tr -d '[:space:]' < .flutter-version)" >> "$GITHUB_ENV"
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           channel: ${{ env.FLUTTER_CHANNEL }}
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
       - run: flutter config --enable-macos-desktop
       - run: flutter create --org $APP_ORG --project-name sonder_runtime --platforms=macos .
+      - name: Install Sonder app branding
+        run: python ../scripts/install_app_branding.py . --platforms macos
       - name: Configure local-network privacy description
         run: python ../scripts/configure_flutter_networking.py .
       - name: Bundle local system
         run: python ../scripts/package_local_system.py --out app/build/local-system --zip app/assets/local-system.zip
-      - run: flutter pub get
+      - run: flutter pub get --enforce-lockfile
+      - run: flutter test --exclude-tags golden
       - run: flutter build macos --release
       - name: Add local system to macOS app
-        run: cp -a build/local-system "build/macos/Build/Products/Release/Sonder Runtime.app/Contents/Resources/local-system"
+        run: cp -a build/local-system "build/macos/Build/Products/Release/Sonder.app/Contents/Resources/local-system"
       - name: Package macOS app
         run: |
           cd build/macos/Build/Products/Release
-          zip -r -y "$GITHUB_WORKSPACE/app/sonder-runtime-macos.zip" "Sonder Runtime.app"
+          zip -r -y "$GITHUB_WORKSPACE/app/sonder-runtime-macos.zip" "Sonder.app"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         id: upload-artifact
         with:
           name: sonder-runtime-macos
           path: app/sonder-runtime-macos.zip
           if-no-files-found: error
+
+  web:
+    # Build smoke only: the browser build must keep compiling (conditional
+    # platform imports, fetch-based HTTP). Nothing is published.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+      - name: Read pinned Flutter version
+        shell: bash
+        run: echo "FLUTTER_VERSION=$(tr -d '[:space:]' < .flutter-version)" >> "$GITHUB_ENV"
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: ${{ env.FLUTTER_CHANNEL }}
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - run: flutter create --org $APP_ORG --project-name sonder_runtime --platforms=web .
+      - name: Install Sonder app branding
+        run: python ../scripts/install_app_branding.py . --platforms web
+      - run: flutter pub get --enforce-lockfile
+      - run: flutter build web --release
 
   integrity:
     needs: [android, linux, windows, macos]

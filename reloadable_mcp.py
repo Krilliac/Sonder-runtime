@@ -20,18 +20,29 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from mcp.server.mcpserver import MCPServer
-from mcp.server.mcpserver.exceptions import ToolError
-from mcp.server.mcpserver.resources import ResourceManager
-from mcp.server.mcpserver.prompts import PromptManager
-from mcp.server.mcpserver.tools import ToolManager
-from mcp.server.lowlevel.server import NotificationOptions
-from mcp.shared.subscriptions import (
-    PromptsListChanged,
-    ResourcesListChanged,
-    ToolsListChanged,
-)
+# The MCP SDK costs roughly a second to import -- about 40% of ``import
+# server`` -- and every process that imports ``server`` for something other
+# than serving MCP (the REPL, the HTTP API, CLI subcommands, every pytest
+# worker) used to pay it. The SDK is therefore loaded on first use: the names
+# below resolve through the module ``__getattr__`` at the bottom of this file,
+# and ``server.py`` holds a ``LazyReloadableMCPServer`` that records its
+# decorator registrations and builds the real ``ReloadableMCPServer`` the first
+# time anything touches the registry. ``tests/test_lazy_mcp_import.py`` pins
+# that ``import server`` leaves ``mcp`` out of ``sys.modules``.
+if TYPE_CHECKING:  # pragma: no cover - static typing only
+    from mcp.server.mcpserver import MCPServer
+    from mcp.server.mcpserver.exceptions import ToolError
+    from mcp.server.mcpserver.resources import ResourceManager
+    from mcp.server.mcpserver.prompts import PromptManager
+    from mcp.server.mcpserver.tools import ToolManager
+    from mcp.server.lowlevel.server import NotificationOptions
+    from mcp.shared.subscriptions import (
+        PromptsListChanged,
+        ResourcesListChanged,
+        ToolsListChanged,
+    )
 
 
 def _refuse_if_gated(name: str, arguments=None) -> None:
@@ -59,7 +70,10 @@ def _refuse_if_gated(name: str, arguments=None) -> None:
     ``GATE_CONTROL_TOOLS`` is exempt, because the refusal below names
     ``permission_mode`` as the remedy and ``plan`` would otherwise refuse that
     tool too -- leaving a client that selected ``plan`` no way to select
-    anything else, across restarts, since the mode persists to disk.
+    anything else, across restarts, since the mode persists to disk. The
+    exemption is a way *out*, not *up*: ``server.permission_mode`` itself
+    refuses an unattended request to raise the mode above ``manual``
+    (``permission_modes.unattended_escalation_refusal``).
 
     Imported lazily: ``permission_modes`` resolves the command catalog, which
     imports ``server``, which imports this module.
@@ -73,6 +87,7 @@ def _refuse_if_gated(name: str, arguments=None) -> None:
     )
     if decision is None or decision.allowed:
         return
+    _load_sdk()
     raise ToolError(
         "%s is refused by the active permission gate: %s (mode=%s, risk=%s). "
         "Change the mode with the permission_mode tool, or write a rule with "
@@ -80,6 +95,69 @@ def _refuse_if_gated(name: str, arguments=None) -> None:
             name, decision.reason, decision.mode, decision.risk,
         )
     )
+
+
+def _refuse_unknown_arguments(tool, arguments) -> None:
+    """Reject argument names the tool's declared input schema does not list.
+
+    The upstream argument models ignore extra fields, so ``{"query": "x",
+    "bogus": 1}`` ran as if ``bogus`` had never been sent -- a misspelt
+    ``max_results`` or ``root`` silently fell back to its default and the
+    caller was never told. The native surface rejects these; this is the same
+    contract for the legacy one. A schema that explicitly admits additional
+    properties is honoured.
+    """
+    if not isinstance(arguments, dict) or not arguments:
+        return
+    schema = getattr(tool, "parameters", None)
+    if not isinstance(schema, dict):
+        return
+    extra = schema.get("additionalProperties")
+    if extra is True or isinstance(extra, dict):
+        return
+    properties = schema.get("properties")
+    accepted = set(properties) if isinstance(properties, dict) else set()
+    unknown = sorted(str(key) for key in arguments if key not in accepted)
+    if not unknown:
+        return
+    shown = ", ".join(key[:64] for key in unknown[:8])
+    if len(unknown) > 8:
+        shown += ", ... (%d more)" % (len(unknown) - 8)
+    raise ToolError(
+        "%s does not accept argument(s): %s. Accepted arguments: %s." % (
+            getattr(tool, "name", "tool"), shown,
+            ", ".join(sorted(accepted)) or "(none)",
+        )
+    )
+
+
+def _flag_legacy_error_reply(result):
+    """Mark a legacy ``ERROR:`` reply as an MCP tool error (``isError``).
+
+    The legacy tools report failures and refusals as text beginning with
+    ``ERROR:`` rather than raising, so a client saw ``isError: false`` for a
+    refused ``file_read``, disabled web tools, or an agent that ran out of
+    steps, and had no protocol-level way to tell them from success. The text
+    itself is kept as the error message.
+
+    The classification is the one the loop surface already applies to the same
+    tool output (``loop_text_result``), deliberately reused rather than
+    re-derived so the two surfaces cannot disagree about what failed.
+    """
+    if getattr(result, "is_error", True):
+        return result
+    content = getattr(result, "content", None) or ()
+    if not content:
+        return result
+    first = content[0]
+    text = getattr(first, "text", None)
+    if getattr(first, "type", None) != "text" or not isinstance(text, str):
+        return result
+    from sonder_runtime.domain.loop_result_formatting import loop_text_result
+
+    if loop_text_result("mcp_tool", text)["ok"]:
+        return result
+    return result.model_copy(update={"is_error": True})
 
 
 def _recovery_action(configured_ready: bool) -> str:
@@ -195,8 +273,153 @@ def _sync_loop_tool_docstring(fn, action_types) -> None:
     fn.__doc__ = head + " " + ", ".join(action_types) + "." + doc[tail_at:]
 
 
-class ReloadableMCPServer(MCPServer):
-    """MCPServer with atomic in-process source and tool-surface refresh."""
+# The bound must admit every call a legacy tool itself accepts. The largest is
+# ``file_batch_write``, whose ``operations_json`` string may be up to
+# ``file_ops.MAX_BATCH_JSON_BYTES`` (4,128,000) UTF-8 bytes. Re-encoded as a
+# JSON-RPC string value it grows by at most 3x (an astral character is 4 UTF-8
+# bytes but 12 bytes as an escaped surrogate pair under ``ensure_ascii``; the
+# already-escaped inner JSON has no raw control characters, and ``"``/``\``
+# only double). A single ``file_write`` at ``MAX_WRITE_BYTES`` (1 MB) is at
+# most 6x (every byte a ``\u00XX`` control escape), which also fits. Plus
+# envelope headroom. The upstream stdio transport reads a line of any length,
+# so without this a single frame could hold arbitrary memory and be echoed back
+# whole. tests/test_legacy_mcp_protocol.py pins it against the file_ops caps.
+LEGACY_MCP_MAX_FRAME_BYTES = 3 * 4_128_000 + 64 * 1024
+
+_PARSE_ERROR = -32700
+_INVALID_REQUEST = -32600
+
+
+def _frame_rejection(raw: bytes):
+    """``None`` for a frame the upstream parser accepts, else the reply.
+
+    The reply is ``(request_id, code, message)``. The upstream ``mcp`` stdio
+    transport (2.0.0) hands a frame it cannot parse to the session as a bare
+    exception, which the server loop drops without answering: ``not json``,
+    a JSON array, ``"jsonrpc": "1.0"``, a lone-surrogate escape, and a request
+    whose ``id`` is ``true`` (accepted upstream as a *notification*) all got no
+    response at all, so a client waiting on that id hung. This applies the
+    very same parser first and answers what it refuses with a JSON-RPC error,
+    echoing the id whenever the frame carried a valid one.
+    """
+    import mcp_types
+
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None, _PARSE_ERROR, "Parse error: frame is not valid UTF-8"
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return None, _PARSE_ERROR, "Parse error: frame is not valid JSON"
+    if not isinstance(value, dict):
+        return None, _INVALID_REQUEST, (
+            "Invalid Request: a frame must be one JSON-RPC object (batches are "
+            "not supported)"
+        )
+    request_id = value.get("id")
+    if "id" in value and type(request_id) not in (int, str):
+        return None, _INVALID_REQUEST, "Invalid Request: id must be a string or integer"
+    try:
+        mcp_types.jsonrpc_message_adapter.validate_json(text, by_name=False)
+    except Exception as exc:
+        kinds = []
+        errors = getattr(exc, "errors", None)
+        if callable(errors):
+            try:
+                kinds = sorted({str(item.get("type", "")) for item in errors()})
+            except Exception:
+                kinds = []
+        if "json_invalid" in kinds:
+            return request_id, _PARSE_ERROR, (
+                "Parse error: frame is not valid JSON-RPC text (for example an "
+                "unpaired UTF-16 surrogate escape)"
+            )
+        return request_id, _INVALID_REQUEST, (
+            "Invalid Request: not a valid JSON-RPC 2.0 message"
+        )
+    return None
+
+
+class _GuardedStdin:
+    """Bounded line source for ``stdio_server`` that answers bad frames.
+
+    It is passed as ``stdio_server(stdin=...)``, whose reader only iterates it,
+    and yields exactly the frames the upstream parser accepts. Everything else
+    is answered here, on the server's own write stream, before the next line
+    is read, so replies keep their order relative to the frames around them.
+    """
+
+    def __init__(self, buffer, *, max_frame_bytes: int = LEGACY_MCP_MAX_FRAME_BYTES):
+        import anyio
+
+        self._buffer = buffer
+        self._max = int(max_frame_bytes)
+        self._ready = anyio.Event()
+        self._write_stream = None
+
+    def attach(self, write_stream) -> None:
+        self._write_stream = write_stream
+        self._ready.set()
+
+    def __aiter__(self):
+        return self._frames()
+
+    async def _readline(self) -> bytes:
+        import anyio.to_thread
+
+        return await anyio.to_thread.run_sync(self._buffer.readline, self._max + 1)
+
+    async def _frames(self):
+        while True:
+            raw = await self._readline()
+            if not raw:
+                return
+            if len(raw) > self._max and not raw.endswith(b"\n"):
+                # Drain the rest of the line so its tail is never read back
+                # as a separate frame (and so a request hidden past the bound
+                # is not executed).
+                while True:
+                    chunk = await self._readline()
+                    if not chunk or chunk.endswith(b"\n"):
+                        break
+                await self._reject(None, _INVALID_REQUEST, (
+                    "Invalid Request: frame exceeds %d bytes" % self._max
+                ))
+                continue
+            if not raw.strip():
+                continue
+            rejection = _frame_rejection(raw)
+            if rejection is None:
+                yield raw.decode("utf-8")
+                continue
+            await self._reject(*rejection)
+
+    async def _reject(self, request_id, code: int, message: str) -> None:
+        import logging
+
+        import mcp_types
+        from mcp.shared.message import SessionMessage
+
+        logging.getLogger("sonder.mcp").warning(
+            "legacy MCP frame rejected: code=%s %s", code, message,
+        )
+        await self._ready.wait()
+        error = mcp_types.JSONRPCError(
+            jsonrpc="2.0", id=request_id,
+            error=mcp_types.ErrorData(code=code, message=message),
+        )
+        await self._write_stream.send(SessionMessage(error))
+
+
+class _ReloadableMCPServerMixin:
+    """MCPServer with atomic in-process source and tool-surface refresh.
+
+    Defined as a mixin so this module imports without the MCP SDK;
+    ``_load_sdk`` combines it with ``MCPServer`` into ``ReloadableMCPServer``.
+    Zero-argument ``super()`` below resolves through the combined class's MRO,
+    so every override still reaches ``MCPServer`` exactly as before.
+    """
 
     def __init__(self, *args, **kwargs):
         self._reload_lock = threading.RLock()
@@ -590,6 +813,43 @@ class ReloadableMCPServer(MCPServer):
                     "error": self._last_error,
                 }
 
+    async def run_stdio_async(self) -> None:
+        """Serve stdio with a bounded frame size and answered parse errors.
+
+        Same claim of fd 0/1 as upstream ``run_stdio_async`` (children and
+        stray prints never touch the wire); only the line source differs --
+        see ``_GuardedStdin``. The claim helpers are upstream-private, so if a
+        future ``mcp`` release moves them this falls back to the stock
+        transport, loudly, rather than failing to serve.
+        """
+        try:
+            from mcp.server import stdio as upstream_stdio
+
+            claim_fd = upstream_stdio._claim_fd
+            open_stdin_diversion = upstream_stdio._open_stdin_diversion
+        except (ImportError, AttributeError):
+            import logging
+
+            logging.getLogger("sonder.mcp").warning(
+                "legacy MCP frame guard unavailable for this mcp release; "
+                "oversized and malformed frames are handled by upstream"
+            )
+            await super().run_stdio_async()
+            return
+        buffer, release = claim_fd(0, sys.stdin, "rb", open_stdin_diversion)
+        try:
+            guard = _GuardedStdin(buffer)
+            async with upstream_stdio.stdio_server(stdin=guard) as (read_stream, write_stream):
+                guard.attach(write_stream)
+                await self._lowlevel_server.run(
+                    read_stream,
+                    write_stream,
+                    self._lowlevel_server.create_initialization_options(),
+                )
+        finally:
+            if release is not None:
+                release()
+
     # The public surface below refreshes but never notifies. MCP 1.x exposed
     # the in-flight request through ``FastMCP.get_context()``, so any of these
     # could reach the client session ambiently; 2.x removed that accessor and
@@ -605,6 +865,14 @@ class ReloadableMCPServer(MCPServer):
 
     async def call_tool(self, name: str, arguments: dict, context=None):
         self.refresh_if_changed()
+        tool = self._tool_manager.get_tool(name)
+        if tool is None:
+            # Nothing would run, so there is nothing to gate: answer as an
+            # unknown tool rather than advising a permission rule for it.
+            raise ToolError(f"Unknown tool: {name}")
+        # Before the gate: a call the tool cannot accept runs nothing, so it
+        # must not spend a one-shot approval or be recorded as a refusal.
+        _refuse_unknown_arguments(tool, arguments)
         # The reach scope wraps the gate and the call: the roots a one-shot
         # approval covered appear only once the gate has spent it for exactly
         # this call, and vanish when the call is over.
@@ -614,7 +882,8 @@ class ReloadableMCPServer(MCPServer):
                           if name == "agent_lane" else arguments)
         with server.approved_call_reach(name, gate_arguments):
             _refuse_if_gated(name, gate_arguments)
-            return await super().call_tool(name, arguments, context)
+            result = await super().call_tool(name, arguments, context)
+        return _flag_legacy_error_reply(result)
 
     async def list_resources(self):
         self.refresh_if_changed()
@@ -767,4 +1036,337 @@ class ReloadableMCPServer(MCPServer):
             "protocol_list_changed": True,
             "provenance": provenance,
         }
+
+
+_SDK_EXPORTS = frozenset({
+    "MCPServer",
+    "ToolError",
+    "ResourceManager",
+    "PromptManager",
+    "ToolManager",
+    "NotificationOptions",
+    "PromptsListChanged",
+    "ResourcesListChanged",
+    "ToolsListChanged",
+    "ReloadableMCPServer",
+})
+_SDK_LOCK = threading.Lock()
+
+
+def _load_sdk():
+    """Import the MCP SDK once; publish its names and ``ReloadableMCPServer``."""
+    namespace = globals()
+    loaded = namespace.get("ReloadableMCPServer")
+    if loaded is not None:
+        return loaded
+    with _SDK_LOCK:
+        loaded = namespace.get("ReloadableMCPServer")
+        if loaded is not None:
+            return loaded
+        from mcp.server.mcpserver import MCPServer
+        from mcp.server.mcpserver.exceptions import ToolError
+        from mcp.server.mcpserver.resources import ResourceManager
+        from mcp.server.mcpserver.prompts import PromptManager
+        from mcp.server.mcpserver.tools import ToolManager
+        from mcp.server.lowlevel.server import NotificationOptions
+        from mcp.shared.subscriptions import (
+            PromptsListChanged,
+            ResourcesListChanged,
+            ToolsListChanged,
+        )
+
+        class ReloadableMCPServer(_ReloadableMCPServerMixin, MCPServer):
+            __doc__ = _ReloadableMCPServerMixin.__doc__
+
+        ReloadableMCPServer.__module__ = __name__
+        ReloadableMCPServer.__qualname__ = "ReloadableMCPServer"
+        namespace.update(
+            MCPServer=MCPServer,
+            ToolError=ToolError,
+            ResourceManager=ResourceManager,
+            PromptManager=PromptManager,
+            ToolManager=ToolManager,
+            NotificationOptions=NotificationOptions,
+            PromptsListChanged=PromptsListChanged,
+            ResourcesListChanged=ResourcesListChanged,
+            ToolsListChanged=ToolsListChanged,
+        )
+        # Published last: its presence is what marks the SDK as loaded.
+        namespace["ReloadableMCPServer"] = ReloadableMCPServer
+        return ReloadableMCPServer
+
+
+def __getattr__(name: str):
+    if name in _SDK_EXPORTS:
+        _load_sdk()
+        return globals()[name]
+    raise AttributeError("module %r has no attribute %r" % (__name__, name))
+
+
+def sdk_loaded() -> bool:
+    """Whether the MCP SDK (and so ``ReloadableMCPServer``) has been imported."""
+    return "ReloadableMCPServer" in globals()
+
+
+def is_reloadable_server(value) -> bool:
+    """``isinstance`` against either registry type, without importing the SDK.
+
+    ``server.py`` uses this to find the registry that survives a hot reload.
+    Naming ``ReloadableMCPServer`` there would import the SDK on every
+    ``import server`` -- the cost the lazy registry exists to avoid -- and a
+    plain ``isinstance`` on a lazy registry would build the real one.
+    """
+    if type(value) is LazyReloadableMCPServer:
+        return True
+    cls = globals().get("ReloadableMCPServer")
+    return cls is not None and isinstance(value, cls)
+
+
+class LazyReloadableMCPServer:
+    """A ``ReloadableMCPServer`` that is built on first use.
+
+    Until something reads the registry, the decorator API ``server.py`` runs
+    at import time -- ``tool``, ``resource``, ``prompt`` and the
+    ``begin/finish/abort_module_refresh`` staging protocol -- is recorded
+    without importing the MCP SDK. Any other attribute access (``run``,
+    ``call_tool``, ``_tool_manager``, ``runtime_snapshot``, ``isinstance``
+    against ``ReloadableMCPServer``, ...) builds the real server, replays the
+    recorded registrations in their original order, and from then on every
+    attribute read, write and delete is forwarded to it.
+
+    The staging protocol keeps its guarantees while lazy: registrations made
+    between ``begin_module_refresh`` and ``finish_module_refresh`` are held
+    apart and replace the committed set only on finish; ``abort`` discards
+    them and keeps the last known-good set. The source identity recorded by
+    ``finish_module_refresh`` is captured at finish time, not at build time,
+    so a file edited in between still shows as a pending refresh afterwards.
+
+    One ordering difference is inherent: upstream decorator validation (a
+    malformed resource URI template, say) raises when the registry is built
+    rather than while ``server.py`` executes. Hot reloads run against the
+    built registry and still fail closed at exec time.
+    """
+
+    def __init__(self, *args, **kwargs):
+        object.__setattr__(self, "_lazy_lock", threading.RLock())
+        object.__setattr__(self, "_lazy_args", (args, kwargs))
+        object.__setattr__(self, "_lazy_real", None)
+        object.__setattr__(self, "_lazy_committed", [])
+        object.__setattr__(self, "_lazy_staging", None)
+        object.__setattr__(self, "_lazy_finish", None)
+        object.__setattr__(self, "_lazy_swaps", 0)
+        object.__setattr__(self, "_lazy_swap_ts", 0)
+        object.__setattr__(self, "_lazy_error", "")
+
+    # -- recording -------------------------------------------------------
+
+    def _lazy_built(self):
+        """The real server, built now if the SDK is already imported.
+
+        Deferring only pays while the SDK is unloaded. Once some caller has
+        imported it anyway, building immediately restores the eager ordering
+        exactly -- ``finish_module_refresh`` then runs on the real registry
+        while the module executes, as it always did.
+        """
+        real = self._lazy_real
+        if real is None and sdk_loaded():
+            real = self._lazy_materialize()
+        return real
+
+    def _lazy_record(self, entry) -> bool:
+        """Record ``entry`` unless the real server exists (then return False)."""
+        with self._lazy_lock:
+            if self._lazy_built() is not None:
+                return False
+            target = self._lazy_staging
+            if target is None:
+                target = self._lazy_committed
+            target.append(entry)
+            return True
+
+    def tool(self, *args, **kwargs):
+        real = self._lazy_built()
+        if real is not None:
+            return real.tool(*args, **kwargs)
+        if args and callable(args[0]):
+            # The same misuse error upstream raises for ``@mcp.tool``.
+            raise TypeError(
+                "The @tool decorator was used incorrectly. Did you forget to "
+                "call it? Use @tool() instead of @tool"
+            )
+
+        def decorator(fn):
+            if not self._lazy_record(("tool", args, kwargs, fn, fn.__doc__)):
+                return self._lazy_real.tool(*args, **kwargs)(fn)
+            # The real ``tool`` keeps ``loop.__doc__`` in lockstep with
+            # ``_LOOP_ACTION_TYPES`` after registering it; readers of the
+            # function must see the synced docstring before the build too.
+            tool_name = kwargs.get("name") or getattr(fn, "__name__", "")
+            if tool_name == "loop" or getattr(fn, "__name__", "") == "loop":
+                module = sys.modules.get(getattr(fn, "__module__", "") or "")
+                action_types = (
+                    getattr(module, "_LOOP_ACTION_TYPES", None) if module else None
+                )
+                _sync_loop_tool_docstring(fn, action_types)
+            return fn
+
+        return decorator
+
+    def resource(self, uri: str, **kwargs):
+        real = self._lazy_built()
+        if real is not None:
+            return real.resource(uri, **kwargs)
+        if callable(uri):
+            raise TypeError(
+                "The @resource decorator was used incorrectly. Did you forget "
+                "to call it? Use @resource('uri') instead of @resource"
+            )
+
+        def decorator(fn):
+            if not self._lazy_record(("resource", (uri,), kwargs, fn, None)):
+                return self._lazy_real.resource(uri, **kwargs)(fn)
+            return fn
+
+        return decorator
+
+    def prompt(self, *args, **kwargs):
+        real = self._lazy_built()
+        if real is not None:
+            return real.prompt(*args, **kwargs)
+        if args and callable(args[0]):
+            raise TypeError(
+                "The @prompt decorator was used incorrectly. Did you forget "
+                "to call it? Use @prompt() instead of @prompt"
+            )
+
+        def decorator(fn):
+            if not self._lazy_record(("prompt", args, kwargs, fn, None)):
+                return self._lazy_real.prompt(*args, **kwargs)(fn)
+            return fn
+
+        return decorator
+
+    def begin_module_refresh(self) -> None:
+        with self._lazy_lock:
+            real = self._lazy_built()
+            if real is None:
+                if self._lazy_staging is None:
+                    object.__setattr__(self, "_lazy_staging", [])
+                return
+        real.begin_module_refresh()
+
+    def abort_module_refresh(self, error: Exception | str) -> None:
+        with self._lazy_lock:
+            real = self._lazy_built()
+            if real is None:
+                object.__setattr__(self, "_lazy_staging", None)
+                error_type = (
+                    "RuntimeError" if isinstance(error, str) else type(error).__name__
+                )
+                object.__setattr__(
+                    self, "_lazy_error", "%s: source refresh failed" % error_type
+                )
+                return
+        real.abort_module_refresh(error)
+
+    def finish_module_refresh(
+        self,
+        module_name: str,
+        source_path: str,
+        namespace: dict | None = None,
+    ) -> bool:
+        with self._lazy_lock:
+            real = self._lazy_built()
+            if real is None:
+                # Read now, exactly when the eager registry read it.
+                state = _source_state(source_path)
+                if self._lazy_staging is not None:
+                    object.__setattr__(self, "_lazy_committed", self._lazy_staging)
+                    object.__setattr__(self, "_lazy_staging", None)
+                    object.__setattr__(self, "_lazy_swaps", self._lazy_swaps + 1)
+                    object.__setattr__(self, "_lazy_swap_ts", int(time.time()))
+                object.__setattr__(
+                    self, "_lazy_finish", (module_name, source_path, namespace, state)
+                )
+                object.__setattr__(self, "_lazy_error", "")
+                # No client can have listed a surface that was never built.
+                return False
+        return real.finish_module_refresh(module_name, source_path, namespace)
+
+    # -- building --------------------------------------------------------
+
+    @staticmethod
+    def _lazy_replay(real, entry) -> None:
+        kind, args, kwargs, fn, raw_doc = entry
+        if kind == "tool":
+            # Register with the docstring the eager registry saw; ``tool``
+            # re-applies the ``loop`` sync afterwards and reaches the same text.
+            fn.__doc__ = raw_doc
+            real.tool(*args, **kwargs)(fn)
+        elif kind == "resource":
+            real.resource(*args, **kwargs)(fn)
+        else:
+            real.prompt(*args, **kwargs)(fn)
+
+    def _lazy_materialize(self):
+        real = self._lazy_real
+        if real is not None:
+            return real
+        with self._lazy_lock:
+            real = self._lazy_real
+            if real is not None:
+                return real
+            cls = _load_sdk()
+            args, kwargs = self._lazy_args
+            real = cls(*args, **kwargs)
+            for entry in self._lazy_committed:
+                self._lazy_replay(real, entry)
+            finish = self._lazy_finish
+            if finish is not None:
+                module_name, source_path, namespace, state = finish
+                real._staging_source_state = state
+                real.finish_module_refresh(module_name, source_path, namespace)
+            if self._lazy_swaps:
+                real._refresh_count += self._lazy_swaps
+                real._last_refresh_ts = self._lazy_swap_ts
+            if self._lazy_error:
+                real._last_error = self._lazy_error
+            staging = self._lazy_staging
+            if staging is not None:
+                # Built mid-refresh: keep collecting into an isolated registry.
+                real.begin_module_refresh()
+                for entry in staging:
+                    self._lazy_replay(real, entry)
+            object.__setattr__(self, "_lazy_committed", [])
+            object.__setattr__(self, "_lazy_staging", None)
+            object.__setattr__(self, "_lazy_real", real)
+            return real
+
+    # -- forwarding ------------------------------------------------------
+
+    @property
+    def __class__(self):
+        return type(self._lazy_materialize())
+
+    def __getattr__(self, name: str):
+        if name.startswith("__") and name.endswith("__"):
+            # Protocol probes (copy, pickle, inspect, ...) must not import the
+            # SDK; ``MCPServer`` defines no dunder attributes they look for.
+            raise AttributeError(name)
+        return getattr(self._lazy_materialize(), name)
+
+    def __setattr__(self, name: str, value) -> None:
+        setattr(self._lazy_materialize(), name, value)
+
+    def __delattr__(self, name: str) -> None:
+        delattr(self._lazy_materialize(), name)
+
+    def __dir__(self):
+        return dir(self._lazy_materialize())
+
+    def __repr__(self) -> str:
+        real = self._lazy_real
+        if real is None:
+            return "<LazyReloadableMCPServer (MCP SDK not loaded yet)>"
+        return repr(real)
 

@@ -25,6 +25,14 @@ abstract final class SonderTheme {
   /// applied where numbers line up in columns.
   static const mono = 'IBM Plex Mono';
 
+  /// The bundled symbol subset (`assets/fonts/SonderSymbols.ttf`) holding the
+  /// status-vocabulary glyphs Plex lacks: ❯ ◈ ⊘ ✗ ▸ ● and friends.
+  static const symbols = 'SonderSymbols';
+
+  /// The fallback chain every Sans and Mono style carries, so a glyph such
+  /// as ◈ or ⊘ renders from a bundled face instead of tofu or a network font.
+  static const fontFallback = <String>[symbols];
+
   static ThemeData get dark => _build(Brightness.dark);
   static ThemeData get light => _build(Brightness.light);
 
@@ -65,6 +73,7 @@ abstract final class SonderTheme {
       brightness: brightness,
       colorScheme: scheme,
       fontFamily: sans,
+      fontFamilyFallback: fontFallback,
       textTheme: text,
       scaffoldBackgroundColor: tokens.canvas,
       canvasColor: tokens.canvas,
@@ -101,17 +110,23 @@ abstract final class SonderTheme {
           horizontal: 12,
           vertical: 10,
         ),
+        // Field boundaries are control boundaries: hairlineStrong keeps them
+        // at 3:1 or better against both the canvas and the fill (WCAG 1.4.11).
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(SonderRadius.row),
-          borderSide: BorderSide(color: tokens.hairline),
+          borderSide: BorderSide(color: tokens.hairlineStrong),
         ),
         enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(SonderRadius.row),
+          borderSide: BorderSide(color: tokens.hairlineStrong),
+        ),
+        disabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(SonderRadius.row),
           borderSide: BorderSide(color: tokens.hairline),
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(SonderRadius.row),
-          borderSide: BorderSide(color: tokens.accent, width: 1.5),
+          borderSide: BorderSide(color: tokens.accentText, width: 1.5),
         ),
       ),
       chipTheme: ChipThemeData(
@@ -143,7 +158,7 @@ abstract final class SonderTheme {
       navigationRailTheme: NavigationRailThemeData(
         backgroundColor: tokens.panel,
         indicatorColor: tokens.raised,
-        selectedIconTheme: IconThemeData(color: tokens.accent, size: 20),
+        selectedIconTheme: IconThemeData(color: tokens.accentText, size: 20),
         unselectedIconTheme: IconThemeData(color: tokens.text2, size: 20),
         selectedLabelTextStyle: text.labelMedium?.copyWith(color: tokens.text),
         unselectedLabelTextStyle:
@@ -272,6 +287,7 @@ abstract final class SonderTheme {
         {Color? color, double spacing = 0}) {
       return TextStyle(
         fontFamily: sans,
+        fontFamilyFallback: fontFallback,
         fontSize: size,
         height: height / size,
         fontWeight: weight,
@@ -290,8 +306,8 @@ abstract final class SonderTheme {
       bodySmall: style(12, 18, FontWeight.w400, color: tokens.text2),
       labelLarge: style(13, 18, FontWeight.w500),
       labelMedium: style(12, 16, FontWeight.w500, color: tokens.text2),
-      labelSmall: style(11, 16, FontWeight.w600,
-          color: tokens.muted, spacing: 0.88),
+      labelSmall:
+          style(11, 16, FontWeight.w600, color: tokens.muted, spacing: 0.88),
     );
   }
 }
@@ -319,6 +335,10 @@ class SonderTokens extends ThemeExtension<SonderTokens> {
   final Color text2;
   final Color muted;
   final Color accent;
+
+  /// The accent as text or a thin glyph: 4.5:1 on every surface. [accent]
+  /// stays the fill, focus and icon colour (3:1 is enough there).
+  final Color accentText;
   final Color onAccent;
   final Color accentDim;
   final Color ok;
@@ -340,6 +360,7 @@ class SonderTokens extends ThemeExtension<SonderTokens> {
     required this.text2,
     required this.muted,
     required this.accent,
+    required this.accentText,
     required this.onAccent,
     required this.accentDim,
     required this.ok,
@@ -357,11 +378,12 @@ class SonderTokens extends ThemeExtension<SonderTokens> {
     panel: Color(0xFF0F171E),
     raised: Color(0xFF141F28),
     hairline: Color(0xFF1F2C36),
-    hairlineStrong: Color(0xFF2A3944),
+    hairlineStrong: Color(0xFF5A6C7E),
     text: Color(0xFFE7EDF2),
     text2: Color(0xFFA5B2BD),
-    muted: Color(0xFF6F7E8A),
+    muted: Color(0xFF7F8E9A),
     accent: Color(0xFF63D6C8),
+    accentText: Color(0xFF63D6C8),
     onAccent: Color(0xFF062A27),
     accentDim: Color(0x2463D6C8),
     ok: Color(0xFF79D394),
@@ -379,20 +401,21 @@ class SonderTokens extends ThemeExtension<SonderTokens> {
     panel: Color(0xFFFFFFFF),
     raised: Color(0xFFEEF3F4),
     hairline: Color(0xFFDCE5E8),
-    hairlineStrong: Color(0xFFC7D3D8),
+    hairlineStrong: Color(0xFF7A8D98),
     text: Color(0xFF0F1A21),
     text2: Color(0xFF42525C),
     muted: Color(0xFF5F6F7A),
     accent: Color(0xFF1FA597),
+    accentText: Color(0xFF0A7B73),
     onAccent: Color(0xFF062A27),
     accentDim: Color(0x1F1FA597),
-    ok: Color(0xFF2E8B57),
+    ok: Color(0xFF1F7A45),
     info: Color(0xFF2F6FB3),
     warn: Color(0xFF946000),
-    danger: Color(0xFFC93C3C),
-    dangerDim: Color(0x1FC93C3C),
+    danger: Color(0xFFC23636),
+    dangerDim: Color(0x1FC23636),
     auto: Color(0xFF7A4BB5),
-    mutation: Color(0xFFB85C2B),
+    mutation: Color(0xFFA4501F),
     execution: Color(0xFF7A5A46),
   );
 
@@ -412,6 +435,7 @@ class SonderTokens extends ThemeExtension<SonderTokens> {
   }) {
     return TextStyle(
       fontFamily: SonderTheme.mono,
+      fontFamilyFallback: SonderTheme.fontFallback,
       fontSize: size,
       height: (height ?? size + 6) / size,
       fontWeight: weight,
@@ -431,6 +455,7 @@ class SonderTokens extends ThemeExtension<SonderTokens> {
     Color? text2,
     Color? muted,
     Color? accent,
+    Color? accentText,
     Color? onAccent,
     Color? accentDim,
     Color? ok,
@@ -452,6 +477,7 @@ class SonderTokens extends ThemeExtension<SonderTokens> {
       text2: text2 ?? this.text2,
       muted: muted ?? this.muted,
       accent: accent ?? this.accent,
+      accentText: accentText ?? this.accentText,
       onAccent: onAccent ?? this.onAccent,
       accentDim: accentDim ?? this.accentDim,
       ok: ok ?? this.ok,
@@ -479,6 +505,7 @@ class SonderTokens extends ThemeExtension<SonderTokens> {
       text2: mix(text2, other.text2),
       muted: mix(muted, other.muted),
       accent: mix(accent, other.accent),
+      accentText: mix(accentText, other.accentText),
       onAccent: mix(onAccent, other.onAccent),
       accentDim: mix(accentDim, other.accentDim),
       ok: mix(ok, other.ok),
@@ -490,5 +517,24 @@ class SonderTokens extends ThemeExtension<SonderTokens> {
       mutation: mix(mutation, other.mutation),
       execution: mix(execution, other.execution),
     );
+  }
+}
+
+/// WCAG 2.x contrast arithmetic, shared by the contrast tests and any
+/// widget that must pick a legible foreground at run time.
+abstract final class SonderContrast {
+  /// Minimum ratio for body text and status words.
+  static const text = 4.5;
+
+  /// Minimum ratio for control boundaries, focus rings and meaningful icons.
+  static const control = 3.0;
+
+  /// The contrast ratio of two opaque colours, 1.0 to 21.0.
+  static double ratio(Color a, Color b) {
+    final la = a.computeLuminance();
+    final lb = b.computeLuminance();
+    final hi = la > lb ? la : lb;
+    final lo = la > lb ? lb : la;
+    return (hi + 0.05) / (lo + 0.05);
   }
 }

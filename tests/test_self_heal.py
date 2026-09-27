@@ -83,7 +83,10 @@ def test_self_heal_repairs_invalid_json_configs(monkeypatch, tmp_path):
     assert "workflows_invalid" in {i.code for i in issues}
     after, actions = self_heal.repair(db, apply=True)
     assert not any(i.code.endswith("_invalid") for i in after)
-    assert json.loads((tmp_path / "emotion_vectors.json").read_text(encoding="utf-8"))
+    # The corrupt bundled default is tracked source: repair writes the live
+    # state-home copy (which now shadows it) and leaves the bundled file as is.
+    assert (tmp_path / "emotion_vectors.json").read_text(encoding="utf-8") == "{bad"
+    assert emotion_vectors.read_vectors() == emotion_vectors.DEFAULT_VECTORS
     assert json.loads((tmp_path / "workflows.json").read_text(encoding="utf-8"))
     assert list(tmp_path.glob("workflows.json.bak-*"))
 

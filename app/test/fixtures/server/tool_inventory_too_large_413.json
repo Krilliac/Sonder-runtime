@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "TOOL_INVENTORY_TOO_LARGE",
+    "message": "filter by category or name"
+  }
+}

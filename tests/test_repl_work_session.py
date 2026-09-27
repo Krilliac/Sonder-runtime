@@ -5,12 +5,14 @@ import sonder_runtime.interfaces.repl.repl as repl
 
 
 @pytest.mark.parametrize('new_thread', [False, True])
-def test_work_persists_exact_host_selected_session_before_execution(monkeypatch, new_thread):
+def test_work_persists_exact_host_selected_session_before_execution(monkeypatch, tmp_path, new_thread):
     monkeypatch.setattr(repl, '_legacy_runtime', None)
     repl.configure_legacy_runtime(server)
     ids = iter(('1111111111111111', '2222222222222222'))
     monkeypatch.setattr(repl.memory_store, 'new_id', lambda: next(ids))
-    lines = iter((('/new',) if new_thread else ()) + ('/work inspect repository', '/exit'))
+    # Managed work needs a selected directory; ``/work`` without one asks.
+    lines = iter((('/new',) if new_thread else ())
+                 + ('/workspace %s' % tmp_path, '/work inspect repository', '/exit'))
     monkeypatch.setattr(repl, '_read_input', lambda *_a, **_k: next(lines))
     monkeypatch.setattr(repl, '_startup_banner', lambda *_a: '')
     monkeypatch.setattr(repl, '_maybe_live_reload', lambda: None)
@@ -34,3 +36,4 @@ def test_work_persists_exact_host_selected_session_before_execution(monkeypatch,
     monkeypatch.setattr(server, '_run_managed_repl_work', managed)
     repl.main()
     assert len(calls) == 1
+    assert calls[0]['project'] == str(tmp_path.resolve())

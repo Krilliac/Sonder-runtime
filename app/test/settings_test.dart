@@ -36,15 +36,17 @@ class _FailingCredentialStore implements CredentialStore {
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  test('malformed restored account tokens are never activated or rewritten', () async {
-    SharedPreferences.setMockInitialValues({'sonder_server_url':'https://host.test'});
+  test('malformed restored account tokens are never activated or rewritten',
+      () async {
+    SharedPreferences.setMockInitialValues(
+        {'sonder_server_url': 'https://host.test'});
     final store = _MemoryCredentialStore();
-    for(final token in ['x' * 513, 'has space', 'has\u0000control']) {
-      final raw = jsonEncode({'token':token,'origin':'https://host.test'});
+    for (final token in ['x' * 513, 'has space', 'has\u0000control']) {
+      final raw = jsonEncode({'token': token, 'origin': 'https://host.test'});
       store.values['sonder_account_session'] = raw;
-      final loaded = await Settings.load(credentialStore:store);
-      expect(loaded.accountSession,isNull);
-      expect(store.values['sonder_account_session'],raw);
+      final loaded = await Settings.load(credentialStore: store);
+      expect(loaded.accountSession, isNull);
+      expect(store.values['sonder_account_session'], raw);
     }
   });
   test('account record is secure, origin-bound and independent', () async {
@@ -65,13 +67,17 @@ void main() {
     final mismatched = await Settings.load(credentialStore: store);
     expect(mismatched.accountSession!.origin, 'https://host.test');
     final before = Map<String, String>.from(store.values);
-    await expectLater(mismatched.save(credentialStore: store), throwsStateError);
+    await expectLater(
+        mismatched.save(credentialStore: store), throwsStateError);
     expect(store.values, before);
     mismatched.serverUrl = 'http://remote.test';
-    await expectLater(mismatched.save(credentialStore: store), throwsStateError);
+    await expectLater(
+        mismatched.save(credentialStore: store), throwsStateError);
     expect(store.values, before);
-    await Settings(serverUrl: 'https://foreign.test').save(credentialStore: store);
-    expect(store.values['sonder_account_session'], before['sonder_account_session']);
+    await Settings(serverUrl: 'https://foreign.test')
+        .save(credentialStore: store);
+    expect(store.values['sonder_account_session'],
+        before['sonder_account_session']);
     await Settings.clearAccountSession(credentialStore: store);
     expect(store.values['sonder_api_key'], 'deployment');
   });

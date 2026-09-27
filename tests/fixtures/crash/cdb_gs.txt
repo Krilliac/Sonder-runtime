@@ -1,0 +1,26 @@
+Loading Dump File [C:\run\in\spark_game_gs.dmp]
+(2b10.2c44): Security check failure or stack buffer overrun - code c0000409 (first/second chance not available)
+0:000> .echo SONDER_0123456789abcdef_BEGIN;.ecxr;kn 64;q
+SONDER_0123456789abcdef_BEGIN
+SONDER_0123456789abcdef_STACK
+ # Child-SP          RetAddr               Call Site
+00 000000d3`1e8ff5a8 00007ff6`10001890     spark_game!__report_gsfailure+0x1d [d:\a01\_work\43\s\src\vctools\crt\vcstartup\src\gs\gs_report.c @ 220]
+01 000000d3`1e8ff5b0 00007ff6`10002100     spark_game!Physics::Integrate+0x90 [C:\agent\_work\3\s\Engine\Physics\integrate.cpp @ 57]
+02 000000d3`1e8ff610 00007ff6`10003000     spark_game!Game::RunFrame+0x60 [C:\agent\_work\3\s\Engine\Game\game.cpp @ 121]
+SONDER_0123456789abcdef_ANALYZE
+ExceptionAddress: 00007ff61000187d (spark_game!__report_gsfailure+0x000000000000001d)
+   ExceptionCode: c0000409 (Security check failure or stack buffer overrun)
+  ExceptionFlags: 00000001
+NumberParameters: 1
+   Parameter[0]: 0000000000000002
+Subcode: 0x2 FAST_FAIL_STACK_COOKIE_CHECK_FAILURE
+
+FAILURE_BUCKET_ID:  STACK_BUFFER_OVERRUN_STACK_COOKIE_CHECK_FAILURE_MISSING_GSFRAME_c0000409_spark_game.exe!__report_gsfailure
+SONDER_0123456789abcdef_THREADS
+.  0  Id: 2b10.2c44 Suspend: 0 Teb: 000000d3`1e6f0000 Unfrozen
+ # Child-SP          RetAddr               Call Site
+00 000000d3`1e8ff5a8 00007ff6`10001890     spark_game!__report_gsfailure+0x1d
+SONDER_0123456789abcdef_MODULES
+start             end                 module name
+00007ff6`10000000 00007ff6`10020000   spark_game spark_game.exe Tue Mar  5 09:58:00 2024 (65E6ED38)
+SONDER_0123456789abcdef_END

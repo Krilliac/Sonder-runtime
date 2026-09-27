@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 815.04 262" role="img" aria-labelledby="t d">
+<title id="t">Sonder Runtime</title>
+<desc id="d">Sonder Runtime logo: a purple-to-blue split S mark beside the SONDER RUNTIME wordmark on a dark navy badge.</desc>
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#16173d"/><stop offset="1" stop-color="#0b0c22"/></linearGradient>
+<linearGradient id="rim" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#a56bf5" stop-opacity=".9"/><stop offset="1" stop-color="#5aa0ff" stop-opacity=".78"/></linearGradient>
+<linearGradient id="sg" gradientUnits="userSpaceOnUse" x1="92.36" y1="62.84" x2="203.32" y2="197.16"><stop offset="0" stop-color="#b56cf7"/><stop offset=".5" stop-color="#8a85fb"/><stop offset="1" stop-color="#4fa6ff"/></linearGradient>
+<linearGradient id="dv" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#aeb2e6" stop-opacity="0"/><stop offset=".5" stop-color="#aeb2e6" stop-opacity=".95"/><stop offset="1" stop-color="#aeb2e6" stop-opacity="0"/></linearGradient>
+<radialGradient id="gl" gradientUnits="userSpaceOnUse" cx="147.84" cy="130" r="146.32"><stop offset="0" stop-color="#7d6cff" stop-opacity=".24"/><stop offset="1" stop-color="#7d6cff" stop-opacity="0"/></radialGradient>
+</defs>
+<rect x="6" y="12" width="803.04" height="236" rx="118" fill="url(#bg)"/>
+<rect x="6" y="12" width="803.04" height="236" rx="118" fill="url(#gl)"/>
+<rect x="7.5" y="13.5" width="800.04" height="233" rx="116.5" fill="none" stroke="url(#rim)" stroke-width="3"/>
+<path fill="url(#sg)" d="M210.62 65.03H126.65A41.59 39.24 0 0 0 126.65 143.5H131.29L152.36 116.5H126.65A14.58 12.23 0 0 1 126.65 92.04H189.55ZM85.06 194.97H169.03A41.59 39.24 0 0 0 169.03 116.5H164.39L143.32 143.5H169.03A14.58 12.23 0 0 1 169.03 167.96H106.13Z"/>
+<rect x="253.62" y="68" width="2" height="124" fill="url(#dv)"/>
+<path fill="#f4f5fb" d="M456.7 77H466.2V129H456.7ZM488.8 77H498.3V129H488.8ZM456.7 77L467.91 77L498.3 129L487.09 129ZM533.66 77H543.16V129H533.66ZM613.74 77H623.24V129H613.74ZM613.74 77H645.98V85.55H613.74ZM613.74 98.73H642.11V107.27H613.74ZM613.74 120.45H645.98V129H613.74ZM681.34 77H690.84V129H681.34ZM696.73 108.81L708.13 108.81L719.82 129L708.42 129Z"/>
+<path fill="none" stroke="#f4f5fb" stroke-width="9.5" d="M329.8 88.46C326.03 82.29 321.4 80.97 317.05 80.97C308.65 80.97 303.72 86.26 303.72 92.87C303.72 100.8 310.09 101.68 317.34 103.44C324.87 105.2 331.25 106.97 331.25 114.02C331.25 121.06 325.45 125.03 317.34 125.03C311.54 125.03 306.33 121.95 303.72 116.22M374.61 103A21.77 22.03 0 1 1 418.15 103A21.77 22.03 0 1 1 374.61 103ZM538.41 81.75H552.38A21.25 21.25 0 0 1 552.38 124.25H538.41M686.09 81.75H700.59A11.41 11.41 0 0 1 700.59 104.56H686.09"/>
+<path fill="#a78bff" d="M298.62 156H304.02V183H298.62ZM306.61 172.51L313.09 172.51L318.6 183L312.12 183ZM438.07 156H443.47V183H438.07ZM454.27 156H459.67V183H454.27ZM438.07 156L444.44 156L459.67 183L453.3 183ZM508.6 156H528.04V160.86H508.6ZM515.62 156H521.02V183H515.62ZM576.97 156H582.37V183H576.97ZM631.31 156H636.71V183H631.31ZM652.91 156H658.31V183H652.91ZM631.31 156L637.68 156L648 178.14L641.62 178.14ZM648 178.14L641.62 178.14L651.94 156L658.31 156ZM707.24 156H712.64V183H707.24ZM707.24 156H723.98V160.86H707.24ZM707.24 167.07H721.97V171.93H707.24ZM707.24 178.14H723.98V183H707.24Z"/>
+<path fill="none" stroke="#a78bff" stroke-width="5.4" d="M301.32 158.7H308.5A5.81 5.81 0 0 1 308.5 170.31H301.32M370.23 156V172.2A8.1 8.51 0 0 0 386.43 172.2V156"/>
+</svg>

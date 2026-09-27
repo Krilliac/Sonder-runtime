@@ -1,0 +1,3908 @@
+{
+  "digest": "78d3e0a5c4d10ee977c6722d00eab68b13d491028e8b7d0ed32e830311a89af1",
+  "events": [
+    {
+      "name": "approval.denied",
+      "required": [
+        "approval_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "approval_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "approval_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "approval.granted",
+      "required": [
+        "approval_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "approval_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "approval_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "approval.requested",
+      "required": [
+        "action",
+        "approval_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "approval_id": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "action",
+          "approval_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "artifact.attached",
+      "required": [
+        "artifact_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "type": "string"
+          },
+          "artifact_type": {
+            "type": "string"
+          },
+          "content_ref": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "artifact.created",
+      "required": [
+        "artifact_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "type": "string"
+          },
+          "artifact_type": {
+            "type": "string"
+          },
+          "content_ref": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "artifact.updated",
+      "required": [
+        "artifact_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "type": "string"
+          },
+          "artifact_type": {
+            "type": "string"
+          },
+          "content_ref": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "cancellation.completed",
+      "required": [
+        "target_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "provenance": {
+            "type": "object"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "cancellation.requested",
+      "required": [
+        "target_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "provenance": {
+            "type": "object"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "compaction.completed",
+      "required": [
+        "compaction_id",
+        "summary_ref"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "compaction_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "removed_items": {
+            "type": "integer"
+          },
+          "summary_ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "compaction_id",
+          "summary_ref"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "compaction.started",
+      "required": [
+        "compaction_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "compaction_id": {
+            "type": "string"
+          },
+          "context_ref": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "compaction_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "context.updated",
+      "required": [
+        "context_ref"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "context_ref": {
+            "type": "string"
+          },
+          "item_count": {
+            "type": "integer"
+          },
+          "provenance": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "context_ref"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "context.window_changed",
+      "required": [
+        "window_tokens"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "previous_tokens": {
+            "type": "integer"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "window_tokens": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "window_tokens"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "error.raised",
+      "required": [
+        "error_code"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "error_code": {
+            "type": "string"
+          },
+          "message_ref": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "retryable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "error_code"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "error.recovered",
+      "required": [
+        "error_code"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "error_code": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "recovery_ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error_code"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "goal.completed",
+      "required": [
+        "goal_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "goal_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "status": {
+            "type": "string"
+          },
+          "title_ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "goal_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "goal.created",
+      "required": [
+        "goal_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "goal_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "status": {
+            "type": "string"
+          },
+          "title_ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "goal_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "goal.updated",
+      "required": [
+        "goal_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "goal_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "status": {
+            "type": "string"
+          },
+          "title_ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "goal_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "message.completed",
+      "required": [
+        "message_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "message_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "message.emitted",
+      "required": [
+        "message_id",
+        "role"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "content_ref": {
+            "type": "string"
+          },
+          "message_id": {
+            "type": "string"
+          },
+          "part_count": {
+            "type": "integer"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "role": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message_id",
+          "role"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "message.received",
+      "required": [
+        "message_id",
+        "role"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "content_ref": {
+            "type": "string"
+          },
+          "message_id": {
+            "type": "string"
+          },
+          "part_count": {
+            "type": "integer"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "role": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message_id",
+          "role"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "model.completed",
+      "required": [
+        "model",
+        "request_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "finish_reason": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "output_tokens": {
+            "type": "integer"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "model",
+          "request_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "model.failed",
+      "required": [
+        "request_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "error_code": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "retryable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "request_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "model.requested",
+      "required": [
+        "model",
+        "request_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "input_tokens": {
+            "type": "integer"
+          },
+          "model": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "model",
+          "request_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "model.started",
+      "required": [
+        "model",
+        "request_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "input_tokens": {
+            "type": "integer"
+          },
+          "model": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "model",
+          "request_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "plan.created",
+      "required": [
+        "plan_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "goal_id": {
+            "type": "string"
+          },
+          "plan_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "step_count": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "plan_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "plan.step_completed",
+      "required": [
+        "plan_id",
+        "step_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "plan_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "status": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "plan_id",
+          "step_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "plan.step_started",
+      "required": [
+        "plan_id",
+        "step_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "plan_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "status": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "plan_id",
+          "step_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "prompt.created",
+      "required": [
+        "prompt_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "content_ref": {
+            "type": "string"
+          },
+          "prompt_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "template_ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "prompt_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "prompt.submitted",
+      "required": [
+        "prompt_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "content_ref": {
+            "type": "string"
+          },
+          "prompt_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "template_ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "prompt_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "retrieval.completed",
+      "required": [
+        "result_count",
+        "retrieval_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "provenance": {
+            "type": "object"
+          },
+          "result_count": {
+            "type": "integer"
+          },
+          "results_ref": {
+            "type": "string"
+          },
+          "retrieval_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result_count",
+          "retrieval_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "retrieval.requested",
+      "required": [
+        "retrieval_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "type": "integer"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "query_ref": {
+            "type": "string"
+          },
+          "retrieval_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "retrieval_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "session.ended",
+      "required": [],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "provenance": {
+            "type": "object"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      }
+    },
+    {
+      "name": "session.paused",
+      "required": [],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "provenance": {
+            "type": "object"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      }
+    },
+    {
+      "name": "session.resumed",
+      "required": [],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "provenance": {
+            "type": "object"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      }
+    },
+    {
+      "name": "session.started",
+      "required": [],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "provenance": {
+            "type": "object"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      }
+    },
+    {
+      "name": "subagent.completed",
+      "required": [
+        "subagent_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "provenance": {
+            "type": "object"
+          },
+          "result_ref": {
+            "type": "string"
+          },
+          "subagent_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "subagent_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "subagent.failed",
+      "required": [
+        "subagent_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "error_code": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "subagent_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "subagent_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "subagent.spawned",
+      "required": [
+        "subagent_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "parent_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "role": {
+            "type": "string"
+          },
+          "subagent_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "subagent_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "subagent.started",
+      "required": [
+        "subagent_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "parent_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "role": {
+            "type": "string"
+          },
+          "subagent_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "subagent_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "tool.completed",
+      "required": [
+        "call_id",
+        "tool"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "call_id": {
+            "type": "string"
+          },
+          "duration_ms": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "result_ref": {
+            "type": "string"
+          },
+          "tool": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "call_id",
+          "tool"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "tool.failed",
+      "required": [
+        "call_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "call_id": {
+            "type": "string"
+          },
+          "error_code": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "retryable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "call_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "tool.requested",
+      "required": [
+        "call_id",
+        "tool"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "arguments_ref": {
+            "type": "string"
+          },
+          "call_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "tool": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "call_id",
+          "tool"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "tool.started",
+      "required": [
+        "call_id",
+        "tool"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "arguments_ref": {
+            "type": "string"
+          },
+          "call_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "tool": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "call_id",
+          "tool"
+        ],
+        "type": "object"
+      }
+    }
+  ],
+  "schema_selection": {
+    "on_demand": true,
+    "schema": "sonder-tool-schema-selection-v1",
+    "summary_first": true,
+    "visible_names": [
+      "agent_lane",
+      "approximate_location_lookup",
+      "archive_create",
+      "archive_extract",
+      "archive_list",
+      "artifact_risk_inspect",
+      "build_fix",
+      "build_fix_restore",
+      "build_fix_result",
+      "build_job",
+      "build_job_result",
+      "build_model",
+      "compute_artifact_fetch",
+      "compute_cancel",
+      "compute_status",
+      "compute_submit",
+      "crash_digest",
+      "crash_triage",
+      "data_inspect",
+      "data_query",
+      "debug_run_result",
+      "dependency_inventory",
+      "directory_create",
+      "directory_digest",
+      "directory_tree",
+      "edit_file",
+      "fetch_artifact",
+      "file_batch_write",
+      "file_copy",
+      "file_delete",
+      "file_digest",
+      "file_edit",
+      "file_find",
+      "file_move",
+      "file_read",
+      "file_read_range",
+      "file_write",
+      "image_inspect",
+      "json_patch",
+      "log_inspect",
+      "make_directory",
+      "output_digest",
+      "process_list",
+      "process_memory_risk_inspect",
+      "profile_capture_digest",
+      "profile_digest",
+      "program_search",
+      "project_detect",
+      "read_file",
+      "run_program",
+      "run_script",
+      "script_search",
+      "secret_scan",
+      "test_run",
+      "test_run_result",
+      "text_patch",
+      "text_search",
+      "tool_inventory",
+      "verify_artifact",
+      "vision_analyze",
+      "weather_lookup",
+      "web_fetch",
+      "web_search",
+      "workspace_compare",
+      "workspace_run",
+      "write_file"
+    ]
+  },
+  "schema_version": "1",
+  "summary": {
+    "on_demand_schema": true,
+    "schema": "sonder-tool-summary-v1",
+    "summary_first": true,
+    "tools": [
+      {
+        "name": "agent_lane",
+        "schema_available": true,
+        "summary": "Open a fresh parent with open_parent; retain its scoped capability to control independent agent conversations. Never place the capability in task text or files."
+      },
+      {
+        "name": "approximate_location_lookup",
+        "schema_available": true,
+        "summary": "Resolve approximate location after explicit consent"
+      },
+      {
+        "name": "archive_create",
+        "schema_available": true,
+        "summary": "Create a bounded deterministic ZIP or TAR without overwriting"
+      },
+      {
+        "name": "archive_extract",
+        "schema_available": true,
+        "summary": "Extract a bounded archive transactionally without replacing a destination"
+      },
+      {
+        "name": "archive_list",
+        "schema_available": true,
+        "summary": "Inspect a bounded archive without extracting it"
+      },
+      {
+        "name": "artifact_risk_inspect",
+        "schema_available": true,
+        "summary": "Statically inspect a guarded artifact for risk"
+      },
+      {
+        "name": "build_fix",
+        "schema_available": true,
+        "summary": "Repair a failing C/C++ build target with a bounded loop: compile the focus file, propose a patch confined to editable project sources (never build scripts or build-time-tool sources), verify with compile_one then a target build, keep the best candidate and revert regressions. Returns a job id for build_fix_result."
+      },
+      {
+        "name": "build_fix_restore",
+        "schema_available": true,
+        "summary": "Write a build_fix job's stored original files back (all, or the named ones) when each file still has the content the fix left; refuses a file changed since."
+      },
+      {
+        "name": "build_fix_result",
+        "schema_available": true,
+        "summary": "Wait (bounded) for a build_fix job you started and return its report: status, stop reason, attempts, per-file digests and diffs, and the final build; cancel=true stops your own fix and its child build instead."
+      },
+      {
+        "name": "build_job",
+        "schema_available": true,
+        "summary": "Configure, build, compile one file, or trace one file's includes, with a host-owned command rendered from closed templates for the project's build system; every value must name a member of build_model. Runs as a background job and returns typed, attributed diagnostics or a job id for build_job_result."
+      },
+      {
+        "name": "build_job_result",
+        "schema_available": true,
+        "summary": "Wait (bounded) for a build_job you started and return its report, or its status while it is still running; cancel=true stops your own job instead."
+      },
+      {
+        "name": "build_model",
+        "schema_available": true,
+        "summary": "Describe a C/C++ project's build without running anything: build system, generator, configs, platforms, targets (utility and build-time-tool flags), toolchains, compile units, PCH and presets, read from the CMake File API reply, compile_commands.json or .sln/.vcxproj. Labels only, no host paths."
+      },
+      {
+        "name": "compute_artifact_fetch",
+        "schema_available": true,
+        "summary": "Fetch one small digest-verified compute artifact through the authenticated transport"
+      },
+      {
+        "name": "compute_cancel",
+        "schema_available": true,
+        "summary": "Cancel one previously placed compute job and prove cleanup"
+      },
+      {
+        "name": "compute_status",
+        "schema_available": true,
+        "summary": "Read one previously placed compute job"
+      },
+      {
+        "name": "compute_submit",
+        "schema_available": true,
+        "summary": "Place one bounded catalog job locally or on an explicitly authorized private node"
+      },
+      {
+        "name": "crash_digest",
+        "schema_available": true,
+        "summary": "Symbolize and walk a crash capture with a host debugger (cdb, gdb, lldb, eu-stack, minidump-stackwalk or llvm-symbolizer on verified PE+PDB/ELF pairs) as a background job over the pure reader's result; returns the merged crash report or a run id to poll with debug_run_result. symbol_dirs must be local directories inside the allowed roots. symbol_server=true is refused from a tool call: the operator runs /crash <dump> --symbols-online at the console."
+      },
+      {
+        "name": "crash_triage",
+        "schema_available": true,
+        "summary": "Read a crash capture without running anything: a Windows/Breakpad/Crashpad minidump, an ELF core, a sanitizer (ASan/UBSan/TSan/MSVC-ASan) log, valgrind memcheck XML or a macOS .ips; returns a typed crash report (exception, crashing thread frames, modules with PDB/build ids, cause hints, signature). With a directory path, reads up to 64 captures in it (non-recursive) and returns buckets grouped by crash signature."
+      },
+      {
+        "name": "data_inspect",
+        "schema_available": true,
+        "summary": "Inspect a bounded data file"
+      },
+      {
+        "name": "data_query",
+        "schema_available": true,
+        "summary": "Run a bounded read-only data query"
+      },
+      {
+        "name": "debug_run_result",
+        "schema_available": true,
+        "summary": "Wait (bounded) for a crash_digest or profile_capture_digest run you started and return its result, or its status while it is still running."
+      },
+      {
+        "name": "dependency_inventory",
+        "schema_available": true,
+        "summary": "Inventory bounded project dependencies"
+      },
+      {
+        "name": "directory_create",
+        "schema_available": true,
+        "summary": "Create a guarded directory and optional parents"
+      },
+      {
+        "name": "directory_digest",
+        "schema_available": true,
+        "summary": "Digest a bounded directory manifest"
+      },
+      {
+        "name": "directory_tree",
+        "schema_available": true,
+        "summary": "List a bounded guarded directory tree"
+      },
+      {
+        "name": "edit_file",
+        "schema_available": true,
+        "summary": "Apply a bounded text edit"
+      },
+      {
+        "name": "fetch_artifact",
+        "schema_available": true,
+        "summary": "Fetch and atomically verify a binary artifact"
+      },
+      {
+        "name": "file_batch_write",
+        "schema_available": true,
+        "summary": "Transactionally create or overwrite bounded files"
+      },
+      {
+        "name": "file_copy",
+        "schema_available": true,
+        "summary": "Copy one bounded binary-safe file"
+      },
+      {
+        "name": "file_delete",
+        "schema_available": true,
+        "summary": "Delete a guarded path only after explicit confirmation"
+      },
+      {
+        "name": "file_digest",
+        "schema_available": true,
+        "summary": "Digest a bounded file"
+      },
+      {
+        "name": "file_edit",
+        "schema_available": true,
+        "summary": "Legacy alias for a bounded text edit"
+      },
+      {
+        "name": "file_find",
+        "schema_available": true,
+        "summary": "Find files under allowed roots"
+      },
+      {
+        "name": "file_move",
+        "schema_available": true,
+        "summary": "Move one bounded binary-safe file"
+      },
+      {
+        "name": "file_read",
+        "schema_available": true,
+        "summary": "Read a UTF-8-ish text file inside allowed roots"
+      },
+      {
+        "name": "file_read_range",
+        "schema_available": true,
+        "summary": "Read a bounded line range from a text file"
+      },
+      {
+        "name": "file_write",
+        "schema_available": true,
+        "summary": "Create, overwrite, or append a text file inside allowed roots"
+      },
+      {
+        "name": "image_inspect",
+        "schema_available": true,
+        "summary": "Inspect bounded image metadata and hash"
+      },
+      {
+        "name": "json_patch",
+        "schema_available": true,
+        "summary": "Preview or atomically apply a bounded JSON patch"
+      },
+      {
+        "name": "log_inspect",
+        "schema_available": true,
+        "summary": "Inspect a bounded log file"
+      },
+      {
+        "name": "make_directory",
+        "schema_available": true,
+        "summary": "Create a directory under an allowed root"
+      },
+      {
+        "name": "output_digest",
+        "schema_available": true,
+        "summary": "Summarize a test-run job's output or a guarded log file: final summary line, counts, FAILED/ERROR lines, first unique errors (file:line), grouped diagnostics and the tail. Give exactly one of job_id or path."
+      },
+      {
+        "name": "process_list",
+        "schema_available": true,
+        "summary": "List bounded process metadata after explicit opt-in"
+      },
+      {
+        "name": "process_memory_risk_inspect",
+        "schema_available": true,
+        "summary": "Inspect bounded process memory risk indicators"
+      },
+      {
+        "name": "profile_capture_digest",
+        "schema_available": true,
+        "summary": "Digest a binary profiler capture with a host tool (perf report, heaptrack_print, tracy-csvexport, xperf) as a background job; returns the profile digest or a run id to poll with debug_run_result."
+      },
+      {
+        "name": "profile_digest",
+        "schema_available": true,
+        "summary": "Digest a profiler capture in a pure format without running anything: callgrind, Chrome trace JSON, Tracy csvexport CSV, WPA/PIX/Superluminal CSV, heaptrack_print text or perf report text; returns hot functions (self/total), hot paths, frame-time percentiles and spikes against a frame budget. Binary captures (perf.data, .etl, .tracy, heaptrack .zst) give CAPTURE_NEEDS_HOST_TOOL: use profile_capture_digest."
+      },
+      {
+        "name": "program_search",
+        "schema_available": true,
+        "summary": "Search the executable path for programs"
+      },
+      {
+        "name": "project_detect",
+        "schema_available": true,
+        "summary": "Detect project manifests and commands"
+      },
+      {
+        "name": "read_file",
+        "schema_available": true,
+        "summary": "Read a bounded file"
+      },
+      {
+        "name": "run_program",
+        "schema_available": true,
+        "summary": "Run an argv-based program"
+      },
+      {
+        "name": "run_script",
+        "schema_available": true,
+        "summary": "Run a bounded script"
+      },
+      {
+        "name": "script_search",
+        "schema_available": true,
+        "summary": "Find scripts under allowed roots"
+      },
+      {
+        "name": "secret_scan",
+        "schema_available": true,
+        "summary": "Scan an authorized tree for redacted credential findings"
+      },
+      {
+        "name": "test_run",
+        "schema_available": true,
+        "summary": "Run a project's test suite with a host-owned command for the detected runner (or the one named), optionally narrowed by a selector (pytest node id or k:<expr>, ctest name, cargo filter, ./go/pkg or run:TestName, dotnet filter, js path, jvm pattern), as a background job; returns a structured report (totals, failures with file:line) or a job id to poll with test_run_result."
+      },
+      {
+        "name": "test_run_result",
+        "schema_available": true,
+        "summary": "Wait (bounded) for a test_run job you started and return its structured report, or its status while it is still running."
+      },
+      {
+        "name": "text_patch",
+        "schema_available": true,
+        "summary": "Preview or transactionally apply a bounded unified diff"
+      },
+      {
+        "name": "text_search",
+        "schema_available": true,
+        "summary": "Search bounded text files under allowed roots"
+      },
+      {
+        "name": "tool_inventory",
+        "schema_available": true,
+        "summary": "List developer tools installed on this host (compilers, build systems, test runners, linters, debuggers, package managers, runtimes, containers, VCS, DB clients, media/doc tools, cloud CLIs, editors, shells) with versions; filter by category or name; refresh re-probes with fixed read-only version switches."
+      },
+      {
+        "name": "verify_artifact",
+        "schema_available": true,
+        "summary": "Verify a guarded artifact already on disk"
+      },
+      {
+        "name": "vision_analyze",
+        "schema_available": true,
+        "summary": "Analyze one guarded local raster image"
+      },
+      {
+        "name": "weather_lookup",
+        "schema_available": true,
+        "summary": "Get bounded weather with explicit consent"
+      },
+      {
+        "name": "web_fetch",
+        "schema_available": true,
+        "summary": "Fetch bounded public web text with explicit consent"
+      },
+      {
+        "name": "web_search",
+        "schema_available": true,
+        "summary": "Search public web with explicit consent"
+      },
+      {
+        "name": "workspace_compare",
+        "schema_available": true,
+        "summary": "Compare two bounded workspaces"
+      },
+      {
+        "name": "workspace_run",
+        "schema_available": true,
+        "summary": "Run a program as a bounded argv list"
+      },
+      {
+        "name": "write_file",
+        "schema_available": true,
+        "summary": "Write a file under an allowed root"
+      }
+    ]
+  },
+  "tools": [
+    {
+      "description": "Open a fresh parent with open_parent; retain its scoped capability to control independent agent conversations. Never place the capability in task text or files.",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "open_parent",
+              "rotate_parent",
+              "revoke_parent",
+              "spawn",
+              "list",
+              "inspect",
+              "send_message",
+              "wait",
+              "interrupt",
+              "resume",
+              "cancel",
+              "reports",
+              "ack",
+              "retrieve_archive"
+            ],
+            "type": "string"
+          },
+          "parent_session_id": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "parent_token": {
+            "maxLength": 256,
+            "type": "string"
+          },
+          "payload": {
+            "maxProperties": 32,
+            "type": "object"
+          }
+        },
+        "required": [
+          "action",
+          "payload"
+        ],
+        "type": "object"
+      },
+      "name": "agent_lane"
+    },
+    {
+      "description": "Resolve approximate location after explicit consent",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "consent": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "consent"
+        ],
+        "type": "object"
+      },
+      "name": "approximate_location_lookup"
+    },
+    {
+      "description": "Create a bounded deterministic ZIP or TAR without overwriting",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "archive_format": {
+            "enum": [
+              "zip",
+              "tar"
+            ],
+            "type": "string"
+          },
+          "destination": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "deterministic": {
+            "type": "boolean"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "inputs_json": {
+            "maxLength": 1000000,
+            "minLength": 2,
+            "type": "string"
+          },
+          "max_depth": {
+            "maximum": 64,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_entries": {
+            "maximum": 20000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_file_bytes": {
+            "maximum": 256000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_files": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_results": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_total_bytes": {
+            "maximum": 1000000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "root": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "root",
+          "inputs_json",
+          "destination"
+        ],
+        "type": "object"
+      },
+      "name": "archive_create"
+    },
+    {
+      "description": "Extract a bounded archive transactionally without replacing a destination",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "destination": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_entries": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_file_bytes": {
+            "maximum": 256000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_path_depth": {
+            "maximum": 128,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_ratio": {
+            "maximum": 1000.0,
+            "minimum": 1,
+            "type": "number"
+          },
+          "max_results": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_seconds": {
+            "maximum": 60.0,
+            "minimum": 1,
+            "type": "number"
+          },
+          "max_total_bytes": {
+            "maximum": 1000000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "source": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "destination"
+        ],
+        "type": "object"
+      },
+      "name": "archive_extract"
+    },
+    {
+      "description": "Inspect a bounded archive without extracting it",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_entries": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_file_bytes": {
+            "maximum": 256000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_path_depth": {
+            "maximum": 128,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_ratio": {
+            "maximum": 1000.0,
+            "minimum": 1,
+            "type": "number"
+          },
+          "max_results": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_seconds": {
+            "maximum": 60.0,
+            "minimum": 1,
+            "type": "number"
+          },
+          "max_total_bytes": {
+            "maximum": 1000000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "archive_list"
+    },
+    {
+      "description": "Statically inspect a guarded artifact for risk",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_scan_bytes": {
+            "type": "integer"
+          },
+          "max_seconds": {
+            "type": "number"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "artifact_risk_inspect"
+    },
+    {
+      "description": "Repair a failing C/C++ build target with a bounded loop: compile the focus file, propose a patch confined to editable project sources (never build scripts or build-time-tool sources), verify with compile_one then a target build, keep the best candidate and revert regressions. Returns a job id for build_fix_result.",
+      "effects": [
+        "execute",
+        "read_files",
+        "write_files"
+      ],
+      "execution_class": "host",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "allow_network": {
+            "type": "boolean"
+          },
+          "apply": {
+            "type": "boolean"
+          },
+          "attempts": {
+            "maximum": 8,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "build_dir": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "config": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "editable_globs": {
+            "items": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 16,
+            "type": "array"
+          },
+          "focus_file": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "platform": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "project": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "revert_after": {
+            "type": "boolean"
+          },
+          "target": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "maximum": 14400,
+            "minimum": 60,
+            "type": "integer"
+          },
+          "verify_dependents": {
+            "type": "boolean"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "type": "object"
+      },
+      "name": "build_fix"
+    },
+    {
+      "description": "Write a build_fix job's stored original files back (all, or the named ones) when each file still has the content the fix left; refuses a file changed since.",
+      "effects": [
+        "read_files",
+        "write_files"
+      ],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "files": {
+            "items": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 6,
+            "type": "array"
+          },
+          "job_id": {
+            "pattern": "^build-fix-[0-9a-f]{16,32}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "type": "object"
+      },
+      "name": "build_fix_restore"
+    },
+    {
+      "description": "Wait (bounded) for a build_fix job you started and return its report: status, stop reason, attempts, per-file digests and diffs, and the final build; cancel=true stops your own fix and its child build instead.",
+      "effects": [
+        "read_files"
+      ],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "cancel": {
+            "type": "boolean"
+          },
+          "job_id": {
+            "pattern": "^build-fix-[0-9a-f]{16,32}$",
+            "type": "string"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "type": "object"
+      },
+      "name": "build_fix_result"
+    },
+    {
+      "description": "Configure, build, compile one file, or trace one file's includes, with a host-owned command rendered from closed templates for the project's build system; every value must name a member of build_model. Runs as a background job and returns typed, attributed diagnostics or a job id for build_job_result.",
+      "effects": [
+        "execute",
+        "read_files",
+        "write_files"
+      ],
+      "execution_class": "host",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "configure",
+              "build",
+              "compile_one",
+              "include_trace"
+            ],
+            "type": "string"
+          },
+          "allow_network": {
+            "type": "boolean"
+          },
+          "build_dir": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "build_preset": {
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$",
+            "type": "string"
+          },
+          "config": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "file": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "generator": {
+            "enum": [
+              "Ninja",
+              "Ninja Multi-Config",
+              "Unix Makefiles",
+              "NMake Makefiles",
+              "Visual Studio 17 2022",
+              "Visual Studio 16 2019"
+            ],
+            "type": "string"
+          },
+          "jobs": {
+            "maximum": 256,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "platform": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "preset": {
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$",
+            "type": "string"
+          },
+          "profile": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "project": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "target": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "maximum": 7200,
+            "minimum": 30,
+            "type": "integer"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "build_job"
+    },
+    {
+      "description": "Wait (bounded) for a build_job you started and return its report, or its status while it is still running; cancel=true stops your own job instead.",
+      "effects": [
+        "read_files"
+      ],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "cancel": {
+            "type": "boolean"
+          },
+          "job_id": {
+            "pattern": "^build-job-[0-9a-f]{16,32}$",
+            "type": "string"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "type": "object"
+      },
+      "name": "build_job_result"
+    },
+    {
+      "description": "Describe a C/C++ project's build without running anything: build system, generator, configs, platforms, targets (utility and build-time-tool flags), toolchains, compile units, PCH and presets, read from the CMake File API reply, compile_commands.json or .sln/.vcxproj. Labels only, no host paths.",
+      "effects": [
+        "read_files"
+      ],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "build_dir": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "detail": {
+            "enum": [
+              "summary",
+              "targets",
+              "compile_units",
+              "toolchain",
+              "presets"
+            ],
+            "type": "string"
+          },
+          "max_items": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "preset": {
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$",
+            "type": "string"
+          },
+          "project": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "refresh": {
+            "type": "boolean"
+          },
+          "target": {
+            "maxLength": 128,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "build_model"
+    },
+    {
+      "description": "Fetch one small digest-verified compute artifact through the authenticated transport",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "controller_job_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "max_bytes": {
+            "maximum": 98304,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "name": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "controller_job_id",
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "compute_artifact_fetch"
+    },
+    {
+      "description": "Cancel one previously placed compute job and prove cleanup",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "controller_job_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "controller_job_id",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "name": "compute_cancel"
+    },
+    {
+      "description": "Read one previously placed compute job",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "controller_job_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "controller_job_id"
+        ],
+        "type": "object"
+      },
+      "name": "compute_status"
+    },
+    {
+      "description": "Place one bounded catalog job locally or on an explicitly authorized private node",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "allow_local_fallback": {
+            "type": "boolean"
+          },
+          "allow_remote": {
+            "type": "boolean"
+          },
+          "arguments": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 64,
+            "type": "array"
+          },
+          "catalog_entry_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "deadline_seconds": {
+            "maximum": 86400,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "environment": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "maxProperties": 32,
+            "type": "object"
+          },
+          "idempotency_key": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "idempotent": {
+            "type": "boolean"
+          },
+          "input_artifacts": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "maxLength": 4096,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "sha256": {
+                  "maxLength": 64,
+                  "minLength": 64,
+                  "type": "string"
+                },
+                "size_bytes": {
+                  "maximum": 1099511627776,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "name",
+                "size_bytes",
+                "sha256"
+              ],
+              "type": "object"
+            },
+            "maxItems": 64,
+            "type": "array"
+          },
+          "placement_policy": {
+            "enum": [
+              "local-only",
+              "prefer-remote",
+              "rank-all"
+            ],
+            "type": "string"
+          },
+          "relative_cwd": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "request_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "workload": {
+            "enum": [
+              "analysis",
+              "build",
+              "container",
+              "embedding",
+              "encode",
+              "fuzz",
+              "index",
+              "render",
+              "service",
+              "storage",
+              "test",
+              "training"
+            ],
+            "type": "string"
+          },
+          "workspace_mapping": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "workload",
+          "catalog_entry_id",
+          "workspace_mapping",
+          "allow_remote"
+        ],
+        "type": "object"
+      },
+      "name": "compute_submit"
+    },
+    {
+      "description": "Symbolize and walk a crash capture with a host debugger (cdb, gdb, lldb, eu-stack, minidump-stackwalk or llvm-symbolizer on verified PE+PDB/ELF pairs) as a background job over the pure reader's result; returns the merged crash report or a run id to poll with debug_run_result. symbol_dirs must be local directories inside the allowed roots. symbol_server=true is refused from a tool call: the operator runs /crash <dump> --symbols-online at the console.",
+      "effects": [
+        "execute",
+        "network",
+        "read_files",
+        "write_files"
+      ],
+      "execution_class": "host",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "engine": {
+            "enum": [
+              "auto",
+              "cdb",
+              "gdb",
+              "lldb",
+              "eu_stack",
+              "minidump_stackwalk",
+              "llvm_symbolizer",
+              "pure"
+            ],
+            "type": "string"
+          },
+          "executable": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "path": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "symbol_dirs": {
+            "items": {
+              "maxLength": 1024,
+              "type": "string"
+            },
+            "maxItems": 8,
+            "type": "array"
+          },
+          "symbol_server": {
+            "type": "boolean"
+          },
+          "timeout_seconds": {
+            "maximum": 900,
+            "minimum": 10,
+            "type": "integer"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "crash_digest"
+    },
+    {
+      "description": "Read a crash capture without running anything: a Windows/Breakpad/Crashpad minidump, an ELF core, a sanitizer (ASan/UBSan/TSan/MSVC-ASan) log, valgrind memcheck XML or a macOS .ips; returns a typed crash report (exception, crashing thread frames, modules with PDB/build ids, cause hints, signature). With a directory path, reads up to 64 captures in it (non-recursive) and returns buckets grouped by crash signature.",
+      "effects": [
+        "read_files"
+      ],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_threads": {
+            "maximum": 16,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "maxLength": 1024,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "crash_triage"
+    },
+    {
+      "description": "Inspect a bounded data file",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "data_inspect"
+    },
+    {
+      "description": "Run a bounded read-only data query",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "sql": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "data_query"
+    },
+    {
+      "description": "Wait (bounded) for a crash_digest or profile_capture_digest run you started and return its result, or its status while it is still running.",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "run_id": {
+            "maxLength": 80,
+            "type": "string"
+          },
+          "wait_seconds": {
+            "maximum": 60,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "run_id"
+        ],
+        "type": "object"
+      },
+      "name": "debug_run_result"
+    },
+    {
+      "description": "Inventory bounded project dependencies",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "dependency_inventory"
+    },
+    {
+      "description": "Create a guarded directory and optional parents",
+      "effects": [
+        "write_files"
+      ],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "parents": {
+            "type": "boolean"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "directory_create"
+    },
+    {
+      "description": "Digest a bounded directory manifest",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "directory_digest"
+    },
+    {
+      "description": "List a bounded guarded directory tree",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "depth": {
+            "type": "integer"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "include_hidden": {
+            "type": "boolean"
+          },
+          "include_ignored": {
+            "type": "boolean"
+          },
+          "max_entries": {
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "directory_tree"
+    },
+    {
+      "description": "Apply a bounded text edit",
+      "effects": [
+        "write_files"
+      ],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "type": "integer"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "new": {
+            "type": "string"
+          },
+          "old": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "old",
+          "new"
+        ],
+        "type": "object"
+      },
+      "name": "edit_file"
+    },
+    {
+      "description": "Fetch and atomically verify a binary artifact",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "dest": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "expect_publisher": {
+            "type": "string"
+          },
+          "expect_type": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_mb": {
+            "type": "number"
+          },
+          "overwrite": {
+            "type": "boolean"
+          },
+          "resume": {
+            "type": "boolean"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "number"
+          },
+          "url": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "dest"
+        ],
+        "type": "object"
+      },
+      "name": "fetch_artifact"
+    },
+    {
+      "description": "Transactionally create or overwrite bounded files",
+      "effects": [
+        "write_files"
+      ],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "operations": {
+            "type": "array"
+          },
+          "operations_json": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "file_batch_write"
+    },
+    {
+      "description": "Copy one bounded binary-safe file",
+      "effects": [
+        "write_files"
+      ],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "destination": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "overwrite": {
+            "type": "boolean"
+          },
+          "source": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "destination"
+        ],
+        "type": "object"
+      },
+      "name": "file_copy"
+    },
+    {
+      "description": "Delete a guarded path only after explicit confirmation",
+      "effects": [
+        "delete_files"
+      ],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "confirm": {
+            "type": "string"
+          },
+          "dry_run": {
+            "type": "boolean"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "recursive": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "file_delete"
+    },
+    {
+      "description": "Digest a bounded file",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "file_digest"
+    },
+    {
+      "description": "Legacy alias for a bounded text edit",
+      "effects": [
+        "write_files"
+      ],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "type": "integer"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "new": {
+            "type": "string"
+          },
+          "old": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "old",
+          "new"
+        ],
+        "type": "object"
+      },
+      "name": "file_edit"
+    },
+    {
+      "description": "Find files under allowed roots",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "include_ignored": {
+            "type": "boolean"
+          },
+          "max_results": {
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          },
+          "root": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "file_find"
+    },
+    {
+      "description": "Move one bounded binary-safe file",
+      "effects": [
+        "delete_files",
+        "write_files"
+      ],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "destination": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "overwrite": {
+            "type": "boolean"
+          },
+          "source": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "destination"
+        ],
+        "type": "object"
+      },
+      "name": "file_move"
+    },
+    {
+      "description": "Read a UTF-8-ish text file inside allowed roots",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_bytes": {
+            "type": "integer"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "file_read"
+    },
+    {
+      "description": "Read a bounded line range from a text file",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "end_line": {
+            "type": "integer"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "start_line": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "file_read_range"
+    },
+    {
+      "description": "Create, overwrite, or append a text file inside allowed roots",
+      "effects": [
+        "write_files"
+      ],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "create",
+              "overwrite",
+              "append"
+            ],
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ],
+        "type": "object"
+      },
+      "name": "file_write"
+    },
+    {
+      "description": "Inspect bounded image metadata and hash",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "image_inspect"
+    },
+    {
+      "description": "Preview or atomically apply a bounded JSON patch",
+      "effects": [
+        "write_files"
+      ],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "preview",
+              "apply"
+            ],
+            "type": "string"
+          },
+          "operations": {
+            "type": "array"
+          },
+          "operations_json": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "json_patch"
+    },
+    {
+      "description": "Inspect a bounded log file",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "log_inspect"
+    },
+    {
+      "description": "Create a directory under an allowed root",
+      "effects": [
+        "write_files"
+      ],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "parents": {
+            "type": "boolean"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "make_directory"
+    },
+    {
+      "description": "Summarize a test-run job's output or a guarded log file: final summary line, counts, FAILED/ERROR lines, first unique errors (file:line), grouped diagnostics and the tail. Give exactly one of job_id or path.",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "job_id": {
+            "maxLength": 80,
+            "type": "string"
+          },
+          "max_failure_lines": {
+            "maximum": 200,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "tail_lines": {
+            "maximum": 200,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "output_digest"
+    },
+    {
+      "description": "List bounded process metadata after explicit opt-in",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_processes": {
+            "type": "integer"
+          },
+          "max_seconds": {
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "name": "process_list"
+    },
+    {
+      "description": "Inspect bounded process memory risk indicators",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_bytes": {
+            "type": "integer"
+          },
+          "max_regions": {
+            "type": "integer"
+          },
+          "max_seconds": {
+            "type": "number"
+          },
+          "pid": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pid"
+        ],
+        "type": "object"
+      },
+      "name": "process_memory_risk_inspect"
+    },
+    {
+      "description": "Digest a binary profiler capture with a host tool (perf report, heaptrack_print, tracy-csvexport, xperf) as a background job; returns the profile digest or a run id to poll with debug_run_result.",
+      "effects": [
+        "execute",
+        "read_files",
+        "write_files"
+      ],
+      "execution_class": "host",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "engine": {
+            "enum": [
+              "auto",
+              "perf",
+              "heaptrack_print",
+              "tracy_csvexport",
+              "xperf",
+              "wpaexporter"
+            ],
+            "type": "string"
+          },
+          "executable": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "frame_budget_ms": {
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          },
+          "frame_zone": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "path": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "symbol_dirs": {
+            "items": {
+              "maxLength": 1024,
+              "type": "string"
+            },
+            "maxItems": 8,
+            "type": "array"
+          },
+          "thread": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "maximum": 900,
+            "minimum": 10,
+            "type": "integer"
+          },
+          "top_n": {
+            "maximum": 50,
+            "minimum": 5,
+            "type": "integer"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "profile_capture_digest"
+    },
+    {
+      "description": "Digest a profiler capture in a pure format without running anything: callgrind, Chrome trace JSON, Tracy csvexport CSV, WPA/PIX/Superluminal CSV, heaptrack_print text or perf report text; returns hot functions (self/total), hot paths, frame-time percentiles and spikes against a frame budget. Binary captures (perf.data, .etl, .tracy, heaptrack .zst) give CAPTURE_NEEDS_HOST_TOOL: use profile_capture_digest.",
+      "effects": [
+        "read_files"
+      ],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "frame_budget_ms": {
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          },
+          "frame_zone": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "path": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "thread": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "top_n": {
+            "maximum": 50,
+            "minimum": 5,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "profile_digest"
+    },
+    {
+      "description": "Search the executable path for programs",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_results": {
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "program_search"
+    },
+    {
+      "description": "Detect project manifests and commands",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "project_detect"
+    },
+    {
+      "description": "Read a bounded file",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_bytes": {
+            "type": "integer"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "read_file"
+    },
+    {
+      "description": "Run an argv-based program",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "args_json": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_output": {
+            "type": "integer"
+          },
+          "program": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "stdin": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "program"
+        ],
+        "type": "object"
+      },
+      "name": "run_program"
+    },
+    {
+      "description": "Run a bounded script",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "args_json": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_output": {
+            "type": "integer"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "stdin": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "run_script"
+    },
+    {
+      "description": "Find scripts under allowed roots",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "include_hidden": {
+            "type": "boolean"
+          },
+          "include_ignored": {
+            "type": "boolean"
+          },
+          "max_entries": {
+            "type": "integer"
+          },
+          "max_results": {
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          },
+          "root": {
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "name": "script_search"
+    },
+    {
+      "description": "Scan an authorized tree for redacted credential findings",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "root": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "name": "secret_scan"
+    },
+    {
+      "description": "Run a project's test suite with a host-owned command for the detected runner (or the one named), optionally narrowed by a selector (pytest node id or k:<expr>, ctest name, cargo filter, ./go/pkg or run:TestName, dotnet filter, js path, jvm pattern), as a background job; returns a structured report (totals, failures with file:line) or a job id to poll with test_run_result.",
+      "effects": [
+        "execute",
+        "read_files",
+        "write_files"
+      ],
+      "execution_class": "host",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "project": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "runner": {
+            "enum": [
+              "auto",
+              "pytest",
+              "unittest",
+              "ctest",
+              "cargo",
+              "go",
+              "dotnet",
+              "npm",
+              "pnpm",
+              "yarn",
+              "gradle",
+              "maven",
+              "make"
+            ],
+            "type": "string"
+          },
+          "selector": {
+            "maxLength": 200,
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "maximum": 1800,
+            "minimum": 10,
+            "type": "integer"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "workers": {
+            "maximum": 8,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "test_run"
+    },
+    {
+      "description": "Wait (bounded) for a test_run job you started and return its structured report, or its status while it is still running.",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "job_id": {
+            "maxLength": 80,
+            "type": "string"
+          },
+          "wait_seconds": {
+            "maximum": 60,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "type": "object"
+      },
+      "name": "test_run_result"
+    },
+    {
+      "description": "Preview or transactionally apply a bounded unified diff",
+      "effects": [
+        "write_files"
+      ],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "apply": {
+            "type": "boolean"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "patch": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "root": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "root",
+          "patch"
+        ],
+        "type": "object"
+      },
+      "name": "text_patch"
+    },
+    {
+      "description": "Search bounded text files under allowed roots",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "case_sensitive": {
+            "type": "boolean"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "glob": {
+            "type": "string"
+          },
+          "include_hidden": {
+            "type": "boolean"
+          },
+          "include_ignored": {
+            "type": "boolean"
+          },
+          "max_entries": {
+            "type": "integer"
+          },
+          "max_file_bytes": {
+            "type": "integer"
+          },
+          "max_results": {
+            "type": "integer"
+          },
+          "query": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "regex": {
+            "type": "boolean"
+          },
+          "root": {
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "text_search"
+    },
+    {
+      "description": "List developer tools installed on this host (compilers, build systems, test runners, linters, debuggers, package managers, runtimes, containers, VCS, DB clients, media/doc tools, cloud CLIs, editors, shells) with versions; filter by category or name; refresh re-probes with fixed read-only version switches.",
+      "effects": [
+        "execute"
+      ],
+      "execution_class": "host",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "category": {
+            "enum": [
+              "compiler",
+              "build_system",
+              "test_runner",
+              "linter_formatter",
+              "debugger_profiler",
+              "package_manager",
+              "runtime",
+              "container_vm",
+              "vcs",
+              "db_client",
+              "media_doc",
+              "cloud_cli",
+              "editor_ide",
+              "shell"
+            ],
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "refresh": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "name": "tool_inventory"
+    },
+    {
+      "description": "Verify a guarded artifact already on disk",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "expect_publisher": {
+            "type": "string"
+          },
+          "expect_type": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "verify_artifact"
+    },
+    {
+      "description": "Analyze one guarded local raster image",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "prompt": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "prompt"
+        ],
+        "type": "object"
+      },
+      "name": "vision_analyze"
+    },
+    {
+      "description": "Get bounded weather with explicit consent",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "consent": {
+            "type": "boolean"
+          },
+          "forecast_days": {
+            "type": "integer"
+          },
+          "location": {
+            "minLength": 2,
+            "type": "string"
+          },
+          "units": {
+            "enum": [
+              "auto",
+              "metric",
+              "imperial"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "location",
+          "consent"
+        ],
+        "type": "object"
+      },
+      "name": "weather_lookup"
+    },
+    {
+      "description": "Fetch bounded public web text with explicit consent",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "consent": {
+            "type": "boolean"
+          },
+          "max_chars": {
+            "type": "integer"
+          },
+          "url": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "consent"
+        ],
+        "type": "object"
+      },
+      "name": "web_fetch"
+    },
+    {
+      "description": "Search public web with explicit consent",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "consent": {
+            "type": "boolean"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "query": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "query",
+          "consent"
+        ],
+        "type": "object"
+      },
+      "name": "web_search"
+    },
+    {
+      "description": "Compare two bounded workspaces",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "left": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "right": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "left",
+          "right"
+        ],
+        "type": "object"
+      },
+      "name": "workspace_compare"
+    },
+    {
+      "description": "Run a program as a bounded argv list",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "args_json": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_output": {
+            "type": "integer"
+          },
+          "program": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "stdin": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "program"
+        ],
+        "type": "object"
+      },
+      "name": "workspace_run"
+    },
+    {
+      "description": "Write a file under an allowed root",
+      "effects": [
+        "write_files"
+      ],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "create",
+              "overwrite",
+              "append"
+            ],
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ],
+        "type": "object"
+      },
+      "name": "write_file"
+    }
+  ]
+}

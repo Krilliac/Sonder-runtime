@@ -69,7 +69,7 @@ def test_piped_turn_emits_one_parseable_json_line_when_opted_in(
         monkeypatch, capsys):
     monkeypatch.setenv("SONDER_REPL_NDJSON", "1")
     monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: False)
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    monkeypatch.setattr(sonder_repl.S, "_CACHED", sonder_repl.S.Caps())
 
     sonder_repl._print_chat_result(
         "exact output", 0.0, offer_feedback=True, interaction_id="deadbeef",
@@ -90,7 +90,7 @@ def test_piped_turn_emits_one_parseable_json_line_when_opted_in(
 def test_piped_error_turn_is_marked_in_the_json_line(monkeypatch, capsys):
     monkeypatch.setenv("SONDER_REPL_NDJSON", "1")
     monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: False)
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    monkeypatch.setattr(sonder_repl.S, "_CACHED", sonder_repl.S.Caps())
 
     sonder_repl._print_chat_result("ERROR: refused", 0.0, error=True)
 
@@ -104,7 +104,7 @@ def test_piped_error_turn_carries_the_same_hint_the_panel_shows(
         monkeypatch, capsys):
     monkeypatch.setenv("SONDER_REPL_NDJSON", "1")
     monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: False)
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    monkeypatch.setattr(sonder_repl.S, "_CACHED", sonder_repl.S.Caps())
 
     sonder_repl._print_chat_result(
         "ERROR contacting local Ollama at x after 1 attempt(s): boom",
@@ -119,7 +119,7 @@ def test_piped_error_turn_carries_the_same_hint_the_panel_shows(
 def test_successful_turns_never_carry_a_hint(monkeypatch, capsys):
     monkeypatch.setenv("SONDER_REPL_NDJSON", "1")
     monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: False)
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    monkeypatch.setattr(sonder_repl.S, "_CACHED", sonder_repl.S.Caps())
 
     # Even answer text that resembles a known failure gets no hint on a
     # non-error turn: the flag, not the prose, is the classification.
@@ -138,7 +138,7 @@ def test_default_piped_output_is_untouched_without_the_flag(
         sonder_repl, "_completion_timing",
         lambda _started: "Sonder completed in 1.00s",
     )
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    monkeypatch.setattr(sonder_repl.S, "_CACHED", sonder_repl.S.Caps())
 
     sonder_repl._print_chat_result("exact output", 0.0)
 
@@ -150,7 +150,7 @@ def test_interactive_terminals_keep_chrome_even_when_opted_in(
     monkeypatch.setenv("SONDER_REPL_NDJSON", "1")
     monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: True)
     monkeypatch.setattr(sonder_repl, "_stdout_is_interactive", lambda: True)
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    monkeypatch.setattr(sonder_repl.S, "_CACHED", sonder_repl.S.Caps())
 
     sonder_repl._print_chat_result("the answer", 0.0)
 

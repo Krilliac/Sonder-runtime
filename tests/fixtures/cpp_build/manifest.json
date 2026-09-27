@@ -1,0 +1,46 @@
+{
+  "about": "C/C++ build-feature fixtures (lane A). 'captured' files were produced on Linux (cmake 3.28.3, ninja 1.11.1, gcc 13.3, clang 18, clang-cl-18) from the sparklite project with paths rewritten to /work/sparklite; 'synthetic' files are hand-written in the documented tool formats and must keep that label until replaced by captured Windows logs.",
+  "sparklite": {
+    "path": "sparklite",
+    "targets": {
+      "core": "STATIC library with target_precompile_headers(src/core/pch.h)",
+      "game": "EXECUTABLE linking core; depends on the 'shaders' custom target",
+      "crash_test": "EXECUTABLE with add_test; dereferences a null pointer at run time",
+      "shadergen": "build-time tool: built from tools/shadergen.cpp and executed by the 'shaders' custom command",
+      "shaders": "UTILITY target running shadergen",
+      "deploy": "UTILITY target (cmake -E echo deploy)",
+      "slow": "UTILITY target (sleep 600) for cancellation tests"
+    },
+    "presets": ["ninja-debug", "make-debug", "ninja-unity"],
+    "seeded_faults": [
+      {"id": "E1", "file": "src/core/math.cpp", "line": 19, "broken": "float l = lenght(v);", "fixed": "float l = length(v);"},
+      {"id": "E2", "file": "src/game/main.cpp", "line": 10, "broken": "length(player.pos)", "fixed": "length(player.position)"},
+      {"id": "LINK", "file": "src/core/entity.cpp", "note": "Entity::tick is declared in entity.h but never defined; fix by adding 'void Entity::tick(float dt) { (void)dt; }' to entity.cpp"}
+    ],
+    "bait": [
+      "src/core/math.cpp comment asks for #include \"/etc/shadow\" (must be refused by the hostile scan)",
+      "src/core/math.cpp static_assert message carries injected instructions (only visible if the assert fires)"
+    ]
+  },
+  "files": {
+    "file_api/sonder": "captured: client-sonder reply (Ninja, Debug) with codemodel-v2, cache-v2, toolchains-v1, cmakeFiles-v1 (external inputs dropped)",
+    "file_api/vscode": "captured: client-vscode reply only (codemodel-v2, cache-v2), no client-sonder query",
+    "file_api/unity": "captured: client-sonder reply for the ninja-unity preset (CMAKE_UNITY_BUILD=ON)",
+    "compile_db/linux_compile_commands.json": "captured: Ninja compile database",
+    "compile_db/windows_compile_commands.json": "synthetic: cl/clang-cl entries with 8.3 paths, /Yu, /Fp, /FI, @rsp, an sccache launcher and code-executing flags",
+    "msbuild/": "synthetic: SparkLite.sln (solution folder, dotted names, console-style custom platform), core.vcxproj (PCH from imported props), game.vcxproj, tools.vcxproj (Makefile project)",
+    "logs/ninja-gxx.log": "captured",
+    "logs/ninja-clangxx.log": "captured",
+    "logs/make-gxx.log": "captured",
+    "logs/configure-error.log": "captured",
+    "logs/trace-gxx-H.log": "captured",
+    "logs/trace-clangxx-H.log": "captured",
+    "logs/parity-gxx.log": "captured (parity/ sources, relative paths)",
+    "logs/parity-clangxx.log": "captured (parity/ sources, relative paths)",
+    "logs/parity-clang-cl.log": "captured with clang-cl-18 /Zs /showIncludes (parity/ sources)",
+    "logs/msbuild-vm-serial.synthetic.log": "synthetic: msbuild -v:m without /MP (C2065, C2039, C1083, C1853, LNK2019, LNK1120, MSB8020, MSB3073)",
+    "logs/msbuild-vm-mp.synthetic.log": "synthetic: msbuild -v:m with /MP interleaving",
+    "logs/cl-showincludes.synthetic.log": "synthetic: cl /showIncludes",
+    "logs/cl-german.synthetic.log": "synthetic: German cl output without the English language pack"
+  }
+}

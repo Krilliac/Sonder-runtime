@@ -13,10 +13,12 @@ Point your chat UI's OpenAI API base at http://127.0.0.1:<port>/v1 (any api key)
 """
 
 from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
+from sonder_runtime.platform.runtime_threads import run_bounded
 import json
 import functools
 import inspect
 import contextlib
+import contextvars
 import hmac
 import hashlib
 import ipaddress
@@ -35,14 +37,22 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from sonder_runtime.interfaces.http.artifact_transfer import handle_artifact_transfer, is_artifact_route
+from sonder_runtime.interfaces.http.host_policy import (
+    HOST_NOT_ALLOWED_REMEDY, HOST_TRUSTED, forwarded_client_ip, host_decision,
+    machine_host_names, normalize_allowed_host, parse_host_header,
+)
 from sonder_runtime.interfaces.http.memory_replication import (
     handle_memory_replication,
     is_memory_replication_route,
 )
+from sonder_runtime.interfaces.http.sse import KEEPALIVE_FRAME, SSEKeepAlive
 
 _APP_CONTROL_BINDING = None
 _APP_CONTROL_CONFIG = None
 from sonder_runtime.interfaces.http.app_control import handle_app_control, is_app_control_route
+from sonder_runtime.interfaces.http.work_runs import (
+    WorkCapacityExhausted, WorkRunner, current_run_id as current_work_run_id,
+)
 
 _ARTIFACT_TRANSFER_BINDING = None
 _ARTIFACT_TRANSFER_CONFIG = None
@@ -50,6 +60,7 @@ _SPANDA_CONFIG = None
 _MEMORY_REPLICATION_RECEIVER = None
 _MEMORY_REPLICATION_SERVICE = None
 _ACCOUNT_LOGOUT_ADMISSION = threading.BoundedSemaphore(2)
+from sonder_runtime.platform import context_policy
 
 import logging as _logging_module
 _serve_logger = _logging_module.getLogger(__name__)
@@ -76,7 +87,9 @@ from sonder_runtime.adapters.command_completion import (
 from sonder_runtime.adapters.content_services import feedback, intents, training_tasks
 from sonder_runtime.adapters.execution_tools import code_runner, grounding
 from sonder_runtime.adapters.model_transport import ModelCallError
+from sonder_runtime.adapters.execution import effect_fence
 from sonder_runtime.adapters.persistence import served_action_receipts
+from sonder_runtime.adapters.persistence import http_work_runs
 from sonder_runtime.adapters.security import unsafe_lab
 from sonder_runtime.adapters.security.account_auth import account_auth as admin_auth
 from sonder_runtime.adapters.web import live_reload
@@ -87,6 +100,8 @@ from sonder_runtime.application.chat.handoff_receipts import (
 from sonder_runtime.application.execution.world_control import OutputWatermark
 from sonder_runtime.application.extensions.facade import ExtensionAuthority
 from sonder_runtime.application.ports.model_gateway import ModelRequest
+from sonder_runtime.application.context import bind_operation_context
+from sonder_runtime.application.chat import provider_bridge as _provider_bridge
 from sonder_runtime.domain import launcher_health as sonder_health
 from sonder_runtime.domain.common.errors import (
     Conflict,
@@ -100,17 +115,25 @@ from sonder_runtime.domain.operational_capabilities import (
 )
 from sonder_runtime.interfaces.http.facades import HealthStatusFacade
 from sonder_runtime.interfaces.http.facades.a2a import A2AAgentCardFacade
+from sonder_runtime.interfaces.http.facades import client_protocol as _client_protocol
+from sonder_runtime.interfaces.http.facades.client_protocol import (
+    RECONNECT_ROUTE as _CLIENT_RECONNECT_ROUTE,
+    SCHEMA_ROUTE as _CLIENT_SCHEMA_ROUTE,
+)
 from sonder_runtime.interfaces.http.facades.a2a_jsonrpc import (
     build_application_a2a_handler,
     dispatch_a2a_jsonrpc_route,
 )
 from sonder_runtime.interfaces.http.facades.control_plane import ControlPlaneFacade
+from sonder_runtime.interfaces.http.facades.approvals import refusal_receipt
 from sonder_runtime.interfaces.http.facades.extensions import dispatch_extension_route
 from sonder_runtime.interfaces.http.facades.model_request import (
     ModelFacadeError,
     ModelRequestFacade,
 )
 from sonder_runtime.interfaces.http.facades.observability import dispatch_trace_route
+from sonder_runtime.interfaces.http.facades import observability_stream
+from sonder_runtime.interfaces.http.facades import observatory_routes
 from sonder_runtime.interfaces.http.facades.session import dispatch_session_route
 from sonder_runtime.platform import debug_dump
 
@@ -392,8 +415,15 @@ def _local_server_log_tail():
             size = stream.tell()
             stream.seek(max(0, size - _LOCAL_LOG_TAIL_BYTES))
             raw = stream.read(_LOCAL_LOG_TAIL_BYTES)
-    except OSError:
-        return "(server log is not available yet)"
+    except FileNotFoundError:
+        return (
+            "(no launcher-managed server log at %s: the server was started "
+            "without the launcher, or its output is redirected elsewhere -- "
+            "read the log where that output goes, e.g. the service journal)" % path
+        )
+    except OSError as error:
+        return "(server log at %s could not be read: %s)" % (
+            path, error.strerror or type(error).__name__)
     # Keep the diagnostic projection stable across Git/OS newline modes;
     # carriage returns are transport framing, not control characters to mask.
     text = raw.decode("utf-8", errors="replace").replace("\r\n", "\n")
@@ -650,8 +680,10 @@ def _resolve_auth_mode(api_key="", require_account=False, configured=None):
         _serve_logger.info(f"Auth mode resolved, mode={mode!r} (explicit)")
         _serve_logger.debug(f"_resolve_auth_mode: explicit mode={mode!r}")
         return mode
-    if not api_key and not require_account:
-        _serve_logger.warning("auth mode defaulting to local-open: no API key or account requirement configured")
+    # No warning here: this also runs at import time, before the launcher's
+    # secrets file and typed configuration are applied, so "no API key" would
+    # routinely be false.  main() warns about local-open once the effective
+    # mode is known (see _warn_if_local_open).
     if api_key:
         _serve_logger.debug("_resolve_auth_mode: inferred api-key mode from API key presence")
         return "api-key"
@@ -676,6 +708,126 @@ HOST = os.environ.get("SONDER_HOST", "127.0.0.1")
 REQUIRE_ACCOUNT = _env_flag("SONDER_REQUIRE_ACCOUNT")
 AUTH_MODE = _resolve_auth_mode(API_KEY, REQUIRE_ACCOUNT)
 CORS_ORIGINS = _parse_cors_origins(os.environ.get("SONDER_CORS_ORIGINS", ""))
+
+
+def _parse_allowed_hosts(values):
+    """Validated public Host names; malformed entries are dropped, not widened."""
+    parsed = []
+    for value in values:
+        try:
+            parsed.append(normalize_allowed_host(value))
+        except ValueError:
+            _serve_logger.warning("ignoring malformed allowed host entry")
+    return tuple(dict.fromkeys(parsed))
+
+
+# Public names a proxy or remote client may put in ``Host`` besides loopback
+# names and IP literals (DNS-rebinding defence; see host_policy.host_decision).
+# They matter only in local-open mode: a listener that requires credentials
+# accepts any well-formed name, since a rebinding page has no credentials.
+ALLOWED_HOSTS = _parse_allowed_hosts(
+    part for part in os.environ.get("SONDER_ALLOWED_HOSTS", "").split(",") if part.strip()
+)
+_MACHINE_NAME_TIMEOUT_SECONDS = 1.0
+_MACHINE_HOST_NAMES = None
+_MACHINE_HOST_NAMES_LOCK = threading.Lock()
+
+
+def _compute_machine_host_names(timeout=_MACHINE_NAME_TIMEOUT_SECONDS):
+    """This machine's own names, from ``gethostname``/``getfqdn`` only.
+
+    ``getfqdn`` may consult the resolver, so it runs behind a bounded
+    timeout; a slow or failing lookup costs the FQDN, never a request.  No
+    other network lookup is made.
+    """
+    import socket
+
+    try:
+        hostname = socket.gethostname()
+    except OSError:
+        hostname = ""
+    fqdn = ""
+    if hostname:
+        value, error, finished = run_bounded(
+            lambda: socket.getfqdn(hostname), timeout, name="sonder-host-fqdn",
+        )
+        if finished and error is None and isinstance(value, str):
+            fqdn = value
+        else:
+            _serve_logger.info("machine FQDN lookup did not finish; using the host name only")
+    return machine_host_names(hostname, fqdn)
+
+
+def _machine_host_names():
+    """Computed once per process (startup warms it); never recomputed."""
+    global _MACHINE_HOST_NAMES
+    names = _MACHINE_HOST_NAMES
+    if names is not None:
+        return names
+    with _MACHINE_HOST_NAMES_LOCK:
+        if _MACHINE_HOST_NAMES is None:
+            try:
+                _MACHINE_HOST_NAMES = _compute_machine_host_names()
+            except Exception:
+                _serve_logger.warning("machine host names unavailable", exc_info=True)
+                _MACHINE_HOST_NAMES = frozenset()
+        return _MACHINE_HOST_NAMES
+
+
+_REJECTED_HOST_LOG_INTERVAL_SECONDS = 60.0
+_REJECTED_HOST_LOG_MAX_NAMES_PER_INTERVAL = 8
+_REJECTED_HOST_LOG = OrderedDict()
+_REJECTED_HOST_LOG_LOCK = threading.Lock()
+
+
+def _log_rejected_host(value):
+    """Warn about a refused Host name, at most once a minute per name.
+
+    Only a well-formed name is logged (it is attacker-chosen text), so an
+    operator can see which name to add to ``allowed_hosts``.
+    """
+    parsed = parse_host_header(value) if value is not None else None
+    name = parsed[0] if parsed is not None else "(malformed or repeated Host header)"
+    now = time.monotonic()
+    with _REJECTED_HOST_LOG_LOCK:
+        last = _REJECTED_HOST_LOG.get(name)
+        if last is not None and now - last < _REJECTED_HOST_LOG_INTERVAL_SECONDS:
+            return
+        # A page can rotate attacker-chosen names; the per-name limit alone
+        # would then log once per request. Cap warnings across all names too.
+        recent = sum(
+            1 for stamp in _REJECTED_HOST_LOG.values()
+            if now - stamp < _REJECTED_HOST_LOG_INTERVAL_SECONDS
+        )
+        if recent >= _REJECTED_HOST_LOG_MAX_NAMES_PER_INTERVAL:
+            return
+        _REJECTED_HOST_LOG[name] = now
+        _REJECTED_HOST_LOG.move_to_end(name)
+        while len(_REJECTED_HOST_LOG) > 64:
+            _REJECTED_HOST_LOG.popitem(last=False)
+    _serve_logger.warning(
+        f"request refused (421 HOST_NOT_ALLOWED): Host {name!r} is not an address, "
+        "a loopback or machine name, or listed in [server].allowed_hosts, and this "
+        "listener runs without credentials"
+    )
+
+
+def _parse_observatory_origins(value):
+    """Exact origins, spelled as a browser sends them (see normalize_origin)."""
+    from sonder_runtime.platform.config import normalize_origins
+
+    return frozenset(normalize_origins(
+        sorted(_parse_cors_origins(value)), setting="SONDER_OBSERVATORY_ORIGINS",
+    ))
+
+
+# Route-scoped browser allowlist for the Observatory telemetry GET routes only
+# (/.well-known/sonder-telemetry, /v1/observability/events,
+# /v1/sonder/ecosystem).  CORS_ORIGINS is global and, in local-open mode, every
+# route is admin, so an Observatory origin must never need to be added there.
+OBSERVATORY_ORIGINS = _parse_observatory_origins(
+    os.environ.get("SONDER_OBSERVATORY_ORIGINS", "")
+)
 # The validated serve entry point sets this whenever a TLS-terminating proxy
 # fronts the otherwise-loopback runtime. Peer-address checks alone cannot tell
 # that proxy apart from a direct local browser.
@@ -709,6 +861,8 @@ STREAM_IDLE_TIMEOUT_SECONDS = max(1, _env_int(
 # the 413 bound meaningful and ends the connection (RFC 9112 6.3). The read is
 # given its own short deadline so an error path never inherits the full
 # per-connection wait above.
+# Interval of SSE keep-alive comment frames while a streamed turn generates.
+STREAM_HEARTBEAT_SECONDS = max(1, min(300, _env_int("SONDER_STREAM_HEARTBEAT_SECONDS", 15)))
 MAX_DISCARDED_BODY_BYTES = min(MAX_REQUEST_BYTES, 64 * 1024)
 DISCARD_BODY_TIMEOUT_SECONDS = 5
 # Closing a socket whose receive buffer still holds body bytes makes the OS
@@ -759,6 +913,91 @@ def _is_extension_route(path):
 
 def _is_trace_projection_route(path):
     return path == "/v1/observability/trace"
+
+
+_TELEMETRY_ROUTES = observability_stream.TELEMETRY_ROUTES
+
+
+def _live_telemetry_application(*, build=False):
+    """The application that owns live telemetry, without composing one to ask.
+
+    Chat turns only describe themselves when a graph already exists; the
+    admin telemetry routes may build the default graph like /trace does.
+    """
+    from sonder_runtime.bootstrap.app import built_default_app, default_app
+
+    application = built_default_app()
+    if application is None:
+        try:
+            application = getattr(server, "_APP_GRAPH", None)
+        except Exception:
+            # No legacy runtime injected (a bare HTTP host): nothing is bound.
+            application = None
+    if application is None and build:
+        try:
+            application = default_app()
+        except Exception:
+            _serve_logger.error("telemetry route could not compose the application", exc_info=True)
+            return None
+    return application
+
+
+_is_legacy_error_reply = observatory_routes.is_legacy_error_reply
+_chat_turn_outcome = observatory_routes.chat_turn_outcome
+_register_telemetry_drain = observatory_routes.register_telemetry_drain
+
+
+def _socket_peer_closed(connection):
+    """True when the peer closed ``connection``; never blocks, never writes.
+
+    An idle telemetry stream otherwise learns of a disconnect only when a
+    heartbeat write fails, holding a subscriber slot for up to two
+    heartbeats.  A readable socket whose peek returns no bytes is at EOF.
+    Unread request bytes (a pipelined request) are not a close.
+    """
+    if connection is None:
+        return False
+    import select
+    import socket as _socket
+
+    try:
+        if hasattr(select, "poll"):
+            poller = select.poll()
+            poller.register(connection, select.POLLIN | select.POLLHUP | select.POLLERR)
+            ready = poller.poll(0)
+            if not ready:
+                return False
+            if ready[0][1] & (select.POLLHUP | select.POLLERR) and not ready[0][1] & select.POLLIN:
+                return True
+        else:
+            readable, _w, _x = select.select([connection], [], [], 0)
+            if not readable:
+                return False
+        return connection.recv(1, _socket.MSG_PEEK) == b""
+    except (BlockingIOError, InterruptedError, ValueError, TimeoutError):
+        return False
+    except OSError:
+        return True
+
+
+def _runtime_loopback_base_url():
+    """The listener URL a same-host client uses (127.0.0.1 for 0.0.0.0)."""
+    return observatory_routes.loopback_base_url(HOST, BOUND_PORT or CONFIGURED_PORT)
+
+
+def _ecosystem_document(application, feed):
+    """GET /v1/sonder/ecosystem body, or None when there is nothing to report."""
+    from datetime import datetime, timezone
+    import platform as _platform
+
+    from sonder_runtime.platform.version import VERSION
+
+    return observatory_routes.ecosystem_document(
+        application, feed, base=_runtime_loopback_base_url(), version=VERSION,
+        generated_at=datetime.now(timezone.utc), node=_platform.node(),
+        observatory_origins=OBSERVATORY_ORIGINS | CORS_ORIGINS,
+        dedicated_origins=OBSERVATORY_ORIGINS,
+    )
 
 
 @dataclass
@@ -906,6 +1145,7 @@ def configure_typed_config(config) -> None:
     _serve_logger.debug("configure_typed_config: binding server config to HTTP boundary")
     _serve_logger.info(f"Applying typed server configuration, host={config.server.host!r}, port={config.server.port}, auth_mode={config.server.auth_mode!r}")
     global CONFIGURED_PORT, API_KEY, AUTH_SECRET, HOST, REQUIRE_ACCOUNT, AUTH_MODE, CORS_ORIGINS
+    global OBSERVATORY_ORIGINS
     global TLS_TERMINATED_BY_PROXY, ALLOW_REGISTRATION, MAX_REQUEST_BYTES
     global MAX_DISCARDED_BODY_BYTES, REQUEST_TIMEOUT_SECONDS
     global STREAM_IDLE_TIMEOUT_SECONDS, HTTP_SESSION_STATE_LIMIT
@@ -955,17 +1195,30 @@ def configure_typed_config(config) -> None:
         _serve_logger.warning("api-key auth mode downgraded to local-open: no API key configured on loopback bind")
         AUTH_MODE = "local-open"
     CORS_ORIGINS = frozenset(server_config.cors_origins)
+    global ALLOWED_HOSTS
+    ALLOWED_HOSTS = _parse_allowed_hosts(server_config.allowed_hosts)
+    OBSERVATORY_ORIGINS = frozenset(
+        origin for origin in config.observability.live_export_origins
+        if origin and origin != "*"
+    )
     TLS_TERMINATED_BY_PROXY = server_config.tls_terminated_by_proxy
     ALLOW_REGISTRATION = server_config.allow_registration
     MAX_REQUEST_BYTES = max(1, min(16 * 1024 * 1024, server_config.max_request_bytes))
     MAX_DISCARDED_BODY_BYTES = min(MAX_REQUEST_BYTES, 64 * 1024)
     REQUEST_TIMEOUT_SECONDS = max(5, server_config.request_timeout_seconds)
     STREAM_IDLE_TIMEOUT_SECONDS = max(1, server_config.stream_idle_timeout_seconds)
+    global STREAM_HEARTBEAT_SECONDS
+    STREAM_HEARTBEAT_SECONDS = max(1, min(300, server_config.stream_heartbeat_seconds))
     HTTP_SESSION_STATE_LIMIT = max(2, min(1024, server_config.session_state_limit))
     HTTP_SESSION_STATE_OWNER_LIMIT = max(
         1, min(HTTP_SESSION_STATE_LIMIT - 1, server_config.session_state_owner_limit)
     )
     TRAIN_MAX_N = max(1, server_config.train_max_n)
+    _WORK_RUNNER.configure(
+        wait_seconds=server_config.work_wait_seconds,
+        budget_seconds=server_config.work_budget_seconds,
+        max_running=server_config.work_max_running,
+    )
     global _HEALTH_STATUS_FACADE, _TRUSTED_PROXY_NETWORKS
     _HEALTH_STATUS_FACADE = HealthStatusFacade(
         metrics_path=config.observability.metrics_path,
@@ -1016,6 +1269,34 @@ def _account_identity(account) -> str:
     return identity
 
 
+def _build_principal(context) -> str:
+    """The build tools' principal for an authenticated request, "" if malformed.
+
+    ``owner`` without an account; an account's own opaque
+    ``account:<sha256(identity)>`` otherwise. The build routes key their
+    model cache by it, and the agent brief shows that principal's build line.
+    """
+    account = (context or {}).get("account")
+    if account is None:
+        return "owner"
+    identity = _account_identity(account)
+    if not identity:
+        return ""
+    return "account:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def _bind_request_build_principal(context) -> None:
+    """Declare whose request this handler thread serves, for the agent brief.
+
+    An unauthorized request declares nobody. Work threads started with a copy
+    of this context (the HTTP work runner) inherit the declaration.
+    """
+    from sonder_runtime.bootstrap.build_tools import bind_build_brief_principal
+
+    authorized = bool((context or {}).get("authorized"))
+    bind_build_brief_principal(_build_principal(context) if authorized else "")
+
+
 def _request_idempotency_key(context, endpoint, supplied_key):
     """Return an opaque idempotency key bound to one HTTP principal.
 
@@ -1035,6 +1316,9 @@ def _request_idempotency_key(context, endpoint, supplied_key):
     return "hi-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
+_MAX_IDEMPOTENCY_KEY_LENGTH = 512
+
+
 def _http_action_idempotency_key(context, supplied_key, action):
     """Return a principal- and action-bound replay key for HTTP work controls.
 
@@ -1050,9 +1334,9 @@ def _http_action_idempotency_key(context, supplied_key, action):
     key = str(supplied_key or "").strip()
     if not key:
         return ""
-    # HTTP headers are already bounded by the server, but keep this helper's
-    # behavior explicit when it is called directly in tests or embeddings.
-    if len(key) > 512:
+    # The HTTP boundary rejects longer keys (``_validate_idempotency_key``);
+    # keep this helper's behavior explicit when called directly.
+    if len(key) > _MAX_IDEMPOTENCY_KEY_LENGTH:
         return ""
     material = "\0".join((
         "served-action-idempotency-v1",
@@ -1075,54 +1359,124 @@ def _receipt_owner_scope(context):
     return "rw-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
+class IdempotencyRefusal(str):
+    """A replay-guard refusal: still readable chat text, never a success.
+
+    Chat and slash surfaces reply with the text itself, exactly as before.
+    Non-chat routes (permission mode, fanout controls) must not mistake the
+    string for a result: they check ``isinstance(result, IdempotencyRefusal)``
+    and answer with ``status`` and ``code`` instead of ``200``.
+    """
+
+    code: str
+    status: int
+    retryable: bool
+
+    def __new__(cls, text, *, code, status, retryable=False):
+        value = super().__new__(cls, text)
+        value.code = code
+        value.status = status
+        value.retryable = retryable
+        return value
+
+
+def _idempotency_refusal_payload(refusal):
+    return {"error": {
+        "message": str(refusal),
+        "type": "rate_limit_error" if refusal.status == 429 else (
+            "server_error" if refusal.status >= 500 else "invalid_request"),
+        "code": refusal.code,
+        "retryable": refusal.retryable,
+    }}
+
+
+def _send_idempotency_refusal(handler, result):
+    """Answer a replay-guard refusal with its status; ``False`` otherwise."""
+    if not isinstance(result, IdempotencyRefusal):
+        return False
+    handler._send_json_payload(
+        _idempotency_refusal_payload(result), status=result.status,
+        headers={"Retry-After": "1"} if result.retryable else None,
+    )
+    return True
+
+
+def _http_action_binding(context, supplied_key, action):
+    """Opaque (binding_key, action_digest) tying one client key to one request."""
+    key = str(supplied_key or "").strip()
+    if not key or len(key) > _MAX_IDEMPOTENCY_KEY_LENGTH:
+        return "", ""
+    binding = "\0".join(("served-action-binding-v1", _state_principal(context), key))
+    return (
+        "bind-" + hashlib.sha256(binding.encode("utf-8")).hexdigest(),
+        hashlib.sha256(
+            ("served-action-request-v1\0" + str(action or "")).encode("utf-8")
+        ).hexdigest(),
+    )
+
+
 def _idempotent_http_action(context, supplied_key, action, factory):
-    """Run an opt-in action once, preserving uncertainty across restarts."""
+    """Run an opt-in action once, preserving uncertainty across restarts.
+
+    Returns the factory's result, or an :class:`IdempotencyRefusal` when the
+    durable guard refused to run it.
+    """
     cache_key = _http_action_idempotency_key(context, supplied_key, action)
     if not cache_key:
         return factory()
+    binding_key, action_digest = _http_action_binding(context, supplied_key, action)
 
     def durable_factory():
         try:
             state = served_action_receipts.claim(
-                cache_key, owner_scope=_receipt_owner_scope(context)
+                cache_key, owner_scope=_receipt_owner_scope(context),
+                binding_key=binding_key, action_digest=action_digest,
             )
         except (OSError, sqlite3.Error, ValueError):
             # An explicit replay key promises no duplicate side effect.  If its
             # durable guard is unavailable, refusing is safer than executing a
             # long-running mutation without a recoverable receipt.
             _serve_logger.error(f"idempotency receipt store unavailable for cache_key={cache_key!r}, refusing action", exc_info=True)
-            refusal = (
+            return IdempotencyRefusal(
                 "idempotency receipt unavailable: the action was not started. "
-                "Retry after restoring local runtime storage."
+                "Retry after restoring local runtime storage.",
+                code="IDEMPOTENCY_RECEIPT_UNAVAILABLE", status=503, retryable=True,
             )
-            return refusal
         if state == served_action_receipts.REJECTED:
             # Admitting this new key would exceed the durable receipt budget
             # (global or this principal's).  Refusing is deterministic
             # backpressure: running without a receipt would silently drop the
             # no-duplicate promise the client asked for.
             _serve_logger.warning(f"idempotency receipt capacity exhausted for cache_key={cache_key!r}")
-            refusal = (
+            return IdempotencyRefusal(
                 "idempotency receipt capacity exhausted: the action was not "
                 "started. Reuse the Idempotency-Key of the retried action, or "
-                "retry after older completed receipts expire."
+                "retry after older completed receipts expire.",
+                code="IDEMPOTENCY_CAPACITY_EXHAUSTED", status=429, retryable=True,
             )
-            return refusal
+        if state == served_action_receipts.CONFLICT:
+            _serve_logger.warning(f"idempotency key reused for a different request, cache_key={cache_key!r}")
+            return IdempotencyRefusal(
+                "idempotency key reused: this Idempotency-Key already names a "
+                "different request, so this one was not started. Use a new "
+                "Idempotency-Key for a new action.",
+                code="IDEMPOTENCY_KEY_REUSED", status=422,
+            )
         if state == "completed":
-            refusal = (
+            return IdempotencyRefusal(
                 "idempotent action refused: it already completed before the "
                 "current server process. It was not run again; query its "
-                "status or submit a new action with a new Idempotency-Key."
+                "status or submit a new action with a new Idempotency-Key.",
+                code="IDEMPOTENT_ACTION_COMPLETED", status=409,
             )
-            return refusal
         if state in {"started", "uncertain"}:
             _serve_logger.warning(f"idempotent action refused with uncertain prior outcome, cache_key={cache_key!r}, state={state!r}")
-            refusal = (
+            return IdempotencyRefusal(
                 "idempotent action refused: it has an uncertain prior outcome "
                 "after an interrupted server process. It was not run again; "
-                "inspect the affected project/status before submitting a new action."
+                "inspect the affected project/status before submitting a new action.",
+                code="IDEMPOTENT_ACTION_UNCERTAIN", status=409,
             )
-            return refusal
         try:
             result = factory()
         except BaseException:
@@ -1147,11 +1501,11 @@ def _idempotent_http_action(context, supplied_key, action, factory):
         # The in-process result cannot outlive the durable receipt: otherwise
         # an expired key remains silently cached until unrelated cache churn.
         cache_ttl_seconds=served_action_receipts.completed_ttl_seconds(),
-        # Capacity rejection writes no durable receipt and explicitly invites
-        # retry after pressure drops, so never freeze that refusal in memory.
+        # Capacity rejection and key-reuse conflicts write no durable receipt
+        # and can change as receipts expire, so never freeze them in memory.
         cache_result=lambda result: not (
-            isinstance(result, str)
-            and result.startswith("idempotency receipt capacity exhausted:")
+            isinstance(result, IdempotencyRefusal)
+            and result.code in ("IDEMPOTENCY_CAPACITY_EXHAUSTED", "IDEMPOTENCY_KEY_REUSED")
         ),
     )
 
@@ -1353,6 +1707,22 @@ def _request_cache_scope(context):
     """
     material = "request-cache-owner\0" + _state_principal(context)
     return "qc-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+_CLIENT_PROTOCOL_SLOT = _client_protocol.ClientProtocolHostSlot(
+    lambda: {"permission_mode": permission_policy.current_mode()})
+
+
+def _client_protocol_host():
+    """The client schema/reconnect host bound to the current application graph."""
+    from sonder_runtime.bootstrap.app import default_app
+
+    return _CLIENT_PROTOCOL_SLOT.bound_to(getattr(default_app(), "protocol", None))
+
+
+def _observe_client_control_state():
+    """Best-effort permission-mode publish on the client control stream."""
+    _client_protocol.observe_control_state(_client_protocol_host, _serve_logger)
 
 
 def _feed_request_owner(context):
@@ -1575,6 +1945,17 @@ def _effective_auth_mode():
     return AUTH_MODE
 
 
+def _warn_if_local_open():
+    """Warn about an unauthenticated listener from the *effective* mode only."""
+    if _effective_auth_mode() != "local-open":
+        return False
+    _serve_logger.warning(
+        "auth mode is local-open: no API key or account requirement configured; "
+        "the loopback listener accepts unauthenticated local clients"
+    )
+    return True
+
+
 def _auth_context(auth_header="", account_header=""):
     mode = _effective_auth_mode()
     api_key_ok = bool(API_KEY) and (
@@ -1734,6 +2115,52 @@ def _ollama_pool_admin_page(context, params):
         return {"error": "invalid_request"}, 400
     result = server._ollama_pool_admin_status_data(principal=_state_principal(context), **params)
     return result, 400 if "error" in result else 200
+
+
+def _http_approver(context):
+    """Who issued an HTTP approval, as the ledger records it."""
+    if context.get("mode") == "local-open":
+        return "local-open"
+    account = context.get("account")
+    if account:
+        username = str(account.get("username") or "") if isinstance(account, dict) else str(
+            getattr(account, "username", "") or "")
+        return "developer:%s" % (username or "account")
+    if context.get("api_key"):
+        return "admin-key"
+    return "http"
+
+
+def _audit_http_approval(action, approval, started):
+    """Record an HTTP approve/revoke on the existing direct-tool audit path."""
+    record = getattr(server, "_record_direct_tool", None)
+    if not callable(record):
+        return
+    try:
+        if action == "revoke":
+            record(
+                "permission_approve", {"revoke": approval.get("nonce", "")}, ok=True,
+                started=started,
+                summary="revoked %s call %s via http" % (
+                    approval.get("tool", ""), approval.get("call_id", "")),
+            )
+        else:
+            record(
+                "permission_approve",
+                {"tool": approval.get("tool", ""), "call_id": approval.get("call_id", ""),
+                 "ttl_seconds": approval.get("ttl_seconds", 0), "surface": "http"},
+                ok=True, started=started, summary=approval.get("nonce", ""),
+            )
+    except Exception:
+        _serve_logger.warning("approval audit record failed", exc_info=True)
+
+
+def _account_created_message(account):
+    """The human sentence a 201 registration carries next to the account."""
+    account = account if isinstance(account, dict) else {}
+    username = str(account.get("username") or "").strip() or "(unnamed)"
+    role = str(account.get("role") or "").strip() or "user"
+    return "Account %s created (role %s)." % (username, role)
 
 
 def _system_operation_authority_error(operation, context):
@@ -2169,6 +2596,54 @@ def _history_from_messages(messages):
 
 
 SERVER_SIDE_HISTORY_TURNS = 8
+# ``history`` on a chat request: "auto" (default) lets a session-named request
+# with no prior messages continue from the durable transcript; "client" means
+# the messages sent are the whole history and nothing is injected.
+_CHAT_HISTORY_SOURCES = ("auto", "client")
+
+
+def _durable_session_history(storage_session, limit):
+    """Return the last ``limit`` turns of a durable session transcript.
+
+    Uses the injected session facade's verified, redacted replay projection so
+    history is never rebuilt from a chain that fails its integrity check.  Any
+    unavailability yields ``[]`` and the caller falls back to legacy turns.
+    """
+    facade = _SESSION_FACADE
+    if facade is None:
+        return []
+    try:
+        result = facade.replay(storage_session)
+    except Exception:
+        _serve_logger.warning("durable session history unavailable", exc_info=True)
+        return []
+    if getattr(result, "status_code", None) != 200:
+        # A chain that fails verification, or one longer than the replay
+        # bound, cannot supply history.  Make that loss of context visible
+        # instead of silently answering the turn without prior messages.
+        _serve_logger.warning(
+            "durable session history unavailable: replay status=%s",
+            getattr(result, "status_code", None),
+        )
+        return []
+    messages = []
+    for item in (result.body or {}).get("transcript") or ():
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        content = item.get("content")
+        if role not in ("user", "assistant") or not isinstance(content, str):
+            continue
+        if role == "assistant":
+            content = _strip_footer(content.split("=== ACTIVITY")[0])
+        content = content.strip()
+        if content:
+            messages.append({"role": role, "content": content})
+    user_positions = [index for index, message in enumerate(messages)
+                      if message["role"] == "user"]
+    if len(user_positions) > limit:
+        messages = messages[user_positions[-limit]:]
+    return messages
 
 
 def _server_side_history(storage_session, limit=SERVER_SIDE_HISTORY_TURNS):
@@ -2182,6 +2657,15 @@ def _server_side_history(storage_session, limit=SERVER_SIDE_HISTORY_TURNS):
     """
     if not (storage_session or "").strip():
         return []
+    limit = max(1, int(limit))
+    # The served chat route captures every named model turn in the durable
+    # session store (``_capture_live_session_turn``), including explicit-model
+    # turns that are non-learning and therefore write no legacy interaction
+    # row.  Prefer that transcript; the legacy table remains the fallback for
+    # sessions that predate durable capture.
+    durable = _durable_session_history(storage_session, limit)
+    if durable:
+        return durable
     try:
         import sonder_runtime.adapters.memory_store as memory_store
 
@@ -2194,7 +2678,7 @@ def _server_side_history(storage_session, limit=SERVER_SIDE_HISTORY_TURNS):
     except Exception:
         return []
     history = []
-    for turn in turns[-max(1, int(limit)):]:
+    for turn in turns[-limit:]:
         task = (turn.get("task") or "").strip()
         response = (turn.get("response") or "").split("=== ACTIVITY")[0]
         response = _strip_footer(response).strip()
@@ -2412,7 +2896,84 @@ def _http_slash_refusal(cmd, argument="", context=None):
     # that it will take the read-only branch; the rules live in the catalog so
     # this chain and `server.control_command` cannot disagree about a read.
     tools = command_catalog.narrow_branch_tools(cmd, argument, tools)
-    return _http_tool_refusal(tools, cmd, context=context)
+    return _http_tool_refusal(
+        tools, cmd, context=context, arguments=_slash_call_arguments(cmd, argument),
+    )
+
+
+def _slash_call_arguments(cmd, argument):
+    """The tool arguments a file-changing slash command will call with, or None.
+
+    Mirrors the branches of ``_handle_slash`` exactly (``/write`` and
+    ``/append`` call ``file_write``, ``/edit`` calls ``file_edit``), so an
+    unattended refusal names the call (a call id an operator can approve once)
+    and the same call digests identically whether it is typed ``/write a b``
+    or ``/file_write path=a content=b mode=create``. The caller's token is a
+    credential knob and never part of the digest.
+    """
+    text = str(argument or "")
+    if cmd in ("/write", "/append"):
+        parts = text.split(None, 1)
+        if len(parts) != 2:
+            return None
+        return {"path": parts[0], "content": parts[1],
+                "mode": "append" if cmd == "/append" else "create"}
+    if cmd == "/edit":
+        pieces = text.split("|", 2)
+        if len(pieces) != 3:
+            return None
+        return {"path": pieces[0].strip(), "old": pieces[1], "new": pieces[2]}
+    return None
+
+
+# S1. Refusals observed during one chat turn. The permission gate reports
+# every unattended decision to its observers; this one keeps the refusals
+# that name a call (an effect-class tool with arguments, already noted as
+# pending in the approval ledger) for the turn that is collecting them.
+_CHAT_REFUSALS = contextvars.ContextVar("sonder_http_chat_refusals", default=None)
+_MAX_TURN_REFUSALS = 8
+
+
+def _capture_unattended_refusal(decision, _surface):
+    sink = _CHAT_REFUSALS.get()
+    if sink is None or len(sink) >= _MAX_TURN_REFUSALS:
+        return
+    if (
+        getattr(decision, "action", "") == "deny"
+        and getattr(decision, "source", "") == "unattended"
+        and getattr(decision, "call_id", "")
+    ):
+        sink.append(decision)
+
+
+def _ensure_refusal_observer():
+    """Idempotent: the gate de-duplicates observers by identity."""
+    try:
+        permission_policy.add_decision_observer(_capture_unattended_refusal)
+    except Exception:
+        _serve_logger.warning("refusal observer unavailable; receipts omit refusal", exc_info=True)
+
+
+def _modes_allowing_risk(risk):
+    try:
+        return list(permission_policy._modes_allowing(risk))
+    except Exception:
+        return []
+
+
+def _turn_refusal_receipt(refusals):
+    """The structured refusal for the last nameable refusal of a turn, or None."""
+    if not refusals:
+        return None
+    decision = refusals[-1]
+    try:
+        label = permission_policy.mode_label(decision.mode)
+    except Exception:
+        label = str(decision.mode or "")
+    return refusal_receipt(
+        decision, mode_label=label, modes_allowing=_modes_allowing_risk(decision.risk),
+        count=len(refusals),
+    )
 
 
 def _loop_global_operation_refusal(actions_json, context=None):
@@ -2544,6 +3105,73 @@ def _slash_system_operation(command, argument):
     return ""
 
 
+_BARE_SLASH_COMMAND = re.compile(r"/[A-Za-z][A-Za-z0-9_-]{0,63}")
+
+
+def _http_principal(auth):
+    """The principal an authenticated HTTP caller acts as, or "" when unknown.
+
+    An account is its hashed identity; the owner key and the local-open
+    listener are ``owner``. Shared by the typed developer routes and their
+    chat spellings so both bind the same principal.
+    """
+    return _build_principal(auth if isinstance(auth, dict) else None)
+
+
+def _http_workspace_roots(auth):
+    """Configured workspace roots for an admin caller; () for anyone else."""
+    if not _admin_authorized(auth):
+        return ()
+    from sonder_runtime.bootstrap.app import default_app
+
+    state = getattr(getattr(default_app(), "config", None), "state", None)
+    return tuple(str(Path(root).resolve()) for root in getattr(state, "workspace_roots", ()))
+
+
+def _http_debug_context(auth, correlation_id):
+    """Typed debug-tool context: source=http, principal from the account."""
+    principal = _http_principal(auth)
+    if not principal:
+        raise PermissionError("authenticated account identity is unavailable")
+    context = sonder_lifecycle.get().operation_context(correlation_id, auth)
+    roots = tuple(Path(root) for root in _http_workspace_roots(auth))
+    return replace(context, principal_id=principal, source="http", workspace_roots=roots)
+
+
+def _debug_tools_http_facade(application):
+    """The admin crash/profile facade over ``application.debug_tools``.
+
+    Host-launching routes are graded by the permission modes first, exactly
+    as the typed gateway grades an HTTP caller.
+    """
+    from sonder_runtime.bootstrap.debug_tools import debug_http_authorizer
+    from sonder_runtime.interfaces.http.facades.debug_tools import DebugToolsHttpFacade
+
+    service = getattr(application, "debug_tools", None)
+    return DebugToolsHttpFacade(lambda: service, authorize=debug_http_authorizer(service))
+
+
+def _developer_chat_reply(cmd, arg, context):
+    """``/test``, ``/digest``, ``/build``, ``/fix-build``, ``/crash``, ``/profile`` in chat.
+
+    ``interfaces/http/facades/developer_chat.py`` turns the line into exactly
+    the call its HTTP route makes, under that route's authority check. The
+    permission modes have already graded the line unattended at the chain
+    gate (``_http_slash_refusal``), without the call's arguments; a mode that
+    refuses the run refuses it there, naming no call. Approval of one run by
+    ``call_id`` goes through the HTTP route.
+    """
+    from sonder_runtime.bootstrap.app import default_app
+    from sonder_runtime.interfaces.http.facades import developer_chat
+
+    return developer_chat.reply(
+        cmd, arg, context, admin_authorized=_admin_authorized,
+        developer_authorized=_developer_authorized, principal_of=_http_principal,
+        workspace_roots_of=_http_workspace_roots, application=default_app,
+        debug_facade=_debug_tools_http_facade, debug_context=_http_debug_context,
+    )
+
+
 def _handle_slash(content, messages=None, state=None, project="", context=None,
                   idempotency_key=""):
     """Return response text if `content` is a recognized slash command, else None."""
@@ -2667,6 +3295,8 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         return server.control_command(stripped, project=project)
     if cmd in ("/activity", "/tools"):
         return server.activity_status()
+    if cmd in ("/test", "/digest", "/build", "/fix-build", "/crash", "/profile"):
+        return _developer_chat_reply(cmd, arg, context)
     if cmd in ("/autopilot", "/auto"):
         # Starting a persistent run is a side effect.  A caller may not know
         # whether its connection died before or after the controller accepted
@@ -2763,12 +3393,13 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         if len(parts2) != 2:
             return "usage: /login <username> <password>"
         out = server.admin_login(parts2[0], parts2[1])
-        marker = "token: "
-        from ...domain.cloud_access import has_legacy_error_prefix
-        if marker in out and not has_legacy_error_prefix(out):
-            state.token = out.split(marker, 1)[1].strip().splitlines()[0]
+        # The token stays in the console session; the reply never shows it.
+        from ...domain.login_output import split_login_output
+        token, display = split_login_output(out)
+        if token:
+            state.token = token
             state.account = server._admin_account_from_token(state.token)
-        return out
+        return display
     if cmd == "/whoami":
         return server.admin_whoami(state.token)
     if cmd == "/admin":
@@ -2911,6 +3542,14 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
     if dispatched is not None:
         return dispatched
 
+    if _BARE_SLASH_COMMAND.fullmatch(stripped):
+        # A lone "/word" is a command attempt, not a sentence: answer without
+        # spending a model call on a typo.  Same text as a hidden command so
+        # the reply does not reveal which names exist for other accounts.
+        return (
+            "No command with that name is available to this account. "
+            "Use /help to list the commands you can run."
+        )
     return None  # not a recognized slash command — fall through to the model
 
 
@@ -3070,6 +3709,83 @@ def _work_project_for_request(project, storage_project):
     return server.served_work_project(project) or storage_project
 
 
+def _work_run_stop_reason():
+    """Stop every work run's effects once the runtime starts draining."""
+    try:
+        draining = sonder_lifecycle.get().coordinator.draining
+    except Exception:
+        # A lifecycle that cannot be read cannot vouch for further effects.
+        return "the runtime lifecycle could not be read"
+    return "the runtime is draining for shutdown" if draining else ""
+
+
+@contextlib.contextmanager
+def _work_run_lifetime():
+    """Count a work run as an in-flight mutation for the graceful drain.
+
+    A run can outlive the request that admitted it (and that request's
+    admission slot); counting it here lets a drain wait its bounded deadline
+    for the run's current effect to finish instead of exiting under it.
+    """
+    coordinator = None
+    counted = False
+    try:
+        coordinator = sonder_lifecycle.get().coordinator
+        counted = bool(coordinator.begin_mutation())
+    except Exception:
+        _serve_logger.warning("work run could not be counted for graceful drain", exc_info=True)
+    try:
+        yield
+    finally:
+        if counted:
+            coordinator.end_mutation()
+
+
+_WORK_RUNNER = WorkRunner(
+    store=http_work_runs, effects=effect_fence,
+    wait_seconds=_env_int("SONDER_HTTP_WORK_WAIT_SECONDS", 240),
+    budget_seconds=_env_int("SONDER_HTTP_WORK_BUDGET_SECONDS", 1800),
+    max_running=_env_int("SONDER_HTTP_WORK_MAX_RUNNING", 2),
+    stop_reason=_work_run_stop_reason,
+    lifetime=_work_run_lifetime,
+    thread_factory=owned_runtime_thread,
+)
+
+
+def _work_run_record(result):
+    """Durable (status, answer) for one finished work run."""
+    if isinstance(result, ChatWorkResult):
+        status = result.status if result.status in ("returned", "unknown", "refused") else "unknown"
+        return status, result.text
+    if isinstance(result, str):
+        return "refused", result
+    return "unknown", ""
+
+
+def _work_run_pending_text(run_id):
+    # Client-neutral: this text is shown as the answer in chat apps, so it
+    # names no HTTP routes. The routes are data in the receipt
+    # (``sonder_receipt.chat_work.get_url`` / ``cancel_url``).
+    return (
+        "Work is still running as work run %s (wall-clock budget %d s); "
+        "check on it or cancel it from your client." % (run_id, _WORK_RUNNER.budget_seconds)
+    )
+
+
+def _bind_current_activity():
+    """Carry the request's activity span into the work-run thread."""
+    response_id = activity_tracker.current_response_id()
+    if not response_id:
+        return None
+
+    def wrap(body):
+        def bound():
+            with activity_tracker.bind_response(response_id):
+                body()
+        return bound
+    return wrap
+
+
 def _handle_work_intent(content, project="", authorized=False, context=None,
                         idempotency_key="", session_id="", session_ref="",
                         correlation_id="", with_receipt=False):
@@ -3122,7 +3838,10 @@ def _handle_work_intent(content, project="", authorized=False, context=None,
             if not decision.is_execution:
                 raise ValueError("admitted work must have an execution handoff")
             try:
-                admission = receipts.admit(session_id, decision.handoff, source)
+                admission = receipts.admit(
+                    session_id, decision.handoff, source,
+                    routing_reason=decision.reason,
+                )
             except Exception as error:
                 raise _LiveSessionCaptureFailure from error
             try:
@@ -3145,17 +3864,45 @@ def _handle_work_intent(content, project="", authorized=False, context=None,
                 output if isinstance(output, str) else "", status,
                 decision.lane, session_ref, admission.event_id,
                 terminal.event_id, source.event_id if source else "",
+                routing_reason=decision.reason,
+                # Bound inside the replay guard so a cached replay names the
+                # run that actually produced the answer.
+                work_run_id=current_work_run_id(),
             )
 
-        result = _idempotent_http_action(context, idempotency_key, action, run_admitted_work)
+        # The lane runs as a bounded work run: a wall-clock budget and an
+        # explicit cancel stop its effects, and a client that stops waiting
+        # can still fetch the persisted answer by run id.
+        try:
+            outcome = _WORK_RUNNER.run(
+                _state_principal(context),
+                lambda: _idempotent_http_action(
+                    context, idempotency_key, action, run_admitted_work,
+                ),
+                classify=_work_run_record,
+                thread_wrapper=_bind_current_activity(),
+            )
+        except WorkCapacityExhausted as error:
+            raise sonder_lifecycle.AdmissionRejected(
+                429, "WORK_CAPACITY_EXHAUSTED",
+                "routed work capacity is busy (%s); retry later, or cancel a run "
+                "with POST /v1/work-runs/<id>/cancel" % error,
+                retryable=True,
+            ) from None
+        if not outcome.finished:
+            return ChatWorkResult(
+                _work_run_pending_text(outcome.run_id), "running",
+                session_ref=session_ref, work_run_id=outcome.run_id,
+            )
+        result = outcome.result
         if isinstance(result, ChatWorkResult):
-            return result
+            return result if result.work_run_id else replace(result, work_run_id=outcome.run_id)
         # A plain string can only originate in the existing durable replay
         # guard, which refused or could not re-run the action; no new lane
         # return or admission receipt is claimed for it.
         return ChatWorkResult(
             result if isinstance(result, str) else "", "refused" if isinstance(result, str) else "unknown",
-            session_ref=session_ref,
+            session_ref=session_ref, work_run_id=outcome.run_id,
         )
     return _idempotent_http_action(
         context, idempotency_key, action,
@@ -3848,6 +4595,28 @@ def _commands_help_payload(topic="", context=None):
         return {"text": "Command catalog unavailable: %s" % exc}
 
 
+class ServeHTTPServer(ThreadingHTTPServer):
+    """The served listener, with a TCP backlog sized for request bursts.
+
+    ``socketserver`` listens with a backlog of 5.  A burst of concurrent
+    clients then overflows the kernel accept queue and some connections are
+    reset before the admission layer can queue them or answer 429, so the
+    backlog must at least cover the default admission capacity.
+    """
+
+    request_queue_size = 128
+
+
+# Inventory routes never read an unexpected body; a request carrying one is
+# answered and its connection closed instead of draining untrusted bytes.
+_BODY_GUARDED_INVENTORY_ROUTES = (
+    "/v1/compute/nodes",
+    "/v1/compute/nodes/refresh",
+    "/v1/tools/inventory",
+    "/v1/tools/inventory/refresh",
+)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "sonder-serve/1.0"
     # socketserver reads this in setup() and calls connection.settimeout(); a
@@ -3873,7 +4642,7 @@ class Handler(BaseHTTPRequestHandler):
         if (getattr(self, "_artifact_transfer_request", False)
                 or getattr(self, "_memory_replication_request", False)
                 or getattr(self, "_app_control_request", False)
-                or _request_route(getattr(self, "path", "")) in ("/v1/compute/nodes", "/v1/compute/nodes/refresh")):
+                or _request_route(getattr(self, "path", "")) in _BODY_GUARDED_INVENTORY_ROUTES):
             return
         if not self.close_connection:
             return
@@ -3906,6 +4675,15 @@ class Handler(BaseHTTPRequestHandler):
             # a server exception worth emitting as a socketserver traceback.
             self.close_connection = True
 
+    def _observatory_origin_request(self, origin):
+        """True for an Observatory-only origin on a telemetry GET/OPTIONS route."""
+        return (
+            origin is not None
+            and origin in OBSERVATORY_ORIGINS
+            and getattr(self, "command", "") in ("GET", "OPTIONS")
+            and _request_route(getattr(self, "path", "")) in _TELEMETRY_ROUTES
+        )
+
     def _cors(self):
         origin = self.headers.get("Origin")
         if origin is not None and origin in CORS_ORIGINS:
@@ -3917,12 +4695,24 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header(
                 "Access-Control-Allow-Headers",
                 "Content-Type, Authorization, X-Sonder-Account-Token, "
-                "X-Sonder-Bootstrap-Secret, X-Sonder-App-Control, X-Sonder-Spanda, Idempotency-Key",
+                "X-Sonder-Bootstrap-Secret, X-Sonder-App-Control, X-Sonder-Spanda, Idempotency-Key, "
+                "Accept, Cache-Control, Last-Event-ID",
             )
             self.send_header(
                 "Access-Control-Expose-Headers",
                 "X-Sonder-Elapsed-Ms, X-Sonder-Correlation-Id, X-Sonder-Spanda-Rsc, X-Sonder-Spanda-Clusters, X-Sonder-Spanda-Decision, X-Sonder-Spanda-Uncertain",
             )
+        elif self._observatory_origin_request(origin):
+            # Route-scoped grant: read-only telemetry routes, GET only.
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+            self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+            self.send_header(
+                "Access-Control-Allow-Headers",
+                "Accept, Authorization, Cache-Control, Last-Event-ID",
+            )
+            self.send_header("Access-Control-Max-Age", "600")
+            self.send_header("Access-Control-Expose-Headers", "X-Sonder-Correlation-Id")
 
     def send_error(self, code, message=None, explain=None):
         if is_app_control_route(getattr(self, "path", "")) and hasattr(self, "headers"):
@@ -3945,12 +4735,16 @@ class Handler(BaseHTTPRequestHandler):
         # requests. A correlation ID is a request receipt, never a socket
         # receipt, so discard the prior request's cached value first.
         self._correlation_id = ""
+        # Nor may the prior request's principal declaration survive it.
+        _bind_request_build_principal(None)
         self._operation_context = None
         self._request_started = time.monotonic()
         self._request_body_consumed = False
         self._app_control_request = False
         self._memory_replication_request = False
         self._spanda_headers = None
+        if self._reject_disallowed_host():
+            return
         if handle_memory_replication(
                 self, "OPTIONS", _MEMORY_REPLICATION_RECEIVER):
             return
@@ -3970,9 +4764,55 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Sonder-Elapsed-Ms", "0")
         self.end_headers()
 
+    def _listener_port(self):
+        server_address = getattr(getattr(self, "server", None), "server_address", None)
+        if isinstance(server_address, tuple) and len(server_address) >= 2:
+            port = server_address[1]
+            if type(port) is int and port > 0:
+                return port
+        return BOUND_PORT or CONFIGURED_PORT
+
+    def _reject_disallowed_host(self):
+        """Refuse a request whose Host could be a DNS-rebinding name (421).
+
+        Runs before any routing, including the private transfer and
+        replication surfaces, so a DNS-rebinding page can reach nothing.
+        Records whether the name was trusted outright: a name accepted only
+        because this listener requires credentials must not also unlock the
+        loopback-peer conveniences (``_peer_is_loopback``), since a browser
+        on this machine is exactly where a rebinding page runs.
+        """
+        self._host_trusted = False
+        headers = getattr(self, "headers", None)
+        if headers is None:
+            return False
+        values = headers.get_all("Host") if hasattr(headers, "get_all") else None
+        if values is not None and len(values) > 1:
+            decision = None
+        else:
+            decision = host_decision(
+                headers.get("Host"), allowed_hosts=ALLOWED_HOSTS,
+                local_names=_machine_host_names(),
+                credentials_required=_effective_auth_mode() != "local-open",
+            )
+        if decision is not None:
+            self._host_trusted = decision == HOST_TRUSTED
+            return False
+        _log_rejected_host(headers.get("Host"))
+        self.close_connection = True
+        self._send_json_payload(
+            {"error": {"message": "host is not allowed for this listener",
+                       "type": "invalid_request", "code": "HOST_NOT_ALLOWED",
+                       "remedy": HOST_NOT_ALLOWED_REMEDY}},
+            status=421, headers={"Connection": "close", "Cache-Control": "no-store"},
+        )
+        return True
+
     def _reject_disallowed_origin(self):
         origin = self.headers.get("Origin")
         if origin is None or origin in CORS_ORIGINS:
+            return False
+        if self._observatory_origin_request(origin):
             return False
         _serve_logger.debug(f"_reject_disallowed_origin: rejecting origin={origin!r}")
         if (
@@ -3984,38 +4824,38 @@ class Handler(BaseHTTPRequestHandler):
                 getattr(self, "_request_started", time.monotonic()),
             )
         self._send_json_payload(
-            {"error": {"message": "origin is not allowed", "type": "cors"}},
+            {"error": {"message": "origin is not allowed", "type": "cors",
+                       "code": "forbidden_origin"}},
             status=403,
         )
         return True
 
     def _request_auth_context(self):
-        return _auth_context(
+        context = _auth_context(
             self.headers.get("Authorization", ""),
             self.headers.get("X-Sonder-Account-Token", ""),
         )
+        # A served account's agent turn must never carry the owner's build
+        # model: the brief shows only the principal this request declares.
+        _bind_request_build_principal(context)
+        return context
 
     def _peer(self):
         return self.client_address[0] if self.client_address else ""
 
     def _client_ip(self):
-        """Resolve client IP through X-Forwarded-For when peer is a trusted proxy."""
-        peer = self._peer()
-        if not peer:
-            return peer
-        try:
-            peer_addr = ipaddress.ip_address(peer)
-        except ValueError:
-            return peer
-        if not any(peer_addr in net for net in _TRUSTED_PROXY_NETWORKS):
-            return peer
-        xff = self.headers.get("X-Forwarded-For", "")
-        if not xff:
-            return peer
-        parts = [p.strip() for p in xff.split(",") if p.strip()]
-        if not parts:
-            return peer
-        return parts[0]
+        """Resolve the client IP; X-Forwarded-For only via a declared proxy.
+
+        A loopback peer is not by itself a proxy: without the operator's
+        ``tls_terminated_by_proxy`` declaration any local process could rotate
+        the header to dodge the authentication-failure limiter, or to spend
+        another address's budget.
+        """
+        return forwarded_client_ip(
+            self._peer(), self.headers.get("X-Forwarded-For", ""),
+            proxy_declared=TLS_TERMINATED_BY_PROXY,
+            trusted_networks=_TRUSTED_PROXY_NETWORKS,
+        )
 
     def _correlation(self):
         if not getattr(self, "_correlation_id", ""):
@@ -4059,7 +4899,9 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def _peer_is_loopback(self):
-        return _is_loopback_host(self._peer())
+        # A loopback peer earns its conveniences only through a trusted Host
+        # name; see ``_reject_disallowed_host``.
+        return getattr(self, "_host_trusted", True) and _is_loopback_host(self._peer())
 
     def _handle_lifecycle_get(self, path):
         """SPEC-2 WP3 endpoints. Returns True when the path was handled.
@@ -4198,7 +5040,7 @@ class Handler(BaseHTTPRequestHandler):
         pending = self._unread_request_body_bytes()
         if (getattr(self, "_artifact_transfer_request", False)
                 or getattr(self, "_app_control_request", False)
-                or _request_route(getattr(self, "path", "")) in ("/v1/compute/nodes", "/v1/compute/nodes/refresh")) and pending != 0:
+                or _request_route(getattr(self, "path", "")) in _BODY_GUARDED_INVENTORY_ROUTES) and pending != 0:
             return True
         if pending == 0:
             self._request_body_consumed = True
@@ -4328,6 +5170,43 @@ class Handler(BaseHTTPRequestHandler):
             # Telemetry remains bounded and non-authoritative; request handling
             # must not become dependent on its optional inspection surface.
             pass
+        # The live Observatory turn ends with the response; remember why.
+        self._telemetry_result = result
+
+    # -- Observatory live telemetry ------------------------------------------
+
+    def send_response(self, code, message=None):
+        # The terminal request.* event reports the status actually written.
+        self._last_response_status = code
+        super().send_response(code, message)
+
+    def _begin_chat_turn_telemetry(self, *, model, stream, session_id):
+        observatory_routes.begin_chat_turn(
+            self, application=_live_telemetry_application(),
+            bind_operation_context=bind_operation_context, log=_serve_logger,
+            model=model, stream=stream, session_id=session_id,
+        )
+
+    def _finish_chat_turn_telemetry(self):
+        observatory_routes.finish_chat_turn(self, log=_serve_logger)
+
+    def _handle_telemetry_get(self, path):
+        observatory_routes.serve_get(
+            self, path,
+            loopback_listener=not TLS_TERMINATED_BY_PROXY and _is_loopback_host(HOST),
+            admin_authorized=_admin_authorized,
+            application_for=lambda: _live_telemetry_application(build=True),
+            ecosystem_for=_ecosystem_document,
+            auth_required=lambda: _effective_auth_mode() != "local-open",
+            stream=lambda feed: observatory_routes.stream_telemetry(
+                self, feed,
+                query=urllib.parse.parse_qs(
+                    urllib.parse.urlsplit(self.path).query, keep_blank_values=True,
+                ),
+                lifecycle=sonder_lifecycle.get(), idle_timeout=STREAM_IDLE_TIMEOUT_SECONDS,
+                peer_closed=_socket_peer_closed,
+            ),
+        )
 
     def _read_json(self, *, max_bytes=None):
         # HTTP framing must be unambiguous before this handler reads a body.
@@ -4379,6 +5258,83 @@ class Handler(BaseHTTPRequestHandler):
         content_lengths = self.headers.get_all("Content-Length") or ()
         if len(content_lengths) > 1:
             raise HTTPRequestError(400, "multiple Content-Length headers are not supported")
+
+    def _validate_idempotency_key(self):
+        """Reject an Idempotency-Key the replay guard could not honor.
+
+        A key the replay helpers cannot bind would otherwise run the action
+        without its no-duplicate promise, and a repeated header lets a proxy
+        and this server pick different keys.  Refuse both before dispatch.
+        """
+        keys = self.headers.get_all("Idempotency-Key") or ()
+        if len(keys) > 1:
+            raise HTTPRequestError(400, "multiple Idempotency-Key headers are not supported")
+        if keys and len(keys[0].strip()) > _MAX_IDEMPOTENCY_KEY_LENGTH:
+            raise HTTPRequestError(
+                400,
+                "Idempotency-Key must be at most %d characters" % _MAX_IDEMPOTENCY_KEY_LENGTH,
+            )
+
+    def _handle_build_request(self, method, path, payload=None):
+        """``/v1/build/*``: C++ build tools through the typed gateway.
+
+        Developer authority is required (these routes run host builds). The
+        call runs as the authenticated principal with ``source="http"``, so the
+        permission modes grade it unattended: under ``manual`` a build is
+        refused with the standard remedies. See
+        ``interfaces/http/facades/build_tools.py``.
+        """
+        if not isinstance(path, str) or not path.startswith("/v1/build/"):
+            return False
+        from sonder_runtime.interfaces.http.facades.build_tools import BuildHttpRoutes
+
+        return self._dispatch_developer_gateway_route(
+            method, path, payload, BuildHttpRoutes, invalid_code="INVALID_BUILD_REQUEST",
+            read_noun="build reads", admin_only=False,
+        )
+
+    def _handle_test_tools_request(self, method, path, payload=None):
+        """``/v1/tools/test-run`` and ``/v1/tools/output-digest``.
+
+        Admin authority is required, as for ``/v1/tools/crash-*``: a test run
+        executes the project's own code, and a digest reads any log-like file
+        under the file roots. An admin caller also carries the configured
+        workspace roots, so the planner's per-caller grant check applies.
+        Then one typed gateway call as the authenticated principal with
+        ``source="http"`` (graded unattended; ``test_run`` is execution). See
+        ``interfaces/http/facades/testing_tools.py``.
+        """
+        from sonder_runtime.interfaces.http.facades.testing_tools import (
+            TestRunHttpRoutes,
+            owns,
+        )
+
+        if not owns(path):
+            return False
+        return self._dispatch_developer_gateway_route(
+            method, path, payload, TestRunHttpRoutes, invalid_code="INVALID_TEST_REQUEST",
+            read_noun="test run reads", admin_only=True,
+        )
+
+    def _dispatch_developer_gateway_route(self, method, path, payload, routes_type, *,
+                                          invalid_code, read_noun, admin_only):
+        """Authenticate, bind the principal, and send one typed gateway route.
+
+        ``admin_only`` requires admin authority; otherwise developer or admin
+        authority is required (see ``facades/typed_gateway.py``).
+        """
+        from sonder_runtime.bootstrap.app import default_app
+        from sonder_runtime.interfaces.http.facades.typed_gateway import serve_developer_route
+
+        return serve_developer_route(
+            self, method, path, payload, routes_type, invalid_code=invalid_code,
+            read_noun=read_noun, admin_only=admin_only, admin_authorized=_admin_authorized,
+            developer_authorized=_developer_authorized, principal_of=_http_principal,
+            workspace_roots_of=_http_workspace_roots, application=default_app,
+            query_of=lambda: urllib.parse.parse_qs(
+                urllib.parse.urlsplit(self.path).query, keep_blank_values=True,
+                max_num_fields=16),
+        )
 
     def _handle_agent_lane_request(self, method, path, payload=None):
         """Bind lane commands to authenticated identity and configured scope."""
@@ -4478,11 +5434,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         self._correlation_id = ""
+        _bind_request_build_principal(None)
         self._request_started = time.monotonic()
         self._request_body_consumed = False
         self._app_control_request = False
         self._memory_replication_request = False
         self._spanda_headers = None
+        if self._reject_disallowed_host():
+            return
         if handle_memory_replication(
                 self, "PUT", _MEMORY_REPLICATION_RECEIVER):
             return
@@ -4519,11 +5478,14 @@ class Handler(BaseHTTPRequestHandler):
         # Keep-alive reuses Handler instances; see do_OPTIONS for why this is
         # reset before every externally visible request.
         self._correlation_id = ""
+        _bind_request_build_principal(None)
         self._request_started = time.monotonic()
         self._request_body_consumed = False
         self._app_control_request = False
         self._memory_replication_request = False
         self._spanda_headers = None
+        if self._reject_disallowed_host():
+            return
         if handle_memory_replication(
                 self, "GET", _MEMORY_REPLICATION_RECEIVER):
             return
@@ -4540,11 +5502,15 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_ollama_pool_admin("GET")
             return
         _serve_logger.debug(f"do_GET: path={path!r}, peer={self._peer()!r}")
-        if path == "/" and _local_log_dashboard_allowed(self._peer()):
+        log_page_allowed = (
+            getattr(self, "_host_trusted", True)
+            and _local_log_dashboard_allowed(self._peer())
+        )
+        if path == "/" and log_page_allowed:
             self._send_local_log_page()
             return
         if path == "/v1/local/server-log":
-            if not _local_log_dashboard_allowed(self._peer()):
+            if not log_page_allowed:
                 self._send_not_found()
             else:
                 self._send_json_payload({"log": _local_server_log_tail()})
@@ -4572,8 +5538,17 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self._handle_agent_lane_request("GET", path):
             return
+        if self._handle_build_request("GET", path):
+            return
+        if self._handle_test_tools_request("GET", path):
+            return
         if path == "/v1/compute/nodes":
             self._with_compute_inventory_admission(self._handle_compute_inventory_read)
+            return
+        if path == "/v1/tools/inventory":
+            self._with_tool_inventory_admission(self._handle_tool_inventory_read)
+            return
+        if self._handle_debug_tools_request("GET", path):
             return
         if path == "/v1/compute/snapshot":
             context = self._request_auth_context()
@@ -4740,8 +5715,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send_json_payload(result.body, status=result.status_code)
             return
+        if path in _TELEMETRY_ROUTES:
+            self._handle_telemetry_get(path)
+            return
         _maybe_live_reload()
-        if path.startswith("/v1/sessions/"):
+        if path == "/v1/sessions" or path.startswith("/v1/sessions/"):
             context = self._request_auth_context()
             if not context["authorized"]:
                 self._send_auth_error()
@@ -5124,6 +6102,14 @@ class Handler(BaseHTTPRequestHandler):
             }
             self._send_json_payload(payload)
             return
+        if path == _CLIENT_SCHEMA_ROUTE:
+            context = self._request_auth_context()
+            if not context["authorized"]:
+                self._send_auth_error()
+                return
+            status, body = _client_protocol.schema_response(_client_protocol_host())
+            self._send_json_payload(body, status=status)
+            return
         if path == "/v1/sonder/feed":
             # Owner-scoped by construction: the tracker only returns spans
             # recorded under this caller's opaque principal, so unlike
@@ -5141,9 +6127,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self._handle_commands_get():
             return
+        if self._handle_approvals_get():
+            return
         if self._handle_permission_mode_get():
             return
         if self._handle_fanout_get():
+            return
+        if self._handle_work_run_request("GET", path):
             return
         self._send_not_found()
 
@@ -5193,6 +6183,42 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json_payload(payload)
         return True
 
+    def _approval_ports(self):
+        """This process's approval ledger, authority check and replay guard."""
+        from sonder_runtime.interfaces.http.facades.approval_routes import HttpApprovalPorts
+
+        return HttpApprovalPorts(
+            developer_authorized=_developer_authorized,
+            error_envelope=lambda *a, **k: sonder_lifecycle.error_envelope(*a, **k),
+            ledger=lambda: permission_policy.approval_ledger(),
+            idempotent_action=_idempotent_http_action,
+            send_idempotency_refusal=_send_idempotency_refusal,
+            approver_of=_http_approver, audit=_audit_http_approval,
+            clock=lambda: time.time(), log=_serve_logger,
+        )
+
+    def _handle_approvals_get(self):
+        """``GET /v1/approvals``: refused calls waiting for approval, and approvals."""
+        from sonder_runtime.interfaces.http.facades import approval_routes
+
+        split = urllib.parse.urlsplit(self.path)
+        return approval_routes.serve_get(
+            self, split.path,
+            lambda: urllib.parse.parse_qs(split.query, keep_blank_values=True),
+            self._approval_ports(),
+        )
+
+    def _handle_approvals_post(self, path, req, context):
+        """``POST /v1/approvals/<call_id>`` and ``POST /v1/approvals/revoke/<nonce>``.
+
+        An authenticated developer/administrator POST is an attended approval
+        surface, like ``POST /v1/permission-mode``; see
+        ``facades/approval_routes.py``.
+        """
+        from sonder_runtime.interfaces.http.facades import approval_routes
+
+        approval_routes.serve_post(self, path, req, context, self._approval_ports())
+
     def _handle_permission_mode_get(self):
         """Current autonomy mode, so a client can show it before you send.
 
@@ -5204,6 +6230,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._request_auth_context()["authorized"]:
             self._send_auth_error()
             return True
+        _observe_client_control_state()
         self._send_json_payload(server.permission_mode_data())
         return True
 
@@ -5228,193 +6255,48 @@ class Handler(BaseHTTPRequestHandler):
                 return None, (404, "fanout run was not found")
         return run, None
 
+    def _handle_work_run_request(self, method, path, context=None):
+        """``GET /v1/work-runs[/<id>]`` and ``POST /v1/work-runs/<id>/cancel``."""
+        from sonder_runtime.interfaces.http.facades import work_runs
+
+        return work_runs.serve_request(
+            self, method, path, context, runner=_WORK_RUNNER,
+            developer_authorized=_developer_authorized, principal_of=_state_principal,
+            store_errors=(OSError, sqlite3.Error), log=_serve_logger,
+        )
+
     def _handle_fanout_get(self):
-        route = urllib.parse.urlsplit(self.path).path.rstrip("/")
-        if route == "/v1/fanout":
-            context = self._request_auth_context()
-            if not context["authorized"]:
-                self._send_auth_error()
-                return True
-            if not _developer_authorized(context):
-                self._send_json_payload({"error": {"message": "developer or admin authentication is required for model fanout", "type": "forbidden"}}, status=403)
-                return True
-            query = urllib.parse.parse_qs(
-                urllib.parse.urlsplit(self.path).query, keep_blank_values=True,
-            )
-            # A history query is a small, explicitly bounded contract.  Do
-            # not let duplicate values acquire accidental first-value-wins
-            # semantics through a proxy or a client encoder.
-            for name in ("limit", "include_finished"):
-                if len(query.get(name, ())) > 1:
-                    self._send_json_payload({"error": {"message": "%s must be supplied at most once" % name, "type": "invalid_request"}}, status=400)
-                    return True
-            limit_text = (query.get("limit") or ["20"])[0]
-            finished_text = (query.get("include_finished") or ["true"])[0].casefold()
-            try:
-                limit = int(limit_text)
-            except (TypeError, ValueError):
-                self._send_json_payload({"error": {"message": "limit must be an integer between 1 and 100", "type": "invalid_request"}}, status=400)
-                return True
-            if not 1 <= limit <= 100:
-                self._send_json_payload({"error": {"message": "limit must be an integer between 1 and 100", "type": "invalid_request"}}, status=400)
-                return True
-            if finished_text not in ("true", "false"):
-                self._send_json_payload({"error": {"message": "include_finished must be true or false", "type": "invalid_request"}}, status=400)
-                return True
-            account = context.get("account") or {}
-            request_owner = None
-            if context.get("mode") != "local-open" and account.get("role") != "admin":
-                request_owner = _fanout_request_owner(context)
-            self._send_json_payload({"runs": server.fanout_store.recent_run_summaries(
-                request_owner=request_owner, include_finished=finished_text == "true",
-                limit=limit,
-            )})
-            return True
-        prefix = "/v1/fanout/"
-        if not route.startswith(prefix) or "/" in route[len(prefix):]:
-            return False
-        run_id = route[len(prefix):]
-        if not run_id or len(run_id) > 80:
-            self._send_json_payload({"error": {"message": "invalid fanout run id", "type": "invalid_request"}}, status=400)
-            return True
-        context = self._request_auth_context()
-        if not context["authorized"]:
-            self._send_auth_error()
-            return True
-        _run, error = self._fanout_run_for_context(context, run_id)
-        if error:
-            status, message = error
-            self._send_json_payload({"error": {"message": message, "type": "forbidden" if status == 403 else "not_found"}}, status=status)
-            return True
-        self._send_json_payload(server._fanout_receipt(run_id))
-        return True
+        from sonder_runtime.interfaces.http.facades import fanout
+
+        return fanout.serve_get(
+            self, urllib.parse.urlsplit(self.path).path.rstrip("/"),
+            parse_query=lambda: urllib.parse.parse_qs(
+                urllib.parse.urlsplit(self.path).query, keep_blank_values=True),
+            developer_authorized=_developer_authorized,
+            request_owner_of=_fanout_request_owner, runtime=server,
+        )
 
     def _handle_fanout_post(self, path, req, context):
         """Mutate or locally synthesize one caller-authorized fanout receipt."""
-        prefix = "/v1/fanout/"
-        if not path.startswith(prefix):
-            return False
-        suffix = path[len(prefix):].strip("/")
-        parts = suffix.split("/")
-        if (len(parts) != 2 or parts[1] not in ("cancel", "resume", "synthesize")
-                or not parts[0] or len(parts[0]) > 80):
-            return False
-        run_id, action = parts
-        # Use the injected compatibility namespace rather than reaching
-        # around it directly.  Besides keeping the route bound to the
-        # composition-time runtime, this preserves the established patch seam
-        # for callers that replace a single legacy operation in tests.
-        runtime = server
+        from sonder_runtime.interfaces.http.facades import fanout
+
+        # Pass the injected compatibility namespace rather than reaching
+        # around it: this keeps the route bound to the composition-time
+        # runtime and preserves the patch seam for callers that replace a
+        # single legacy operation in tests.
+        return fanout.serve_post(
+            self, path, req, context, runtime=server, account_auth=admin_auth,
+            idempotent_http_action=_idempotent_http_action,
+            send_idempotency_refusal=_send_idempotency_refusal,
+        )
+
+    def _handle_client_reconnect(self, req, context):
+        """Plan one client reconnect against the served schema and streams."""
         if not context["authorized"]:
             self._send_auth_error()
-            return True
-        _run, error = self._fanout_run_for_context(context, run_id)
-        if error:
-            status, message = error
-            self._send_json_payload({"error": {"message": message, "type": "forbidden" if status == 403 else "not_found"}}, status=status)
-            return True
-        supplied_key = self.headers.get("Idempotency-Key", "")
-
-        def replay(action_name, factory):
-            # The run is already owner-authorized above.  Bind each replay to
-            # both that durable run and the complete small action payload, so
-            # a client key cannot turn a cancel into a resume or select a
-            # different synthesis model.  _http_action_idempotency_key hashes
-            # this text; neither it nor the raw header is retained.
-            return _idempotent_http_action(
-                context,
-                supplied_key,
-                "fanout\0%s\0%s" % (run_id, action_name),
-                factory,
-            )
-        if action == "synthesize":
-            if set(req) - {"synth_model"}:
-                self._send_json_payload({"error": {"message": "synthesis accepts only synth_model", "type": "invalid_request"}}, status=400)
-                return True
-            synth_model = req.get("synth_model", "")
-            if not isinstance(synth_model, str):
-                self._send_json_payload({"error": {"message": "synth_model must be a string", "type": "invalid_request"}}, status=400)
-                return True
-            # Synthesis starts a fresh bounded local generation.  In shared
-            # deployments it must consume the same per-account admission
-            # budget as chat completions, otherwise callers can bypass the
-            # inference rate limit by repeatedly synthesizing one receipt.
-            conn = runtime._open_db()
-            try:
-                ok, message = admin_auth.rate_limit(conn, context.get("account"))
-            finally:
-                conn.close()
-            if not ok:
-                self._send_json_payload(
-                    {"error": {"message": message, "type": "rate_limit"}},
-                    status=429,
-                )
-                return True
-            try:
-                payload = replay(
-                    "synthesize\0%s" % synth_model,
-                    lambda: runtime._fanout_synthesize_run(_run, synth_model),
-                )
-                self._send_json_payload(payload)
-            except runtime.ModelCallError as exc:
-                status = exc.status or (
-                    400 if exc.kind == "configuration" else
-                    504 if exc.kind == "timeout" else 502
-                )
-                if status == 408:
-                    status = 504
-                if status not in (400, 403, 404, 429, 502, 503, 504):
-                    status = 502
-                error_type = "invalid_request_error" if 400 <= status < 500 else "server_error"
-                headers = None
-                if status in (429, 503, 504):
-                    wait = exc.retry_after_seconds
-                    retry_after = 1 if wait is None else max(0, int(round(wait)))
-                    headers = {"Retry-After": str(retry_after)}
-                self._send_json_payload(
-                    {"error": {"message": exc.detail, "type": error_type}},
-                    status=status, headers=headers,
-                )
-            return True
-        if action == "cancel":
-            replay("cancel", lambda: runtime.fanout_store.request_cancel(run_id))
-        else:
-            for name in ("include_failed", "retry_unknown"):
-                if name in req and not isinstance(req[name], bool):
-                    self._send_json_payload({"error": {"message": "%s must be a boolean" % name, "type": "invalid_request"}}, status=400)
-                    return True
-            include_failed = req.get("include_failed") is True
-            retry_unknown = req.get("retry_unknown") is True
-
-            def resume():
-                resumed = runtime.fanout_store.resume_run(
-                    run_id,
-                    include_failed=include_failed,
-                    retry_unknown=retry_unknown,
-                )
-                if resumed is None:
-                    return False
-                # A resume is an explicit replay instruction. _execute
-                # preserves the stored snapshot and never retries unknown rows
-                # unless this request included retry_unknown=true.
-                runtime._execute_fanout_run(run_id)
-                return True
-
-            resumed = replay(
-                "resume\0include_failed=%d\0retry_unknown=%d" % (
-                    include_failed, retry_unknown,
-                ),
-                resume,
-            )
-            if resumed is None:
-                self._send_json_payload({"error": {"message": "fanout run is not resumable with the selected retry options", "type": "invalid_request"}}, status=400)
-                return True
-            if not resumed:
-                self._send_json_payload({"error": {"message": "fanout run is not resumable with the selected retry options", "type": "invalid_request"}}, status=400)
-                return True
-        receipt = runtime._fanout_receipt(run_id)
-        self._send_json_payload(receipt or {"error": {"message": "fanout receipt was unavailable", "type": "not_found"}}, status=200 if receipt else 404)
-        return True
+            return
+        status, body = _client_protocol.reconnect_response(_client_protocol_host(), req)
+        self._send_json_payload(body, status=status)
 
     def _handle_permission_mode_post(self, req, context=None):
         """Switch the autonomy mode. Deliberately cannot grant elevation."""
@@ -5428,7 +6310,7 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         try:
-            _idempotent_http_action(
+            result = _idempotent_http_action(
                 context,
                 self.headers.get("Idempotency-Key", ""),
                 "permission-mode\0%s" % wanted,
@@ -5440,7 +6322,11 @@ class Handler(BaseHTTPRequestHandler):
                 status=400,
             )
             return
+        if _send_idempotency_refusal(self, result):
+            return
+        _observe_client_control_state()
         self._send_json_payload(server.permission_mode_data())
+
 
     def _with_compute_inventory_admission(self, handler):
         from sonder_runtime.interfaces.http.facades.compute_inventory import inventory_request_slot
@@ -5508,6 +6394,107 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json_payload(body, status=status, headers={"Cache-Control": "no-store"})
         return True
 
+    def _with_tool_inventory_admission(self, handler):
+        from sonder_runtime.interfaces.http.facades.host_tools import tool_inventory_request_slot
+        with tool_inventory_request_slot() as admitted:
+            if not admitted:
+                self._send_json_payload({"error": {"code": "TOOL_INVENTORY_BUSY"}}, status=429)
+                return
+            handler()
+
+    @staticmethod
+    def _tool_inventory_service_factory():
+        from sonder_runtime.bootstrap.app import default_app
+
+        def factory():
+            services = getattr(default_app(), "developer_tools", None)
+            return getattr(services, "inventory", None) if services is not None else None
+
+        return factory
+
+    def _handle_tool_inventory_read(self):
+        """Admin-only redacted host tool inventory (``GET /v1/tools/inventory``)."""
+        context = self._request_auth_context()
+        if not context["authorized"]:
+            self._send_auth_error()
+            return
+        if not _admin_authorized(context):
+            self._send_json_payload({"error": {"code": "FORBIDDEN"}}, status=403)
+            return
+        try:
+            self._validate_request_framing()
+            if self._unread_request_body_bytes() != 0:
+                raise ValueError("tool inventory reads do not accept a body")
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query,
+                keep_blank_values=True, max_num_fields=2)
+            from sonder_runtime.interfaces.http.facades.host_tools import dispatch_tool_inventory
+            status, body = dispatch_tool_inventory(self._tool_inventory_service_factory(), query)
+        except (ValueError, HTTPRequestError):
+            status, body = 400, {"error": {"code": "INVALID_TOOL_INVENTORY_QUERY"}}
+        except Exception:
+            status, body = 503, {"error": {"code": "TOOL_INVENTORY_UNAVAILABLE"}}
+        self._send_json_payload(body, status=status, headers={"Cache-Control": "no-store"})
+
+    def _handle_tool_inventory_refresh(self):
+        if _request_route(self.path) != "/v1/tools/inventory/refresh":
+            return False
+        self._with_tool_inventory_admission(self._handle_admitted_tool_inventory_refresh)
+        return True
+
+    def _handle_admitted_tool_inventory_refresh(self):
+        """Admin-only forced rediscovery (``POST /v1/tools/inventory/refresh``)."""
+        if self._reject_disallowed_origin():
+            return
+        if self._auth_rate_limited():
+            return
+        context = self._request_auth_context()
+        if not context["authorized"]:
+            self._send_auth_error()
+            return
+        if not _admin_authorized(context):
+            self._send_json_payload({"error": {"code": "FORBIDDEN"}}, status=403)
+            return
+        try:
+            if "?" in self.path:
+                raise ValueError("refresh accepts a JSON body only")
+            payload = self._read_json(max_bytes=1024)
+            from sonder_runtime.interfaces.http.facades.host_tools import (
+                dispatch_tool_inventory_refresh,
+            )
+            status, body = dispatch_tool_inventory_refresh(
+                self._tool_inventory_service_factory(), payload,
+            )
+        except HTTPRequestError as error:
+            status, body = error.status, {"error": {"code": "INVALID_TOOL_INVENTORY_QUERY"}}
+        except (ValueError, TypeError):
+            status, body = 400, {"error": {"code": "INVALID_TOOL_INVENTORY_QUERY"}}
+        except Exception:
+            status, body = 503, {"error": {"code": "TOOL_INVENTORY_UNAVAILABLE"}}
+        self._send_json_payload(body, status=status, headers={"Cache-Control": "no-store"})
+
+    # --- crash / profile digests (admin-only; lane D routes) -------------------
+
+    def _debug_tools_context(self, auth):
+        """Typed HTTP context: source=http, principal from the account."""
+        return _http_debug_context(auth, self._correlation())
+
+    def _handle_debug_tools_request(self, method, route):
+        """``/v1/tools/crash-*``, ``profile-*`` and ``debug-runs/<id>`` (admin)."""
+        from sonder_runtime.interfaces.http.facades import debug_tools
+
+        def facade():
+            from sonder_runtime.bootstrap.app import default_app
+
+            return _debug_tools_http_facade(default_app())
+
+        return debug_tools.serve_request(
+            self, method, route, admin_authorized=_admin_authorized,
+            request_error=HTTPRequestError, facade_factory=facade,
+            parse_query=lambda: urllib.parse.parse_qs(
+                urllib.parse.urlsplit(self.path).query, keep_blank_values=True,
+                max_num_fields=1),
+        )
+
     def _handle_account_logout(self):
         """Revoke an explicitly supplied login; never infer a target account.
 
@@ -5557,9 +6544,27 @@ class Handler(BaseHTTPRequestHandler):
         reply({'ok': True})
 
     def do_POST(self):
+        # One turn scope per request: the ambient OperationContext and the
+        # Observatory turn are bound inside it and always unwound, and a
+        # started turn always gets exactly one terminal request.* event.
+        self._telemetry_turn = None
+        self._telemetry_result = None
+        self._telemetry_error_kind = None
+        self._telemetry_error_reply = False
+        self._last_response_status = None
+        with contextlib.ExitStack() as stack:
+            self._turn_stack = stack
+            try:
+                self._handle_post_request()
+            finally:
+                self._turn_stack = None
+                self._finish_chat_turn_telemetry()
+
+    def _handle_post_request(self):
         # Keep-alive reuses Handler instances; see do_OPTIONS for why this is
         # reset before every externally visible request.
         self._correlation_id = ""
+        _bind_request_build_principal(None)
         self._request_started = time.monotonic()
         # BaseHTTPRequestHandler reuses this instance for HTTP/1.1 keep-alive
         # requests. The terminal-metric latch is per request, never per socket,
@@ -5569,6 +6574,9 @@ class Handler(BaseHTTPRequestHandler):
         self._app_control_request = False
         self._memory_replication_request = False
         self._spanda_headers = None
+        self._early_stream = None
+        if self._reject_disallowed_host():
+            return
         if handle_memory_replication(
                 self, "POST", _MEMORY_REPLICATION_RECEIVER):
             return
@@ -5579,6 +6587,10 @@ class Handler(BaseHTTPRequestHandler):
         if handle_artifact_transfer(self, "POST", _ARTIFACT_TRANSFER_BINDING, max_request_bytes=MAX_REQUEST_BYTES):
             return
         if self._handle_compute_inventory_refresh():
+            return
+        if self._handle_tool_inventory_refresh():
+            return
+        if self._handle_debug_tools_request("POST", _request_route(self.path)):
             return
         is_chat_completion = _request_route(self.path) == "/v1/chat/completions"
         _serve_logger.debug(f"do_POST: path={_request_route(self.path)!r}, peer={self._peer()!r}, is_chat_completion={is_chat_completion}")
@@ -5600,6 +6612,7 @@ class Handler(BaseHTTPRequestHandler):
         self._correlation()
         try:
             self._validate_request_framing()
+            self._validate_idempotency_key()
         except HTTPRequestError as error:
             record_early_chat_metric("malformed_request")
             self._send_json_payload(
@@ -5641,6 +6654,13 @@ class Handler(BaseHTTPRequestHandler):
             if callable(operation_context) else None
         )
         if self._handle_agent_lane_request("POST", path, req):
+            return
+        if self._handle_build_request("POST", path, req):
+            return
+        if self._handle_test_tools_request("POST", path, req):
+            return
+        if path == _CLIENT_RECONNECT_ROUTE:
+            self._handle_client_reconnect(req, context)
             return
         compute_route = _compute_job_route(path)
         if compute_route is not None and compute_route[0] in ("submit", "cancel"):
@@ -5732,9 +6752,17 @@ class Handler(BaseHTTPRequestHandler):
             application = default_app()
             handler = _A2A_REQUEST_HANDLER or build_application_a2a_handler(
                 application,
-                base_url=os.environ.get("SONDER_A2A_BASE_URL", "").strip(),
+                # Serve the same endpoint the agent card advertises.
+                base_url=_a2a_discovery_base_url(),
                 card_facade=_A2A_AGENT_CARD_FACADE,
             )
+            # The A2A facade derives the turn id from the messageId and falls
+            # back to this request's correlation id via the ambient context.
+            turn_stack = getattr(self, "_turn_stack", None)
+            if self._operation_context is not None and turn_stack is not None:
+                turn_stack.enter_context(
+                    bind_operation_context(self._operation_context)
+                )
             result = dispatch_a2a_jsonrpc_route(handler, "POST", path, req)
             if result is None:
                 self._send_not_found()
@@ -5978,6 +7006,11 @@ class Handler(BaseHTTPRequestHandler):
                 path = "/v1/chat/completions"
         if self._handle_fanout_post(path, req, context):
             return
+        if self._handle_work_run_request("POST", path, context=context):
+            return
+        if path == "/v1/approvals" or path.startswith("/v1/approvals/"):
+            self._handle_approvals_post(path, req, context)
+            return
         if path == "/v1/permission-mode":
             if not context["authorized"]:
                 self._send_auth_error()
@@ -6015,7 +7048,12 @@ class Handler(BaseHTTPRequestHandler):
                     allow_additional=ALLOW_REGISTRATION,
                     actor=context["account"] if context["authorized"] else None,
                 )
-                self._send_json_payload({"ok": True, "account": account}, status=201)
+                # ``message`` lets a client that only reads ``ok``/``message``
+                # (older apps) report the success instead of a bare 201.
+                self._send_json_payload({
+                    "ok": True, "account": account,
+                    "message": _account_created_message(account),
+                }, status=201)
             except PermissionError as error:
                 self._send_json_payload({"ok": False, "message": str(error)}, status=403)
             except sqlite3.IntegrityError:
@@ -6144,6 +7182,10 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
         model = req.get("model", "sonder")
+        if isinstance(model, str):
+            # Surrounding whitespace is not part of a model name; echoing it
+            # back made the response name a model that does not exist.
+            model = model.strip()
         if not isinstance(model, str):
             record_early_chat_metric("invalid_model")
             self._send_json_payload(
@@ -6290,6 +7332,22 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             _serve_logger.error(f"model prewarm failed for selector={model_selector!r}", exc_info=True)
         context_size = req.get("context_size", "")
+        if context_size is None:
+            context_size = ""
+        if context_size != "" and (
+            isinstance(context_size, bool)
+            or not isinstance(context_size, (str, int))
+            or context_policy.parse_strict(context_size) is None
+        ):
+            # Previously any unparseable or non-positive value silently fell
+            # back to the default window; say so instead.
+            record_early_chat_metric("invalid_context_size")
+            self._send_json_payload({"error": {
+                "message": "context_size must be a positive token count, optionally "
+                           "suffixed k or m (e.g. 8192, 32k, 1m)",
+                "type": "invalid_request",
+            }}, status=400)
+            return
         location_consent = req.get("location_consent") is True
         location_hint = req.get("location_hint")
         if location_hint is not None and not isinstance(location_hint, dict):
@@ -6316,9 +7374,20 @@ class Handler(BaseHTTPRequestHandler):
                 status=error.status,
             )
             return
+        history_source = req.get("history")
+        if history_source is not None and history_source not in _CHAT_HISTORY_SOURCES:
+            record_early_chat_metric("invalid_history")
+            self._send_json_payload({"error": {
+                "message": "history must be \"client\" (use only the messages "
+                           "sent) or \"auto\" (the default)",
+                "type": "invalid_request",
+            }}, status=400)
+            return
         history = _history_from_messages(messages)
-        if not history and storage_session:
-            # Thin client: named a session, resent no transcript.
+        if not history and storage_session and history_source != "client":
+            # Thin client: named a session, resent no transcript. A client
+            # that owns its transcript (``history: "client"``) opts out, so a
+            # turn it cancelled or dropped is never re-injected.
             history = _server_side_history(storage_session)
         account_header = self.headers.get("X-Sonder-Account-Token", "")
         auth_header = self.headers.get("Authorization", "")
@@ -6339,6 +7408,11 @@ class Handler(BaseHTTPRequestHandler):
         response_tier = ""
         activity_response = None
         chat_work_receipt = None
+        # S1: unattended refusals of a nameable call during this turn, so the
+        # receipt can carry the call id a client needs to approve it once.
+        turn_refusals = []
+        refusal_scope = _CHAT_REFUSALS.set(turn_refusals)
+        _ensure_refusal_observer()
         _lifecycle = sonder_lifecycle.get()
         _request_started = time.monotonic()
         # Selecting a concrete model is an API routing contract.  The default
@@ -6349,6 +7423,16 @@ class Handler(BaseHTTPRequestHandler):
             model_operation != "responses"
             and _uses_default_model_route(model)
         )
+        # From here every exit records a terminal chat metric, so this is the
+        # turn's start for the Observatory (early validation rejections above
+        # never start one).  Ollama-only steps a non-Ollama turn has to skip
+        # are collected for the receipt.
+        self._begin_chat_turn_telemetry(
+            model=model, stream=stream, session_id=storage_session,
+        )
+        turn_degradations = self._turn_stack.enter_context(
+            _provider_bridge.degradation_scope()
+        ) if getattr(self, "_turn_stack", None) is not None else []
         try:
             # SPEC-2 WP4 admission: bounded concurrency slot with queue
             # depth, admission deadline, drain and maintenance awareness,
@@ -6423,6 +7507,9 @@ class Handler(BaseHTTPRequestHandler):
                                 and _is_loopback_host(self.client_address[0])
                                 and _http_server_location_lookup_allowed(context)
                             ),
+                            # Provider bindings apply here: a research agent
+                            # on a tier bound elsewhere fails closed (503).
+                            gateway_bound=True,
                         )
                         web_routed = reply is not None
                     if structured_schema is None and allow_control_routes and reply is None:
@@ -6552,7 +7639,12 @@ class Handler(BaseHTTPRequestHandler):
                             response_model = turn.resolved_model
                             response_tier = turn.resolved_tier
                         else:
-                            turn = _run_prompt(
+                            if stream:
+                                # Commit to SSE now and keep the connection
+                                # alive while the turn generates.
+                                self._begin_early_stream()
+                            try:
+                                turn = self._run_streamable_prompt(
                                 prompt,
                                 history,
                                 model_selector,
@@ -6578,7 +7670,9 @@ class Handler(BaseHTTPRequestHandler):
                                 # principal-namespaced above.
                                 augment=not bool(context.get("account")),
                                 metrics=_lifecycle.metrics,
-                            )
+                                )
+                            finally:
+                                self._pause_early_stream()
                             content = turn.content
                             response_iid = turn.iid
                             response_reasoning = turn.thinking
@@ -6623,6 +7717,9 @@ class Handler(BaseHTTPRequestHandler):
                 _lifecycle, rejection.code.lower(),
                 getattr(self, "_request_started", _request_started),
             )
+            if self._end_early_stream_with_error(
+                    str(rejection), "server_error", rejection.code, model):
+                return
             self._send_json_payload(
                 sonder_lifecycle.error_envelope(
                     rejection.code,
@@ -6636,6 +7733,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         except server.ModelCallError as error:
             _serve_logger.error(f"model call error: kind={error.kind!r}, status={error.status}, detail={error.detail!r}, correlation={self._correlation()!r}")
+            # The live turn reports the failure's kind, not the metric label.
+            self._telemetry_error_kind = error.kind
             self._record_chat_completion_metric(
                 _lifecycle, "model_error",
                 getattr(self, "_request_started", _request_started),
@@ -6664,6 +7763,9 @@ class Handler(BaseHTTPRequestHandler):
             message = error.detail
             if error.cloud and error.status == 429:
                 message = server._format_model_call_error(error)
+            if self._end_early_stream_with_error(
+                    message, error_type, "MODEL_CALL_%s" % status, model):
+                return
             self._send_json_payload(
                 {
                     "error": {
@@ -6681,6 +7783,10 @@ class Handler(BaseHTTPRequestHandler):
                 _lifecycle, "session_capture_failed",
                 getattr(self, "_request_started", _request_started),
             )
+            if self._end_early_stream_with_error(
+                    "durable session capture unavailable", "server_error",
+                    "SESSION_CAPTURE_UNAVAILABLE", model):
+                return
             self._send_json_payload(
                 {"error": {
                     "message": "durable session capture unavailable",
@@ -6698,6 +7804,9 @@ class Handler(BaseHTTPRequestHandler):
                 _lifecycle, "error",
                 getattr(self, "_request_started", _request_started),
             )
+            if self._end_early_stream_with_error(
+                    "internal server error", "server_error", "INTERNAL_ERROR", model):
+                return
             self._send_json_payload(
                 {"error": {"message": "internal server error",
                            "type": "server_error",
@@ -6706,12 +7815,16 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         finally:
+            _CHAT_REFUSALS.reset(refusal_scope)
             _release_http_conversation_state(state, state_pinned)
 
         # The handler timer starts before body parsing, authentication, and
         # routing.  It is the public HTTP contract, unlike the inner request
         # timer which exists only for the lifecycle histogram.
         request_started = getattr(self, "_request_started", _request_started)
+        # A legacy dispatcher reports a failed model call as an "ERROR ..."
+        # answer with HTTP 200; the live turn must still say it failed.
+        self._telemetry_error_reply = _is_legacy_error_reply(content)
         if not _reasoning_visible_to(context):
             response_reasoning = ""
         elapsed_ms = int((time.monotonic() - request_started) * 1000)
@@ -6728,8 +7841,15 @@ class Handler(BaseHTTPRequestHandler):
         # request cache; a closed "hit"/"miss" set with no request identity.
         if turn is not None and getattr(turn, "cache", ""):
             receipt["cache"] = turn.cache
+        if turn_degradations:
+            # Ollama-only steps this non-Ollama turn ran without (closed set
+            # of step names, never content); also logged at WARNING.
+            receipt["degraded"] = list(turn_degradations)
         if chat_work_receipt is not None:
             receipt["chat_work"] = chat_work_receipt
+        refusal = _turn_refusal_receipt(turn_refusals)
+        if refusal is not None:
+            receipt["refusal"] = refusal
         if stream:
             streamed = self._send_stream(
                 content, model, iid=response_iid, elapsed_ms=elapsed_ms,
@@ -6800,8 +7920,15 @@ class Handler(BaseHTTPRequestHandler):
             else (server.activity_tracker.public_snapshot(include_detail=False) or {}).get("latest")
         )
         headers_sent = False
+        early = getattr(self, "_early_stream", None)
+        if early is not None:
+            # Headers went out before generation; only data frames remain.
+            if not early.stop():
+                self.close_connection = True
+                return False
+            headers_sent = True
         connection = getattr(self, "connection", None)
-        if connection is not None:
+        if connection is not None and early is None:
             try:
                 connection.settimeout(STREAM_IDLE_TIMEOUT_SECONDS)
             except (AttributeError, OSError):
@@ -6810,6 +7937,11 @@ class Handler(BaseHTTPRequestHandler):
                 # still protects those paths.
                 pass
         try:
+            if early is not None:
+                return Handler._write_stream_body(
+                    self, iid, model, content, elapsed_ms, receipt, usage, activity,
+                    lock=early.lock,
+                )
             self.send_response(200)
             self._cors()
             self.send_header("Content-Type", "text/event-stream")
@@ -6828,15 +7960,9 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             self.end_headers()
             headers_sent = True
-            self.wfile.write(_chunk(iid, model, {"role": "assistant", "content": content}).encode("utf-8"))
-            self.wfile.write(_chunk(
-                iid, model, {}, finish_reason="stop", elapsed_ms=elapsed_ms,
-                receipt=receipt, activity=activity,
-            ).encode("utf-8"))
-            if usage is not None:
-                self.wfile.write(_chunk(iid, model, {}, usage=usage).encode("utf-8"))
-            self.wfile.write(b"data: [DONE]\n\n")
-            return True
+            return Handler._write_stream_body(
+                self, iid, model, content, elapsed_ms, receipt, usage, activity,
+            )
         except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
             # Header writes can fail before the first event just as body writes
             # can.  Return the same cancellation signal so the caller records
@@ -6855,16 +7981,98 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             return None
 
-    def _send_stream_terminal_error(self, iid, model):
+    def _write_stream_body(self, iid, model, content, elapsed_ms, receipt, usage,
+                           activity, lock=None):
+        with lock if lock is not None else contextlib.nullcontext():
+            self.wfile.write(_chunk(iid, model, {"role": "assistant", "content": content}).encode("utf-8"))
+            self.wfile.write(_chunk(
+                iid, model, {}, finish_reason="stop", elapsed_ms=elapsed_ms,
+                receipt=receipt, activity=activity,
+            ).encode("utf-8"))
+            if usage is not None:
+                self.wfile.write(_chunk(iid, model, {}, usage=usage).encode("utf-8"))
+            self.wfile.write(b"data: [DONE]\n\n")
+        return True
+
+    def _run_streamable_prompt(self, *args, **kwargs):
+        """The plain model turn; a seam kept separate from stream framing."""
+        return _run_prompt(*args, **kwargs)
+
+    def _begin_early_stream(self):
+        """Send SSE headers before generation and start keep-alive frames.
+
+        Model errors after this point can no longer change the HTTP status;
+        they are delivered as one terminal SSE error event followed by
+        ``[DONE]`` (see ``_end_early_stream_with_error``).
+        """
+        connection = getattr(self, "connection", None)
+        if connection is not None:
+            try:
+                connection.settimeout(STREAM_IDLE_TIMEOUT_SECONDS)
+            except (AttributeError, OSError):
+                pass
+
+        def write(frame):
+            self.wfile.write(frame)
+            flush = getattr(self.wfile, "flush", None)
+            if callable(flush):
+                flush()
+
+        keepalive = SSEKeepAlive(
+            write, STREAM_HEARTBEAT_SECONDS, thread_factory=owned_runtime_thread,
+        )
+        self._early_stream = keepalive
+        self.close_connection = True
+        try:
+            self.send_response(200)
+            self._cors()
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            # Ask buffering reverse proxies (nginx) to pass frames through.
+            self.send_header("X-Accel-Buffering", "no")
+            started = getattr(self, "_request_started", None)
+            elapsed_ms = int((time.monotonic() - started) * 1000) if started else 0
+            self.send_header("X-Sonder-Elapsed-Ms", str(max(0, elapsed_ms)))
+            if getattr(self, "_correlation_id", ""):
+                self.send_header("X-Sonder-Correlation-Id", self._correlation_id)
+            self.send_header("Connection", "close")
+            self.end_headers()
+            write(KEEPALIVE_FRAME)
+        except (OSError, ValueError):
+            keepalive.client_gone = True
+            return keepalive
+        return keepalive.start()
+
+    def _pause_early_stream(self):
+        early = getattr(self, "_early_stream", None)
+        if early is not None:
+            early.stop()
+
+    def _end_early_stream_with_error(self, message, error_type, code, model):
+        """Deliver an error on an already-committed SSE response; else ``False``."""
+        early = getattr(self, "_early_stream", None)
+        if early is None:
+            return False
+        self.close_connection = True
+        if early.stop():
+            with early.lock:
+                Handler._send_stream_terminal_error(
+                    self, uuid.uuid4().hex[:12], model or "sonder",
+                    message=message, error_type=error_type, code=code,
+                )
+        return True
+
+    def _send_stream_terminal_error(self, iid, model, *, message=None,
+                                    error_type="server_error", code="STREAM_INTERRUPTED"):
         """Best-effort terminal SSE error after an already-started stream."""
         payload = {
             "id": "chatcmpl-%s" % iid,
             "object": "error",
             "model": model,
             "error": {
-                "message": "stream interrupted before completion",
-                "type": "server_error",
-                "code": "STREAM_INTERRUPTED",
+                "message": message or "stream interrupted before completion",
+                "type": error_type,
+                "code": code,
             },
         }
         try:
@@ -6887,6 +8095,11 @@ def main(
 ):
     _serve_logger.info("HTTP server starting")
     _serve_logger.debug("main: starting HTTP server")
+    # This process serves several principals: an agent turn that inherited no
+    # request declaration shows no build line rather than the owner's.
+    from sonder_runtime.bootstrap.build_tools import require_declared_build_brief_principal
+
+    require_declared_build_brief_principal()
     global CONFIGURED_PORT, BOUND_PORT
     global _ARTIFACT_TRANSFER_BINDING, _ARTIFACT_TRANSFER_CONFIG
     global _APP_CONTROL_BINDING, _APP_CONTROL_CONFIG
@@ -7001,8 +8214,11 @@ def main(
             print("startup failed before bind: %s" % error, file=sys.stderr)
             raise SystemExit(1)
         lifecycle.begin_ollama_probe()
+        # Resolve the machine's own Host names before the first request, so
+        # no request ever waits on the bounded FQDN lookup.
+        _machine_host_names()
         try:
-            factory = ThreadingHTTPServer if _server_factory is None else _server_factory
+            factory = ServeHTTPServer if _server_factory is None else _server_factory
             httpd = factory((HOST, port), Handler)
         except OSError:
             _serve_logger.critical(f"server cannot bind to {HOST}:{port}, port may already be in use", exc_info=True)
@@ -7013,9 +8229,14 @@ def main(
                 target=httpd.shutdown, daemon=True, name="sonder-httpd-shutdown"
             ).start()
         )
+        try:
+            _WORK_RUNNER.reconcile()
+        except Exception:
+            _serve_logger.error("HTTP work run reconciliation failed at startup", exc_info=True)
         BOUND_PORT = port
         url = "http://%s:%d" % (HOST, port)
         _serve_logger.info(f"Server listening on {url}, auth_mode={_effective_auth_mode()!r}")
+        _warn_if_local_open()
         print("sonder_serve listening on %s" % url)
         print("auth mode: %s" % _effective_auth_mode())
         try:
@@ -7026,6 +8247,12 @@ def main(
         except Exception as exc:
             print("runtime source update status unavailable: %s" % type(exc).__name__)
         print("point your chat UI's OpenAI API base at %s/v1" % url)
+        telemetry_app = application or _live_telemetry_application()
+        if _register_telemetry_drain(lifecycle.coordinator, telemetry_app):
+            print(
+                "observatory telemetry: %s%s (admin authorization)"
+                % (_runtime_loopback_base_url(), observability_stream.DISCOVERY_ROUTE)
+            )
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:

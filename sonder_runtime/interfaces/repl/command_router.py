@@ -118,8 +118,12 @@ def _web_search_action(match):
 
 
 def _weather_action(match):
-    """Keep a follow-on request in the normal agent path."""
-    arg = (match.group("arg") or "").strip()
+    """Keep a follow-on request in the normal agent path.
+
+    The bare ``weather``/``forecast`` rule has no ``arg`` group; it routes to
+    ``/weather`` so the command's own usage line asks for a place.
+    """
+    arg = (match.groupdict().get("arg") or "").strip()
     if re.search(
         r"\b(?:and|then)\s+(?:tell|show|explain|describe|recommend|"
         r"suggest|say|summarize|search|fetch|open|run|check)\b",
@@ -127,7 +131,22 @@ def _weather_action(match):
         re.I,
     ):
         return None
-    return ("/weather %s" % arg).strip() if arg else None
+    return ("/weather %s" % arg).strip()
+
+
+_TEST_RUNNER_WORDS = {
+    "pytest": "pytest", "ctest": "ctest", "cargo test": "cargo", "go test": "go",
+    "dotnet test": "dotnet", "npm test": "npm", "pnpm test": "pnpm",
+    "yarn test": "yarn", "gradle test": "gradle", "mvn test": "maven",
+    "make test": "make",
+}
+
+
+def _test_runner_action(match):
+    """"run cargo test" -> /test cargo (runner names as /test spells them)."""
+    words = re.sub(r"\s+", " ", match.group("arg").strip().lower())
+    runner = _TEST_RUNNER_WORDS.get(words)
+    return "/test %s" % runner if runner else None
 
 
 def _rule(pattern, action):
@@ -312,6 +331,44 @@ _RULES = [
     _rule(r"^(?:weather|forecast)\s+(?P<arg>[A-Z][\w\s,.-]+?)\s*[?!.]*$",
           _weather_action),
     _rule(r"^(?:weather|forecast)\s*[?!.]*$", _weather_action),
+
+    # --- developer tools ---
+    # Whole-turn forms only. "which toolchains are installed" stays with /env
+    # (host OS + shells); these name the categorized inventory, a test run of
+    # the current project, or a digest of one job/log.
+    _rule(r"^(?:show|list)\s+(?:me\s+)?(?:the\s+|my\s+)?(?:tool\s+inventory|"
+          r"(?:installed|available)\s+(?:dev(?:eloper)?\s+)?tools(?:\s+by\s+category)?)"
+          r"\s*[?!.]*$", _fixed("/tools")),
+    _rule(r"^tool\s+inventory\s*[?!.]*$", _fixed("/tools")),
+    _rule(r"^run\s+(?:the\s+|all\s+(?:the\s+)?)?(?:project'?s?\s+)?tests?\s*[?!.]*$",
+          _fixed("/test")),
+    _rule(r"^run\s+(?P<arg>pytest|ctest|cargo\s+test|go\s+test|dotnet\s+test|npm\s+test|"
+          r"pnpm\s+test|yarn\s+test|gradle\s+test|mvn\s+test|make\s+test)\s*[?!.]*$",
+          _test_runner_action),
+    _rule(r"^summari[sz]e\s+(?:the\s+)?(?:output|log)\s+(?:of|for|from)\s+"
+          r"(?:job\s+)?(?P<arg>\S+)\s*$", _with_arg("/digest")),
+    # Crash and profile digests: whole-turn forms naming a capture file only.
+    # "profile startup" or "why is this slow" is work for the agent, not a
+    # digest, so the profile rule needs analyze/summarize + a capture noun +
+    # a path with a capture extension.
+    _rule(r"^(?:why did (?:it|this|the game) crash|analy[sz]e (?:the |this )?crash(?: dump)?)"
+          r"\s+(?P<arg>\S+\.(?:dmp|mdmp|core|ips|log|txt|xml)|core(?:\.\d+)?)\s*[?!.]*$",
+          _with_arg("/crash")),
+    _rule(r"^(?:analy[sz]e|summari[sz]e) (?:the |this )?(?:profile|capture|trace)\s+"
+          r"(?P<arg>\S+\.(?:json|csv|etl|tracy|zst|gz|out|data|txt)|callgrind\.out\.\d+|perf\.data)"
+          r"\s*[?!.]*$", _with_arg("/profile")),
+    _rule(r"^fix (?:the|that) crash\s*[?!.]*$", _fixed("/crash fix last")),
+    # C/C++ build tools: whole-turn forms that name the build model, or a
+    # build *target* by the word "target". "build a game" or "fix the build
+    # so the tests pass" is work for the agent, not a build call; the target
+    # token is a plain name so the slash line needs no quoting. The resolved
+    # line still goes through the console's approval gate.
+    _rule(r"^(?:show|describe)\s+(?:me\s+)?(?:the\s+)?(?:c\+\+\s+|cmake\s+)?"
+          r"(?:build\s+model|build\s+targets)\s*[?!.]*$", _fixed("/build model")),
+    _rule(r"^build\s+(?:the\s+)?target\s+(?P<arg>[A-Za-z0-9_](?:[A-Za-z0-9_.:+-]{0,62}[A-Za-z0-9_])?)\s*[?!.]*$",
+          lambda m: "/build run %s" % m.group("arg")),
+    _rule(r"^fix\s+(?:the\s+)?(?:failing\s+|broken\s+)?build\s+(?:of|for)\s+(?:the\s+)?target\s+"
+          r"(?P<arg>[A-Za-z0-9_](?:[A-Za-z0-9_.:+-]{0,62}[A-Za-z0-9_])?)\s*[?!.]*$", _with_arg("/fix-build")),
 
     # --- environment ---
     _rule(r"^(?:show\s+(?:the\s+)?|what\s+)?(?:host\s+)?environment\b(?:\s+are\s+you\s+(?:on|in))?\s*\??$",

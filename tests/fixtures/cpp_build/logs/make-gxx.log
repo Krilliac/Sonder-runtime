@@ -1,0 +1,22 @@
+[  9%] Building CXX object CMakeFiles/core.dir/cmake_pch.hxx.gch
+[ 18%] Building CXX object CMakeFiles/core.dir/src/core/math.cpp.o
+/work/sparklite/src/core/math.cpp: In function 'float normalized_length(const Vec3&)':
+/work/sparklite/src/core/math.cpp:19:15: error: 'lenght' was not declared in this scope; did you mean 'length'?
+   19 |     float l = lenght(v);
+      |               ^~~~~~
+      |               length
+gmake[2]: *** [CMakeFiles/core.dir/build.make:93: CMakeFiles/core.dir/src/core/math.cpp.o] Error 1
+[ 27%] Building CXX object CMakeFiles/core.dir/src/core/entity.cpp.o
+gmake[2]: Target 'CMakeFiles/core.dir/build' not remade because of errors.
+gmake[1]: *** [CMakeFiles/Makefile2:92: CMakeFiles/core.dir/all] Error 2
+[ 36%] Building CXX object CMakeFiles/shadergen.dir/tools/shadergen.cpp.o
+[ 45%] Linking CXX executable shadergen
+[ 45%] Built target shadergen
+[ 54%] Generating shaders.h
+[ 54%] Built target shaders
+[ 63%] Building CXX object CMakeFiles/crash_test.dir/tests/crash_test.cpp.o
+[ 72%] Linking CXX executable crash_test
+[ 72%] Built target crash_test
+gmake[1]: Target 'all' not remade because of errors.
+gmake: *** [Makefile:101: all] Error 2
+gmake: Target 'default_target' not remade because of errors.

@@ -28,6 +28,9 @@ except ImportError:  # pragma: no cover - exercised on minimal installs
 
 # Identity reservations belong to the process metric owner, never roster
 # positions. Removed members retain their slots; later identities overflow.
+# Bounded ``backend`` label values for inference measurements; any other
+# backend is folded into "other" so label cardinality stays fixed.
+_INFERENCE_BACKEND_LABELS = frozenset({"ollama", "openai_compatible", "sonder_inference"})
 _WORKER_LABELS = frozenset({*("w%d" % index for index in range(16)), "overflow"})
 _WORKER_IDENTITY = re.compile(r"[0-9a-f]{64}")
 _COMPUTE_REJECTION_REASONS = frozenset({
@@ -263,7 +266,7 @@ class MetricsRegistry:
         """Record bounded, content-free measurements from a backend."""
         if telemetry is None:
             return
-        backend = backend if backend in ("ollama", "openai_compatible") else "other"
+        backend = backend if backend in _INFERENCE_BACKEND_LABELS else "other"
         phases = (
             ("total", getattr(telemetry, "backend_total_ms", None)),
             ("load", getattr(telemetry, "load_ms", None)),

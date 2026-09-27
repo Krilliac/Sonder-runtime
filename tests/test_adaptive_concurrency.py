@@ -488,6 +488,13 @@ def test_dispatch_lanes_surfaces_stalled_lane_without_waiting_for_executor_shutd
 
 def test_run_delegated_stall_is_uncertain_and_retains_child_capacity(monkeypatch):
     monkeypatch.setenv("SONDER_FLEET_PROGRESS_DEADLINE_SECONDS", "0.1")
+    # The worker hangs inside its model call, and a lane in a model call is
+    # live until the call's own timeout plus a margin (finding 39).  Shrink
+    # both so the hang outlives them quickly.
+    import sonder_runtime.adapters.persistence.fleet_store as fleet_store
+
+    monkeypatch.setenv("SONDER_TIMEOUT", "1")
+    monkeypatch.setattr(fleet_store, "MODEL_CALL_PROGRESS_MARGIN_SECONDS", 0)
     monkeypatch.setattr(master_orchestrator, "parallel_worker_slots", lambda requested: 1)
     release = threading.Event()
     entered = threading.Event()

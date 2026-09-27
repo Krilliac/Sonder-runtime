@@ -1,0 +1,8 @@
+explode now
+✗ error ───────────────────────────────────────────────────
+ERROR: local Ollama rejected the model request (HTTP 500)
+after 1 attempt(s): fake model crashed
+  failed after <t> · 1 model call
+
+code · sonder:latest · manual · ctx 80/8.2k
+❯

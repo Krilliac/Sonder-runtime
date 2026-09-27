@@ -1,0 +1,8 @@
+/fix-build game --config Debug
+? approve  /fix-build game --config Debug  [runs]
+  repair a failing C/C++ build target; approving
+  lets the fix edit only its in-scope sources
+  while it runs
+  manual mode asks before commands that run
+  programs
+  run it? [y/N]

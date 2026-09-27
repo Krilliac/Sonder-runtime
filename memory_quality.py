@@ -220,8 +220,10 @@ def contradiction_findings(conn, sim_threshold=None, limit=20):
             continue
         conflicts = lesson_decay.detect_contradictions(
             candidates,
-            lambda a, b: sum(
-                x * y for x, y in zip(unit_by_text[a], unit_by_text[b])
+            # Bind this space's vectors explicitly; the callback is consumed
+            # synchronously, but the binding should not depend on that.
+            lambda a, b, units=unit_by_text: sum(
+                x * y for x, y in zip(units[a], units[b])
             ),
             sim_threshold=threshold,
         )

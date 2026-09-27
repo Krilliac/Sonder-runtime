@@ -186,6 +186,16 @@ _DESCRIPTORS = (
         resources=frozenset({ResourceClass.CPU}),
         inspection=True, secrets=SecretPolicy.NO_SECRET_INPUT,
     ),
+    # Host inventory: fixed, host-owned version probes on refresh; redacted
+    # paths still describe the machine, so it stays local-only.
+    _read_tool(
+        "tool_inventory", root=RootRequirement.NONE,
+        mode=ExecutionMode.BOUNDED_SUBPROCESS,
+        resources=frozenset({ResourceClass.CPU, ResourceClass.DISK}),
+        inspection=True, secrets=SecretPolicy.NO_SECRET_INPUT,
+    ),
+    # Guarded log/job digest: redacted before parsing, bounded, read-only.
+    _read_tool("output_digest"),
     _read_tool(
         "hardware_profile", root=RootRequirement.NONE,
         mode=ExecutionMode.MIXED,

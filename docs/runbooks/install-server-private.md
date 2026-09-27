@@ -68,3 +68,41 @@ sudo -u sonder /opt/sonder/current/venv/bin/python -m sonder_runtime status --js
 Never expose the runtime port directly. Install the reverse-proxy
 reference from `packaging/reverse-proxy/nginx-sonder.conf` with real
 certificates, and keep `[server].host = "127.0.0.1"`.
+
+## 7. Host names, phones and `421 HOST_NOT_ALLOWED`
+
+The listener checks the `Host` header to stop DNS rebinding
+([HTTP API & lifecycle](../wiki/05-http-api-and-lifecycle.md)):
+
+- IP addresses are always accepted, on any port. A phone that connects to
+  `https://192.168.1.20`, a Tailscale `100.x` address, or the Android
+  emulator's `10.0.2.2` needs no setting.
+- `localhost` and the server's own names (host name, FQDN and
+  `<hostname>.local`) are always accepted, on any port.
+- With credentials configured (this profile's API key, or accounts) any
+  other name is accepted too: a rebinding page has no credentials.
+- Only an unauthenticated `local-open` listener refuses other names. The
+  `421` body carries `error.code = "HOST_NOT_ALLOWED"` and names the remedy,
+  and the server log has a WARNING naming the refused host. Either connect by
+  IP, or list the name:
+
+  ```toml
+  [server]
+  allowed_hosts = ["sonder.example.com", "mypc.tail1234.ts.net"]
+  ```
+
+  or `SONDER_ALLOWED_HOSTS=sonder.example.com,mypc.tail1234.ts.net`. An entry
+  without a port matches any port; `name:port` matches that port only.
+
+Proxies that keep the client's `Host` (Caddy's default, Tailscale Serve,
+Cloudflare Tunnel, nginx with `proxy_set_header Host $host`) forward the
+public name. That is accepted when credentials are configured; on a
+`local-open` listener list the name in `allowed_hosts`. The reference nginx
+configuration forwards the upstream address and needs nothing. For SSE
+streaming through nginx, keep `proxy_buffering off` on the chat location.
+
+Rate limits on failed sign-ins are per client address. Behind a proxy every
+request arrives from the proxy's address, so set `tls_terminated_by_proxy =
+true` and list the proxy's address in `trusted_proxy_cidrs` (default
+loopback only); `X-Forwarded-For` is then read right to left from that proxy
+and no other peer can set it.

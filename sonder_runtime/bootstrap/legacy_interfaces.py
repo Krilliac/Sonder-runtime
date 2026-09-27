@@ -55,7 +55,9 @@ def configure_legacy_interfaces(runtime: ModuleType | None = None) -> None:
     repl = importlib.import_module("sonder_runtime.interfaces.repl.repl")
 
     runtime = runtime or runtime_proxy()
-    logger.warning("legacy HTTP/REPL interfaces still in use, deprecated code path exercised")
+    # INFO, not WARNING: this path runs on every REPL/serve start, so it is
+    # an expected startup fact (kept in the log file and /logs), not an alert.
+    logger.info("legacy HTTP/REPL interfaces still in use, deprecated code path exercised")
     logger.debug("injecting legacy runtime into HTTP and REPL interfaces")
     serve.configure_legacy_runtime(runtime)
     repl.configure_legacy_runtime(runtime)

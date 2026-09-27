@@ -1,0 +1,11 @@
+/status
+  mode      manual
+  tier      code
+  model     sonder:latest
+  context   0 of 8.2k tokens
+  agents    0 running, 0 lanes
+  project   default
+  endpoint  http://127.0.0.1:1 not listening
+  pool      Ollama: 1 worker (0 ready), idle
+  /status pool for worker detail | /about for provenance
+>

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import json
+
+import pytest
 from types import SimpleNamespace
 
 from sonder_runtime.platform.config import SonderConfig
@@ -52,6 +54,21 @@ def _app():
     })()
 
 
+@pytest.fixture
+def allow_native_tools(monkeypatch):
+    """Answer the runtime permission gate with allow for routing tests.
+
+    Every native call is gated; these tests prove routing, not policy, so
+    they grant the call the way an operator allow rule would.
+    """
+    from sonder_runtime.adapters.security.permission_policy import permission_policy
+
+    monkeypatch.setattr(
+        permission_policy, "decide_for_caller",
+        lambda *_args, **_kwargs: SimpleNamespace(action="allow"),
+    )
+
+
 class _Inspections:
     def inspect(self, name, arguments, context):
         from sonder_runtime.application.ports.tool_executor import ToolResult
@@ -93,12 +110,15 @@ def test_native_catalog_is_bounded_and_deterministic():
     assert [item.name for item in native_tool_registry().list_all()] == [
         "agent_lane",
         "approximate_location_lookup", "archive_create", "archive_extract", "archive_list", "artifact_risk_inspect",
-        "compute_artifact_fetch", "compute_cancel", "compute_status", "compute_submit", "data_inspect", "data_query", "dependency_inventory",
+        "build_fix", "build_fix_restore", "build_fix_result", "build_job", "build_job_result", "build_model",
+        "compute_artifact_fetch", "compute_cancel", "compute_status", "compute_submit",
+        "crash_digest", "crash_triage", "data_inspect", "data_query", "debug_run_result", "dependency_inventory",
         "directory_create", "directory_digest", "directory_tree", "edit_file", "fetch_artifact",
         "file_batch_write", "file_copy", "file_delete", "file_digest", "file_edit",
         "file_find", "file_move", "file_read", "file_read_range", "file_write", "image_inspect",
-        "json_patch", "log_inspect", "make_directory", "process_list", "process_memory_risk_inspect",
-        "program_search", "project_detect", "read_file", "run_program", "run_script", "script_search", "secret_scan", "text_patch", "text_search",
+        "json_patch", "log_inspect", "make_directory", "output_digest", "process_list", "process_memory_risk_inspect",
+        "profile_capture_digest", "profile_digest", "program_search", "project_detect", "read_file", "run_program", "run_script", "script_search", "secret_scan",
+        "test_run", "test_run_result", "text_patch", "text_search", "tool_inventory",
         "verify_artifact", "vision_analyze", "weather_lookup", "web_fetch", "web_search", "workspace_compare", "workspace_run", "write_file",
     ]
 
@@ -125,7 +145,20 @@ def test_native_catalog_has_exact_packaged_adapter_executor_parity():
             "sonder_runtime.bootstrap.native_mcp", fromlist=["_LEGACY_ALIASES"]
         )._LEGACY_ALIASES.items() if name != target
     }
-    canonical_native = native_names - compatibility_aliases - {
+    # The developer tools are served by DeveloperToolExecutor through the typed
+    # gateway (tests/test_developer_tool_typed_gateway.py), not the packaged one.
+    developer_tools = {"output_digest", "test_run", "test_run_result", "tool_inventory"}
+    assert developer_tools <= native_names
+    # The C++ build tools are served by BuildToolExecutor through the typed
+    # gateway (tests/test_build_executor.py), not the packaged one.
+    build_tools = {"build_model", "build_job", "build_job_result", "build_fix",
+                   "build_fix_result", "build_fix_restore"}
+    assert build_tools <= native_names
+    # So are the crash/profile digest tools, through DebugToolExecutor.
+    developer_tools |= {"crash_triage", "crash_digest", "profile_digest",
+                        "profile_capture_digest", "debug_run_result"}
+    assert developer_tools <= native_names
+    canonical_native = native_names - compatibility_aliases - developer_tools - build_tools - {
         "vision_analyze", "compute_submit", "compute_status", "compute_cancel",
         "compute_artifact_fetch", "agent_lane",
     }
@@ -324,7 +357,7 @@ def test_native_file_edit_schema_is_bounded_and_omits_legacy_bypass_fields():
     assert "approval" not in schema["properties"]
 
 
-def test_native_file_edit_routes_to_canonical_typed_executor():
+def test_native_file_edit_routes_to_canonical_typed_executor(allow_native_tools):
     request = {
         "jsonrpc": "2.0", "id": 1, "method": "initialize",
         "params": {"protocolVersion": "2.0", "capabilities": {"tools": {}}},
@@ -360,7 +393,7 @@ def test_native_archive_extract_schema_declares_safe_bounds():
     assert schema["properties"]["max_seconds"]["maximum"] == 60.0
 
 
-def test_native_archive_extract_routes_to_typed_executor():
+def test_native_archive_extract_routes_to_typed_executor(allow_native_tools):
     request = {
         "jsonrpc": "2.0", "id": 1, "method": "initialize",
         "params": {"protocolVersion": "2.0", "capabilities": {"tools": {}}},
@@ -395,7 +428,7 @@ def test_native_archive_create_schema_is_bounded_and_omits_legacy_bypass_fields(
     assert "approval" not in schema["properties"]
 
 
-def test_native_archive_create_routes_to_typed_executor():
+def test_native_archive_create_routes_to_typed_executor(allow_native_tools):
     request = {
         "jsonrpc": "2.0", "id": 1, "method": "initialize",
         "params": {"protocolVersion": "2.0", "capabilities": {"tools": {}}},
@@ -562,9 +595,44 @@ def test_native_mcp_composes_durable_tasks_when_job_service_is_available():
         output_stream=output,
     )
     rows = [json.loads(line) for line in output.getvalue().splitlines()]
-    assert rows[0]["result"]["capabilities"] == {"tasks": {}}
+    assert rows[0]["result"]["capabilities"] == {"tools": {}, "notifications": {}, "tasks": {}}
     assert rows[1]["result"]["taskId"] == "job-1"
     assert rows[1]["result"]["contentRedacted"] is True
+
+
+def test_native_initialize_advertises_server_capabilities_and_build_version():
+    """A client that sends ``capabilities: {}`` still learns tools are served.
+
+    MCP has each side declare its own capabilities. Initialize used to answer
+    with the intersection, so the official client read ``tools`` as absent
+    even though ``tools/list`` worked. ``serverInfo.version`` names the build,
+    not the ``2.0`` contract label.
+    """
+    from sonder_runtime.platform.version import runtime_version
+
+    requests = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+        }},
+        {"jsonrpc": "2.0", "id": 2, "method": "tasks/get", "params": {"taskId": "job-1"}},
+    ]
+    app = _app()
+    app.job_service = lambda: _Jobs()
+    output = io.StringIO()
+    run_native_mcp(
+        app,
+        input_stream=io.StringIO("\n".join(json.dumps(item) for item in requests) + "\n"),
+        output_stream=output,
+    )
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    result = rows[0]["result"]
+    assert result["capabilities"] == {"tools": {}, "notifications": {}}
+    assert result["serverInfo"] == {"name": "sonder-runtime", "version": runtime_version()}
+    # Tasks need the client's opt-in, so they are neither advertised nor
+    # served to a client that did not advertise ``tasks``: initialize never
+    # promises a method the session then refuses.
+    assert rows[1]["error"]["code"] == -32602
+    assert "not negotiated" in rows[1]["error"]["message"]
 
 
 def test_native_legacy_file_read_alias_calls_canonical_executor():
@@ -686,3 +754,108 @@ def test_native_entrypoint_reports_safety_refusal_without_traceback(monkeypatch,
 
     assert entrypoint.cmd_mcp(SimpleNamespace(native=True)) == 2
     assert capsys.readouterr().err == "native MCP startup refused: elevated host\n"
+
+
+_UNGATED_BEFORE = {
+    # native name -> (arguments, the name the permission catalog grades)
+    "run_program": ({"program": "id"}, "workspace_run"),
+    "workspace_run": ({"program": "id"}, "workspace_run"),
+    "run_script": ({"path": "tool.py"}, "script_run"),
+    "archive_create": ({"root": "p", "inputs_json": "[]", "destination": "a.zip"}, "archive_create"),
+    "archive_extract": ({"source": "a.zip", "destination": "out"}, "archive_extract"),
+    "fetch_artifact": ({"url": "https://example.test/a.bin", "dest": "a.bin"}, "fetch_artifact"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_UNGATED_BEFORE))
+def test_native_host_program_and_write_tools_obey_runtime_permission_policy(monkeypatch, name):
+    """Every native tool answers to the runtime permission modes.
+
+    The typed file family and compute already did; host programs, archive
+    writes, and artifact downloads reached the packaged executor with no gate,
+    so `plan` or `manual` did not stop a native client running `id`.
+    """
+    from sonder_runtime.adapters.security.permission_policy import permission_policy
+
+    arguments, graded = _UNGATED_BEFORE[name]
+    decided = []
+
+    def deny(tool, **kwargs):
+        decided.append((tool, kwargs))
+        return SimpleNamespace(action="deny", reason="refused for test", call_id="c1")
+
+    monkeypatch.setattr(permission_policy, "decide_for_caller", deny)
+
+    class _Refuse:
+        def execute(self, call, context):
+            raise AssertionError("a denied native tool must not execute")
+
+    app = _app()
+    app.tool_executor = _Refuse()
+    requests = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2.0", "capabilities": {"tools": {}},
+        }},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+            "name": name, "arguments": arguments,
+        }},
+    ]
+    output = io.StringIO()
+    run_native_mcp(
+        app,
+        input_stream=io.StringIO("\n".join(json.dumps(item) for item in requests) + "\n"),
+        output_stream=output,
+    )
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert rows[1]["result"]["isError"] is True
+    assert rows[1]["result"]["error"] == "permission_denied"
+    assert rows[1]["result"]["evidence"]["call_id"] == "c1"
+    assert decided[0][0] == graded
+    assert decided[0][1]["interactive"] is False
+    assert decided[0][1]["surface"] == "native-mcp"
+    assert decided[0][1]["arguments"] == arguments
+
+
+def test_native_entrypoint_exit_status_is_not_the_frame_count(monkeypatch):
+    """`run_native_mcp` returns frames handled; the process must exit 0.
+
+    Returning it from `cmd_mcp` made a clean session exit with status N mod
+    256 (a 41-frame session exited 41), which supervisors read as a crash.
+    """
+    import sonder_runtime.__main__ as entrypoint
+    import sonder_runtime.adapters.security.unsafe_lab as unsafe_lab
+    import sonder_runtime.bootstrap.app as bootstrap_app
+    import sonder_runtime.bootstrap.native_mcp as native_mcp
+    from sonder_runtime.adapters.persistence import migrations
+
+    monkeypatch.setattr(unsafe_lab, "require_startup", lambda: None)
+    monkeypatch.setattr(entrypoint, "_load_config", lambda _args: SonderConfig())
+    monkeypatch.setattr(entrypoint, "_configure_typed_home", lambda _config: None)
+    monkeypatch.setattr(entrypoint, "_export_runtime_environment", lambda *_a, **_k: None)
+    monkeypatch.setattr(migrations, "migrate_all", lambda **_kwargs: None)
+    monkeypatch.setattr(bootstrap_app, "build_application", lambda **_kwargs: _app())
+    monkeypatch.setattr(native_mcp, "run_native_mcp", lambda _app, **_kwargs: 41)
+
+    assert entrypoint.cmd_mcp(SimpleNamespace(native=True)) == 0
+
+
+def test_native_run_script_is_graded_as_the_legacy_execution_tool():
+    """`run_script` must grade as `script_run`, not fall through unclassified.
+
+    Unclassified tools are refused in every mode, so an ungraded `run_script`
+    stayed refused even under `auto`, where the legacy `script_run` runs.
+    """
+    from sonder_runtime.adapters.security.permission_policy import permission_policy
+    from sonder_runtime.bootstrap import native_mcp
+
+    graded = native_mcp._GRADED_NAMES.get("run_script", "run_script")
+    decision = permission_policy.decide_for_caller(
+        graded, interactive=False, gate_control_exempt=False,
+        surface="native-mcp", record=False, mode="auto", arguments={},
+    )
+    assert decision is None or decision.action == permission_policy.allow_action()
+    manual = permission_policy.decide_for_caller(
+        graded, interactive=False, gate_control_exempt=False,
+        surface="native-mcp", record=False, mode="manual", arguments={},
+    )
+    assert manual is not None and manual.action != permission_policy.allow_action()

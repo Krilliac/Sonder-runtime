@@ -347,5 +347,22 @@ SONDER_OPENAI_MODEL=sonder-bonsai
 ```
 
 The dispatcher makes one provider call and never falls through to another
-provider. Non-loopback OpenAI-compatible endpoints still require explicit cloud
-consent, and remote Ollama still requires explicit remote-Ollama consent.
+provider, except for the opt-in Sonder Inference fallback below. Non-loopback
+OpenAI-compatible endpoints still require explicit cloud consent, and remote
+Ollama still requires explicit remote-Ollama consent.
+
+To run tiers on Sonder Inference (`sonder-infer serve`) instead:
+
+```text
+SONDER_MODEL_BACKEND=sonder-inference
+SONDER_EMBEDDING_PROVIDER=ollama
+SONDER_INFERENCE_BASE_URL=http://127.0.0.1:11437
+SONDER_INFERENCE_TIER_MODELS=fast=qwen2.5:3b,general=qwen2.5:7b
+# optional: requests Inference never received go to local Ollama once
+SONDER_INFERENCE_FALLBACK=ollama
+```
+
+Tier model ids are Inference's served ids, not the runtime policy's Ollama
+names, which are never forwarded. The fallback triggers only when Inference
+provably did not run the request; timeouts and server errors surface as
+errors. See the [Sonder Inference runbook](../runbooks/sonder-inference.md).

@@ -12,6 +12,9 @@ from sonder_runtime.application.ports.runtime_threads import Thread as owned_run
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
+import hashlib
+import json
+import re
 from threading import Event, Lock, Thread
 from typing import Any, Protocol
 from uuid import uuid4
@@ -24,21 +27,182 @@ from ..ports.subagents import (
 )
 
 
+# Version 2 adds ``gateway_call_ordinal``; version 1 records (written before
+# it existed) stay readable and digest-valid only with an ordinal of zero.
+PROVENANCE_VERSION = 2
+_GATEWAY_ORDINAL_VERSION = 2
+_DIGEST = re.compile(r"[0-9a-f]{64}")
+_MAX_PROVENANCE_TEXT = 512
+
+
+def _canonical_bytes(value: object) -> bytes:
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def checkpoint_state_digest(state: Mapping[str, Any]) -> str:
+    """Return the SHA-256 of a checkpoint state's canonical JSON encoding.
+
+    The digest is taken over the JSON form because that is what every child
+    store persists; a tuple and the list it round-trips to digest equally.
+    """
+    if not isinstance(state, Mapping):
+        raise InvalidSubagentRequest("checkpoint state must be a mapping")
+    try:
+        encoded = _canonical_bytes(dict(state))
+    except (TypeError, ValueError) as exc:
+        raise InvalidSubagentRequest("checkpoint state must be canonical JSON") from exc
+    return hashlib.sha256(encoded).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class CheckpointProvenance:
+    """Host-stamped, immutable binding of a child checkpoint to an effect journal.
+
+    It binds the checkpoint subject (child id, sequence, canonical state digest
+    and cursor) to the journal identity, run, worker, owner epoch and settled
+    journal position observed before the child compare-and-set.  From version
+    2 it also records ``gateway_call_ordinal``: how many deterministic gateway
+    call ordinals the child runner had issued when the checkpoint was saved,
+    so a runner resumed from it re-issues later calls at the same ordinals.
+    Construction checks only shape: a row read back from storage must stay readable even
+    when tampered, so that the resume validator can refuse it with a typed
+    reason instead of failing every read of the child.  ``record_digest``
+    covers every other field; ``digest_valid`` recomputes it.
+    """
+
+    child_id: str
+    sequence: int
+    state_digest: str
+    cursor: str | None
+    journal_identity: str
+    run_id: str
+    worker_id: str
+    owner_epoch: int
+    settled_position: int
+    record_digest: str
+    version: int = PROVENANCE_VERSION
+    gateway_call_ordinal: int = 0
+
+    def __post_init__(self) -> None:
+        for name in ("child_id", "journal_identity", "run_id", "worker_id"):
+            value = getattr(self, name)
+            if (not isinstance(value, str) or not value.strip()
+                    or len(value) > _MAX_PROVENANCE_TEXT):
+                raise InvalidSubagentRequest(f"checkpoint provenance {name} must be bounded text")
+        if self.cursor is not None and not isinstance(self.cursor, str):
+            raise InvalidSubagentRequest("checkpoint provenance cursor must be text")
+        for name, minimum in (("sequence", 0), ("owner_epoch", 1), ("settled_position", 0),
+                              ("version", 1), ("gateway_call_ordinal", 0)):
+            value = getattr(self, name)
+            if type(value) is not int or value < minimum:
+                raise InvalidSubagentRequest(f"checkpoint provenance {name} is invalid")
+        for name in ("state_digest", "record_digest"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or _DIGEST.fullmatch(value) is None:
+                raise InvalidSubagentRequest(f"checkpoint provenance {name} must be SHA-256 hex")
+
+    @staticmethod
+    def compute_digest(*, child_id: str, sequence: int, state_digest: str,
+                       cursor: str | None, journal_identity: str, run_id: str,
+                       worker_id: str, owner_epoch: int, settled_position: int,
+                       version: int = PROVENANCE_VERSION,
+                       gateway_call_ordinal: int = 0) -> str:
+        fields: dict[str, object] = {
+            "child_id": child_id, "sequence": sequence, "state_digest": state_digest,
+            "cursor": cursor, "journal_identity": journal_identity, "run_id": run_id,
+            "worker_id": worker_id, "owner_epoch": owner_epoch,
+            "settled_position": settled_position, "version": version,
+        }
+        if version >= _GATEWAY_ORDINAL_VERSION:
+            fields["gateway_call_ordinal"] = gateway_call_ordinal
+        return hashlib.sha256(_canonical_bytes(fields)).hexdigest()
+
+    @classmethod
+    def stamp(cls, *, child_id: str, sequence: int, state_digest: str,
+              cursor: str | None, journal_identity: str, run_id: str,
+              worker_id: str, owner_epoch: int, settled_position: int,
+              gateway_call_ordinal: int = 0) -> CheckpointProvenance:
+        fields = {
+            "child_id": child_id, "sequence": sequence, "state_digest": state_digest,
+            "cursor": cursor, "journal_identity": journal_identity, "run_id": run_id,
+            "worker_id": worker_id, "owner_epoch": owner_epoch,
+            "settled_position": settled_position,
+            "gateway_call_ordinal": gateway_call_ordinal,
+        }
+        return cls(**fields, record_digest=cls.compute_digest(**fields))
+
+    @property
+    def digest_valid(self) -> bool:
+        if self.version < _GATEWAY_ORDINAL_VERSION and self.gateway_call_ordinal != 0:
+            # A version-1 digest does not cover the ordinal, so a nonzero
+            # ordinal on such a record cannot have been stamped.
+            return False
+        return self.record_digest == self.compute_digest(
+            child_id=self.child_id, sequence=self.sequence,
+            state_digest=self.state_digest, cursor=self.cursor,
+            journal_identity=self.journal_identity, run_id=self.run_id,
+            worker_id=self.worker_id, owner_epoch=self.owner_epoch,
+            settled_position=self.settled_position, version=self.version,
+            gateway_call_ordinal=self.gateway_call_ordinal,
+        )
+
+
 @dataclass(frozen=True)
 class ContinuableCheckpoint:
-    """An immutable, monotonic child state snapshot."""
+    """An immutable, monotonic child state snapshot.
+
+    ``provenance`` is ``None`` for checkpoints written without a host
+    provenance hook and for rows written before provenance existed.  Such a
+    checkpoint is *provenance-absent*: it remains readable, but it can never
+    authorize resume-from-checkpoint against the effect journal.
+    """
 
     child_id: str
     sequence: int
     state: Mapping[str, Any] = field(default_factory=dict)
     cursor: str | None = None
+    provenance: CheckpointProvenance | None = None
 
     def __post_init__(self) -> None:
         if not self.child_id.strip() or self.sequence < 0:
             raise InvalidSubagentRequest("checkpoint child_id and non-negative sequence are required")
         if not isinstance(self.state, Mapping):
             raise InvalidSubagentRequest("checkpoint state must be a mapping")
+        if self.provenance is not None and not isinstance(self.provenance, CheckpointProvenance):
+            raise InvalidSubagentRequest("checkpoint provenance must be host-stamped provenance")
         object.__setattr__(self, "state", deepcopy(dict(self.state)))
+
+    @property
+    def provenance_absent(self) -> bool:
+        return self.provenance is None
+
+
+def provenance_subject_error(checkpoint: ContinuableCheckpoint) -> str | None:
+    """Return why a present provenance record does not describe ``checkpoint``.
+
+    Stores call this inside their compare-and-set so a provenance record can
+    only ever be persisted next to the exact checkpoint it was stamped for.
+    Absent provenance is not an error here; it is refused at resume time.
+    """
+    provenance = checkpoint.provenance
+    if provenance is None:
+        return None
+    if (provenance.child_id, provenance.sequence, provenance.cursor) != (
+        checkpoint.child_id, checkpoint.sequence, checkpoint.cursor,
+    ):
+        return "checkpoint provenance subject does not match the checkpoint"
+    try:
+        digest = checkpoint_state_digest(checkpoint.state)
+    except InvalidSubagentRequest:
+        return "checkpoint provenance cannot bind a non-canonical state"
+    if provenance.state_digest != digest:
+        return "checkpoint provenance state digest does not match the checkpoint"
+    if not provenance.digest_valid:
+        return "checkpoint provenance record digest is invalid"
+    return None
 
 
 @dataclass(frozen=True)
@@ -299,7 +463,8 @@ class _Handle(SubagentHandle):
 
 
 __all__ = [
-    "ContinuableCheckpoint", "ContinuableRecord", "ContinuableSubagentRepository",
+    "CheckpointProvenance", "PROVENANCE_VERSION", "checkpoint_state_digest",
+    "provenance_subject_error", "ContinuableCheckpoint", "ContinuableRecord", "ContinuableSubagentRepository",
     "ContinuableSubagentService", "InMemoryContinuableSubagentRepository", "CheckpointWriter", "Runner",
     "ContinuableSubagentState", "SubagentCheckpoint", "SubagentStore", "ResumeToken",
 ]

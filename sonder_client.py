@@ -8,7 +8,9 @@ documented TLS reverse proxy; see CLIENT.md.
 
 Config (env or argv):
     SONDER_SERVER   e.g. https://sonder.example.com   (required)
-    SONDER_API_KEY  optional bearer key, if the server has auth enabled
+    SONDER_API_KEY  optional bearer key, if the server has auth enabled; sent
+                    only over https:// (or http:// to a loopback host) and
+                    never across a redirect
     SONDER_LOCAL_FALLBACK  default http://127.0.0.1:11435
     SONDER_FALLBACK_LOCAL=0 disables local fallback
     --server URL       argv override for SONDER_SERVER
@@ -29,7 +31,9 @@ from sonder_runtime.adapters.client_fallback import (
     send_prompt_with_fallback as _send_prompt_with_fallback,
 )
 from sonder_runtime.adapters.client_request import (
+    InsecureKeyTransportError as _InsecureKeyTransportError,
     build_chat_request as _build_chat_request,
+    require_secure_key_transport as _require_secure_key_transport,
 )
 from sonder_runtime.adapters.client_transport import (
     send_chat_prompt as _send_chat_prompt,
@@ -88,6 +92,13 @@ def main(argv=None):
     if not server:
         print(USAGE)
         return 1
+
+    if api_key:
+        try:
+            _require_secure_key_transport(server)
+        except _InsecureKeyTransportError as e:
+            print("error: %s" % e)
+            return 2
 
     print("Sonder Runtime (remote) — connected to %s" % server)
 

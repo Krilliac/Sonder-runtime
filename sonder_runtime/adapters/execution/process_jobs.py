@@ -18,10 +18,13 @@ from ...application.execution.effect_journal import (
     EffectIntent, EffectState, ReconciliationProof,
 )
 from ...application.execution.worker_bindings import AuthenticatedWorkerBinding, journaled_effect, _digest
-from ...application.jobs.durable_registry import ProcessTreeCleanupContract
+from ...application.jobs.durable_registry import (
+    DurableJobRegistry, OutputAppend, ProcessTreeCleanupContract,
+)
 from ...application.jobs.session_lifecycle import JobRegistryLifecycleAdapter
 from ...application.execution.world_control import OutputStream
 from .durable_output import DurableExecutionOutput
+from .output_batching import OutputBatcher, OutputBatchPolicy
 from ...application.ports.jobs import JobStatus
 from ...platform import logging as runtime_logging
 from ..process_liveness import PROCESS_ALIVE, probe_process, process_identity
@@ -107,6 +110,11 @@ class DurableProcessEffectVerifier:
         )
 
 
+# Upper bound ``wait`` spends publishing the last output window after the
+# root process exited and its readers reached end of file.
+OUTPUT_DRAIN_SECONDS = 5.0
+
+
 class _ProcessSlotLease:
     """One acquired semaphore slot, returned at most once across cleanup races."""
 
@@ -148,6 +156,7 @@ class SubprocessJobProvider:
         cleanup_retry_seconds: float = 1.0,
         max_concurrent_processes: int | None = None,
         effect_binding: AuthenticatedWorkerBinding | None = None,
+        output_batch: OutputBatchPolicy | None = None,
     ) -> None:
         if not all(callable(getattr(registry, name, None)) for name in (
             "start", "attach_process", "poll", "transition", "append_output", "stream",
@@ -163,6 +172,9 @@ class SubprocessJobProvider:
         self._platform = platform_name or os.name
         self._output = output
         self._inline_output_bytes = inline_output_bytes
+        if output_batch is not None and not isinstance(output_batch, OutputBatchPolicy):
+            raise TypeError("output_batch must be an OutputBatchPolicy")
+        self._output_batch = output_batch or OutputBatchPolicy()
         if memory_limiter is None:
             from ..extensions.memory_limits import NativeExtensionMemoryLimiter
             memory_limiter = NativeExtensionMemoryLimiter(platform_name=self._platform)
@@ -186,6 +198,7 @@ class SubprocessJobProvider:
         self._memory_tokens: dict[str, Any] = {}
         self._unresolved_scopes: dict[str, dict[str, Any]] = {}
         self._output_threads: dict[str, tuple[threading.Thread, ...]] = {}
+        self._output_batchers: dict[str, OutputBatcher] = {}
         self._output_failures: dict[str, str] = {}
         self._output_failure_lock = threading.Lock()
         self._timer_lock = threading.RLock()
@@ -452,6 +465,7 @@ class SubprocessJobProvider:
             if cleanup_complete:
                 self._processes.pop(request.identity.job_id, None)
                 self._failed_launches.discard(request.identity.job_id)
+                self._forget_output_threads(request.identity.job_id)
                 self._release_process_slot(request.identity.job_id)
                 self._limits.pop(request.identity.job_id, None)
                 self._discard_deadline(request.identity.job_id)
@@ -502,8 +516,7 @@ class SubprocessJobProvider:
                 # stream consumers before completion and avoids racing a
                 # second consumer through ``communicate``.
                 exit_code = process.wait(timeout=timeout)
-                for reader in readers:
-                    reader.join(timeout=1)
+                self._drain_output(job_id, readers)
             elif callable(getattr(process, "communicate", None)):
                 stdout, stderr = process.communicate(timeout=timeout)
                 exit_code = getattr(process, "returncode", None)
@@ -528,11 +541,23 @@ class SubprocessJobProvider:
             self._schedule_deadline(job_id, self._cleanup_retry_seconds)
             return ProcessJobWait(records[-1], exit_code)
         current = self._registry.poll(job_id)
+        if containment is None and current.status is JobStatus.CANCELLATION_REQUESTED:
+            # Reaping the root does not settle a recorded tree cancellation.
+            # Reuse the cleanup contract, retaining ownership and its retry
+            # timer when descendants or their identity remain unproven.
+            self.cancel(job_id, reason=current.error or "cancellation requested")
+            return ProcessJobWait(self._registry.poll(job_id), exit_code)
         if containment is not None and (
             containment.forced or current.status is JobStatus.CANCELLATION_REQUESTED
         ):
+            # A recorded cancellation (a deadline or an operator cancel) is the
+            # decision that ended this process; its forced cleanup is only the
+            # mechanism.  Keep the recorded reason so a deadline kill whose
+            # exit this waiter observed first still reads as the deadline.
             reason = (
-                containment.detail
+                current.error
+                if current.status is JobStatus.CANCELLATION_REQUESTED and current.error
+                else containment.detail
                 or "job scope required forced descendant cleanup after process exit"
             )
             if current.status is not JobStatus.CANCELLATION_REQUESTED:
@@ -550,15 +575,8 @@ class SubprocessJobProvider:
                 self._schedule_deadline(job_id, self._cleanup_retry_seconds)
                 raise
             return ProcessJobWait(records[-1], exit_code)
-        if containment is not None or job_id in self._cleanup_observations:
-            self._cleanup_observations[job_id] = exit_code
-            try:
-                self._release_memory_limit(job_id)
-                self._release_capacity(job_id)
-            except Exception:
-                self._schedule_deadline(job_id, self._cleanup_retry_seconds)
-                raise
-        output_failure = self._take_output_failure(job_id)
+        with self._output_failure_lock:
+            output_failure = self._output_failures.get(job_id)
         status = (
             JobStatus.SUCCEEDED
             if exit_code == 0 and output_failure is None
@@ -569,18 +587,39 @@ class SubprocessJobProvider:
             error = f"process output persistence failed ({output_failure})"
         elif status is JobStatus.FAILED:
             error = "process exited with a non-zero status"
+        # The observed exit code is durable for failed runs too: consumers that
+        # classify by exit code (pytest 5 = no tests, 2-4 = error) must read the
+        # same answer after a restart as before it.
+        observed = isinstance(exit_code, int) and not isinstance(exit_code, bool)
         record = self._registry.transition(
             job_id,
             status,
-            result={"exit_code": exit_code} if status is JobStatus.SUCCEEDED else None,
+            result={"exit_code": exit_code} if observed else None,
             error=error,
+            expected_revision=current.revision,
+            expected_status=current.status,
         )
+        if record.status is JobStatus.CANCELLATION_REQUESTED:
+            self.cancel(job_id, reason=record.error or "cancellation requested")
+            return ProcessJobWait(self._registry.poll(job_id), exit_code)
+        if not record.is_terminal:
+            self._schedule_deadline(job_id, self._cleanup_retry_seconds)
+            return ProcessJobWait(record, exit_code)
+        self._take_output_failure(job_id)
+        if containment is not None or job_id in self._cleanup_observations:
+            self._cleanup_observations[job_id] = exit_code
+            try:
+                self._release_memory_limit(job_id)
+                self._release_capacity(job_id)
+            except Exception:
+                self._schedule_deadline(job_id, self._cleanup_retry_seconds)
+                raise
         if self._jobs._lifecycle is not None:
             self._jobs._lifecycle.record(record)
         self._processes.pop(job_id, None)
         self._failed_launches.discard(job_id)
         self._limits.pop(job_id, None)
-        self._output_threads.pop(job_id, None)
+        self._forget_output_threads(job_id)
         self._discard_deadline(job_id)
         self._release_process_slot(job_id)
         if containment is None:
@@ -593,6 +632,21 @@ class SubprocessJobProvider:
                 raise
         return ProcessJobWait(record, exit_code)
 
+    def bind_cancel_request(
+        self, job_id: str, *, idempotency_key: str, request_digest: str,
+    ) -> None:
+        """Durably bind a journaled cancellation request before cancelling.
+
+        This is reconciliation evidence only: it changes no lifecycle state
+        and does not itself cancel anything.  A registry without the binding
+        refuses, so a caller that asked for durable evidence never proceeds
+        believing it exists.
+        """
+        bind = getattr(self._registry, "bind_cancel_request", None)
+        if not callable(bind):
+            raise RuntimeError("durable job registry cannot bind cancellation requests")
+        bind(job_id, idempotency_key=idempotency_key, request_digest=request_digest)
+
     def cancel(self, job_id: str, reason: str = "cancelled") -> JobCancellationResult:
         with self._timer_lock:
             launch_lock = self._launch_locks.get(job_id)
@@ -602,6 +656,12 @@ class SubprocessJobProvider:
             return self._cancel_owned(job_id, reason)
 
     def _cancel_owned(self, job_id: str, reason: str) -> JobCancellationResult:
+        # Publish what the child already printed without waiting for the
+        # batch window; this never blocks cancellation on storage.
+        with self._timer_lock:
+            batcher = self._output_batchers.get(job_id)
+        if batcher is not None:
+            batcher.request_flush()
         limit = self._limits.get(job_id, 64)
         process_exited = True
         if job_id in self._failed_launches:
@@ -625,6 +685,18 @@ class SubprocessJobProvider:
                 self._jobs._lifecycle.record_many(result.records)
             self._schedule_deadline(job_id, self._cleanup_retry_seconds)
             return result
+        if job_id in self._memory_tokens:
+            # Record the decision before the containment kill.  Terminating a
+            # job object (Windows) makes the root exit nonzero at once, and a
+            # concurrent ``wait`` that observes that exit before the intent is
+            # durable would publish it as an ordinary FAILED run -- losing the
+            # deadline or cancellation that caused it.
+            current = self._registry.poll(job_id)
+            if (
+                not current.is_terminal
+                and current.status is not JobStatus.CANCELLATION_REQUESTED
+            ):
+                self._jobs.request_cancellation(job_id, reason, max_descendants=limit)
         containment = self._quiesce_containment(job_id, force=True)
         if not process_exited or (containment is not None and not containment.complete):
             records = self._jobs.request_cancellation(
@@ -827,6 +899,11 @@ class SubprocessJobProvider:
                         self.wait(job_id, timeout=0)
                     elif self._owns_cleanup_resources(job_id):
                         self.cancel(job_id, reason="terminal job resource cleanup retry")
+                return
+            if record.status is JobStatus.CANCELLATION_REQUESTED:
+                # Root exit after an incomplete cancellation is not proof that
+                # its descendants were cleaned up, including after restart.
+                self.cancel(job_id, reason=record.error or "process deadline exceeded")
                 return
             process = self._processes.get(job_id)
             if process is not None:
@@ -1067,7 +1144,7 @@ class SubprocessJobProvider:
         self._limits.pop(job_id, None)
         self._release_process_slot(job_id)
         self._unresolved_scopes.pop(job_id, None)
-        self._output_threads.pop(job_id, None)
+        self._forget_output_threads(job_id)
         self._discard_deadline(job_id)
 
     def _release_process_slot(self, job_id: str) -> None:
@@ -1088,31 +1165,64 @@ class SubprocessJobProvider:
         The provider still supports lightweight process doubles that only
         implement ``wait``/``communicate``.  Real ``Popen`` instances use
         daemon readers so a running job can be streamed through the durable
-        registry before ``wait`` finalizes its status.
+        registry before ``wait`` finalizes its status.  Readers hand lines to
+        one persister per job, which publishes them in bounded batches (see
+        ``output_batching``): one registry transaction per window instead of
+        one per line, with the same events, order and sequence numbers.
         """
-        readers: list[threading.Thread] = []
-        for stream_name, stream in (
-            (OutputStream.STDOUT, getattr(process, "stdout", None)),
-            (OutputStream.STDERR, getattr(process, "stderr", None)),
-        ):
-            if not callable(getattr(stream, "readline", None)):
-                continue
-            reader = owned_runtime_thread(
-                target=self._read_output,
-                args=(job_id, stream_name, stream),
-                name=f"sonder-job-output-{job_id}-{stream_name.value}",
-                daemon=True,
+        pipes = [
+            (stream_name, stream)
+            for stream_name, stream in (
+                (OutputStream.STDOUT, getattr(process, "stdout", None)),
+                (OutputStream.STDERR, getattr(process, "stderr", None)),
             )
-            reader.start()
-            readers.append(reader)
-        if readers:
-            self._output_threads[job_id] = tuple(readers)
+            if callable(getattr(stream, "readline", None))
+        ]
+        if not pipes:
+            return
+        batcher = OutputBatcher(
+            lambda batch: self._persist_output(job_id, batch),
+            writers=len(pipes),
+            policy=self._output_batch,
+            on_failure=lambda exc: self._persistence_stopped(job_id, exc),
+        )
+        persister = owned_runtime_thread(
+            target=batcher.run,
+            name=f"sonder-job-output-{job_id}-persist",
+            daemon=True,
+        )
+        with self._timer_lock:
+            self._output_batchers[job_id] = batcher
+        persister.start()
+        threads: list[threading.Thread] = [persister]
+        try:
+            for index, (stream_name, stream) in enumerate(pipes):
+                reader = owned_runtime_thread(
+                    target=self._read_output,
+                    args=(job_id, stream_name, stream, batcher),
+                    name=f"sonder-job-output-{job_id}-{stream_name.value}",
+                    daemon=True,
+                )
+                try:
+                    reader.start()
+                except BaseException:
+                    # Readers that never started cannot report end of file.
+                    for _ in pipes[index:]:
+                        batcher.writer_done()
+                    raise
+                threads.append(reader)
+        finally:
+            self._output_threads[job_id] = tuple(threads)
 
-    def _read_output(self, job_id: str, stream: OutputStream, pipe: Any) -> None:
+    def _read_output(
+        self, job_id: str, stream: OutputStream, pipe: Any, batcher: OutputBatcher,
+    ) -> None:
         try:
             for chunk in iter(pipe.readline, ""):
-                if chunk:
-                    self._record_output(job_id, stream, chunk)
+                if chunk and not batcher.put(stream, chunk):
+                    # Persistence stopped; like a failed per-line commit,
+                    # the reader stops and the failure (if any) is recorded.
+                    return
         except (OSError, ValueError):
             # Process teardown can close a pipe while its reader is waking.
             # The durable job status and already-published watermark remain
@@ -1123,19 +1233,77 @@ class SubprocessJobProvider:
             # wait() reports a successful job.  Keep only the exception type:
             # storage messages can contain paths or operator data.
             self._remember_output_failure(job_id, exc)
+        finally:
+            # End of file (or a stopped reader) flushes the pending window
+            # immediately instead of waiting for its time bound.
+            batcher.writer_done()
+
+    def _persistence_stopped(self, job_id: str, exc: BaseException) -> None:
+        # Same classification as the former per-line reader: an OSError or
+        # ValueError ended output quietly, anything else fails the job.
+        if isinstance(exc, (OSError, ValueError)):
+            return
+        if isinstance(exc, Exception):
+            self._remember_output_failure(job_id, exc)
+
+    def _drain_output(self, job_id: str, threads: tuple[threading.Thread, ...]) -> None:
+        """After the root exits: let readers reach EOF, then publish their tail.
+
+        Each reader gets the historical one-second join.  The persister then
+        gets a bounded flush: once readers are done at most one window is
+        left, so this returns as soon as that commit lands.  A reader kept
+        alive by a descendant holding the pipe keeps publishing later,
+        exactly as before.
+
+        A drain that times out fails closed: the job must not read as
+        succeeded while output read before its exit is still unpersisted, so
+        it is recorded as an output-persistence failure.  (A persister that
+        already stopped on an error has classified that error itself.)
+        """
+        with self._timer_lock:
+            batcher = self._output_batchers.get(job_id)
+        persister = threads[0] if batcher is not None and threads else None
+        for thread in threads:
+            if thread is not persister:
+                thread.join(timeout=1)
+        if batcher is not None and not batcher.flush(OUTPUT_DRAIN_SECONDS):
+            if not batcher.finished:
+                self._remember_output_failure(
+                    job_id, TimeoutError("process output was not persisted in time"),
+                )
+
+    def _forget_output_threads(self, job_id: str) -> None:
+        self._output_threads.pop(job_id, None)
+        with self._timer_lock:
+            self._output_batchers.pop(job_id, None)
 
     def _record_output(self, job_id: str, stream: OutputStream, data: str | None) -> None:
         if not data:
             return
-        payload = str(data)
-        encoded_size = len(payload.encode("utf-8"))
-        spill = None
-        inline = payload
-        if encoded_size > self._inline_output_bytes:
-            if self._output is not None:
-                spill = self._output.spill_text(payload, owner_id=job_id)
-            inline = payload[: self._inline_output_bytes]
-        self._registry.append_output(job_id, stream, inline, spill=spill)
+        self._persist_output(job_id, ((stream, str(data)),))
+
+    def _persist_output(self, job_id: str, batch) -> None:
+        """Publish lines through one registry call, spilling each oversized line."""
+        entries: list[OutputAppend] = []
+        for stream, payload in batch:
+            if not payload:
+                continue
+            encoded_size = len(payload.encode("utf-8"))
+            spill = None
+            inline = payload
+            if encoded_size > self._inline_output_bytes:
+                if self._output is not None:
+                    spill = self._output.spill_text(payload, owner_id=job_id)
+                inline = payload[: self._inline_output_bytes]
+            entries.append(OutputAppend(stream, inline, spill))
+        if not entries:
+            return
+        append_many = getattr(self._registry, "append_outputs", None)
+        if callable(append_many):
+            append_many(job_id, entries)
+        else:
+            for entry in entries:
+                self._registry.append_output(job_id, entry.stream, entry.data, spill=entry.spill)
         if self._jobs._lifecycle is not None:
             page = self._registry.stream(job_id, max_events=1, max_bytes=self._inline_output_bytes)
             if page.events:
@@ -1169,4 +1337,7 @@ class SubprocessJobProvider:
         return isinstance(exit_code, int) and not isinstance(exit_code, bool)
 
 
-__all__ = ["DurableProcessEffectVerifier", "SubprocessJobProvider"]
+__all__ = [
+    "DurableProcessEffectVerifier", "OUTPUT_DRAIN_SECONDS", "OutputBatchPolicy",
+    "SubprocessJobProvider",
+]

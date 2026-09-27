@@ -11,6 +11,7 @@ import json
 from dataclasses import asdict, replace
 
 from sonder_runtime.application.ports.runtime_checkpoints import (
+    CheckpointConflict,
     CheckpointError,
     RestoreStatus,
     RuntimeCheckpoint,
@@ -79,6 +80,15 @@ class StrategyTraceService:
     def history(self, run_id: str) -> tuple[StrategyAttempt, ...]:
         _, data = self._restore(run_id)
         return () if data is None else tuple(StrategyAttempt.from_dict(x) for x in data["attempts"])
+
+    def sealed_budget(self, run_id: str) -> StrategyBudget | None:
+        """Return the authenticated budget a run was sealed with, if any.
+
+        A recorded budget may only narrow, so observers use this to avoid
+        requesting an expansion for runs sealed under an older budget.
+        """
+        _, data = self._restore(run_id)
+        return None if data is None else StrategyBudget(**data["budget"])
 
     def observed_decisions(self, run_id: str) -> tuple[StrategyDecision, ...]:
         """Read decisions in attempt order from the authenticated checkpoint."""
@@ -247,12 +257,21 @@ class StrategyTraceService:
     def record(self, attempt: StrategyAttempt, *, budget: StrategyBudget,
                available_actions: tuple[StrategyAction, ...], unresolved_effects: bool = False,
                policy_blocked: bool = False, artifacts_ready: bool = True,
-               transport_replay_safe: bool = False) -> StrategyDecision:
+               transport_replay_safe: bool = False,
+               expected_prior: tuple[str, ...] | None = None) -> StrategyDecision:
+        """Append or replay one attempt in a single generation CAS.
+
+        ``expected_prior`` names the sealed attempts, in order, that precede
+        this attempt in the history its usage was derived from. When given,
+        the restored history must match it exactly or ``CheckpointConflict``
+        is raised before anything is written, so a charge computed from a
+        stale read is never sealed.
+        """
         return self._record(
             attempt, budget=budget, available_actions=available_actions,
             unresolved_effects=unresolved_effects, policy_blocked=policy_blocked,
             artifacts_ready=artifacts_ready, transport_replay_safe=transport_replay_safe,
-            reserved=False, reserved_action=None,
+            reserved=False, reserved_action=None, expected_prior=expected_prior,
         )
 
     def record_reserved(self, attempt: StrategyAttempt, *, budget: StrategyBudget,
@@ -274,7 +293,8 @@ class StrategyTraceService:
                 available_actions: tuple[StrategyAction, ...], unresolved_effects: bool,
                 policy_blocked: bool, artifacts_ready: bool,
                 transport_replay_safe: bool, reserved: bool,
-                reserved_action: StrategyAction | None) -> StrategyDecision:
+                reserved_action: StrategyAction | None,
+                expected_prior: tuple[str, ...] | None = None) -> StrategyDecision:
         if not isinstance(attempt, StrategyAttempt) or not isinstance(budget, StrategyBudget):
             raise StrategyError("typed strategy attempt and budget required")
         if attempt.usage.attempts != 1:
@@ -311,6 +331,14 @@ class StrategyTraceService:
                         raise StrategyError("strategy attempt identity reused with different content")
                     replay = True
                     break
+        if expected_prior is not None:
+            prior = []
+            for old in history:
+                if old.attempt_id == attempt.attempt_id:
+                    break
+                prior.append(old.attempt_id)
+            if tuple(prior) != tuple(expected_prior):
+                raise CheckpointConflict("strategy history changed after the attempt was derived")
         if not replay:
             history += (attempt,)
         usage = StrategyUsage()

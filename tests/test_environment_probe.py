@@ -89,3 +89,15 @@ def test_formal_toolchains_are_part_of_read_only_discovery(monkeypatch):
     assert {"elan", "lean", "lake"} <= set(seen)
     monkeypatch.undo()
     ep.probe(refresh=True)
+
+
+def test_probe_lists_the_sonder_infer_binary(monkeypatch):
+    monkeypatch.setattr(
+        ep.shutil, "which",
+        lambda name: "/usr/local/bin/sonder-infer" if name == "sonder-infer" else None,
+    )
+    env = ep.probe(refresh=True)
+    assert env["specialist_tools"] == {"sonder-infer": "/usr/local/bin/sonder-infer"}
+    assert "sonder-infer" in ep.format_profile()
+    monkeypatch.undo()
+    ep.probe(refresh=True)  # restore a real probe for later tests

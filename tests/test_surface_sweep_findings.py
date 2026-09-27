@@ -240,3 +240,44 @@ def test_an_unreadable_checkout_leaves_the_guard_silent(tmp_path):
     sweep = _load_sweep()
     assert sweep.checkout_state(str(tmp_path / "not-a-repo")) == {}
 
+
+
+def test_a_typed_unavailable_refusal_is_not_a_crash_but_other_exceptions_are():
+    # The legacy ``agent_lane`` tool on the graph ``server.py`` composes itself
+    # used to crash with AttributeError; it now raises a typed
+    # DependencyUnavailable, which FastMCP wraps. Only that typed refusal, not
+    # its wording, moves a raised exception out of the crash class.
+    from sonder_runtime.domain.common.errors import DependencyUnavailable
+
+    sweep = _load_sweep()
+    refusal = DependencyUnavailable("agent conversations require a configured runtime")
+    try:
+        try:
+            raise refusal
+        except DependencyUnavailable as exc:
+            raise RuntimeError("Error executing tool agent_lane: %s" % exc) from exc
+    except RuntimeError as wrapped:
+        assert sweep.classify("", exception=wrapped) == "unavailable"
+    assert sweep.classify("", exception=refusal) == "unavailable"
+    assert sweep.classify("", exception=AttributeError(
+        "'NoneType' object has no attribute 'state'")) == "crash"
+    assert sweep.classify("", exception=RuntimeError("feature not configured")) == "crash"
+
+
+def test_a_bug_raised_while_handling_a_typed_refusal_is_still_a_crash():
+    # Only explicit ``raise ... from`` chaining carries a typed refusal out of
+    # the crash class. An AttributeError that merely happened inside an
+    # ``except DependencyUnavailable`` block is implicitly chained through
+    # ``__context__``; it is a handler defect and must stay a crash.
+    from sonder_runtime.domain.common.errors import DependencyUnavailable
+
+    sweep = _load_sweep()
+    try:
+        try:
+            raise DependencyUnavailable("ollama down")
+        except DependencyUnavailable:
+            None.state  # noqa: B018 - the handler bug under test
+    except AttributeError as bug:
+        assert isinstance(bug.__context__, DependencyUnavailable)
+        assert bug.__cause__ is None
+        assert sweep.classify("", exception=bug) == "crash"

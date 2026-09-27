@@ -38,7 +38,27 @@ MUTATING_TOOLS = (
     "json_patch", "make_directory", "text_patch", "write_file",
 )
 
-TYPED_TOOLS = READ_ONLY_TOOLS + MUTATING_TOOLS
+# The developer tools (host tool inventory, structured test runs, output
+# digest). Their executor is ``DeveloperToolExecutor``; ``test_run`` is graded
+# as execution by the permission catalog, the other three are safe.
+DEVELOPER_TOOLS = ("output_digest", "test_run", "test_run_result", "tool_inventory")
+
+# The C++ build tools (bootstrap/build_tools.py). Their executor is
+# ``BuildToolExecutor``; ``build_job`` and ``build_fix`` are graded execution,
+# ``build_fix_restore`` mutation and the other three safe (permission_modes).
+BUILD_TOOLS = (
+    "build_fix", "build_fix_restore", "build_fix_result", "build_job", "build_job_result",
+    "build_model",
+)
+
+# Crash and profile digests (bootstrap/debug_tools.py), served by
+# ``DebugToolExecutor``. ``crash_digest`` and ``profile_capture_digest`` launch
+# host debuggers/profilers and are graded execution; the other three are safe.
+DEBUG_TOOLS = ("crash_triage", "crash_digest", "profile_digest", "profile_capture_digest",
+               "debug_run_result")
+
+TYPED_TOOLS = (READ_ONLY_TOOLS + MUTATING_TOOLS + DEVELOPER_TOOLS + BUILD_TOOLS
+               + DEBUG_TOOLS)
 
 # Canonical (typed) name -> the name the permission catalog grades.
 POLICY_NAMES = {
@@ -70,6 +90,21 @@ GUARD_KNOBS = {
     "make_directory": ("extra_roots", "bypass", "developer_authorized"),
     "text_patch": ("extra_roots", "developer_authorized"),
     "write_file": ("extra_roots", "bypass", "developer_authorized"),
+    "output_digest": (),
+    "test_run": (),
+    "test_run_result": (),
+    "tool_inventory": (),
+    "build_fix": (),
+    "build_fix_restore": (),
+    "build_fix_result": (),
+    "build_job": (),
+    "build_job_result": (),
+    "build_model": (),
+    "crash_triage": (),
+    "crash_digest": (),
+    "profile_digest": (),
+    "profile_capture_digest": (),
+    "debug_run_result": (),
 }
 
 
@@ -120,11 +155,37 @@ def typed_tool_policy() -> ResourcePolicy:
         )
         for name in MUTATING_TOOLS
     )
+    rules.extend(
+        PolicyRule(
+            "developer:%s" % name, Decision.ALLOW, tool=name,
+            reason="developer tool; host-owned commands and guarded sources, and "
+                   "the permission gate grades test_run as execution",
+        )
+        for name in DEVELOPER_TOOLS
+    )
+    rules.extend(
+        PolicyRule(
+            "build:%s" % name, Decision.ALLOW, tool=name,
+            reason="build tool; host-rendered commands from closed templates over the "
+                   "parsed build model, and the permission gate grades build_job and "
+                   "build_fix as execution",
+        )
+        for name in BUILD_TOOLS
+    )
+    rules.extend(
+        PolicyRule(
+            "debug:%s" % name, Decision.ALLOW, tool=name,
+            reason="crash/profile digest; guarded captures and host-owned argv templates, and "
+                   "the permission gate grades the host tools as execution",
+        )
+        for name in DEBUG_TOOLS
+    )
     logger.info(f"typed tool policy built, rules={len(rules)}")
     return ResourcePolicy(rules)
 
 
 __all__ = [
-    "GUARD_KNOBS", "LEGACY_TO_CANONICAL", "MUTATING_TOOLS", "POLICY_NAMES",
+    "BUILD_TOOLS", "DEBUG_TOOLS", "DEVELOPER_TOOLS", "GUARD_KNOBS", "LEGACY_TO_CANONICAL",
+    "MUTATING_TOOLS", "POLICY_NAMES",
     "READ_ONLY_TOOLS", "TYPED_TOOLS", "typed_tool_policy", "typed_tool_registry",
 ]

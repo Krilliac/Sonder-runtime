@@ -12,7 +12,8 @@ Commands:
     config        show the effective redacted configuration
     migrate       apply pending schema migrations
     backup        create / verify / list / prune backups
-    restore       verify / apply a backup into an empty directory
+    restore       verify / apply a backup into an empty directory, or
+                  rehearse restore + failed-upgrade rollback in a disposable tree
     drain         request graceful drain of a running server
     smoke         minimal end-to-end check without a real model
     control-state-rehearsal  collect disposable provider evidence without promotion
@@ -37,7 +38,7 @@ from sonder_runtime.application.command_surface import McpCommand
 from sonder_runtime.bootstrap.legacy_mcp import build_legacy_server_mcp_runtime
 
 
-def _load_config(args) -> "sonder_config.SonderConfig":
+def _cli_overrides(args) -> dict:
     overrides = {}
     for item in getattr(args, "set", None) or []:
         if "=" not in item:
@@ -46,6 +47,11 @@ def _load_config(args) -> "sonder_config.SonderConfig":
             )
         key, _, value = item.partition("=")
         overrides[key.strip()] = value.strip()
+    return overrides
+
+
+def _load_config(args) -> "sonder_config.SonderConfig":
+    overrides = _cli_overrides(args)
     # Preserve the legacy ``python sonder_serve.py [port]`` launcher contract
     # for the packaged ``python -m sonder_runtime serve [port]`` entrypoint.
     if getattr(args, "port", None) is not None:
@@ -403,9 +409,14 @@ def cmd_doctor(args) -> int:
         return 2
     checks = sonder_doctor.default_checks()
     replacements = dict(sonder_doctor.storage_checks(
-        config, throughput=args.storage_probe
+        config, throughput=args.storage_probe,
+        discover_models=not args.skip_ollama,
     ))
+    replacements.update(sonder_doctor.ollama_checks(config))
+    replacements.update(sonder_doctor.sonder_inference_checks())
     replacements["schemas"] = sonder_doctor.schema_check(config)
+    replacements["schema_epoch"] = sonder_doctor.schema_epoch_check(config)
+    replacements.update(sonder_doctor.memory_checks(config))
     replacements["backup"] = sonder_doctor.backup_check(config)
     checks = [
         (
@@ -421,12 +432,34 @@ def cmd_doctor(args) -> int:
         checks = [
             (name, check) for name, check in checks if name not in skipped_names
         ]
+    if args.skip_inference:
+        skipped_names = {"sonder_inference", "sonder_inference_scope"}
+        checks = [
+            (name, check) for name, check in checks if name not in skipped_names
+        ]
     report = sonder_doctor.run_doctor(checks)
     if args.json:
         _emit(report, as_json=True)
     else:
         print(render_report(report))
     return 1 if report.get("overall") == STATUS_FAIL else 0
+
+
+def _warn_config_errors_reported(args) -> None:
+    """Flag an invalid configuration on stderr for always-available reports.
+
+    ``status`` and ``diagnostics`` deliberately still exit 0 and emit their
+    payload when the configuration is invalid -- they are what an operator
+    collects from a broken install -- but the failure must not be visible
+    only inside the payload. stdout stays a parseable report.
+    """
+    print(
+        "WARNING: configuration is invalid (see config_errors); this %s "
+        "report still exits 0 -- use `config`, `doctor` or `preflight` "
+        "(exit 2) to gate on configuration validity"
+        % getattr(args, "command", "status"),
+        file=sys.stderr,
+    )
 
 
 def cmd_status(args) -> int:
@@ -449,6 +482,7 @@ def cmd_status(args) -> int:
             )
     except sonder_config.ConfigError as exc:
         payload["config_errors"] = list(exc.errors)
+        _warn_config_errors_reported(args)
     try:
         payload["schemas"] = {
             store: {
@@ -477,6 +511,7 @@ def cmd_diagnostics(args) -> int:
         _export_runtime_environment(config)
     except sonder_config.ConfigError as exc:
         payload["config_errors"] = list(exc.errors)
+        _warn_config_errors_reported(args)
     try:
         payload["schemas"] = {
             store: {
@@ -504,9 +539,29 @@ def cmd_config(args) -> int:
     return 0
 
 
+def _read_epoch2_receipt(home) -> dict:
+    """Return the adoption receipt's fields, or ``{}`` when unreadable."""
+    try:
+        data = json.loads(
+            (home / "epoch2_adoption_receipt.json").read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def cmd_migrate(args) -> int:
     import sonder_runtime.adapters.persistence.migrations as sonder_migrations
 
+    if getattr(args, "adopt_epoch2", False) and args.store:
+        # --store used to be accepted and silently ignored here, so an
+        # operator scoping the command to one store still adopted every one.
+        print(
+            "--store cannot be combined with --adopt-epoch2: epoch adoption "
+            "always covers every domain database",
+            file=sys.stderr,
+        )
+        return 2
     try:
         config = _load_config(args)
         _configure_typed_home(config)
@@ -524,6 +579,34 @@ def cmd_migrate(args) -> int:
             )
 
             home = runtime_paths.default_home()
+            # Re-running an already verified adoption used to take another
+            # full pre-epoch2 copy every time. A home that already passes the
+            # read-only adoption check is a verified no-op: nothing is copied
+            # or rewritten. Partial/unverified state still re-runs the
+            # crash-safe bridge, which backs up first.
+            import sqlite3
+
+            try:
+                existing = (
+                    check_epoch2_cleanup(home) if home.is_dir() else None
+                )
+            except (OSError, sqlite3.Error):
+                existing = None  # not provably adopted: take the safe path
+            if existing is not None and existing.allowed:
+                prior = _read_epoch2_receipt(home)
+                _emit(
+                    {
+                        "adopted": True,
+                        "already_adopted": True,
+                        "epoch": 2,
+                        "source_version": prior.get("source_version"),
+                        "backup_path": prior.get("backup_path"),
+                        "tasks_migrated": 0,
+                        "verified": True,
+                    },
+                    as_json=args.json,
+                )
+                return 0
             receipt = run_bridge_migration(home, version="spec5-bridge-cli")
             cleanup = check_epoch2_cleanup(home)
             if not cleanup.allowed:
@@ -536,6 +619,7 @@ def cmd_migrate(args) -> int:
             _emit(
                 {
                     "adopted": True,
+                    "already_adopted": False,
                     "epoch": receipt.epoch,
                     "source_version": receipt.source_version,
                     "backup_path": receipt.backup_path,
@@ -606,7 +690,27 @@ def _report_problems(
     return 0
 
 
+def _backup_failure(verb: str, exc: BaseException) -> int:
+    """Report an expected backup/restore fault without a traceback."""
+    detail = str(exc) or type(exc).__name__
+    if isinstance(exc, OSError) and exc.strerror:
+        detail = "%s: %s" % (exc.strerror, exc.filename or "")
+        detail = detail.rstrip(": ")
+    print("%s failed: %s" % (verb, detail), file=sys.stderr)
+    return 1
+
+
 def cmd_backup(args) -> int:
+    from .adapters.backup import BackupError
+    from .adapters.persistence.operations_store import MaintenanceLockHeld
+
+    try:
+        return _cmd_backup(args)
+    except (BackupError, MaintenanceLockHeld, OSError) as exc:
+        return _backup_failure("backup", exc)
+
+
+def _cmd_backup(args) -> int:
     from .bootstrap.app import default_app
 
     config = None
@@ -643,6 +747,18 @@ def cmd_backup(args) -> int:
         _emit({"backups": backups.list(_backup_target(args, config))},
               as_json=args.json)
         return 0
+    if args.backup_command == "latest":
+        latest = backups.latest_dated(_backup_target(args, config))
+        if latest is None:
+            print("no backup with a valid created_at_utc in the target",
+                  file=sys.stderr)
+            return 1
+        if args.json:
+            _emit({"backup": latest}, as_json=True)
+        else:
+            # A bare path, so shell callers can use it without parsing JSON.
+            print(latest["path"])
+        return 0
     if args.backup_command == "prune":
         if args.keep is not None:
             removed = backups.prune(
@@ -662,6 +778,21 @@ def cmd_backup(args) -> int:
 
 
 def cmd_restore(args) -> int:
+    from .adapters.backup import BackupError
+    from .adapters.persistence.operations_store import MaintenanceLockHeld
+
+    try:
+        return _cmd_restore(args)
+    except (BackupError, MaintenanceLockHeld, OSError) as exc:
+        return _backup_failure("restore", exc)
+
+
+def _cmd_restore(args) -> int:
+    if args.restore_command == "rehearse":
+        # Filesystem-only: the drill needs no application graph, services
+        # or state home, and must not open the live stores.
+        return _restore_rehearse(args)
+
     from .bootstrap.app import default_app
 
     backups = default_app().backup
@@ -686,13 +817,140 @@ def cmd_restore(args) -> int:
             return 2
         restored = backups.restore_to_empty(args.path, args.destination)
         _emit({"restored": restored}, as_json=args.json)
+        # --json promises one parseable document on stdout; keep the
+        # operator hint visible without corrupting it.
         print(
             "State restored. Point SONDER_HOME at the destination (or move "
             "it into place with the service stopped) per "
             "docs/runbooks/backup-restore.md.",
+            file=sys.stderr if args.json else sys.stdout,
         )
         return 0
     raise AssertionError(args.restore_command)
+
+
+_REHEARSAL_TARGET_SUFFIX = "+rehearsal"
+
+
+def _rehearsal_target_revision(source_revision: str, requested: str | None) -> str:
+    """The candidate revision the scripted upgrade pretends to install.
+
+    It only labels the disposable release marker, so a caller that has no real
+    candidate gets a value that is visibly synthetic and always differs from
+    the source revision the backup records.
+    """
+    if requested is not None:
+        return requested
+    from sonder_runtime.application.updates.recovery_rehearsal import MAX_REVISION_CHARS
+
+    candidate = source_revision + _REHEARSAL_TARGET_SUFFIX
+    if len(candidate) <= MAX_REVISION_CHARS:
+        return candidate
+    import hashlib
+
+    return "rehearsal-of:" + hashlib.sha256(source_revision.encode("utf-8")).hexdigest()
+
+
+def _restore_rehearse(args) -> int:
+    """Run the P6 offline recovery rehearsal against one backup directory.
+
+    Restores the backup into a fresh directory under a fenced workspace,
+    applies a scripted candidate upgrade that fails on purpose, rolls it back,
+    restores the authoritative state from the same backup, verifies every
+    digest, and removes the disposable tree.  It never reads or switches the
+    live release pointer or the running state home.
+    """
+    import tempfile
+    import uuid
+
+    from sonder_runtime.adapters.updates.offline_rehearsal import (
+        FilesystemOfflineRecoveryPort,
+    )
+    from sonder_runtime.application.updates.recovery_rehearsal import (
+        OfflineRecoveryRehearsal, OfflineRehearsalRequest, RehearsalError,
+    )
+
+    as_json = bool(args.json)
+    owned_workspace = args.workspace is None
+    if owned_workspace:
+        workspace = tempfile.mkdtemp(prefix="sonder-recovery-rehearsal-")
+    else:
+        workspace = os.path.abspath(os.path.expanduser(args.workspace))
+
+    def refuse(payload: dict, code: int) -> int:
+        payload = {"ok": False, "path": args.path, "workspace": workspace, **payload}
+        if as_json:
+            _emit(payload, as_json=True)
+        else:
+            print("FAIL: %s: %s" % (payload["error"], payload["message"]), file=sys.stderr)
+            if payload.get("steps_completed"):
+                print("steps completed: " + ", ".join(payload["steps_completed"]),
+                      file=sys.stderr)
+        return code
+
+    try:
+        try:
+            port = FilesystemOfflineRecoveryPort(workspace)
+        except (OSError, ValueError) as exc:
+            return refuse({
+                "error": "workspace_invalid",
+                "message": "--workspace must be an existing regular directory ("
+                           + type(exc).__name__ + ")",
+                "steps_completed": [],
+            }, 2)
+        if args.source_revision is not None:
+            source_revision = args.source_revision
+        else:
+            try:
+                source_revision = port.inspect_backup(args.path).source_revision
+            except RehearsalError as exc:
+                return refuse({
+                    "error": type(exc).__name__, "message": str(exc),
+                    "steps_completed": [],
+                }, 1)
+            except OSError as exc:
+                return refuse({
+                    "error": "backup_unreadable",
+                    "message": "backup directory is unreadable (" + type(exc).__name__ + ")",
+                    "steps_completed": [],
+                }, 1)
+        destination = os.path.join(workspace, "rehearsal-" + uuid.uuid4().hex[:12])
+        try:
+            request = OfflineRehearsalRequest(
+                backup_ref=args.path,
+                destination_ref=destination,
+                source_revision=source_revision,
+                target_revision=_rehearsal_target_revision(
+                    source_revision, args.target_revision,
+                ),
+            )
+        except ValueError as exc:
+            return refuse({
+                "error": "request_invalid", "message": str(exc), "steps_completed": [],
+            }, 2)
+        try:
+            report = OfflineRecoveryRehearsal(port).run(request)
+        except RehearsalError as exc:
+            return refuse({
+                "error": type(exc).__name__,
+                "message": str(exc),
+                "steps_completed": [step.value for step in exc.steps],
+                "destination_left": os.path.lexists(destination),
+            }, 1)
+        payload = {"ok": True, "path": args.path, "workspace": workspace,
+                   **report.as_dict(), "evidence_digest": report.evidence_digest}
+        _emit(payload, as_json=as_json)
+        if not as_json:
+            print("Offline recovery rehearsal passed; the disposable tree was "
+                  "removed and the live state was not touched.")
+        return 0
+    finally:
+        if owned_workspace:
+            # Only an empty directory this command created is removed: a
+            # tree the rehearsal left behind (cleanup refused past its bound)
+            # stays for the operator to inspect, as the contract requires.
+            with contextlib.suppress(OSError):
+                os.rmdir(workspace)
 
 
 def cmd_smoke(args) -> int:
@@ -732,6 +990,9 @@ def cmd_smoke(args) -> int:
             failures.append("operations store roundtrip failed")
     except Exception as exc:
         failures.append(f"operations store: {exc}")
+    if getattr(args, "json", False):
+        _emit({"ok": not failures, "failures": failures}, as_json=True)
+        return 1 if failures else 0
     if failures:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
@@ -1022,6 +1283,46 @@ def cmd_serve(args) -> int:
     return 0
 
 
+def _repl_is_interactive(*, machine_output: bool, stdin=None, stdout=None) -> bool:
+    if machine_output:
+        return False
+    for stream in (stdin or sys.stdin, stdout or sys.stdout):
+        try:
+            if not stream.isatty():
+                return False
+        except (AttributeError, OSError, ValueError):
+            return False
+    return True
+
+
+def _configure_repl_logging(config, *, machine_output: bool, stdin=None, stdout=None):
+    """Keep JSON log lines off the interactive REPL (serve/MCP unchanged).
+
+    Records go to ``SONDER_HOME/logs/repl.log``; on a terminal, WARNING+ is
+    queued in ``application.ports.repl_notices`` for the REPL to drain between
+    turns. ``SONDER_REPL_LOG_STDERR=1`` restores JSON on stderr.
+    """
+    from sonder_runtime.application.ports import repl_notices
+    from sonder_runtime.platform.logging import configure_repl_logging
+
+    interactive = _repl_is_interactive(
+        machine_output=machine_output, stdin=stdin, stdout=stdout,
+    )
+    queue = repl_notices.ReplNoticeQueue() if interactive else None
+    plan = configure_repl_logging(
+        home=runtime_paths.default_home(),
+        interactive=interactive,
+        notice_sink=None if queue is None else queue.push,
+        redactor=_redactor_for_config(config),
+        log_format=config.observability.log_format,
+    )
+    repl_notices.install_repl_notices(
+        queue if plan.console == "notices" else None,
+        log_path=plan.file_path,
+    )
+    return plan
+
+
 def cmd_repl(args) -> int:
     try:
         config = _load_config(args)
@@ -1029,18 +1330,7 @@ def cmd_repl(args) -> int:
         print(str(exc), file=sys.stderr)
         return 2
     _configure_typed_home(config)
-    from sonder_runtime.platform.logging import configure_logging
-    # Interactive REPL must stay readable. JSON INFO lines on stdout/stderr
-    # drown the composer unless the operator explicitly opts into REPL logs.
-    # Serve/MCP keep their configured observability level unchanged.
-    repl_level = (os.environ.get("SONDER_REPL_LOG_LEVEL") or "").strip().upper()
-    if repl_level not in ("DEBUG", "INFO", "WARNING", "ERROR"):
-        repl_level = "WARNING"
-    configure_logging(
-        level=repl_level,
-        log_format=config.observability.log_format,
-        redactor=_redactor_for_config(config),
-    )
+    _configure_repl_logging(config, machine_output=bool(args.json))
     _export_runtime_environment(config)
     import sonder_runtime.adapters.persistence.migrations as sonder_migrations
     try:
@@ -1111,9 +1401,13 @@ def cmd_mcp(args) -> int:
             return 1
         application = build_application(config=config)
         try:
+            # run_native_mcp returns the number of frames served, not a
+            # status: a session that reached EOF cleanly exits 0.
             if getattr(args, "progressive_tools", False):
-                return run_native_mcp(application, close_compute_on_exit=False, progressive_tools=True)
-            return run_native_mcp(application, close_compute_on_exit=False)
+                run_native_mcp(application, close_compute_on_exit=False, progressive_tools=True)
+            else:
+                run_native_mcp(application, close_compute_on_exit=False)
+            return 0
         finally:
             application.close_providers(timeout=5)
     from sonder_runtime.bootstrap.app import close_default_runtime_resources
@@ -1158,10 +1452,17 @@ def cmd_mcp(args) -> int:
         owned_application = default_app(config=config)
         configure_legacy_application(owned_application)
 
+    from sonder_runtime.adapters.security import unsafe_lab
+
     try:
         McpCommand(build_legacy_server_mcp_runtime()).execute(_configure_mcp_legacy)
     except sonder_config.ConfigError as exc:
         print(str(exc), file=sys.stderr)
+        return 2
+    except unsafe_lab.UnsafeLabError as exc:
+        # Same refusal contract as --native: a clean message and exit 2, not
+        # a traceback and exit 1. The gate still runs before any adapter.
+        print(f"MCP startup refused: {exc}", file=sys.stderr)
         return 2
     finally:
         if owned_application is not None:
@@ -1245,6 +1546,7 @@ def cmd_update(args) -> int:
             print(
                 "Rollback complete. Restart the service to run the restored "
                 "release.",
+                file=sys.stderr if args.json else sys.stdout,
             )
             return 0
         if args.update_command == "cancel":
@@ -1260,12 +1562,32 @@ def cmd_update(args) -> int:
 def cmd_rotate_key(args) -> int:
     import sonder_runtime.adapters.secrets as sonder_secrets
 
-    if not args.secrets:
-        print("rotate-key requires --secrets <path>", file=sys.stderr)
+    # Resolve the secrets file exactly like every other command does:
+    # --secrets, then SONDER_SECRETS, then <state home>/sonder.env. Only
+    # --secrets used to count, so an operator whose runtime reads its key via
+    # SONDER_SECRETS was refused.
+    secrets_path = _configured_path(args.secrets, "SONDER_SECRETS", "sonder.env")
+    if not secrets_path:
+        print(
+            "rotate-key requires --secrets <path> (or SONDER_SECRETS, or a "
+            "sonder.env in the state home)",
+            file=sys.stderr,
+        )
         return 2
+    # --config/--set select the state home that receives the rotation state
+    # and the audit event; both used to land in the environment's home. The
+    # configuration is validated exactly as serve validates it (including the
+    # secrets file), so a key is never rotated under a configuration the
+    # restarted server would reject.
+    try:
+        config = _load_config(args)
+    except sonder_config.ConfigError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    _configure_typed_home(config)
     try:
         report = sonder_secrets.rotate_api_key(
-            args.secrets, overlap_seconds=args.overlap_seconds
+            secrets_path, overlap_seconds=args.overlap_seconds
         )
     except sonder_secrets.RotationError as exc:
         print(f"rotation failed: {exc}", file=sys.stderr)
@@ -1460,6 +1782,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="do not probe the Ollama endpoint",
     )
     p.add_argument(
+        "--skip-inference", action="store_true",
+        help="do not probe the Sonder Inference endpoint",
+    )
+    p.add_argument(
         "--storage-probe", action="store_true",
         help="explicitly run an 8 MiB/5 second state-storage throughput probe",
     )
@@ -1488,8 +1814,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("backup", help="backup management")
     backup_sub = p.add_subparsers(dest="backup_command", required=True)
-    for name in ("create", "list", "prune"):
-        bp = backup_sub.add_parser(name)
+    for name in ("create", "list", "latest", "prune"):
+        bp = backup_sub.add_parser(
+            name,
+            help=(
+                "print the path of the newest backup with a valid "
+                "created_at_utc (exit 1 when there is none)"
+                if name == "latest" else None
+            ),
+        )
         common(bp)
         bp.add_argument("--target", help="backup repository directory")
         if name == "prune":
@@ -1514,6 +1847,26 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("path")
     rp.add_argument("destination")
     rp.add_argument("--confirm", help="pass 'restore' to confirm")
+    rp.add_argument("--json", action="store_true")
+    rp = restore_sub.add_parser(
+        "rehearse",
+        help="offline restore + failed-upgrade rollback drill in a disposable tree",
+    )
+    rp.add_argument("path", help="verified backup directory")
+    rp.add_argument(
+        "--workspace",
+        help="existing directory that fences the disposable tree "
+             "(default: a fresh temporary directory, removed afterwards)",
+    )
+    rp.add_argument(
+        "--source-revision",
+        help="revision the backup must record (default: the backup's own)",
+    )
+    rp.add_argument(
+        "--target-revision",
+        help="label for the scripted candidate upgrade "
+             "(default: '<source>+rehearsal')",
+    )
     rp.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_restore)
 

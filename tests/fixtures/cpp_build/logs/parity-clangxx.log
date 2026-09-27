@@ -1,0 +1,8 @@
+In file included from cc.cpp:1:
+./local.h:3:37: error: use of undeclared identifier 'undefined_in_header'
+    3 | inline int broken_helper() { return undefined_in_header; }
+      |                                     ^
+cc.cpp:5:22: error: use of undeclared identifier 'x'
+    5 |     return doubled + x;
+      |                      ^
+2 errors generated.

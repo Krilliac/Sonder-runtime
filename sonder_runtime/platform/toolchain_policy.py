@@ -40,6 +40,7 @@ VERSION_ARGUMENTS = {
     "sccache": ("--version",),
     "clcache": ("--version",),
     "doxygen": ("--version",),
+    "sonder-infer": ("version",),
 }
 
 

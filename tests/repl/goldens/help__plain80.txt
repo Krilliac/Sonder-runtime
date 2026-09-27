@@ -1,0 +1,21 @@
+/help
+sonder commands | ### in ## groups
+  in manual: [asks] asks first | [writes] changes files | [runs] runs a program
+  [danger] destructive
+    /model [tier|name]  switch model or tier
+    /mode <name>        plan, manual, acceptEdits or auto
+    /read <path>        show a file
+    /run                run the last answer's code block  [runs]
+    /todo               list tasks (add/done change them)
+    /status             session, model, endpoint, context
+    /pass  /fail        rate the last answer (teaches Sonder)
+    /exit               quit (or Ctrl-D)
+  groups | /help <group> | /help all | /help status
+    admin         #    dev          ##    repo         ##
+    agents       ##    diagnostics  ##    runtime      ##
+    basic        ##    execution    ##    security     ##
+    chat          #    filesystem   ##    training      #
+    context      ##    memory       ##    updates       #
+    creative     ##    persona       #    web           #
+    data          #    planning     ##
+>

@@ -172,6 +172,49 @@ def _check_ollama_workers(
         return list(executor.map(check, entries))
 
 
+def _check_sonder_inference() -> CheckResult | None:
+    """Non-required readiness note for a bound Sonder Inference provider.
+
+    Startup never blocks on Inference: the server may legitimately start
+    after the runtime, and a request that finds it down fails closed (or
+    falls back) at call time.  This only makes the state visible, and it
+    never raises: any failure of the check itself is reported, not thrown.
+    """
+    try:
+        return _sonder_inference_result()
+    except Exception as exc:  # noqa: BLE001 - preflight never blocks on Inference
+        return CheckResult(
+            "sonder_inference", False, False,
+            f"check failed: {type(exc).__name__}: {exc}"[:240],
+        )
+
+
+def _sonder_inference_result() -> CheckResult | None:
+    from sonder_runtime.adapters.provider_bindings import provider_bindings_from_env
+
+    try:
+        bindings = provider_bindings_from_env()
+    except ValueError as exc:
+        return CheckResult("sonder_inference", False, False, f"invalid provider bindings: {exc}")
+    if "sonder_inference" not in bindings.bound_providers:
+        return None
+    from sonder_runtime.adapters.inference.sonder_inference_gateway import (
+        SonderInferenceGateway,
+    )
+
+    readiness = SonderInferenceGateway().readiness()
+    ready = readiness.kind == "ready"
+    detail = readiness.detail
+    if ready and readiness.synthetic:
+        detail += " (MOCK backend: synthetic output)"
+    fallback = bindings.fallbacks.get("sonder_inference")
+    if readiness.kind == "unreachable" and fallback:
+        detail += f"; requests it never receives fall back to {fallback}"
+    elif readiness.kind == "misconfigured":
+        detail += "; every request fails until this is fixed"
+    return CheckResult("sonder_inference", ready, False, detail)
+
+
 def run_preflight(
     config: SonderConfig,
     *,
@@ -186,4 +229,7 @@ def run_preflight(
     if check_ollama:
         checks.append(_check_ollama(config, timeout=ollama_timeout))
         checks.extend(_check_ollama_workers(config, timeout=ollama_timeout))
+    inference = _check_sonder_inference()
+    if inference is not None:
+        checks.append(inference)
     return PreflightReport(checks=tuple(checks))

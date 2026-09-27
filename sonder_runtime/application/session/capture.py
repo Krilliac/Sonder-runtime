@@ -5,6 +5,19 @@ It records the exact request snapshot first, then the user/tool/model facts
 that belong to the turn.  The repository remains the source of truth; replay
 and export are run against that same committed stream before the result is
 returned to the caller.
+
+Redaction before the durable write
+----------------------------------
+Every content-bearing field (prompt, system text, history, options, UI facts,
+user and model messages, tool arguments/results, provider payloads and
+responses) passes through the runtime redactor *before* it is appended, and
+the request ``snapshot_digest`` is computed over the redacted snapshot. The
+stored form is therefore the only form: replay, export and continuation all
+read the same redacted events, so replay stays deterministic and the hash
+chain and snapshot digest verify. A secret the redactor recognises is never
+written to ``sessions.db``; a replayed request carries ``[REDACTED]`` in its
+place. Identity and evidence fields (request/turn/call/attempt ids, tier,
+tool names, prefix/replay manifests, digests) are never rewritten.
 """
 from __future__ import annotations
 
@@ -12,7 +25,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Callable
 
 from ...domain.common.errors import (
     Cancelled, CapacityExceeded, ConcurrencyConflict, Conflict,
@@ -21,6 +34,7 @@ from ...domain.common.errors import (
 )
 from ..ports.model_gateway import ModelRequest
 from ...domain.common.ids import new_id
+from ...domain.security import redaction as _redaction
 from ..ports.session_repository import SessionEvent, SessionRepository
 from .durable_replay import DurableReplayResult, crash_safe_replay
 from .query_export import SessionExport, SessionQueryEngine
@@ -66,6 +80,42 @@ class CapturedTurn:
     appended: tuple[SessionEvent, ...]
     replay: DurableReplayResult
     export: SessionExport
+
+
+# Identity/evidence fields a redaction pass must never rewrite: replay and
+# integrity checks key off them, and none of them carries user content.
+_IDENTITY_FIELDS = frozenset({
+    "request_id", "turn_id", "call_id", "attempt_id", "name", "tier", "stream",
+    "tools", "prefix_manifest", "replay_manifest", "prefix_cache_observation",
+    "provenance", "snapshot_digest", "provider", "operation", "error_code",
+})
+
+Redact = Callable[[str], str]
+
+
+def _fail_closed(redact: Redact | None) -> Redact:
+    """A ``str -> str`` redactor that never lets unredacted text through."""
+    base = redact or _redaction.redact_text
+
+    def apply(text: str) -> str:
+        try:
+            out = base(text)
+        except Exception:
+            return _redaction.REDACTION_FAILED
+        return out if isinstance(out, str) else _redaction.REDACTION_FAILED
+
+    return apply
+
+
+def _redact_value(value: Any, redact: Redact) -> Any:
+    return _redaction.redact_structure(value, redact, sensitive_keys=True)
+
+
+def _redact_payload(payload: Mapping[str, object], redact: Redact) -> dict[str, object]:
+    return {
+        key: value if key in _IDENTITY_FIELDS else _redact_value(value, redact)
+        for key, value in payload.items()
+    }
 
 
 def _required_text(value: object, name: str) -> str:
@@ -130,6 +180,7 @@ def _snapshot_payload(
     turn_id: str,
     tools: Sequence[Mapping[str, object]],
     ui_facts: Mapping[str, object],
+    redact: Redact | None = None,
 ) -> dict[str, object]:
     history = _json_copy(list(request.history), "request.history")
     options = _json_copy(dict(request.options), "request.options")
@@ -176,6 +227,8 @@ def _snapshot_payload(
         payload["provenance"] = PromptProvenanceBoundary.request_event_metadata(
             request.context_packet, request.provenance,
         )
+    # Redact before the digest so the stored snapshot verifies on replay.
+    payload = _redact_payload(payload, _fail_closed(redact))
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True,
                            separators=(",", ":")).encode("utf-8")
     payload["snapshot_digest"] = hashlib.sha256(canonical).hexdigest()
@@ -207,9 +260,15 @@ class SessionCaptureService:
         *,
         query_engine: SessionQueryEngine | None = None,
         replay_limit: int = 10_000,
+        redact: Redact | None = None,
     ) -> None:
+        """``redact`` is the runtime's ``str -> str`` redactor (the platform
+        log ``Redactor.redact`` in production); the default is the canonical
+        domain pattern set. It is applied fail-closed to every content field
+        before a durable write."""
         if not 1 <= replay_limit <= 100_000:
             raise InvalidInput("replay_limit must be between 1 and 100000")
+        self._redact = _fail_closed(redact)
         self._repository = repository
         self._query = query_engine or SessionQueryEngine(
             repository, max_page_size=min(100, replay_limit),
@@ -262,7 +321,7 @@ class SessionCaptureService:
                          for tool in values)
         payload = _snapshot_payload(
             request, request_id=request_id, turn_id=turn_id,
-            tools=manifest, ui_facts=ui_copy,
+            tools=manifest, ui_facts=ui_copy, redact=self._redact,
         )
         appended: list[SessionEvent] = [self._repository.append(
             session_id, "model.requested", payload,
@@ -271,16 +330,18 @@ class SessionCaptureService:
             _required_text(user_message, "user_message")
             appended.append(self._repository.append(
                 session_id, "user.message",
-                {"content": user_message, "turn_id": turn_id},
+                {"content": self._redact(user_message), "turn_id": turn_id},
             ))
         for tool in values:
-            arguments = _json_copy(dict(tool.arguments), "tool.arguments")
+            arguments = _redact_value(
+                _json_copy(dict(tool.arguments), "tool.arguments"), self._redact,
+            )
             appended.append(self._repository.append(
                 session_id, "tool.call",
                 {"content": _canonical_json(arguments, "tool.arguments"),
                  "turn_id": turn_id, "call_id": tool.call_id, "name": tool.name},
             ))
-            result = _json_copy(tool.result, "tool.result")
+            result = _redact_value(_json_copy(tool.result, "tool.result"), self._redact)
             appended.append(self._repository.append(
                 session_id, "tool.result",
                 {"content": _canonical_json(result, "tool.result"),
@@ -291,7 +352,7 @@ class SessionCaptureService:
             _required_text(model_response, "model_response")
             appended.append(self._repository.append(
                 session_id, "model.response",
-                {"content": model_response, "turn_id": turn_id,
+                {"content": self._redact(model_response), "turn_id": turn_id,
                  "request_id": request_id},
             ))
         return self._finalize_capture(session_id, turn_id, tuple(appended))
@@ -319,12 +380,14 @@ class SessionCaptureService:
             _required_text(user_message, "user_message")
         payload = _snapshot_payload(
             request, request_id=request_id, turn_id=turn_id, tools=(), ui_facts={},
+            redact=self._redact,
         )
         appended = [self._repository.append(session_id, "model.requested", payload)]
         if user_message is not None:
             appended.append(self._repository.append(
                 session_id, "user.message",
-                {"content": user_message, "turn_id": turn_id, "request_id": request_id},
+                {"content": self._redact(user_message), "turn_id": turn_id,
+                 "request_id": request_id},
             ))
         return CapturedRequest(session_id, turn_id, request_id, tuple(appended))
 
@@ -335,7 +398,7 @@ class SessionCaptureService:
         _required_text(model_response, "model_response")
         event = self._repository.append(
             pending.session_id, "model.response",
-            {"content": model_response, "turn_id": pending.turn_id,
+            {"content": self._redact(model_response), "turn_id": pending.turn_id,
              "request_id": pending.request_id},
         )
         return self._finalize_capture(
@@ -363,7 +426,9 @@ class SessionCaptureService:
             "attempt_id": attempt_id,
             "provider": _required_text(provider, "provider"),
             "operation": _required_text(operation, "operation"),
-            "payload": _json_copy(dict(payload), "provider payload"),
+            "payload": _redact_value(
+                _json_copy(dict(payload), "provider payload"), self._redact,
+            ),
         })
         return attempt_id
 
@@ -378,7 +443,9 @@ class SessionCaptureService:
             payload["error_code"] = error_code
             kind = "provider.failed"
         else:
-            payload["response"] = _json_copy(response, "provider response")
+            payload["response"] = _redact_value(
+                _json_copy(response, "provider response"), self._redact,
+            )
             kind = "provider.responded"
         return self._repository.append(pending.session_id, kind, payload)
 

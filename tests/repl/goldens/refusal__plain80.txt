@@ -1,0 +1,4 @@
+/read /etc/shadow
+x refused  /read /etc/shadow
+  path is outside allowed roots
+>

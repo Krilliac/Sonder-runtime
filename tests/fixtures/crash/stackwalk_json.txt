@@ -1,0 +1,42 @@
+{
+  "status": "OK",
+  "system_info": {"os": "Windows NT", "os_ver": "10.0.19045", "cpu_arch": "amd64", "cpu_count": 8},
+  "crash_info": {"type": "EXCEPTION_ACCESS_VIOLATION_READ", "address": "0x0000000000000008", "crashing_thread": 0, "assertion": null},
+  "pid": 4242,
+  "thread_count": 2,
+  "threads": [
+    {
+      "thread_id": 6972,
+      "thread_name": "MainThread",
+      "frame_count": 3,
+      "frames": [
+        {"frame": 0, "module": "spark_game.exe", "function": "Renderer::Submit(int)", "function_offset": "0x14",
+         "file": "C:\\agent\\_work\\3\\s\\Engine\\Render\\render.cpp", "line": 42, "offset": "0x00007ff610001234",
+         "module_offset": "0x0000000000001234", "trust": "context",
+         "inlines": [{"function_name": "Renderer::Validate()", "file": "C:\\agent\\_work\\3\\s\\Engine\\Render\\render.h", "line": 17}]},
+        {"frame": 1, "module": "spark_game.exe", "function": "Game::RunFrame()", "function_offset": "0x40",
+         "file": "C:\\agent\\_work\\3\\s\\Engine\\Game\\game.cpp", "line": 118, "offset": "0x00007ff610002000",
+         "module_offset": "0x0000000000002000", "trust": "cfi"},
+        {"frame": 2, "module": "ntdll.dll", "function": null, "offset": "0x00007ffb30000500",
+         "module_offset": "0x0000000000000500", "trust": "scan"}
+      ]
+    },
+    {
+      "thread_id": 8704,
+      "thread_name": null,
+      "frame_count": 1,
+      "frames": [
+        {"frame": 0, "module": "ntdll.dll", "function": "NtWaitForSingleObject", "offset": "0x00007ffb3009f000",
+         "module_offset": "0x000000000009f000", "trust": "context"}
+      ]
+    }
+  ],
+  "modules": [
+    {"base_addr": "0x00007ff610000000", "end_addr": "0x00007ff610020000", "filename": "spark_game.exe",
+     "debug_file": "spark_game.pdb", "debug_id": "1B4E28BA2FA111D2883FB9A761BDE3FB3", "version": "1.2.3.4",
+     "loaded_symbols": true, "missing_symbols": false, "corrupt_symbols": false},
+    {"base_addr": "0x00007ffb30000000", "end_addr": "0x00007ffb301f0000", "filename": "ntdll.dll",
+     "debug_file": "ntdll.pdb", "debug_id": "ABCDEF0123456789ABCDEF01234567891", "version": "10.0.19041.1",
+     "loaded_symbols": false, "missing_symbols": true, "corrupt_symbols": false}
+  ]
+}

@@ -42,6 +42,12 @@ backup bundles.
   requires explicit approval.
 - `auto-low-risk`: deterministic host checks may approve only narrowly scoped
   low-risk work. High/critical and protected work always requires a user.
+  Host approval also needs a passing independent-oracle receipt and a fixed
+  floor of passed unattended gates. That receipt
+  exists only on a Linux host with a dedicated candidate uid and
+  evaluator-held cases for the target function (see
+  [#517 Linux isolation](docs/architecture/REMAINING-SELFMOD-517-LINUX-ISOLATION.md)).
+  The nightly driver never promotes unattended.
 
 Disable all self-modification with `/selfmod disable`. Re-enable explicitly
 with `/selfmod enable`.
@@ -124,6 +130,7 @@ Acceptance also rejects:
 /selfmod plan <objective> --files module.py,tests/test_module.py
 /selfmod plan <objective> --maintenance --files protected.py,tests/test_security.py
 /selfmod run <objective> --files module.py,tests/test_module.py --tests python -m pytest -q tests/test_module.py
+/selfmod run <objective> --files ... --tests <reproducer> --unisolated   (attended console, host without a candidate supervisor)
 /selfmod run <protected objective> --maintenance --files ... --tests <reproducer> ;; <security-suite>
 /selfmod diff <run-id>
 /selfmod tests <run-id>
@@ -140,6 +147,25 @@ Acceptance also rejects:
 /selfmod retention <days> <max-gb>
 /selfmod prune-backups
 ```
+
+`/selfmod run` executes every candidate check (`syntax`, `targeted`,
+`regression`, `security` and the `smoke` probe) under the host's candidate
+supervisor: the Linux uid supervisor when `SONDER_SELFMOD_CANDIDATE_UID` is
+configured, the low-integrity supervisor on Windows. On a host with neither
+(Linux without a configured candidate uid, a non-root supervisor, macOS) the
+command is refused before any run, backup or workspace exists. The one way
+past that refusal is an attended console operator adding `--unisolated` to the
+command; HTTP, MCP and piped consoles cannot, an `auto-low-risk` candidate
+cannot, and `SELFMOD_LOW_INTEGRITY=1` forbids it. An unisolated run records its
+checks with isolation `unverified` and writes the opt-in to the run's audit
+events. Each mutating stage of `/selfmod run`, `approve`, `deploy` and
+`rollback` goes through the selfmod stage journal; without one the command is
+refused. An unknown run id, a run in the wrong phase, and a run that another
+`/selfmod` call is driving are refused before anything is journaled. A
+`deploy` or `rollback` refused before it writes anything (deployment lock
+held, source changed since the proposal, rollback conflict) can be retried
+once the cause is fixed. See
+[the Linux isolation notes](docs/architecture/REMAINING-SELFMOD-517-LINUX-ISOLATION.md).
 
 The hosted chat API accepts the same slash lifecycle with developer/admin
 authorization for mutating actions. `/v1/sonder/status` exposes the current

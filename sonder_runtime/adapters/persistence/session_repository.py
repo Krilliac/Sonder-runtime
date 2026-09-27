@@ -24,6 +24,7 @@ from sonder_runtime.application.ports.session_repository import (
     IntegrityIssue,
     IntegrityReport,
     SessionEvent,
+    SessionSummary,
 )
 
 _DDL = """
@@ -289,6 +290,32 @@ class SQLiteSessionRepository:
                 if len(rows) < page_size:
                     break
         return tuple(events)
+
+    def list_sessions(self, *, limit: int = 20,
+                      after: tuple[str, str] | None = None) -> tuple[SessionSummary, ...]:
+        """Sessions, most recently updated first, one bounded keyset page.
+
+        ``after`` is the ``(updated_at_utc, session_id)`` of the last row of
+        the previous page. Reads only identity, counts and timestamps; no
+        payload leaves this method.
+        """
+        _validate_bounds(1, None, limit, min(self._max_read_limit, 200))
+        having, args = "", []
+        if after is not None:
+            updated, session_id = after
+            having = " HAVING MAX(occurred_at_utc) < ? OR (MAX(occurred_at_utc) = ? AND session_id > ?)"
+            args = [str(updated), str(updated), str(session_id)]
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT session_id, COUNT(*), "
+                "SUM(CASE WHEN event_type IN ('user.message', 'message.received') THEN 1 ELSE 0 END), "
+                "MIN(occurred_at_utc), MAX(occurred_at_utc) FROM session_event "
+                f"GROUP BY session_id{having} "
+                "ORDER BY MAX(occurred_at_utc) DESC, session_id ASC LIMIT ?",
+                (*args, limit),
+            ).fetchall()
+        return tuple(SessionSummary(str(r[0]), int(r[1]), int(r[2] or 0), str(r[3]), str(r[4]))
+                     for r in rows)
 
     def search(self, *, session_id: str | None = None, event_type: str | None = None,
                text: str | None = None, limit: int | None = None) -> tuple[SessionEvent, ...]:

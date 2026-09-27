@@ -23,6 +23,7 @@ from ..application.ports.web import (
     WebPolicyError,
     WebRequest,
     WebResponse,
+    WebToolsDisabled,
 )
 
 
@@ -44,7 +45,7 @@ class LegacyWebProvider:
         if not policy.allows(request.url, context):
             raise WebPolicyError("web request is outside the egress policy")
         if not self._transport.enabled():
-            raise RuntimeError("web tools disabled by SONDER_WEB_TOOLS")
+            raise WebToolsDisabled()
 
         current_url = request.url
         redirects = 0

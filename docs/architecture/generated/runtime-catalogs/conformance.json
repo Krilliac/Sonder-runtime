@@ -1,0 +1,3634 @@
+{
+  "events": [
+    {
+      "name": "approval.denied",
+      "required": [
+        "approval_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "approval_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "approval_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "approval.granted",
+      "required": [
+        "approval_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "approval_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "approval_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "approval.requested",
+      "required": [
+        "action",
+        "approval_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "approval_id": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "action",
+          "approval_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "artifact.attached",
+      "required": [
+        "artifact_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "type": "string"
+          },
+          "artifact_type": {
+            "type": "string"
+          },
+          "content_ref": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "artifact.created",
+      "required": [
+        "artifact_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "type": "string"
+          },
+          "artifact_type": {
+            "type": "string"
+          },
+          "content_ref": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "artifact.updated",
+      "required": [
+        "artifact_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "type": "string"
+          },
+          "artifact_type": {
+            "type": "string"
+          },
+          "content_ref": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "cancellation.completed",
+      "required": [
+        "target_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "provenance": {
+            "type": "object"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "cancellation.requested",
+      "required": [
+        "target_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "provenance": {
+            "type": "object"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "compaction.completed",
+      "required": [
+        "compaction_id",
+        "summary_ref"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "compaction_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "removed_items": {
+            "type": "integer"
+          },
+          "summary_ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "compaction_id",
+          "summary_ref"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "compaction.started",
+      "required": [
+        "compaction_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "compaction_id": {
+            "type": "string"
+          },
+          "context_ref": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "compaction_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "context.updated",
+      "required": [
+        "context_ref"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "context_ref": {
+            "type": "string"
+          },
+          "item_count": {
+            "type": "integer"
+          },
+          "provenance": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "context_ref"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "context.window_changed",
+      "required": [
+        "window_tokens"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "previous_tokens": {
+            "type": "integer"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "window_tokens": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "window_tokens"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "error.raised",
+      "required": [
+        "error_code"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "error_code": {
+            "type": "string"
+          },
+          "message_ref": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "retryable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "error_code"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "error.recovered",
+      "required": [
+        "error_code"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "error_code": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "recovery_ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error_code"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "goal.completed",
+      "required": [
+        "goal_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "goal_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "status": {
+            "type": "string"
+          },
+          "title_ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "goal_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "goal.created",
+      "required": [
+        "goal_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "goal_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "status": {
+            "type": "string"
+          },
+          "title_ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "goal_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "goal.updated",
+      "required": [
+        "goal_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "goal_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "status": {
+            "type": "string"
+          },
+          "title_ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "goal_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "message.completed",
+      "required": [
+        "message_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "message_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "message.emitted",
+      "required": [
+        "message_id",
+        "role"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "content_ref": {
+            "type": "string"
+          },
+          "message_id": {
+            "type": "string"
+          },
+          "part_count": {
+            "type": "integer"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "role": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message_id",
+          "role"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "message.received",
+      "required": [
+        "message_id",
+        "role"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "content_ref": {
+            "type": "string"
+          },
+          "message_id": {
+            "type": "string"
+          },
+          "part_count": {
+            "type": "integer"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "role": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message_id",
+          "role"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "model.completed",
+      "required": [
+        "model",
+        "request_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "finish_reason": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "output_tokens": {
+            "type": "integer"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "model",
+          "request_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "model.failed",
+      "required": [
+        "request_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "error_code": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "retryable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "request_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "model.requested",
+      "required": [
+        "model",
+        "request_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "input_tokens": {
+            "type": "integer"
+          },
+          "model": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "model",
+          "request_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "model.started",
+      "required": [
+        "model",
+        "request_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "input_tokens": {
+            "type": "integer"
+          },
+          "model": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "model",
+          "request_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "plan.created",
+      "required": [
+        "plan_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "goal_id": {
+            "type": "string"
+          },
+          "plan_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "step_count": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "plan_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "plan.step_completed",
+      "required": [
+        "plan_id",
+        "step_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "plan_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "status": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "plan_id",
+          "step_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "plan.step_started",
+      "required": [
+        "plan_id",
+        "step_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "plan_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "status": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "plan_id",
+          "step_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "prompt.created",
+      "required": [
+        "prompt_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "content_ref": {
+            "type": "string"
+          },
+          "prompt_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "template_ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "prompt_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "prompt.submitted",
+      "required": [
+        "prompt_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "content_ref": {
+            "type": "string"
+          },
+          "prompt_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "template_ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "prompt_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "retrieval.completed",
+      "required": [
+        "result_count",
+        "retrieval_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "provenance": {
+            "type": "object"
+          },
+          "result_count": {
+            "type": "integer"
+          },
+          "results_ref": {
+            "type": "string"
+          },
+          "retrieval_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result_count",
+          "retrieval_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "retrieval.requested",
+      "required": [
+        "retrieval_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "type": "integer"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "query_ref": {
+            "type": "string"
+          },
+          "retrieval_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "retrieval_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "session.ended",
+      "required": [],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "provenance": {
+            "type": "object"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      }
+    },
+    {
+      "name": "session.paused",
+      "required": [],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "provenance": {
+            "type": "object"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      }
+    },
+    {
+      "name": "session.resumed",
+      "required": [],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "provenance": {
+            "type": "object"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      }
+    },
+    {
+      "name": "session.started",
+      "required": [],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "provenance": {
+            "type": "object"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      }
+    },
+    {
+      "name": "subagent.completed",
+      "required": [
+        "subagent_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "provenance": {
+            "type": "object"
+          },
+          "result_ref": {
+            "type": "string"
+          },
+          "subagent_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "subagent_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "subagent.failed",
+      "required": [
+        "subagent_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "error_code": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "subagent_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "subagent_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "subagent.spawned",
+      "required": [
+        "subagent_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "parent_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "role": {
+            "type": "string"
+          },
+          "subagent_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "subagent_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "subagent.started",
+      "required": [
+        "subagent_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "parent_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "role": {
+            "type": "string"
+          },
+          "subagent_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "subagent_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "tool.completed",
+      "required": [
+        "call_id",
+        "tool"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "call_id": {
+            "type": "string"
+          },
+          "duration_ms": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "result_ref": {
+            "type": "string"
+          },
+          "tool": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "call_id",
+          "tool"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "tool.failed",
+      "required": [
+        "call_id"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "call_id": {
+            "type": "string"
+          },
+          "error_code": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "retryable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "call_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "tool.requested",
+      "required": [
+        "call_id",
+        "tool"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "arguments_ref": {
+            "type": "string"
+          },
+          "call_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "tool": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "call_id",
+          "tool"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "tool.started",
+      "required": [
+        "call_id",
+        "tool"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "arguments_ref": {
+            "type": "string"
+          },
+          "call_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object"
+          },
+          "tool": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "call_id",
+          "tool"
+        ],
+        "type": "object"
+      }
+    }
+  ],
+  "schema": "sonder-catalog-conformance-v1",
+  "tools": [
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "open_parent",
+              "rotate_parent",
+              "revoke_parent",
+              "spawn",
+              "list",
+              "inspect",
+              "send_message",
+              "wait",
+              "interrupt",
+              "resume",
+              "cancel",
+              "reports",
+              "ack",
+              "retrieve_archive"
+            ],
+            "type": "string"
+          },
+          "parent_session_id": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "parent_token": {
+            "maxLength": 256,
+            "type": "string"
+          },
+          "payload": {
+            "maxProperties": 32,
+            "type": "object"
+          }
+        },
+        "required": [
+          "action",
+          "payload"
+        ],
+        "type": "object"
+      },
+      "name": "agent_lane",
+      "surfaces": {
+        "cli": "agent_lane",
+        "client": "agent_lane",
+        "mcp": "agent_lane",
+        "openai": "agent_lane"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "consent": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "consent"
+        ],
+        "type": "object"
+      },
+      "name": "approximate_location_lookup",
+      "surfaces": {
+        "cli": "approximate_location_lookup",
+        "client": "approximate_location_lookup",
+        "mcp": "approximate_location_lookup",
+        "openai": "approximate_location_lookup"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "archive_format": {
+            "enum": [
+              "zip",
+              "tar"
+            ],
+            "type": "string"
+          },
+          "destination": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "deterministic": {
+            "type": "boolean"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "inputs_json": {
+            "maxLength": 1000000,
+            "minLength": 2,
+            "type": "string"
+          },
+          "max_depth": {
+            "maximum": 64,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_entries": {
+            "maximum": 20000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_file_bytes": {
+            "maximum": 256000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_files": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_results": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_total_bytes": {
+            "maximum": 1000000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "root": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "root",
+          "inputs_json",
+          "destination"
+        ],
+        "type": "object"
+      },
+      "name": "archive_create",
+      "surfaces": {
+        "cli": "archive_create",
+        "client": "archive_create",
+        "mcp": "archive_create",
+        "openai": "archive_create"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "destination": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_entries": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_file_bytes": {
+            "maximum": 256000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_path_depth": {
+            "maximum": 128,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_ratio": {
+            "maximum": 1000.0,
+            "minimum": 1,
+            "type": "number"
+          },
+          "max_results": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_seconds": {
+            "maximum": 60.0,
+            "minimum": 1,
+            "type": "number"
+          },
+          "max_total_bytes": {
+            "maximum": 1000000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "source": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "destination"
+        ],
+        "type": "object"
+      },
+      "name": "archive_extract",
+      "surfaces": {
+        "cli": "archive_extract",
+        "client": "archive_extract",
+        "mcp": "archive_extract",
+        "openai": "archive_extract"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_entries": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_file_bytes": {
+            "maximum": 256000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_path_depth": {
+            "maximum": 128,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_ratio": {
+            "maximum": 1000.0,
+            "minimum": 1,
+            "type": "number"
+          },
+          "max_results": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_seconds": {
+            "maximum": 60.0,
+            "minimum": 1,
+            "type": "number"
+          },
+          "max_total_bytes": {
+            "maximum": 1000000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "archive_list",
+      "surfaces": {
+        "cli": "archive_list",
+        "client": "archive_list",
+        "mcp": "archive_list",
+        "openai": "archive_list"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_scan_bytes": {
+            "type": "integer"
+          },
+          "max_seconds": {
+            "type": "number"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "artifact_risk_inspect",
+      "surfaces": {
+        "cli": "artifact_risk_inspect",
+        "client": "artifact_risk_inspect",
+        "mcp": "artifact_risk_inspect",
+        "openai": "artifact_risk_inspect"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "allow_network": {
+            "type": "boolean"
+          },
+          "apply": {
+            "type": "boolean"
+          },
+          "attempts": {
+            "maximum": 8,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "build_dir": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "config": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "editable_globs": {
+            "items": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 16,
+            "type": "array"
+          },
+          "focus_file": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "platform": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "project": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "revert_after": {
+            "type": "boolean"
+          },
+          "target": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "maximum": 14400,
+            "minimum": 60,
+            "type": "integer"
+          },
+          "verify_dependents": {
+            "type": "boolean"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "type": "object"
+      },
+      "name": "build_fix",
+      "surfaces": {
+        "cli": "build_fix",
+        "client": "build_fix",
+        "mcp": "build_fix",
+        "openai": "build_fix"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "files": {
+            "items": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 6,
+            "type": "array"
+          },
+          "job_id": {
+            "pattern": "^build-fix-[0-9a-f]{16,32}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "type": "object"
+      },
+      "name": "build_fix_restore",
+      "surfaces": {
+        "cli": "build_fix_restore",
+        "client": "build_fix_restore",
+        "mcp": "build_fix_restore",
+        "openai": "build_fix_restore"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "cancel": {
+            "type": "boolean"
+          },
+          "job_id": {
+            "pattern": "^build-fix-[0-9a-f]{16,32}$",
+            "type": "string"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "type": "object"
+      },
+      "name": "build_fix_result",
+      "surfaces": {
+        "cli": "build_fix_result",
+        "client": "build_fix_result",
+        "mcp": "build_fix_result",
+        "openai": "build_fix_result"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "configure",
+              "build",
+              "compile_one",
+              "include_trace"
+            ],
+            "type": "string"
+          },
+          "allow_network": {
+            "type": "boolean"
+          },
+          "build_dir": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "build_preset": {
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$",
+            "type": "string"
+          },
+          "config": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "file": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "generator": {
+            "enum": [
+              "Ninja",
+              "Ninja Multi-Config",
+              "Unix Makefiles",
+              "NMake Makefiles",
+              "Visual Studio 17 2022",
+              "Visual Studio 16 2019"
+            ],
+            "type": "string"
+          },
+          "jobs": {
+            "maximum": 256,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "platform": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "preset": {
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$",
+            "type": "string"
+          },
+          "profile": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "project": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "target": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "maximum": 7200,
+            "minimum": 30,
+            "type": "integer"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "build_job",
+      "surfaces": {
+        "cli": "build_job",
+        "client": "build_job",
+        "mcp": "build_job",
+        "openai": "build_job"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "cancel": {
+            "type": "boolean"
+          },
+          "job_id": {
+            "pattern": "^build-job-[0-9a-f]{16,32}$",
+            "type": "string"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "type": "object"
+      },
+      "name": "build_job_result",
+      "surfaces": {
+        "cli": "build_job_result",
+        "client": "build_job_result",
+        "mcp": "build_job_result",
+        "openai": "build_job_result"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "build_dir": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "detail": {
+            "enum": [
+              "summary",
+              "targets",
+              "compile_units",
+              "toolchain",
+              "presets"
+            ],
+            "type": "string"
+          },
+          "max_items": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "preset": {
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$",
+            "type": "string"
+          },
+          "project": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "refresh": {
+            "type": "boolean"
+          },
+          "target": {
+            "maxLength": 128,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "build_model",
+      "surfaces": {
+        "cli": "build_model",
+        "client": "build_model",
+        "mcp": "build_model",
+        "openai": "build_model"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "controller_job_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "max_bytes": {
+            "maximum": 98304,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "name": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "controller_job_id",
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "compute_artifact_fetch",
+      "surfaces": {
+        "cli": "compute_artifact_fetch",
+        "client": "compute_artifact_fetch",
+        "mcp": "compute_artifact_fetch",
+        "openai": "compute_artifact_fetch"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "controller_job_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "controller_job_id",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "name": "compute_cancel",
+      "surfaces": {
+        "cli": "compute_cancel",
+        "client": "compute_cancel",
+        "mcp": "compute_cancel",
+        "openai": "compute_cancel"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "controller_job_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "controller_job_id"
+        ],
+        "type": "object"
+      },
+      "name": "compute_status",
+      "surfaces": {
+        "cli": "compute_status",
+        "client": "compute_status",
+        "mcp": "compute_status",
+        "openai": "compute_status"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "allow_local_fallback": {
+            "type": "boolean"
+          },
+          "allow_remote": {
+            "type": "boolean"
+          },
+          "arguments": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 64,
+            "type": "array"
+          },
+          "catalog_entry_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "deadline_seconds": {
+            "maximum": 86400,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "environment": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "maxProperties": 32,
+            "type": "object"
+          },
+          "idempotency_key": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "idempotent": {
+            "type": "boolean"
+          },
+          "input_artifacts": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "maxLength": 4096,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "sha256": {
+                  "maxLength": 64,
+                  "minLength": 64,
+                  "type": "string"
+                },
+                "size_bytes": {
+                  "maximum": 1099511627776,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "name",
+                "size_bytes",
+                "sha256"
+              ],
+              "type": "object"
+            },
+            "maxItems": 64,
+            "type": "array"
+          },
+          "placement_policy": {
+            "enum": [
+              "local-only",
+              "prefer-remote",
+              "rank-all"
+            ],
+            "type": "string"
+          },
+          "relative_cwd": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "request_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "workload": {
+            "enum": [
+              "analysis",
+              "build",
+              "container",
+              "embedding",
+              "encode",
+              "fuzz",
+              "index",
+              "render",
+              "service",
+              "storage",
+              "test",
+              "training"
+            ],
+            "type": "string"
+          },
+          "workspace_mapping": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "workload",
+          "catalog_entry_id",
+          "workspace_mapping",
+          "allow_remote"
+        ],
+        "type": "object"
+      },
+      "name": "compute_submit",
+      "surfaces": {
+        "cli": "compute_submit",
+        "client": "compute_submit",
+        "mcp": "compute_submit",
+        "openai": "compute_submit"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "engine": {
+            "enum": [
+              "auto",
+              "cdb",
+              "gdb",
+              "lldb",
+              "eu_stack",
+              "minidump_stackwalk",
+              "llvm_symbolizer",
+              "pure"
+            ],
+            "type": "string"
+          },
+          "executable": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "path": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "symbol_dirs": {
+            "items": {
+              "maxLength": 1024,
+              "type": "string"
+            },
+            "maxItems": 8,
+            "type": "array"
+          },
+          "symbol_server": {
+            "type": "boolean"
+          },
+          "timeout_seconds": {
+            "maximum": 900,
+            "minimum": 10,
+            "type": "integer"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "crash_digest",
+      "surfaces": {
+        "cli": "crash_digest",
+        "client": "crash_digest",
+        "mcp": "crash_digest",
+        "openai": "crash_digest"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_threads": {
+            "maximum": 16,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "maxLength": 1024,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "crash_triage",
+      "surfaces": {
+        "cli": "crash_triage",
+        "client": "crash_triage",
+        "mcp": "crash_triage",
+        "openai": "crash_triage"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "data_inspect",
+      "surfaces": {
+        "cli": "data_inspect",
+        "client": "data_inspect",
+        "mcp": "data_inspect",
+        "openai": "data_inspect"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "sql": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "data_query",
+      "surfaces": {
+        "cli": "data_query",
+        "client": "data_query",
+        "mcp": "data_query",
+        "openai": "data_query"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "run_id": {
+            "maxLength": 80,
+            "type": "string"
+          },
+          "wait_seconds": {
+            "maximum": 60,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "run_id"
+        ],
+        "type": "object"
+      },
+      "name": "debug_run_result",
+      "surfaces": {
+        "cli": "debug_run_result",
+        "client": "debug_run_result",
+        "mcp": "debug_run_result",
+        "openai": "debug_run_result"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "dependency_inventory",
+      "surfaces": {
+        "cli": "dependency_inventory",
+        "client": "dependency_inventory",
+        "mcp": "dependency_inventory",
+        "openai": "dependency_inventory"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "parents": {
+            "type": "boolean"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "directory_create",
+      "surfaces": {
+        "cli": "directory_create",
+        "client": "directory_create",
+        "mcp": "directory_create",
+        "openai": "directory_create"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "directory_digest",
+      "surfaces": {
+        "cli": "directory_digest",
+        "client": "directory_digest",
+        "mcp": "directory_digest",
+        "openai": "directory_digest"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "depth": {
+            "type": "integer"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "include_hidden": {
+            "type": "boolean"
+          },
+          "include_ignored": {
+            "type": "boolean"
+          },
+          "max_entries": {
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "directory_tree",
+      "surfaces": {
+        "cli": "directory_tree",
+        "client": "directory_tree",
+        "mcp": "directory_tree",
+        "openai": "directory_tree"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "type": "integer"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "new": {
+            "type": "string"
+          },
+          "old": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "old",
+          "new"
+        ],
+        "type": "object"
+      },
+      "name": "edit_file",
+      "surfaces": {
+        "cli": "edit_file",
+        "client": "edit_file",
+        "mcp": "edit_file",
+        "openai": "edit_file"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "dest": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "expect_publisher": {
+            "type": "string"
+          },
+          "expect_type": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_mb": {
+            "type": "number"
+          },
+          "overwrite": {
+            "type": "boolean"
+          },
+          "resume": {
+            "type": "boolean"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "number"
+          },
+          "url": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "dest"
+        ],
+        "type": "object"
+      },
+      "name": "fetch_artifact",
+      "surfaces": {
+        "cli": "fetch_artifact",
+        "client": "fetch_artifact",
+        "mcp": "fetch_artifact",
+        "openai": "fetch_artifact"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "operations": {
+            "type": "array"
+          },
+          "operations_json": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "file_batch_write",
+      "surfaces": {
+        "cli": "file_batch_write",
+        "client": "file_batch_write",
+        "mcp": "file_batch_write",
+        "openai": "file_batch_write"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "destination": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "overwrite": {
+            "type": "boolean"
+          },
+          "source": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "destination"
+        ],
+        "type": "object"
+      },
+      "name": "file_copy",
+      "surfaces": {
+        "cli": "file_copy",
+        "client": "file_copy",
+        "mcp": "file_copy",
+        "openai": "file_copy"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "confirm": {
+            "type": "string"
+          },
+          "dry_run": {
+            "type": "boolean"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "recursive": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "file_delete",
+      "surfaces": {
+        "cli": "file_delete",
+        "client": "file_delete",
+        "mcp": "file_delete",
+        "openai": "file_delete"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "file_digest",
+      "surfaces": {
+        "cli": "file_digest",
+        "client": "file_digest",
+        "mcp": "file_digest",
+        "openai": "file_digest"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "type": "integer"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "new": {
+            "type": "string"
+          },
+          "old": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "old",
+          "new"
+        ],
+        "type": "object"
+      },
+      "name": "file_edit",
+      "surfaces": {
+        "cli": "file_edit",
+        "client": "file_edit",
+        "mcp": "file_edit",
+        "openai": "file_edit"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "include_ignored": {
+            "type": "boolean"
+          },
+          "max_results": {
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          },
+          "root": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "file_find",
+      "surfaces": {
+        "cli": "file_find",
+        "client": "file_find",
+        "mcp": "file_find",
+        "openai": "file_find"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "destination": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "overwrite": {
+            "type": "boolean"
+          },
+          "source": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "destination"
+        ],
+        "type": "object"
+      },
+      "name": "file_move",
+      "surfaces": {
+        "cli": "file_move",
+        "client": "file_move",
+        "mcp": "file_move",
+        "openai": "file_move"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_bytes": {
+            "type": "integer"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "file_read",
+      "surfaces": {
+        "cli": "file_read",
+        "client": "file_read",
+        "mcp": "file_read",
+        "openai": "file_read"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "end_line": {
+            "type": "integer"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "start_line": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "file_read_range",
+      "surfaces": {
+        "cli": "file_read_range",
+        "client": "file_read_range",
+        "mcp": "file_read_range",
+        "openai": "file_read_range"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "create",
+              "overwrite",
+              "append"
+            ],
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ],
+        "type": "object"
+      },
+      "name": "file_write",
+      "surfaces": {
+        "cli": "file_write",
+        "client": "file_write",
+        "mcp": "file_write",
+        "openai": "file_write"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "image_inspect",
+      "surfaces": {
+        "cli": "image_inspect",
+        "client": "image_inspect",
+        "mcp": "image_inspect",
+        "openai": "image_inspect"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "preview",
+              "apply"
+            ],
+            "type": "string"
+          },
+          "operations": {
+            "type": "array"
+          },
+          "operations_json": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "json_patch",
+      "surfaces": {
+        "cli": "json_patch",
+        "client": "json_patch",
+        "mcp": "json_patch",
+        "openai": "json_patch"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "log_inspect",
+      "surfaces": {
+        "cli": "log_inspect",
+        "client": "log_inspect",
+        "mcp": "log_inspect",
+        "openai": "log_inspect"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "parents": {
+            "type": "boolean"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "make_directory",
+      "surfaces": {
+        "cli": "make_directory",
+        "client": "make_directory",
+        "mcp": "make_directory",
+        "openai": "make_directory"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "job_id": {
+            "maxLength": 80,
+            "type": "string"
+          },
+          "max_failure_lines": {
+            "maximum": 200,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "tail_lines": {
+            "maximum": 200,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "output_digest",
+      "surfaces": {
+        "cli": "output_digest",
+        "client": "output_digest",
+        "mcp": "output_digest",
+        "openai": "output_digest"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_processes": {
+            "type": "integer"
+          },
+          "max_seconds": {
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "name": "process_list",
+      "surfaces": {
+        "cli": "process_list",
+        "client": "process_list",
+        "mcp": "process_list",
+        "openai": "process_list"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_bytes": {
+            "type": "integer"
+          },
+          "max_regions": {
+            "type": "integer"
+          },
+          "max_seconds": {
+            "type": "number"
+          },
+          "pid": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pid"
+        ],
+        "type": "object"
+      },
+      "name": "process_memory_risk_inspect",
+      "surfaces": {
+        "cli": "process_memory_risk_inspect",
+        "client": "process_memory_risk_inspect",
+        "mcp": "process_memory_risk_inspect",
+        "openai": "process_memory_risk_inspect"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "engine": {
+            "enum": [
+              "auto",
+              "perf",
+              "heaptrack_print",
+              "tracy_csvexport",
+              "xperf",
+              "wpaexporter"
+            ],
+            "type": "string"
+          },
+          "executable": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "frame_budget_ms": {
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          },
+          "frame_zone": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "path": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "symbol_dirs": {
+            "items": {
+              "maxLength": 1024,
+              "type": "string"
+            },
+            "maxItems": 8,
+            "type": "array"
+          },
+          "thread": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "maximum": 900,
+            "minimum": 10,
+            "type": "integer"
+          },
+          "top_n": {
+            "maximum": 50,
+            "minimum": 5,
+            "type": "integer"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "profile_capture_digest",
+      "surfaces": {
+        "cli": "profile_capture_digest",
+        "client": "profile_capture_digest",
+        "mcp": "profile_capture_digest",
+        "openai": "profile_capture_digest"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "frame_budget_ms": {
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          },
+          "frame_zone": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "path": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "thread": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "top_n": {
+            "maximum": 50,
+            "minimum": 5,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "profile_digest",
+      "surfaces": {
+        "cli": "profile_digest",
+        "client": "profile_digest",
+        "mcp": "profile_digest",
+        "openai": "profile_digest"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_results": {
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "program_search",
+      "surfaces": {
+        "cli": "program_search",
+        "client": "program_search",
+        "mcp": "program_search",
+        "openai": "program_search"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "project_detect",
+      "surfaces": {
+        "cli": "project_detect",
+        "client": "project_detect",
+        "mcp": "project_detect",
+        "openai": "project_detect"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_bytes": {
+            "type": "integer"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "read_file",
+      "surfaces": {
+        "cli": "read_file",
+        "client": "read_file",
+        "mcp": "read_file",
+        "openai": "read_file"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "args_json": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_output": {
+            "type": "integer"
+          },
+          "program": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "stdin": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "program"
+        ],
+        "type": "object"
+      },
+      "name": "run_program",
+      "surfaces": {
+        "cli": "run_program",
+        "client": "run_program",
+        "mcp": "run_program",
+        "openai": "run_program"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "args_json": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_output": {
+            "type": "integer"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "stdin": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "run_script",
+      "surfaces": {
+        "cli": "run_script",
+        "client": "run_script",
+        "mcp": "run_script",
+        "openai": "run_script"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "include_hidden": {
+            "type": "boolean"
+          },
+          "include_ignored": {
+            "type": "boolean"
+          },
+          "max_entries": {
+            "type": "integer"
+          },
+          "max_results": {
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          },
+          "root": {
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "name": "script_search",
+      "surfaces": {
+        "cli": "script_search",
+        "client": "script_search",
+        "mcp": "script_search",
+        "openai": "script_search"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "root": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "name": "secret_scan",
+      "surfaces": {
+        "cli": "secret_scan",
+        "client": "secret_scan",
+        "mcp": "secret_scan",
+        "openai": "secret_scan"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "project": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "runner": {
+            "enum": [
+              "auto",
+              "pytest",
+              "unittest",
+              "ctest",
+              "cargo",
+              "go",
+              "dotnet",
+              "npm",
+              "pnpm",
+              "yarn",
+              "gradle",
+              "maven",
+              "make"
+            ],
+            "type": "string"
+          },
+          "selector": {
+            "maxLength": 200,
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "maximum": 1800,
+            "minimum": 10,
+            "type": "integer"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "workers": {
+            "maximum": 8,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "test_run",
+      "surfaces": {
+        "cli": "test_run",
+        "client": "test_run",
+        "mcp": "test_run",
+        "openai": "test_run"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "job_id": {
+            "maxLength": 80,
+            "type": "string"
+          },
+          "wait_seconds": {
+            "maximum": 60,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "type": "object"
+      },
+      "name": "test_run_result",
+      "surfaces": {
+        "cli": "test_run_result",
+        "client": "test_run_result",
+        "mcp": "test_run_result",
+        "openai": "test_run_result"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "apply": {
+            "type": "boolean"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "patch": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "root": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "root",
+          "patch"
+        ],
+        "type": "object"
+      },
+      "name": "text_patch",
+      "surfaces": {
+        "cli": "text_patch",
+        "client": "text_patch",
+        "mcp": "text_patch",
+        "openai": "text_patch"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "case_sensitive": {
+            "type": "boolean"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "glob": {
+            "type": "string"
+          },
+          "include_hidden": {
+            "type": "boolean"
+          },
+          "include_ignored": {
+            "type": "boolean"
+          },
+          "max_entries": {
+            "type": "integer"
+          },
+          "max_file_bytes": {
+            "type": "integer"
+          },
+          "max_results": {
+            "type": "integer"
+          },
+          "query": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "regex": {
+            "type": "boolean"
+          },
+          "root": {
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "text_search",
+      "surfaces": {
+        "cli": "text_search",
+        "client": "text_search",
+        "mcp": "text_search",
+        "openai": "text_search"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "category": {
+            "enum": [
+              "compiler",
+              "build_system",
+              "test_runner",
+              "linter_formatter",
+              "debugger_profiler",
+              "package_manager",
+              "runtime",
+              "container_vm",
+              "vcs",
+              "db_client",
+              "media_doc",
+              "cloud_cli",
+              "editor_ide",
+              "shell"
+            ],
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "refresh": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "name": "tool_inventory",
+      "surfaces": {
+        "cli": "tool_inventory",
+        "client": "tool_inventory",
+        "mcp": "tool_inventory",
+        "openai": "tool_inventory"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "expect_publisher": {
+            "type": "string"
+          },
+          "expect_type": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "verify_artifact",
+      "surfaces": {
+        "cli": "verify_artifact",
+        "client": "verify_artifact",
+        "mcp": "verify_artifact",
+        "openai": "verify_artifact"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "prompt": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "prompt"
+        ],
+        "type": "object"
+      },
+      "name": "vision_analyze",
+      "surfaces": {
+        "cli": "vision_analyze",
+        "client": "vision_analyze",
+        "mcp": "vision_analyze",
+        "openai": "vision_analyze"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "consent": {
+            "type": "boolean"
+          },
+          "forecast_days": {
+            "type": "integer"
+          },
+          "location": {
+            "minLength": 2,
+            "type": "string"
+          },
+          "units": {
+            "enum": [
+              "auto",
+              "metric",
+              "imperial"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "location",
+          "consent"
+        ],
+        "type": "object"
+      },
+      "name": "weather_lookup",
+      "surfaces": {
+        "cli": "weather_lookup",
+        "client": "weather_lookup",
+        "mcp": "weather_lookup",
+        "openai": "weather_lookup"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "consent": {
+            "type": "boolean"
+          },
+          "max_chars": {
+            "type": "integer"
+          },
+          "url": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "consent"
+        ],
+        "type": "object"
+      },
+      "name": "web_fetch",
+      "surfaces": {
+        "cli": "web_fetch",
+        "client": "web_fetch",
+        "mcp": "web_fetch",
+        "openai": "web_fetch"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "consent": {
+            "type": "boolean"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "query": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "query",
+          "consent"
+        ],
+        "type": "object"
+      },
+      "name": "web_search",
+      "surfaces": {
+        "cli": "web_search",
+        "client": "web_search",
+        "mcp": "web_search",
+        "openai": "web_search"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "left": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "right": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "left",
+          "right"
+        ],
+        "type": "object"
+      },
+      "name": "workspace_compare",
+      "surfaces": {
+        "cli": "workspace_compare",
+        "client": "workspace_compare",
+        "mcp": "workspace_compare",
+        "openai": "workspace_compare"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "args_json": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_output": {
+            "type": "integer"
+          },
+          "program": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "stdin": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "program"
+        ],
+        "type": "object"
+      },
+      "name": "workspace_run",
+      "surfaces": {
+        "cli": "workspace_run",
+        "client": "workspace_run",
+        "mcp": "workspace_run",
+        "openai": "workspace_run"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "create",
+              "overwrite",
+              "append"
+            ],
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ],
+        "type": "object"
+      },
+      "name": "write_file",
+      "surfaces": {
+        "cli": "write_file",
+        "client": "write_file",
+        "mcp": "write_file",
+        "openai": "write_file"
+      }
+    }
+  ]
+}

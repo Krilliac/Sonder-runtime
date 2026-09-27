@@ -54,7 +54,11 @@ def test_tier_trio_still_precedes_the_catalog():
 
 def test_generic_matches_on_command_names():
     assert cr.resolve("scan for secrets") == "/secret_scan"
-    assert cr.resolve("run the tests") == "/test_run"
+    # The bare "run the tests" is now claimed by the hand-written /test rule
+    # (structured, permission-gated test runs); a phrase no rule claims still
+    # reaches the legacy tool through the generic catalog match.
+    assert cr.resolve("run tests now") == "/test_run"
+    assert cr.explain("run tests now")["source"] == "catalog"
     assert cr.resolve("what's my task progress") == "/task_progress"
     assert cr.resolve("format the code") == "/format_code"
     assert cr.resolve("list processes") == "/process_list"

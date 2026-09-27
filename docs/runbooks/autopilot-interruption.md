@@ -15,6 +15,22 @@ heartbeats. A crash, drain deadline, or kill leaves work in an explicit
    (`/autopilot cancel <id>`). Resume re-claims ownership with a fresh
    heartbeat; a stale owner cannot overwrite the new one.
 
+Cancelling a run closes its open tasks: the task that was running shows
+`[cancelled]` with a note that its result was discarded and any tool
+effects it already made were not rolled back. Pending tasks show
+`[cancelled]` too. Passed, failed, and `uncertain` tasks keep their
+status as evidence.
+
+## Paused on a budget
+
+Each invocation (a start or a resume) has two budgets: `max_cycles`
+tasks and a wall-clock budget (`SONDER_AUTOPILOT_MAX_WALL_SECONDS`,
+default 3600 seconds, at most 24 hours). The wall-clock budget is checked
+at every host checkpoint before the next task starts, so the task already
+running may finish past it. Reaching either budget pauses the run with the
+reason in its summary. Review the progress, then `/autopilot resume <id>`
+to continue with fresh budgets.
+
 ## Stuck "running" with a dead owner
 
 Ownership uses process-liveness probes; a dead owner's work transitions

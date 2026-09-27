@@ -1,0 +1,9 @@
+In file included from cc.cpp:1:
+local.h: In function 'int broken_helper()':
+local.h:3:37: error: 'undefined_in_header' was not declared in this scope
+    3 | inline int broken_helper() { return undefined_in_header; }
+      |                                     ^~~~~~~~~~~~~~~~~~~
+cc.cpp: In function 'int compute(int)':
+cc.cpp:5:22: error: 'x' was not declared in this scope
+    5 |     return doubled + x;
+      |                      ^

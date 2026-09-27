@@ -1,0 +1,104 @@
+{
+ "configurations": [
+  {
+   "directories": [
+    {
+     "build": ".",
+     "jsonFile": "directory-.-Debug-f5ebdc15457944623624.json",
+     "minimumCMakeVersion": {
+      "string": "3.20"
+     },
+     "projectIndex": 0,
+     "source": ".",
+     "targetIndexes": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    }
+   ],
+   "name": "Debug",
+   "projects": [
+    {
+     "directoryIndexes": [
+      0
+     ],
+     "name": "SparkLite",
+     "targetIndexes": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    }
+   ],
+   "targets": [
+    {
+     "directoryIndex": 0,
+     "id": "core::@6890427a1f51a3e7e1df",
+     "jsonFile": "target-core-Debug-ad7f1b8d3d60edb64d02.json",
+     "name": "core",
+     "projectIndex": 0
+    },
+    {
+     "directoryIndex": 0,
+     "id": "crash_test::@6890427a1f51a3e7e1df",
+     "jsonFile": "target-crash_test-Debug-714ac5bee4a9244eba09.json",
+     "name": "crash_test",
+     "projectIndex": 0
+    },
+    {
+     "directoryIndex": 0,
+     "id": "deploy::@6890427a1f51a3e7e1df",
+     "jsonFile": "target-deploy-Debug-470ddb1a73d67e107f59.json",
+     "name": "deploy",
+     "projectIndex": 0
+    },
+    {
+     "directoryIndex": 0,
+     "id": "game::@6890427a1f51a3e7e1df",
+     "jsonFile": "target-game-Debug-c911323d3600675513cd.json",
+     "name": "game",
+     "projectIndex": 0
+    },
+    {
+     "directoryIndex": 0,
+     "id": "shadergen::@6890427a1f51a3e7e1df",
+     "jsonFile": "target-shadergen-Debug-9637e17b3635a6f059d6.json",
+     "name": "shadergen",
+     "projectIndex": 0
+    },
+    {
+     "directoryIndex": 0,
+     "id": "shaders::@6890427a1f51a3e7e1df",
+     "jsonFile": "target-shaders-Debug-f3dbeace8317151b9af6.json",
+     "name": "shaders",
+     "projectIndex": 0
+    },
+    {
+     "directoryIndex": 0,
+     "id": "slow::@6890427a1f51a3e7e1df",
+     "jsonFile": "target-slow-Debug-2efa386d8bfbaec9e75a.json",
+     "name": "slow",
+     "projectIndex": 0
+    }
+   ]
+  }
+ ],
+ "kind": "codemodel",
+ "paths": {
+  "build": "/work/sparklite/build/ninja-unity",
+  "source": "/work/sparklite"
+ },
+ "version": {
+  "major": 2,
+  "minor": 6
+ }
+}

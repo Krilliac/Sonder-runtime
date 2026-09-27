@@ -469,6 +469,7 @@ def test_make_generate_auto_sizes_context_from_selected_model(monkeypatch):
     seen = {}
     # The expected 16k native window is the quantised-KV policy branch.  Make
     # the test independent of the runner's ambient Ollama setting.
+    monkeypatch.delenv("SONDER_KV_CACHE_TYPE", raising=False)
     monkeypatch.setenv("OLLAMA_KV_CACHE_TYPE", "q4_0")
 
     def fake_post(path, payload, **_kwargs):

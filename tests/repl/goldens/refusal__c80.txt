@@ -1,0 +1,6 @@
+/read /etc/shadow
+⊘ refused  /read /etc/shadow
+  path is outside allowed roots
+
+code · sonder:latest · manual · ctx 0/8.2k
+❯

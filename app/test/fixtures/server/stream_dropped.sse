@@ -1,0 +1,4 @@
+: keep-alive
+
+data: {"id": "chatcmpl-a1b2c3d4e5f6", "object": "chat.completion.chunk", "created": 1790335000, "model": "sonder", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "half an ans"}, "finish_reason": null}]}
+

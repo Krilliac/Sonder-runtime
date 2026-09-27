@@ -24,6 +24,15 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 import sonder_runtime.adapters.git_discovery as git_discovery
 from sonder_runtime.platform import paths as runtime_paths
 from sonder_runtime.adapters.security.control_plane_paths import live_control_plane_inventory
+from sonder_runtime.adapters.filesystem.intent_executor import (
+    execute_delete as _execute_delete_intent,
+    same_identity as _same_identity,
+)
+from sonder_runtime.application.security.race_resistant_paths import (
+    PlatformCapabilityError,
+    RaceResistanceError,
+    build_open_intent,
+)
 
 # Preserve the packaged filesystem adapter's historical attribute shape while
 # callers migrate from the old root ``sonder_paths`` name.  This is an alias
@@ -50,9 +59,26 @@ CONTROL_CONFIG_FILES = {
 SECRET_FILES = {
     ".credentials.json", ".netrc", ".token", "auth.json",
     "credentials.json", "secrets.json", "token.json",
+    # OpenSSH private keys carry no secret suffix.
+    "id_dsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk", "id_rsa",
 }
 SECRET_SUFFIXES = {".key", ".p12", ".pem", ".pfx"}
-SENSITIVE_READ_DIRECTORIES = {".git", ".ssh", ".aws", ".azure", ".kube"}
+SENSITIVE_READ_DIRECTORIES = {".git", ".ssh", ".aws", ".azure", ".gnupg", ".kube"}
+# Credential stores the direct read tools (file_read, file_read_range,
+# data_inspect, image_inspect, file_copy/move sources) deny by default even
+# inside an allowed root, and even with a developer token or bypass: a key
+# pair or cloud credential is never ordinary workspace content. The one way
+# to read one is an operator-configured root that *names* it -- the store's
+# directory itself (``~/.ssh``), a path inside it, or the exact file
+# (``/proj/.env``) listed in ``file_roots.local`` or ``SONDER_FILE_ROOTS``.
+# See ``credential_read_component``.
+CREDENTIAL_READ_DIRECTORIES = frozenset({".ssh", ".aws", ".azure", ".gnupg", ".kube"})
+CREDENTIAL_READ_FILES = frozenset({
+    ".netrc", "_netrc", ".git-credentials", ".pgpass",
+    "id_dsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk", "id_rsa",
+})
+# (directory, file) pairs whose file is a credential store only in context.
+CREDENTIAL_READ_PAIRS = frozenset({(".docker", "config.json"), (".git", "config")})
 # Sonder's own first-party package below the install root. The mutation guard
 # used to recognize Sonder modules only by ``parent == root``, which was true
 # when every module sat directly in the install directory. The SPEC-3 Phase 5
@@ -377,7 +403,9 @@ def _control_plane_paths() -> set[Path]:
 def _is_secret_path(path: Path) -> bool:
     name = path.name.lower()
     suffix = path.suffix.lower()
-    if name in SECRET_FILES or suffix in SECRET_SUFFIXES:
+    # CREDENTIAL_READ_FILES is the direct-read deny list; folding it in here
+    # keeps archive/scan/compare exclusions from drifting behind it.
+    if name in SECRET_FILES or name in CREDENTIAL_READ_FILES or suffix in SECRET_SUFFIXES:
         return True
     if name == ".env" or name.startswith(".env."):
         return True
@@ -459,13 +487,79 @@ def _is_protected_read_path(path: Path) -> bool:
     return _is_protected_mutation_path(path) or _is_personal_corpus(path)
 
 
+def _is_env_file(name: str) -> bool:
+    return name == ".env" or name == ".envrc" or name.startswith(".env.")
+
+
+def _credential_part(parts) -> str:
+    """The credential-store component in *parts*, or "" when there is none."""
+    lowered = [str(part).lower() for part in parts]
+    last = len(lowered) - 1
+    for index, part in enumerate(lowered):
+        if part in CREDENTIAL_READ_DIRECTORIES:
+            return part
+        if index < last and (part, lowered[index + 1]) in CREDENTIAL_READ_PAIRS:
+            return "%s/%s" % (part, lowered[index + 1])
+        if index == last and (part in CREDENTIAL_READ_FILES or _is_env_file(part)):
+            return part
+    return ""
+
+
+def credential_read_component(path: Path) -> str:
+    """Why reading *path* would expose a credential store ("" if it would not).
+
+    The classification is made relative to every operator-configured root
+    that contains the path: when one of those roots already lies inside the
+    store (or is the file itself) the operator has named it explicitly and the
+    read is allowed. A path outside every root (a bypass read) is judged on
+    its full absolute form, so bypass never unlocks a credential store.
+    """
+    resolved = _resolve_best_effort(path)
+    containing = [
+        root for root in (_resolve_best_effort(item) for item in allowed_roots())
+        if resolved == root or _is_inside(resolved, root)
+    ]
+    if not containing:
+        return _credential_part(resolved.parts[1:])
+    found = ""
+    for root in containing:
+        if any(part.lower() in CREDENTIAL_READ_DIRECTORIES for part in root.parts):
+            # The root is the store (``~/.ssh``) or lies inside it: named.
+            return ""
+        relative = () if resolved == root else resolved.relative_to(root).parts
+        part = _credential_part(relative)
+        if not part:
+            return ""
+        found = found or part
+    return found
+
+
+def _require_credential_read_access(path: Path) -> None:
+    component = credential_read_component(path)
+    if component:
+        # The path goes before the phrase so the output redactor never reads
+        # "token: <path>" as a credential assignment.
+        raise PermissionError(
+            # Keeps the established "protected Sonder secret/control-plane"
+            # and "secret or control state" phrasing callers match on.
+            "refusing to read protected Sonder secret/control-plane path %s: "
+            "%s is a credential store (secret or control state), denied by "
+            "default even with a developer token or bypass. To allow it, add "
+            "that exact file or directory as a file root (file_roots.local or "
+            "SONDER_FILE_ROOTS)" % (path, component)
+        )
+
+
 def _require_read_access(path: Path, authorized: bool) -> None:
     """Refuse a non-authorized read of a secret/control-plane path.
 
     ``authorized`` is the developer-token OR bypass signal (mirroring the
     escape hatch the write guard honors for a developer token). Fails closed
     with a clear error; an unclassified workspace file is never affected.
+    Credential stores (``CREDENTIAL_READ_*``) are refused first and are not
+    opened by that escape hatch; only a root that names them allows them.
     """
+    _require_credential_read_access(path)
     if _is_protected_read_path(path) and not authorized:
         raise PermissionError(
             "refusing to read protected Sonder secret/control-plane path %s "
@@ -696,8 +790,21 @@ def _require_safe_recursive_delete(
                 ) from exc
 
 
+def _guard_delete_entry(child: Path) -> None:
+    """Veto removal of a descendant that the recursive preflight would refuse."""
+    if _is_reparse_point(child):
+        raise PermissionError("refusing to traverse symlink or junction: %s" % child)
+    if _is_sensitive_control_path(child) or _is_protected_mutation_path(child):
+        raise PermissionError("refusing to delete protected control state: %s" % child)
+
+
 def _delete_tree_guarded(path: Path) -> None:
-    """Delete a preflighted tree without traversing reparse points."""
+    """Pathname tree delete for Windows, which has no stdlib dir_fd primitives.
+
+    POSIX deletes use ``_delete_through_intent``.  This walk re-checks each
+    entry for reparse points and protected state immediately before removing
+    it, which narrows but does not close the check/use window.
+    """
     if _is_reparse_point(path):
         raise PermissionError("refusing to traverse symlink or junction: %s" % path)
     try:
@@ -707,10 +814,9 @@ def _delete_tree_guarded(path: Path) -> None:
     for entry in entries:
         child = Path(entry.path)
         try:
-            if entry.is_symlink() or _is_reparse_point(child):
+            if entry.is_symlink():
                 raise PermissionError("refusing to traverse symlink or junction: %s" % child)
-            if _is_sensitive_control_path(child) or _is_protected_mutation_path(child):
-                raise PermissionError("refusing to delete protected control state: %s" % child)
+            _guard_delete_entry(child)
             if entry.is_dir(follow_symlinks=False):
                 _delete_tree_guarded(child)
                 child.rmdir()
@@ -720,6 +826,58 @@ def _delete_tree_guarded(path: Path) -> None:
             raise
         except OSError as exc:
             raise PermissionError("could not safely delete tree entry: %s" % child) from exc
+
+
+def _delete_intent_roots(target: Path, *, extra_roots: str, bypass: bool) -> list[Path]:
+    """Authorized roots a descriptor-relative delete may walk from.
+
+    These mirror ``resolve_path``: the configured roots, plus the filesystem
+    anchor only when an explicit bypass without managed roots already let the
+    target resolve outside them.  The walk from the anchor still opens every
+    component with ``O_NOFOLLOW``.
+    """
+    roots = [_resolve_best_effort(root) for root in allowed_roots(extra_roots if bypass else "")]
+    if bypass and not _MANAGED_ROOTS.get():
+        roots.append(Path(target.anchor))
+    return roots
+
+
+def _delete_through_intent(
+    target: Path,
+    *,
+    recursive: bool,
+    extra_roots: str,
+    bypass: bool,
+) -> None:
+    """Delete a preflighted target through the race-resistant POSIX executor.
+
+    The pathname checks in ``delete_path`` decide *what* may be deleted; this
+    step performs the removal from an authorized-root descriptor, one
+    ``O_NOFOLLOW`` component at a time, so a symlink swapped into any
+    component after those checks is refused rather than followed.
+    """
+    try:
+        expected = os.lstat(target)
+        intent = build_open_intent(
+            target,
+            _delete_intent_roots(target, extra_roots=extra_roots, bypass=bypass),
+            "delete",
+        )
+        _execute_delete_intent(
+            intent,
+            recursive=recursive,
+            expected=expected,
+            entry_guard=_guard_delete_entry,
+        )
+    except PlatformCapabilityError:
+        raise
+    except PermissionError:
+        raise
+    except (RaceResistanceError, OSError) as exc:
+        raise PermissionError(
+            "refusing delete: target could not be removed race-safely (%s): %s"
+            % (exc, target)
+        ) from exc
 
 
 def resolve_path(path: str, *, extra_roots: str = "", bypass: bool = False) -> Path:
@@ -949,14 +1107,6 @@ def _resolve_transfer_path(
     if _is_sensitive_control_path(resolved):
         raise PermissionError("%s is sensitive Sonder control state" % label)
     return resolved
-
-
-def _stat_identity(value: os.stat_result) -> tuple[int, int, int]:
-    return (int(value.st_dev), int(value.st_ino), stat.S_IFMT(value.st_mode))
-
-
-def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
-    return _stat_identity(left) == _stat_identity(right)
 
 
 class _DirectoryAnchor:
@@ -2020,9 +2170,20 @@ def delete_path(
             "deleted": False,
             "lines_deleted": 0,
         }
-    if p.is_dir():
-        if not recursive:
-            raise ValueError("directory delete requires recursive=True")
+    is_directory = p.is_dir()
+    if is_directory and not recursive:
+        raise ValueError("directory delete requires recursive=True")
+    if not developer_authorized and os.name != "nt":
+        # POSIX: remove through the descriptor-relative executor. A host that
+        # lacks the dir_fd/O_NOFOLLOW primitives raises PlatformCapabilityError
+        # instead of falling back to the pathname operations below.
+        _delete_through_intent(
+            p, recursive=recursive, extra_roots=extra_roots, bypass=bypass,
+        )
+    elif is_directory:
+        # Developer-authorized deletes and Windows keep the pathname walk.
+        # Windows has no stdlib dir_fd primitives; its guarantee is the
+        # reparse-point checks, not check/use race resistance.
         if developer_authorized:
             for child in sorted(p.rglob("*"), reverse=True):
                 if child.is_file() or child.is_symlink():

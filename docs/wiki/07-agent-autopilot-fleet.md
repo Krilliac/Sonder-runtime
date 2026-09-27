@@ -8,7 +8,10 @@ A Claude-style local loop: the model chooses one JSON tool call at a time,
 receives the observation, and continues until it returns
 `{"final": "..."}` or hits `max_steps`. It enforces:
 
-- a **guaranteed checklist** (inspect → implement → validate → report);
+- a **guaranteed checklist** (inspect → implement → validate → report).
+  If the run stops early, the failing step is `blocked`, the report step is
+  `done`, and any step it left open is closed as `canceled`, so `/tasks`
+  never shows an abandoned attempt as live work;
 - **inspect-before-mutate** (no file change before workspace evidence);
 - **validate-after-mutate** (a grounded check must pass before final);
 - **negative-claim review** ("there are no X files" triggers a re-check);
@@ -57,9 +60,23 @@ compare-and-set SQL is the concurrency authority. Invariants:
 - A dead owner's work transitions to interrupted (process-liveness probe);
   unknown liveness never causes two owners (no split-brain).
 - Terminal tasks do not replay. Budgets hold even when planners/models fail.
+- Each invocation is bounded by `max_cycles` tasks and a wall-clock budget
+  (`SONDER_AUTOPILOT_MAX_WALL_SECONDS`, default 3600s). Either one pauses
+  the run for an explicit resume.
+- A cancelled run closes its open tasks as `cancelled` and keeps
+  `passed`/`failed`/`uncertain` tasks as evidence.
 
 Control: `/autopilot status|resume|cancel`, or the master orchestrator
 tools. See [autopilot-interruption](../runbooks/autopilot-interruption.md).
+
+Steering (`/autopilot steer|clarify <id> <message>`) is owner-scoped and
+fails closed for unowned runs. Runs started from the console
+(`/autopilot plan|run`, `/mission start`) carry an opaque console owner
+(`rc-<digest of OS user and state home>`, stable across console restarts),
+so the console can steer them. Status, pause, resume, and cancel from the
+console stay unscoped and still reach every local run. Runs started before
+this change are unowned and cannot be steered; cancel and restart them if
+they need steering.
 
 ## Fleet
 
@@ -71,10 +88,29 @@ task phrase `use 24 workers`. The override is shown in `master_status` and
 `master_capacity`, ends with that run, and is clamped to the operator ceiling.
 `SONDER_MAX_WORKER_CAP` may lower that ceiling; the compiled absolute ceiling is
 64, so malformed or enormous values cannot create unbounded threads.
+The phrase must start the request (`use|run|spawn|launch N workers|agents`),
+and it is ignored when the request also contains a negation (`not`, `no`,
+`never`, `don't`), an explanatory or quoting word (`ignore`, `quote`,
+`phrase`, `document`, `instruction`, `example`, `say(s)`, `mention(s)`,
+`explain`, `why`), a comparative (`more/fewer/less than`), quotation
+marks or backticks, or a second worker count. This keeps a quoted or
+discussed count from starting a fleet. When a cue is ignored, the route
+header (and the console) prints a `note:` naming the word that disabled
+it; use `/master fleet <task>` to fan out explicitly.
 Statuses `queued → running → done | failed | cancelled | interrupted`, with
 `interrupted`/`failed`/`cancelled` re-dispatchable to `queued`. Claims use
 compare-and-set; heartbeats detect stale owners. Two model instances (e.g.
 two `facts.` sticks) roughly double fleet throughput.
+
+A lane that makes no progress within the progress deadline is declared
+stalled and the fleet result becomes uncertain. The default deadline is
+`max(120, SONDER_TIMEOUT + 60)` seconds (360 with the default 300-second
+model timeout). An explicit `SONDER_FLEET_PROGRESS_DEADLINE_SECONDS` is
+honored as given. A lane inside a model call does not update its row until
+the call returns, so it is never declared stalled before that call's own
+timeout plus 60 seconds, whatever shorter deadline is configured. The old
+fixed 120-second default was shorter than the model timeout, so slow CPU
+hosts discarded valid late results.
 
 Research tasks can opt into deterministic provenance checks with bounded,
 standalone marker lines:

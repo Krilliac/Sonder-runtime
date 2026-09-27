@@ -341,6 +341,30 @@ class _SystemdScopeToken:
         self._closed = True
 
 
+_PROC_ROOT = "/proc"
+
+
+def _proc_uid_threads(status_path: str, uid: int) -> int:
+    """Threads of one /proc process whose real uid is *uid* (0 when gone or other)."""
+    try:
+        with open(status_path, encoding="ascii", errors="replace") as handle:
+            text = handle.read(8192)
+    except OSError:
+        return 0
+    real_uid = None
+    threads = 1
+    for line in text.splitlines():
+        if line.startswith("Uid:"):
+            fields = line.split()
+            if len(fields) > 1 and fields[1].isdigit():
+                real_uid = int(fields[1])
+        elif line.startswith("Threads:"):
+            fields = line.split()
+            if len(fields) > 1 and fields[1].isdigit():
+                threads = int(fields[1])
+    return threads if real_uid == uid else 0
+
+
 class NativeExtensionMemoryLimiter:
     """Apply an OS-owned hard limit to one extension process."""
 
@@ -610,6 +634,7 @@ class NativeExtensionMemoryLimiter:
             raise ExtensionMemoryLimitUnsupported(
                 "required POSIX resource limits are unavailable"
             )
+        nproc_limit = self._nproc_limit(resource, rlimit_nproc, process_limit)
 
         def install_limits() -> None:
             if memory_limit_bytes is not None:
@@ -619,10 +644,80 @@ class NativeExtensionMemoryLimiter:
                 )
             resource.setrlimit(
                 rlimit_nproc,
-                (process_limit, process_limit),
+                (nproc_limit, nproc_limit),
             )
 
         return {"preexec_fn": install_limits}
+
+    def _nproc_limit(self, resource, rlimit_nproc, process_limit: int) -> int:
+        """RLIMIT_NPROC for a child of a shared uid: a runaway-fork backstop.
+
+        RLIMIT_NPROC is charged against every task (process or thread) of the
+        real uid, not against the child's own descendants. Setting it to
+        *process_limit* alone made every fork of the child fail with EAGAIN
+        whenever the runtime's uid already ran that many tasks (a desktop
+        session, or a CI runner whose agent shares the uid), while root, which
+        the kernel exempts, never noticed.
+
+        The child cannot tell its own tasks from the uid's other work, and
+        that work (sibling jobs, the runtime's own threads) keeps changing
+        while the child runs, so a limit of "current count + process_limit"
+        still starved children whenever siblings started tasks after the
+        count was taken. The limit therefore also leaves the uid room to
+        double its current work: a runaway fork loop is still stopped within
+        a bounded multiple of the uid's steady state, and never above the
+        limits the runtime itself runs under. An exact per-job task cap is
+        the systemd scope's ``TasksMax`` (``prepare_process_job``) or the
+        Windows Job Object; this limit does not claim to be one.
+        """
+        in_use = self._uid_task_count()
+        if in_use is None:
+            raise ExtensionMemoryLimitUnsupported(
+                "the per-uid task count RLIMIT_NPROC is charged against is unavailable"
+            )
+        limit = 2 * in_use + process_limit
+        infinity = getattr(resource, "RLIM_INFINITY", -1)
+        getrlimit = getattr(resource, "getrlimit", None)
+        if callable(getrlimit):
+            for current in getrlimit(rlimit_nproc):
+                if current != infinity and current >= 0:
+                    limit = min(limit, int(current))
+        return limit
+
+    def _uid_task_count(self) -> int | None:
+        """Tasks the kernel charges to this process's real uid, or None."""
+        getuid = getattr(self._os, "getuid", None)
+        if not callable(getuid):
+            return None
+        uid = int(getuid())
+        proc = _PROC_ROOT
+        if os.path.isdir(os.path.join(proc, "self", "task")):
+            # Linux counts threads: sum each process's Threads for this real uid.
+            total = 0
+            try:
+                entries = os.listdir(proc)
+            except OSError:
+                return None
+            for entry in entries:
+                if not entry.isdigit():
+                    continue
+                total += _proc_uid_threads(os.path.join(proc, entry, "status"), uid)
+            return total
+        # BSD and macOS charge processes, not threads: count them with ps.
+        ps = self._which("ps")
+        if not ps:
+            return None
+        try:
+            result = self._command_runner(
+                [ps, "-A", "-o", "ruid="], capture_output=True, text=True,
+                timeout=10, check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if getattr(result, "returncode", 1) != 0:
+            return None
+        values = str(getattr(result, "stdout", "") or "").split()
+        return sum(1 for value in values if value.strip() == str(uid))
 
     def apply_process_limits(
         self,

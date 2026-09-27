@@ -662,14 +662,20 @@ def test_repl_startup_banner_reads_cached_update_status(monkeypatch):
             "running_commit": "a" * 40, "restart_required": True,
         },
     )
-    monkeypatch.setattr(sonder_repl, "_paint", lambda text, *_styles: str(text))
+    monkeypatch.setattr(sonder_repl.S, "_CACHED", sonder_repl.S.Caps())
     banner = sonder_repl._startup_banner(False, "coder", "")
     assert seen == [False]
-    assert "installed source" in banner
-    assert "running source" in banner
-    assert "newest known source" in banner
-    assert "restart required" in banner
-    assert "/updatecheck | /update" in banner
+    # REPL redesign spec 2.5: the banner keeps only what needs action; the
+    # provenance moved to /about.
+    assert "1 commit behind | /update" in banner
+    assert "restart required | /restart" in banner
+    about = "\n".join(sonder_repl.S.about_lines(
+        sonder_repl._banner_state(False, "coder", ""), 100))
+    assert seen == [False, False]
+    assert "installed" in about and "a" * 12 in about
+    assert "running" in about and "(restart required)" in about
+    assert "newest known" in about and "b" * 12 in about
+    assert "/updatecheck | /update" in about
 
 
 def test_runtime_update_format_marks_cached_remote_ref_as_known():

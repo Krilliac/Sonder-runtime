@@ -134,6 +134,41 @@ def test_python_exe_ignores_broken_venv(monkeypatch, tmp_path):
     assert H.python_exe() == "C:/Python/python.exe"
 
 
+def test_python_exe_uses_posix_venv_bin_python(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    venv_bin = root / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").write_text("", encoding="utf-8")
+    monkeypatch.delenv("SONDER_PYTHON", raising=False)
+    monkeypatch.setattr(H, "repo_root", lambda: root)
+    monkeypatch.setattr(
+        H.engine_bundle, "discover_engine_bundle", lambda _root: None
+    )
+    monkeypatch.setattr(H, "_python_works", lambda path: True)
+    monkeypatch.setattr(H.sys, "executable", "/usr/bin/python3")
+
+    assert H.python_exe() == str(venv_bin / "python")
+
+
+def test_python_exe_prefers_native_venv_layout(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    for rel in (("venv", "bin", "python"), ("venv", "Scripts", "python.exe")):
+        path = root.joinpath(*rel)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
+    monkeypatch.delenv("SONDER_PYTHON", raising=False)
+    monkeypatch.setattr(H, "repo_root", lambda: root)
+    monkeypatch.setattr(
+        H.engine_bundle, "discover_engine_bundle", lambda _root: None
+    )
+    monkeypatch.setattr(H, "_python_works", lambda path: True)
+
+    monkeypatch.setattr(H.os, "name", "posix")
+    assert H.python_exe().endswith("python") and "bin" in H.python_exe()
+    monkeypatch.setattr(H.os, "name", "nt")
+    assert H.python_exe().endswith("python.exe")
+
+
 def test_runtime_executables_honor_explicit_bundle_environment(monkeypatch):
     monkeypatch.setenv("SONDER_PYTHON", "C:/bundle/python.exe")
     monkeypatch.setenv("SONDER_OLLAMA_EXE", "C:/bundle/ollama.exe")
@@ -557,3 +592,54 @@ def test_main_start_rejects_unmanaged_listener(monkeypatch):
     monkeypatch.setattr(H, "_managed_listener_pid", lambda *args: None)
 
     assert H.main(["start"]) == 1
+
+
+def _posix_stop_fixture(monkeypatch, tmp_path, alive_polls):
+    """Model a server that keeps running ``alive_polls`` probes after SIGTERM."""
+    state = {"signalled": False, "polls": 0, "signals": []}
+    monkeypatch.setattr(H, "run_dir", lambda: tmp_path)
+    monkeypatch.setattr(H.os, "name", "posix", raising=False)
+    monkeypatch.setattr(H, "_listener_pids", lambda host, port: [])
+    monkeypatch.setattr(H, "_is_sonder_server_for_port", lambda pid, port: True)
+
+    def alive(pid):
+        if not state["signalled"]:
+            return True
+        state["polls"] += 1
+        return state["polls"] <= alive_polls
+
+    def kill(pid, sig):
+        state["signals"].append((pid, sig))
+        state["signalled"] = True
+
+    monkeypatch.setattr(H, "pid_alive", alive)
+    monkeypatch.setattr(H.os, "kill", kill)
+    monkeypatch.setattr(H.time, "sleep", lambda _s: None)
+    H.pid_file("sonder_serve").write_text("4242", encoding="ascii")
+    return state
+
+
+def test_posix_stop_waits_for_the_server_to_exit(monkeypatch, tmp_path):
+    # ``restart`` used to start again while the SIGTERMed server still held
+    # the port, saw an "unmanaged listener", and left nothing running.
+    state = _posix_stop_fixture(monkeypatch, tmp_path, alive_polls=3)
+
+    out = H.stop_pid("sonder_serve", port=11452)
+
+    assert out == "sonder_serve: stopped pid=4242"
+    assert state["signals"] == [(4242, 15)]
+    assert state["polls"] > 3, "stop returned before the process exited"
+    assert not H.pid_file("sonder_serve").exists()
+
+
+def test_posix_stop_reports_a_server_that_outlives_the_wait(monkeypatch, tmp_path):
+    _posix_stop_fixture(monkeypatch, tmp_path, alive_polls=10**9)
+    clock = iter(range(0, 10**6))
+    monkeypatch.setattr(H.time, "time", lambda: float(next(clock)))
+
+    out = H.stop_pid("sonder_serve", port=11452)
+
+    assert out.startswith("sonder_serve: stop failed for pid=4242")
+    assert "still running" in out
+    assert not H._stop_succeeded(out)
+    assert H.pid_file("sonder_serve").read_text(encoding="ascii") == "4242"

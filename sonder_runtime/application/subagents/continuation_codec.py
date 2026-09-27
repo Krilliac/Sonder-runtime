@@ -1,6 +1,7 @@
 """Roundtrip typed continuation snapshots independently of a SQL dialect."""
 
 from ..ports.subagents import (
+    InvalidSubagentRequest,
     SubagentRequest,
     SubagentBudget,
     SubagentStatus,
@@ -8,7 +9,35 @@ from ..ports.subagents import (
     SubagentResult,
     SubagentError,
 )
-from .continuable import ContinuableCheckpoint
+from .continuable import CheckpointProvenance, ContinuableCheckpoint
+
+_PROVENANCE_FIELDS = frozenset(CheckpointProvenance.__dataclass_fields__)
+# Snapshots written before provenance version 2 carry no gateway call
+# ordinal; they decode with an ordinal of zero, which only a version-1 digest
+# accepts.
+_LEGACY_PROVENANCE_FIELDS = _PROVENANCE_FIELDS - {"gateway_call_ordinal"}
+_CHECKPOINT_FIELDS = frozenset(ContinuableCheckpoint.__dataclass_fields__)
+
+
+def provenance_from_data(value):
+    """Decode host-stamped provenance; ``None`` marks a provenance-absent row."""
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) not in (
+            _PROVENANCE_FIELDS, _LEGACY_PROVENANCE_FIELDS):
+        raise InvalidSubagentRequest("checkpoint provenance snapshot is malformed")
+    return CheckpointProvenance(**value)
+
+
+def checkpoint_from_data(value):
+    """Decode a checkpoint snapshot, including ones written before provenance."""
+    if not value:
+        return None
+    value = dict(value)
+    if not set(value) <= _CHECKPOINT_FIELDS:
+        raise InvalidSubagentRequest("checkpoint snapshot is malformed")
+    value["provenance"] = provenance_from_data(value.get("provenance"))
+    return ContinuableCheckpoint(**value)
 
 
 def result_from_data(value):
@@ -36,11 +65,7 @@ def session_from_data(value):
         lineage=ChildSessionLineage(**lineage),
         status=SubagentStatus(value["status"]),
         usage=SubagentUsage(**value["usage"]),
-        checkpoint=(
-            ContinuableCheckpoint(**value["checkpoint"])
-            if value["checkpoint"]
-            else None
-        ),
+        checkpoint=checkpoint_from_data(value["checkpoint"]),
         result=result_from_data(value["result"]),
     )
     return DurableChildSession(**value)
@@ -53,7 +78,7 @@ def decode_call(prepared):
     if prepared.kind == "create":
         return (session_from_data(value["session"]),), {}
     if prepared.kind == "save_checkpoint":
-        return (ContinuableCheckpoint(**value.pop("checkpoint")),), value
+        return (checkpoint_from_data(value.pop("checkpoint")),), value
     if prepared.kind == "update":
         value["status"] = SubagentStatus(value["status"])
         if value.get("usage") is not None:

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'theme.dart';
+import 'ui/status_vocab.dart';
 
 /// Shared safety vocabulary for command and autonomy surfaces.
 ///
@@ -51,26 +52,22 @@ String riskLabel(String risk) {
   }
 }
 
-/// The tone of an autonomy mode: the dot beside its label, never a fill
-/// behind white text. Green is reserved for the read-only plan mode; unknown
-/// modes remain neutral rather than borrowing another meaning.
+/// The tone of an autonomy mode: the dot or word beside its label, never a
+/// fill behind white text. It follows the REPL's `mode_roles` through
+/// [modeStyle] (lib/ui/status_vocab.dart): plan muted, manual text,
+/// acceptEdits warn, auto warn (drawn strong by callers that show the word;
+/// see [permissionModeIsStrong]). Unknown modes remain neutral rather than
+/// borrowing another meaning.
 Color permissionModeColor(ColorScheme scheme, String mode) {
   final tokens = scheme.brightness == Brightness.dark
       ? SonderTokens.dark
       : SonderTokens.light;
-  switch (mode) {
-    case 'plan':
-      return tokens.ok;
-    case 'manual':
-      return tokens.info;
-    case 'acceptEdits':
-      return tokens.warn;
-    case 'auto':
-      return tokens.auto;
-    default:
-      return scheme.outline;
-  }
+  if (modeRank(mode) < 0) return scheme.outline;
+  return modeStyle(mode).color(tokens);
 }
+
+/// Whether the mode word is drawn in the strong weight (auto).
+bool permissionModeIsStrong(String mode) => modeStyle(mode).strong;
 
 /// A glyph per autonomy mode so meaning is never carried by color alone.
 IconData permissionModeIcon(String mode) {

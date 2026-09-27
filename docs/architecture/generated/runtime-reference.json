@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "5599c9d0c78ad36e5490d5d450bb3c1c96216a1ec6edcedf17c28e1941172cf8",
+    "catalog_digest": "1b178d9c0fa675b82c42f258b77e6f63627f182d894f2bdfc3cc0aa2821376f0",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "5599c9d0c78ad36e5490d5d450bb3c1c96216a1ec6edcedf17c28e1941172cf8",
+      "catalog_digest": "1b178d9c0fa675b82c42f258b77e6f63627f182d894f2bdfc3cc0aa2821376f0",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -4582,6 +4582,33 @@
           "name": "ollama_pool_admin_status"
         },
         {
+          "description": "Summarize a guarded log file or your own test-run job output.\n\n    The structured form of ``tail -1 out.txt; grep -E \"^(FAILED|ERROR) \" out.txt``:\n    final line, recognized run summary (pytest, unittest, cargo, go, ctest,\n    jest, vitest, dotnet, maven, gradle, make), failure lines, first parsed\n    compiler/test errors, repeated-error groups, and a short tail. Pass exactly\n    one of ``path`` (inside allowed roots; credential stores refused) or\n    ``job_id``. Everything is redacted and bounded.\n    ",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "job_id": {
+                "default": "",
+                "title": "Job Id",
+                "type": "string"
+              },
+              "path": {
+                "default": "",
+                "title": "Path",
+                "type": "string"
+              },
+              "tail_lines": {
+                "default": 20,
+                "title": "Tail Lines",
+                "type": "integer"
+              }
+            },
+            "title": "output_digestArguments",
+            "type": "object"
+          },
+          "name": "output_digest"
+        },
+        {
           "description": "Generate several Python code candidates in parallel, then compile/run each.\n\n    The prompt should describe the desired Python solution. `check` is appended to\n    each extracted code block, usually as assertions. This is meant for search:\n    generate multiple attempts, compile them, execute them, and keep the winners.\n    ",
           "effects": [],
           "execution_class": "pure",
@@ -4793,7 +4820,7 @@
           "name": "permission_approve"
         },
         {
-          "description": "Show or set how much Sonder does without asking.\n\n    Modes, least to most autonomous: plan (reads only), manual (ask before\n    anything that is not a read), acceptEdits (file changes proceed, running\n    programs still asks), auto (programs proceed too). Destructive tools ask in\n    every mode, including auto.\n\n    Elevation is a separate axis no mode grants; see permission_policy.\n    ",
+          "description": "Show or set how much Sonder does without asking.\n\n    Modes, least to most autonomous: plan (reads only), manual (ask before\n    anything that is not a read), acceptEdits (file changes proceed, running\n    programs still asks), auto (programs proceed too). Destructive tools ask in\n    every mode, including auto.\n\n    Elevation is a separate axis no mode grants; see permission_policy.\n    Raising the mode above manual needs an attended caller (the console's\n    /mode, or an administrator's POST /v1/permission-mode); from here an\n    unattended client may only lower it or return from plan to manual.\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -5544,7 +5571,7 @@
           "name": "run_project"
         },
         {
-          "description": "Show shared local model mappings and execution-lane tier choices.",
+          "description": "Show shared local model mappings, execution-lane tiers and cached model readiness.\n\n    Read-only: renders the last model-inventory result with its age and never\n    contacts the model endpoint. ``/runtime status refresh`` re-checks it.\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -6580,7 +6607,7 @@
           "name": "test_discover"
         },
         {
-          "description": "Run tests with auto-detected or specified framework (pytest, jest, vitest, cargo, go, mocha, dotnet). Supports filtering by path/pattern, coverage, and extra args.",
+          "description": "Run tests with auto-detected or specified framework (pytest, jest, vitest, cargo, go, mocha, dotnet). Filter with path or pattern.\n\n    pytest runs through the structured test runner (host-owned command,\n    scrubbed environment, hard deadline, process-tree cleanup) when the\n    runtime composes it; coverage runs, and path and pattern together, keep\n    the host-built legacy command. ``extra_args_json`` is retired: anything\n    but empty or ``\"[]\"`` is refused.\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -6591,7 +6618,7 @@
                 "type": "boolean"
               },
               "extra_args_json": {
-                "default": "[]",
+                "default": "",
                 "title": "Extra Args Json",
                 "type": "string"
               },
@@ -6766,6 +6793,33 @@
           "name": "tool_capability_manifest"
         },
         {
+          "description": "Report the categorized host tool inventory (compilers, build systems,\n    test runners, linters, debuggers, package managers, runtimes, containers,\n    VCS, database clients, media/doc tools, cloud CLIs, editors, shells).\n\n    Filter by ``category`` or a tool ``name``. Paths are redacted; versions\n    come only from fixed, bounded, host-owned probes. ``refresh`` re-probes\n    the host instead of using the cached snapshot. Local-only host data.\n    ",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "category": {
+                "default": "",
+                "title": "Category",
+                "type": "string"
+              },
+              "name": {
+                "default": "",
+                "title": "Name",
+                "type": "string"
+              },
+              "refresh": {
+                "default": false,
+                "title": "Refresh",
+                "type": "boolean"
+              }
+            },
+            "title": "tool_inventoryArguments",
+            "type": "object"
+          },
+          "name": "tool_inventory"
+        },
+        {
           "description": "List the sonder-runtime MCP tools and what they are for.",
           "effects": [],
           "execution_class": "pure",
@@ -6801,7 +6855,7 @@
           "name": "toolchain_status"
         },
         {
-          "description": "Live-tune emotion/tone vectors from plain-language feedback.\n\n    Examples:\n      \"be warmer but more concise\"\n      \"more rigorous, less playful, warmth=0.4\"\n\n    This applies small bounded deltas, writes emotion_vectors.json, and the next\n    model request picks up the change without restarting.\n    ",
+          "description": "Live-tune emotion/tone vectors from plain-language feedback.\n\n    Examples:\n      \"be warmer but more concise\"\n      \"more rigorous, less playful, warmth=0.4\"\n\n    This applies small bounded deltas, writes the state-home emotion_vectors.json, and the next\n    model request picks up the change without restarting.\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -6901,7 +6955,7 @@
           "name": "unload"
         },
         {
-          "description": "Merge, replace, or clear the live emotion/tone steering vectors.\n\n    `vectors_json` must be a JSON object, for example:\n      {\"warmth\": 0.6, \"brevity\": 0.4, \"urgency\": -0.2}\n\n    Values are clamped to [-1.0, 1.0]. mode: merge (default), replace, clear,\n    or reset/defaults.\n    Direct edits to emotion_vectors.json also apply on the next request.\n    ",
+          "description": "Merge, replace, or clear the live emotion/tone steering vectors.\n\n    `vectors_json` must be a JSON object, for example:\n      {\"warmth\": 0.6, \"brevity\": 0.4, \"urgency\": -0.2}\n\n    Values are clamped to [-1.0, 1.0]. mode: merge (default), replace, clear,\n    or reset/defaults.\n    Updates are saved to the state-home copy (<SONDER_HOME>/emotion_vectors.json),\n    never the bundled default; direct edits to that copy also apply on the\n    next request.\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -7462,6 +7516,16 @@
   },
   "commands": [
     {
+      "aliases": [],
+      "category": "diagnostics",
+      "name": "/about",
+      "native": true,
+      "params": [],
+      "risk": "safe",
+      "summary": "show source provenance, endpoint, session and mode details",
+      "tool": ""
+    },
+    {
       "aliases": [
         "/accepted",
         "/used",
@@ -7478,7 +7542,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "admin",
       "name": "/access_request_preview",
       "native": false,
       "params": [
@@ -7510,10 +7574,8 @@
       "tool": ""
     },
     {
-      "aliases": [
-        "/tools"
-      ],
-      "category": "system",
+      "aliases": [],
+      "category": "diagnostics",
       "name": "/activity",
       "native": true,
       "params": [],
@@ -7523,7 +7585,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/activity_status",
       "native": false,
       "params": [
@@ -7717,7 +7779,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/agent_lane",
       "native": false,
       "params": [
@@ -8146,7 +8208,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/artifact-mobility",
       "native": true,
       "params": [],
@@ -8555,6 +8617,16 @@
     {
       "aliases": [],
       "category": "dev",
+      "name": "/build",
+      "native": true,
+      "params": [],
+      "risk": "execution",
+      "summary": "describe, configure, build or compile a C/C++ project",
+      "tool": ""
+    },
+    {
+      "aliases": [],
+      "category": "dev",
       "name": "/build_clean",
       "native": false,
       "params": [
@@ -8606,7 +8678,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/calibration_status",
       "native": false,
       "params": [],
@@ -8850,7 +8922,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/cloud",
       "native": true,
       "params": [],
@@ -8985,7 +9057,7 @@
       "aliases": [
         "/cmds"
       ],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/commands",
       "native": true,
       "params": [],
@@ -9007,7 +9079,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/compiler_cache_status",
       "native": false,
       "params": [],
@@ -9191,12 +9263,22 @@
         "/chainofthought",
         "/thoughts"
       ],
-      "category": "system",
+      "category": "admin",
       "name": "/cot",
       "native": true,
       "params": [],
       "risk": "ask",
       "summary": "model reasoning; refused without opt-in (flag + allow rule)",
+      "tool": ""
+    },
+    {
+      "aliases": [],
+      "category": "dev",
+      "name": "/crash",
+      "native": true,
+      "params": [],
+      "risk": "execution",
+      "summary": "digest a crash (minidump, core, sanitizer/valgrind log)",
       "tool": ""
     },
     {
@@ -9440,7 +9522,7 @@
       "aliases": [
         "/inspect"
       ],
-      "category": "system",
+      "category": "admin",
       "name": "/debug",
       "native": true,
       "params": [],
@@ -9450,7 +9532,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "admin",
       "name": "/debug_inspect",
       "native": false,
       "params": [
@@ -9658,7 +9740,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/diagnostics",
       "native": false,
       "params": [],
@@ -9700,6 +9782,16 @@
       "risk": "ask",
       "summary": "Compute a unified diff between two files in the workspace.",
       "tool": "diff_files"
+    },
+    {
+      "aliases": [],
+      "category": "dev",
+      "name": "/digest",
+      "native": true,
+      "params": [],
+      "risk": "safe",
+      "summary": "summarize job output or a log: final line, failures, errors",
+      "tool": ""
     },
     {
       "aliases": [],
@@ -9868,7 +9960,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/dump",
       "native": true,
       "params": [],
@@ -10029,7 +10121,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/ensemble_codegen_build_loop",
       "native": false,
       "params": [
@@ -10084,7 +10176,7 @@
       "aliases": [
         "/environment"
       ],
-      "category": "system",
+      "category": "runtime",
       "name": "/env",
       "native": true,
       "params": [],
@@ -10094,7 +10186,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/environment_status",
       "native": false,
       "params": [
@@ -10284,7 +10376,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "updates",
       "name": "/fetch_artifact",
       "native": false,
       "params": [
@@ -10910,6 +11002,16 @@
       "tool": "find_references"
     },
     {
+      "aliases": [],
+      "category": "dev",
+      "name": "/fix-build",
+      "native": true,
+      "params": [],
+      "risk": "execution",
+      "summary": "repair a failing C/C++ build target; approving lets the fix edit only its in-scope sources while it runs",
+      "tool": ""
+    },
+    {
       "aliases": [
         "/gamesuite"
       ],
@@ -11456,7 +11558,7 @@
       "aliases": [
         "/goals"
       ],
-      "category": "system",
+      "category": "runtime",
       "name": "/goal",
       "native": true,
       "params": [],
@@ -11489,7 +11591,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/hardware",
       "native": true,
       "params": [],
@@ -11499,7 +11601,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/hardware_profile",
       "native": false,
       "params": [
@@ -11540,7 +11642,7 @@
       "aliases": [
         "/inspectimage"
       ],
-      "category": "system",
+      "category": "runtime",
       "name": "/image",
       "native": true,
       "params": [],
@@ -11587,7 +11689,7 @@
       "aliases": [
         "/improvements"
       ],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/improve",
       "native": true,
       "params": [],
@@ -11782,7 +11884,7 @@
       "aliases": [
         "/recover"
       ],
-      "category": "system",
+      "category": "runtime",
       "name": "/lanes",
       "native": true,
       "params": [],
@@ -11928,7 +12030,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "updates",
       "name": "/live_reload_status",
       "native": false,
       "params": [],
@@ -11938,7 +12040,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/local_service_probe",
       "native": false,
       "params": [
@@ -11967,7 +12069,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/location",
       "native": true,
       "params": [],
@@ -11977,7 +12079,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/log_inspect",
       "native": false,
       "params": [
@@ -12072,6 +12174,16 @@
       "params": [],
       "risk": "dangerous",
       "summary": "login for admin/debug commands",
+      "tool": ""
+    },
+    {
+      "aliases": [],
+      "category": "diagnostics",
+      "name": "/logs",
+      "native": true,
+      "params": [],
+      "risk": "safe",
+      "summary": "show the last n records of this session's REPL log",
       "tool": ""
     },
     {
@@ -12274,7 +12386,7 @@
       "aliases": [
         "/convergence"
       ],
-      "category": "system",
+      "category": "updates",
       "name": "/mcp",
       "native": true,
       "params": [],
@@ -12284,7 +12396,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "updates",
       "name": "/mcp_runtime_status",
       "native": false,
       "params": [],
@@ -12465,7 +12577,7 @@
       "native": true,
       "params": [],
       "risk": "ask",
-      "summary": "",
+      "summary": "one goal + optional task plan + autopilot (status|start|done|abandon)",
       "tool": ""
     },
     {
@@ -12549,7 +12661,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/mode",
       "native": true,
       "params": [],
@@ -12569,7 +12681,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/model_fanout",
       "native": false,
       "params": [
@@ -12622,7 +12734,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/model_fanout_cancel",
       "native": false,
       "params": [
@@ -12645,7 +12757,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/model_fanout_recent",
       "native": false,
       "params": [
@@ -12674,7 +12786,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/model_fanout_resume",
       "native": false,
       "params": [
@@ -12709,7 +12821,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/model_fanout_status",
       "native": false,
       "params": [
@@ -12732,7 +12844,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/model_fanout_synthesize",
       "native": false,
       "params": [
@@ -12771,7 +12883,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/npu_status",
       "native": false,
       "params": [
@@ -12859,7 +12971,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "admin",
       "name": "/ollama_pool_admin_status",
       "native": false,
       "params": [
@@ -12891,6 +13003,35 @@
       "risk": "ask",
       "summary": "Read an administrator-only cached worker page; optionally refresh one bounded stale batch.",
       "tool": "ollama_pool_admin_status"
+    },
+    {
+      "aliases": [],
+      "category": "dev",
+      "name": "/output_digest",
+      "native": false,
+      "params": [
+        {
+          "default": "",
+          "name": "path",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "job_id",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": 20,
+          "name": "tail_lines",
+          "required": false,
+          "type": "int"
+        }
+      ],
+      "risk": "safe",
+      "summary": "Summarize a guarded log file or your own test-run job output.",
+      "tool": "output_digest"
     },
     {
       "aliases": [],
@@ -13232,7 +13373,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/policy_explain",
       "native": false,
       "params": [
@@ -13307,7 +13448,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "admin",
       "name": "/process_list",
       "native": false,
       "params": [
@@ -13362,6 +13503,16 @@
       "risk": "safe",
       "summary": "Inspect one PID for fixed memory-risk indicators without returning content.",
       "tool": "process_memory_risk_inspect"
+    },
+    {
+      "aliases": [],
+      "category": "dev",
+      "name": "/profile",
+      "native": true,
+      "params": [],
+      "risk": "execution",
+      "summary": "hot paths, frame spikes, allocations",
+      "tool": ""
     },
     {
       "aliases": [],
@@ -13505,7 +13656,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/reasoning_show",
       "native": false,
       "params": [
@@ -13545,7 +13696,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/recovery",
       "native": true,
       "params": [],
@@ -13948,7 +14099,7 @@
       "aliases": [
         "/endreport"
       ],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/report",
       "native": true,
       "params": [],
@@ -14184,7 +14335,7 @@
       "aliases": [
         "/models"
       ],
-      "category": "system",
+      "category": "runtime",
       "name": "/runtime",
       "native": true,
       "params": [],
@@ -14194,17 +14345,17 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/runtime_policy_status",
       "native": false,
       "params": [],
-      "risk": "ask",
-      "summary": "Show shared local model mappings and execution-lane tier choices.",
+      "risk": "safe",
+      "summary": "Show shared local model mappings, execution-lane tiers and cached model readiness.",
       "tool": "runtime_policy_status"
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "updates",
       "name": "/runtime_policy_update",
       "native": false,
       "params": [
@@ -14546,7 +14697,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "updates",
       "name": "/self_heal_check",
       "native": false,
       "params": [],
@@ -14556,7 +14707,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "updates",
       "name": "/self_heal_repair",
       "native": false,
       "params": [
@@ -14575,7 +14726,7 @@
       "aliases": [
         "/selfmodify"
       ],
-      "category": "system",
+      "category": "updates",
       "name": "/selfmod",
       "native": true,
       "params": [],
@@ -14746,7 +14897,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "admin",
       "name": "/sonder_authoritative_indexes",
       "native": false,
       "params": [
@@ -15001,9 +15152,9 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/status",
-      "native": false,
+      "native": true,
       "params": [],
       "risk": "safe",
       "summary": "Report cached inference capacity without contacting Ollama workers.",
@@ -15011,7 +15162,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/strict",
       "native": true,
       "params": [],
@@ -15021,7 +15172,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/system_improvement_report",
       "native": false,
       "params": [
@@ -15364,6 +15515,16 @@
     {
       "aliases": [],
       "category": "dev",
+      "name": "/test",
+      "native": true,
+      "params": [],
+      "risk": "execution",
+      "summary": "run the project's tests; /test status|result|cancel <job>",
+      "tool": ""
+    },
+    {
+      "aliases": [],
+      "category": "dev",
       "name": "/test_discover",
       "native": false,
       "params": [
@@ -15433,7 +15594,7 @@
           "type": "int"
         },
         {
-          "default": "[]",
+          "default": "",
           "name": "extra_args_json",
           "required": false,
           "type": "str"
@@ -15594,13 +15755,42 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/tool_capability_manifest",
       "native": false,
       "params": [],
       "risk": "ask",
       "summary": "Return the live tool schemas and a deterministic fingerprint of them.",
       "tool": "tool_capability_manifest"
+    },
+    {
+      "aliases": [],
+      "category": "runtime",
+      "name": "/tool_inventory",
+      "native": false,
+      "params": [
+        {
+          "default": "",
+          "name": "category",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "name",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": false,
+          "name": "refresh",
+          "required": false,
+          "type": "bool"
+        }
+      ],
+      "risk": "safe",
+      "summary": "Report the categorized host tool inventory (compilers, build systems, test runners, linters, debuggers, package managers, runtimes, containers, VCS, database clients, media/doc tools, cloud CLIs, editors, shells).",
+      "tool": "tool_inventory"
     },
     {
       "aliases": [],
@@ -15614,7 +15804,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/toolchain_status",
       "native": false,
       "params": [
@@ -15636,10 +15826,20 @@
       "tool": "toolchain_status"
     },
     {
+      "aliases": [],
+      "category": "runtime",
+      "name": "/tools",
+      "native": true,
+      "params": [],
+      "risk": "safe",
+      "summary": "categorized host tool inventory with versions",
+      "tool": ""
+    },
+    {
       "aliases": [
         "/toolversion"
       ],
-      "category": "system",
+      "category": "runtime",
       "name": "/toolstatus",
       "native": true,
       "params": [],
@@ -15649,7 +15849,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/trace",
       "native": true,
       "params": [],
@@ -15718,7 +15918,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/turn_inspect",
       "native": false,
       "params": [
@@ -15782,7 +15982,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/unload",
       "native": false,
       "params": [
@@ -15867,7 +16067,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "updates",
       "name": "/verify_artifact",
       "native": false,
       "params": [
@@ -15932,17 +16132,17 @@
       "aliases": [
         "/analyzeimage"
       ],
-      "category": "system",
+      "category": "runtime",
       "name": "/vision",
       "native": true,
       "params": [],
       "risk": "ask",
-      "summary": "",
+      "summary": "ask the local vision tier about a guarded image",
       "tool": ""
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/vision_analyze",
       "native": false,
       "params": [
@@ -16093,7 +16293,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/why",
       "native": true,
       "params": [],
@@ -16321,7 +16521,7 @@
       "native": true,
       "params": [],
       "risk": "mutation",
-      "summary": "",
+      "summary": "create a guarded directory, select it, and resume queued work",
       "tool": ""
     },
     {
@@ -16688,6 +16888,12 @@
       "field": "spanda",
       "section": "root",
       "type": "SpandaConfig"
+    },
+    {
+      "default": null,
+      "field": "build_tools",
+      "section": "root",
+      "type": "BuildToolsConfig"
     },
     {
       "default": "[redacted]",
@@ -17560,6 +17766,30 @@
       "type": "int"
     },
     {
+      "default": true,
+      "field": "live_export",
+      "section": "observability",
+      "type": "bool"
+    },
+    {
+      "default": 4096,
+      "field": "live_export_buffer",
+      "section": "observability",
+      "type": "int"
+    },
+    {
+      "default": 8,
+      "field": "live_export_max_subscribers",
+      "section": "observability",
+      "type": "int"
+    },
+    {
+      "default": [],
+      "field": "live_export_origins",
+      "section": "observability",
+      "type": "tuple[str, ...]"
+    },
+    {
       "default": "http://127.0.0.1:11434",
       "field": "url",
       "section": "ollama",
@@ -17773,6 +18003,36 @@
       "type": "bool"
     },
     {
+      "default": [],
+      "field": "allowed_hosts",
+      "section": "server",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": 240,
+      "field": "work_wait_seconds",
+      "section": "server",
+      "type": "int"
+    },
+    {
+      "default": 1800,
+      "field": "work_budget_seconds",
+      "section": "server",
+      "type": "int"
+    },
+    {
+      "default": 2,
+      "field": "work_max_running",
+      "section": "server",
+      "type": "int"
+    },
+    {
+      "default": 15,
+      "field": "stream_heartbeat_seconds",
+      "section": "server",
+      "type": "int"
+    },
+    {
       "default": false,
       "field": "enabled",
       "section": "spanda",
@@ -17835,14 +18095,15 @@
   ],
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES plus sonder_runtime.platform.memory_replication_config",
   "counts": {
-    "capabilities": 214,
-    "commands": 320,
-    "configuration": 214,
+    "capabilities": 216,
+    "commands": 331,
+    "configuration": 224,
     "events": 43,
+    "native_tools": 66,
     "schemas": 4,
-    "tools": 214
+    "tools": 216
   },
-  "digest": "d50d0ad0bad7faa8b0ad6200acef2e313e71035d75a9d6d9100aed83a048be8f",
+  "digest": "bbde775878b130a70314ca6a0c2956887f874b86b87d4db4e7a3394e2f4bc564",
   "events": [
     {
       "name": "session.started",
@@ -18310,11 +18571,2152 @@
       ]
     }
   ],
+  "native_tool_source": "sonder_runtime.bootstrap.native_mcp.native_tool_registry",
+  "native_tools": [
+    {
+      "description": "Open a fresh parent with open_parent; retain its scoped capability to control independent agent conversations. Never place the capability in task text or files.",
+      "name": "agent_lane",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "open_parent",
+              "rotate_parent",
+              "revoke_parent",
+              "spawn",
+              "list",
+              "inspect",
+              "send_message",
+              "wait",
+              "interrupt",
+              "resume",
+              "cancel",
+              "reports",
+              "ack",
+              "retrieve_archive"
+            ],
+            "type": "string"
+          },
+          "parent_session_id": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "parent_token": {
+            "maxLength": 256,
+            "type": "string"
+          },
+          "payload": {
+            "maxProperties": 32,
+            "type": "object"
+          }
+        },
+        "required": [
+          "action",
+          "payload"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Resolve approximate location after explicit consent",
+      "name": "approximate_location_lookup",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "consent": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "consent"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Create a bounded deterministic ZIP or TAR without overwriting",
+      "name": "archive_create",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "archive_format": {
+            "enum": [
+              "zip",
+              "tar"
+            ],
+            "type": "string"
+          },
+          "destination": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "deterministic": {
+            "type": "boolean"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "inputs_json": {
+            "maxLength": 1000000,
+            "minLength": 2,
+            "type": "string"
+          },
+          "max_depth": {
+            "maximum": 64,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_entries": {
+            "maximum": 20000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_file_bytes": {
+            "maximum": 256000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_files": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_results": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_total_bytes": {
+            "maximum": 1000000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "root": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "root",
+          "inputs_json",
+          "destination"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Extract a bounded archive transactionally without replacing a destination",
+      "name": "archive_extract",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "destination": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_entries": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_file_bytes": {
+            "maximum": 256000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_path_depth": {
+            "maximum": 128,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_ratio": {
+            "maximum": 1000.0,
+            "minimum": 1,
+            "type": "number"
+          },
+          "max_results": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_seconds": {
+            "maximum": 60.0,
+            "minimum": 1,
+            "type": "number"
+          },
+          "max_total_bytes": {
+            "maximum": 1000000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "source": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "destination"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Inspect a bounded archive without extracting it",
+      "name": "archive_list",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "max_entries": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_file_bytes": {
+            "maximum": 256000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_path_depth": {
+            "maximum": 128,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_ratio": {
+            "maximum": 1000.0,
+            "minimum": 1,
+            "type": "number"
+          },
+          "max_results": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_seconds": {
+            "maximum": 60.0,
+            "minimum": 1,
+            "type": "number"
+          },
+          "max_total_bytes": {
+            "maximum": 1000000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Statically inspect a guarded artifact for risk",
+      "name": "artifact_risk_inspect",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_scan_bytes": {
+            "type": "integer"
+          },
+          "max_seconds": {
+            "type": "number"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Repair a failing C/C++ build target with a bounded loop: compile the focus file, propose a patch confined to editable project sources (never build scripts or build-time-tool sources), verify with compile_one then a target build, keep the best candidate and revert regressions. Returns a job id for build_fix_result.",
+      "name": "build_fix",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "allow_network": {
+            "type": "boolean"
+          },
+          "apply": {
+            "type": "boolean"
+          },
+          "attempts": {
+            "maximum": 8,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "build_dir": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "config": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "editable_globs": {
+            "items": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 16,
+            "type": "array"
+          },
+          "focus_file": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "platform": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "project": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "revert_after": {
+            "type": "boolean"
+          },
+          "target": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "maximum": 14400,
+            "minimum": 60,
+            "type": "integer"
+          },
+          "verify_dependents": {
+            "type": "boolean"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Write a build_fix job's stored original files back (all, or the named ones) when each file still has the content the fix left; refuses a file changed since.",
+      "name": "build_fix_restore",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "files": {
+            "items": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 6,
+            "type": "array"
+          },
+          "job_id": {
+            "pattern": "^build-fix-[0-9a-f]{16,32}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Wait (bounded) for a build_fix job you started and return its report: status, stop reason, attempts, per-file digests and diffs, and the final build; cancel=true stops your own fix and its child build instead.",
+      "name": "build_fix_result",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "cancel": {
+            "type": "boolean"
+          },
+          "job_id": {
+            "pattern": "^build-fix-[0-9a-f]{16,32}$",
+            "type": "string"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Configure, build, compile one file, or trace one file's includes, with a host-owned command rendered from closed templates for the project's build system; every value must name a member of build_model. Runs as a background job and returns typed, attributed diagnostics or a job id for build_job_result.",
+      "name": "build_job",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "configure",
+              "build",
+              "compile_one",
+              "include_trace"
+            ],
+            "type": "string"
+          },
+          "allow_network": {
+            "type": "boolean"
+          },
+          "build_dir": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "build_preset": {
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$",
+            "type": "string"
+          },
+          "config": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "file": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "generator": {
+            "enum": [
+              "Ninja",
+              "Ninja Multi-Config",
+              "Unix Makefiles",
+              "NMake Makefiles",
+              "Visual Studio 17 2022",
+              "Visual Studio 16 2019"
+            ],
+            "type": "string"
+          },
+          "jobs": {
+            "maximum": 256,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "platform": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "preset": {
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$",
+            "type": "string"
+          },
+          "profile": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "project": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "target": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "maximum": 7200,
+            "minimum": 30,
+            "type": "integer"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "description": "Wait (bounded) for a build_job you started and return its report, or its status while it is still running; cancel=true stops your own job instead.",
+      "name": "build_job_result",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "cancel": {
+            "type": "boolean"
+          },
+          "job_id": {
+            "pattern": "^build-job-[0-9a-f]{16,32}$",
+            "type": "string"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Describe a C/C++ project's build without running anything: build system, generator, configs, platforms, targets (utility and build-time-tool flags), toolchains, compile units, PCH and presets, read from the CMake File API reply, compile_commands.json or .sln/.vcxproj. Labels only, no host paths.",
+      "name": "build_model",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "build_dir": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "detail": {
+            "enum": [
+              "summary",
+              "targets",
+              "compile_units",
+              "toolchain",
+              "presets"
+            ],
+            "type": "string"
+          },
+          "max_items": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "preset": {
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$",
+            "type": "string"
+          },
+          "project": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "refresh": {
+            "type": "boolean"
+          },
+          "target": {
+            "maxLength": 128,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "description": "Fetch one small digest-verified compute artifact through the authenticated transport",
+      "name": "compute_artifact_fetch",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "controller_job_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "max_bytes": {
+            "maximum": 98304,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "name": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "controller_job_id",
+          "name"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Cancel one previously placed compute job and prove cleanup",
+      "name": "compute_cancel",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "controller_job_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "controller_job_id",
+          "reason"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Read one previously placed compute job",
+      "name": "compute_status",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "controller_job_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "controller_job_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Place one bounded catalog job locally or on an explicitly authorized private node",
+      "name": "compute_submit",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "allow_local_fallback": {
+            "type": "boolean"
+          },
+          "allow_remote": {
+            "type": "boolean"
+          },
+          "arguments": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 64,
+            "type": "array"
+          },
+          "catalog_entry_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "deadline_seconds": {
+            "maximum": 86400,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "environment": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "maxProperties": 32,
+            "type": "object"
+          },
+          "idempotency_key": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "idempotent": {
+            "type": "boolean"
+          },
+          "input_artifacts": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "maxLength": 4096,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "sha256": {
+                  "maxLength": 64,
+                  "minLength": 64,
+                  "type": "string"
+                },
+                "size_bytes": {
+                  "maximum": 1099511627776,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "name",
+                "size_bytes",
+                "sha256"
+              ],
+              "type": "object"
+            },
+            "maxItems": 64,
+            "type": "array"
+          },
+          "placement_policy": {
+            "enum": [
+              "local-only",
+              "prefer-remote",
+              "rank-all"
+            ],
+            "type": "string"
+          },
+          "relative_cwd": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "request_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "workload": {
+            "enum": [
+              "analysis",
+              "build",
+              "container",
+              "embedding",
+              "encode",
+              "fuzz",
+              "index",
+              "render",
+              "service",
+              "storage",
+              "test",
+              "training"
+            ],
+            "type": "string"
+          },
+          "workspace_mapping": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "workload",
+          "catalog_entry_id",
+          "workspace_mapping",
+          "allow_remote"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Symbolize and walk a crash capture with a host debugger (cdb, gdb, lldb, eu-stack, minidump-stackwalk or llvm-symbolizer on verified PE+PDB/ELF pairs) as a background job over the pure reader's result; returns the merged crash report or a run id to poll with debug_run_result. symbol_dirs must be local directories inside the allowed roots. symbol_server=true is refused from a tool call: the operator runs /crash <dump> --symbols-online at the console.",
+      "name": "crash_digest",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "engine": {
+            "enum": [
+              "auto",
+              "cdb",
+              "gdb",
+              "lldb",
+              "eu_stack",
+              "minidump_stackwalk",
+              "llvm_symbolizer",
+              "pure"
+            ],
+            "type": "string"
+          },
+          "executable": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "path": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "symbol_dirs": {
+            "items": {
+              "maxLength": 1024,
+              "type": "string"
+            },
+            "maxItems": 8,
+            "type": "array"
+          },
+          "symbol_server": {
+            "type": "boolean"
+          },
+          "timeout_seconds": {
+            "maximum": 900,
+            "minimum": 10,
+            "type": "integer"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Read a crash capture without running anything: a Windows/Breakpad/Crashpad minidump, an ELF core, a sanitizer (ASan/UBSan/TSan/MSVC-ASan) log, valgrind memcheck XML or a macOS .ips; returns a typed crash report (exception, crashing thread frames, modules with PDB/build ids, cause hints, signature). With a directory path, reads up to 64 captures in it (non-recursive) and returns buckets grouped by crash signature.",
+      "name": "crash_triage",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "max_threads": {
+            "maximum": 16,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "maxLength": 1024,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Inspect a bounded data file",
+      "name": "data_inspect",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Run a bounded read-only data query",
+      "name": "data_query",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "sql": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Wait (bounded) for a crash_digest or profile_capture_digest run you started and return its result, or its status while it is still running.",
+      "name": "debug_run_result",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "run_id": {
+            "maxLength": 80,
+            "type": "string"
+          },
+          "wait_seconds": {
+            "maximum": 60,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "run_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Inventory bounded project dependencies",
+      "name": "dependency_inventory",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "description": "Create a guarded directory and optional parents",
+      "name": "directory_create",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "parents": {
+            "type": "boolean"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Digest a bounded directory manifest",
+      "name": "directory_digest",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "description": "List a bounded guarded directory tree",
+      "name": "directory_tree",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "depth": {
+            "type": "integer"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "include_hidden": {
+            "type": "boolean"
+          },
+          "include_ignored": {
+            "type": "boolean"
+          },
+          "max_entries": {
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "description": "Apply a bounded text edit",
+      "name": "edit_file",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "type": "integer"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "new": {
+            "type": "string"
+          },
+          "old": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "old",
+          "new"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Fetch and atomically verify a binary artifact",
+      "name": "fetch_artifact",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "dest": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "expect_publisher": {
+            "type": "string"
+          },
+          "expect_type": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_mb": {
+            "type": "number"
+          },
+          "overwrite": {
+            "type": "boolean"
+          },
+          "resume": {
+            "type": "boolean"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "number"
+          },
+          "url": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "dest"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Transactionally create or overwrite bounded files",
+      "name": "file_batch_write",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "operations": {
+            "type": "array"
+          },
+          "operations_json": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "description": "Copy one bounded binary-safe file",
+      "name": "file_copy",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "destination": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "overwrite": {
+            "type": "boolean"
+          },
+          "source": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "destination"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Delete a guarded path only after explicit confirmation",
+      "name": "file_delete",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "confirm": {
+            "type": "string"
+          },
+          "dry_run": {
+            "type": "boolean"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "recursive": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Digest a bounded file",
+      "name": "file_digest",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Legacy alias for a bounded text edit",
+      "name": "file_edit",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "type": "integer"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "new": {
+            "type": "string"
+          },
+          "old": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "old",
+          "new"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Find files under allowed roots",
+      "name": "file_find",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "include_ignored": {
+            "type": "boolean"
+          },
+          "max_results": {
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          },
+          "root": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "description": "Move one bounded binary-safe file",
+      "name": "file_move",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "destination": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "overwrite": {
+            "type": "boolean"
+          },
+          "source": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "destination"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Read a UTF-8-ish text file inside allowed roots",
+      "name": "file_read",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_bytes": {
+            "type": "integer"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Read a bounded line range from a text file",
+      "name": "file_read_range",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "end_line": {
+            "type": "integer"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "start_line": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Create, overwrite, or append a text file inside allowed roots",
+      "name": "file_write",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "create",
+              "overwrite",
+              "append"
+            ],
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Inspect bounded image metadata and hash",
+      "name": "image_inspect",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Preview or atomically apply a bounded JSON patch",
+      "name": "json_patch",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "preview",
+              "apply"
+            ],
+            "type": "string"
+          },
+          "operations": {
+            "type": "array"
+          },
+          "operations_json": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Inspect a bounded log file",
+      "name": "log_inspect",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Create a directory under an allowed root",
+      "name": "make_directory",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "parents": {
+            "type": "boolean"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Summarize a test-run job's output or a guarded log file: final summary line, counts, FAILED/ERROR lines, first unique errors (file:line), grouped diagnostics and the tail. Give exactly one of job_id or path.",
+      "name": "output_digest",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "job_id": {
+            "maxLength": 80,
+            "type": "string"
+          },
+          "max_failure_lines": {
+            "maximum": 200,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "tail_lines": {
+            "maximum": 200,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "description": "List bounded process metadata after explicit opt-in",
+      "name": "process_list",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "max_processes": {
+            "type": "integer"
+          },
+          "max_seconds": {
+            "type": "number"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "description": "Inspect bounded process memory risk indicators",
+      "name": "process_memory_risk_inspect",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "max_bytes": {
+            "type": "integer"
+          },
+          "max_regions": {
+            "type": "integer"
+          },
+          "max_seconds": {
+            "type": "number"
+          },
+          "pid": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pid"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Digest a binary profiler capture with a host tool (perf report, heaptrack_print, tracy-csvexport, xperf) as a background job; returns the profile digest or a run id to poll with debug_run_result.",
+      "name": "profile_capture_digest",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "engine": {
+            "enum": [
+              "auto",
+              "perf",
+              "heaptrack_print",
+              "tracy_csvexport",
+              "xperf",
+              "wpaexporter"
+            ],
+            "type": "string"
+          },
+          "executable": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "frame_budget_ms": {
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          },
+          "frame_zone": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "path": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "symbol_dirs": {
+            "items": {
+              "maxLength": 1024,
+              "type": "string"
+            },
+            "maxItems": 8,
+            "type": "array"
+          },
+          "thread": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "maximum": 900,
+            "minimum": 10,
+            "type": "integer"
+          },
+          "top_n": {
+            "maximum": 50,
+            "minimum": 5,
+            "type": "integer"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Digest a profiler capture in a pure format without running anything: callgrind, Chrome trace JSON, Tracy csvexport CSV, WPA/PIX/Superluminal CSV, heaptrack_print text or perf report text; returns hot functions (self/total), hot paths, frame-time percentiles and spikes against a frame budget. Binary captures (perf.data, .etl, .tracy, heaptrack .zst) give CAPTURE_NEEDS_HOST_TOOL: use profile_capture_digest.",
+      "name": "profile_digest",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "frame_budget_ms": {
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          },
+          "frame_zone": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "path": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "thread": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "top_n": {
+            "maximum": 50,
+            "minimum": 5,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Search the executable path for programs",
+      "name": "program_search",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "max_results": {
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "description": "Detect project manifests and commands",
+      "name": "project_detect",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "description": "Read a bounded file",
+      "name": "read_file",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_bytes": {
+            "type": "integer"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Run an argv-based program",
+      "name": "run_program",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "args_json": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_output": {
+            "type": "integer"
+          },
+          "program": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "stdin": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "program"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Run a bounded script",
+      "name": "run_script",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "args_json": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_output": {
+            "type": "integer"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "stdin": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Find scripts under allowed roots",
+      "name": "script_search",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "include_hidden": {
+            "type": "boolean"
+          },
+          "include_ignored": {
+            "type": "boolean"
+          },
+          "max_entries": {
+            "type": "integer"
+          },
+          "max_results": {
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          },
+          "root": {
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "type": "number"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "description": "Scan an authorized tree for redacted credential findings",
+      "name": "secret_scan",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "root": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "number"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "description": "Run a project's test suite with a host-owned command for the detected runner (or the one named), optionally narrowed by a selector (pytest node id or k:<expr>, ctest name, cargo filter, ./go/pkg or run:TestName, dotnet filter, js path, jvm pattern), as a background job; returns a structured report (totals, failures with file:line) or a job id to poll with test_run_result.",
+      "name": "test_run",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "project": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "runner": {
+            "enum": [
+              "auto",
+              "pytest",
+              "unittest",
+              "ctest",
+              "cargo",
+              "go",
+              "dotnet",
+              "npm",
+              "pnpm",
+              "yarn",
+              "gradle",
+              "maven",
+              "make"
+            ],
+            "type": "string"
+          },
+          "selector": {
+            "maxLength": 200,
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "maximum": 1800,
+            "minimum": 10,
+            "type": "integer"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "workers": {
+            "maximum": 8,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "description": "Wait (bounded) for a test_run job you started and return its structured report, or its status while it is still running.",
+      "name": "test_run_result",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "job_id": {
+            "maxLength": 80,
+            "type": "string"
+          },
+          "wait_seconds": {
+            "maximum": 60,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Preview or transactionally apply a bounded unified diff",
+      "name": "text_patch",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "apply": {
+            "type": "boolean"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "patch": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "root": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "root",
+          "patch"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Search bounded text files under allowed roots",
+      "name": "text_search",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "case_sensitive": {
+            "type": "boolean"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "glob": {
+            "type": "string"
+          },
+          "include_hidden": {
+            "type": "boolean"
+          },
+          "include_ignored": {
+            "type": "boolean"
+          },
+          "max_entries": {
+            "type": "integer"
+          },
+          "max_file_bytes": {
+            "type": "integer"
+          },
+          "max_results": {
+            "type": "integer"
+          },
+          "query": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "regex": {
+            "type": "boolean"
+          },
+          "root": {
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "List developer tools installed on this host (compilers, build systems, test runners, linters, debuggers, package managers, runtimes, containers, VCS, DB clients, media/doc tools, cloud CLIs, editors, shells) with versions; filter by category or name; refresh re-probes with fixed read-only version switches.",
+      "name": "tool_inventory",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "category": {
+            "enum": [
+              "compiler",
+              "build_system",
+              "test_runner",
+              "linter_formatter",
+              "debugger_profiler",
+              "package_manager",
+              "runtime",
+              "container_vm",
+              "vcs",
+              "db_client",
+              "media_doc",
+              "cloud_cli",
+              "editor_ide",
+              "shell"
+            ],
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "refresh": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "description": "Verify a guarded artifact already on disk",
+      "name": "verify_artifact",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "expect_publisher": {
+            "type": "string"
+          },
+          "expect_type": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Analyze one guarded local raster image",
+      "name": "vision_analyze",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "prompt": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "prompt"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Get bounded weather with explicit consent",
+      "name": "weather_lookup",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "consent": {
+            "type": "boolean"
+          },
+          "forecast_days": {
+            "type": "integer"
+          },
+          "location": {
+            "minLength": 2,
+            "type": "string"
+          },
+          "units": {
+            "enum": [
+              "auto",
+              "metric",
+              "imperial"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "location",
+          "consent"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Fetch bounded public web text with explicit consent",
+      "name": "web_fetch",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "consent": {
+            "type": "boolean"
+          },
+          "max_chars": {
+            "type": "integer"
+          },
+          "url": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "consent"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Search public web with explicit consent",
+      "name": "web_search",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "consent": {
+            "type": "boolean"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "query": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "query",
+          "consent"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Compare two bounded workspaces",
+      "name": "workspace_compare",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "left": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "right": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "left",
+          "right"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Run a program as a bounded argv list",
+      "name": "workspace_run",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "args_json": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_output": {
+            "type": "integer"
+          },
+          "program": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "stdin": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "program"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Write a file under an allowed root",
+      "name": "write_file",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "create",
+              "overwrite",
+              "append"
+            ],
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ],
+        "type": "object"
+      }
+    }
+  ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "5599c9d0c78ad36e5490d5d450bb3c1c96216a1ec6edcedf17c28e1941172cf8",
+    "catalog_digest": "1b178d9c0fa675b82c42f258b77e6f63627f182d894f2bdfc3cc0aa2821376f0",
     "client": {
-      "digest": "5599c9d0c78ad36e5490d5d450bb3c1c96216a1ec6edcedf17c28e1941172cf8",
+      "digest": "1b178d9c0fa675b82c42f258b77e6f63627f182d894f2bdfc3cc0aa2821376f0",
       "events": [
         {
           "name": "approval.denied",
@@ -19610,6 +22012,7 @@
           "npu_status",
           "offload",
           "ollama_pool_admin_status",
+          "output_digest",
           "parallel_generate_run",
           "parallel_generate_run_languages",
           "parallel_run_code",
@@ -19674,6 +22077,7 @@
           "text_patch",
           "text_search",
           "tool_capability_manifest",
+          "tool_inventory",
           "tool_manifest",
           "toolchain_status",
           "tune_emotion_vectors",
@@ -20349,6 +22753,11 @@
             "summary": "Read an administrator-only cached worker page; optionally refresh one bounded stale batch.\n\n    Page size is 1..128 and the full JSON page is at most 65,536 UTF-8 bytes.\n    Remote probes retain configured consent and HTTPS policy. Callers cannot\n    change configured probe batch size or parallelism. Cursors belong to one\n    administrator and roster generation. Local-open direct use is permitted.\n    "
           },
           {
+            "name": "output_digest",
+            "schema_available": true,
+            "summary": "Summarize a guarded log file or your own test-run job output.\n\n    The structured form of ``tail -1 out.txt; grep -E \"^(FAILED|ERROR) \" out.txt``:\n    final line, recognized run summary (pytest, unittest, cargo, go, ctest,\n    jest, vitest, dotnet, maven, gradle, make), failure lines, first parsed\n    compiler/test errors, repeated-error groups, and a short tail. Pass exactly\n    one of ``path`` (inside allowed roots; credential stores refused) or\n    ``job_id``. Everything is redacted and bounded.\n    "
+          },
+          {
             "name": "parallel_generate_run",
             "schema_available": true,
             "summary": "Generate several Python code candidates in parallel, then compile/run each.\n\n    The prompt should describe the desired Python solution. `check` is appended to\n    each extracted code block, usually as assertions. This is meant for search:\n    generate multiple attempts, compile them, execute them, and keep the winners.\n    "
@@ -20376,7 +22785,7 @@
           {
             "name": "permission_mode",
             "schema_available": true,
-            "summary": "Show or set how much Sonder does without asking.\n\n    Modes, least to most autonomous: plan (reads only), manual (ask before\n    anything that is not a read), acceptEdits (file changes proceed, running\n    programs still asks), auto (programs proceed too). Destructive tools ask in\n    every mode, including auto.\n\n    Elevation is a separate axis no mode grants; see permission_policy.\n    "
+            "summary": "Show or set how much Sonder does without asking.\n\n    Modes, least to most autonomous: plan (reads only), manual (ask before\n    anything that is not a read), acceptEdits (file changes proceed, running\n    programs still asks), auto (programs proceed too). Destructive tools ask in\n    every mode, including auto.\n\n    Elevation is a separate axis no mode grants; see permission_policy.\n    Raising the mode above manual needs an attended caller (the console's\n    /mode, or an administrator's POST /v1/permission-mode); from here an\n    unattended client may only lower it or return from plan to manual.\n    "
           },
           {
             "name": "permission_policy",
@@ -20481,7 +22890,7 @@
           {
             "name": "runtime_policy_status",
             "schema_available": true,
-            "summary": "Show shared local model mappings and execution-lane tier choices."
+            "summary": "Show shared local model mappings, execution-lane tiers and cached model readiness.\n\n    Read-only: renders the last model-inventory result with its age and never\n    contacts the model endpoint. ``/runtime status refresh`` re-checks it.\n    "
           },
           {
             "name": "runtime_policy_update",
@@ -20651,7 +23060,7 @@
           {
             "name": "test_run",
             "schema_available": true,
-            "summary": "Run tests with auto-detected or specified framework (pytest, jest, vitest, cargo, go, mocha, dotnet). Supports filtering by path/pattern, coverage, and extra args."
+            "summary": "Run tests with auto-detected or specified framework (pytest, jest, vitest, cargo, go, mocha, dotnet). Filter with path or pattern.\n\n    pytest runs through the structured test runner (host-owned command,\n    scrubbed environment, hard deadline, process-tree cleanup) when the\n    runtime composes it; coverage runs, and path and pattern together, keep\n    the host-built legacy command. ``extra_args_json`` is retired: anything\n    but empty or ``\"[]\"`` is refused.\n    "
           },
           {
             "name": "text_patch",
@@ -20669,6 +23078,11 @@
             "summary": "Return the live tool schemas and a deterministic fingerprint of them.\n\n    This is visibility only: it cannot add, remove, approve, or invoke tools.\n    Clients can use ``tools`` to construct a valid call, and retain the\n    SHA-256 value with a run receipt to notice when a live-reloaded runtime\n    presents a different capability surface.  The digest is of the canonical\n    JSON form of that exact returned ``tools`` list, not merely its names.\n    "
           },
           {
+            "name": "tool_inventory",
+            "schema_available": true,
+            "summary": "Report the categorized host tool inventory (compilers, build systems,\n    test runners, linters, debuggers, package managers, runtimes, containers,\n    VCS, database clients, media/doc tools, cloud CLIs, editors, shells).\n\n    Filter by ``category`` or a tool ``name``. Paths are redacted; versions\n    come only from fixed, bounded, host-owned probes. ``refresh`` re-probes\n    the host instead of using the cached snapshot. Local-only host data.\n    "
+          },
+          {
             "name": "tool_manifest",
             "schema_available": true,
             "summary": "List the sonder-runtime MCP tools and what they are for."
@@ -20681,7 +23095,7 @@
           {
             "name": "tune_emotion_vectors",
             "schema_available": true,
-            "summary": "Live-tune emotion/tone vectors from plain-language feedback.\n\n    Examples:\n      \"be warmer but more concise\"\n      \"more rigorous, less playful, warmth=0.4\"\n\n    This applies small bounded deltas, writes emotion_vectors.json, and the next\n    model request picks up the change without restarting.\n    "
+            "summary": "Live-tune emotion/tone vectors from plain-language feedback.\n\n    Examples:\n      \"be warmer but more concise\"\n      \"more rigorous, less playful, warmth=0.4\"\n\n    This applies small bounded deltas, writes the state-home emotion_vectors.json, and the next\n    model request picks up the change without restarting.\n    "
           },
           {
             "name": "turn_inspect",
@@ -20701,7 +23115,7 @@
           {
             "name": "update_emotion_vectors",
             "schema_available": true,
-            "summary": "Merge, replace, or clear the live emotion/tone steering vectors.\n\n    `vectors_json` must be a JSON object, for example:\n      {\"warmth\": 0.6, \"brevity\": 0.4, \"urgency\": -0.2}\n\n    Values are clamped to [-1.0, 1.0]. mode: merge (default), replace, clear,\n    or reset/defaults.\n    Direct edits to emotion_vectors.json also apply on the next request.\n    "
+            "summary": "Merge, replace, or clear the live emotion/tone steering vectors.\n\n    `vectors_json` must be a JSON object, for example:\n      {\"warmth\": 0.6, \"brevity\": 0.4, \"urgency\": -0.2}\n\n    Values are clamped to [-1.0, 1.0]. mode: merge (default), replace, clear,\n    or reset/defaults.\n    Updates are saved to the state-home copy (<SONDER_HOME>/emotion_vectors.json),\n    never the bundled default; direct edits to that copy also apply on the\n    next request.\n    "
           },
           {
             "name": "update_system_profile",
@@ -25274,6 +27688,33 @@
           "name": "ollama_pool_admin_status"
         },
         {
+          "description": "Summarize a guarded log file or your own test-run job output.\n\n    The structured form of ``tail -1 out.txt; grep -E \"^(FAILED|ERROR) \" out.txt``:\n    final line, recognized run summary (pytest, unittest, cargo, go, ctest,\n    jest, vitest, dotnet, maven, gradle, make), failure lines, first parsed\n    compiler/test errors, repeated-error groups, and a short tail. Pass exactly\n    one of ``path`` (inside allowed roots; credential stores refused) or\n    ``job_id``. Everything is redacted and bounded.\n    ",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "job_id": {
+                "default": "",
+                "title": "Job Id",
+                "type": "string"
+              },
+              "path": {
+                "default": "",
+                "title": "Path",
+                "type": "string"
+              },
+              "tail_lines": {
+                "default": 20,
+                "title": "Tail Lines",
+                "type": "integer"
+              }
+            },
+            "title": "output_digestArguments",
+            "type": "object"
+          },
+          "name": "output_digest"
+        },
+        {
           "description": "Generate several Python code candidates in parallel, then compile/run each.\n\n    The prompt should describe the desired Python solution. `check` is appended to\n    each extracted code block, usually as assertions. This is meant for search:\n    generate multiple attempts, compile them, execute them, and keep the winners.\n    ",
           "effects": [],
           "execution_class": "pure",
@@ -25485,7 +27926,7 @@
           "name": "permission_approve"
         },
         {
-          "description": "Show or set how much Sonder does without asking.\n\n    Modes, least to most autonomous: plan (reads only), manual (ask before\n    anything that is not a read), acceptEdits (file changes proceed, running\n    programs still asks), auto (programs proceed too). Destructive tools ask in\n    every mode, including auto.\n\n    Elevation is a separate axis no mode grants; see permission_policy.\n    ",
+          "description": "Show or set how much Sonder does without asking.\n\n    Modes, least to most autonomous: plan (reads only), manual (ask before\n    anything that is not a read), acceptEdits (file changes proceed, running\n    programs still asks), auto (programs proceed too). Destructive tools ask in\n    every mode, including auto.\n\n    Elevation is a separate axis no mode grants; see permission_policy.\n    Raising the mode above manual needs an attended caller (the console's\n    /mode, or an administrator's POST /v1/permission-mode); from here an\n    unattended client may only lower it or return from plan to manual.\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -26236,7 +28677,7 @@
           "name": "run_project"
         },
         {
-          "description": "Show shared local model mappings and execution-lane tier choices.",
+          "description": "Show shared local model mappings, execution-lane tiers and cached model readiness.\n\n    Read-only: renders the last model-inventory result with its age and never\n    contacts the model endpoint. ``/runtime status refresh`` re-checks it.\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -27272,7 +29713,7 @@
           "name": "test_discover"
         },
         {
-          "description": "Run tests with auto-detected or specified framework (pytest, jest, vitest, cargo, go, mocha, dotnet). Supports filtering by path/pattern, coverage, and extra args.",
+          "description": "Run tests with auto-detected or specified framework (pytest, jest, vitest, cargo, go, mocha, dotnet). Filter with path or pattern.\n\n    pytest runs through the structured test runner (host-owned command,\n    scrubbed environment, hard deadline, process-tree cleanup) when the\n    runtime composes it; coverage runs, and path and pattern together, keep\n    the host-built legacy command. ``extra_args_json`` is retired: anything\n    but empty or ``\"[]\"`` is refused.\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -27283,7 +29724,7 @@
                 "type": "boolean"
               },
               "extra_args_json": {
-                "default": "[]",
+                "default": "",
                 "title": "Extra Args Json",
                 "type": "string"
               },
@@ -27458,6 +29899,33 @@
           "name": "tool_capability_manifest"
         },
         {
+          "description": "Report the categorized host tool inventory (compilers, build systems,\n    test runners, linters, debuggers, package managers, runtimes, containers,\n    VCS, database clients, media/doc tools, cloud CLIs, editors, shells).\n\n    Filter by ``category`` or a tool ``name``. Paths are redacted; versions\n    come only from fixed, bounded, host-owned probes. ``refresh`` re-probes\n    the host instead of using the cached snapshot. Local-only host data.\n    ",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "category": {
+                "default": "",
+                "title": "Category",
+                "type": "string"
+              },
+              "name": {
+                "default": "",
+                "title": "Name",
+                "type": "string"
+              },
+              "refresh": {
+                "default": false,
+                "title": "Refresh",
+                "type": "boolean"
+              }
+            },
+            "title": "tool_inventoryArguments",
+            "type": "object"
+          },
+          "name": "tool_inventory"
+        },
+        {
           "description": "List the sonder-runtime MCP tools and what they are for.",
           "effects": [],
           "execution_class": "pure",
@@ -27493,7 +29961,7 @@
           "name": "toolchain_status"
         },
         {
-          "description": "Live-tune emotion/tone vectors from plain-language feedback.\n\n    Examples:\n      \"be warmer but more concise\"\n      \"more rigorous, less playful, warmth=0.4\"\n\n    This applies small bounded deltas, writes emotion_vectors.json, and the next\n    model request picks up the change without restarting.\n    ",
+          "description": "Live-tune emotion/tone vectors from plain-language feedback.\n\n    Examples:\n      \"be warmer but more concise\"\n      \"more rigorous, less playful, warmth=0.4\"\n\n    This applies small bounded deltas, writes the state-home emotion_vectors.json, and the next\n    model request picks up the change without restarting.\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -27593,7 +30061,7 @@
           "name": "unload"
         },
         {
-          "description": "Merge, replace, or clear the live emotion/tone steering vectors.\n\n    `vectors_json` must be a JSON object, for example:\n      {\"warmth\": 0.6, \"brevity\": 0.4, \"urgency\": -0.2}\n\n    Values are clamped to [-1.0, 1.0]. mode: merge (default), replace, clear,\n    or reset/defaults.\n    Direct edits to emotion_vectors.json also apply on the next request.\n    ",
+          "description": "Merge, replace, or clear the live emotion/tone steering vectors.\n\n    `vectors_json` must be a JSON object, for example:\n      {\"warmth\": 0.6, \"brevity\": 0.4, \"urgency\": -0.2}\n\n    Values are clamped to [-1.0, 1.0]. mode: merge (default), replace, clear,\n    or reset/defaults.\n    Updates are saved to the state-home copy (<SONDER_HOME>/emotion_vectors.json),\n    never the bundled default; direct edits to that copy also apply on the\n    next request.\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -33554,6 +36022,31 @@
           "name": "ollama_pool_admin_status"
         },
         {
+          "description": "Summarize a guarded log file or your own test-run job output.\n\n    The structured form of ``tail -1 out.txt; grep -E \"^(FAILED|ERROR) \" out.txt``:\n    final line, recognized run summary (pytest, unittest, cargo, go, ctest,\n    jest, vitest, dotnet, maven, gradle, make), failure lines, first parsed\n    compiler/test errors, repeated-error groups, and a short tail. Pass exactly\n    one of ``path`` (inside allowed roots; credential stores refused) or\n    ``job_id``. Everything is redacted and bounded.\n    ",
+          "inputSchema": {
+            "properties": {
+              "job_id": {
+                "default": "",
+                "title": "Job Id",
+                "type": "string"
+              },
+              "path": {
+                "default": "",
+                "title": "Path",
+                "type": "string"
+              },
+              "tail_lines": {
+                "default": 20,
+                "title": "Tail Lines",
+                "type": "integer"
+              }
+            },
+            "title": "output_digestArguments",
+            "type": "object"
+          },
+          "name": "output_digest"
+        },
+        {
           "description": "Generate several Python code candidates in parallel, then compile/run each.\n\n    The prompt should describe the desired Python solution. `check` is appended to\n    each extracted code block, usually as assertions. This is meant for search:\n    generate multiple attempts, compile them, execute them, and keep the winners.\n    ",
           "inputSchema": {
             "properties": {
@@ -33755,7 +36248,7 @@
           "name": "permission_approve"
         },
         {
-          "description": "Show or set how much Sonder does without asking.\n\n    Modes, least to most autonomous: plan (reads only), manual (ask before\n    anything that is not a read), acceptEdits (file changes proceed, running\n    programs still asks), auto (programs proceed too). Destructive tools ask in\n    every mode, including auto.\n\n    Elevation is a separate axis no mode grants; see permission_policy.\n    ",
+          "description": "Show or set how much Sonder does without asking.\n\n    Modes, least to most autonomous: plan (reads only), manual (ask before\n    anything that is not a read), acceptEdits (file changes proceed, running\n    programs still asks), auto (programs proceed too). Destructive tools ask in\n    every mode, including auto.\n\n    Elevation is a separate axis no mode grants; see permission_policy.\n    Raising the mode above manual needs an attended caller (the console's\n    /mode, or an administrator's POST /v1/permission-mode); from here an\n    unattended client may only lower it or return from plan to manual.\n    ",
           "inputSchema": {
             "properties": {
               "explain": {
@@ -34464,7 +36957,7 @@
           "name": "run_project"
         },
         {
-          "description": "Show shared local model mappings and execution-lane tier choices.",
+          "description": "Show shared local model mappings, execution-lane tiers and cached model readiness.\n\n    Read-only: renders the last model-inventory result with its age and never\n    contacts the model endpoint. ``/runtime status refresh`` re-checks it.\n    ",
           "inputSchema": {
             "properties": {},
             "title": "runtime_policy_statusArguments",
@@ -35432,7 +37925,7 @@
           "name": "test_discover"
         },
         {
-          "description": "Run tests with auto-detected or specified framework (pytest, jest, vitest, cargo, go, mocha, dotnet). Supports filtering by path/pattern, coverage, and extra args.",
+          "description": "Run tests with auto-detected or specified framework (pytest, jest, vitest, cargo, go, mocha, dotnet). Filter with path or pattern.\n\n    pytest runs through the structured test runner (host-owned command,\n    scrubbed environment, hard deadline, process-tree cleanup) when the\n    runtime composes it; coverage runs, and path and pattern together, keep\n    the host-built legacy command. ``extra_args_json`` is retired: anything\n    but empty or ``\"[]\"`` is refused.\n    ",
           "inputSchema": {
             "properties": {
               "coverage": {
@@ -35441,7 +37934,7 @@
                 "type": "boolean"
               },
               "extra_args_json": {
-                "default": "[]",
+                "default": "",
                 "title": "Extra Args Json",
                 "type": "string"
               },
@@ -35610,6 +38103,31 @@
           "name": "tool_capability_manifest"
         },
         {
+          "description": "Report the categorized host tool inventory (compilers, build systems,\n    test runners, linters, debuggers, package managers, runtimes, containers,\n    VCS, database clients, media/doc tools, cloud CLIs, editors, shells).\n\n    Filter by ``category`` or a tool ``name``. Paths are redacted; versions\n    come only from fixed, bounded, host-owned probes. ``refresh`` re-probes\n    the host instead of using the cached snapshot. Local-only host data.\n    ",
+          "inputSchema": {
+            "properties": {
+              "category": {
+                "default": "",
+                "title": "Category",
+                "type": "string"
+              },
+              "name": {
+                "default": "",
+                "title": "Name",
+                "type": "string"
+              },
+              "refresh": {
+                "default": false,
+                "title": "Refresh",
+                "type": "boolean"
+              }
+            },
+            "title": "tool_inventoryArguments",
+            "type": "object"
+          },
+          "name": "tool_inventory"
+        },
+        {
           "description": "List the sonder-runtime MCP tools and what they are for.",
           "inputSchema": {
             "properties": {},
@@ -35641,7 +38159,7 @@
           "name": "toolchain_status"
         },
         {
-          "description": "Live-tune emotion/tone vectors from plain-language feedback.\n\n    Examples:\n      \"be warmer but more concise\"\n      \"more rigorous, less playful, warmth=0.4\"\n\n    This applies small bounded deltas, writes emotion_vectors.json, and the next\n    model request picks up the change without restarting.\n    ",
+          "description": "Live-tune emotion/tone vectors from plain-language feedback.\n\n    Examples:\n      \"be warmer but more concise\"\n      \"more rigorous, less playful, warmth=0.4\"\n\n    This applies small bounded deltas, writes the state-home emotion_vectors.json, and the next\n    model request picks up the change without restarting.\n    ",
           "inputSchema": {
             "properties": {
               "feedback_text": {
@@ -35733,7 +38251,7 @@
           "name": "unload"
         },
         {
-          "description": "Merge, replace, or clear the live emotion/tone steering vectors.\n\n    `vectors_json` must be a JSON object, for example:\n      {\"warmth\": 0.6, \"brevity\": 0.4, \"urgency\": -0.2}\n\n    Values are clamped to [-1.0, 1.0]. mode: merge (default), replace, clear,\n    or reset/defaults.\n    Direct edits to emotion_vectors.json also apply on the next request.\n    ",
+          "description": "Merge, replace, or clear the live emotion/tone steering vectors.\n\n    `vectors_json` must be a JSON object, for example:\n      {\"warmth\": 0.6, \"brevity\": 0.4, \"urgency\": -0.2}\n\n    Values are clamped to [-1.0, 1.0]. mode: merge (default), replace, clear,\n    or reset/defaults.\n    Updates are saved to the state-home copy (<SONDER_HOME>/emotion_vectors.json),\n    never the bundled default; direct edits to that copy also apply on the\n    next request.\n    ",
           "inputSchema": {
             "properties": {
               "mode": {
@@ -40891,6 +43409,34 @@
         },
         {
           "function": {
+            "description": "Summarize a guarded log file or your own test-run job output.\n\n    The structured form of ``tail -1 out.txt; grep -E \"^(FAILED|ERROR) \" out.txt``:\n    final line, recognized run summary (pytest, unittest, cargo, go, ctest,\n    jest, vitest, dotnet, maven, gradle, make), failure lines, first parsed\n    compiler/test errors, repeated-error groups, and a short tail. Pass exactly\n    one of ``path`` (inside allowed roots; credential stores refused) or\n    ``job_id``. Everything is redacted and bounded.\n    ",
+            "name": "output_digest",
+            "parameters": {
+              "properties": {
+                "job_id": {
+                  "default": "",
+                  "title": "Job Id",
+                  "type": "string"
+                },
+                "path": {
+                  "default": "",
+                  "title": "Path",
+                  "type": "string"
+                },
+                "tail_lines": {
+                  "default": 20,
+                  "title": "Tail Lines",
+                  "type": "integer"
+                }
+              },
+              "title": "output_digestArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
             "description": "Generate several Python code candidates in parallel, then compile/run each.\n\n    The prompt should describe the desired Python solution. `check` is appended to\n    each extracted code block, usually as assertions. This is meant for search:\n    generate multiple attempts, compile them, execute them, and keep the winners.\n    ",
             "name": "parallel_generate_run",
             "parameters": {
@@ -41107,7 +43653,7 @@
         },
         {
           "function": {
-            "description": "Show or set how much Sonder does without asking.\n\n    Modes, least to most autonomous: plan (reads only), manual (ask before\n    anything that is not a read), acceptEdits (file changes proceed, running\n    programs still asks), auto (programs proceed too). Destructive tools ask in\n    every mode, including auto.\n\n    Elevation is a separate axis no mode grants; see permission_policy.\n    ",
+            "description": "Show or set how much Sonder does without asking.\n\n    Modes, least to most autonomous: plan (reads only), manual (ask before\n    anything that is not a read), acceptEdits (file changes proceed, running\n    programs still asks), auto (programs proceed too). Destructive tools ask in\n    every mode, including auto.\n\n    Elevation is a separate axis no mode grants; see permission_policy.\n    Raising the mode above manual needs an attended caller (the console's\n    /mode, or an administrator's POST /v1/permission-mode); from here an\n    unattended client may only lower it or return from plan to manual.\n    ",
             "name": "permission_mode",
             "parameters": {
               "properties": {
@@ -41879,7 +44425,7 @@
         },
         {
           "function": {
-            "description": "Show shared local model mappings and execution-lane tier choices.",
+            "description": "Show shared local model mappings, execution-lane tiers and cached model readiness.\n\n    Read-only: renders the last model-inventory result with its age and never\n    contacts the model endpoint. ``/runtime status refresh`` re-checks it.\n    ",
             "name": "runtime_policy_status",
             "parameters": {
               "properties": {},
@@ -42949,7 +45495,7 @@
         },
         {
           "function": {
-            "description": "Run tests with auto-detected or specified framework (pytest, jest, vitest, cargo, go, mocha, dotnet). Supports filtering by path/pattern, coverage, and extra args.",
+            "description": "Run tests with auto-detected or specified framework (pytest, jest, vitest, cargo, go, mocha, dotnet). Filter with path or pattern.\n\n    pytest runs through the structured test runner (host-owned command,\n    scrubbed environment, hard deadline, process-tree cleanup) when the\n    runtime composes it; coverage runs, and path and pattern together, keep\n    the host-built legacy command. ``extra_args_json`` is retired: anything\n    but empty or ``\"[]\"`` is refused.\n    ",
             "name": "test_run",
             "parameters": {
               "properties": {
@@ -42959,7 +45505,7 @@
                   "type": "boolean"
                 },
                 "extra_args_json": {
-                  "default": "[]",
+                  "default": "",
                   "title": "Extra Args Json",
                   "type": "string"
                 },
@@ -43139,6 +45685,34 @@
         },
         {
           "function": {
+            "description": "Report the categorized host tool inventory (compilers, build systems,\n    test runners, linters, debuggers, package managers, runtimes, containers,\n    VCS, database clients, media/doc tools, cloud CLIs, editors, shells).\n\n    Filter by ``category`` or a tool ``name``. Paths are redacted; versions\n    come only from fixed, bounded, host-owned probes. ``refresh`` re-probes\n    the host instead of using the cached snapshot. Local-only host data.\n    ",
+            "name": "tool_inventory",
+            "parameters": {
+              "properties": {
+                "category": {
+                  "default": "",
+                  "title": "Category",
+                  "type": "string"
+                },
+                "name": {
+                  "default": "",
+                  "title": "Name",
+                  "type": "string"
+                },
+                "refresh": {
+                  "default": false,
+                  "title": "Refresh",
+                  "type": "boolean"
+                }
+              },
+              "title": "tool_inventoryArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
             "description": "List the sonder-runtime MCP tools and what they are for.",
             "name": "tool_manifest",
             "parameters": {
@@ -43176,7 +45750,7 @@
         },
         {
           "function": {
-            "description": "Live-tune emotion/tone vectors from plain-language feedback.\n\n    Examples:\n      \"be warmer but more concise\"\n      \"more rigorous, less playful, warmth=0.4\"\n\n    This applies small bounded deltas, writes emotion_vectors.json, and the next\n    model request picks up the change without restarting.\n    ",
+            "description": "Live-tune emotion/tone vectors from plain-language feedback.\n\n    Examples:\n      \"be warmer but more concise\"\n      \"more rigorous, less playful, warmth=0.4\"\n\n    This applies small bounded deltas, writes the state-home emotion_vectors.json, and the next\n    model request picks up the change without restarting.\n    ",
             "name": "tune_emotion_vectors",
             "parameters": {
               "properties": {
@@ -43280,7 +45854,7 @@
         },
         {
           "function": {
-            "description": "Merge, replace, or clear the live emotion/tone steering vectors.\n\n    `vectors_json` must be a JSON object, for example:\n      {\"warmth\": 0.6, \"brevity\": 0.4, \"urgency\": -0.2}\n\n    Values are clamped to [-1.0, 1.0]. mode: merge (default), replace, clear,\n    or reset/defaults.\n    Direct edits to emotion_vectors.json also apply on the next request.\n    ",
+            "description": "Merge, replace, or clear the live emotion/tone steering vectors.\n\n    `vectors_json` must be a JSON object, for example:\n      {\"warmth\": 0.6, \"brevity\": 0.4, \"urgency\": -0.2}\n\n    Values are clamped to [-1.0, 1.0]. mode: merge (default), replace, clear,\n    or reset/defaults.\n    Updates are saved to the state-home copy (<SONDER_HOME>/emotion_vectors.json),\n    never the bundled default; direct edits to that copy also apply on the\n    next request.\n    ",
             "name": "update_emotion_vectors",
             "parameters": {
               "properties": {
@@ -43856,12 +46430,13 @@
   },
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "50a9634add6990f7d7caa991d1ea7d07510d07575e25e9f33e7c0b3688df7b80",
-    "sonder_runtime/application/tools/generated_catalogs.py": "57a490ddd581e3e7a5d4b7b73379d205048f1db6de8e7e73c71f1124c6d84900",
+    "server.py": "52ae1b06caf080b9db9cb26fbd4900249921bbd3dcbf6706f66c93bb8279ff16",
+    "sonder_runtime/application/tools/generated_catalogs.py": "0cb58ae27e9f0e56102282b7e2a5b7b8a9d955a4322055e87d18d3970fe644d8",
+    "sonder_runtime/bootstrap/native_mcp.py": "f88dcc1eb15ba75200359a06f9fb05b4673bbe5013dca64dfca3e158d873675d",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/domain/operational_capabilities.py": "6f8f2083343ac1b0de076cd4d545b5f99602a9916c185bd15d965ffa0c405fe6",
     "sonder_runtime/interfaces/sdk/discovery.py": "db8aeca8dd84d06cbbf834495db30b211956393375676f23899a28685aea015b",
-    "sonder_runtime/platform/config.py": "a7caf20f77ebb3a18b59140edc58d3ebf000360c9b1e7ba69d97cb08b93234ac",
+    "sonder_runtime/platform/config.py": "e459b7eb1df24bf9f2e21e17b913763b4bd20f31bb1f3e55dd1904bc1ca237b7",
     "sonder_runtime/platform/memory_replication_config.py": "f9fc0a642812bdc456ac082f0f8c52f051822f0160e16882b634895feb0cea61"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
@@ -48106,6 +50681,31 @@
       }
     },
     {
+      "description": "Summarize a guarded log file or your own test-run job output.\n\n    The structured form of ``tail -1 out.txt; grep -E \"^(FAILED|ERROR) \" out.txt``:\n    final line, recognized run summary (pytest, unittest, cargo, go, ctest,\n    jest, vitest, dotnet, maven, gradle, make), failure lines, first parsed\n    compiler/test errors, repeated-error groups, and a short tail. Pass exactly\n    one of ``path`` (inside allowed roots; credential stores refused) or\n    ``job_id``. Everything is redacted and bounded.\n    ",
+      "name": "output_digest",
+      "parameters": {
+        "properties": {
+          "job_id": {
+            "default": "",
+            "title": "Job Id",
+            "type": "string"
+          },
+          "path": {
+            "default": "",
+            "title": "Path",
+            "type": "string"
+          },
+          "tail_lines": {
+            "default": 20,
+            "title": "Tail Lines",
+            "type": "integer"
+          }
+        },
+        "title": "output_digestArguments",
+        "type": "object"
+      }
+    },
+    {
       "description": "Generate several Python code candidates in parallel, then compile/run each.\n\n    The prompt should describe the desired Python solution. `check` is appended to\n    each extracted code block, usually as assertions. This is meant for search:\n    generate multiple attempts, compile them, execute them, and keep the winners.\n    ",
       "name": "parallel_generate_run",
       "parameters": {
@@ -48307,7 +50907,7 @@
       }
     },
     {
-      "description": "Show or set how much Sonder does without asking.\n\n    Modes, least to most autonomous: plan (reads only), manual (ask before\n    anything that is not a read), acceptEdits (file changes proceed, running\n    programs still asks), auto (programs proceed too). Destructive tools ask in\n    every mode, including auto.\n\n    Elevation is a separate axis no mode grants; see permission_policy.\n    ",
+      "description": "Show or set how much Sonder does without asking.\n\n    Modes, least to most autonomous: plan (reads only), manual (ask before\n    anything that is not a read), acceptEdits (file changes proceed, running\n    programs still asks), auto (programs proceed too). Destructive tools ask in\n    every mode, including auto.\n\n    Elevation is a separate axis no mode grants; see permission_policy.\n    Raising the mode above manual needs an attended caller (the console's\n    /mode, or an administrator's POST /v1/permission-mode); from here an\n    unattended client may only lower it or return from plan to manual.\n    ",
       "name": "permission_mode",
       "parameters": {
         "properties": {
@@ -49016,7 +51616,7 @@
       }
     },
     {
-      "description": "Show shared local model mappings and execution-lane tier choices.",
+      "description": "Show shared local model mappings, execution-lane tiers and cached model readiness.\n\n    Read-only: renders the last model-inventory result with its age and never\n    contacts the model endpoint. ``/runtime status refresh`` re-checks it.\n    ",
       "name": "runtime_policy_status",
       "parameters": {
         "properties": {},
@@ -49984,7 +52584,7 @@
       }
     },
     {
-      "description": "Run tests with auto-detected or specified framework (pytest, jest, vitest, cargo, go, mocha, dotnet). Supports filtering by path/pattern, coverage, and extra args.",
+      "description": "Run tests with auto-detected or specified framework (pytest, jest, vitest, cargo, go, mocha, dotnet). Filter with path or pattern.\n\n    pytest runs through the structured test runner (host-owned command,\n    scrubbed environment, hard deadline, process-tree cleanup) when the\n    runtime composes it; coverage runs, and path and pattern together, keep\n    the host-built legacy command. ``extra_args_json`` is retired: anything\n    but empty or ``\"[]\"`` is refused.\n    ",
       "name": "test_run",
       "parameters": {
         "properties": {
@@ -49994,7 +52594,7 @@
             "type": "boolean"
           },
           "extra_args_json": {
-            "default": "[]",
+            "default": "",
             "title": "Extra Args Json",
             "type": "string"
           },
@@ -50162,6 +52762,31 @@
       }
     },
     {
+      "description": "Report the categorized host tool inventory (compilers, build systems,\n    test runners, linters, debuggers, package managers, runtimes, containers,\n    VCS, database clients, media/doc tools, cloud CLIs, editors, shells).\n\n    Filter by ``category`` or a tool ``name``. Paths are redacted; versions\n    come only from fixed, bounded, host-owned probes. ``refresh`` re-probes\n    the host instead of using the cached snapshot. Local-only host data.\n    ",
+      "name": "tool_inventory",
+      "parameters": {
+        "properties": {
+          "category": {
+            "default": "",
+            "title": "Category",
+            "type": "string"
+          },
+          "name": {
+            "default": "",
+            "title": "Name",
+            "type": "string"
+          },
+          "refresh": {
+            "default": false,
+            "title": "Refresh",
+            "type": "boolean"
+          }
+        },
+        "title": "tool_inventoryArguments",
+        "type": "object"
+      }
+    },
+    {
       "description": "List the sonder-runtime MCP tools and what they are for.",
       "name": "tool_manifest",
       "parameters": {
@@ -50193,7 +52818,7 @@
       }
     },
     {
-      "description": "Live-tune emotion/tone vectors from plain-language feedback.\n\n    Examples:\n      \"be warmer but more concise\"\n      \"more rigorous, less playful, warmth=0.4\"\n\n    This applies small bounded deltas, writes emotion_vectors.json, and the next\n    model request picks up the change without restarting.\n    ",
+      "description": "Live-tune emotion/tone vectors from plain-language feedback.\n\n    Examples:\n      \"be warmer but more concise\"\n      \"more rigorous, less playful, warmth=0.4\"\n\n    This applies small bounded deltas, writes the state-home emotion_vectors.json, and the next\n    model request picks up the change without restarting.\n    ",
       "name": "tune_emotion_vectors",
       "parameters": {
         "properties": {
@@ -50285,7 +52910,7 @@
       }
     },
     {
-      "description": "Merge, replace, or clear the live emotion/tone steering vectors.\n\n    `vectors_json` must be a JSON object, for example:\n      {\"warmth\": 0.6, \"brevity\": 0.4, \"urgency\": -0.2}\n\n    Values are clamped to [-1.0, 1.0]. mode: merge (default), replace, clear,\n    or reset/defaults.\n    Direct edits to emotion_vectors.json also apply on the next request.\n    ",
+      "description": "Merge, replace, or clear the live emotion/tone steering vectors.\n\n    `vectors_json` must be a JSON object, for example:\n      {\"warmth\": 0.6, \"brevity\": 0.4, \"urgency\": -0.2}\n\n    Values are clamped to [-1.0, 1.0]. mode: merge (default), replace, clear,\n    or reset/defaults.\n    Updates are saved to the state-home copy (<SONDER_HOME>/emotion_vectors.json),\n    never the bundled default; direct edits to that copy also apply on the\n    next request.\n    ",
       "name": "update_emotion_vectors",
       "parameters": {
         "properties": {

@@ -7,6 +7,9 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from time import monotonic
 from ..application.tools.facade import ToolApplicationFacade
+from ..application.developer_tools import DeveloperToolServices
+from ..application.debugging.service import DebugDigestService
+from ..application.protocol.facade import ProtocolApplicationFacade
 from ..adapters.provider_bindings import ProviderBindings
 from ..application.chat.handle_chat import ChatService
 from ..application.vision import VisionService
@@ -52,6 +55,8 @@ from ..application.runtime_policy.use_cases import RuntimePolicyService
 from ..application.workflows.use_cases import WorkflowService
 from ..application.context_integration import ContextPlanningFacade
 from ..application.control_plane import ControlPlaneSnapshotService
+from ..application.observability.runtime_telemetry import RuntimeTelemetry
+from ..application.ports.telemetry_feed import TelemetryFeed
 from ..application.context import OperationContext
 from ..platform.config import SonderConfig
 
@@ -93,6 +98,9 @@ class Application:
     memory_replication: Any | None = None
     process_job_provider: Callable[[], ProcessJobProvider] | None = None
     job_recovery: Callable[..., JobRecoveryReport] | None = None
+    # Bounded verifier reconciliation of unresolved worker effects.  Runs once
+    # during composition; operators may re-run it.  Never executes an effect.
+    worker_effect_reconciliation: Callable[..., Any] | None = None
     config: SonderConfig | None = None
     vision: VisionService | None = None
     web_provider: WebProvider | None = None
@@ -118,6 +126,9 @@ class Application:
     # on every surface, with the runtime's permission modes as its evaluator
     # and operations-grade durable receipts (see bootstrap/typed_tools.py).
     tools: ToolApplicationFacade | None = None
+    # Client/SDK schema and reconnect contract derived from ``tools``'
+    # catalog; deny-by-default until a hosting interface authorizes it.
+    protocol: ProtocolApplicationFacade | None = None
     container_world_provider: Any | None = None
     remote_world_provider: Any | None = None
     compute_inventory_page: Callable[..., dict] | None = None
@@ -133,6 +144,19 @@ class Application:
     _artifact_mobility_available: Callable[[], bool] | None = field(default=None, repr=False)
     # Shared with the typed gateway to record native MCP compatibility calls.
     tool_audit: ToolAuditRepository | None = field(default=None, repr=False)
+    # Host tool inventory, structured test runs and the output digest
+    # (bootstrap/developer_tools.py); None when this runtime did not compose
+    # them, which every surface reports instead of failing.
+    developer_tools: DeveloperToolServices | None = None
+    # Crash and profile digests (bootstrap/debug_tools.py); None when this
+    # runtime did not compose them, which every surface reports instead.
+    debug_tools: "DebugDigestService | None" = None
+    # Observatory live producer: the Runtime v1 vocabulary (session, request,
+    # route events) and the bounded feed the admin telemetry routes read.
+    # Both are None when SONDER_OBSERVATORY_EXPORT=0.
+    telemetry: RuntimeTelemetry | None = None
+    telemetry_feed: TelemetryFeed | None = None
+    close_telemetry: Callable[[], None] | None = field(default=None, repr=False)
 
     def operational_capabilities(self):
         from ..domain.operational_capabilities import build_operational_capabilities
@@ -230,6 +254,13 @@ class Application:
     def close_providers(self, timeout: float | None = None) -> None:
         """Quiesce every composed runtime resource before process shutdown."""
         started = monotonic()
+        if self.close_telemetry is not None:
+            # Best effort and in-memory only: session.ended, then the live
+            # streams close so HTTP stream handlers exit before the listener.
+            try:
+                self.close_telemetry()
+            except Exception:
+                logger.warning("live telemetry close failed", exc_info=True)
         try:
             if self.close_artifact_mobility is not None:
                 self.close_artifact_mobility()

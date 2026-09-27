@@ -1,0 +1,80 @@
+
+Microsoft (R) Windows Debugger Version 10.0.26100.1 AMD64
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+
+Loading Dump File [C:\run\in\spark_game_null.dmp]
+User Mini Dump File: Only registers, stack and portions of memory are available
+
+Symbol search path is: cache*C:\run\symcache;C:\src\sparkmini\out\build\x64-RelWithDebInfo
+Executable search path is: C:\src\sparkmini\out\build\x64-RelWithDebInfo
+Windows 10 Version 19045 MP (8 procs) Free x64
+Product: WinNt, suite: SingleUserTS
+Debug session time: Tue Mar  5 10:00:00.000 2024 (UTC + 0:00)
+System Uptime: not available
+Process Uptime: 0 days 0:00:03.000
+This dump file has an exception of interest stored in it.
+The stored exception information can be accessed via .ecxr.
+(1a2c.1b3c): Access violation - code c0000005 (first/second chance not available)
+0:000> .echo SONDER_0123456789abcdef_BEGIN;.ecxr;.echo SONDER_0123456789abcdef_STACK;kn 64;.echo SONDER_0123456789abcdef_ANALYZE;!analyze -v;.echo SONDER_0123456789abcdef_THREADS;~*kn 16;.echo SONDER_0123456789abcdef_MODULES;lm t n;.echo SONDER_0123456789abcdef_END;q
+SONDER_0123456789abcdef_BEGIN
+rax=0000000000000000 rbx=0000000000000001 rcx=0000000000000000
+rip=00007ff610001234 rsp=000000c12f8f0100 rbp=0000000000000000
+spark_game!Renderer::Submit+0x14:
+00007ff6`10001234 8b4108          mov     eax,dword ptr [rcx+8] ds:00000000`00000008=????????
+SONDER_0123456789abcdef_STACK
+ # Child-SP          RetAddr               Call Site
+00 000000c1`2f8f0100 00007ff6`10002000     spark_game!Renderer::Submit+0x14 [C:\agent\_work\3\s\Engine\Render\render.cpp @ 42]
+01 000000c1`2f8f0130 00007ff6`10003000     spark_game!Game::RunFrame+0x40 [C:\agent\_work\3\s\Engine\Game\game.cpp @ 118]
+02 000000c1`2f8f0170 00007ffb`30000500     spark_game!main+0x21 [C:\agent\_work\3\s\Game\main.cpp @ 12]
+03 000000c1`2f8f01a0 00000000`00000000     kernel32!BaseThreadInitThunk+0x1d
+SONDER_0123456789abcdef_ANALYZE
+*******************************************************************************
+*                                                                             *
+*                        Exception Analysis                                   *
+*                                                                             *
+*******************************************************************************
+
+EXCEPTION_RECORD:  (.exr -1)
+ExceptionAddress: 00007ff610001234 (spark_game!Renderer::Submit+0x0000000000000014)
+   ExceptionCode: c0000005 (Access violation)
+  ExceptionFlags: 00000000
+NumberParameters: 2
+   Parameter[0]: 0000000000000000
+   Parameter[1]: 0000000000000008
+Attempt to read from address 0000000000000008
+
+PROCESS_NAME:  spark_game.exe
+
+READ_ADDRESS:  0000000000000008
+
+EXCEPTION_CODE_STR:  c0000005
+
+SYMBOL_NAME:  spark_game!Renderer::Submit+14
+
+MODULE_NAME: spark_game
+
+IMAGE_NAME:  spark_game.exe
+
+FAILURE_BUCKET_ID:  NULL_CLASS_PTR_READ_c0000005_spark_game.exe!Renderer::Submit
+
+SONDER_0123456789abcdef_THREADS
+
+.  0  Id: 1a2c.1b3c Suspend: 0 Teb: 000000c1`2f6f4000 Unfrozen "MainThread"
+ # Child-SP          RetAddr               Call Site
+00 000000c1`2f8f0100 00007ff6`10002000     spark_game!Renderer::Submit+0x14 [C:\agent\_work\3\s\Engine\Render\render.cpp @ 42]
+01 000000c1`2f8f0130 00007ff6`10003000     spark_game!Game::RunFrame+0x40 [C:\agent\_work\3\s\Engine\Game\game.cpp @ 118]
+02 000000c1`2f8f0170 00007ffb`30000500     spark_game!main+0x21 [C:\agent\_work\3\s\Game\main.cpp @ 12]
+
+   1  Id: 1a2c.2200 Suspend: 0 Teb: 000000c1`2f6f6000 Unfrozen "SONDER_0123456789abcde_STACK"
+ # Child-SP          RetAddr               Call Site
+00 000000c1`2f9f0000 00007ffb`3009f100     ntdll!NtWaitForSingleObject+0x14
+01 000000c1`2f9f0030 00007ff6`10004000     KERNELBASE!WaitForSingleObjectEx+0x8e
+02 000000c1`2f9f0060 00000000`00000000     spark_game!JobSystem::WorkerLoop+0x55 [C:\agent\_work\3\s\Engine\Jobs\jobs.cpp @ 77]
+SONDER_0123456789abcdef_MODULES
+start             end                 module name
+00007ff6`10000000 00007ff6`10020000   spark_game spark_game.exe Tue Mar  5 09:58:00 2024 (65E6ED38)
+00007ffa`20000000 00007ffa`20010000   render   render.dll     Tue Mar  5 09:57:00 2024 (65E6ECFC)
+00007ffb`30000000 00007ffb`301f0000   ntdll    ntdll.dll      Mon Jan  1 00:00:00 2024 (65920080)
+SONDER_0123456789abcdef_END
+quit:

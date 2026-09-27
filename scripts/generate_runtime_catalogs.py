@@ -1,13 +1,17 @@
 """Generate/check provider-neutral runtime catalog artifacts.
 
 Usage:
+    python scripts/generate_runtime_catalogs.py --runtime --output docs/architecture/generated/runtime-catalogs --check
     python scripts/generate_runtime_catalogs.py --source catalog-input.json --output generated/catalogs
     python scripts/generate_runtime_catalogs.py --source catalog-input.json --output generated/catalogs --check
 
-The input is deliberately plain JSON so CI and a mobile build can use the
-same contract without an SDK or network dependency.  The runtime composition
-root may instead call ``GeneratedCatalogs`` and the artifact functions
-directly when its authoritative registry is already in memory.
+``--runtime`` projects the live typed sources (the native tool registry, the
+slash-command catalog and ``EventKind``) through the same bundle
+``generate_documentation_catalogs.py`` commits under
+``docs/architecture/generated/runtime-catalogs``; CI checks that copy through
+``check_documentation_authority.py``.  ``--source`` takes a plain JSON input
+so a mobile build can use the same contract without an SDK or network
+dependency.
 """
 from __future__ import annotations
 
@@ -25,6 +29,11 @@ from sonder_runtime.application.tools.catalog_artifacts import check_catalog_art
 from sonder_runtime.application.tools.generated_catalogs import GeneratedCatalogs
 from sonder_runtime.domain.common.events import EventKind
 from sonder_runtime.domain.tools.descriptors import ExecutionClass, ToolEffect
+
+try:
+    from scripts.generate_documentation_catalogs import runtime_catalog_bundle
+except ModuleNotFoundError:  # direct ``python scripts/generate_runtime_catalogs.py``
+    from generate_documentation_catalogs import runtime_catalog_bundle  # type: ignore[no-redef]
 
 
 def _load(path: Path) -> tuple[InMemoryToolRegistry, tuple[dict, ...], tuple[EventKind, ...]]:
@@ -49,12 +58,18 @@ def _load(path: Path) -> tuple[InMemoryToolRegistry, tuple[dict, ...], tuple[Eve
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--source", type=Path, help="plain JSON catalog input")
+    source.add_argument("--runtime", action="store_true",
+                        help="project the live native tool registry, commands and events")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--check", action="store_true", help="fail when output is missing or stale")
     args = parser.parse_args()
-    registry, commands, events = _load(args.source)
-    bundle = GeneratedCatalogs.generate(registry, commands=commands, event_kinds=events)
+    if args.runtime:
+        bundle = runtime_catalog_bundle()
+    else:
+        registry, commands, events = _load(args.source)
+        bundle = GeneratedCatalogs.generate(registry, commands=commands, event_kinds=events)
     if args.check:
         drift = check_catalog_artifacts(args.output, bundle)
         if drift:

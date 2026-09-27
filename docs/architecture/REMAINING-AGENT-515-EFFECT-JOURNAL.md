@@ -101,7 +101,8 @@ mutation remains exactly once in the fixture.
 worker family through its real adapter: `SubprocessJobProvider.start`
 (`process-start`), `ComputeJobWorker.submit` (`compute-submit`),
 `ComputeJobWorker.cancel` (`compute-cancel`), `LocalSubagentProvider.spawn`
-(`subagent-run`), and `GuardedLegacySelfmodService.deploy`
+(`subagent-dispatch`, originally `subagent-run`; see the dispatch section
+below), and `GuardedLegacySelfmodService.deploy`
 (`selfmod-deploy`). Each case runs in a child interpreter against a
 file-backed `SQLiteEffectJournal` and is killed with `os._exit` at one cut, so
 no `except` or `finally` handler runs. The external effect appends to a marker
@@ -119,9 +120,11 @@ status is asserted first; a case whose crash hook did not fire fails.
 For every family and cut, a restarted worker at a newer epoch retries the same
 operation. The effect journal refuses it: the restart fence for unresolved
 cuts, or intent-identity conflict or duplicate-intent refusal for the
-committed cut. The marker count does not change. For `subagent-run`, the
-refusal surfaces as a non-succeeded child, because the child runs on a worker
-thread. That gives 25 hard-crash cases (5 families x 5 cuts).
+committed cut. The marker count does not change. For `subagent-dispatch` the
+marker is the admitting `running` transition in the child store; the refusal
+now surfaces from `spawn()` itself, because dispatch is journaled in the
+spawning thread (the former `subagent-run` family surfaced it as a
+non-succeeded child). That gives 25 hard-crash cases (5 families x 5 cuts).
 
 A mutation check confirmed that the harness is not vacuous. Temporarily
 committing the receipt before the checkpoint insert made all five
@@ -289,23 +292,29 @@ Remaining limits:
   launcher, compute provider, subagent runner, and legacy self-mod adapter. The
   earlier real child-process test covers only the process family's real OS
   launch.
-- Legacy self-mod stages other than deploy and rollback still run outside the
-  journal: `create_backup`, `prepare_workspace`, `record_reproducer_before`,
-  `begin_testing`, `record_test`, `review`, and `approve`. This change is
-  described here but not made. `_mutating_call` hardcodes a deploy-shaped
-  success predicate and one `"{operation}:{run_id}"` operation ID per run. Each
-  stage would need its own success predicate. Repeatable stages such as
-  `record_test` also need a per-attempt operation identity, so that a
-  legitimate retry is not refused as a duplicate. Without that identity, the
-  journal would fence every retried test. This work belongs in
-  `selfmod_service.py`, not in the #519 low-integrity nightly harness files.
-- `compute-cancel` uses one operation ID per job. A second cancel of the same
-  job is refused as a duplicate intent, even after a
-  `cancellation_requested` receipt whose cleanup was pending. This was
-  confirmed by a direct run. Retrying cancellation needs a per-attempt identity
-  or a query-based reconciliation strategy.
-- Compute, subagent, and self-mod operation families still have no provider
-  verifier, so their fences can be cleared only by future trusted composition.
+- Legacy self-mod stages now have per-stage success predicates, phase
+  preconditions and, for repeatable stages (`record_reproducer_before`,
+  `begin_testing`, `record_test`), per-attempt identities
+  (`selfmod-record-test:<run>:attempt-<n>`) in `selfmod_service.py`. The
+  unattended driver `scripts/nightly_selfmod.run` routes `create_backup`,
+  `prepare_workspace`, `begin_testing`, every candidate gate including the
+  host probe, `review`, `approve` and `deploy` through the bootstrap-composed
+  service (`GuardedLegacySelfmodService.journaled_stage`), exercised by
+  `tests/test_wiring_selfmod_linux_nightly.py`. Still outside the journal:
+  `verify_backup`, `record_host_grade`, `reject`, `cancel`, the host grader's
+  clean replay, and the operator `/selfmod` path in `server.py`
+  (`_selfmod_command`, `_execute_selfmod_run`), which calls the legacy module
+  directly.
+- `compute-cancel` retries get a journal-derived per-attempt identity
+  (`ComputeJobWorker._next_cancel_attempt`). Attempt 1 keeps the historical
+  operation ID. The serve route reaches it through
+  `dispatch_compute_job_cancel` on the bootstrap-composed worker, exercised by
+  `tests/test_wiring_selfmod_compute_cancel_attempts.py` (only the systemd
+  containment seam is replaced).
+- *Superseded for compute-cancel by "The `compute-cancel` verifier" below.*
+  Self-mod operation families still have no provider verifier, so their
+  fences can be cleared only by future trusted composition. Compute-submit and subagent-dispatch verifiers are described below; they
+  prove launch or admission only, never workload or runner success.
 - A full hosted regression and deployment receipt are still required before
   LOOP-008 can be promoted to `verified`.
 
@@ -343,27 +352,78 @@ matrix.
 
 ### Concrete child-checkpoint blocker and next implementation
 
-`LocalSubagentProvider` currently wraps the entire runner in one
-`subagent-run:{child_id}` effect. That first intent stays unresolved while the
-runner saves child checkpoints and completes inner tool effects in the same
-run. Consequently, even a journal containing a completed inner mutation has a
-settled high-water of zero until the outer runner returns. Copying zero into a
-child checkpoint would not establish a resumable effect prefix.
+*Superseded by the bounded dispatch effect below:* `LocalSubagentProvider`
+originally wrapped the entire runner in one `subagent-run:{child_id}` effect.
+That first intent stayed unresolved while the runner saved child checkpoints
+and completed inner tool effects in the same run, so even a journal containing
+a completed inner mutation had a settled high-water of zero until the outer
+runner returned.
 
-`test_child_effect_checkpoint_crash.py` reproduces this with two persisted
-databases and a real interpreter exit after one fsynced mutation and a child
-checkpoint. The inner effect has a completed receipt, the outer intent has none,
-and reopening both stores refuses duplicate work. This qualifies the existing
-fence, not checkpoint-based continuation.
+#### Bounded `subagent-dispatch` effect (item 1 below)
+
+`LocalSubagentProvider` now journals one `subagent-dispatch:{child_id}` effect
+around admission only (`DurableContinuationService.spawn`), in the spawning
+thread, with reconciliation strategy `query`. The binding factory runs before
+the intent, so a fenced run is refused before any admission. The runner thread
+is gated: it waits (bounded by 30 s and the operation deadline) until the
+dispatch receipt and checkpoint commit, and fails closed if the receipt is not
+published. It then runs under the same binding, so inner effects are journaled
+in the same run above the settled dispatch.
+
+The receipt proves exact durable admission, not runner completion. The
+provider and the new host verifier
+(`adapters/execution/subagent_dispatch_verifier.py`) derive it from the child
+store only. They recompute a canonical request digest from the persisted request
+(child, parent, prompt, budget, metadata, resume and idempotency keys). They
+require an exact child, parent, idempotency key, and digest match. They take the
+admitted revision from the retained receipt of the first applied `running`
+update in the store's mutation log. The receipt key is
+`subagent-dispatch:{child_id}:{admitted_revision}`. The outcome digest binds
+those fields, and the live and reconciled values are identical. The child
+store schema is unchanged. A missing row, a digest, parent, or idempotency
+mismatch, a wrong run, scope, or strategy, and a legacy or unstarted row
+without a retained admission record all produce no proof. Terminal status text
+alone is not used. A synchronous admission refusal with no durable admission
+is recorded as a `failed` dispatch, not a fence. Reuse of a settled dispatch
+returns the existing child only while the child store still proves that
+admission, and it cannot start a runner. A repeat spawn of a child whose runner
+this provider launched and which is still live does not compose a new binding
+(composition runs restart recovery, which would fence the live runner's
+in-flight inner effects); it only returns the live handle or is refused, and
+dispatch is serialized per provider. Production composition registers the
+verifier in `get_worker_effect_journal` through a lazy continuation-repository
+getter, and passes the same kind of verifier to the provider.
+
+Evidence (focused, not a requirement verification):
+`tests/test_subagent_dispatch_effect.py` covers the dispatch being completed
+before the runner's first inner effect and a settled high-water of 2 while the
+child is running. It also covers registry-reserved delegation, reuse, refusal,
+and verifier no-proof cases. A real `os._exit` after admission but before the
+receipt leaves an intent. A second spawn is refused. A verifier bound to a
+store without the row gives no proof. The exact row reconciles it, and the
+settled dispatch still starts no runner. `test_child_effect_checkpoint_crash.py`
+was rewritten deliberately to these semantics. After a real crash mid-run,
+the dispatch and inner receipts are `completed` and the settled high-water is
+2. Restart still requires owner cleanup (`ContinuationCleanupRequired`), a
+restarted provider cannot launch a second runner, and the inner write is
+refused rather than re-invoked. `tests/test_worker_effect_crash_injection.py`
+now runs the `subagent-dispatch` family through all five cuts.
+`tests/test_515_bounded_subagent_dispatch_effect_bootstrap.py` checks the
+composition wiring.
+
+The settled prefix now exists, but nothing consumes it yet. The remaining
+items below are unchanged, and restart of a child whose runner crashed after
+dispatch remains non-resuming.
 
 The child checkpoint CAS in `application/subagents/durable_continuation.py`
 stores no journal provenance. Existing restart paths correctly require owner
-cleanup and fence the unresolved outer effect. They prevent duplicate execution
+cleanup and refuse a second runner. They prevent duplicate execution
 but cannot continue from the saved child state. The next implementation needs:
 
-1. A bounded dispatch effect whose receipt proves exact durable child admission,
-   with an identity and request digest, rather than completion of the entire
-   runner. Crashes across dispatch must still refuse an unproven second start.
+1. Implemented as described above: a bounded dispatch effect whose receipt
+   proves exact durable child admission, with an identity and request digest,
+   rather than completion of the entire runner. Crashes across dispatch still
+   refuse an unproven second start.
 2. Host-stamped checkpoint provenance binding child sequence/state digest,
    journal identity, run, worker, owner epoch, and settled position to the child
    CAS. SQLite child storage, PostgreSQL snapshots, and the continuation codec
@@ -382,3 +442,1070 @@ but cannot continue from the saved child state. The next implementation needs:
 
 This is a coordinated lifecycle and persistence change, not an extra checkpoint
 field. Terminal child status text is not a substitute for a dispatch receipt.
+
+## Child checkpoint journal provenance on 2026-09-25 (item 2, validation half of item 3)
+
+This slice implements item 2 of the list above and the validation half of
+item 3, for the SQLite child store and the continuation codec. It does not
+change `LocalSubagentProvider`, the outer `subagent-run` effect, or add a
+production resume adapter. Item 1 (the dispatch receipt) belongs to a
+separate slice.
+
+What now exists:
+
+- `ContinuableCheckpoint.provenance` holds an optional immutable
+  `CheckpointProvenance`, defined in `application/subagents/continuable.py`.
+  It binds `(child_id, sequence, canonical state digest, cursor)` to
+  `(journal identity, run_id, worker_id, owner_epoch, settled position)`. A
+  `record_digest` covers every field. `None` means provenance-absent.
+- `DurableContinuationService(repository, checkpoint_provenance=hook)`
+  accepts an injectable host hook. The runner's `save(state, cursor)` callable
+  has no provenance parameter. The service computes the state digest, calls
+  the hook, and refuses a record whose subject or digest does not match. A
+  refusal fails the save and the child keeps its previous checkpoint. A
+  `provenance` key inside the runner's state is plain data. Without a hook,
+  behaviour is unchanged and checkpoints are stored provenance-absent.
+- `JournalProvenanceStamp` (`application/subagents/checkpoint_provenance.py`)
+  is the host hook. It reads one journal snapshot: identity, current owner
+  epoch and settled high-water. It refuses to stamp for an owner that is not
+  the current epoch, or when the journal identity is missing. It records the
+  settled prefix, not the high-water, so an open outer intent pins the
+  position below itself.
+- `SQLiteDurableContinuationRepository` stores provenance in an additive
+  `child_checkpoint_provenance` table, keyed by `(child_id, sequence)`. The
+  row is inserted in the same `BEGIN IMMEDIATE` transaction as the checkpoint
+  compare-and-set and the mutation receipt. Triggers refuse `UPDATE` and
+  `DELETE`. Every read left-joins the row for the current checkpoint, so
+  rows written before the table existed read back provenance-absent. The
+  store also refuses provenance whose subject does not match the checkpoint.
+- `SQLiteJournalProvenanceSource` gives a SQLite effect journal a durable
+  random identity. The identity lives in an additive
+  `effect_journal_identity` table in the journal file and is minted only when
+  trusted composition passes `create_identity=True`. Validation reads open the
+  file read-only and never mint an identity, so a missing or recreated
+  journal refuses.
+- `continuation_codec` round-trips provenance, and snapshots without the
+  field decode as absent. `postgres_continuation` exposes
+  `encode_child_snapshot` and `decode_child_snapshot`, and its
+  `save_checkpoint` applies the same subject check. In PostgreSQL, provenance
+  lives inside the single child snapshot, so it commits with the
+  compare-and-set by construction.
+- `validate_checkpoint_resume` is a pure decision. It reads the whole run
+  through bounded, contiguous `effects_since` pages. It returns
+  `allowed=True` with `receipts` (settled outcomes at or below the position)
+  and `later_receipts` (settled after it), each keyed by idempotency key.
+  Otherwise it returns a typed `CheckpointResumeRefusal`: no checkpoint,
+  provenance absent, record digest, subject or state digest mismatch, journal
+  missing, unavailable or swapped, run or worker mismatch, stale resumer
+  epoch, epoch ahead, superseded owner, position ahead of the journal, an
+  unresolved intent at or below the position, an unresolved intent reusing a
+  settled idempotency key, any other unresolved intent, an incomplete or
+  inconsistent page, or an exhausted page budget. After the last page it
+  re-reads the journal identity and current owner epoch and refuses with
+  `journal_changed_during_validation` if either moved while pages were read.
+
+Tests: `tests/test_child_checkpoint_journal_provenance.py`. They include
+real `os._exit` crash cuts in a child interpreter at three points: after the
+journal receipt commits but before the child compare-and-set, inside the
+compare-and-set transaction before `COMMIT`, and after the compare-and-set.
+Reopening both files yields either the old checkpoint with its old valid
+provenance or the new one. No reopened checkpoint names a position above the
+journal's settled high-water, and the validator accepts each one. The receipt
+after the old checkpoint appears in `later_receipts`.
+
+Verification on 2026-09-25:
+
+- The new file has 16 tests, all passing (17 after review added the
+  swapped-or-reclaimed-during-paging case). Before the implementation existed,
+  the file failed at collection.
+- Mutation check: 11 planted defects each made at least one test fail, and
+  the sources were then restored. The defects disabled the state-digest,
+  page-end, contiguity, stale-epoch, journal-identity, unresolved-below and
+  overlap checks; stamped the high-water instead of the settled prefix;
+  dropped the service hook; dropped the SQLite provenance insert; and dropped
+  the PostgreSQL subject check.
+- The 19 existing continuation, child-storage, child-migration, worker
+  registry, subagent provider and effect-journal test files, together with the
+  new file: 205 passed, 23 skipped. The skips need a PostgreSQL binding.
+- The 19 other test files that import the child store or provider: 222
+  passed, 13 skipped (PostgreSQL or Windows only).
+- The first run found that `child_migration.py` splits the child DDL on `;`.
+  The immutability triggers are therefore installed separately, when the
+  repository opens a database.
+
+What is not qualified:
+
+- There is no production resume path. Nothing in `LocalSubagentProvider` or
+  bootstrap installs the hook or calls the validator. The outer
+  `subagent-run:{child_id}` intent still pins the settled position at 0 for
+  every production child checkpoint, so production checkpoints would be
+  refused. Item 1 (the dispatch receipt) and a bound resume entry point are
+  required before any checkpoint can authorize continuation. Whole-child
+  fencing remains the only production guarantee.
+- The validator returns receipts. It does not make a runner consume them.
+  Runner-side consumption, and crash cuts around dispatch and terminal
+  publication, remain open (items 3 and 4).
+- The journal and child store are separate files. The protocol is
+  journal-proof-first, with the validator covering the gap. It is not a
+  cross-store transaction. The owner-epoch check in the stamp and the child
+  compare-and-set are not one atomic step. A newer owner that claims between
+  them is detected at validation (`owner_superseded` or `stale_owner_epoch`),
+  not prevented at write time.
+- PostgreSQL is qualified at the codec and `_apply` level only, with no live
+  database. *(Superseded 2026-09-26: see "PostgreSQL child store: stamped
+  checkpoints and resume on a live pair" below.)* The SQLite-to-PostgreSQL child migration copies
+  `durable_child_session` rows only, so migrated checkpoints arrive
+  provenance-absent (fail-closed). A child migration that was paused before
+  this change and resumed after it recomputes page digests over snapshots
+  that now carry `"provenance": null`, so the recorded page digests no
+  longer match and the resume is refused (fail-closed; restart the
+  migration).
+- A `save_checkpoint` intent that was retained unresolved before this change
+  cannot be replayed through `mutate`, because the payload now includes the
+  `provenance` field. It stays fenced as an ambiguous mutation, and receipt
+  reconciliation is unchanged.
+- No master-spec checkbox changes. LOOP-008, AGENT-006 and SESSION-007 stay
+  unverified.
+
+## Production wiring: startup reconciliation, stamped checkpoints and child resume (2026-09-25)
+
+This slice connects the mechanisms above to real production callers. Every
+item below is reached from `build_application` in `sonder_runtime/bootstrap/app.py`,
+which the runtime entry points (`python -m sonder_runtime` and the HTTP
+server, through `default_app`) compose. The
+end-to-end tests drive that composition, not hand-built services.
+
+*Superseded by this section:* the "What is not qualified" list under the
+provenance slice says that nothing installs the hook or calls the validator,
+and that there is no production resume path. Both statements are now false
+for the SQLite child store.
+
+What is now wired (caller -> callee):
+
+- **Automatic bounded reconciliation.**
+  - At startup, `build_application` calls `reconcile_worker_effects()`, which
+    calls `application/execution/effect_reconciliation.reconcile_unresolved_effects`.
+    That pass pages `SQLiteEffectJournal.unresolved_page` (a new read-only
+    keyset query). For each run whose unresolved intents were all admitted by
+    a worker identity this host owns (`process`, `compute`, `subagent`,
+    `selfmod` on this node), it calls
+    `AuthenticatedWorkerBinding.reconcile_before_restart`. That method claims
+    the host epoch, calls `recover()` so orphans become `uncertain` and the run
+    is fenced, then calls `journal.reconcile()` for each of this worker's
+    intents through the immutable verifier registry.
+  - Before any restart, the production `worker_binding()` sets
+    `auto_reconcile=True`. `recover_before_restart` therefore runs the same
+    bounded reconciliation before it refuses. This covers the process
+    provider and compute worker constructors, `_compose_subagent_binding`
+    (spawn and child resume) and `_compose_selfmod_binding`.
+  - Bounds: at most 64 runs and 16 pages of 100 intents per startup pass, a
+    20 s wall budget, the journal's recovery page per run, and a 2 s
+    timeout on each verifier call.
+  - Observability: a log line for each run and for the whole pass. The
+    content-free `worker.effects.reconciled` event goes to the durable
+    operations sink. Each proof is recorded in the journal's durable
+    `verified:<verifier>:<reference>` detail.
+  - Crash safety: every step is read-only or a single journal transaction. A
+    second pass skips terminal intents.
+  - Nothing invokes an effect. An intent with no proof stays `uncertain` and
+    its run stays fenced.
+  - A run that contains another host's worker identity is left untouched and
+    reported under `foreign_runs`.
+  - Live local peers (review fix). Worker identities are per node, so a
+    second runtime process on the same node (for example `serve` plus an
+    IDE-launched `mcp`) composes the same `<family>:<node>` identities. Each
+    process that composes the worker-effects journal holds an exclusive OS
+    file lock on its own lease under `worker-effect-hosts/` beside the
+    journal (`adapters/persistence/worker_effect_hosts.py`), acquired before
+    any intent can be admitted and held until the process exits. The startup
+    pass first probes the other leases. If one is held, or the probe fails, it
+    claims nothing and reports `deferred="live-peer-host-process"` (also in
+    the event); a peer's in-flight intents and owner epoch stay untouched.
+    Leases of exited processes are reaped when their lock is acquired. A
+    pass that finds nothing unresolved claims nothing and emits no event.
+    Before this fix the pass fenced a live peer's in-flight effects and made
+    its receipt commit fail.
+  - A failed pass is logged and keeps every fence in place. It does not stop
+    composition.
+  - Operators can run the pass again through
+    `Application.worker_effect_reconciliation`.
+  - Bindings that tests construct directly keep the old explicit-reconcile
+    semantics (`auto_reconcile=False`).
+- **Stamped child checkpoints.** `get_delegation_service` composes
+  `SQLiteJournalProvenanceSource(get_worker_effect_journal(), create_identity=True)`
+  and `DurableContinuationService(..., checkpoint_provenance=JournalProvenanceStamp(...))`.
+  The binding resolver maps `ProvenanceSubject.child_id` to the same run,
+  worker and epoch as `_compose_subagent_binding`. Every production child
+  checkpoint save therefore runs `_stamp_checkpoint` and
+  `CheckpointProvenance.stamp`. The SQLite store persists the record in the
+  same transaction as the checkpoint compare-and-set.
+- **Child resume path.** `LocalSubagentProvider` receives the same
+  provenance source as `provenance_journal`. `LocalSubagentProvider.resume`
+  follows these steps, and an exact repeat of a crashed or recoverable
+  child's request through `spawn` / `DelegationService.dispatch` takes the
+  same route:
+  1. Prove the old owner dead with `DurableContinuationService.release_dead_owner`.
+     This works only for registry reservations whose recorded pid and host are
+     another, provably dead process. Anything else raises
+     `ContinuationCleanupRequired`.
+  2. Compose the binding. This claims a newer epoch and reconciles.
+  3. Require a settled dispatch receipt that the child store still proves.
+  4. Run `validate_checkpoint_resume`, or run `validate_uncheckpointed_resume`
+     for a child that never checkpointed. The second is allowed only when
+     the run holds nothing but settled dispatch attempts.
+  5. Claim the exact validated revision with `resume(expected_revision=...)`.
+
+  The resumed runner runs with `resumed_from(decision)` and
+  `settled_receipts(...)` bound. `resume_receipts()` and
+  `effect_journal.settled_receipt(key)` hand the runner the receipts settled
+  at or before the checkpoint and those settled after it.
+  `JournalBinding.begin_request` refuses one of those keys with
+  `SettledEffectReplay` before any journal write. A refused validation
+  raises `ChildResumeRefused` with the typed `CheckpointResumeRefusal`
+  reason, and the child stays `FAILED`/`recovery_required`.
+  `ContinuableCheckpoint.provenance_absent` is now the check that the
+  validator uses.
+- **Concurrent spawn decision (operator).**
+  - Two identical concurrent dispatches join. `ContinuationWorkerRegistry`
+    returns the reservation the other caller created when the launch is
+    identical, and the provider's live-runner join returns the same handle.
+    One runner and one `completed` dispatch intent result.
+  - The same child identity with a different request digest is refused with
+    `InvalidSubagentRequest` before any journal write.
+  - A dispatch refused synchronously, with no durable admission, is recorded
+    as a `failed` no-effect attempt (receipt `subagent-dispatch-refused:...`).
+    A corrected dispatch is journaled as the next bounded attempt: operation
+    `subagent-dispatch:{child}#dispatch-attempt-N` and idempotency key
+    `{key}#dispatch-attempt-N`, with N up to 8. The dispatch verifier parses
+    and proves attempts.
+  - An unresolved or uncertain prior attempt still refuses (fail-closed).
+
+Evidence (end-to-end through `build_application`):
+
+- `tests/test_wiring_journal_child_startup_reconcile.py`: a real child
+  interpreter is killed with `os._exit` after durable child admission and
+  before the dispatch receipt. The next composition:
+  - proves the dispatch from the child store;
+  - leaves an unprovable selfmod intent `uncertain` with its run fenced;
+  - leaves a foreign worker's intent untouched;
+  - emits the operations event;
+  - resolves nothing new on a second pass;
+  - then resumes the admitted child through the exact delegation, with no
+    second dispatch intent.
+- `tests/test_wiring_journal_child_resume.py`: a real child interpreter
+  dispatches through `DelegationService`. The runner checkpoints, performs a
+  journaled append, and is killed with `os._exit` after the receipt and before
+  its next checkpoint. The repeated delegation in a new composition finds a
+  stamped checkpoint, resumes from it, and consumes the settled append
+  receipt: the file holds one append and the run holds one append intent. A
+  swapped journal identity refuses with `JOURNAL_IDENTITY_MISMATCH` and leaves
+  the child `recovery_required`.
+- `tests/test_wiring_journal_live_peer_startup.py`: a real child
+  interpreter composes the application and admits an intent it keeps in
+  flight. A second `build_application` leaves the intent `intent` and the
+  owner epoch unchanged and reports the pass deferred. The peer then commits
+  its receipt, and once it has exited the next pass is no longer deferred.
+- `tests/test_wiring_journal_child_spawn.py` covers three cases: concurrent
+  identical dispatch joins with one runner and one intent; a different digest
+  is refused; a refused dispatch is followed by a corrected dispatch as
+  attempt 2.
+
+What remains:
+
+- *Superseded 2026-09-26 (live-pair section below):* PostgreSQL child
+  storage has provenance stamping at the codec level, but the resume path
+  has been exercised only with the SQLite child store. A killed PostgreSQL
+  owner still blocks resume until a reviewed owner-cleanup procedure exists.
+  `release_dead_owner` relies on the reservation's recorded pid/host, so a
+  child started without a worker-registry reservation still needs manual
+  owner cleanup (`ContinuationCleanupRequired`).
+- Runner-side consumption is cooperative for effects outside the journal.
+  Journaled effects are refused (`SettledEffectReplay`) if re-admitted, but
+  the production conversational runner makes model calls, not journaled tool
+  effects. Its model-attempt ledger is the session store, not the effect
+  journal.
+- *Superseded by "Deterministic gateway call identities for child runners"
+  below:* the typed tool gateway used a fresh `request_id` per call as its
+  idempotency key, so a resumed runner that re-issued a gateway tool call got
+  a new key and was not matched to the settled receipt. A journaled child
+  runner's gateway calls now use deterministic identities; other callers
+  keep the request id.
+- *Superseded for compute-cancel by "The `compute-cancel` verifier" below.*
+  The selfmod families still have no provider verifier, so startup
+  reconciliation leaves them fenced. That is correct and fail-closed; the
+  same section records why no sound selfmod verifier exists today.
+- The journal and child store remain separate files. The cross-store window
+  is covered by validation, not by a transaction.
+- While any peer runtime process on the node is live, the startup pass is
+  deferred as a whole, so a crashed third process's orphans stay fenced until
+  their worker is recomposed (pre-restart path) or a later startup finds no
+  live peer. *Superseded in part (2026-09-26, "Node-shared worker runs"
+  below):* a peer process that lazily composes the process or compute
+  provider no longer claims the shared `runtime:process-jobs` /
+  `runtime:compute-jobs` run while another live process owns it; it is
+  refused with `PeerWorkerLive`. Peers in one process share one lease; the
+  lease is local OS evidence and does not coordinate hosts sharing a
+  journal over a network filesystem.
+- No master-spec checkbox changes. LOOP-008, AGENT-006 and SESSION-007 stay
+  unverified.
+
+## The `build-fix` effect family (2026-09-25)
+
+*Supersedes, for build fixes only,* the statement above that the typed
+gateway journals each fix write. Before this slice, `_compose_fix` in
+`sonder_runtime/bootstrap/build_tools.py` passed no journal to
+`BuildFixService`. Production fix edits were therefore not in the worker
+effect journal, and neither startup reconciliation nor a pre-resume path
+could see an interrupted edit. Tests that passed a journal got one gateway
+intent per write, keyed by a fresh request id, under a fixed worker
+(`build-fix`) and epoch (`1`). No verifier could prove that intent, so after a
+crash it would have stayed fenced forever.
+
+What is wired now (caller -> callee):
+
+- `build_application` passes `_compose_build_tools(...,
+  effect_binding_factory=...)` down through `compose_build_tools` and
+  `_compose_fix` into `BuildFixService(effect_binding_factory=...)`. The
+  factory is `worker_binding(family="build-fix", scope=<project root>,
+  run_id=<run>)`. That binding is authenticated, uses `auto_reconcile=True`,
+  runs as worker `build-fix:<node>` under the host epoch, and uses the shared
+  `worker-effects.db`. The binding is resolved lazily, on the first edit.
+- `BuildFixService._edit` routes every source edit through
+  `application/build/fix_effects.BuildFixEffects.replace`, which wraps the
+  editor call in `journaled_effect`. The edits covered are the attempt's
+  candidate write (`attempt-<n>`), the revert to best, the unjudged revert
+  and the `revert_after` revert (`revert-<n>`), and `build_fix_restore`
+  (`restore-<random>`).
+  - Run: `build-fix:<job_id>`. Scope: the project root.
+  - Idempotency key: the JSON tuple `["build-fix", job, candidate, rel,
+    before_sha256, after_sha256]`. Operation id: `build-fix:` plus the first
+    40 hex characters of the key's SHA-256. Request digest: the canonical
+    digest of the same fields (`worker_bindings.effect_request_digest`).
+  - The intent commits before the editor runs. After the editor returns, the
+    receipt and a content-free checkpoint commit in one transaction.
+  - A refused write (`EditRefused`) or one the editor proves did not happen
+    (`EditConflict(uncertain=False)`) is a `failed` outcome with receipt
+    `<op>:not-applied:<type>`.
+  - An unprovable write (`EditConflict(uncertain=True)`, an invoker
+    exception, or a receipt that does not match the journaled digests)
+    marks the intent `uncertain`.
+  - A journal refusal before the edit becomes `EditConflict(uncertain=False)`,
+    and the editor is not called. Before refusing, `BuildFixEffects.replace`
+    runs the run's reconciliation (`recover_before_restart`) once and retries
+    only when every unresolved edit was proven. This covers an earlier edit
+    of the same fix that raised inside the gateway (a cancellation or an
+    expired budget), so the unjudged revert and `revert_after` are not fenced
+    by an edit the file proves never happened. A duplicate key is refused
+    again on the retry.
+  - A journal failure after the edit becomes `EditConflict(uncertain=True)`.
+    In both cases the fix stops with `UNCERTAIN_SIDE_EFFECT`.
+  - An unchanged text (equal digests) is not an effect and is not journaled.
+- With a binding in place, the fix no longer binds the ambient gateway
+  journal. Each write therefore has exactly one intent, and that intent can be
+  proven. Gateway receipts and audit are unchanged. `effect_journal_store=`
+  (a bare journal, used by tests and embedders) still works: the service
+  derives a binding from it, as worker `build-fix:local`, with one epoch per
+  service instance.
+- `get_worker_effect_journal` registers
+  `adapters/build/fix_effect_verifier.BuildFixEditVerifier` for the
+  `build-fix` family, and `worker_families` now includes `build-fix`. The
+  startup pass therefore claims and reconciles this host's fix runs. The
+  verifier authenticates the intent (`edit_from_intent`): the key, run,
+  operation id, scope, worker prefix and request digest must all round-trip.
+  It then hashes the file as it is now:
+  - current digest equals the after-digest: `completed`, with receipt
+    `<op>:applied:sha256:<digest>`;
+  - current digest equals the before-digest: `failed` (not applied);
+  - anything else: no proof. The intent stays `uncertain` and the run stays
+    fenced. This covers another digest and a file that is missing, larger
+    than 2 MiB, a final symlink, or under a parent that resolves outside the
+    root.
+
+  The verifier only reads, at most 2 MiB, under the journal's 2 s verifier
+  timeout.
+- Pre-resume path: `build_fix_restore` first calls
+  `recover_before_restart` on the fix's run. That call reconciles
+  automatically, so a crash-interrupted edit is proven there too. An
+  unproven edit refuses the restore with `RESTORE_CONFLICT` whenever the
+  restore would write. A completed edit counts as written by the fix
+  (`BuildFixEffects.applied`, bounded to 8 pages of 100 records). A restore
+  after a crash between the write and the pre-image record therefore
+  succeeds; before this slice it answered `RESTORE_CONFLICT`.
+
+Crash evidence: `tests/test_build_fix_effect_journal.py` runs the real
+`BuildFixService` loop in a child interpreter. The loop uses the fakes of
+`test_build_fix_service` with an editor over real files, and every real
+write is counted in a log. The child is killed with `os._exit` at one of
+three cuts:
+
+| Cut | File after the crash | Startup reconciliation |
+|---|---|---|
+| attempt 1: after the intent, before the write | original; 0 writes | `failed` (`not-applied`), resolved |
+| attempt 1: after the write, before the receipt | candidate; 1 write | `completed` (`applied`), resolved |
+| attempt 2's revert: after the write, before the receipt | best; 3 writes | `completed`, resolved |
+
+For every cut:
+
+- a second pass is a no-op;
+- the same edit re-requested by a restarted fix at a newer epoch is refused
+  by the journal before the editor runs (the key is already admitted), and
+  the write count and the file are unchanged;
+- `build_fix_restore` from the restarted runtime returns the original.
+
+A file edited by hand after the crash (neither digest) stays `uncertain`. In
+that case a successor binding refuses to restart, the restore refuses (the
+file matches no record), and a later pass proves the edit once the file
+carries the after-digest again. A fourth cut (attempt 2's write, before the
+file write) leaves the file at the pre-image record's digest. With no
+verifier registered, only the journal fence stops that restore
+(`RESTORE_CONFLICT`, editor never called). With the verifier, the same
+restore proves the edit not applied and writes the original.
+Another host's fix run is reported under `foreign_runs` and not claimed.
+A fifth cut, a `revert_after` restore of the original after the write and
+before the receipt, is proven `completed` at startup, and the restarted
+restore finds the file already original without a write. An edit that raises
+`Cancelled` or `DeadlineExceeded` inside the editor is journaled `uncertain`;
+with the verifier the fix proves it `failed` in-run and `revert_after`
+restores the originals, and without one every later edit of the run is
+refused (`revert_after failed`, the file keeps the best candidate).
+`test_build_application_proves_a_crashed_fix_edit_at_startup` crashes a fix
+into the production journal file under the node's `build-fix:<node>`
+identity, and `build_application` proves the edit at startup. It also checks
+that the composed fix service journals through that same binding. Removing
+`build-fix` from `worker_families` makes that test fail (the run becomes
+foreign). `tests/test_build_fix_real_gcc.py` asserts the three `build-fix`
+effects of a real g++/clang++ fix and the absence of gateway twins.
+
+Limits:
+
+- The proof is about the file's current state. An edit that ran and was
+  then undone by hand to the exact before-digest is recorded as not
+  applied. That is the state that a resumed fix and `build_fix_restore` act
+  on.
+- A fix job is still never retried (`max_attempts=1`). Production
+  composition (`build_application`) calls `BuildFixService.recover()` once
+  at startup, after the worker-effect reconciliation, so a fix a crash left
+  `running` or `planned` reads `interrupted` (manifest and registry job);
+  it is never retried or reverted. A failing `recover()` is logged by
+  exception type and does not block startup. The journal proof and the
+  restore path do not depend on it
+  (`tests/test_build_fix_effect_journal.py::test_build_application_marks_a_crashed_fix_interrupted`).
+- No master-spec checkbox changes. LOOP-008 stays unverified.
+
+## Deterministic gateway call identities for child runners (2026-09-26)
+
+*Supersedes* the "What remains" item of the production-wiring section that
+said the typed tool gateway keys a resumed child runner's call by a fresh
+`request_id`. Before this slice, a child runner that crashed after a gateway
+call's receipt committed, and was then resumed, re-issued the call under a
+new id. The journal admitted it as a new intent and the tool ran twice. The
+RED run of the new wiring tests shows it: with the deterministic path
+disabled, a divergent re-issue succeeded and appended a second time.
+
+What is wired now (caller -> callee):
+
+- `LocalSubagentProvider._bounded_runner` (spawn, and resume through
+  `_resume_locked`) binds a `GatewayCallSequence`
+  (`application/execution/gateway_calls.py`) for the runner thread, next to
+  the child's journal binding. `_gateway_call_sequence` anchors it to:
+  - the binding's run (`subagent:<child>`) and worker (`subagent:<node>`);
+  - the child id;
+  - the settled dispatch attempt `N`, read from the journal. It refuses to
+    start a runner whose last dispatch attempt is not `completed`.
+  A fresh dispatch starts at ordinal 0. A resumed runner starts from
+  `CheckpointResumeDecision.gateway_call_ordinal`, and a child that never
+  checkpointed resumes from 0.
+- `ToolGateway.execute` -> `_begin_journaled`. For a mutating call under a
+  journal binding, when a sequence is bound, `GatewayCallSequence.admit`
+  checks that the sequence belongs to the bound journal run and worker and
+  that the request is well formed (either refusal raises
+  `EffectJournalError` before an ordinal is addressed). Under the sequence
+  lock it then takes the next ordinal `K` and derives:
+  - `operation_id` `gateway-call:<child>#dispatch-attempt-<N>#call-<K>`, so
+    the intent id `<run>:<operation_id>` depends only on the call's
+    position;
+  - `request_digest`, the canonical SHA-256 of the tool name, arguments and
+    declared effects;
+  - `idempotency_key`, the JSON tuple `["gateway-call", run, worker, child,
+    N, K, request_digest]`.
+
+  Still under the lock, `JournalBinding.begin_request` handles three cases,
+  in this order:
+  1. A key in the resumed runner's settled receipts raises
+     `SettledEffectReplay` with the recorded receipt key (the original
+     `request_id`, which is also the tool audit row's id). This is the
+     existing semantics, and it happens before any journal write.
+  2. An intent already admitted at that id under a different key raises the
+     new `DivergentEffectReplay` (a subclass of `EffectJournalError`), also
+     before any journal write. The invoker is not called.
+  3. Otherwise the intent commits as before.
+
+  The sequence consumes ordinal `K` only in case 3 (the intent is durably
+  admitted) or case 1 (the call is the one that settled at `K`). Any other
+  failure, including `DivergentEffectReplay` and a transient journal error
+  such as SQLite `database is locked`, halts the sequence without consuming
+  `K`:
+  - every later call of that runner incarnation raises
+    `GatewayCallSequenceHalted` before it reaches the journal;
+  - `JournalProvenanceStamp` refuses to stamp a checkpoint from a halted
+    sequence, so the child keeps its previous checkpoint;
+  - when the runner returns anyway (a model tool loop that reports a tool
+    error and carries on), the provider raises `GatewayCallSequenceHalted`,
+    and the child fails as `recovery_required`.
+
+  Consumed ordinals therefore match admitted or settled calls one for one.
+  A runner that swallows a refusal cannot re-run a settled effect at a fresh
+  ordinal. A call retried after a failed admission cannot settle at an
+  ordinal that a resumed runner would address with a different request.
+  Pure (effect-free) calls are not journaled and use no ordinal.
+  The receipt, audit row and `receipt_key` still carry the caller's
+  `request_id`.
+- Without a bound sequence, the gateway journals exactly as before, under
+  `request_id`. This covers every non-child caller: the REPL, HTTP, MCP,
+  interactive lanes (whose `call-<attempt>-step-<n>` ids were already
+  deterministic) and build-fix.
+- `JournalProvenanceStamp` (the production checkpoint hook composed in
+  `get_delegation_service`) records the sequence's issued count as
+  `CheckpointProvenance.gateway_call_ordinal`. It refuses a sequence that is
+  bound for another child run, and a halted sequence. With no sequence bound it records 0, which
+  is exact, because the gateway then journals no deterministic call.
+  - Provenance is now version 2, and its record digest covers the ordinal.
+  - A version-1 record is digest-valid only with an ordinal of 0.
+  - SQLite adds the `gateway_call_ordinal` column with an additive
+    `ALTER TABLE` (default 0) and writes it in the same transaction as the
+    child compare-and-set.
+  - The codec and PostgreSQL snapshots carry the field. Snapshots without
+    it decode as version 1.
+- `validate_checkpoint_resume` returns the ordinal in the decision. It adds
+  three typed refusals:
+  - `gateway_ordinal_behind_journal`: a gateway call at or below the
+    stamped position has an ordinal above the recorded one.
+  - `gateway_ordinal_gap`: the gateway calls after the stamped position do
+    not continue the recorded ordinal without a gap (per child and
+    dispatch attempt, in journal order). Ordinals are consumed only by
+    admitted or settled calls, so a gap means a call landed at an ordinal
+    the resumed runner would address with another request.
+  - `request_id_keyed_call_after_position`: an intent after the stamped
+    position is keyed the old way, where the operation id equals the
+    idempotency key. This applies to every provenance version. After a
+    version-1 checkpoint such an intent predates deterministic identities.
+    After a version-2 checkpoint it means something bound the child's
+    journal without its call sequence. Either way a resumed runner could
+    not match it, so the resume fails closed. Any other journaled effect
+    in the child run that uses the same key for both fields is refused
+    too; the child's dispatch receipt does not (its operation id is
+    `subagent-dispatch:<child>`).
+
+Crash evidence (`tests/test_wiring_journal_child_gateway_calls.py`): a real
+child interpreter composes `build_application`, dispatches through
+`DelegationService`, and its runner appends to a workspace file through the
+production `application.tools` gateway (`write_file`, append). The child is
+killed with `os._exit`, and the test process then repeats the delegation in a
+new composition.
+
+| Cut | After the crash | Repeat delegation |
+|---|---|---|
+| checkpoint, append `x`, receipt committed | call 1 `completed`; checkpoint ordinal 0 | the re-issued `x` raises `SettledEffectReplay` and is consumed; a new `y` runs at ordinal 2; file `xy`; final checkpoint ordinal 2 |
+| append `a`, checkpoint (ordinal 1), append `b`, receipt committed | calls 1 and 2 `completed` | resumes at ordinal 1, `b` is consumed at ordinal 2; file `ab`; journal unchanged |
+| checkpoint, append `x` on disk, no receipt | call 1 bare `intent` | startup reconciliation has no gateway verifier, so it stays `uncertain` and the run fenced; the repeat raises `EffectJournalError`, no runner starts; file `x` |
+| checkpoint, append `x`, receipt committed; the resumed runner asks for `z` | call 1 `completed` | `DivergentEffectReplay`; child `FAILED`, `recovery_required`; file `x`; journal unchanged |
+| same cut; the resumed runner handles the `z` refusal, asks for `x`, then checkpoints (or returns without one) | call 1 `completed` | `x` raises `GatewayCallSequenceHalted` and does not run; the stamp (or the provider) fails the child, `recovery_required`; checkpoint still `{"step": 1}`; file `x`; journal unchanged |
+
+Mutation checks:
+
+- Disabling the sequence in the gateway made all four tests fail. With the
+  sequence disabled, the divergent re-issue succeeded.
+- Starting every resumed runner at ordinal 0 made the checkpointed-ordinal
+  case fail.
+- Stamping ordinal 0 made two cases fail.
+
+- Letting a failed admission consume its ordinal instead of halting the
+  sequence made six tests fail, including both swallowing-runner crash
+  cuts and the transient-failure retry test.
+- Removing the provider's halted check made the swallowing runner that
+  returns without a checkpoint succeed; its crash-cut test failed.
+- Against the previous commit the validator's gap and version-2
+  request-id refusals failed.
+
+The sources were restored after each check.
+`tests/test_gateway_call_identity.py` (14 tests) covers:
+
+- identity derivation and parsing;
+- refusal of a foreign binding and a foreign sequence;
+- that a non-child caller is still keyed by `request_id`;
+- the gateway's replay, new-ordinal and divergence behaviour;
+- stamp recording and tamper detection;
+- version-1 compatibility in the codec and in a SQLite table rebuilt
+  without the column (which the repository upgrades; the triggers still
+  refuse updates);
+- a failed admission halting the sequence without consuming the ordinal;
+- a runner that swallows `DivergentEffectReplay` and asks for the settled
+  call: it is refused, and the invoker ran once;
+- a transient `database is locked` admission failure followed by a retry
+  before the crash: the retry is refused, and after the resume the call
+  runs once, at ordinal 1;
+- the stamp refusing a halted sequence;
+- the validator's ordinal, gap and request-id refusals.
+
+Limits:
+
+- The identity is positional. A resumed runner avoids a repeat only when it
+  re-issues its calls in the same order with the same requests. A
+  model-driven runner that takes a different path gets
+  `DivergentEffectReplay`, and the sequence halts. That is fail-closed, not
+  continuation: even when the runner handles the refusal and keeps going,
+  none of its later calls run, and the child fails `recovery_required`. It
+  needs a new child or operator action.
+- The gateway does not reconstruct the recorded output. The runner receives
+  `SettledEffectReplay` with the receipt key (the original request id) and
+  must consume it itself, for example by reading the durable tool audit.
+  That reading is not wired. A refused replay publishes no gateway receipt,
+  which is the existing behaviour for journal refusals.
+- The sequence and the child's journal binding are both context variables
+  bound in the runner thread. A thread the runner starts itself inherits
+  neither, so its gateway calls are not journaled at all: no intent, no
+  fence and no idempotency. They do not fall back to `request_id` keys. A
+  runner that copies its context into such threads shares one sequence, and
+  concurrent calls then get ordinals in nondeterministic order, which a
+  resumed runner cannot reproduce.
+- No production child runner issues typed gateway calls yet. The runner
+  that `get_delegation_service` composes (`conversational_runner_factory`)
+  only calls the model gateway (`gateway.generate`). The deterministic
+  identity is proven only with a test-substituted runner that calls
+  `application.tools`.
+- Gateway-call intents have no reconciliation verifier. An in-flight call
+  therefore stays `uncertain`, and its child run stays fenced until future
+  trusted composition can prove it.
+- Resume from any checkpoint is refused whenever an intent keyed the old
+  way follows it. A version-1 checkpoint is not upgraded.
+- A halted sequence is not recovered in place. The runner incarnation
+  ends, and the child resumes from its last checkpoint. A failed admission
+  that did commit its intent leaves it unresolved, and the run stays fenced
+  as for any in-flight call.
+- No master-spec checkbox changes. LOOP-008, AGENT-006 and SESSION-007 stay
+  unverified.
+
+## The `compute-cancel` verifier, and why selfmod stays fenced (2026-09-26)
+
+*Supersedes, for compute-cancel only,* the statements above that
+compute-cancel has no provider verifier and that startup reconciliation
+leaves it fenced.
+
+Before this slice an interrupted `ComputeJobWorker.cancel` intent could never
+be proven: the durable job registry recorded the job's terminal status and a
+free-form cancellation reason, but nothing tied that state to the journaled
+cancel request. A registry row can also become `cancelled` through other
+paths (a hard deadline, a cleanup retry), so the status alone is not proof
+that this request was admitted for this job, or that the cancellation came
+after it.
+
+What is wired now (caller -> callee):
+
+- **Durable request binding.** `ComputeJobWorker.cancel` keeps its
+  per-attempt identity (`compute-cancel:<worker>:<job>` for attempt 1,
+  `compute-cancel:<worker>:attempt-<n>:<job>` for attempt 2..32) and now
+  invokes `_cancel_bound` inside `journaled_effect`. That runs after the
+  intent commits and before the provider is asked to cancel. It calls
+  `SubprocessJobProvider.bind_cancel_request`, which calls
+  `bind_cancel_request` on the durable registry: `SQLiteDurableJobRegistry`
+  (one `BEGIN IMMEDIATE` transaction) or the in-memory `DurableJobRegistry`.
+  The registry records `{attempt idempotency key: journaled request digest}`
+  under the job's `cancel_request_digests` metadata. In the same update it
+  records the record's revision and lifecycle status read at bind time under
+  `cancel_request_bound_states` (`{key: {"revision", "status"}}`). The digest is the same
+  canonical SHA-256 that `journaled_effect` stores in the intent
+  (`worker_bindings._digest` of `{"remote_job_id", "reason"}`). The shared
+  helper `_bind_cancel_request_metadata` in `application/jobs/durable_registry.py`
+  applies these rules:
+  - A binding is write-once. The same key with the same digest is a no-op
+    that keeps the originally bound revision and status, and another digest
+    is refused.
+  - At most 32 bindings are kept per job, matching
+    `MAX_COMPUTE_CANCEL_ATTEMPTS`.
+  - The record revision is not changed, so cleanup evidence bound to a
+    revision stays valid.
+  - A provider without `bind_cancel_request`, such as a test double, still
+    cancels, but a crash before its receipt can then never be proven.
+  - A binding failure raises inside the effect, which leaves the intent
+    `uncertain` (fail-closed).
+- **Verifier.** `get_worker_effect_journal` in `bootstrap/app.py` registers
+  `adapters/execution/compute_effect_verifier.DurableComputeCancelVerifier(get_job_registry)`
+  for the `compute-cancel` family, next to `process-start`, `compute-submit`,
+  `subagent-dispatch` and `build-fix`. The `compute` family was already in
+  `worker_families`, so the startup pass (`reconcile_worker_effects`), the
+  operator pass (`Application.worker_effect_reconciliation`) and every
+  auto-reconciling `recover_before_restart` of the compute worker reach it.
+  The verifier reads one registry view and the immutable cleanup record. It
+  runs under the journal's bounded verifier timeout (2 s by default) and
+  within its process-wide verifier slots. It returns a proof only when all of
+  the following hold:
+  - The operation id parses exactly as the worker mints it. The intent's
+    idempotency key, worker (`compute:<worker>`), run
+    (`runtime:compute-jobs`), scope (`compute-jobs`) and `idempotent`
+    strategy all match, and the digest is SHA-256.
+  - The registry row is the exact remote job:
+    - its job id is the `cf-` id this worker derives from the row's own
+      submit idempotency key, so a row swapped under another id fails;
+    - its kind is a local compute kind;
+    - `compute_worker_id` and the controller binding match;
+    - `require_job_scope` is `1`.
+  - `cancel_request_digests[<attempt key>]` equals the intent's request
+    digest. A legacy row without bindings, a binding for another attempt, or
+    another digest gives no proof.
+  - `cancel_request_bound_states[<attempt key>]` shows the binding was made
+    while the record was not terminal (`pending`, `claimed`, `running`,
+    `cancellation_requested`, `paused` or `interrupted`), at a revision older
+    than the cancelled revision. Terminal statuses are absorbing in both
+    registries, so the `cancelled` transition happened after this request was
+    durably bound. A request bound on a record that was already terminal (for
+    example cancelled and cleaned earlier by a hard deadline) gives no proof;
+    the live worker reports `cancellation_requested`, not `cancelled`, for
+    that request, so a restart must not settle it as a cleaned cancel. A
+    missing, malformed or forged bound state also gives no proof.
+  - The status is exactly `cancelled`. `cancellation_requested`, `running`,
+    `succeeded`, `failed` and `interrupted` give no proof.
+  - Immutable cleanup evidence (`process_cleanup_proof`) exists for that
+    record revision and passes `_validate_cleanup_evidence`: process exited,
+    containment empty, resources released, and the same status and revision.
+    Its self-digest must also recompute.
+
+  The proof is `completed`, with receipt `<job>:cancelled` (the live receipt
+  shape for a cleaned cancellation) and external reference
+  `job-registry:<job>:<revision>`. Its outcome digest binds the job, kind,
+  controller, both idempotency keys, the request digest, the bound revision
+  and status, the final status and revision, and the cleanup digest. The verifier never reads caller text, process output,
+  the cancellation reason or an in-memory handle.
+
+Evidence (focused, not a requirement verification):
+
+- `tests/test_compute_cancel_effect_reconciliation.py` has 44 tests:
+  - A success proof for attempts 1, 2 and 32, followed by stale-epoch
+    refusal, a newer-epoch reconcile, and `resume`.
+  - Each mismatch stays `uncertain` and fenced: request digest, legacy or
+    missing binding, a binding for another attempt, kind, the job's submit
+    idempotency key, the intent's idempotency key, the registry's
+    `compute_worker_id`, controller, unscoped job, and strategy. Three more
+    cases admit an intent with a valid operation id, key and digest and valid
+    binding and cleanup evidence, but journaled under another worker
+    (`compute:other`), run id or scope.
+  - Ordering: a request bound after the job was already cancelled and cleaned
+    by a hard deadline stays fenced, as do a missing bound state, a bound
+    state forged as terminal, a bound revision not older than the cancelled
+    one, and a malformed bound state. A live worker whose cancel of a job
+    already cancelled by its deadline loses its receipt also stays fenced on
+    restart.
+  - Each unfinished state stays fenced: `cancellation_requested`, `running`,
+    `succeeded`, `failed`, no cleanup evidence, cleanup evidence for a stale
+    revision, and a forged cleanup digest.
+  - A missing job, a swapped job (another job's request digest, and another
+    job's row moved under this id), and malformed operation ids give no
+    proof.
+  - A hung registry read times out. The intent stays `uncertain` and the run
+    fenced, and the same evidence proves the cancel once the read returns.
+  - Binding rules for both registries: write-once, conflict refusal, digest
+    and key validation, unknown job, a bound of 32, no revision change, and
+    a recorded bound revision and status that a later no-op rebind keeps.
+  - Through a real `ComputeJobWorker` and `SubprocessJobProvider` (with a
+    scoped containment double): the binding is durable before the provider
+    cancels, and a lost receipt after cleanup is proven by a restarted
+    worker's auto-reconciling binding. With cleanup still pending, the intent
+    stays fenced until the provider's own cleanup retry makes the record
+    `cancelled` with cleanup evidence, and then it is proven. A completed
+    cancel is not retried.
+- `tests/test_wiring_compute_cancel_startup_reconcile.py` (2 tests) runs
+  through `build_application`. Only the containment seam, launcher and
+  deadline timer are replaced.
+  - A lost cancel receipt after cleanup is proven by the next composition's
+    startup pass (`verified:durable-compute-cancel-v1:job-registry:...`). The
+    fence clears, and the successor worker composes and refuses a retry of
+    the completed cancel.
+  - A lost receipt with cleanup pending stays `uncertain`. The fence stays
+    set, compute-worker composition refuses, and a second pass changes
+    nothing. After the orphaned provider's cleanup retry completes, the
+    operator pass proves the cancel and clears the fence.
+- Mutation check: eleven planted defects each made at least one of these
+  tests fail. They skipped the digest binding check, accepted any terminal
+  status, dropped the cleanup-evidence requirement, dropped the job-id
+  derivation (swap) check, dropped the intent idempotency-key check, dropped
+  the kind check, dropped the intent worker, run id or scope check, and
+  dropped the bound-revision or bound-status ordering check. The source was
+  restored afterwards.
+
+Compute-cancel limits:
+
+- A pending-cleanup job whose owning process dies is later marked
+  `interrupted` by the successor provider's deadline restore ("deadline owner
+  process exited or changed identity"). That record is not `cancelled` and
+  has no cleanup evidence, so its cancel intent stays fenced, and no
+  automatic path resolves it. The wiring test fires only the orphaned
+  provider's retry, and states this explicitly.
+- A cancel journaled before this slice, or through a provider without
+  durable bindings, has no binding and stays fenced.
+- Remote (HTTP) compute cancellation is not a `ComputeJobWorker` effect on
+  this host and is not covered.
+- The proof shows that this exact request was durably bound while the job
+  was not yet terminal, and that the job afterwards reached a cleaned,
+  terminal cancelled state. It does not show which code path performed the
+  final transition: this cancel, a provider cleanup retry of it, or a
+  concurrent path (such as a hard deadline) that fired after the binding.
+  That is the idempotent outcome the intent declares.
+- A cancel request bound on an already-terminal job, then interrupted before
+  its receipt, stays fenced and needs operator reconciliation.
+
+### Why the selfmod families stay fenced
+
+The selfmod stage effects (`selfmod-backup`, `selfmod-prepare-workspace`,
+`selfmod-reproducer-before`, `selfmod-begin-testing`, `selfmod-record-test`,
+`selfmod-review`, `selfmod-approve`, `selfmod-deploy`, `selfmod-rollback`)
+were assessed against the legacy durable store in `selfmod.py`. That store
+has the `selfmod_runs` phase row, `selfmod_tests`, `selfmod_backups`,
+`selfmod_deployed_files` and free-text `selfmod_events`. No sound verifier
+can be built from it today:
+
+- Nothing in the store binds the journaled request digest. The stage
+  requests (for example deploy's `health_command` and `commit`, and a
+  test's command and kind) are digested only in the effect journal. The legacy
+  rows record outcomes, not the request that produced them, so a proof could
+  not be bound to the intent the way the compute and dispatch verifiers are.
+- Phase state is not unique to the journaled path. The operator `/selfmod`
+  path in `server.py` (`_selfmod_command`, `_execute_selfmod_run`) now goes
+  through the stage journal for its run, approve, deploy and rollback stages,
+  but `reject`, `cancel`, `resume` and `verify_backup` still call the legacy
+  module directly. Stale-owner recovery in `selfmod.py` also moves runs
+  to `interrupted` or requires an exact restore. A phase such as `backed_up`
+  or `deployed` therefore cannot show that the journaled attempt, rather than
+  an unjournaled call, performed the change.
+- Repeatable stages have no durable attempt identity outside the journal.
+  `selfmod_tests` rows carry no `attempt-<n>`, so
+  `selfmod-record-test:<run>:attempt-<n>` cannot be matched to one row.
+- Deploy's effect spans the live source tree, a git commit, health and
+  rollback checks, and an automatic restore. Its phase cannot distinguish a
+  deployed-then-restored run from a partially applied one without per-file
+  evidence bound to the intent.
+- Every selfmod stage is journaled with `reconciliation="manual"`. The
+  adapter itself declares that these effects need operator reconciliation.
+
+A future verifier would need the selfmod store to durably record, in the
+same transaction as each stage's mutation, the journaled operation id,
+attempt and request digest. It would also need the operator path routed
+through `GuardedLegacySelfmodService.journaled_stage`. Until then, selfmod
+intents stay `uncertain` and fenced.
+`tests/test_wiring_journal_child_startup_reconcile.py` still asserts this for
+an unprovable `selfmod-deploy` intent.
+
+No master-spec checkbox changes. LOOP-008 stays unverified.
+
+## Node-shared worker runs and live peers (2026-09-26)
+
+*Supersedes* the limitation above that a peer process lazily composing the
+process or compute provider still claims the shared run in its constructor.
+
+The problem. The process provider binds run `runtime:process-jobs` and the
+compute worker binds `runtime:compute-jobs`, both under the per-node worker
+identity (`process:<node>`, `compute:<node>`) and the per-process
+`worker_owner_epoch`. Their constructors call `recover_before_restart`,
+which calls `claim_owner` and then `recover(live_workers={})`. A second
+runtime process on the node that composed either provider therefore advanced
+the run's single owner epoch and treated the first process's in-flight
+intents as orphans. The first process's next admission then failed with
+`stale worker owner epoch`, and its in-flight intents were fenced. The
+startup pass had been made peer-aware, but this constructor path had not.
+
+What is wired now (caller -> callee):
+
+- `build_application` defines `node_shared_runs` (the two run ids above) and
+  `claim_node_shared_run(run_id, worker_id)`. `worker_binding` calls it
+  after composing the journal and before it builds the
+  `AuthenticatedWorkerBinding`, so the lease is taken before the provider
+  constructor claims the owner.
+- `claim_node_shared_run` calls
+  `adapters/persistence/worker_effect_hosts.acquire_run_lease`. That takes a
+  non-blocking exclusive OS lock (`flock`, or `msvcrt.locking` on Windows)
+  on `worker-effect-runs/run-<sha256(run, worker)[:32]>.lock` beside the
+  journal and holds it until the process exits. Every composition in one
+  process shares it, and a forked child must take its own.
+- When another live process holds the lock, or the lock file cannot be
+  opened, composition raises `PeerWorkerLive` (an `EffectJournalError`, in
+  `application/execution/worker_bindings.py`) and emits a
+  `worker.effects.peer_owned` WARNING operations event with the run and
+  worker ids. No owner row or intent is touched. The provider getter stays
+  uncomposed, so a later call retries.
+- When the owner exits, however it exits, the kernel releases the lock. The
+  next lazy composition claims the run under its newer epoch and offers the
+  dead owner's unresolved intents to the trusted verifiers through the
+  existing `auto_reconcile` path. Unprovable intents stay fenced
+  (`EffectRecoveryRequired`).
+- `reconcile_unresolved_effects` takes an optional `claim_guard`: a callable
+  returning a context manager that is entered before a run's owner is
+  claimed and exited when that run's reconciliation ends. The composition
+  passes `reconcile_node_shared_run`, which holds the run lease through
+  `worker_effect_hosts.transient_run_lease` for that one run only. The
+  startup pass only runs when no peer lease is live, but a peer may still
+  compose a shared worker between that probe and the claim. With the guard,
+  a run the pass cannot lease is reported under `failed_runs`
+  (`PeerWorkerLive`) with every fence in place.
+- The pass releases the lease afterwards, unless a worker composition in
+  this process took it in the meantime. The pass binding is transient and
+  leaves no in-flight intent. An earlier revision kept the lease until
+  process exit. A process that had only reconciled a shared run then kept
+  every peer from composing that worker for its whole lifetime. It could
+  also split ownership: after a crash that left orphans only in
+  `runtime:compute-jobs`, the first process kept the compute lease and a
+  later peer took the process lease. The compute worker needs both leases
+  (it composes the process provider first), so neither process could compose
+  it or the compute service until one exited. Now only a worker composition
+  holds a run lease for the process lifetime, and it always takes the
+  process lease before the compute lease, so ownership cannot split.
+- The subagent, selfmod and build-fix bindings keep per-run ids and take no
+  run lease.
+
+Qualification (`tests/test_wiring_journal_live_peer_startup.py`):
+
+- A real child interpreter composes the compute worker and the process
+  provider and keeps one manual intent in flight in each shared run. In the
+  parent, `build_application` followed by `process_job_provider()` and by
+  `compute_job_worker()` raises `PeerWorkerLive`. The owner rows (epochs,
+  `recovery_required`) and both intent states are byte-identical afterwards,
+  and the `worker.effects.peer_owned` event names the run.
+- The child then commits both receipts and admits and settles new work in
+  the shared run. After it exits, the parent's same lazy composition
+  succeeds, and both runs are owned by the parent's newer epoch.
+- A killed owner: the next lazy composition claims `runtime:process-jobs`
+  and routes the orphan through verifier reconciliation. No verifier proves
+  a manual effect, so `EffectRecoveryRequired` reports it fenced, the intent
+  becomes `uncertain` and the compute run stays unclaimed.
+- `claim_guard` refusal leaves the owner row and intent untouched, and a
+  granting guard lets the same pass claim. A child interpreter is refused a
+  held run lease but granted an unrelated one.
+- The composed guard: a child interpreter holds the `runtime:process-jobs`
+  run lease through `acquire_run_lease` alone, with no host lease, so the
+  host probe finds no live peer. The parent's `build_application` startup
+  pass then reports one failed run, the owner row and the orphan intent are
+  unchanged, `worker.effects.peer_owned` names the run, and
+  `worker_effect_reconciliation()` reports
+  `(("runtime:process-jobs", "PeerWorkerLive"),)`. Without the guard wired
+  into `build_application` this test fails.
+- The compute-only orphan ordering: the parent starts first and its startup
+  pass fences a manual orphan in `runtime:compute-jobs`. A child interpreter
+  started afterwards composes the process provider and then reaches the
+  compute run, where it is refused by the orphan's own fence
+  (`EffectRecoveryRequired`) and not by a lease. The parent is then refused
+  `runtime:process-jobs` (`PeerWorkerLive`), and a third interpreter cannot
+  take either lease while the child lives. With the startup-pass lease kept
+  until exit, this test fails.
+- `transient_run_lease` releases the lock once its last scope exits, keeps
+  it when `acquire_run_lease` took it during or before the scope, and a
+  child interpreter observes both outcomes.
+- With `claim_node_shared_run` disabled, the two cross-process tests fail
+  (`EffectRecoveryRequired` raised by the peer's composition), so they
+  detect the defect.
+
+Limits:
+
+- This is exclusion, not concurrency. Only one runtime process per node can
+  own the process and compute job runs at a time: the first to compose that
+  worker. A second process (for example an IDE-launched `mcp` beside
+  `serve`) cannot start process or compute jobs until the owner exits. That
+  refusal is typed and fail-closed. Before this change the second process
+  silently took the run over and broke the first. Per-process run ids were
+  rejected: compute-cancel attempt numbering and cross-restart duplicate
+  refusal read the shared run's history, and per-process runs would lose that
+  history.
+- The run lease is local OS evidence, like the host lease. It does not
+  coordinate hosts that share a journal over a network filesystem.
+- Compositions inside one process share the lease. As before, a later
+  composition in the same process claims a newer epoch over an earlier one.
+- Owner epochs are per-process `time_ns()` values. If a process that started
+  later composed a shared worker and then exited, an older process that
+  composes that worker afterwards takes the free lease but is refused by
+  `claim_owner` with `stale worker owner epoch`, until it restarts. The
+  refusal is fail-closed (no owner row or intent changes), but it is not
+  recovered automatically. This predates the run lease; no test in this
+  change asserts on it.
+- No master-spec checkbox changes. LOOP-008 stays unverified.
+
+## PostgreSQL child store: stamped checkpoints and resume on a live pair (2026-09-26)
+
+*Supersedes* the limitation "PostgreSQL is qualified at the codec and `_apply`
+level only, with no live database", and the remaining item "the resume path
+has been exercised only with the SQLite child store".
+
+Production already wrapped the PostgreSQL child repository in
+`DurableContinuationService(checkpoint_provenance=JournalProvenanceStamp(...))`
+over the SQLite worker-effects journal, and `LocalSubagentProvider` already
+validated resumes with `validate_checkpoint_resume`. No test had run either
+path against a real database. `tests/test_postgres_child_storage_integration.py`,
+which `scripts/run_disposable_postgres_pair.py` runs against an owned
+PostgreSQL 18.6+ primary and synchronous standby, now covers them:
+
+- `test_actual_pair_checkpoint_cuts_never_pass_the_settled_journal`
+  (`after_receipt`, `in_cas`, `after_cas`) mirrors the SQLite crash-cut
+  matrix. The runner saves a checkpoint, commits one journaled write, and is
+  cut at one point. In the `in_cas` case, a connection proxy lets the
+  PostgreSQL snapshot `UPDATE` run inside the open transaction. It reads the
+  written snapshot back to prove that the stamped provenance is in it, then
+  fails before the receipt insert and `COMMIT`. Read back from the pair,
+  the checkpoint is always either the old one or the new one, never past the
+  settled journal. The validator accepts it under a newer epoch, and the
+  write appears in `receipts` or `later_receipts`. In `in_cas`, the rolled
+  back save leaves the child fenced as an unresolved mutation.
+- `test_actual_pair_refuses_superseded_and_foreign_checkpoint_provenance`:
+  a stale epoch is refused (`STALE_OWNER_EPOCH`). A journal with another
+  identity is refused (`JOURNAL_IDENTITY_MISMATCH`). A newer owner's later
+  receipts do not invalidate the old settled prefix. A digest-valid stamp
+  from the superseded epoch-1 owner that claims the newer owner's settled
+  effect is saved to and read back from PostgreSQL unchanged, and the resume
+  is refused as `OWNER_SUPERSEDED`. The production stamp already refuses a
+  writer that is not the current owner, so this case is built with
+  `CheckpointProvenance.stamp` directly; it qualifies the read-back check,
+  not a path the stamp can produce.
+- `test_actual_pair_store_refuses_provenance_for_a_different_subject`: the
+  live `save_checkpoint` refuses provenance stamped for other state, and a
+  genuine stamp round-trips.
+- `test_actual_pair_child_resumes_from_stamped_checkpoint_and_consumes_settled_write`
+  ports `test_wiring_journal_child_resume.py` to `build_application` with
+  `child_storage.backend=postgresql`. A delegated child checkpoints and
+  commits one journaled append. Its host then stops before the next
+  checkpoint, and the child is left `failed` and `recovery_required`. The
+  application is closed and composed again, which gives a newer worker
+  epoch and a clean pair-owner handover. The exact delegation then resumes
+  from the stamped checkpoint read back from PostgreSQL and consumes the
+  settled receipt. The file holds one append, the journal holds one append
+  intent, and the final checkpoint's owner epoch is newer.
+- `test_actual_pair_resume_refuses_a_swapped_journal_identity`: after the
+  same interruption, a swapped journal identity refuses the resume with
+  `ChildResumeRefused(JOURNAL_IDENTITY_MISMATCH)`. The child stays
+  `recovery_required` and the runner never runs again.
+- Planted-defect checks, run locally on the pair:
+  - With provenance dropped from `encode_child_snapshot`, all six
+    provenance tests fail.
+  - With the `provenance_subject_error` check dropped from the PostgreSQL
+    `_apply`, the subject test fails.
+- The workflow's `paths` filter now also covers the effect journal, the
+  worker bindings, the bootstrap composition, the subagent-dispatch verifier
+  that admits a resume, the conversational runner the end-to-end test
+  patches, and the journal host lease the composition takes. Changes to the
+  stamp or resume wiring in those modules trigger the live job. The filter
+  lists modules, not the full import closure, so a change elsewhere that
+  these tests reach still needs a `workflow_dispatch` run.
+
+Local run: the PGDG 18.6 server packages were unpacked (not installed) and the
+harness was run as an unprivileged user. Result: 28 passed, 0 skipped.
+
+Limits:
+
+- These cuts do not kill the process. The pair has one durable owner marker,
+  and a killed owner leaves it unclean. By design
+  (`docs/postgresql-child-storage.md`), an unclean marker blocks every later
+  owner until a reviewed cleanup procedure exists, and the harness allows
+  only the owner-loss canary to leave it unclean. Each cut is therefore a
+  failure raised at the same point. For the database the result is the same:
+  a transaction that never committed is rolled back.
+- For the same reason, resuming a `running` child whose PostgreSQL owner
+  process was killed stays blocked (`ContinuationCleanupRequired`, then the
+  unclean owner marker) until that cleanup procedure exists. What is
+  qualified is resuming a `recoverable` child after a clean restart.
+- The journal and the child store are still separate stores. Validation
+  covers the window between them; no single transaction spans both.
+- No master-spec checkbox changes. LOOP-008, AGENT-006 and SESSION-007 stay
+  unverified.

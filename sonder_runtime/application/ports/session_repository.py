@@ -20,6 +20,21 @@ class SessionEvent:
 
 
 @dataclass(frozen=True)
+class SessionSummary:
+    """One durable session as a list row: identity, size and recency only.
+
+    Listing is an optional repository capability (``list_sessions``); it is
+    not part of ``SessionRepository`` so existing implementations stay valid.
+    """
+
+    session_id: str
+    events: int
+    user_turns: int
+    first_at_utc: str
+    updated_at_utc: str
+
+
+@dataclass(frozen=True)
 class IntegrityIssue:
     sequence: int | None
     code: str

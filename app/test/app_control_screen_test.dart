@@ -295,4 +295,25 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
     client.dispose();
   });
+
+  test('recovery unavailable reads as nothing changed, with a next step', () {
+    final text =
+        appControlError(const AppControlFailure('APP_RECOVERY_UNAVAILABLE'));
+    expect(text, contains('Recovery is unavailable'));
+    expect(text, contains('Nothing was resumed or closed'));
+    expect(text, isNot(contains('could not be read')));
+    // Every server code the client accepts has its own sentence.
+    for (final code in const [
+      'APP_CONTROL_AUTH_REQUIRED',
+      'APP_CONTROL_REFUSED',
+      'APP_CONTROL_BUSY',
+      'APP_BINDING_NOT_FOUND',
+      'APP_CONTROL_UNAVAILABLE',
+      'APP_RECOVERY_UNAVAILABLE',
+    ]) {
+      expect(appControlError(AppControlFailure(code)),
+          isNot(contains('could not be read')),
+          reason: code);
+    }
+  });
 }

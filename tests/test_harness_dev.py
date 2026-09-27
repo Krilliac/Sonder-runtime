@@ -286,23 +286,43 @@ def test_run_unknown_framework(tmp_path):
     assert result["framework"] == "bogus_framework"
 
 
-def test_run_extra_args(tmp_path):
+@pytest.mark.parametrize("extra", ['["--co", "-q"]', '["-p", "evil_plugin"]',
+                                   '["-c", "/tmp/other.ini"]', '["--rootdir=/"]',
+                                   "{bad json", '"-p evil"'])
+def test_run_refuses_retired_extra_args(tmp_path, monkeypatch, extra):
+    """Raw argv is retired: it is refused by name and never reaches a child."""
+    (tmp_path / "test_x.py").write_text("def test_x(): pass\n", encoding="utf-8")
+    monkeypatch.setattr(harness_tools, "_run", lambda *a, **k: pytest.fail("argv reached _run"))
+    result = harness_tools.test_run(
+        root=str(tmp_path), framework="pytest", extra_args_json=extra, timeout=30,
+    )
+    assert result["ok"] is False
+    assert result["error"] == "extra_args_json retired; use path/pattern"
+    assert result["error_code"] == "EXTRA_ARGS_RETIRED"
+    assert result["framework"] == "pytest"
+
+
+@pytest.mark.parametrize("extra", ["", "[]", " [ ] ", None])
+def test_run_accepts_an_empty_extra_args_json(tmp_path, extra):
     (tmp_path / "test_x.py").write_text("def test_x(): pass\n", encoding="utf-8")
     result = harness_tools.test_run(
-        root=str(tmp_path), framework="pytest",
-        extra_args_json='["--co", "-q"]', timeout=30,
+        root=str(tmp_path), framework="pytest", extra_args_json=extra, timeout=30,
     )
     assert result["framework"] == "pytest"
     assert result["ok"] is True
 
 
-def test_run_bad_extra_args_json(tmp_path):
+def test_run_argv_is_host_built_only(tmp_path, monkeypatch):
+    """A pattern is one -k value and a path is confined: no caller-built flag."""
     (tmp_path / "test_x.py").write_text("def test_x(): pass\n", encoding="utf-8")
-    result = harness_tools.test_run(
-        root=str(tmp_path), framework="pytest",
-        extra_args_json="{bad json", timeout=30,
-    )
-    assert result["ok"] is True
+    seen = []
+    monkeypatch.setattr(harness_tools, "_run",
+                        lambda cmd, **k: seen.append(list(cmd)) or {"ok": True, "returncode": 0})
+    harness_tools.test_run(root=str(tmp_path), framework="pytest", pattern="-p evil", timeout=30)
+    argv = seen[-1]
+    assert argv[argv.index("-k") + 1] == "-p evil"
+    assert "evil" not in [part for index, part in enumerate(argv) if argv[index - 1] != "-k"]
+    assert "-c" not in argv and "--rootdir" not in " ".join(argv)
 
 
 # ---------------------------------------------------------------------------
@@ -450,3 +470,38 @@ def test_resolve_root_invalid(tmp_path):
     missing = tmp_path / "not_created"
     with pytest.raises(ValueError, match="not a directory"):
         harness_tools._resolve_root(str(missing))
+
+
+# ---------------------------------------------------------------------------
+# secret_scan timeout
+# ---------------------------------------------------------------------------
+
+
+def test_secret_scan_honours_timeout_and_marks_result_incomplete(tmp_path, monkeypatch):
+    """``timeout`` bounds the walk; an expired scan is marked, never "clean".
+
+    The scan used to validate ``timeout`` and then walk the whole tree. A fake
+    monotonic clock that jumps past the 5-second budget after a couple of
+    reads proves the deadline is actually consulted.
+    """
+    for index in range(20):
+        (tmp_path / ("f%02d.txt" % index)).write_text("nothing here\n", encoding="utf-8")
+    clock = {"now": 1000.0}
+
+    def fake_monotonic():
+        clock["now"] += 3.0
+        return clock["now"]
+
+    monkeypatch.setattr(harness_tools.time, "monotonic", fake_monotonic)
+    result = harness_tools.secret_scan(root=str(tmp_path), timeout=5)
+    assert result.get("timed_out") is True
+    assert result["truncated"] is True
+    assert result["files_scanned"] < 20
+
+
+def test_secret_scan_without_expiry_reports_complete(tmp_path):
+    (tmp_path / "a.txt").write_text("nothing here\n", encoding="utf-8")
+    result = harness_tools.secret_scan(root=str(tmp_path), timeout=30)
+    assert result["timed_out"] is False
+    assert result["truncated"] is False
+    assert result["files_scanned"] == 1

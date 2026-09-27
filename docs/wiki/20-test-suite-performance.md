@@ -65,6 +65,23 @@ Keep parallelism bounded (`-n 4` rather than `-n auto`) when other builds or
 agent fleets are running; the suite spawns real subprocesses in places, so
 worker count understates process count.
 
+### `--dist load` versus `--dist worksteal` (measured 2026-09-25)
+
+CI keeps `--dist load`. Work-stealing was measured against it on a
+2,347-test subset (`tests/production` plus `tests/test_r*`, `test_t*`,
+`test_u*`) with `-n 4`, four runs each, interleaved back to back on a shared
+4-CPU container:
+
+| Mode | Runs (s) | Median |
+|---|---|---:|
+| `load` | 345, 297, 224, 306 | ~302 s |
+| `worksteal` | 343, 342, 248, 324 | ~333 s |
+
+Worksteal was slower in three of four adjacent pairs. The spread within one
+mode (224-345 s) is wider than the gap, so read this as "not better here",
+not as a precise penalty; re-measure before switching on other hardware.
+`pytest-xdist>=3.2` is pinned because `scripts/test_fast.py` uses worksteal.
+
 Parallel runs are also a flakiness detector: each worker starts with cold
 process state, so a test that only passes because an earlier test warmed a
 cache fails immediately under xdist. That is how the `/api/show`
@@ -83,13 +100,57 @@ merging.
 python scripts\select_regression_tests.py --format args | % { scripts\run-tests.cmd -q $_.Split(" ") }
 ```
 
+`scripts/test_fast.py` does the selection and the run in one step, with the
+wrappers `scripts/test-fast.sh` and `scripts\test-fast.cmd` resolving the
+interpreter the way `run-tests.cmd` does (`SONDER_PYTHON`, else the checkout's
+`venv`):
+
+```bash
+scripts/test-fast.sh                  # change since merge-base(HEAD, origin/main)
+scripts/test-fast.sh --since HEAD~3   # change since any ref
+scripts/test-fast.sh --working-tree   # uncommitted edits only (vs HEAD)
+scripts/test-fast.sh --all            # full suite, same flags
+scripts/test-fast.sh -n 4 -- -x -k gate   # own options, then pytest's after --
+scripts/test-fast.sh --dry-run        # print the pytest command only
+```
+
+It runs `pytest -n auto --dist worksteal --ff` (passthrough arguments come
+after these, so they override them) and always prints the selector's
+uncovered-identifier list: a green selected set says nothing about a changed
+name no test mentions. A vacuous selection exits 2, as the selector does --
+it is an infrastructure failure, never "nothing to run". When `origin/main`
+is unavailable the selector's own default base is used.
+
+## Slow tests that were waste (2026-09-25 capture)
+
+A full `-n 3` capture ranked with `slow_tests.py` found two avoidable costs:
+
+- `fanout_store`'s URI-credential redaction was quadratic on long runs of
+  scheme characters; one 100k-character answer took ~90 s. The pattern now
+  tries each run once, from its start, with unchanged output (letter runs
+  and mixed runs such as hex digests alike). `test_fanout_store.py` and
+  `test_model_fanout.py` (~449 s of recorded time) now run in ~22 s wall.
+- `test_app_recovery_http.py` polled with a fixed 10 s sleep; it now backs
+  off from 0.5 s to the same cap (96 s -> 62 s back to back).
+
+The rest of the top of the ranking is real work: nested processes, the
+architecture checker on copied trees, and `app_control_http`'s private-scope
+fingerprinting (`_private_scope_digest`, ~52k calls and ~76 s cumulative in
+`test_managed_learning_principal_qualification.py` alone), which is a
+product hot path, not test overhead.
+
 ## Where the fixed costs live
 
 - **Collection (~19 s)** is dominated by importing 770+ test modules, most of
-  which import `server` (a ~22k-line module) and, transitively, the `mcp`
-  package. `-k`/file selection does not avoid collection of the rest;
+  which import `server` (a ~22k-line module). Since 2026-09-25 that no
+  longer imports the `mcp` SDK: `server.mcp` is a
+  `reloadable_mcp.LazyReloadableMCPServer` that records registrations and
+  builds the real registry on first use (`tests/test_lazy_mcp_import.py`
+  pins it). On the shared 4-CPU container, `import server` went from a
+  2.66 s to a 1.02 s median (9 interleaved runs each; noisy host).
+  `-k`/file selection does not avoid collection of the rest;
   pointing pytest at explicit files (as `select_regression_tests.py --format
   args` does) does.
-- **Per-process interpreter setup** (~1 s for `import server`) is paid once
+- **Per-process interpreter setup** (`import server`, see above) is paid once
   per pytest process and once per xdist worker; it is why very small `-n`
   values amortize better than one worker per test file would.

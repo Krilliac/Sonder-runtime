@@ -36,7 +36,7 @@ def _origin_error(origin: object, *, allow_insecure_loopback: bool) -> str | Non
         return "[control_state_rehearsal].origin must be a bounded HTTP(S) origin"
     try:
         parsed = urlsplit(origin)
-        parsed.port
+        _ = parsed.port  # urllib validates the port lazily, on access
     except ValueError:
         return "[control_state_rehearsal].origin has an invalid port"
     if (

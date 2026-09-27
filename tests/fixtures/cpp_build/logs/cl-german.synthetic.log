@@ -1,0 +1,5 @@
+math.cpp
+Hinweis: Einlesen der Datei: C:\src\SparkLite\src\core\pch.h
+Hinweis: Einlesen der Datei:  C:\src\SparkLite\src\core\math.h
+C:\src\SparkLite\src\core\math.cpp(19,15): error C2065: "lenght": nichtdeklarierter Bezeichner
+C:\src\SparkLite\src\core\math.cpp(20,12): Fehler C2065: "lenght": nichtdeklarierter Bezeichner

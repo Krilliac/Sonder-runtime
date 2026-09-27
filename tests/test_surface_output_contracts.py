@@ -37,14 +37,14 @@ def test_json_repl_uses_machine_mode_without_changing_the_normal_loop(monkeypatc
         print("answer\nstatus: complete")
 
     monkeypatch.setattr(sonder_repl, "main", fake_main)
-    original_ansi = sonder_repl._Ansi.enabled
+    original_caps = sonder_repl.S._CACHED
 
     sonder_repl.run_jsonl(target)
 
     records = [json.loads(line) for line in target.getvalue().splitlines()]
     assert calls == [True]
     assert [record["text"] for record in records] == ["answer", "status: complete"]
-    assert sonder_repl._Ansi.enabled is original_ansi
+    assert sonder_repl.S._CACHED is original_caps
 
 
 def test_explicit_json_repl_temporarily_disables_legacy_ndjson(monkeypatch):

@@ -38,6 +38,19 @@ class CancellationTree:
     def status(self, node_id: str = "root") -> CancellationSnapshot:
         return self.node(node_id).snapshot()
 
+    def discard(self, node_id: str) -> None:
+        """Forget a finished non-root scope and its descendants."""
+        node = self.node(node_id)
+        if node is self.root:
+            raise ValueError("the root cancellation scope cannot be discarded")
+        pending = [node]
+        while pending:
+            current = pending.pop()
+            pending.extend(current.children())
+            if self._nodes.get(current.node_id) is current:
+                del self._nodes[current.node_id]
+        node.detach()
+
     def join(self, node_id: str = "root", timeout: float | None = None) -> bool:
         return self.node(node_id).join(timeout)
 

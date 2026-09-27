@@ -1,7 +1,10 @@
 # Sonder Runtime
 
 <p align="center">
-  <img src="docs/assets/brand/sonder-runtime-badge.png" alt="Sonder Runtime" width="720">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/sonder-runtime-banner-dark.svg">
+    <img src="docs/assets/brand/sonder-runtime-banner-light.svg" alt="Sonder Runtime" width="720">
+  </picture>
 </p>
 
 <p align="center"><strong>Your models. Your memory. Your machine.</strong></p>
@@ -246,7 +249,7 @@ python -m sonder_runtime repl
 ```
 
 <p align="center">
-  <img src="docs/assets/repl/terminal-repl.png" alt="Sonder terminal REPL with a framed dark-blue composer, live context and token statistics, and activity summary" width="1000">
+  <img src="docs/assets/repl/terminal-repl.png" alt="Sonder terminal REPL: a two-line startup banner, a status line with tier, model, mode and context, an answer with its tool rows, and a one-line footer with timing and token counts" width="880">
 </p>
 
 The terminal REPL keeps the current model, active lanes, context budget, token
@@ -277,6 +280,10 @@ now live in the normal per-user state directory (for example,
 `%LOCALAPPDATA%\sonder\workflows.json` on Windows), so new workflow saves no
 longer dirty an installed source tree. Existing root `workflows.json` files are
 copied once on first use; the original is left untouched for review.
+Live tone tuning (`/emotion`, `update_emotion_vectors`) is saved the same way,
+to `emotion_vectors.json` in the state directory. The checkout's
+`emotion_vectors.json` is the bundled default: it is read when no state copy
+exists and is never written unless `SONDER_EMOTION_VECTORS` names it.
 
 Start the loopback OpenAI-compatible API in a second terminal when another
 client needs it. Run `doctor` first if this is a new machine.

@@ -87,6 +87,7 @@ def test_completed_workbench_lane_is_observed_and_indexed(tmp_path):
     ).history(lane_id)
     assert len(history) == 1 and history[0].outcome == "succeeded"
     assert history[0].usage.attempts == 1
+    assert history[0].usage.model_calls == model.calls == store.read_lane(lane_id)["used_steps"]
     with sqlite3.connect(memory_path) as connection:
         assert connection.execute("SELECT COUNT(*) FROM strategy_experience").fetchone()[0] == 1
     service.inspect(lane_id, context)

@@ -441,6 +441,7 @@ def test_database_manifest_matches_active_shared_literal_resolvers():
         "bootstrap/app.py",
         "adapters/persistence/queued_actions.py",
         "adapters/persistence/served_action_receipts.py",
+        "adapters/persistence/http_work_runs.py",
         "adapters/persistence/composition_store.py",
         "adapters/persistence/autopilot_store.py",
         "adapters/persistence/fanout_store.py",

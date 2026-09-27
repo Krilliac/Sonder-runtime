@@ -90,6 +90,12 @@ from sonder_runtime.platform.deployment_auth import (
     authenticates_callers as _deployment_authenticates_callers_policy,
 )
 from sonder_runtime.domain.model_usage import usage_count as _model_usage_count
+from sonder_runtime.domain.model_usage import (
+    merge_reasoning_response_usage as _merge_reasoning_response_usage,
+)
+from sonder_runtime.domain.memory.authoritative_fact_metadata import (
+    fact_metadata_from_inputs as _surface_fact_metadata,
+)
 from sonder_runtime.domain.model_usage_formatting import (
     usage_source as _model_usage_source,
 )
@@ -109,6 +115,7 @@ from sonder_runtime.platform.private_cot_policy import (
 )
 from sonder_runtime.platform.version import (
     running_source_commit_at_import as _running_source_commit,
+    runtime_version as _runtime_version,
 )
 from sonder_runtime.adapters import ollama_lifecycle
 import admin_auth
@@ -176,12 +183,18 @@ from sonder_runtime.adapters.model_inventory import inventory_rows as _inventory
 from sonder_runtime.domain.context import compaction as context_compaction
 from sonder_runtime.domain.context import overflow as context_overflow
 from sonder_runtime.application.routing import tier_escalation
+# The per-rung provider ContextVar lives in this package module, not here, so
+# a live reload of server.py cannot orphan an in-flight rung binding.
+from sonder_runtime.application.chat import provider_bridge as _provider_bridge
+from sonder_runtime.adapters import legacy_chat_bridge as _legacy_chat_bridge
+from sonder_runtime.adapters import mcp_tool_manifest as _mcp_tool_manifest
 from sonder_runtime.application.context_health import (
     ContextHealthService,
     ContextHealthSettings,
     ContextMemorySnapshot,
 )
 from sonder_runtime.domain.common.errors import InvalidInput
+from sonder_runtime.domain.common.errors import SonderError as _SonderError
 from sonder_runtime.domain.runtime_identity import (
     runtime_identity_block as _runtime_identity_block,
 )
@@ -238,6 +251,7 @@ from sonder_runtime.domain.agents.observation_prompt import (
     UNTRUSTED_OBSERVATION_FOOTER as _AGENT_UNTRUSTED_OBSERVATION_FOOTER,
     UNTRUSTED_OBSERVATION_HEADER as _AGENT_UNTRUSTED_OBSERVATION_HEADER,
     clip_prompt_text as _clip_agent_prompt_text,
+    fit_sectioned_text as _fit_sectioned_agent_text,
     frame_observations as _frame_agent_observations,
     observation_prompt as _agent_observation_prompt,
 )
@@ -309,6 +323,7 @@ from sonder_runtime.domain.thinking_controls import (
 )
 from sonder_runtime.domain import reasoning_continuation as _reasoning_continuation
 from sonder_runtime.domain import verification_progress
+from sonder_runtime.domain import batch_coalescing as _batch_coalescing
 from sonder_runtime.domain.fanout_receipts import (
     safe_answer as _fanout_safe_answer,
     snapshot_allows as _fanout_snapshot_allows_policy,
@@ -483,6 +498,7 @@ from sonder_runtime.domain.retry_after import retry_after_seconds as _retry_afte
 from sonder_runtime.domain.cancellation_policy import (
     cancellation_requested as _cancel_requested,
 )
+from sonder_runtime.application import foreground_turns as _foreground_turns
 from sonder_runtime.domain.code_gate_policy import (
     code_gate_target as _code_gate_target_policy,
 )
@@ -1148,6 +1164,8 @@ from sonder_runtime.adapters.runtime_readiness_formatting import (
     format_model_readiness as _runtime_model_readiness_lines,
 )
 from sonder_runtime.adapters.goal_formatting import format_goal as _format_goal
+from sonder_runtime.adapters.inference.residency_feedback import ResidencyFeedback as _ResidencyFeedback, record_dispatched_context as _record_residency_dispatch
+from sonder_runtime.domain import kv_budget as _kv_budget
 from sonder_runtime.adapters.learning_tier_formatting import (
     format_learning_tiers,
 )
@@ -1299,7 +1317,12 @@ def _prime_live_reload_modules():
 _prime_live_reload_modules()
 
 
-def _maybe_live_reload():
+def _maybe_live_reload(*, create_policy=True):
+    """Reload changed watched modules, then re-apply the shared runtime policy.
+
+    ``create_policy=False`` is for read-only surfaces (``runtime_policy_status``):
+    a missing policy file then renders defaults instead of being written.
+    """
     modules = live_reload.reload_changed_modules(LIVE_RELOAD_MODULES)
     for name, module in modules.items():
         if name == "sonder_runtime.adapters.recall":
@@ -1370,7 +1393,7 @@ def _maybe_live_reload():
             continue
         if name in globals():
             globals()[name] = module
-    _refresh_runtime_policy(create=True)
+    _refresh_runtime_policy(create=create_policy)
 
 
 def _open_db():
@@ -1549,6 +1572,11 @@ _MODEL_CONTEXT_CACHE_TTL = 300.0
 # fallback; keep that verdict short-lived so a transient provider hiccup does
 # not undersize a large model's window for the full positive TTL.
 _MODEL_CONTEXT_CACHE_NEGATIVE_TTL = 30.0
+# Attention geometry parsed from the same /api/show response, guarded by
+# _MODEL_CONTEXT_CACHE_LOCK; None records "not modelled", not a failure.
+_MODEL_GEOMETRY_CACHE = {}
+_RESIDENCY_FEEDBACK = None
+_RESIDENCY_FEEDBACK_LOCK = threading.Lock()
 
 _MODEL_PROMPT_IDENTITY_CACHE = {}
 _MODEL_PROMPT_IDENTITY_CACHE_LOCK = threading.Lock()
@@ -1677,6 +1705,8 @@ def _model_context_metadata(model):
             count = info.get("general.parameter_count")
             if count:
                 parameter_size = float(count) / 1_000_000_000.0
+        with _MODEL_CONTEXT_CACHE_LOCK:
+            _MODEL_GEOMETRY_CACHE[key] = _kv_budget.geometry_from_model_info(info)
     except Exception:
         # Metadata is an optimization and cannot make an otherwise valid model
         # unavailable. The deterministic context-policy fallback remains safe.
@@ -1686,10 +1716,51 @@ def _model_context_metadata(model):
     return context_length, parameter_size
 
 
+def _residency_feedback():
+    """Return the process residency tracker, or ``None`` when unsound.
+
+    ``/api/ps`` describes one server.  Like reusable prompt prefixes, the
+    feedback is only attributable when exactly one Ollama origin is
+    configured; with a worker pool the probe could read a different host than
+    the one that served the request.  ``SONDER_RESIDENCY_FEEDBACK=0`` opts out.
+    """
+    global _RESIDENCY_FEEDBACK
+    if str(os.environ.get("SONDER_RESIDENCY_FEEDBACK", "1")).strip().lower() in (
+        "0", "false", "no", "off",
+    ):
+        return None
+    try:
+        primary = ollama_policy.normalize(BASE).rstrip("/")
+        if tuple(OLLAMA_POOL.configured_origins) != (primary,):
+            _RESIDENCY_FEEDBACK = None
+            return None
+    except Exception:
+        return None
+    with _RESIDENCY_FEEDBACK_LOCK:
+        if _RESIDENCY_FEEDBACK is None or _RESIDENCY_FEEDBACK.origin != primary:
+            _RESIDENCY_FEEDBACK = _ResidencyFeedback(
+                lambda: _get("/api/ps"), minimum_context=context_policy.MIN_CONTEXT, origin=primary,
+            )
+        return _RESIDENCY_FEEDBACK
+
+
 def _auto_model_context(model):
-    """Select a native window for the resolved model when no pin was supplied."""
+    """Select a native window for the resolved model when no pin was supplied.
+
+    Metadata and the declared KV cache type give the starting window; a
+    measured spill to system RAM (``/api/ps``) lowers it until the model is
+    GPU-resident again.  See ``adapters.inference.residency_feedback``.
+    """
     context_length, parameter_size = _model_context_metadata(model)
-    return context_policy.auto_context(context_length, parameter_size)
+    feedback = None if _is_cloud_model_name(model) else _residency_feedback()
+    if feedback is None:
+        return context_policy.auto_context(context_length, parameter_size)
+    with _MODEL_CONTEXT_CACHE_LOCK:
+        geometry = _MODEL_GEOMETRY_CACHE.get(str(model or "").strip().casefold())
+    feedback.refresh(model, geometry=geometry, kv_type=context_policy.kv_cache_type()[0])
+    return context_policy.auto_context(
+        context_length, parameter_size, feedback.ceiling(model),
+    )
 
 
 def _make_generate(
@@ -1739,7 +1810,12 @@ def _make_generate(
             total_tokens=reasoning_total_tokens,
         )
     if not cloud and (num_ctx is None or int(num_ctx or 0) <= 0):
-        num_ctx = _auto_model_context(model)
+        # /api/show is an Ollama probe.  A non-Ollama rung requests the
+        # runtime's default window instead of probing a model it never uses.
+        num_ctx = (
+            _auto_model_context(model)
+            if _provider_bridge.active_rung() is None else None
+        )
 
     def gen(prompt, history=None):
         gen.last_usage = {}
@@ -1811,6 +1887,12 @@ def _make_generate(
                     single_send=single_send,
                     **local_chat_options,
                 )
+                if (
+                    _provider_bridge.active_rung() is not None
+                    and isinstance(out.get("model"), str) and out["model"]
+                ):
+                    # A bridged rung reports the provider's served model.
+                    used_model = out["model"]
             tokens_in = _model_usage_count(out.get("prompt_eval_count"))
             tokens_out = _model_usage_count(out.get("eval_count"))
             source = _model_usage_source(tokens_in, tokens_out)
@@ -1893,9 +1975,12 @@ def _generate_text(prompt, tier="fast", system="", temperature=0.2,
                    num_predict=256, num_ctx=0, timeout=None):
     _refresh_live_cloud_tiers()
     model = TIERS.get(tier, TIERS["fast"])
-    return _make_generate(
-        model, system, temperature, num_predict, num_ctx, timeout=timeout,
-    )(prompt)
+    # A helper call names its own tier; it must never inherit the enclosing
+    # chat rung's provider binding (it keeps its historical Ollama route).
+    with _provider_bridge.suspend_rung():
+        return _make_generate(
+            model, system, temperature, num_predict, num_ctx, timeout=timeout,
+        )(prompt)
 
 
 _APP_GRAPH = None
@@ -1914,7 +1999,23 @@ def _application():
                 preference_module_provider=lambda: preference_learning,
             )
             _APP_GRAPH_OWNED_BY_SERVER = True
+        # Every graph this runtime serves feeds the ledger, whether it built
+        # the graph itself or an entrypoint handed one over (the handoff also
+        # installs it; adding the same observer again is a no-op).
+        _install_typed_build_feed(_APP_GRAPH)
         return _APP_GRAPH
+
+
+def _install_typed_build_feed(application) -> None:
+    """Observe typed build reports on ``application``'s gateway (idempotent).
+
+    Typed ``build_job``/``build_job_result`` reports then judge recent
+    generations in this process's grounded-outcome ledger, as ``build_run``
+    does. A graph without a typed tool facade is left alone.
+    """
+    observe = getattr(getattr(application, "tools", None), "add_receipt_observer", None)
+    if callable(observe):
+        observe(_typed_receipt_outcome)
 
 
 def _close_server_owned_application(*, timeout=5) -> None:
@@ -2208,25 +2309,38 @@ def _gateway_generate_text(prompt, tier="fast", system="", temperature=0.2,
     gateway resolves the native session context via _make_generate.
     """
     from sonder_runtime.application.chat.handle_chat import ChatCommand
-    from sonder_runtime.application.context import local_owner_context
+    from sonder_runtime.application.context import (
+        current_operation_context,
+        local_owner_context,
+    )
     from sonder_runtime.domain.common import errors as _errors
 
+    # An offload made inside a turn joins that turn's run (same correlation
+    # id R) so the next producer's events group with it.
+    ambient = current_operation_context()
     context = local_owner_context(
-        correlation_id="offload-%s" % os.urandom(4).hex(),
+        correlation_id=(
+            ambient.correlation_id if ambient is not None
+            else "offload-%s" % os.urandom(4).hex()
+        ),
         source="system",
         cloud_allowed=_cloud_allowed_policy(os.environ),
         remote_ollama_allowed=not _ollama_endpoint_is_local(),
         timeout_seconds=float(timeout) if timeout else None,
     )
     try:
-        result = _application().chat.complete(
-            ChatCommand(
-                content=prompt, tier=tier, system=system,
-                temperature=temperature, num_predict=num_predict,
-                num_ctx=num_ctx,
-            ),
-            context,
-        )
+        # The offload asks for its own tier; the gateway routes it, never the
+        # enclosing chat rung's binding (the Ollama gateway re-enters
+        # _chat_request, which must take the ordinary path).
+        with _provider_bridge.suspend_rung():
+            result = _application().chat.complete(
+                ChatCommand(
+                    content=prompt, tier=tier, system=system,
+                    temperature=temperature, num_predict=num_predict,
+                    num_ctx=num_ctx,
+                ),
+                context,
+            )
     except _errors.SonderError as exc:
         # Translate the domain taxonomy back to the legacy transport error
         # at the adapter edge so callers' URLError handling is unchanged.
@@ -2662,7 +2776,7 @@ def _autopilot_command(arg: str, project: str = "", request_owner: str | None = 
             launched = _launch_autopilot(ap_result["run_id"])
             prefix = "autopilot bound to goal %s" % active["id"]
             if not launched:
-                prefix = "autopilot already active"
+                prefix = _autopilot_not_launched(ap_result["run_id"])
             return "%s\n  run: %s\n  objective: %s\n  use /autopilot status %s" % (
                 prefix, ap_result["run_id"], active["objective"][:120],
                 ap_result["run_id"],
@@ -2710,6 +2824,8 @@ def _runtime_command(arg: str) -> str:
     text = str(arg or "").strip()
     if not text or text.lower() in {"status", "show", "list"}:
         return runtime_policy_status()
+    if text.lower().split() == ["status", "refresh"]:
+        return _runtime_policy_refresh_status()
     action, _, rest = text.partition(" ")
     action = action.lower()
     rest = rest.strip()
@@ -2752,13 +2868,14 @@ def _runtime_command(arg: str) -> str:
     if action in {"help", "?"}:
         return (
             "runtime policy commands:\n"
-            "  /runtime status\n"
+            "  /runtime status   (cached model readiness; no model call)\n"
+            "  /runtime status refresh   (re-check the local model inventory now)\n"
             "  /runtime set fast=<model> code=<model> general=<model>\n"
             "  /runtime set reasoning=<model> vision=<model>   (specialist "
             "tiers; assign an empty value to leave one unset)\n"
             "  /runtime set embedding=<installed-embedding-model>\n"
-            "  /runtime set router=<tier> workbench=<tier> autopilot=<tier> "
-            "fleet=<tier> review=<tier>\n"
+            "  /runtime set chat=<tier> router=<tier> workbench=<tier> "
+            "autopilot=<tier> fleet=<tier> review=<tier>\n"
             "  /runtime reset\n"
             "Only installed local models are accepted. Embedding changes affect "
             "future vectors only; use /embeddings apply to refresh stored memory. "
@@ -2879,78 +2996,194 @@ def _selfmod_agent_policy(run):
     return policy
 
 
-def _execute_selfmod_run(run_id, explicit_tests=None):
-    run = selfmod.get_run(run_id)
-    if run["phase"] == "proposed":
-        selfmod.create_backup(run_id)
-        run = selfmod.prepare_workspace(run_id)
-    elif run["phase"] == "backed_up":
-        run = selfmod.prepare_workspace(run_id)
-    if run["phase"] != "editing":
-        return "ERROR: selfmod run is not ready for editing: %s" % run["phase"]
-    owner = selfmod.claim(run_id)
+def _selfmod_stage_journal():
+    """The bootstrap-composed selfmod stage journal for operator-driven stages.
+
+    The same ``GuardedLegacySelfmodService`` the nightly driver journals
+    through: its binding factory is the host's ``_compose_selfmod_binding``
+    over the shared worker-effects journal, so an operator stage and a
+    nightly stage of one run share journal identities and per-attempt
+    numbering.  Raises when the graph composes no selfmod service; callers
+    refuse to mutate rather than run a stage unjournaled.
+    """
+    factory = getattr(_application(), "selfmod_service", None)
+    if not callable(factory):
+        raise RuntimeError("the application graph does not compose a selfmod service")
+    return factory()
+
+
+def _selfmod_journal_refusal(action, exc):
+    return ("refused /selfmod %s: selfmod stage journal unavailable (%s); "
+            "refusing to mutate without journaled effects" % (action, type(exc).__name__))
+
+
+class _SelfmodRunBusy(RuntimeError):
+    """Another operator ``/selfmod`` call already drives this run."""
+
+
+@contextlib.contextmanager
+def _selfmod_operator_lease(run_id):
+    """Hold the run's process-safe owner lease across one operator stage sequence.
+
+    Every operator stage composes a fresh selfmod journal binding, and
+    composing one treats any open intent of the run as orphaned.  Two
+    concurrent operator calls on one run (a double submit, or the REPL and an
+    HTTP caller) would therefore fence each other mid-effect.  The run's
+    ledger lease (``selfmod.claim``: one live owner per run, across threads
+    and processes, renewed by a heartbeat while held) serializes them: the
+    second caller gets ``_SelfmodRunBusy`` before it composes a binding or
+    touches the journal.  Yields the owner id.
+    """
+    try:
+        owner = selfmod.claim(run_id)
+    except RuntimeError as exc:
+        raise _SelfmodRunBusy(
+            "run %s is already being driven by another /selfmod call (%s); "
+            "retry after it finishes" % (run_id, exc)
+        ) from exc
     heartbeat_stop = threading.Event()
+
     def heartbeat_worker():
         while not heartbeat_stop.wait(30):
             if not selfmod.heartbeat(run_id, owner):
                 return
+
     heartbeat_thread = owned_runtime_thread(
         target=heartbeat_worker, name="sonder-selfmod-heartbeat", daemon=True,
     )
     heartbeat_thread.start()
-    previous = os.environ.get("SONDER_SELFMOD_ACTIVE")
-    os.environ["SONDER_SELFMOD_ACTIVE"] = "1"
     try:
-        workspace = run["workspace_path"]
-        test_commands = _selfmod_test_commands(run, explicit_tests or [])
-        selfmod.record_reproducer_before(run_id, test_commands[1][1])
-        prompt = (
-            "Implement this bounded self-improvement only inside the isolated workspace.\n"
-            "Objective: %s\nEvidence: %s\nAcceptance criteria: %s\n"
-            "Authorized files (no others may change): %s\nWorkspace: %s\n"
-            "Inspect first, then use guarded file tools. Do not approve, deploy, alter tests outside scope, "
-            "change permissions, install dependencies, invoke selfmod, or touch the live repository."
-            % (run["objective"], "; ".join(run["evidence"]), "; ".join(run["criteria"]), ", ".join(run["files"]), workspace)
-        )
-        # The run's lease already fences its record; this fences the editing
-        # agent's effects on the same lease, so a worker that lost the run
-        # stops writing into the workspace at its next tool call.
-        with effect_fence.held(effect_fence.selfmod_fence(run_id, owner)):
-            output = _agent_impl(
-                prompt, tier="code", max_steps=min(run["budgets"]["max_tool_calls"], run["budgets"]["max_model_calls"], 20),
-                allow_web=False, require_file_evidence=True, read_only=False,
-                include_evidence=True, auto_checklist=True,
-                tool_allowlist={"workspace_inventory", "directory_tree", "text_search", "file_read", "file_read_range", "file_write", "file_edit", "file_delete"},
-                tool_policy=_selfmod_agent_policy(run),
-            )
-        diff = selfmod.inspect_diff(run_id)
-        if not diff["changed_files"]:
-            selfmod.reject(run_id, "editing agent produced no scoped diff")
-            return "Selfmod rejected: editing agent produced no scoped diff.\n\n" + output
-        selfmod.begin_testing(run_id)
-        for kind, command in test_commands:
-            selfmod.record_test(run_id, kind, command)
-        # review() requires a passing `smoke`; this is what supplies it. It runs
-        # the candidate rather than describing it, so it is recorded here rather
-        # than being one more argv in the list above.
-        selfmod.record_smoke(run_id)
-        selfmod.review(run_id)
-        return selfmod.format_run(run_id) + "\n\nAgent evidence:\n" + output
-    except Exception as exc:
-        current = selfmod.get_run(run_id)
-        if current["phase"] in {"editing", "testing", "reviewing"}:
-            with contextlib.suppress(Exception):
-                selfmod.reject(run_id, "selfmod execution failed: %s" % exc)
-        return "ERROR: selfmod run failed closed: %s" % exc
+        yield owner
     finally:
         heartbeat_stop.set()
         heartbeat_thread.join(timeout=2)
-        if previous is None:
-            os.environ.pop("SONDER_SELFMOD_ACTIVE", None)
-        else:
-            os.environ["SONDER_SELFMOD_ACTIVE"] = previous
         with contextlib.suppress(Exception):
             selfmod.release(run_id, owner)
+
+
+def _execute_selfmod_run(run_id, explicit_tests=None, *, unisolated=False, operator_approved=False):
+    """Drive one operator-authorized selfmod run through its candidate checks.
+
+    Every mutating stage goes through the selfmod stage journal
+    (``_selfmod_stage_journal``), and every command that executes candidate
+    bytes (each ``record_test`` and the ``record_smoke`` probe) runs under the
+    isolation ``selfmod.operator_candidate_isolation`` selects: the host's
+    candidate supervisor (the Linux uid supervisor when
+    ``SONDER_SELFMOD_CANDIDATE_UID`` is configured, Windows low integrity on
+    Windows) or -- only on a host without one, and only for an attended
+    console operator who typed ``--unisolated`` -- an unisolated run that the
+    run's audit events record as such.  Both are settled before a backup or
+    workspace exists.
+    """
+    try:
+        isolated = selfmod.operator_candidate_isolation(
+            unisolated_requested=bool(unisolated),
+            operator_attended=bool(operator_approved), run_id=run_id,
+        )
+    except selfmod.CandidateIsolationRefused as exc:
+        return "refused /selfmod run: %s" % exc
+    try:
+        stages = _selfmod_stage_journal()
+    except Exception as exc:
+        return _selfmod_journal_refusal("run", exc)
+    # The run's owner lease covers every stage below, from the backup on, so
+    # a concurrent operator call on this run is refused before it composes a
+    # journal binding over this one's in-flight intents.
+    held = contextlib.ExitStack()
+    try:
+        owner = held.enter_context(_selfmod_operator_lease(run_id))
+    except _SelfmodRunBusy as exc:
+        return "refused /selfmod run: %s" % exc
+    with held:
+        run = selfmod.get_run(run_id)
+        if run["phase"] == "proposed":
+            stages.journaled_stage(run_id, "create_backup", {},
+                                   lambda: selfmod.create_backup(run_id))
+            run = stages.journaled_stage(run_id, "prepare_workspace", {},
+                                         lambda: selfmod.prepare_workspace(run_id))
+        elif run["phase"] == "backed_up":
+            run = stages.journaled_stage(run_id, "prepare_workspace", {},
+                                         lambda: selfmod.prepare_workspace(run_id))
+        if run["phase"] != "editing":
+            return "ERROR: selfmod run is not ready for editing: %s" % run["phase"]
+        previous = os.environ.get("SONDER_SELFMOD_ACTIVE")
+        os.environ["SONDER_SELFMOD_ACTIVE"] = "1"
+        try:
+            workspace = run["workspace_path"]
+            test_commands = _selfmod_test_commands(run, explicit_tests or [])
+            reproducer = [str(item) for item in test_commands[1][1]]
+            # The reproducer runs the declared check against the untouched live
+            # source, not candidate bytes, so it is journaled but not isolated
+            # (``selfmod._record_command`` exempts it from auto-low-risk isolation
+            # for the same reason).
+            stages.journaled_stage(
+                run_id, "record_reproducer_before", {"command": reproducer},
+                lambda: selfmod.record_reproducer_before(run_id, reproducer),
+            )
+            prompt = (
+                "Implement this bounded self-improvement only inside the isolated workspace.\n"
+                "Objective: %s\nEvidence: %s\nAcceptance criteria: %s\n"
+                "Authorized files (no others may change): %s\nWorkspace: %s\n"
+                "Inspect first, then use guarded file tools. Do not approve, deploy, alter tests outside scope, "
+                "change permissions, install dependencies, invoke selfmod, or touch the live repository."
+                % (run["objective"], "; ".join(run["evidence"]), "; ".join(run["criteria"]), ", ".join(run["files"]), workspace)
+            )
+            # The run's lease already fences its record; this fences the editing
+            # agent's effects on the same lease, so a worker that lost the run
+            # stops writing into the workspace at its next tool call.
+            with effect_fence.held(effect_fence.selfmod_fence(run_id, owner)):
+                output = _agent_impl(
+                    prompt, tier="code", max_steps=min(run["budgets"]["max_tool_calls"], run["budgets"]["max_model_calls"], 20),
+                    allow_web=False, require_file_evidence=True, read_only=False,
+                    include_evidence=True, auto_checklist=True,
+                    tool_allowlist={"workspace_inventory", "directory_tree", "text_search", "file_read", "file_read_range", "file_write", "file_edit", "file_delete"},
+                    tool_policy=_selfmod_agent_policy(run),
+                )
+            diff = selfmod.inspect_diff(run_id)
+            if not diff["changed_files"]:
+                selfmod.reject(run_id, "editing agent produced no scoped diff")
+                return "Selfmod rejected: editing agent produced no scoped diff.\n\n" + output
+            stages.journaled_stage(run_id, "begin_testing", {},
+                                   lambda: selfmod.begin_testing(run_id))
+            # The rollback point (sealed backup bundle and manifest) is evaluator
+            # truth: a supervisor refuses to launch while it is candidate-writable
+            # and re-digests it after every check.
+            protected = selfmod.evaluator_truth_paths(run_id)
+            for kind, command in test_commands:
+                argv = [str(item) for item in command]
+                stages.journaled_stage(
+                    run_id, "record_test",
+                    {"kind": str(kind), "command": argv,
+                     "protected_paths": list(protected), "low_integrity": isolated},
+                    lambda kind=kind, argv=argv: selfmod.record_test(
+                        run_id, kind, argv, protected_paths=protected,
+                        low_integrity=isolated,
+                    ),
+                )
+            # review() requires a passing `smoke`; this is what supplies it. It runs
+            # the candidate rather than describing it, so it is recorded here rather
+            # than being one more argv in the list above -- under the same isolation.
+            stages.journaled_stage(
+                run_id, "record_smoke",
+                {"protected_paths": list(protected), "low_integrity": isolated},
+                lambda: selfmod.record_smoke(
+                    run_id, protected_paths=protected, low_integrity=isolated,
+                ),
+            )
+            stages.journaled_stage(run_id, "review", {"require_kinds": None},
+                                   lambda: selfmod.review(run_id))
+            return selfmod.format_run(run_id) + "\n\nAgent evidence:\n" + output
+        except Exception as exc:
+            current = selfmod.get_run(run_id)
+            if current["phase"] in {"editing", "testing", "reviewing"}:
+                with contextlib.suppress(Exception):
+                    selfmod.reject(run_id, "selfmod execution failed: %s" % exc)
+            return "ERROR: selfmod run failed closed: %s" % exc
+        finally:
+            if previous is None:
+                os.environ.pop("SONDER_SELFMOD_ACTIVE", None)
+            else:
+                os.environ["SONDER_SELFMOD_ACTIVE"] = previous
 
 
 def refresh_goal_proposals(scope: str = "") -> dict:
@@ -2991,12 +3224,14 @@ def refresh_goal_proposals(scope: str = "") -> dict:
     return {"proposed": proposed, "skipped": skipped, "error": ""}
 
 
-def _goal_command(arg: str, request_owner: str = "") -> str:
+def _goal_command(arg: str, project: str = "", request_owner: str = "") -> str:
     """User-facing goal bookkeeping.
 
     Slash commands originate only from the user's own chat input, so this
     layer is authorized to pass actor="user"; goal_store independently
     enforces that closure and adoption can never come from model output.
+    ``project`` is the session project, used to scope a ``set --auto`` run the
+    same way ``/autopilot --goal`` scopes one.
     """
     import goal_store
 
@@ -3039,17 +3274,18 @@ def _goal_command(arg: str, request_owner: str = "") -> str:
                     lines.append("plan: %d steps decomposed" % plan_result["step_count"])
             if auto:
                 ap = _composition.goal_to_autopilot(
-                    goal, project=_resolve_project(project) if 'project' in dir() else "",
+                    goal, project=_resolve_project(project) or "",
                     request_owner=request_owner,
                 )
                 if ap.get("error"):
                     lines.append("autopilot: %s" % ap["error"])
-                else:
-                    _launch_autopilot(ap["run_id"])
+                elif _launch_autopilot(ap["run_id"]):
                     lines.append(
                         "autopilot: %s started (use /autopilot status %s)"
                         % (ap["run_id"], ap["run_id"])
                     )
+                else:
+                    lines.append("autopilot: %s" % _autopilot_not_launched(ap["run_id"]))
             return "\n".join(lines)
         if action == "note":
             if not rest:
@@ -3081,8 +3317,10 @@ def _goal_command(arg: str, request_owner: str = "") -> str:
                 "\n(adopt with /goal adopt <id>; dismiss with "
                 "/goal decline <id>)"
             )
+        if action in ("adopt", "decline") and not rest:
+            return "usage: /goal %s <proposal-id>  (list them with /goal proposals)" % action
         if action == "adopt":
-            return "adopted\n" + _fmt(goal_store.adopt(rest, actor="user"))
+            return "adopted\n" + _format_goal(goal_store.adopt(rest, actor="user"))
         if action == "decline":
             goal = goal_store.decline(rest, actor="user")
             return "declined proposal %s" % goal["id"]
@@ -3168,7 +3406,8 @@ def _mission_command(arg: str, project: str = "", request_owner: str = "") -> st
                         "autopilot: %s created (use /autopilot status %s)"
                         % (ap["run_id"], ap["run_id"])
                     )
-                    _launch_autopilot(ap["run_id"])
+                    if not _launch_autopilot(ap["run_id"]):
+                        lines.append("autopilot: %s" % _autopilot_not_launched(ap["run_id"]))
             return "\n".join(lines)
 
         if action in ("done", "complete"):
@@ -3209,6 +3448,10 @@ def _mission_command(arg: str, project: str = "", request_owner: str = "") -> st
 # refusing a status read unattended would be the over-refusal this gate exists
 # to avoid.
 _SELFMOD_SOURCE_WRITING_ACTIONS = frozenset({"deploy", "rollback"})
+# The journaled operator stages and the legacy phase each one starts from.
+_SELFMOD_OPERATOR_STAGE_PHASES = {
+    "approve": "reviewing", "deploy": "approved", "rollback": "deployed",
+}
 
 
 def _selfmod_command(arg: str, *, repository_root="", operator_approved=False) -> str:
@@ -3230,6 +3473,9 @@ def _selfmod_command(arg: str, *, repository_root="", operator_approved=False) -
                 "requires a console operator approval, or an explicit allow "
                 "rule via /permissions (mode: %s)"
             ) % (action, permission_modes.MODE_LABELS.get(mode, mode))
+    # Operator stage leases (``_selfmod_operator_lease``) taken below are
+    # released when this command returns.
+    held = contextlib.ExitStack()
     try:
         if action in {"status", "show", "list"}:
             return selfmod.format_status()
@@ -3266,11 +3512,28 @@ def _selfmod_command(arg: str, *, repository_root="", operator_approved=False) -
             return "pruned backups: %s" % (", ".join(removed) or "none")
         if action in {"plan", "run"}:
             selfmod.recursive_guard()
-            maintenance = "--maintenance" in rest.split()
-            parsed_rest = " ".join(part for part in rest.split() if part != "--maintenance")
+            words = rest.split()
+            maintenance = "--maintenance" in words
+            unisolated = selfmod.UNISOLATED_FLAG in words
+            parsed_rest = " ".join(
+                part for part in words
+                if part not in ("--maintenance", selfmod.UNISOLATED_FLAG)
+            )
             objective, files, tests = selfmod.parse_plan_text(parsed_rest)
             if not files:
-                return "usage: /selfmod %s <objective> --files path.py,test_path.py [--tests python -m pytest ...]" % action
+                return "usage: /selfmod %s <objective> --files path.py,test_path.py [--tests python -m pytest ...] [--maintenance] [%s]" % (action, selfmod.UNISOLATED_FLAG)
+            if action == "run":
+                # Settle candidate isolation before a run record exists, so a
+                # host without a candidate supervisor leaves nothing behind.
+                # ``_execute_selfmod_run`` decides again, authoritatively,
+                # against the run it is about to execute.
+                try:
+                    selfmod.operator_candidate_isolation(
+                        unisolated_requested=unisolated,
+                        operator_attended=bool(operator_approved),
+                    )
+                except selfmod.CandidateIsolationRefused as exc:
+                    return "refused /selfmod run: %s" % exc
             evidence = ["explicit user-authorized objective: %s" % objective, "host improvement report: %s" % system_improvement_report()[:2000]]
             run = selfmod.create_plan(
                 objective, root, problem=objective, evidence=evidence, files=files,
@@ -3280,14 +3543,50 @@ def _selfmod_command(arg: str, *, repository_root="", operator_approved=False) -
             )
             if action == "plan":
                 return selfmod.format_run(run["id"])
-            return _execute_selfmod_run(run["id"], tests)
+            return _execute_selfmod_run(
+                run["id"], tests, unisolated=unisolated,
+                operator_approved=bool(operator_approved),
+            )
+        if action in _SELFMOD_OPERATOR_STAGE_PHASES:
+            # These stages mutate the run (and, for deploy/rollback, Sonder's
+            # own source); each goes through the selfmod stage journal, under
+            # the run's owner lease, or does not run at all.  A refusal here
+            # happens before any journal record exists for the run, so a
+            # typo'd id or a wrong phase never fences it.
+            try:
+                selfmod.get_run(rest)
+            except KeyError:
+                return "refused /selfmod %s: unknown selfmod run %r" % (action, rest[:120])
+            try:
+                stages = _selfmod_stage_journal()
+            except Exception as exc:
+                return _selfmod_journal_refusal(action, exc)
+            try:
+                # Held until this command returns (``held.close()`` below), so
+                # a concurrent operator call on this run is refused before it
+                # composes a journal binding over this one's in-flight intent.
+                held.enter_context(_selfmod_operator_lease(rest))
+            except _SelfmodRunBusy as exc:
+                return "refused /selfmod %s: %s" % (action, exc)
+            # Read under the lease: a concurrent call may have moved the run
+            # since the lookup above.
+            phase = str(selfmod.get_run(rest).get("phase", ""))
+            required = _SELFMOD_OPERATOR_STAGE_PHASES[action]
+            if phase != required:
+                return "refused /selfmod %s: run %s is %s; it requires phase %s" % (
+                    action, rest, phase, required)
         if action == "resume":
             run = selfmod.resume(rest)
             return selfmod.format_run(run["id"])
         if action == "cancel":
             return selfmod.format_run(selfmod.cancel(rest)["id"])
         if action == "approve":
-            return selfmod.format_run(selfmod.approve(rest, approver="explicit local/developer user")["id"])
+            approver = "explicit local/developer user"
+            approved = stages.journaled_stage(
+                rest, "approve", {"approver": approver},
+                lambda: selfmod.approve(rest, approver=approver),
+            )
+            return selfmod.format_run(approved["id"])
         if action == "reject":
             run_id, _, reason = rest.partition(" ")
             return selfmod.format_run(selfmod.reject(run_id, reason or "explicit user rejection")["id"])
@@ -3304,7 +3603,11 @@ def _selfmod_command(arg: str, *, repository_root="", operator_approved=False) -
             # tree whose rollback was broken. `selfmod.deploy` now dry-runs both
             # rollback routes itself, unconditionally, so that property cannot be
             # lost by editing the argv here or by a caller that passes none.
-            run = selfmod.deploy(rest, health_command=[sys.executable, "-c", "import server; print(server.status())"])
+            health_command = [sys.executable, "-c", "import server; print(server.status())"]
+            run = stages.journaled_stage(
+                rest, "deploy", {"health_command": health_command, "commit": True},
+                lambda: selfmod.deploy(rest, health_command=health_command),
+            )
             module_names = {
                 Path(path).stem for path in run["files"]
                 if path.endswith(".py") and "/" not in path
@@ -3317,21 +3620,32 @@ def _selfmod_command(arg: str, *, repository_root="", operator_approved=False) -
                     if row.get("error")
                 ]
                 if failures:
-                    selfmod.rollback(rest, reason="in-process live reload health failed")
+                    reason = "in-process live reload health failed"
+                    stages.journaled_stage(
+                        rest, "rollback", {"reason": reason},
+                        lambda: selfmod.rollback(rest, reason=reason),
+                    )
                     return "ERROR: live reload failed; automatic rollback completed: %s" % failures
             return selfmod.format_run(run["id"])
         if action == "rollback":
-            return selfmod.format_run(selfmod.rollback(rest)["id"])
+            reason = "user requested rollback"
+            restored = stages.journaled_stage(
+                rest, "rollback", {"reason": reason},
+                lambda: selfmod.rollback(rest, reason=reason),
+            )
+            return selfmod.format_run(restored["id"])
         if action in {"help", "?"}:
             return (
                 "selfmod: status|opportunities|history|inspect <id>|plan <objective> --files a,b|"
-                "run <objective> --files a,b --tests <command>|diff <id>|tests <id>|approve <id>|"
+                "run <objective> --files a,b --tests <command> [--unisolated]|diff <id>|tests <id>|approve <id>|"
                 "reject <id>|deploy <id>|rollback <id>|backups|verify-backup <id>|"
                 "mode observe|propose|auto-low-risk|resume <id>|cancel <id>|retention <days> <GB>|prune-backups|disable|enable"
             )
         return "ERROR: unknown selfmod action; try /selfmod help"
-    except (KeyError, ValueError, RuntimeError, PermissionError, OSError) as exc:
+    except (KeyError, ValueError, RuntimeError, PermissionError, OSError, _SonderError) as exc:
         return "ERROR: %s" % exc
+    finally:
+        held.close()
 
 
 def _control_tool_refusal(tools, label, *, operator_approved=False, arguments=None):
@@ -3442,7 +3756,7 @@ def control_command(prompt: str, history=None, session="", project="",
         return context_compaction_plan()
     if cmd in ("/commands", "/cmds"):
         return command_registry_list(arg.strip())
-    if cmd in ("/activity", "/tools"):
+    if cmd == "/activity":
         return activity_status()
     if cmd in ("/autopilot", "/auto"):
         return _autopilot_command(arg, project=project, request_owner=autopilot_request_owner)
@@ -3475,7 +3789,9 @@ def control_command(prompt: str, history=None, session="", project="",
     if cmd == "/approve":
         return _approve_command(arg, operator_approved=bool(operator_approved))
     if cmd in ("/goal", "/goals"):
-        return _goal_command(arg, request_owner=autopilot_request_owner or "")
+        return _goal_command(
+            arg, project=project, request_owner=autopilot_request_owner or "",
+        )
     if cmd in ("/mission",):
         return _mission_command(arg, project=project, request_owner=autopilot_request_owner or "")
     if cmd in ("/ensemble",):
@@ -3866,6 +4182,13 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
     qv = embeddings.embed(prompt)
     if not embeddings.valid_vector(qv):
         qv = None
+    if qv is None and augment and _provider_bridge.active_rung() is not None:
+        # Recall ranks by the Ollama embedder even when generation runs on
+        # another provider; say so instead of silently recalling less.
+        _legacy_chat_bridge.note_degradation(
+            "memory_recall_embeddings",
+            "embedding provider unavailable; recall used no query vector",
+        )
     blob = embeddings.to_blob(qv) if qv else None
     embedding_provenance = embeddings.provenance(qv) if qv else {}
     if augment:
@@ -4462,11 +4785,17 @@ def _apply_code_gate(reply, interaction_id=None, regenerate=None):
 
 
 _existing_mcp = globals().get("_PERSISTENT_MCP")
-if isinstance(_existing_mcp, reloadable_mcp.ReloadableMCPServer):
+if reloadable_mcp.is_reloadable_server(_existing_mcp):
     mcp = _existing_mcp
     mcp.begin_module_refresh()
 else:
-    mcp = reloadable_mcp.ReloadableMCPServer("sonder-runtime")
+    # Lazy: the MCP SDK is imported (and the registry built) on first use, so
+    # importing this module for the REPL, HTTP API or CLI does not pay for it.
+    # ``version`` is the initialize ``serverInfo.version``; left unset, MCP
+    # clients saw an empty string and could not tell which build answered.
+    mcp = reloadable_mcp.LazyReloadableMCPServer(
+        "sonder-runtime", version=_runtime_version(),
+    )
 _PERSISTENT_MCP = mcp
 
 
@@ -4610,7 +4939,10 @@ def _post_model(
     attempt_index = 0
     while attempt_index < max_attempts:
         attempt = attempt_index + 1
-        if _cancel_requested(cancel_check):
+        # An interrupted foreground turn (REPL Ctrl-C) cancels its scope in
+        # the shared cancellation tree; no further request may be sent for
+        # it even when a caller swallowed the original interrupt.
+        if _cancel_requested(cancel_check) or _foreground_turns.cancel_requested():
             raise ModelCallError(
                 "cancelled",
                 "model call cancelled before another request was sent",
@@ -4833,52 +5165,6 @@ def _reasoning_segment_tokens(out, payload) -> int:
     return 1
 
 
-def _merge_reasoning_response_usage(first, later, *, segments: int) -> dict:
-    """Combine provider counters while retaining only the final response body."""
-    merged = dict(later if isinstance(later, dict) else {})
-    for key in (
-        "total_duration",
-        "load_duration",
-        "prompt_eval_count",
-        "prompt_eval_duration",
-        "eval_count",
-        "eval_duration",
-    ):
-        left = first.get(key) if isinstance(first, dict) else None
-        right = later.get(key) if isinstance(later, dict) else None
-        if all(
-            isinstance(value, int) and not isinstance(value, bool) and value >= 0
-            for value in (left, right)
-        ):
-            merged[key] = left + right
-        elif isinstance(left, int) and not isinstance(left, bool) and left >= 0:
-            merged[key] = left
-    first_message = first.get("message") if isinstance(first, dict) else None
-    first_thinking = (
-        first_message.get("thinking") if isinstance(first_message, dict) else None
-    )
-    first_thinking_chars = (
-        len(first_thinking) if isinstance(first_thinking, str) else 0
-    )
-    later_thinking_chars = None
-    if isinstance(later, dict) and "reasoning_segments" in later:
-        later_thinking_chars = _model_usage_count(later.get("thinking_chars"))
-    if later_thinking_chars is None:
-        later_message = later.get("message") if isinstance(later, dict) else None
-        later_thinking = (
-            later_message.get("thinking")
-            if isinstance(later_message, dict) else None
-        )
-        later_thinking_chars = (
-            len(later_thinking) if isinstance(later_thinking, str) else 0
-        )
-    thinking_chars = first_thinking_chars + later_thinking_chars
-    if thinking_chars > 0:
-        merged["thinking_chars"] = thinking_chars
-    merged["reasoning_segments"] = max(1, int(segments))
-    return merged
-
-
 def _preserve_reasoning_failure_usage(
     error: ModelCallError,
     first: dict,
@@ -4906,6 +5192,33 @@ def _preserve_reasoning_failure_usage(
     error.reasoning_segments = max(1, int(segments), later_segments)
 
 
+# HTTP chat through the ModelGateway for non-Ollama rungs: the bridge lives in
+# sonder_runtime/adapters/legacy_chat_bridge.py; these wrappers inject policy.
+
+
+def _bridge_provider_for_tier(tier_label, cloud=False):
+    """The non-Ollama provider serving a local rung, or None for Ollama."""
+    return _legacy_chat_bridge.provider_for_tier(tier_label, cloud, _APP_GRAPH)
+
+
+def _bridge_operation_context(timeout, cancel_check):
+    return _legacy_chat_bridge.operation_context(
+        timeout, cancel_check,
+        cloud_allowed=_cloud_allowed_policy(os.environ),
+        remote_ollama_allowed=not _ollama_endpoint_is_local(),
+    )
+
+
+def _refuse_ollama_agent_on_bound_tier(tier, step):
+    """Fail closed (503) when an Ollama-only HTTP chat step meets a bound tier."""
+    _model, cloud, _augment, tier_label = _serve_target(tier, None)
+    if tier_label in (None, "cloud-disabled"):
+        return
+    provider = _bridge_provider_for_tier(tier_label, cloud)
+    if provider is not None:
+        raise _legacy_chat_bridge.ollama_agent_refusal(step, tier_label, provider)
+
+
 def _chat_request(
     payload: dict,
     *,
@@ -4931,6 +5244,21 @@ def _chat_request(
         raise ValueError("single_send requires a local, non-thinking, single-segment call")
     if cloud and reasoning_continuation:
         raise ValueError("reasoning continuation is available only for local models")
+    bridged_rung = None if cloud else _provider_bridge.active_rung()
+    if bridged_rung is not None:
+        # Delegation hook: this rung's tier is bound to a non-Ollama provider.
+        # Every Ollama-only probe below (thinking budget, think support) is
+        # skipped by returning here.
+        if reasoning_continuation:
+            raise ModelCallError(
+                _provider_bridge.UNSUPPORTED_FEATURE_KIND,
+                "reasoning continuation is only available on Ollama tiers",
+                status=400, attempts=0,
+            )
+        return _legacy_chat_bridge.chat_request(
+            _application().model_gateway, payload, bridged_rung,
+            context=_bridge_operation_context(timeout, cancel_check),
+        )
     if reasoning_continuation:
         options = payload.get("options") if isinstance(payload, dict) else None
         initial_chunk = options.get("num_predict") if isinstance(options, dict) else None
@@ -5191,6 +5519,7 @@ def _post(
         )
         def transport():
             with OLLAMA_POOL.open_url(req, timeout=remaining) as resp:
+                _record_residency_dispatch(path, json.loads(data), _residency_feedback, _is_cloud_model_name)
                 raw = _read_ollama_response_bytes(resp)
                 return json.loads(raw.decode("utf-8"))
 
@@ -5234,6 +5563,13 @@ def prewarm_model(tier: str = "") -> bool:
     except Exception:
         return False
     if cloud or not model or tier_label in (None, "cloud-disabled"):
+        return False
+    try:
+        if _bridge_provider_for_tier(tier_label) is not None:
+            # The tier is served by another provider; loading its Ollama model
+            # would be wasted work (and a probe of an Ollama that may be absent).
+            return False
+    except ModelCallError:
         return False
     with _PREWARM_LOCK:
         if model in _PREWARM_INFLIGHT:
@@ -5841,7 +6177,17 @@ def _approve_standalone_verification(prepared, context):
 
 def _agent_lane_context():
     from sonder_runtime.application.context import local_owner_context
+    from sonder_runtime.domain.common.errors import DependencyUnavailable
     application = _application()
+    if application.config is None:
+        # A graph this module composed lazily (bare loopback ``python
+        # server.py``) deliberately carries no typed configuration, so it has
+        # no configured workspace grants to scope a lane to. Refuse instead of
+        # inventing roots; the configured entrypoint binds a typed graph.
+        raise DependencyUnavailable(
+            "agent conversations require a configured runtime; "
+            "start the MCP server with python -m sonder_runtime mcp"
+        )
     context = local_owner_context(
         correlation_id="lane-" + os.urandom(16).hex(), source="mcp",
         workspace_roots=tuple(Path(root) for root in application.config.state.workspace_roots),
@@ -6728,6 +7074,9 @@ def _answer_with_history_impl(
     session_id = _resolve_session(session) if (session or "").strip() else None
     project_id = _resolve_project(project)
     interaction_snapshot = None
+    # Each rung binds the provider its tier is bound to (None = Ollama); the
+    # binding covers every local model step of the rung, including repairs.
+    rung_scope = contextlib.ExitStack()
     conn = _open_db()
     try:
         if session_id:
@@ -6742,6 +7091,11 @@ def _answer_with_history_impl(
             )
             following = escalation_plan.next_rung(attempt)
             detail = ""
+            rung_scope.close()
+            bridged_provider = _bridge_provider_for_tier(tier_label, cloud)
+            rung_binding = rung_scope.enter_context(
+                _provider_bridge.bind_rung(bridged_provider, tier_label)
+            )
             # Every attempt reports its own target, so the receipt names the
             # model that answered -- including a pre-routed first attempt,
             # which is not the route the request resolved to.
@@ -6754,7 +7108,11 @@ def _answer_with_history_impl(
             learn = _should_learn(_canonical_learn_tier(tier_label), True)
             req_ctx = (
                 pinned_ctx if pinned_ctx is not None
-                else (0 if cloud else _auto_model_context(model))
+                else 0 if cloud
+                # No Ollama context probe for a model a non-Ollama rung never
+                # loads; _make_generate requests the default window instead.
+                else None if bridged_provider is not None
+                else _auto_model_context(model)
             )
             try:
                 if learn:
@@ -6791,9 +7149,12 @@ def _answer_with_history_impl(
                     request_cache_key = None
                     request_cache_status = ""
                     endpoint_is_local = _ollama_endpoint_is_local()
+                    # The cache revision is an Ollama model digest; a
+                    # non-Ollama rung has none, so it never uses the cache.
                     model_revision = (
                         _cache_model_revision(model)
-                        if not cloud and endpoint_is_local else ""
+                        if not cloud and endpoint_is_local
+                        and bridged_provider is None else ""
                     )
                     if model_revision and request_cache.eligible(
                         scope=cache_scope, cloud=cloud, temperature=temperature,
@@ -6863,6 +7224,11 @@ def _answer_with_history_impl(
                         if following is not None else None
                     )
                     if reason is None:
+                        if rung_binding is not None and rung_binding.served_model:
+                            # The receipt names the model the provider says
+                            # answered, not the rung's Ollama model name.
+                            model = rung_binding.served_model
+                            _observe_target(model, tier_label, cloud)
                         break
                     detail = tier_escalation.VERIFIER_DETAIL
                 # The empty or unverified attempt was captured; it must not
@@ -6885,6 +7251,7 @@ def _answer_with_history_impl(
         return ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
                 "running? (the tray app / `ollama serve`)" % (_ollama_display(), e))
     finally:
+        rung_scope.close()
         conn.close()
     # The serve handler already routes web intents pre-model (no double routing
     # here); this is only the post-hoc net for denial phrasings it missed.
@@ -7016,16 +7383,22 @@ def structured_answer_with_history(
             target_observer(model, tier_label, cloud)
         except Exception:
             pass
+    bridged_provider = _bridge_provider_for_tier(tier_label, cloud)
     req_ctx = (
         _platform_requested_context(context_size, default_value=SESSION_NUM_CTX)
         if str(context_size or "").strip()
-        else (0 if cloud else _auto_model_context(model))
+        else 0 if cloud
+        else None if bridged_provider is not None
+        else _auto_model_context(model)
     )
     system = _build_system("", False, "", model=model, cloud=cloud)
-    response = _make_generate(
-        model, system, 0.2, 1024, req_ctx, cloud=cloud, schema=schema,
-        allow_cloud_fallback=_allow_cloud_fallback_for_target(tier_label),
-    )(prompt, history or None)
+    # A non-Ollama rung refuses decoder schemas with a 400 (the bridge
+    # cannot carry ``format``) instead of reaching an absent Ollama.
+    with _provider_bridge.bind_rung(bridged_provider, tier_label):
+        response = _make_generate(
+            model, system, 0.2, 1024, req_ctx, cloud=cloud, schema=schema,
+            allow_cloud_fallback=_allow_cloud_fallback_for_target(tier_label),
+        )(prompt, history or None)
     try:
         data = json.loads(
             response,
@@ -10765,7 +11138,7 @@ def _record_outcome_signal(interaction_id: str, signal: str) -> None:
 
 
 def _feed_grounded_outcome(name, ok, output, args=None, project=None, run_id="",
-                           evidence=None) -> None:
+                           evidence=None):
     """Attribute execution evidence to the work it judges.
 
     `evidence` is the verifier's own result dict, when the caller has one.
@@ -10799,6 +11172,9 @@ def _feed_grounded_outcome(name, ok, output, args=None, project=None, run_id="",
     both unscoped -- can otherwise have a verification from one run match the
     newest pending generation from the OTHER run. Direct MCP calls pass
     nothing here, which is unchanged from before this parameter existed.
+
+    Returns ``grounded_outcomes.attribute``'s report when ``name`` is a
+    verifier, and None otherwise (or when the bookkeeping itself failed).
     """
     if project is None:
         project = ""
@@ -10835,7 +11211,7 @@ def _feed_grounded_outcome(name, ok, output, args=None, project=None, run_id="",
                 rendered = grounded_outcomes.rendered_verdict(output)
                 if rendered is not None:
                     verdict = rendered
-            grounded_outcomes.attribute(
+            return grounded_outcomes.attribute(
                 name, verdict, project, record_fn=_record_outcome_signal,
                 run_id=run_id,
                 evidence=evidence if evidence is not None else output,
@@ -10843,6 +11219,85 @@ def _feed_grounded_outcome(name, ok, output, args=None, project=None, run_id="",
     except Exception:
         # Bookkeeping must never break the run it is observing.
         pass
+    return None
+
+
+# job id -> [resolved project root of the typed ``build_job`` that started it,
+# whether that job's terminal report was already attributed]. A later
+# ``build_job_result`` (which names only the job) is attributed within the
+# same project, and one job's verdict is attributed once whichever tool
+# returned it: re-reading a finished job is not new execution evidence.
+# Bounded; a job id this process never saw start attributes nothing.
+_TYPED_BUILD_JOBS: dict[str, list] = {}
+_TYPED_BUILD_JOBS_MAX = 256
+_TYPED_BUILD_JOBS_LOCK = threading.Lock()
+
+
+def _typed_build_project(arguments) -> str:
+    """The absolute project root a typed build call named, or "" (unscoped)."""
+    text = str((arguments or {}).get("project") or "").strip()
+    if not text or "\x00" in text or not os.path.isabs(text):
+        return ""
+    try:
+        return os.path.realpath(text)
+    except (OSError, ValueError):
+        return ""
+
+
+def _typed_receipt_outcome(request, receipt) -> None:
+    """Feed a finished typed build report to the grounded-outcome ledger.
+
+    Installed on the typed tool gateway of every graph bound to this
+    runtime (``_install_typed_build_feed``), so every surface that runs
+    ``build_job``/``build_job_result`` through that gateway (the REPL
+    ``/build`` console, the HTTP build routes) feeds the same ledger the
+    generators note into. No legacy tool alias reaches ``build_job``. The
+    verdict comes from the report's terminal status
+    (``grounded_outcomes.typed_build_verdict``); a running job, a
+    cancellation or a refused call is not evidence and records nothing.
+    Each build job's verdict is attributed at most once (``build_job`` may
+    already return the finished report that a later ``build_job_result``
+    re-reads), and a ``build_job_result`` for a job this process did not see
+    start is not attributed, since nothing scopes it to a project.
+    """
+    name = str(getattr(request, "tool_name", "") or "")
+    if name not in grounded_outcomes.TYPED_BUILD_VERIFIERS or not getattr(receipt, "success", False):
+        return
+    try:
+        payload = json.loads(receipt.output or "")
+    except (TypeError, ValueError):
+        return
+    if not isinstance(payload, dict):
+        return
+    arguments = dict(getattr(request, "arguments", None) or {})
+    verdict, _reason = grounded_outcomes.typed_build_verdict(payload)
+    with _TYPED_BUILD_JOBS_LOCK:
+        if name == "build_job":
+            job_id = str(payload.get("job_id") or "")
+            project = _typed_build_project(arguments)
+            entry = [project, False]
+            if job_id:
+                _TYPED_BUILD_JOBS.pop(job_id, None)
+                _TYPED_BUILD_JOBS[job_id] = entry
+                while len(_TYPED_BUILD_JOBS) > _TYPED_BUILD_JOBS_MAX:
+                    _TYPED_BUILD_JOBS.pop(next(iter(_TYPED_BUILD_JOBS)))
+        else:
+            entry = _TYPED_BUILD_JOBS.get(str(arguments.get("job_id") or ""))
+            if entry is None:
+                return
+            project = entry[0]
+        if verdict is not None:
+            if entry[1]:
+                return
+            entry[1] = True
+    report = _feed_grounded_outcome(name, True, receipt.output, arguments, project=project,
+                                    evidence=payload)
+    if verdict is not None and isinstance(report, dict) and report.get("recorded") is False:
+        # The ledger write failed, so grounded_outcomes released the
+        # generation again and the verdict is not spent: a later read of the
+        # same job may still file it.
+        with _TYPED_BUILD_JOBS_LOCK:
+            entry[1] = False
 
 
 def _record_direct_tool(
@@ -11026,6 +11481,9 @@ def permission_mode(mode: str = "", explain: bool = False) -> str:
     every mode, including auto.
 
     Elevation is a separate axis no mode grants; see permission_policy.
+    Raising the mode above manual needs an attended caller (the console's
+    /mode, or an administrator's POST /v1/permission-mode); from here an
+    unattended client may only lower it or return from plan to manual.
     """
     _maybe_live_reload()
     started = time.time()
@@ -11036,6 +11494,13 @@ def permission_mode(mode: str = "", explain: bool = False) -> str:
         elif explain:
             output = permission_modes.describe(wanted)
         else:
+            refusal = permission_modes.unattended_escalation_refusal(wanted)
+            if refusal:
+                _record_direct_tool(
+                    "permission_mode", {"mode": wanted}, ok=False, started=started,
+                    summary="unattended escalation refused",
+                )
+                return refusal
             permission_modes.set_mode(wanted)
             output = permission_modes.describe()
     except ValueError as exc:
@@ -11297,6 +11762,9 @@ def file_read(path: str, max_bytes: int = 256000, token: str = "", approval: str
 
 _CONTEXT_PACK_MAX_FILES = 64
 _CONTEXT_PACK_MAX_TOTAL_BYTES = 1_000_000
+# Every context_pack file section starts with this line prefix; the agent
+# loop's model view splits a pack on it (see _agent_model_observation_view).
+_CONTEXT_PACK_SECTION_PREFIX = "===== CONTEXT FILE "
 
 
 
@@ -11351,8 +11819,8 @@ def context_pack(
 
     for index, requested in enumerate(selected, 1):
         display = requested.replace("\r", "\\r").replace("\n", "\\n")
-        header = "===== CONTEXT FILE %d/%d: %s =====" % (
-            index, len(selected), display,
+        header = "%s%d/%d: %s =====" % (
+            _CONTEXT_PACK_SECTION_PREFIX, index, len(selected), display,
         )
         if remaining <= 0:
             truncated_files += 1
@@ -12773,6 +13241,59 @@ def test_discover(
     return "\n".join(lines)
 
 
+def _structured_legacy_test_run(root, framework, path, pattern, coverage, timeout,
+                                extra_args_json):
+    """A legacy pytest ``test_run`` on the structured runner, or None.
+
+    None hands the call to ``harness_tools.test_run``: no composed test
+    runner, a framework other than pytest, a coverage run, path and pattern
+    together (the runner takes one selector), a root/path the harness
+    refuses (it answers that refusal in its own words), or a project only
+    the agent dispatch's ``authorized_root_scope`` authorizes (the planner
+    confines to the file roots and would refuse it). The retired
+    ``extra_args_json`` is refused before anything else.
+    """
+    from sonder_runtime.application.testing.legacy_runs import (
+        legacy_pytest_request,
+        retired_extra_args,
+        run_legacy_pytest,
+    )
+
+    refusal = retired_extra_args(extra_args_json)
+    if refusal is not None:
+        refusal["framework"] = framework
+        return refusal
+    if coverage or (path and pattern) or framework not in ("auto", "pytest"):
+        return None
+    services = _developer_tool_services()
+    runs = getattr(services, "test_runs", None) if services is not None else None
+    if runs is None:
+        return None
+    try:
+        resolved = harness_tools._resolve_root(root)
+        target = harness_tools._resolve_target_path(resolved, path)
+    except (PermissionError, ValueError, OSError):
+        return None
+    try:
+        # The harness also honors the ONE project an agent dispatch's
+        # ``authorized_root_scope`` binds; the structured planner confines to
+        # the operator's file roots alone and would refuse that project with
+        # PROJECT_OUTSIDE_ROOTS. Such a project keeps its harness run.
+        file_ops.resolve_repository_read_path(
+            str(resolved), allow_workspace_root=True, reject_sensitive=True)
+    except (PermissionError, ValueError, OSError):
+        return None
+    if framework == "auto" and harness_tools._detect_test_framework(resolved) != "pytest":
+        return None
+    request = legacy_pytest_request(
+        str(resolved), path=target, pattern=str(pattern or ""),
+        timeout=harness_tools._bounded_int(timeout, 120, 5, harness_tools.MAX_TIMEOUT),
+    )
+    if request is None:
+        return None
+    return run_legacy_pytest(runs, request, _developer_tool_context())
+
+
 @mcp.tool()
 def test_run(
     root: str = ".",
@@ -12782,23 +13303,34 @@ def test_run(
     verbose: bool = False,
     coverage: bool = False,
     timeout: int = 120,
-    extra_args_json: str = "[]",
+    extra_args_json: str = "",
 ) -> str:
-    """Run tests with auto-detected or specified framework (pytest, jest, vitest, cargo, go, mocha, dotnet). Supports filtering by path/pattern, coverage, and extra args."""
+    """Run tests with auto-detected or specified framework (pytest, jest, vitest, cargo, go, mocha, dotnet). Filter with path or pattern.
+
+    pytest runs through the structured test runner (host-owned command,
+    scrubbed environment, hard deadline, process-tree cleanup) when the
+    runtime composes it; coverage runs, and path and pattern together, keep
+    the host-built legacy command. ``extra_args_json`` is retired: anything
+    but empty or ``"[]"`` is refused.
+    """
     _maybe_live_reload()
     started = time.time()
     args = {"root": root, "framework": framework, "path": path, "pattern": pattern, "timeout": timeout}
     try:
-        data = harness_tools.test_run(
-            root=root, framework=framework, path=path, pattern=pattern,
-            verbose=verbose, coverage=coverage, timeout=timeout,
-            extra_args_json=extra_args_json,
+        data = _structured_legacy_test_run(
+            root, framework, path, pattern, coverage, timeout, extra_args_json,
         )
+        if data is None:
+            data = harness_tools.test_run(
+                root=root, framework=framework, path=path, pattern=pattern,
+                verbose=verbose, coverage=coverage, timeout=timeout,
+                extra_args_json=extra_args_json,
+            )
     except Exception as exc:
         _record_direct_tool("test_run", args, ok=False, started=started, summary=str(exc),
                             evidence={"error": str(exc)})
         return "ERROR: %s" % exc
-    output = _format_run_result("test run (%s)" % data.get("framework", "?"), data)
+    output = _format_run_result("test run (%s)" % data.get("framework", "?"), data, digest=True)
     _record_direct_tool(
         "test_run", args, ok=data.get("ok", False), started=started,
         summary="exit %s" % data.get("returncode"),
@@ -12825,7 +13357,7 @@ def lint_run(
         _record_direct_tool("lint_run", args, ok=False, started=started, summary=str(exc),
                             evidence={"error": str(exc)})
         return "ERROR: %s" % exc
-    output = _format_run_result("lint (%s, %s)" % (data.get("tool", "?"), data.get("mode", "check")), data)
+    output = _format_run_result("lint (%s, %s)" % (data.get("tool", "?"), data.get("mode", "check")), data, digest=True)
     _record_direct_tool(
         "lint_run", args, ok=data.get("ok", False), started=started,
         summary="exit %s" % data.get("returncode"),
@@ -12877,7 +13409,7 @@ def typecheck_run(
         _record_direct_tool("typecheck_run", args, ok=False, started=started, summary=str(exc),
                             evidence={"error": str(exc)})
         return "ERROR: %s" % exc
-    output = _format_run_result("typecheck (%s)" % data.get("tool", "?"), data)
+    output = _format_run_result("typecheck (%s)" % data.get("tool", "?"), data, digest=True)
     _record_direct_tool(
         "typecheck_run", args, ok=data.get("ok", False), started=started,
         summary="exit %s" % data.get("returncode"),
@@ -13155,7 +13687,7 @@ def build_run(
         _record_direct_tool("build_run", args, ok=False, started=started, summary=str(exc),
                             evidence={"error": str(exc)})
         return "ERROR: %s" % exc
-    output = _format_run_result("build", data)
+    output = _format_run_result("build", data, digest=True)
     _record_direct_tool("build_run", args, ok=data.get("ok", False), started=started, summary="exit %s" % data.get("returncode"), output=output, evidence=data)
     return output
 
@@ -13306,7 +13838,10 @@ def secret_scan(
     ]
     for f in findings:
         lines.append("  %s:%d  [%s]  %s" % (f["file"], f["line"], f["type"], f["match"]))
-    if data.get("truncated"):
+    if data.get("timed_out"):
+        lines.append("  ... (incomplete: stopped at the %ss timeout; raise timeout "
+                     "to scan the rest)" % data.get("timeout", timeout))
+    elif data.get("truncated"):
         lines.append("  ... (truncated at 100 findings)")
     output = "\n".join(lines)
     _record_direct_tool(
@@ -13562,26 +14097,19 @@ def script_run(
         "risk_policy": risk_policy,
     }
     try:
-        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
-        risk = artifact_risk_module.enforce_execution_policy(
-            path, requested=risk_policy, extra_roots=trusted_roots,
-        )
-        if str(risk.get("policy", "")).startswith("deny-"):
-            # A scan followed by a pathname-based interpreter launch is not an
-            # exact-file handoff: another same-user process could replace the
-            # path between those operations. Until the runner can execute the
-            # already-inspected handle cross-platform, enforcing policies fail
-            # closed even when the static result itself is below the threshold.
-            refused = dict(risk)
-            refused.update({
-                "denied": True,
-                "denial_reason": "exact_execution_handoff_unavailable",
-            })
-            raise artifact_risk_module.ArtifactRiskDenied(refused)
-        data = workbench.run_script(
-            path, args_json=args_json, cwd=cwd, stdin=stdin, timeout=timeout,
-            max_output=max_output, extra_roots=extra_roots,
-            bypass=_file_bypass_allowed(token, approval),
+        bypass = _file_bypass_allowed(token, approval)
+        # Enforcing policies run only the sealed copy that was inspected
+        # (Linux memfd, .py/.sh) and refuse everywhere else; see
+        # artifact_risk.run_script_under_policy.
+        risk, data = artifact_risk_module.run_script_under_policy(
+            path,
+            lambda sealed: workbench.run_script(
+                path, args_json=args_json, cwd=cwd, stdin=stdin,
+                timeout=timeout, max_output=max_output,
+                extra_roots=extra_roots, bypass=bypass, sealed_script=sealed,
+            ),
+            requested=risk_policy,
+            extra_roots=extra_roots if bypass else "",
         )
     except artifact_risk_module.ArtifactRiskDenied as exc:
         output = (
@@ -13911,71 +14439,6 @@ def sonder_sessions(limit: int = 20) -> str:
             s.get("updated_ts") or "?",
         ))
     return "\n".join(lines)
-
-
-def _surface_fact_metadata(
-    entities_json: str = "",
-    decision_json: str = "",
-    valid_from: str = "",
-    valid_until: str = "",
-    supersedes: str = "",
-    provenance_json: str = "",
-):
-    """Decode explicit metadata without inferring policy from fact text."""
-    from sonder_runtime.adapters.persistence.sqlite.authoritative_memory import AuthoritativeFactMetadata
-
-    fields = {
-        "entities_json": entities_json,
-        "decision_json": decision_json,
-        "valid_from": valid_from,
-        "valid_until": valid_until,
-        "supersedes": supersedes,
-        "provenance_json": provenance_json,
-    }
-    if any(not isinstance(value, str) for value in fields.values()):
-        raise ValueError("authoritative metadata inputs must be strings")
-    if not any((entities_json, decision_json, valid_from, valid_until, supersedes, provenance_json)):
-        return None
-
-    def bounded_json(value, label, expected):
-        if not value:
-            return expected()
-        if not isinstance(value, str) or len(value) > 8192:
-            raise ValueError(label + " exceeds the input bound")
-        try:
-            parsed = json.loads(value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(label + " must be valid JSON") from exc
-        return parsed
-
-    entities = bounded_json(entities_json, "entities_json", list)
-    if not isinstance(entities, list) or len(entities) > 32 or any(
-        not isinstance(item, str) or not item.strip() or len(item) > 160
-        for item in entities
-    ):
-        raise ValueError("entities_json must be a bounded list of identifiers")
-    decision = bounded_json(decision_json, "decision_json", lambda: None)
-    if decision is not None and (
-        not isinstance(decision, dict) or set(decision) != {"id", "value"}
-        or any(not isinstance(item, str) or not item.strip() or len(item) > 2048
-               for item in decision.values())
-    ):
-        raise ValueError("decision_json must contain only bounded id and value")
-    provenance = bounded_json(provenance_json, "provenance_json", list)
-    if not isinstance(provenance, list) or len(provenance) > 32 or any(
-        not isinstance(item, str) or not item.strip() or len(item) > 256
-        for item in provenance
-    ):
-        raise ValueError("provenance_json must be a bounded list of strings")
-    values = {"valid_from": valid_from, "valid_until": valid_until, "supersedes": supersedes}
-    for label, value in values.items():
-        if value and (not isinstance(value, str) or len(value) > 64):
-            raise ValueError(label + " exceeds the input bound")
-    return AuthoritativeFactMetadata(
-        entities=tuple(entities), decision=decision,
-        valid_from=valid_from or None, valid_until=valid_until or None,
-        supersedes=supersedes or None, provenance=tuple(provenance),
-    )
 
 
 @mcp.tool()
@@ -15721,8 +16184,16 @@ def chat_web_response(
     location_consent: bool = False,
     location_hint=None,
     allow_server_location_lookup: bool = False,
+    gateway_bound: bool = False,
 ) -> str | None:
-    """Handle explicit web chat intent before the plain model fallback."""
+    """Handle explicit web chat intent before the plain model fallback.
+
+    ``gateway_bound`` is set by the HTTP chat route, where provider bindings
+    apply: the research agent's tool-using model steps only exist on Ollama,
+    so a research turn whose tier is bound to another provider fails closed
+    (503 naming the binding) instead of reaching an Ollama the operator did
+    not bind.  REPL and MCP keep their documented Ollama route.
+    """
     _maybe_live_reload()
     refusal = intents.containment_egress_refusal(prompt)
     if refusal:
@@ -15817,6 +16288,8 @@ def chat_web_response(
     # workspace discovery, which wastes serialized local-model steps on a pure
     # web question (observed: a spurious local text_search after web results
     # already answered the prompt).
+    if gateway_bound:
+        _refuse_ollama_agent_on_bound_tier(tier or "code", "web research")
     return _agent_impl(
         task,
         tier=tier or "code",
@@ -16047,7 +16520,9 @@ def emotion_vector_status() -> str:
     """
     _maybe_live_reload()
     vectors, path = emotion_vectors.ensure_vectors()
-    return "emotion vectors: %s\n\n%s" % (path, emotion_vectors.format_vectors(vectors))
+    live = emotion_vectors._resolve_path(emotion_vectors.default_path())
+    source = path if path == live else "%s (bundled default; updates are saved to %s)" % (path, live)
+    return "emotion vectors: %s\n\n%s" % (source, emotion_vectors.format_vectors(vectors))
 
 
 @mcp.tool()
@@ -16059,7 +16534,9 @@ def update_emotion_vectors(vectors_json: str, mode: str = "merge") -> str:
 
     Values are clamped to [-1.0, 1.0]. mode: merge (default), replace, clear,
     or reset/defaults.
-    Direct edits to emotion_vectors.json also apply on the next request.
+    Updates are saved to the state-home copy (<SONDER_HOME>/emotion_vectors.json),
+    never the bundled default; direct edits to that copy also apply on the
+    next request.
     """
     _maybe_live_reload()
     try:
@@ -16084,7 +16561,7 @@ def tune_emotion_vectors(feedback_text: str, step: float = 0.1) -> str:
       "be warmer but more concise"
       "more rigorous, less playful, warmth=0.4"
 
-    This applies small bounded deltas, writes emotion_vectors.json, and the next
+    This applies small bounded deltas, writes the state-home emotion_vectors.json, and the next
     model request picks up the change without restarting.
     """
     _maybe_live_reload()
@@ -16576,79 +17053,7 @@ def repo_blame(
 @mcp.tool()
 def tool_manifest() -> str:
     """List the sonder-runtime MCP tools and what they are for."""
-    tools = {
-        "agent": "Run a Claude-like tool-calling loop that can use local tools and web tools. Exact-ack unsafe lab mode removes its host tool policy only on a loopback, unprivileged process.",
-        "autopilot_start/autopilot_status/autopilot_resume/autopilot_pause/autopilot_cancel": "Run a restart-persistent local goal with evidence-aware checkpoints, bounded replans, host tool gates, and explicit lifecycle control.",
-        "runtime_policy_status/runtime_policy_update": "Inspect or guarded-edit shared hot-reloadable local model mappings and execution-lane tiers; cloud opt-in stays separate.",
-        "cloud_opt_in": "Show, explicitly enable, or immediately revoke process-local hosted/cloud consent; enabling allows later cloud-* prompts to leave the machine and does not persist across restart.",
-        "runtime_source_update_status/runtime_source_update": "Check the installed Git commit and canonical origin/main update time, or safely fast-forward only a clean canonical Sonder source checkout. Updates never merge/rebase/overwrite local work and require restart.",
-        "mcp_runtime_status/live_reload_status": "Audit atomic MCP source/tool convergence, refresh history, list-change signaling, and fail-closed reload errors.",
-        "master_orchestrate/master_status/master_capacity/master_cancel/master_retry": "Run restart-safe hardware-scheduled orchestration, inspect capacity/activity, cancel fleets, and explicitly retry interrupted work.",
-        "admin_register/admin_login/admin_accounts/admin_set_account": "Manage hosted accounts, roles, bans, tiers, and developer flags.",
-        "admin_status/debug_inspect/admin_private_chain_of_thought": "Inspect admin/debug state; private chain-of-thought is refused unless the operator opted in twice (SONDER_ALLOW_PRIVATE_COT plus an explicit allow rule), and then serves only the reasoning record reasoning_show serves.",
-        "sonder": "Ask through Sonder Runtime's local learning loop.",
-        "offload": "Route a self-contained task to a configured local/cloud tier.",
-        "model_fanout/model_fanout_recent/model_fanout_status/model_fanout_cancel/model_fanout_resume/model_fanout_synthesize": "Run a durable, bounded fanout across discovered local, cloud, or all chat models; list caller-scoped safe recent-run summaries after a restart, inspect its owner-scoped receipt, cancel it, explicitly retry finished results, or locally synthesize one completed receipt's exact complete answer previews. Synthesis has no natural-language route, requires two non-truncated answered receipts and a fixed/discovered local generative model, and persists neither synthesis nor reasoning. Fixed profiles are `healthy-local-chat`, `healthy-cloud-chat`, `healthy-chat`, and `loaded-local-chat`; they exclude non-chat targets and active health cooldowns, but never accept arbitrary selectors. `loaded-local-chat` is local-only and fails closed unless Ollama confirms residency at both planning and dispatch, so it never triggers a model load. Natural chat supports `use code and reasoning ensemble to review ...` for a fixed local two-tier answer, `ask all healthy local chat models: ...`, `ask all loaded local chat models: ...`, `ask all available models for ...`, `ask all available local models: ...`, `ask all local and cloud models: ...`, `ask all local models and cloud models: ...`, `ask all Sonder models + cloud: ...`, `run every available cloud models to answer: ...`, `run phi4:latest to ...`, `ask the phi4:latest model to ...`, `run using model phi4:latest: ...`, `run using phi4:latest: ...`, `run using phi4:latest to ...`, and `ask with qwen2.5-coder:14b for ...`. Compiler-feedback repair remains the explicit `codegen_build_loop` tool because it needs an approved project root, an exact file contract, and an exact build command; it is never inferred from conversational text. Cloud use still needs explicit operator opt-in; shared deployments restrict fanout and ensembles to developer-authorized callers.",
-        "web_search/web_fetch/weather_lookup/approximate_location_lookup": "Search/fetch public pages, get sourced weather, or resolve an explicitly consented approximate IP location without retaining the IP.",
-        "local_service_probe": "Bounded unauthenticated GET/HEAD health probe for an explicit-port HTTP/HTTPS service resolving exclusively to loopback.",
-        "workspace_inventory/workspace_compare/dependency_inventory/directory_tree/directory_create/text_search/file_read_range/context_pack": "Budgeted guarded workspace/dependency inventory and metadata-only comparison, folder discovery, creation, text search, bounded line-range reads, and multi-file context packs.",
-        "repo_status/repo_diff": "Inspect bounded read-only Git branch, worktree, staged, and unstaged state without shell execution.",
-        "project_detect": "Inventory guarded build/test/runtime manifests and return deterministic evidence-backed language, framework, and cross-platform argv candidates without executing them.",
-        "file_policy/file_find/file_read/file_write/file_batch_write/json_patch/file_edit/file_copy/file_move/file_delete/text_patch": "Guarded filesystem find/read/create/edit/transactional batch write/atomic JSON patch/single-file transfer/delete and strict unified-diff preview/apply.",
-        "repository_symbol_index": "Build a deterministic bounded read-only declaration index with Python AST and conservative JS/TS/C/C++/C#/Rust/Go extraction.",
-        "repo_log/repo_show/repo_blame": "Read bounded structured Git history, patches, and line attribution from an exact project repository without shell execution or upward discovery.",
-        "file_digest/directory_digest": "Stream guarded files into SHA-256 and build deterministic relative-path manifests with fail-closed complete or explicitly partial directory Merkle roots.",
-        "archive_list/archive_extract": "Prevalidate bounded ZIP/TAR manifests or transactionally extract them to a new non-overwriting workspace directory.",
-        "archive_create": "Transactionally create a bounded deterministic ZIP/TAR from explicit guarded project inputs without overwriting.",
-        "artifact_risk_inspect": "Statically inspect guarded PDFs, PE/ELF/Mach-O executables, scripts, or opaque binaries for bounded risk indicators without executing or returning content.",
-        "process_list/process_memory_risk_inspect": "Opt-in bounded Windows process metadata and fixed-indicator memory-risk inspection; never returns command lines, paths, addresses, strings, or raw bytes.",
-        "log_inspect": "Inspect one guarded text log with fixed level/timestamp/source extraction, failure clusters, repeats, and bounded context.",
-        "scaffold_project": "Write a complete deterministic project skeleton (cpp-msvc .sln/.vcxproj, cpp-cmake, csharp, rust, python, node, typescript, go, java-maven) -- never hand-write solution/build plumbing.",
-        "environment_status": "Report the host OS, available shells (PowerShell/cmd/bash/wsl), and installed toolchains -- check before choosing a command shape or assuming a tool exists.",
-        "toolchain_status": "Run one fixed, bounded, local version probe for a tool already discovered by environment_status; it never accepts a command or arguments.",
-        "hardware_profile": "Detect cross-vendor accelerators and report conservative resident, unified-memory, and GPU+RAM-spill model plans without changing host settings.",
-        "data_inspect/data_query/sqlite_mutate": "Preview structured data, run bounded read-only queries, or explicitly preview/apply one guarded parameterized SQLite DML statement.",
-        "data_convert": "Preview or atomically create a non-overwriting JSON/JSONL/CSV/TSV conversion with explicit ordered fields.",
-        "program_search/script_search/workspace_run/script_run/image_inspect": "Discover installed programs and workspace scripts, run bounded argv-only processes, and inspect image metadata; script_run applies the operator execution-risk policy before launch.",
-        "task_create/task_list/task_update/task_show/task_delete/task_plan/task_progress/task_ledger/task_depend/checklist_create/checklist_update/checklist_show": "Visible todo, ordered checklist, and digest-bound manager ledger state shared by console, app, agents, and MCP. task_plan batch-creates a work plan with ordered steps and auto-dependencies. task_progress shows a compact summary; task_ledger exposes bounded dependencies and replan metadata.",
-        "workbench_agent": "Run an autonomous local tool loop with a guaranteed checklist, exact action transcript, validation gate, and end report.",
-        "command_registry_list": "Inspect available slash commands by category, name, or risk.",
-        "tool_manifest/tool_capability_manifest/access_request_preview": "Inspect the human-readable MCP tool catalog, fingerprint the live registered capability schemas, or preview a non-authorizing scoped filesystem access request.",
-        "activity_status": "Inspect active/latest response activity, tool calls, and file changes.",
-        "permission_policy/permission_rule_set/permission_approve/permission_approvals": "Inspect the effective permission decision -- the rule, the active mode, and which one governs -- guarded-edit a rule, or approve exactly one refused call once and list what asked.",
-        "context_compaction_plan": "Preview when to summarize, split sessions, or reduce live context.",
-        "run_code": "Run a bounded snippet: Python, JS/TypeScript, Bash, Ruby, Perl, PHP, Lua, R, Go, Java, Rust, PowerShell, C++, C#.",
-        "isolated_run": "Direct MCP-only, explicitly enabled and developer-authorized Docker/Podman execution with approved roots, separate writable approval, and a fixed resource-capped isolation policy.",
-        "ground_artifact": "Validate in-memory non-code content with exact/contains/regex/JSON checks.",
-        "artifact_ground": "Validate files or bundles with inferred writing, data, editable Office/media/timelines, UI, image, audio, and static or animated humanoid model recipes.",
-        "run_project": "Run a bounded temporary multi-file project with optional build commands.",
-        "artifact_generate/artifact_verify": "Create and verify stdlib-only images, animated GIF/AVI video, SVGs, Office files, MIDI/WAV audio, captions, EDL timelines, data, web mockups, OBJ and textured humanoid GLBs with full morph frames and clip sequences, scenes, and themed packs from a free-form brief.",
-        "game_reference_suite/game_generate_and_test/game_generation_campaign": "Build, execute, repair, and ground persistent in-house 2D/2.5D/3D game projects and fleets.",
-        "loop": "Repeat bounded code/model/system actions.",
-        # Spell every tool out.  The old "workflow_list/save/run/delete"
-        # shorthand read as four tool names, three of which ("save", "run",
-        # "delete") are not registered tools at all -- the only names on any
-        # advertising surface that no @mcp.tool() backs.
-        "workflow_list/workflow_save/workflow_run/workflow_delete": "Manage reusable loop workflows.",
-        "system_profile_text/update_system_profile": "Read or edit standing instructions.",
-        "emotion_vector_status/update_emotion_vectors/tune_emotion_vectors": "Read, edit, or live-tune tone vectors.",
-        "learn_preference/preferences_status": "Read or teach durable user behavior/workflow preferences.",
-        "memory_search/memory_export/session_export": "Inspect local memory.",
-        "learning_health_status": "Inspect grounded outcome coverage, signal quality, lesson provenance, distillation yield, and memory hygiene.",
-        "evaluation_history_status": "Read explicit evaluation trends separated by exact model digest and suite version/digest; it never runs or promotes a model.",
-        "memory_quality_report/memory_quality_repair": "Audit and dry-run/prune exact duplicate lessons.",
-        "memory_privacy_review/memory_privacy_repair": "Review redacted privacy findings and explicitly dry-run/remove selected flagged lessons.",
-        "memory_embedding_backfill": "Dry-run or refresh stale/missing semantic vectors with the local embedding model.",
-        "memory_interaction_embedding_backfill": "Dry-run or locally refresh stale raw-interaction task vectors without printing task text.",
-        "system_improvement_report": "Suggest next improvements from learning, memory, context, and deployment signals.",
-        "context_policy_status/set_context_size": "Show or select requested virtual context up to 1m while clamping Ollama native num_ctx.",
-        "learn_from_example/apply_learned": "Teach from examples and preview lesson application.",
-        "self_heal_check/self_heal_repair": "Detect and safely repair common local breakage.",
-        "context_health/diagnostics/live_reload_status/status/unload": "Observe and manage runtime health.",
-        "record_outcome": "Feed grounded outcomes back into learning.",
-        "sonder_stats/sonder_sessions/sonder_remember_fact/sonder_forget_fact": "Memory observability and durable facts.",
-    }
-    return "\n".join("  %s: %s" % item for item in sorted(tools.items()))
+    return _mcp_tool_manifest.render_tool_manifest()
 
 
 @mcp.tool()
@@ -16783,13 +17188,15 @@ AGENT_TOOL_HELP = """Available tools:
 - scaffold_project: {"kind": "cpp-msvc|cpp-cmake|csharp|rust|python|node|typescript|go|java-maven", "name": "MyApp", "root": "MyApp"} -- writes the full skeleton (.sln/.vcxproj/Cargo.toml/...); use this instead of hand-writing build/solution files
 - environment_status: {} -- host OS, shells, installed toolchains; check before choosing command shapes
 - toolchain_status: {"name": "cargo|git|cmake|...", "refresh": false} -- fixed, local-only version probe for a discovered tool; no command or arguments
+- tool_inventory: {"category": "compiler|build_system|test_runner|linter_formatter|...", "name": "", "refresh": false} -- categorized installed-tool inventory with versions; paths redacted
+- output_digest: {"path": "<task-relevant log file>", "job_id": "", "tail_lines": 20} -- pass exactly one of path or job_id; tail -1 + FAILED/ERROR lines + first parsed errors
 - hardware_profile: {"workload": "general|chat|coding|agentic|research", "refresh": false} -- cross-vendor device inventory and conservative local-model fit; detection is not backend readiness
 - script_search: {"query": "build", "root": ".", "max_results": 100}
 - program_search: {"query": "python", "max_results": 50}
 - workspace_run: {"program": "git", "args_json": ["status", "--short"], "cwd": ".", "timeout": 30}
 - script_run: {"path": "scripts/check.py", "args_json": [], "cwd": ".", "timeout": 30, "risk_policy": "off|report|deny-high|deny-medium|deny-unknown"} -- request may strengthen but never weaken operator policy
 - test_discover: {"root": ".", "framework": "auto"} -- discover tests; auto-detects pytest/jest/vitest/cargo/go/dotnet
-- test_run: {"root": ".", "framework": "auto", "path": "", "pattern": "", "verbose": false, "coverage": false, "timeout": 120, "extra_args_json": "[]"} -- run tests with filtering, coverage, extra args
+- test_run: {"root": ".", "framework": "auto", "path": "", "pattern": "", "verbose": false, "coverage": false, "timeout": 120} -- run tests filtered by path or pattern; pytest uses the structured runner (host-owned command, hard deadline)
 - lint_run: {"root": ".", "tool": "auto", "path": "", "fix": false, "timeout": 60} -- lint with ruff/flake8/eslint/clippy; fix=true to auto-fix
 - format_code: {"root": ".", "tool": "auto", "path": "", "check_only": false, "timeout": 60} -- format with ruff/black/prettier/rustfmt/gofmt
 - typecheck_run: {"root": ".", "tool": "auto", "path": "", "timeout": 120} -- type check with mypy/pyright/tsc
@@ -16889,6 +17296,7 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "evaluation_history_status",
     "memory_quality_report", "memory_privacy_review", "system_improvement_report", "master_status", "master_capacity",
     "self_heal_check", "status", "system_profile_text", "environment_status", "toolchain_status", "hardware_profile",
+    "tool_inventory", "output_digest",
     "emotion_vector_status", "preferences_status", "tool_manifest",
     "memory_search", "web_search", "web_fetch", "weather_lookup",
     "test_discover",
@@ -16939,6 +17347,8 @@ an exact symbol named by the task; do not default to Python or server.py.
 - program_search: {"query": "<required program name>", "max_results": 50}
 - environment_status: {"refresh": false}
 - toolchain_status: {"name": "cargo|git|cmake|...", "refresh": false} -- fixed local version probe; no command, executable path, or arguments
+- tool_inventory: {"category": "compiler|build_system|test_runner|...", "name": "", "refresh": false} -- categorized installed-tool inventory; paths redacted
+- output_digest: {"path": "<task-relevant log file>", "job_id": "", "tail_lines": 20} -- exactly one of path or job_id; bounded failure summary
 - hardware_profile: {"workload": "general|chat|coding|agentic|research", "refresh": false}
 - image_inspect: {"path": "<task-relevant image path>"}
 - data_inspect: {"path": "<task-relevant data file>", "max_bytes": 256000}
@@ -17418,6 +17828,13 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
                 reject_sensitive=True,
                 extra_roots=trusted_extra_roots,
             )
+        elif tool_name == "output_digest" and str(args.get("path") or "").strip():
+            file_ops.resolve_repository_read_path(
+                args.get("path", ""),
+                allow_workspace_root=False,
+                reject_sensitive=True,
+                extra_roots=trusted_extra_roots,
+            )
         elif tool_name in {"repo_status", "repo_diff"}:
             root_value = args.get("root", "") or "."
             resolved_root = file_ops.resolve_repository_read_path(
@@ -17477,7 +17894,6 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
     return ""
 
 
-_AGENT_DECISION_REPAIR_LIMIT = 2
 def _agent_generate_decision(
     gen,
     step_prompt,
@@ -18023,6 +18439,18 @@ def _agent_dispatch(
         return toolchain_status(
             name=args.get("name", ""),
             refresh=bool(args.get("refresh", False)),
+        )
+    if tool_name == "tool_inventory":
+        return tool_inventory(
+            category=args.get("category", ""),
+            name=args.get("name", ""),
+            refresh=bool(args.get("refresh", False)),
+        )
+    if tool_name == "output_digest":
+        return output_digest(
+            path=args.get("path", ""),
+            job_id=args.get("job_id", ""),
+            tail_lines=args.get("tail_lines", 20),
         )
     if tool_name == "run_project":
         return run_project(
@@ -18875,7 +19303,9 @@ def _agent_dispatch(
                 verbose=args.get("verbose", False),
                 coverage=args.get("coverage", False),
                 timeout=args.get("timeout", 120),
-                extra_args_json=args.get("extra_args_json", "[]"),
+                # Retired: forwarded only so a caller still sending it is
+                # refused by name instead of silently dropped.
+                extra_args_json=args.get("extra_args_json", ""),
             )
         if tool_name == "lint_run":
             return lint_run(
@@ -19056,6 +19486,7 @@ _PROJECT_SCOPED_PATH_TOOLS = frozenset({
     "build_run", "build_clean",
     "ensemble_codegen_build_loop",
     "rename_symbol", "find_references", "diff_files", "apply_patch", "secret_scan",
+    "output_digest",
 })
 _PROJECT_SCOPED_EXECUTION_TOOLS = frozenset({"workspace_run", "script_run"})
 # The developer-workflow tools (harness_tools.py).  Every OTHER project-scoped
@@ -19106,6 +19537,7 @@ _PROJECT_BOUND_AGENT_TOOLS = (
         "master_capacity", "self_heal_check", "status", "system_profile_text",
         "emotion_vector_status", "preferences_status", "context_policy_status",
         "environment_status", "toolchain_status", "hardware_profile",
+        "tool_inventory", "output_digest",
         "process_list", "process_memory_risk_inspect",
     })
 )
@@ -19117,6 +19549,7 @@ _CLOUD_AGENT_NESTED_MODEL_TOOLS = frozenset({
 _CLOUD_AGENT_LOCAL_ONLY_TOOLS = frozenset({
     "agent_lane",
     "environment_status", "toolchain_status", "hardware_profile", "file_policy",
+    "tool_inventory", "output_digest",
     "workspace_inventory", "directory_tree", "file_find", "file_read",
     "file_read_range", "file_digest", "text_search", "repo_status",
     "repo_diff", "artifact_risk_inspect", "process_list",
@@ -19322,6 +19755,17 @@ def _project_scope_args(tool_name, args, project):
         )
         if raw_cwd and not cwd_is_abs:
             scoped["cwd"] = os.path.join(project, raw_cwd)
+        return scoped
+
+    if tool_name == "output_digest":
+        # ``path`` is optional (a job digest names ``job_id`` instead), so an
+        # omitted path must stay omitted rather than becoming the project dir.
+        raw_path = str(scoped.get("path") or "").strip()
+        is_abs = os.path.isabs(raw_path) or bool(
+            re.match(r"^[A-Za-z]:[\\/]", raw_path)
+        )
+        if raw_path and not is_abs:
+            scoped["path"] = os.path.normpath(os.path.join(project, raw_path))
         return scoped
 
     if tool_name == "ensemble_codegen_build_loop":
@@ -19692,6 +20136,7 @@ _WORK_INSPECTION_TOOLS = frozenset({
     "memory_quality_report", "memory_privacy_review", "artifact_ground",
     "web_search", "web_fetch", "weather_lookup", "approximate_location_lookup",
     "status", "diagnostics", "toolchain_status", "process_list", "process_memory_risk_inspect",
+    "tool_inventory", "output_digest",
     "test_discover", "test_run", "lint_run", "format_code", "typecheck_run",
     "dependency_audit", "find_references", "diff_files", "secret_scan",
     "build_run",
@@ -19708,9 +20153,12 @@ _WORK_INSPECTION_TOOLS = frozenset({
 # Membership was established by running each tool in a cold interpreter against
 # traps on file writes, process spawns, outbound sockets and non-DDL SQL, on its
 # SUCCESS path. Candidates that look read-only and failed that check are
-# deliberately absent: debug_inspect and npu_status spawn PowerShell,
-# apply_learned writes the embedding cache and calls the model endpoint, and
-# runtime_policy_status calls the model endpoint. admin_accounts is absent
+# deliberately absent: debug_inspect and npu_status spawn PowerShell, and
+# apply_learned writes the embedding cache and calls the model endpoint.
+# runtime_policy_status used to call the model endpoint too; it now renders
+# cached readiness (the live probe moved to `/runtime status refresh`) and was
+# re-verified by tests/test_runtime_policy_status_trap_check.py, which runs it
+# under audit-hook traps in a fresh interpreter. admin_accounts is absent
 # because it answers "login required" and its success path could not be
 # exercised -- unverified is not the same as verified-safe. permission_mode is
 # absent because with a mode argument it rewrites the saved mode, which would
@@ -19724,6 +20172,7 @@ _RUNTIME_OBSERVATION_TOOLS = frozenset({
     "learn_tiers", "live_reload_status", "mcp_runtime_status",
     "reasoning_show", "sonder_sessions", "sonder_stats",
     "turn_inspect", "workflow_list", "memory_export",
+    "runtime_policy_status",
 })
 
 # Tools that resolve a caller-supplied root through harness_tools._resolve_root,
@@ -19754,15 +20203,151 @@ _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "context_pack",
     "data_inspect", "data_query", "text_search", "script_search",
     "program_search", "image_inspect", "environment_status", "toolchain_status", "hardware_profile", "repo_status", "repo_diff", "project_detect",
+    "tool_inventory", "output_digest",
     "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
     "process_list", "process_memory_risk_inspect",
 })
 _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS = frozenset({
     "workspace_run", "script_run", "run_code", "run_project", "workflow_run",
 })
+
+
+# Hard ceiling on one agent turn's steps.  The batching guard's threshold
+# ceilings are derived from the same number (batch_coalescing.AGENT_STEP_CEILING).
+_AGENT_MAX_STEPS_CEILING = 20
+# Characters of one tool observation shown to the model in the agent loop.
+_AGENT_MODEL_OBSERVATION_CHARS = 6000
+# Batch results with one section per target, keyed by tool: their model view
+# gives every section an equal share of the budget instead of a head slice.
+_AGENT_SECTIONED_OBSERVATION_PREFIXES = {
+    "context_pack": _CONTEXT_PACK_SECTION_PREFIX,
+}
+
+
+def _agent_model_observation_view(tool_name, text):
+    """Model-facing view of one tool observation; the host keeps the full text.
+
+    Ordinary observations keep their head slice.  A sectioned batch result
+    (one ``context_pack`` holding several files) is fitted so every file stays
+    visible with a marked clip, because a head slice would silently hide every
+    file after the first few thousand characters.
+    """
+    text = str(text)
+    prefix = _AGENT_SECTIONED_OBSERVATION_PREFIXES.get(tool_name)
+    if prefix is None:
+        return text[:_AGENT_MODEL_OBSERVATION_CHARS]
+    return _fit_sectioned_agent_text(
+        text, _AGENT_MODEL_OBSERVATION_CHARS, prefix,
+        clip_hint=(
+            "Read a clipped file with file_read or file_read_range to see "
+            "the rest; that is never refused by the batch guard."
+        ),
+    )
+
+
+def _agent_batch_target_identity(raw):
+    """Host identity of one batching-guard target path; never raises.
+
+    Relative paths resolve against the workspace root exactly as the file
+    tools resolve them, and symlinks are followed, so ``src/a.py``, its
+    absolute spelling and a symlink to it are one target.  When the
+    filesystem cannot answer, the lexical absolute path is used instead.
+    """
+    text = str(raw or "").strip()
+    try:
+        candidate = Path(text).expanduser()
+        if not candidate.is_absolute():
+            candidate = file_ops.workspace_root() / candidate
+    except (OSError, RuntimeError, ValueError):
+        return text
+    try:
+        return str(candidate.resolve())
+    except (OSError, RuntimeError, ValueError):
+        return os.path.normpath(str(candidate))
+
+
+@functools.lru_cache(maxsize=1)
+def _agent_batch_counterparts():
+    """Batch counterparts the agent dispatcher really registers (Issue #510 s6).
+
+    Derived, never assumed: a declared candidate is active only when both
+    tools have a literal ``_agent_dispatch`` branch, both are on the
+    repository read-only allow-list, and neither is a mutation or execution
+    tool.  If the dispatcher cannot be inspected the set is empty and the
+    batch-coalescing guard is inert, so it can never refuse on a guess.
+    """
+    registered = tool_capabilities.dispatch_names(_agent_dispatch)
+    return _batch_coalescing.resolve_counterparts(
+        _batch_coalescing.CANDIDATE_COUNTERPARTS,
+        registered=registered,
+        read_only=REPOSITORY_READ_ONLY_TOOLS,
+        state_changing=(
+            _WORK_MUTATION_TOOLS
+            | _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS
+            | _CLOUD_AGENT_NESTED_MODEL_TOOLS
+            | {"agent_lane"}
+        ),
+    )
+
+
+def _agent_batch_coalescing_config(env=None):
+    """Typed guard thresholds; an invalid setting keeps the safe defaults.
+
+    The guard stays enabled either way: a malformed operator value must not
+    silently switch it off or loosen it past the configuration ceilings.
+    """
+    try:
+        return _batch_coalescing.BatchCoalescingConfig.from_environ(
+            os.environ if env is None else env
+        )
+    except ValueError as exc:
+        logging.getLogger("sonder.server").warning(
+            "invalid batch-coalescing guard setting (%s); using defaults", exc,
+        )
+        return _batch_coalescing.BatchCoalescingConfig()
+
+
+def _agent_batch_guard_telemetry(event):
+    """Emit one guard decision to the response activity feed and the log."""
+    fields = dict(event)
+    summary = "%s %s -> %s (%d distinct target(s), threshold %d)" % (
+        fields["action"], fields["tool"], fields["batch_tool"],
+        fields["distinct_targets"], fields["threshold"],
+    )
+    logging.getLogger("sonder.server").info("agent guard %s: %s", fields["guard"], summary)
+    activity_tracker.record_event(
+        "agent_guard",
+        summary=summary,
+        ok=fields["action"] == "advisory",
+        **fields,
+    )
+
+
 _LOCAL_AGENT_NUM_PREDICT = 1200
 _CLOUD_AGENT_WRITE_CHUNK_HINT = 24000
 
+
+
+def _local_agent_brief(project_scope: str = "") -> str:
+    """The host brief for a local agent turn, carrying its caller's build line.
+
+    The build line is the declared principal's cached build model of the
+    turn's project (the planner labels a project by its directory name), or
+    that principal's newest one when the turn names no project
+    (``build_brief_turn``): a served request declares its own caller (the
+    owner, or an account's own ``account:<sha256>`` principal); a local
+    operator surface (the REPL, the stdio MCP) declares ``LOCAL_OWNER``; and
+    a turn in the HTTP host that inherited no request (a fleet worker, an
+    autopilot run) declares nobody and shows no build line. The line is read
+    from the cache only; hosted agents never receive this brief.
+    """
+    try:
+        from sonder_runtime.bootstrap.build_tools import build_brief_turn
+    except ImportError:
+        return environment_probe.agent_brief()
+    label = os.path.basename(str(project_scope or "").rstrip("/\\")) if project_scope else ""
+    with build_brief_turn(project_label=label):
+        return environment_probe.agent_brief()
 
 
 def _agent_project_scope(project):
@@ -19828,10 +20413,28 @@ def _agent_checklist_mark(checklist_id, states, item, status, note):
         states[item] = status
 
 
+_AGENT_CHECKLIST_ITEMS = 4
+_AGENT_CHECKLIST_TERMINAL = frozenset(("done", "blocked", "canceled"))
+
+
 def _agent_checklist_fail(checklist_id, states, reason, item=1):
-    """Leave persistent, honest task state when an agent exits early."""
+    """Leave persistent, honest task state when an agent exits early.
+
+    The failing step is ``blocked`` and the report step ``done``.  Every other
+    step this run left open -- an inspection still ``in_progress``, a
+    validation still ``pending`` -- is closed as ``canceled``: the run will
+    never finish it, and a row left open under a blocked parent read in
+    ``/tasks`` like live work that was still going.
+    """
     _agent_checklist_mark(checklist_id, states, item, "blocked", reason)
     _agent_checklist_mark(checklist_id, states, 4, "done", "failure included in end report")
+    for other in range(1, _AGENT_CHECKLIST_ITEMS + 1):
+        if other in (item, 4) or states.get(other) in _AGENT_CHECKLIST_TERMINAL:
+            continue
+        _agent_checklist_mark(
+            checklist_id, states, other, "canceled",
+            "not completed: the agent stopped early (%s)" % str(reason or "failure")[:200],
+        )
 
 
 _AGENT_MODEL_FAILURE = threading.local()
@@ -19948,7 +20551,7 @@ def _agent_turn(
         tool_allowlist = None
         tool_policy = None
         auto_checklist = False
-    max_steps = _safe_limit_policy(max_steps, 6, 20)
+    max_steps = _safe_limit_policy(max_steps, 6, _AGENT_MAX_STEPS_CEILING)
     from sonder_runtime.bootstrap.prepared_workbench import prepared_target
     pinned_target = prepared_target(prompt, tier, max_steps, allow_web, project, allow_location)
     if pinned_target is not None:
@@ -19996,6 +20599,13 @@ def _agent_turn(
             "answer. Lead with the outcome and disclose failures."
         )
     else:
+        # Composing the application installs the host capability-summary hook
+        # the brief below reads. It never probes the host here, and a failure
+        # only leaves the brief without its capabilities suffix.
+        try:
+            _application()
+        except Exception:
+            pass
         default_agent_system = (
             "You are a local tool-using coding agent. Inspect real workspace evidence before making claims. "
             "For action tasks, use tools instead of merely describing commands. Prefer workspace_inventory, directory_tree, "
@@ -20010,7 +20620,7 @@ def _agent_turn(
             # One deterministic line about the host, so a local model picks the
             # right command shape instead of guessing. Never send this private
             # machine inventory to a hosted agent.
-            + environment_probe.agent_brief()
+            + _local_agent_brief(project_scope)
         )
     # Hosted agents receive only the explicitly supplied/default hosted
     # system text. _build_system also appends mutable local profile, emotion,
@@ -20112,6 +20722,35 @@ def _agent_turn(
     # Keep only a small window of host-known failed/empty outcomes so those
     # semantic retries cannot consume the whole agent budget.
     semantic_no_progress = collections.deque(maxlen=6)
+    # Issue #510 s6 batching/coalescing guard: one window per turn over
+    # distinct single-target read-only calls that have a registered batch
+    # form.  A tool this run must use by name keeps its single form, and the
+    # batch tool must pass every run gate the dispatcher will apply; an
+    # argument-aware ``tool_policy`` cannot be consulted without charging its
+    # budget, so such runs never get steered to a tool it might refuse.
+    def _batch_admissible(counterpart, _target):
+        if tool_policy is not None:
+            return False
+        if allowed_tools is not None and counterpart.batch_tool not in allowed_tools:
+            return False
+        return not _agent_run_tool_refusal(
+            counterpart.batch_tool,
+            read_only=read_only, cloud=cloud, unsafe=unsafe,
+            project_bound=bool(project_scope),
+            allow_web=allow_web, allow_location=allow_location,
+        )
+
+    batch_guard = _batch_coalescing.BatchCoalescingGuard(
+        tuple(
+            counterpart for counterpart in _agent_batch_counterparts()
+            if counterpart.single_tool not in required_tools
+            and counterpart.single_tool not in abort_on_tool_failure
+        ),
+        _agent_batch_coalescing_config(),
+        batch_admissible=_batch_admissible,
+        resolve_target=_agent_batch_target_identity,
+        view_chars=_AGENT_MODEL_OBSERVATION_CHARS,
+    )
     # A later unrelated success must not turn a failed required/evidence call
     # into a host-approved completion. Key by the canonical call signature so
     # only a successful retry of that exact host observation can recover it.
@@ -20205,7 +20844,10 @@ def _agent_turn(
         transcript += context_text
 
     def ensure_not_cancelled():
-        if cancel_check is not None and _cancel_requested(cancel_check):
+        if (
+            (cancel_check is not None and _cancel_requested(cancel_check))
+            or _foreground_turns.cancel_requested()
+        ):
             if _standalone_lanes.current() is not None:
                 _standalone_lanes.current().request_cancel()
             raise ModelCallError(
@@ -20548,7 +21190,7 @@ def _agent_turn(
                 review_number,
                 tool_name or "(missing)",
                 review.get("reason", ""),
-                observation_text[:6000],
+                _agent_model_observation_view(tool_name, observation_text),
             )
         )
 
@@ -20873,6 +21515,19 @@ def _agent_turn(
                 "before making a mutation."
             )
         tool_dispatched = False
+        batch_refusal = None
+        # A retry the host itself demands (a completion-blocking failed
+        # evidence call) is never refused; the guard also exempts every
+        # previously attempted target on its own.
+        if (
+            prior_identical_failures < 2
+            and not policy_error
+            and not cached_inspection
+            and call_signature not in completion_blocking_failures
+        ):
+            batch_refusal = batch_guard.before_dispatch(tool_name, policy_tool_args)
+            if batch_refusal is not None:
+                _agent_batch_guard_telemetry(batch_refusal.telemetry())
         if prior_identical_failures >= 2:
             observation = (
                 "ERROR: HOST NO-PROGRESS: this exact tool call already failed twice. "
@@ -20889,6 +21544,10 @@ def _agent_turn(
             )
         elif policy_error:
             observation = policy_error
+        elif batch_refusal is not None:
+            # Not dispatched: the typed refusal names the registered batch
+            # tool with this target already in its argument.
+            observation = batch_refusal.render()
         elif cached_inspection:
             repeated = repeated_inspection_counts.get(call_signature, 0) + 1
             repeated_inspection_counts[call_signature] = repeated
@@ -21083,7 +21742,9 @@ def _agent_turn(
                 tool_name in _AGENT_DEDUPLICATED_INSPECTION_TOOLS
                 and not cached_inspection
             ):
-                successful_inspection_results[call_signature] = observation_text[:6000]
+                successful_inspection_results[call_signature] = (
+                    _agent_model_observation_view(tool_name, observation_text)
+                )
                 repeated_inspection_counts.pop(call_signature, None)
         if tool_name in _AGENT_FILE_EVIDENCE_TOOLS and tool_ok:
             file_evidence = True
@@ -21112,8 +21773,20 @@ def _agent_turn(
             tool_dispatched
             and tool_name in _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS
         )
+        batch_advisory = None
+        if tool_dispatched and not (
+            mutation_attempt_may_have_changed or execution_may_have_changed
+        ):
+            batch_advisory = batch_guard.after_dispatch(
+                tool_name, policy_tool_args, ok=tool_ok,
+            )
+            if batch_advisory is not None:
+                _agent_batch_guard_telemetry(batch_advisory.telemetry())
         if mutation_attempt_may_have_changed or execution_may_have_changed:
             parent_effect_dirty = True
+            # Fresh reads after a state change are legitimate evidence, not
+            # a wasteful run of singles: start a new batching window.
+            batch_guard.reset()
             # A real mutation or an execution-capable tool can make prior
             # inspection results stale even when the command exits nonzero.
             # Dry-run mutation tools do not reach here.
@@ -21225,14 +21898,36 @@ def _agent_turn(
                 verifier=tool_name in _AGENT_VERIFICATION_TOOLS,
                 validator=tool_name in _WORK_VALIDATION_TOOLS,
             )
+        # The advisory is steering for the model only: it is appended after
+        # the host ledger, inspection cache and evidence checks have seen the
+        # unchanged tool result.
+        model_observation = _agent_model_observation_view(tool_name, observation_text)
+        if batch_advisory is not None:
+            model_observation += "\n" + batch_advisory.render()
         observations.append(
             "step %d tool=%s reason=%s\n%s" % (
                 step,
                 tool_name,
                 decision.get("reason", ""),
-                observation_text[:6000],
+                model_observation,
             )
         )
+        if batch_refusal is not None and batch_refusal.exhausted:
+            if auto_checklist:
+                _agent_checklist_fail(
+                    checklist_id, checklist_states,
+                    "model ignored repeated batch-tool steering", 2,
+                )
+            return _early_exit(
+                "ERROR: agent kept issuing single %s calls after %d batch-guard "
+                "refusals; use %s for multi-target reads.\n\n%s"
+                % (
+                    batch_refusal.counterpart.single_tool,
+                    batch_refusal.refusals,
+                    batch_refusal.counterpart.batch_tool,
+                    "\n\n".join(observations),
+                )
+            )
         if semantic_stall is not None:
             stalled_tool, outcome_class, distinct_count = semantic_stall
             return _early_exit(
@@ -21595,6 +22290,7 @@ _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "project_detect",
     "repo_status", "repo_diff", "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
     "program_search", "image_inspect", "memory_search", "web_search", "toolchain_status",
+    "tool_inventory", "output_digest",
     "web_fetch", "weather_lookup", "status", "diagnostics",
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
     # test_discover / find_references / diff_files / secret_scan /
@@ -22048,6 +22744,10 @@ def _autopilot_work_model(
             tool_allowlist=allowed,
             tool_policy=_autopilot_tool_policy(run),
             return_host_receipt=True,
+            # The fence refuses effects once the run is cancelled or its lease
+            # is lost; the same check also stops the loop before its next model
+            # or tool action, so a cancel does not wait out the task's steps.
+            cancel_check=lambda: bool(effect_fence.reason_lost(fence)),
             **({"pre_model_context": pre_model_context}
                if strategy_memory is not None else {}),
         )
@@ -22154,6 +22854,33 @@ def _launch_autopilot(run_id: str, max_cycles=12, plan_only=False, request_owner
         return True
 
 
+def _autopilot_not_launched(run_id: str) -> str:
+    """Say why ``_launch_autopilot(run_id)`` just returned False.
+
+    It refuses for two different reasons: this run already has a live worker,
+    or the configured concurrent-run capacity is full.  Only the first is
+    "already active"; the second leaves a brand-new run saved but not started,
+    and reporting it as active told the operator a run was executing when
+    nothing would ever pick it up.
+    """
+    with _AUTOPILOT_THREADS_LOCK:
+        current = _AUTOPILOT_THREADS.get(run_id)
+        if current is not None and current.is_alive():
+            return "autopilot already active"
+        alive = sum(1 for t in _AUTOPILOT_THREADS.values() if t.is_alive())
+        limit = _MAX_AUTOPILOT_RUNS
+    if limit is not None and alive >= limit:
+        return (
+            "autopilot not started: capacity reached (%d of %d concurrent run(s) "
+            "active); run %s is saved and can be started with /autopilot resume %s "
+            "once an active run finishes" % (alive, limit, run_id, run_id)
+        )
+    return (
+        "autopilot not started; run %s is saved and can be started with "
+        "/autopilot resume %s" % (run_id, run_id)
+    )
+
+
 def _autopilot_start(
     objective: str,
     project: str = "",
@@ -22204,7 +22931,7 @@ def _autopilot_start(
         return "autopilot request failed: %s" % exc
     prefix = "autopilot plan started" if plan_only else "autopilot started"
     if not launched:
-        prefix = "autopilot already active"
+        prefix = _autopilot_not_launched(run["id"])
     return "%s\n%s\n  use /autopilot status %s" % (
         prefix, autopilot_controller.format_run(run, include_report=False), run["id"],
     )
@@ -22234,7 +22961,7 @@ def _autopilot_resume(
     except (OSError, RuntimeError, ValueError, autopilot_controller.AutopilotError) as exc:
         return "autopilot request failed: %s" % exc
     return "%s\n%s" % (
-        "autopilot resumed" if launched else "autopilot already active",
+        "autopilot resumed" if launched else _autopilot_not_launched(run["id"]),
         autopilot_controller.format_run(run, include_report=False),
     )
 
@@ -22293,10 +23020,20 @@ def _autopilot_cancel(run_id: str, request_owner: str | None = None) -> str:
     """Request cancellation; an active task result is discarded."""
     _maybe_live_reload()
     run = autopilot_store.request_cancel(run_id, request_owner=request_owner)
-    return (
-        autopilot_controller.format_run(run, include_report=False)
-        if run else "autopilot request rejected: no accessible run matches '%s'." % run_id
-    )
+    if not run:
+        return "autopilot request rejected: no accessible run matches '%s'." % run_id
+    # An active run only records the request here; echoing its unchanged
+    # "running" status alone read as if the cancel had been ignored.
+    if run.get("status") in autopilot_store.ACTIVE_STATUSES:
+        prefix = (
+            "autopilot cancellation requested; the run stops at its next host "
+            "checkpoint and the active task result is discarded"
+        )
+    elif run.get("status") == "cancelled":
+        prefix = "autopilot cancelled"
+    else:
+        prefix = "autopilot run is already %s" % run.get("status", "finished")
+    return "%s\n%s" % (prefix, autopilot_controller.format_run(run, include_report=False))
 
 
 def _autopilot_status(run_id: str = "", include_finished: bool = True, request_owner: str | None = None) -> str:
@@ -22370,8 +23107,11 @@ def mission_start(
         objective, criteria, auto=auto, plan=plan,
         policy=policy, tier=tier, allow_web=allow_web, project=project,
     )
-    if result.get("autopilot", {}).get("run_id"):
-        _launch_autopilot(result["autopilot"]["run_id"])
+    # The bridge reports ``autopilot: None`` when ``auto`` is off.
+    not_launched = ""
+    if (result.get("autopilot") or {}).get("run_id"):
+        if not _launch_autopilot(result["autopilot"]["run_id"]):
+            not_launched = _autopilot_not_launched(result["autopilot"]["run_id"])
     lines = ["mission started"]
     lines.append(_format_goal(result.get("goal")))
     p = result.get("plan")
@@ -22380,6 +23120,8 @@ def mission_start(
     ap = result.get("autopilot")
     if ap:
         lines.append("autopilot: %s" % (ap.get("error") or ap.get("run_id", "")))
+    if not_launched:
+        lines.append("autopilot: %s" % not_launched)
     return "\n".join(lines)
 
 
@@ -22556,6 +23298,9 @@ def _route_work_request(
     if refusal:
         return refusal
     explicit_worker_cap = master_orchestrator.requested_worker_cap(prompt)
+    ignored_worker_cue = ""
+    with contextlib.suppress(Exception):
+        ignored_worker_cue = master_orchestrator.worker_request_ignored_reason(prompt)
     intent_override = (
         {
             "mode": "fleet",
@@ -22748,8 +23493,9 @@ def _route_work_request(
             plan_only=bool(decision.get("plan_only")),
             wait=False,
         )
-    return "%s\n\n%s" % (
+    return "%s%s\n\n%s" % (
         _execution_route_header(mode, source, reason, confidence, selected_tier),
+        ("\nnote: " + ignored_worker_cue) if ignored_worker_cue and mode != "fleet" else "",
         output,
     )
 
@@ -22832,16 +23578,105 @@ def runtime_policy_data() -> dict:
                 data["capability_errors"]["embedding"] = "does not declare embedding capability"
     except Exception as exc:
         data["inventory_error"] = "%s: %s" % (type(exc).__name__, exc)
+    _remember_runtime_readiness(data)
     return data
 
 
-@mcp.tool()
-def runtime_policy_status() -> str:
-    """Show shared local model mappings and execution-lane tier choices."""
-    _maybe_live_reload()
-    data = runtime_policy_data()
+# The last live model-inventory result, kept in process memory only.
+#
+# ``runtime_policy_status`` is graded ``safe`` (``_RUNTIME_OBSERVATION_TOOLS``)
+# on the strength of an execution check: no file write, no process spawn, no
+# outbound socket, no non-DDL SQL. Asking the model endpoint for its catalog is
+# an outbound socket, so the default status renders this snapshot and its age
+# instead, and the live probe is the separate ``/runtime status refresh``
+# action, which keeps the ``/runtime`` branch's strictest grade. Never persist
+# this to disk: a status read that writes a cache file would fail that same
+# check.
+_RUNTIME_READINESS_CACHE: dict = {}
+
+
+def _runtime_readiness_key(data) -> tuple:
+    """What a readiness verdict was computed against: the configured models."""
+    local_models = data.get("local_models") or {}
+    return (
+        tuple(sorted((str(k), str(v or "")) for k, v in local_models.items())),
+        str(data.get("embedding_model") or ""),
+    )
+
+
+def _remember_runtime_readiness(data) -> None:
+    _RUNTIME_READINESS_CACHE.clear()
+    _RUNTIME_READINESS_CACHE.update({
+        "key": _runtime_readiness_key(data),
+        "checked_at": time.monotonic(),
+        "fields": {
+            "missing_models": list(data.get("missing_models") or ()),
+            "capability_errors": dict(data.get("capability_errors") or {}),
+            "inventory_error": str(data.get("inventory_error") or ""),
+        },
+    })
+
+
+def _runtime_readiness_age(seconds) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return "%ds ago" % seconds
+    if seconds < 3600:
+        return "%dm ago" % (seconds // 60)
+    if seconds < 86400:
+        return "%dh %dm ago" % (seconds // 3600, (seconds % 3600) // 60)
+    return "%dd ago" % (seconds // 86400)
+
+
+def _runtime_policy_cached_data() -> dict:
+    """Policy plus the cached readiness verdict, touching no socket or file.
+
+    ``create=False`` so a missing policy file renders the defaults rather than
+    being written by a read. A cached verdict computed for different models
+    than the policy now names is not reused.
+    """
+    policy = _refresh_runtime_policy(create=False)
+    data = {
+        **policy,
+        "local_models": dict(policy["local_models"]),
+        "routing": dict(policy["routing"]),
+        "embedding_model": policy["embedding_model"],
+        "missing_models": [],
+        "capability_errors": {},
+    }
+    cached = dict(_RUNTIME_READINESS_CACHE)
+    if not cached:
+        data["readiness_state"] = "unchecked"
+    elif cached.get("key") != _runtime_readiness_key(data):
+        data["readiness_state"] = "stale"
+    else:
+        fields = cached.get("fields") or {}
+        data["missing_models"] = list(fields.get("missing_models") or ())
+        data["capability_errors"] = dict(fields.get("capability_errors") or {})
+        if fields.get("inventory_error"):
+            data["inventory_error"] = fields["inventory_error"]
+        data["readiness_state"] = "cached"
+        data["readiness_age_seconds"] = time.monotonic() - float(cached["checked_at"])
+    return data
+
+
+def _format_runtime_policy_status(data, *, live=False) -> str:
     output = runtime_policy.format_policy(data)
+    state = "live" if live else data.get("readiness_state", "unchecked")
+    if state == "unchecked":
+        return output + "\n  readiness: not checked yet \u00b7 /runtime status refresh"
+    if state == "stale":
+        return output + (
+            "\n  readiness: not checked for the current models \u00b7 "
+            "/runtime status refresh"
+        )
     output += "\n" + "\n".join(_runtime_model_readiness_lines(data))
+    if live:
+        output += "\n  checked: just now (live model inventory)"
+    else:
+        output += "\n  checked: %s (cached) \u00b7 /runtime status refresh" % (
+            _runtime_readiness_age(data.get("readiness_age_seconds") or 0)
+        )
     if data.get("missing_models"):
         output += "\n  WARNING missing local model(s): %s" % ", ".join(
             sorted(set(data["missing_models"]))
@@ -22849,6 +23684,31 @@ def runtime_policy_status() -> str:
     if data.get("inventory_error"):
         output += "\n  WARNING model inventory unavailable: %s" % data["inventory_error"]
     return output
+
+
+@mcp.tool()
+def runtime_policy_status() -> str:
+    """Show shared local model mappings, execution-lane tiers and cached model readiness.
+
+    Read-only: renders the last model-inventory result with its age and never
+    contacts the model endpoint. ``/runtime status refresh`` re-checks it.
+    """
+    # Not the default ``create_policy=True``: that would write a missing
+    # policy file (and its lock) from a read graded ``safe``.
+    _maybe_live_reload(create_policy=False)
+    return _format_runtime_policy_status(_runtime_policy_cached_data())
+
+
+def _runtime_policy_refresh_status() -> str:
+    """Probe the local model inventory now, then render the policy.
+
+    Not a registered tool and not a read-only one: it opens a socket to the
+    model endpoint. ``/runtime status refresh`` reaches it, and
+    ``command_catalog.narrow_branch_tools`` deliberately leaves that form at
+    the ``/runtime`` branch's strictest grade.
+    """
+    _maybe_live_reload()
+    return _format_runtime_policy_status(runtime_policy_data(), live=True)
 
 
 def npu_fallback_status_data() -> dict:
@@ -22997,7 +23857,9 @@ def runtime_policy_update(
         _refresh_runtime_policy(create=False)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         return "ERROR: %s" % exc
-    return runtime_policy_status()
+    # The update already validated against the live catalog; show (and cache)
+    # the live readiness it now implies rather than a verdict for old models.
+    return _runtime_policy_refresh_status()
 
 
 @mcp.tool()
@@ -24726,6 +25588,160 @@ def toolchain_status(name: str, refresh: bool = False) -> str:
         summary="ok" if ok else "unavailable",
         output=output,
         evidence={"tool": result.get("tool", ""), "ok": ok},
+    )
+    return output
+
+
+# Model-visible payload ceiling shared with the native MCP frame headroom.
+_DEVELOPER_TOOL_OUTPUT_BYTES = 48_000
+
+
+def _developer_tool_services():
+    """The composed developer tools, or None when this runtime has none."""
+    try:
+        return getattr(_application(), "developer_tools", None)
+    except Exception:
+        return None
+
+
+def _developer_tool_json(payload):
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _developer_tool_context(source="mcp"):
+    from sonder_runtime.application.context import local_owner_context
+
+    return local_owner_context(correlation_id=uuid.uuid4().hex, source=source)
+
+
+def _tool_inventory_payload(category, name, refresh):
+    services = _developer_tool_services()
+    if services is None or getattr(services, "inventory", None) is None:
+        return {"ok": False, "error_code": "DEVELOPER_TOOLS_UNAVAILABLE"}
+    try:
+        from sonder_runtime.domain.host_tools.model import view_to_wire
+
+        view = services.inventory.view(
+            category=(str(category or "").strip().lower() or None),
+            name=(str(name or "").strip() or None),
+            refresh=bool(refresh),
+            redacted=True,
+        )
+        wire = dict(view_to_wire(view))
+    except (InvalidInput, ValueError, TypeError) as exc:
+        return {
+            "ok": False, "error_code": "INVALID_INVENTORY_QUERY",
+            "detail": str(exc)[:200],
+        }
+    except Exception as exc:
+        return {
+            "ok": False, "error_code": "TOOL_INVENTORY_UNAVAILABLE",
+            "detail": type(exc).__name__,
+        }
+    payload = {"ok": True, **wire}
+    tools = list(payload.get("tools") or [])
+    payload["tools"] = tools
+    while tools and len(_developer_tool_json(payload).encode("utf-8")) > _DEVELOPER_TOOL_OUTPUT_BYTES:
+        tools.pop()
+        payload["truncated"] = True
+    return payload
+
+
+@mcp.tool()
+def tool_inventory(category: str = "", name: str = "", refresh: bool = False) -> str:
+    """Report the categorized host tool inventory (compilers, build systems,
+    test runners, linters, debuggers, package managers, runtimes, containers,
+    VCS, database clients, media/doc tools, cloud CLIs, editors, shells).
+
+    Filter by ``category`` or a tool ``name``. Paths are redacted; versions
+    come only from fixed, bounded, host-owned probes. ``refresh`` re-probes
+    the host instead of using the cached snapshot. Local-only host data.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    payload = _tool_inventory_payload(category, name, refresh)
+    ok = bool(payload.get("ok"))
+    output = _developer_tool_json(payload)
+    _record_direct_tool(
+        "tool_inventory",
+        {"category": str(category or "")[:40], "name": str(name or "")[:64],
+         "refresh": bool(refresh)},
+        ok=ok,
+        started=started,
+        summary=(
+            "%d tools" % len(payload.get("tools") or []) if ok
+            else payload.get("error_code", "unavailable")
+        ),
+        output=output,
+        evidence={"ok": ok},
+    )
+    return output
+
+
+def _output_digest_payload(path, job_id, tail_lines):
+    path_text = str(path or "").strip()
+    job_text = str(job_id or "").strip()
+    if bool(path_text) == bool(job_text):
+        return {
+            "ok": False, "error_code": "INVALID_DIGEST_REQUEST",
+            "detail": "pass exactly one of path or job_id",
+        }
+    services = _developer_tool_services()
+    if services is None or getattr(services, "digest", None) is None:
+        return {"ok": False, "error_code": "DEVELOPER_TOOLS_UNAVAILABLE"}
+    from sonder_runtime.domain.common.errors import NotFound, SonderError
+
+    try:
+        tail = max(1, min(int(tail_lines), 200))
+    except (TypeError, ValueError):
+        tail = 20
+    context = _developer_tool_context()
+    try:
+        if job_text:
+            digest = services.digest.digest_job(
+                job_text, context, tail_lines=tail, operator=False,
+            )
+        else:
+            digest = services.digest.digest_file(path_text, context, tail_lines=tail)
+    except NotFound:
+        return {"ok": False, "error_code": "JOB_NOT_FOUND"}
+    except PermissionError:
+        return {"ok": False, "error_code": "DIGEST_SOURCE_REJECTED"}
+    except InvalidInput as exc:
+        return {"ok": False, "error_code": "INVALID_DIGEST_REQUEST", "detail": str(exc)[:200]}
+    except SonderError as exc:
+        return {"ok": False, "error_code": getattr(exc, "code", "DIGEST_UNAVAILABLE")}
+    except Exception as exc:
+        return {"ok": False, "error_code": "DIGEST_UNAVAILABLE", "detail": type(exc).__name__}
+    # Keep the whole JSON (envelope included) under the model payload ceiling.
+    return {"ok": True, "digest": digest.to_wire(max_bytes=_DEVELOPER_TOOL_OUTPUT_BYTES - 64)}
+
+
+@mcp.tool()
+def output_digest(path: str = "", job_id: str = "", tail_lines: int = 20) -> str:
+    """Summarize a guarded log file or your own test-run job output.
+
+    The structured form of ``tail -1 out.txt; grep -E "^(FAILED|ERROR) " out.txt``:
+    final line, recognized run summary (pytest, unittest, cargo, go, ctest,
+    jest, vitest, dotnet, maven, gradle, make), failure lines, first parsed
+    compiler/test errors, repeated-error groups, and a short tail. Pass exactly
+    one of ``path`` (inside allowed roots; credential stores refused) or
+    ``job_id``. Everything is redacted and bounded.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    payload = _output_digest_payload(path, job_id, tail_lines)
+    ok = bool(payload.get("ok"))
+    output = _developer_tool_json(payload)
+    _record_direct_tool(
+        "output_digest",
+        {"path": str(path or "")[:256], "job_id": str(job_id or "")[:80],
+         "tail_lines": tail_lines},
+        ok=ok,
+        started=started,
+        summary="digest" if ok else payload.get("error_code", "unavailable"),
+        output=output,
+        evidence={"ok": ok},
     )
     return output
 

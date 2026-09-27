@@ -177,3 +177,23 @@ def test_opted_in_runtime_refuses_unbound_or_mixed_provider_dispatch(tmp_path):
         )},
     )
     assert compatible.model_gateway is compatible.model_routes
+
+
+@pytest.mark.parametrize("alias", ["sonder-inference", "sonder_inference", "inference"])
+def test_runtime_container_accepts_sonder_inference_aliases(alias):
+    runtime = build_runtime(_config(alias), RuntimeCapabilities())
+    assert runtime.model_gateway.__class__.__name__ == "SonderInferenceGateway"
+    assert runtime.provider_bindings.required_providers == frozenset({"sonder_inference"})
+
+
+def test_runtime_configuration_captures_the_inference_fallback():
+    from sonder_runtime.adapters.runtime_configuration import build_config_from_env
+
+    config = build_config_from_env("local", {
+        "SONDER_MODEL_BACKEND": "sonder-inference",
+        "SONDER_INFERENCE_FALLBACK": "ollama",
+    })
+    assert config.provider_bindings is not None
+    assert dict(config.provider_bindings.fallbacks) == {"sonder_inference": "ollama"}
+    runtime = build_runtime(config, RuntimeCapabilities())
+    assert runtime.model_gateway.__class__.__name__ == "PreSendFallbackGateway"

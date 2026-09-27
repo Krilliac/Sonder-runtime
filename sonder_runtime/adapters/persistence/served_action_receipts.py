@@ -50,6 +50,10 @@ CREATE TABLE IF NOT EXISTS served_action_receipts (
 # Returned by claim() when admitting a new replay key would exceed a bound.
 # Deliberately not a table state: a rejected claim writes nothing.
 REJECTED = "rejected-capacity"
+# Returned by claim() when the client's key is already bound to a *different*
+# request (same principal and Idempotency-Key, other action).  Nothing is
+# written; the retained receipt of the original request is untouched.
+CONFLICT = "conflict-request"
 
 
 def _env_int(name: str, default: int) -> int:
@@ -103,6 +107,24 @@ def _connect() -> sqlite3.Connection:
                         "ALTER TABLE served_action_receipts "
                         "ADD COLUMN owner_scope TEXT NOT NULL DEFAULT ''"
                     )
+                # Opaque digests binding a client key to one request, so a
+                # reused key with a different request is refused instead of
+                # silently admitted as a new action.  Rows written before
+                # these columns existed carry '' and never conflict.
+                if "binding_key" not in columns:
+                    conn.execute(
+                        "ALTER TABLE served_action_receipts "
+                        "ADD COLUMN binding_key TEXT NOT NULL DEFAULT ''"
+                    )
+                if "action_digest" not in columns:
+                    conn.execute(
+                        "ALTER TABLE served_action_receipts "
+                        "ADD COLUMN action_digest TEXT NOT NULL DEFAULT ''"
+                    )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS served_action_receipts_binding "
+                    "ON served_action_receipts(binding_key) WHERE binding_key != ''"
+                )
                 conn.commit()
             finally:
                 conn.close()
@@ -115,14 +137,18 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
-def claim(replay_key: str, owner_scope: str = "", now: float | None = None) -> str:
+def claim(replay_key: str, owner_scope: str = "", now: float | None = None,
+          *, binding_key: str = "", action_digest: str = "") -> str:
     """Atomically admit an action or return its durable terminal state.
 
     ``started`` means a prior process may have crossed the side-effect boundary
     and never reported back.  It is intentionally not retried automatically.
     Expired ``completed`` receipts are pruned before lookup, so a key claimed
     past the TTL window is a fresh admission.  A new key that would exceed the
-    global or per-owner bound returns :data:`REJECTED` without writing.
+    global or per-owner bound returns :data:`REJECTED` without writing.  When
+    ``binding_key`` (principal + client key) already names a retained receipt
+    for a different ``action_digest``, :data:`CONFLICT` is returned without
+    writing.
     """
     if not replay_key:
         raise ValueError("replay key is required")
@@ -142,6 +168,16 @@ def claim(replay_key: str, owner_scope: str = "", now: float | None = None) -> s
         if row is not None:
             conn.commit()
             return str(row[0])
+        if binding_key and action_digest:
+            other = conn.execute(
+                "SELECT 1 FROM served_action_receipts "
+                "WHERE binding_key = ? AND action_digest != '' "
+                "AND action_digest != ? LIMIT 1",
+                (binding_key, action_digest),
+            ).fetchone()
+            if other is not None:
+                conn.commit()
+                return CONFLICT
         total = conn.execute(
             "SELECT COUNT(*) FROM served_action_receipts"
         ).fetchone()[0]
@@ -158,9 +194,11 @@ def claim(replay_key: str, owner_scope: str = "", now: float | None = None) -> s
                 return REJECTED
         conn.execute(
             "INSERT INTO served_action_receipts"
-            "(replay_key, state, created_ts, updated_ts, owner_scope) "
-            "VALUES (?, 'started', ?, ?, ?)",
-            (replay_key, now, now, owner_scope or ""),
+            "(replay_key, state, created_ts, updated_ts, owner_scope, "
+            "binding_key, action_digest) "
+            "VALUES (?, 'started', ?, ?, ?, ?, ?)",
+            (replay_key, now, now, owner_scope or "",
+             binding_key or "", action_digest or ""),
         )
         conn.commit()
         return "claimed"

@@ -151,8 +151,13 @@ _BENIGN_RESOURCE_CANONICAL_RE = re.compile(
 _SAFE_STYLE_CANONICAL_RE = re.compile(
     r"^(?:user prefers|user likes it when|user does not like|"
     r"user does not want sonder to|user wants sonder to always|from now on) "
-    r"(?:(?:(?:concise|brief|short|direct|detailed|verbose|formal|casual|clear) )+"
+    r"(?:(?:use|give) )?"
+    r"(?:(?:(?:concise|brief|short|terse|direct|detailed|verbose|formal|casual|clear) )+"
     r"(?:answers?|responses?|replies|explanations?|reports?|status updates?)|"
+    r"(?:answer|respond|reply) (?:tersely|concisely|briefly|directly|clearly|"
+    r"formally|casually|in detail|step by step)|"
+    r"be (?:concise|brief|terse|direct|detailed|formal|casual|clear)|"
+    r"keep (?:answers?|responses?|replies) (?:short|brief|concise)|"
     r"step by step (?:answers?|responses?|explanations?)|"
     r"(?:bullet|bulleted) (?:lists?|answers?|responses?)|"
     r"(?:use )?markdown(?: formatting| headings?)?|use emojis?|avoid emojis?|"
@@ -173,7 +178,8 @@ _SAFE_CODE_CANONICAL_RE = re.compile(
     r"(?:(?:concise|brief|short|direct|detailed|clear) )?"
     r"(?:python|javascript|typescript|rust|java|cpp|csharp) "
     r"(?:code|examples?|tests?)|"
-    r"(?:python|javascript|typescript|rust|java|cpp|csharp)|"
+    r"(?:python|javascript|typescript|rust|java|cpp|csharp)"
+    r"(?: for (?:scripts?|scripting|automation|tooling|examples?|tests?|prototypes?))?|"
     r"(?:msvc|clang|gcc) for (?:c|cpp) examples?|"
     r"(?:tabs|spaces) for indentation|type hints|docstrings)\.?$"
 )
@@ -212,7 +218,8 @@ _CATEGORY_PATTERNS = (
         re.I,
     )),
     ("response_style", re.compile(
-        r"\b(?:concise|brief|short|direct|detailed|verbose|bullets?|headings?|"
+        r"\b(?:concise|concisely|brief|briefly|short|terse|tersely|direct|"
+        r"directly|detailed|verbose|bullets?|headings?|"
         r"markdown|emojis?|explain|explanation|tone|formal|casual|"
         r"status\s+updates?|"
         r"mention\s+what\s+changed|show\s+(?:your\s+)?progress)\b", re.I,
@@ -547,6 +554,61 @@ def extract_preferences(text):
                 seen.add(key)
                 found.append(pref)
     return found
+
+
+# A short imperative typed to the explicit learn tool ("prefer Python for
+# scripts", "use tabs for indentation", "answer tersely").  Only the explicit
+# ``learn_preference`` path rewrites these: passive capture from ordinary chat
+# turns stays first-person only, because "use tabs" in a chat turn is usually
+# a one-off instruction, not a standing default.
+_EXPLICIT_IMPERATIVE_RE = re.compile(
+    r"^(?:please\s+)?(?P<verb>prefer|use|avoid|answer|respond|reply|be|keep)\b"
+    r"\s+(?P<rest>\S.*)$",
+    re.I,
+)
+
+EXPLICIT_FORMS_HINT = (
+    "state it as a standing default, for example 'I prefer concise answers', "
+    "'always answer tersely', 'never use emojis', 'prefer Python for scripts', "
+    "'use tabs for indentation', 'use metric units', or 'call me Sam'. "
+    "Accepted topics: response style, code and shell conventions, UI theme, "
+    "workflow confirmations, units/dates/time, answer language, and your name"
+)
+
+
+def _explicit_first_person(text):
+    """The first-person form of a short imperative, or '' when not one."""
+    cleaned = _clean(text).rstrip(" .!")
+    match = _EXPLICIT_IMPERATIVE_RE.match(cleaned)
+    if not match:
+        return ""
+    verb = match.group("verb").lower()
+    rest = match.group("rest").strip()
+    if verb in ("prefer", "use"):
+        return "I prefer %s" % rest
+    if verb == "avoid":
+        return "I prefer not to use %s" % rest
+    return "Always %s %s" % (verb, rest)
+
+
+def extract_explicit_preferences(text):
+    """Preferences from an explicit ``learn_preference`` request.
+
+    Tries the conversational extractor first, then the first-person form of a
+    short imperative.  Every result must still pass the same allowlisted
+    grammar and safety filters against *both* the typed text and the
+    rewrite, so this accepts more phrasings, never more content.
+    """
+    found = extract_preferences(text)
+    if found:
+        return found
+    rewritten = _explicit_first_person(text)
+    if not rewritten:
+        return []
+    return [
+        pref for pref in extract_preferences(rewritten)
+        if is_stable_preference(pref, source_text=text)
+    ]
 
 
 def format_preferences(rows):

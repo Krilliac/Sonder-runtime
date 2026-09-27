@@ -302,6 +302,25 @@ def connect(path=":memory:", check_same_thread=True):
     return conn
 
 
+def connect_read_only(path):
+    """Open an EXISTING memory database without creating or migrating it.
+
+    ``connect`` runs ``init_db`` (schema creation and migrations) and switches
+    the journal to WAL; both write. Read-only inspectors such as ``doctor``
+    must not do that, so this opens a ``mode=ro`` URI instead: a missing file
+    raises ``sqlite3.OperationalError`` rather than being created, and any
+    write attempted through the handle fails.
+    """
+    from pathlib import Path
+
+    uri = Path(os.fspath(path)).expanduser().resolve().as_uri() + "?mode=ro"
+    conn = owned_sqlite_connect(uri, uri=True)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA query_only=ON")
+    return conn
+
+
 def _column_names(conn, table):
     return {r[1] for r in conn.execute("PRAGMA table_info(%s)" % table).fetchall()}
 
