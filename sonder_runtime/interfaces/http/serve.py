@@ -37,6 +37,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from sonder_runtime.interfaces.http.artifact_transfer import handle_artifact_transfer, is_artifact_route
+from sonder_runtime.interfaces.http.connection_limit import BoundedConnectionsMixin
 from sonder_runtime.interfaces.http.host_policy import (
     HOST_NOT_ALLOWED_REMEDY, HOST_TRUSTED, forwarded_client_ip, host_decision,
     machine_host_names, normalize_allowed_host, parse_host_header,
@@ -4638,16 +4639,19 @@ def _commands_help_payload(topic="", context=None):
         return {"text": "Command catalog unavailable: %s" % exc}
 
 
-class ServeHTTPServer(ThreadingHTTPServer):
+class ServeHTTPServer(BoundedConnectionsMixin, ThreadingHTTPServer):
     """The served listener, with a TCP backlog sized for request bursts.
 
     ``socketserver`` listens with a backlog of 5.  A burst of concurrent
     clients then overflows the kernel accept queue and some connections are
     reset before the admission layer can queue them or answer 429, so the
-    backlog must at least cover the default admission capacity.
+    backlog must at least cover the default admission capacity.  Connection
+    threads are capped (see ``connection_limit``) so slow or idle clients
+    cannot grow them without bound.
     """
 
     request_queue_size = 128
+    max_connections = max(16, min(4096, _env_int("SONDER_HTTP_MAX_CONNECTIONS", 256)))
 
 
 # Inventory routes never read an unexpected body; a request carrying one is
