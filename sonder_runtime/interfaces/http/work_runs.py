@@ -215,11 +215,23 @@ class WorkRunner:
 
         target = thread_wrapper(body) if thread_wrapper is not None else body
         context = contextvars.copy_context()
-        worker = self._thread_factory(
-            target=context.run, args=(target,), name="sonder-http-work-" + run_id[-8:],
-            daemon=True,
-        )
-        worker.start()
+        try:
+            worker = self._thread_factory(
+                target=context.run, args=(target,), name="sonder-http-work-" + run_id[-8:],
+                daemon=True,
+            )
+            worker.start()
+        except BaseException:
+            # body() never ran, so its cleanup did not either: free the slot
+            # and terminalize the durable row instead of leaving it running.
+            try:
+                self._store.finish(run_id, "failed", "")
+            except Exception:
+                _LOG.error("HTTP work run %s could not be marked failed", run_id, exc_info=True)
+            with self._lock:
+                self._runs.pop(run_id, None)
+            run.done.set()
+            raise
         if not run.done.wait(self.wait_seconds):
             waiter["attached"] = False
             # Close the race with a run that finished just after the wait.

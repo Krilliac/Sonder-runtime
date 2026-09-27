@@ -138,6 +138,29 @@ def test_capacity_is_bounded(work_env, monkeypatch):
     _wait_finished(first.work_run_id)
 
 
+def test_thread_start_failure_frees_the_slot_and_terminalizes_the_run(work_env):
+    class _Unstartable:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    runner = work_runs.WorkRunner(store=http_work_runs, effects=effect_fence, wait_seconds=1,
+                                  budget_seconds=60, max_running=1, thread_factory=_Unstartable)
+    with pytest.raises(RuntimeError, match="can't start new thread"):
+        runner.run("local", lambda: "never runs", classify=lambda result: ("returned", str(result)))
+    assert runner.running_count() == 0
+    [record] = http_work_runs.recent(owner_scope=work_runs.owner_scope("local"))
+    assert record["status"] == "failed"
+    # The slot is free again: a startable run is admitted.
+    ok = work_runs.WorkRunner(store=http_work_runs, effects=effect_fence, wait_seconds=1,
+                              budget_seconds=60, max_running=1, thread_factory=owned_runtime_thread)
+    runner._thread_factory = ok._thread_factory
+    outcome = runner.run("local", lambda: "done", classify=lambda result: ("returned", str(result)))
+    assert outcome.finished and outcome.result == "done"
+
+
 def test_runs_are_owner_scoped(work_env, monkeypatch):
     monkeypatch.setattr(server, "route_work_request", lambda prompt, **_k: "alice's answer")
     result = _work(context=ALICE)
