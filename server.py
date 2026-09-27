@@ -514,6 +514,9 @@ from sonder_runtime.domain.runtime_update_parsing import (
 from sonder_runtime.domain.execution_route_formatting import (
     execution_route_header as _execution_route_header_impl,
 )
+from sonder_runtime.adapters.inference.served_tier_models import (
+    served_tier_models as _served_tier_models_impl,
+)
 from sonder_runtime.domain.agent_observation_quality import (
     observation_ok as _agent_observation_ok,
 )
@@ -23230,7 +23233,7 @@ def _execution_route_header(
 ) -> str:
     return _execution_route_header_impl(
         mode, source, reason, confidence, tier,
-        tiers_map=TIERS, local_tiers=runtime_policy.LOCAL_TIERS,
+        tiers_map=_served_tier_models_impl(TIERS), local_tiers=runtime_policy.LOCAL_TIERS,
     )
 
 
