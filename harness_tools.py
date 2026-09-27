@@ -962,6 +962,70 @@ def build_clean(root=".", timeout=30, extra_roots=""):
 # Refactoring helpers
 # ---------------------------------------------------------------------------
 
+def _refactor_source_files(root, glob):
+    """Yield ``(path, rel)`` for regular files the refactoring helpers read.
+
+    Dot-directories are skipped only BELOW the root.  Testing the absolute
+    path skipped every file whenever the root itself had a dot-prefixed
+    ancestor (``~/.claude/worktrees/...``), so both helpers matched nothing.
+    """
+    for path in root.glob(glob):
+        try:
+            rel_path = path.relative_to(root)
+        except ValueError:
+            continue
+        if any(part.startswith(".") for part in rel_path.parts):
+            continue
+        if not path.is_file() or path.stat().st_size > 2_000_000:
+            continue
+        yield path, str(rel_path)
+
+
+def _read_source(path):
+    # newline="" keeps each file's own line endings through a rewrite.
+    with open(path, encoding="utf-8", newline="") as handle:
+        return handle.read()
+
+
+def _apply_staged_rewrites(staged):
+    """Write every staged rewrite, or none of them.
+
+    Each new content is first written to a temporary file beside its target;
+    only when all are staged are they swapped in with ``os.replace``.  If any
+    step fails, staged files are removed and already-swapped targets are
+    restored to their original content, so a failure never leaves a
+    half-renamed tree.
+    """
+    import tempfile
+
+    temps = []
+    applied = []
+    try:
+        for path, _original, new_content in staged:
+            fd, temp = tempfile.mkstemp(dir=path.parent, prefix="." + path.name + ".", suffix=".rename")
+            temps.append(temp)
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+                handle.write(new_content)
+            shutil.copymode(path, temp)
+        for (path, original, _new), temp in zip(staged, temps):
+            os.replace(temp, path)
+            applied.append((path, original))
+    except BaseException:
+        for temp in temps:
+            with contextlib.suppress(OSError):
+                os.unlink(temp)
+        unrestored = []
+        for path, original in reversed(applied):
+            try:
+                with open(path, "w", encoding="utf-8", newline="") as handle:
+                    handle.write(original)
+            except OSError:
+                unrestored.append(path)
+        if unrestored:
+            raise OSError("rename rollback could not restore %d file(s)" % len(unrestored))
+        raise
+
+
 def rename_symbol(root=".", old_name="", new_name="", glob="**/*.py", dry_run=True, timeout=30, extra_roots=""):
     root = _resolve_root(root, extra_roots)
     if not old_name or not new_name:
@@ -969,16 +1033,12 @@ def rename_symbol(root=".", old_name="", new_name="", glob="**/*.py", dry_run=Tr
 
     files_changed = []
     preview = []
+    staged = []
     pattern = re.compile(r'\b' + re.escape(old_name) + r'\b')
 
-    for path in root.glob(glob):
-        if not path.is_file() or path.stat().st_size > 2_000_000:
-            continue
-        rel = str(path.relative_to(root))
-        if any(part.startswith(".") for part in path.parts):
-            continue
+    for path, rel in _refactor_source_files(root, glob):
         try:
-            content = path.read_text(encoding="utf-8")
+            content = _read_source(path)
         except (UnicodeDecodeError, OSError):
             continue
         matches = list(pattern.finditer(content))
@@ -991,9 +1051,20 @@ def rename_symbol(root=".", old_name="", new_name="", glob="**/*.py", dry_run=Tr
             line_no = content[:m.start()].count("\n") + 1
             line = content.splitlines()[line_no - 1].strip()
             preview.append({"file": rel, "line": line_no, "text": line})
+        staged.append((path, content, new_content))
 
-        if not dry_run:
-            path.write_text(new_content, encoding="utf-8")
+    if not dry_run and staged:
+        try:
+            _apply_staged_rewrites(staged)
+        except OSError as exc:
+            return {
+                "ok": False,
+                "error": "rename failed and was rolled back: %s" % exc,
+                "dry_run": dry_run,
+                "old_name": old_name,
+                "new_name": new_name,
+                "files_changed": 0,
+            }
 
     return {
         "ok": True,
@@ -1014,12 +1085,7 @@ def extract_references(root=".", symbol="", glob="**/*.py", timeout=30, extra_ro
 
     pattern = re.compile(r'\b' + re.escape(symbol) + r'\b')
     refs = []
-    for path in root.glob(glob):
-        if not path.is_file() or path.stat().st_size > 2_000_000:
-            continue
-        rel = str(path.relative_to(root))
-        if any(part.startswith(".") for part in path.parts):
-            continue
+    for path, rel in _refactor_source_files(root, glob):
         try:
             content = path.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
