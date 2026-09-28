@@ -1635,6 +1635,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /location [on|off] allow approximate IP location for "my area" weather answers
   /stats             show Sonder Runtime's learning stats
   /context           show context, session, and memory health meters
+  /prompts [list|show|path|reload] [name]  inspect the editable system/agent prompt files
   /contextsize [N]   show/set requested context (8k..1m; native num_ctx is clamped)
   /compact           preview context compaction/rollover recommendations
   /commands [filter] list available commands by category, name, or risk
@@ -4204,6 +4205,8 @@ def main(*, machine_output=False):
                         _emit(server.sonder_stats())
                     elif cmd == "/context":
                         _emit(server.context_health(session=session_id, project=project))
+                    elif cmd == "/prompts":
+                        _emit(server.control_command(line, session=session_id, project=project))
                     elif cmd in ("/contextsize", "/ctxsize"):
                         if arg.strip():
                             _emit(server.set_context_size(arg.strip()))
