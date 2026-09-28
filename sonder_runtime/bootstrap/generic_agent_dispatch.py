@@ -21,6 +21,11 @@ RECURSIVE_ENTRYPOINTS = frozenset({
     "master_orchestrate", "master_retry", "master_cancel", "master",
     "workflow_run", "agent_lane",
 })
+# Tools the agent must not reach even through the fallback: ``isolated_run``
+# is direct-MCP only by design (developer-authorized container execution), and
+# ``codegen_build_loop`` is a verifier whose verdict only its hand-written
+# branch renders (``server._RENDERED_VERDICT_TOOLS``).
+DIRECT_ONLY_NAMES = frozenset({"isolated_run", "codegen_build_loop"})
 ADMIN_NAMES = frozenset({
     "elevate", "permission_mode", "permission_rule_set", "permission_approve",
     "runtime_policy_update", "runtime_source_update", "update_system_profile",
@@ -38,7 +43,7 @@ def registered_tools(registry: Any) -> dict[str, Any]:
 
 
 def excluded_names(registry: Any, system_operator_tools: Iterable[str] = ()) -> frozenset[str]:
-    return (RECURSIVE_ENTRYPOINTS | ADMIN_NAMES | frozenset(system_operator_tools)
+    return (RECURSIVE_ENTRYPOINTS | ADMIN_NAMES | DIRECT_ONLY_NAMES | frozenset(system_operator_tools)
             | frozenset(name for name in registered_tools(registry) if name.startswith("admin_")))
 
 

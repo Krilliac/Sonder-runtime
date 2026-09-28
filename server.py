@@ -529,7 +529,7 @@ from sonder_runtime.domain.agent_help_parsing import (
     help_advertised_tools as _agent_help_advertised_tools,
 )
 from sonder_runtime.bootstrap import generic_agent_dispatch as _generic_agent_dispatch
-from sonder_runtime.bootstrap.computer_use_chat import route as route_computer_use  # noqa: F401 (HTTP chat)
+from sonder_runtime.bootstrap.computer_use_chat import route as _computer_use_route
 import sonder_speculation
 import consult as consult_flow
 import code_improve
@@ -26913,7 +26913,11 @@ def run_mcp(*, safety_checked: bool = False) -> None:
 
 
 from sonder_runtime.bootstrap.computer_use_tools import register as _register_computer_use  # noqa: E402
-_register_computer_use(mcp, _record_direct_tool)
+_register_computer_use(mcp, _record_direct_tool, lambda: _application())
+
+
+def route_computer_use(text):
+    return _computer_use_route(text, sys.modules[__name__])  # HTTP chat's desktop route
 
 
 if __name__ == "__main__" and not globals().get("_MCP_HOT_RELOAD_EXEC"):

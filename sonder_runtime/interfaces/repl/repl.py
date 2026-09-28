@@ -46,7 +46,6 @@ from sonder_runtime.adapters.observability.session_replay_formatting import (
 import sonder_runtime.adapters.memory_store as memory_store
 from sonder_runtime.adapters.execution_tools import code_runner, grounding
 from sonder_runtime.adapters.content_services import intents, training_tasks
-from sonder_runtime.bootstrap.computer_use_chat import route as route_computer_use
 from sonder_runtime.adapters.repl_services import personas, web_intents
 from sonder_runtime.adapters.content_services import feedback
 from sonder_runtime.adapters.web import live_reload
@@ -4735,7 +4734,7 @@ def main(*, machine_output=False):
 
                 # Explicit desktop requests use the gated computer-use agent;
                 # keep them out of the workspace classifier and plain chat.
-                computer_reply = route_computer_use(line)
+                computer_reply = server.route_computer_use(line)
                 if computer_reply is not None:
                     _print_chat_result(computer_reply, time.monotonic(), label="Sonder computer use")
                     continue

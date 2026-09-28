@@ -41,12 +41,15 @@ def _status_guidance(status_text):
     return ""
 
 
-def route(text: str) -> str | None:
-    """Run a recognized computer request through fixed, gated host dispatch."""
+def route(text: str, server) -> str | None:
+    """Run a recognized computer request through fixed, gated host dispatch.
+
+    ``server`` is the legacy runtime, passed in by its caller: packaged code
+    never imports it (tests/test_wp1_root_server_boundary.py).
+    """
     intent = classify(text)
     if intent is None:
         return None
-    import server
     if intent.tool == "computer_use_stop":
         return str(_dispatch(server, intent.tool, intent.args))
     status = str(_dispatch(server, "computer_use_status", {}))

@@ -158,7 +158,7 @@ def test_generic_dispatch_refuses_authority_arguments_and_hides_them_from_help()
     import server
     from sonder_runtime.bootstrap import generic_agent_dispatch as g
 
-    for name in ("vision_analyze", "fetch_artifact", "codegen_build_loop"):
+    for name in ("vision_analyze", "fetch_artifact"):
         out = g.dispatch(name, {"token": "x"}, server.mcp, server._AGENT_SYSTEM_OPERATOR_TOOLS,
                          run_refusal=lambda *a, **k: "")
         assert "may not supply token" in out, out

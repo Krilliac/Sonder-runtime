@@ -33,6 +33,8 @@ from ..adapters.desktop import windows as desktop
 from ..adapters.desktop.session import SessionController, SessionRefused
 
 _CONTROLLER: SessionController | None = None
+# The composed application, supplied by the legacy server at registration.
+_APPLICATION = None
 _CAPTURES_KEPT = 20
 _SETTLE_SECONDS = 0.6
 _VISION_TIMEOUT_SECONDS = 180.0
@@ -75,11 +77,12 @@ def controller() -> SessionController:
 
 def _vision(image: bytes, prompt: str) -> str:
     """Ask the local vision tier about one PNG; the answer is untrusted text."""
-    import server
     from ..application.context import local_owner_context
     from ..application.ports.vision_gateway import VisionRequest
 
-    gateway = server._application().vision._gateway
+    if _APPLICATION is None:
+        raise SessionRefused("the vision model is not available in this runtime")
+    gateway = _APPLICATION().vision._gateway
     context = local_owner_context(
         correlation_id=uuid.uuid4().hex, source="mcp", timeout_seconds=_VISION_TIMEOUT_SECONDS,
     )
@@ -257,8 +260,14 @@ def run_task(goal: str, max_steps: int, surface="mcp") -> dict:
     return {"ok": False, "done": False, "stopped": "step limit reached", "steps": transcript}
 
 
-def register(mcp, record) -> None:
-    """Register the tools on the legacy MCP registry. ``record`` is ``_record_direct_tool``."""
+def register(mcp, record, application=None) -> None:
+    """Register the tools on the legacy MCP registry.
+
+    ``record`` is ``_record_direct_tool``; ``application`` returns the composed
+    application (for the vision gateway), since packaged code never imports server.
+    """
+    global _APPLICATION
+    _APPLICATION = application
 
     def run(name, args, body):
         started = time.time()

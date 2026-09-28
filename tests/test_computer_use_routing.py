@@ -57,7 +57,7 @@ def test_route_preserves_user_goal_for_task_tools():
 def test_chat_route_uses_managed_gated_dispatch_in_status_first_order(monkeypatch):
     from contextlib import nullcontext
     import server
-    from sonder_runtime.bootstrap.computer_use_chat import route
+    route = server.route_computer_use
 
     calls = []
 
@@ -78,7 +78,7 @@ def test_chat_route_uses_managed_gated_dispatch_in_status_first_order(monkeypatc
 def test_stop_is_fixed_dispatch_without_model(monkeypatch):
     from contextlib import nullcontext
     import server
-    from sonder_runtime.bootstrap.computer_use_chat import route
+    route = server.route_computer_use
 
     calls = []
     monkeypatch.setattr(server, "_agent_dispatch", lambda name, args, **kwargs: calls.append(name) or '{"ok":true}')
@@ -90,7 +90,7 @@ def test_stop_is_fixed_dispatch_without_model(monkeypatch):
 def test_disabled_computer_use_returns_concrete_guidance(monkeypatch):
     from contextlib import nullcontext
     import server
-    from sonder_runtime.bootstrap.computer_use_chat import route
+    route = server.route_computer_use
 
     monkeypatch.setattr(server, "_agent_dispatch", lambda name, args, **kwargs: '{"ok":true,"enabled":false}')
     monkeypatch.setattr(server, "_managed_agent_admission_scope", lambda: nullcontext())
@@ -100,7 +100,7 @@ def test_disabled_computer_use_returns_concrete_guidance(monkeypatch):
 def test_action_gate_refusal_is_returned_without_fallback(monkeypatch):
     from contextlib import nullcontext
     import server
-    from sonder_runtime.bootstrap.computer_use_chat import route
+    route = server.route_computer_use
 
     def dispatch(name, _args, **_kwargs):
         if name == "computer_use_status":
@@ -145,7 +145,7 @@ def test_status_failure_does_not_become_an_action(payload):
 
 def test_inactive_session_dispatches_only_status(monkeypatch):
     import server
-    from sonder_runtime.bootstrap.computer_use_chat import route
+    route = server.route_computer_use
 
     calls = []
     def dispatch(name, args, **kwargs):
@@ -158,7 +158,7 @@ def test_inactive_session_dispatches_only_status(monkeypatch):
 
 def test_run_refusal_prevents_even_status_dispatch(monkeypatch):
     import server
-    from sonder_runtime.bootstrap.computer_use_chat import route
+    route = server.route_computer_use
 
     monkeypatch.setattr(server, "_agent_run_tool_refusal", lambda *a, **k: "refused by this run")
     monkeypatch.setattr(server, "_agent_dispatch", lambda *a, **k: pytest.fail("refused call dispatched"))
