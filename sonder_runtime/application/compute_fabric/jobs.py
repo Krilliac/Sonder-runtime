@@ -754,23 +754,28 @@ class ComputeJobWorker:
                 requested = sum(item.size_bytes for item in envelope.input_artifacts)
                 if requested > self._max_input_staging_bytes:
                     raise ValueError("input staging exceeds the per-job limit")
-                spool = self._input_stage_base()
-                with locked_spool(spool):
-                    # Stages older than any job deadline (<= 1 day) are leftovers.
-                    reap_stale_directories(spool, max_age_seconds=2 * 86400)
-                    stages = tuple(counted_directories(spool, max_directories=64))
-                    if len(stages) >= 64:
-                        raise ValueError("input staging exceeds the stage count limit")
-                    occupied = sum(regular_file_bytes(path) for path in stages)
-                    if occupied + requested > self._max_input_spool_bytes:
-                        raise ValueError("input staging exceeds the aggregate limit")
-                    if shutil.disk_usage(spool).free < requested + self._min_disk_headroom_bytes:
-                        raise ValueError("input staging lacks disk space headroom")
-                    input_stage, argv = self._stage_inputs(
-                        remote_job_id, root, cwd, argv, envelope.input_artifacts,
-                    )
+                with PrivateDirectoryAnchor.open_base(self._input_stage_base()) as input_root:
+                    spool = input_root.path
+                    with locked_spool(spool):
+                        # Stages older than any job deadline (<= 1 day) are leftovers.
+                        input_root.validate()
+                        reap_stale_directories(spool, max_age_seconds=2 * 86400)
+                        stages = tuple(counted_directories(spool, max_directories=64))
+                        if len(stages) >= 64:
+                            raise ValueError("input staging exceeds the stage count limit")
+                        occupied = sum(regular_file_bytes(path) for path in stages)
+                        if occupied + requested > self._max_input_spool_bytes:
+                            raise ValueError("input staging exceeds the aggregate limit")
+                        if shutil.disk_usage(spool).free < requested + self._min_disk_headroom_bytes:
+                            raise ValueError("input staging lacks disk space headroom")
+                        input_root.validate()
+                        input_stage, argv = self._stage_inputs(
+                            remote_job_id, root, cwd, argv, envelope.input_artifacts,
+                        )
             except ValueError as exc:
                 raise InvalidInput(str(exc)) from exc
+            except ArtifactSpoolError as exc:
+                raise InvalidInput("private compute input spool is unsafe") from exc
             except OSError as exc:
                 raise InvalidInput("input staging budget is unavailable") from exc
         request = ProcessJobRequest(
@@ -900,45 +905,52 @@ class ComputeJobWorker:
                 if durable is not None:
                     return self._with_artifacts(receipt, durable)
                 artifacts: list[RemoteArtifactReceipt] = []
-                for relative_path in artifact_paths:
-                    candidate = (cwd / relative_path).resolve()
-                    if not candidate.is_relative_to(root):
-                        raise InvalidInput(
-                            "catalog artifact would escape its configured workspace"
+                created_snapshots: list[str] = []
+                try:
+                    for relative_path in artifact_paths:
+                        candidate = (cwd / relative_path).resolve()
+                        if not candidate.is_relative_to(root):
+                            raise InvalidInput(
+                                "catalog artifact would escape its configured workspace"
+                            )
+                        snapshot_name = self._artifact_snapshot_name(
+                            receipt.request_sha256, relative_path,
                         )
-                    snapshot_name = self._artifact_snapshot_name(
-                        receipt.request_sha256, relative_path,
-                    )
-                    if stage.exists(snapshot_name):
-                        raise Conflict(
-                            "compute artifact snapshot exists without a request-bound receipt"
+                        if stage.exists(snapshot_name):
+                            raise Conflict(
+                                "compute artifact snapshot exists without a request-bound receipt"
+                            )
+                        try:
+                            size_bytes, sha256 = self._snapshot_artifact(
+                                stage, root, candidate, snapshot_name,
+                                max_copy_bytes=self._max_artifact_spool_bytes - used_bytes,
+                                min_free_bytes=self._min_disk_headroom_bytes,
+                            )
+                        except FileNotFoundError:
+                            continue
+                        except ArtifactSpoolConflict as exc:
+                            raise Conflict(str(exc)) from exc
+                        except (ArtifactSpoolError, OSError) as exc:
+                            raise InvalidInput(
+                                "catalog artifact could not be snapshotted"
+                            ) from exc
+                        created_snapshots.append(snapshot_name)
+                        mime_type = (
+                            mimetypes.guess_type(candidate.name)[0]
+                            or "application/octet-stream"
                         )
-                    try:
-                        size_bytes, sha256 = self._snapshot_artifact(
-                            stage, root, candidate, snapshot_name,
-                            max_copy_bytes=self._max_artifact_spool_bytes - used_bytes,
-                            min_free_bytes=self._min_disk_headroom_bytes,
-                        )
-                    except FileNotFoundError:
-                        continue
-                    except ArtifactSpoolConflict as exc:
-                        raise Conflict(str(exc)) from exc
-                    except (ArtifactSpoolError, OSError) as exc:
-                        raise InvalidInput(
-                            "catalog artifact could not be snapshotted"
-                        ) from exc
-                    mime_type = (
-                        mimetypes.guess_type(candidate.name)[0]
-                        or "application/octet-stream"
-                    )
-                    artifacts.append(RemoteArtifactReceipt(
-                        name=relative_path,
-                        size_bytes=size_bytes,
-                        mime_type=mime_type,
-                        sha256=sha256,
-                    ))
-                    used_bytes += size_bytes
-                self._publish_artifact_manifest(stage, receipt, tuple(artifacts))
+                        artifacts.append(RemoteArtifactReceipt(
+                            name=relative_path,
+                            size_bytes=size_bytes,
+                            mime_type=mime_type,
+                            sha256=sha256,
+                        ))
+                        used_bytes += size_bytes
+                    self._publish_artifact_manifest(stage, receipt, tuple(artifacts))
+                except Exception:
+                    for snapshot_name in created_snapshots:
+                        stage.unlink(snapshot_name)
+                    raise
                 return self._with_artifacts(receipt, tuple(artifacts))
 
     @staticmethod
@@ -1292,9 +1304,7 @@ class ComputeJobWorker:
 
     @staticmethod
     def _input_stage_base() -> Path:
-        base = Path(tempfile.gettempdir()) / "sonder-compute-inputs"
-        base.mkdir(mode=0o700, parents=True, exist_ok=True)
-        return base
+        return Path(tempfile.gettempdir()) / "sonder-compute-inputs"
 
     @classmethod
     def _stage_inputs(
@@ -1390,19 +1400,20 @@ class ComputeJobWorker:
 
     @staticmethod
     def _remove_input_stage(stage: Path) -> None:
-        base = ComputeJobWorker._input_stage_base().resolve()
-        resolved = stage.resolve()
-        if not resolved.is_relative_to(base) or resolved == base:
-            return
         def make_writable_and_retry(function, path, _error) -> None:
             os.chmod(path, 0o700)
             function(path)
 
         try:
-            shutil.rmtree(resolved, onerror=make_writable_and_retry)
-        except OSError:
-            # Cleanup failure cannot rewrite execution truth. The stage remains
-            # inside the dedicated temp root for later maintenance.
+            with PrivateDirectoryAnchor.open_base(ComputeJobWorker._input_stage_base()) as root:
+                resolved = stage.resolve()
+                if resolved.parent != root.path or not resolved.is_dir():
+                    return
+                root.validate()
+                shutil.rmtree(resolved, onerror=make_writable_and_retry)
+        except (ArtifactSpoolError, OSError):
+            # Cleanup failure cannot rewrite execution truth. Leave the stage
+            # untouched for later maintenance.
             return
 
     def _cleanup_input_stage(self, remote_job_id: str) -> None:
