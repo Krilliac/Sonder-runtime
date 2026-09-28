@@ -1339,10 +1339,14 @@ def _erase_startup_notice(shown: bool) -> None:
 
 def cmd_repl(args) -> int:
     # Startup takes seconds; say so at once instead of sitting silent. No
-    # newline: the line is erased in place before the banner (or an error), so
-    # the finished screen is unchanged. A dumb terminal cannot erase; skip it.
-    notice = (not args.json and sys.stderr.isatty()
-              and os.environ.get("TERM", "") != "dumb")
+    # newline: the line is erased in place (CR + erase-line) before the banner
+    # or an error, so the finished screen is unchanged. That needs escapes and
+    # a redraw, so the REPL's own capability detection decides: never under
+    # NO_COLOR, SONDER_PLAIN, TERM=dumb, a pipe, or a console without VT.
+    from sonder_runtime.interfaces.repl.style import detect_caps
+
+    caps = detect_caps(stream=sys.stderr)
+    notice = not args.json and caps.color != "none" and not caps.plain
     if notice:
         sys.stderr.write(_STARTUP_NOTICE)
         sys.stderr.flush()
