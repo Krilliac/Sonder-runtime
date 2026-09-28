@@ -7,6 +7,47 @@ independent layers, and any one of them can stop it.
 
 ## Tools
 
+The console REPL and ordinary default-model HTTP `/v1/chat/completions` turns
+recognize desktop requests before workspace routing. Examples:
+
+- `control notepad and type hello`, `open notepad and write a shopping list`,
+  and `click the Save button in paint` call `computer_task` after a status check.
+- `what's on my screen`, `show me my screen`, `look at my screen`, and
+  `read my screen` call `screen_capture` after a status check. This observes the
+  approved session window, not the whole desktop.
+- `use my computer to ...` (also `control`/`drive`, and `desktop`) expresses an
+  explicit desktop task, including when its contents mention code or files.
+- `stop controlling`, `stop driving`, and `stop computer use` call the gated
+  stop tool directly, without waiting for a model. `please` and
+  `can/could/would/will you` prefixes are recognized.
+
+Control/open/launch/start requests must name a known desktop app immediately;
+click/type/press/write/enter/scroll requests need an `in/into/on/using <app>`
+target. Recognized app names are Notepad, Paint, Calculator/Calc, Explorer,
+Browser, Chrome, Edge, Microsoft Word, Excel, Terminal, PowerShell, Cmd,
+Outlook, Discord, and Slack; executable `.exe` suffixes are accepted. For other
+apps, use the explicit computer/desktop phrasing. Recognition grants no access:
+the configured executable allowlist still applies.
+
+Ordinary coding/file requests such as `type hints in foo.py`, `click handler
+bug`, `open the file X`, and `open notepad.py` stay on their existing routes.
+Questions about computer performance or screen documentation do too.
+
+If configuration is disabled or the allowlist is empty, the route explains the
+configuration needed. If no session is active, it asks the person to open an
+allowlisted app, call `computer_use_start` with its app or window handle, approve
+the pending call with `/approve <id>` at the console, and retry the identical
+start call. Chat does not launch apps or synthesize that approval. Stop and
+setup guidance do not depend on model availability. Structured-output requests
+and explicit non-default HTTP model routes keep their existing behavior.
+
+The general model-driven agent loop also discovers these tools through its MCP
+registry fallback. Missing help entries include their actual input schemas.
+Recursive entry points, system-operator operations, and admin/elevation tools
+are excluded from the fallback. Every invocation still crosses the agent gate
+and per-run restrictions; newly exposed generic tools stay local to protect
+desktop observations and other host data from hosted models.
+
 | Tool | Grade | What it does |
 |---|---|---|
 | `computer_use_status` | safe | Whether the feature is enabled, the allowlist, and the running session. |
