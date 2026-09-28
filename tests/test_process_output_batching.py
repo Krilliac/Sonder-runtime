@@ -11,6 +11,7 @@ most the unflushed window without duplicating or reordering what persisted.
 from __future__ import annotations
 
 import os
+import io
 import random
 import subprocess
 import sys
@@ -671,6 +672,84 @@ def test_a_drain_that_times_out_fails_the_job_closed(tmp_path, monkeypatch):
     assert _eventually(lambda: [d for _, _, d in _events(registry, "slow-store")] == [
         "only line\n",
     ], 10)
+
+
+def test_newline_free_output_is_read_with_a_bound_and_fails_closed(tmp_path):
+    registry = SQLiteDurableJobRegistry(tmp_path / "jobs.db")
+    provider = SubprocessJobProvider(
+        registry, process_cleanup=ProcessTreeSupervisor(),
+        output_batch=OutputBatchPolicy(max_bytes=1024, max_line_bytes=1024),
+    )
+    provider.start(_request("long-line", "import sys; sys.stdout.write('x' * 4096)"))
+    waited = provider.wait("long-line", timeout=30)
+    assert waited.record.status is JobStatus.FAILED
+    assert "output" in waited.record.error
+
+
+@pytest.mark.parametrize("data", ["x" * 4096, "😀" * 1024])
+def test_pipe_reader_never_requests_an_unbounded_line(data):
+    class Pipe(io.StringIO):
+        limits = []
+
+        def readline(self, size=-1):
+            self.limits.append(size)
+            assert 0 < size <= 1025
+            return super().readline(size)
+
+    class Batcher:
+        policy = OutputBatchPolicy(max_line_bytes=1024)
+        data = []
+
+        def put(self, stream, value):
+            self.data.append(value)
+            return True
+
+        def writer_done(self):
+            pass
+
+    provider = SubprocessJobProvider(
+        DurableJobRegistry(), process_cleanup=ProcessTreeSupervisor(),
+    )
+    pipe = Pipe(data)
+    batcher = Batcher()
+    provider._read_output("unbounded-line", STDOUT, pipe, batcher)
+    assert pipe.limits and batcher.data == []
+    assert provider._output_failures["unbounded-line"] == "ValueError"
+
+
+def test_spill_limit_failure_cannot_be_reported_as_success(tmp_path):
+    from sonder_runtime.adapters.execution.durable_output import DurableExecutionOutput, SQLiteSpillStore
+
+    registry = SQLiteDurableJobRegistry(tmp_path / "jobs.db")
+    provider = SubprocessJobProvider(
+        registry, process_cleanup=ProcessTreeSupervisor(),
+        output=DurableExecutionOutput(SQLiteSpillStore(tmp_path / "spills.db"), max_bytes=32),
+        inline_output_bytes=8,
+    )
+    provider.start(_request("oversized-spill", "print('x' * 100)"))
+    waited = provider.wait("oversized-spill", timeout=30)
+    assert waited.exit_code == 0
+    assert waited.record.status is JobStatus.FAILED
+    assert waited.record.error == "process output persistence failed (ValueError)"
+
+
+def test_pruned_output_references_release_spill_quota(tmp_path):
+    from sonder_runtime.adapters.execution.durable_output import DurableExecutionOutput, SQLiteSpillStore
+
+    registry = SQLiteDurableJobRegistry(tmp_path / "jobs.db", output_bounds=(1, 128))
+    output = DurableExecutionOutput(
+        SQLiteSpillStore(tmp_path / "spills.db", max_owner_bytes=42, max_total_bytes=42),
+    )
+    provider = SubprocessJobProvider(
+        registry, process_cleanup=ProcessTreeSupervisor(), output=output,
+        inline_output_bytes=8, output_batch=OutputBatchPolicy(max_lines=1),
+    )
+    provider.start(_request("rolling-spills", "for i in range(3): print(str(i) * 20, flush=True)"))
+    waited = provider.wait("rolling-spills", timeout=30)
+    assert waited.record.status is JobStatus.SUCCEEDED
+    page = registry.stream("rolling-spills")
+    assert len(page.events) == 1
+    assert output.read(page.events[0].spill, max_bytes=64) == b"2" * 20 + b"\n"
 
 
 def test_cancel_requests_publication_before_the_kill_and_never_waits_for_storage(tmp_path):

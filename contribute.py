@@ -1,16 +1,15 @@
 """Export scrubbed, shareable lessons from memory.db to an outbox JSONL.
 
 Contribution is strictly OPT-IN: nothing here uploads or opens a PR
-automatically. It only writes a local file under contrib/ that YOU review,
-then send home yourself (PR or file-server copy). Only distilled lesson
-TEXT is considered for export — never raw interactions, code, or the model
-itself. Lessons that look like they might leak private information (a
-filesystem path, a secret-looking token, an email address) or that are not
-a short generic sentence are excluded.
+automatically. It only writes a local file under contrib/ that YOU review.
+By default the export is empty. An owner-reviewed --approved-file JSONL row
+must map the SHA-256 digest of exact source text to generic export text.
+The rewrite must also pass the length and known-private-marker screen.
 
-Run: python contribute.py
+Review the generated file before sharing it.
 """
 import io
+import argparse
 import hashlib
 import json
 import os
@@ -202,7 +201,7 @@ def privacy_preview(text, max_chars=120):
 
 
 def is_shareable(text):
-    """True only if `text` has no private markers and is a short generic sentence."""
+    """Syntactic screen for already approved export text, not an approval."""
     if not text:
         return False
     if len(text) > MAX_LEN:
@@ -210,28 +209,50 @@ def is_shareable(text):
     return not private_reasons(text)
 
 
-def scrubbed_lessons(conn):
+def load_approved_rewrites(path):
+    """Load owner-reviewed source digest to generic export text mappings."""
+    if path is None:
+        return {}
+    with io.open(path, encoding="utf-8") as stream:
+        rows = (json.loads(line) for line in stream if line.strip())
+        approved = {}
+        for row in rows:
+            digest, text = row["source_sha256"], row["text"]
+            if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError("invalid approved source digest")
+            if not isinstance(text, str) or not is_shareable(text):
+                raise ValueError("approved rewrite failed privacy screen")
+            approved[digest] = text
+        return approved
+
+
+def scrubbed_lessons(conn, approved_rewrites=None):
+    # An unmarked lesson is still private until its exact content digest has an
+    # owner-reviewed rewrite. Marker screening remains a second boundary.
+    approved_rewrites = approved_rewrites or {}
     lessons = memory_store.all_lessons(conn)
-    return [
-        {
-            "id": "lesson-" + hashlib.sha256(
-                lesson["text"].encode("utf-8")
-            ).hexdigest()[:24],
-            "text": lesson["text"],
-        }
-        for lesson in lessons
-        if is_shareable(lesson["text"])
-    ]
+    result = []
+    for lesson in lessons:
+        source = lesson["text"]
+        digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+        rewrite = approved_rewrites.get(digest)
+        if not isinstance(rewrite, str) or not is_shareable(rewrite):
+            continue
+        result.append({
+            "id": "lesson-" + hashlib.sha256(rewrite.encode("utf-8")).hexdigest()[:24],
+            "text": rewrite,
+        })
+    return result
 
 
-def main(out="contrib/lessons_contrib.jsonl", db=None):
+def main(out="contrib/lessons_contrib.jsonl", db=None, approved_rewrites=None):
     # The state home's store (SONDER_DB/SONDER_HOME), never a checkout-relative
     # file: that default silently created an empty database beside this module
     # and "exported" nothing while the real lessons sat in the state home.
     db = db or sonder_paths.memory_db_path()
     conn = memory_store.connect(db)
     try:
-        lessons = scrubbed_lessons(conn)
+        lessons = scrubbed_lessons(conn, approved_rewrites)
     finally:
         conn.close()
 
@@ -254,4 +275,7 @@ def main(out="contrib/lessons_contrib.jsonl", db=None):
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--approved-file", help="JSONL rows with source_sha256 and reviewed generic text")
+    args = parser.parse_args()
+    main(approved_rewrites=load_approved_rewrites(args.approved_file))

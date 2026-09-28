@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 365,
+      "file_count": 366,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -396,6 +396,7 @@
         "sonder_runtime/adapters/updates/activation_journal.py",
         "sonder_runtime/adapters/updates/control_plane.py",
         "sonder_runtime/adapters/updates/engine.py",
+        "sonder_runtime/adapters/updates/metadata_ledger.py",
         "sonder_runtime/adapters/updates/offline_rehearsal.py",
         "sonder_runtime/adapters/updates/service.py",
         "sonder_runtime/adapters/vision_input.py",
@@ -414,7 +415,7 @@
       ]
     },
     {
-      "file_count": 384,
+      "file_count": 385,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -481,6 +482,7 @@
         "sonder_runtime/application/compute_fabric/refresh.py",
         "sonder_runtime/application/compute_fabric/registry.py",
         "sonder_runtime/application/compute_fabric/service.py",
+        "sonder_runtime/application/compute_fabric/spool_budget.py",
         "sonder_runtime/application/compute_fabric/wire.py",
         "sonder_runtime/application/context.py",
         "sonder_runtime/application/context_health.py",
