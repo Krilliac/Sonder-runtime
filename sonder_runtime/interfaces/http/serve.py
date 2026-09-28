@@ -7543,7 +7543,7 @@ class Handler(BaseHTTPRequestHandler):
                             project=storage_project, require_all_tiers=True,
                         )
                     if structured_schema is None and allow_control_routes and reply is None:
-                        reply = server.chat_web_response(
+                        reply = (None if natural_model else server.route_computer_use(prompt)) or server.chat_web_response(  # desktop requests: gated computer use first
                             prompt,
                             history=history,
                             tier=model_selector or "code",
