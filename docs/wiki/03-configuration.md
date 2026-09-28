@@ -287,6 +287,47 @@ route step up to the next distinct bound local model when its first model
 fails or answers nothing, at most twice per turn; explicit tiers and model
 pins never move ([Tiers & Gateway](08-model-tiers-and-gateway.md)).
 
+#### Long-context overflow
+
+Opt-in (off by default). A dense local model that is fast at short context
+can spill out of VRAM and slow sharply past roughly 32k tokens, while a
+mixture-of-experts model keeps its speed there. With the overflow on, an HTTP
+chat turn whose estimated prompt exceeds the threshold moves from its local
+tier (`sonder`, `fast`, `code`, `general`, `reasoning`) to the overflow model
+on the Ollama worker pool, so it runs on whichever worker advertises that
+model, and the context window is raised to hold the prompt. Cloud targets,
+exact model pins and the vision tier never move. The estimate is the
+context-health one (about four characters per token) over the history and
+the prompt; the system prompt and retrieval augmentation are not counted, so
+it is a floor.
+
+The runtime policy holds the setting (`long_context_overflow` in
+`runtime_policy.json`; `enabled`, `threshold_tokens` 4096..1048576 default
+32768, `model`, `provider` which must be `ollama`). An empty `model` means the
+bound reasoning tier's model. Cloud models are refused.
+
+| Control | Effect |
+|---|---|
+| `/runtime overflow status` | show the settings in force (also a line of `/runtime status`) |
+| `/runtime overflow on` / `off` | enable or disable it |
+| `/runtime overflow threshold <tokens>` | set the trigger |
+| `/runtime overflow model <local-model>` | set the model (`model` alone: reasoning tier) |
+| `SONDER_LONG_CONTEXT_OVERFLOW=1` | override `enabled` for this process |
+| `SONDER_LONG_CONTEXT_THRESHOLD`, `SONDER_LONG_CONTEXT_MODEL` | override the threshold and model; an invalid value is ignored and reported |
+
+Every overflow decision is stated, never inside the answer text: the
+response receipt carries `sonder_receipt.overflow` (`status` `switched` or
+`unavailable`, `notice`, models, `worker`, `estimated_tokens`,
+`threshold_tokens`), the app shows the notice as a chip on the message, the
+activity record gets a `model_route` event, the system prompt names the
+overflow model, and the Observatory receives `route.changed` with
+`reason_code: context_over_threshold`. Notices read, for example,
+`long-context overflow: switched to qwen3.6:35b on 10.77.0.2:8443 — context
+41.2k tokens > 32.8k threshold`, or `long-context overflow (qwen3.6:35b)
+unavailable, stayed on <model>: <reason> — …` when no pool worker advertises
+the model or the overflow attempt fails (the turn then falls back to its
+original route).
+
 ### Sonder ecosystem (Inference provider and Observatory)
 
 Sonder Inference provider (read lazily per call; reference:

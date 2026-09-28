@@ -1462,7 +1462,7 @@
       "category": "runtime",
       "name": "/runtime",
       "risk": "dangerous",
-      "summary": "Inspect or guarded-edit shared local model mappings and execution-lane tiers; cloud remains separate."
+      "summary": "Inspect or guarded-edit shared local model mappings, execution-lane tiers and the long-context overflow; cloud remains separate."
     },
     {
       "category": "runtime",
