@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "0e4da095ecb144d71588e348277dc55f7ca972709d4eddb5b67de570fcd8146d",
+    "catalog_digest": "5bc6f6b91c00b111c94059c9372bb792df6e63dd07d0b0745283b94a837e1a11",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "0e4da095ecb144d71588e348277dc55f7ca972709d4eddb5b67de570fcd8146d",
+      "catalog_digest": "5bc6f6b91c00b111c94059c9372bb792df6e63dd07d0b0745283b94a837e1a11",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -1377,6 +1377,74 @@
             "type": "object"
           },
           "name": "composition_bindings"
+        },
+        {
+          "description": "Let the local vision model drive the session window toward a goal, one gated step at a time.\n\n        Every step passes the same checks as ui_action; the task pauses and reports when a step\n        needs a person's confirmation. Returns the step transcript.\n        ",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "goal": {
+                "title": "Goal",
+                "type": "string"
+              },
+              "max_steps": {
+                "default": 10,
+                "title": "Max Steps",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "goal"
+            ],
+            "title": "computer_taskArguments",
+            "type": "object"
+          },
+          "name": "computer_task"
+        },
+        {
+          "description": "Start a driving session on one allowlisted window (by hwnd, or the first window of app).\n\n        Shows a \"Sonder is driving\" bar with a Stop button and the kill hotkey\n        Ctrl+Alt+Shift+K. Graded dangerous: a person approves it at the console.\n        The session ends on its TTL, the hotkey, Stop, or any mouse/keyboard use by a person.\n        ",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "app": {
+                "default": "",
+                "title": "App",
+                "type": "string"
+              },
+              "hwnd": {
+                "default": 0,
+                "title": "Hwnd",
+                "type": "integer"
+              }
+            },
+            "title": "computer_use_startArguments",
+            "type": "object"
+          },
+          "name": "computer_use_start"
+        },
+        {
+          "description": "Report whether gated computer use is enabled, the allowlist, and the running driving session.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {},
+            "title": "computer_use_statusArguments",
+            "type": "object"
+          },
+          "name": "computer_use_status"
+        },
+        {
+          "description": "End the driving session now and close its indicator.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {},
+            "title": "computer_use_stopArguments",
+            "type": "object"
+          },
+          "name": "computer_use_stop"
         },
         {
           "description": "Ask several tiers independently and expose agreement as a confidence signal.\n\n    This deliberately returns every answer and an agree/disagree verdict. It\n    never synthesizes them or chooses a winner: measured ensembles did not\n    improve accuracy, while divergence is useful evidence that a caller should\n    verify the answer. Two good answers still yield a verdict even if a third\n    tier fails; if the judge fails, a token-overlap fallback is labeled\n    unknown-confidence.\n\n    By default it contrasts configured LOCAL base/specialist models and joins a\n    cloud model (cloud-general) whenever\n    cloud is enabled (SONDER_ALLOW_CLOUD=1) -- so the cloud is used when\n    available but a disabled cloud never blocks the second opinion.\n\n    Args:\n        prompt: the identical question to ask every tier.\n        tiers: optional comma-separated tier override (e.g. \"code,reasoning\");\n            empty uses the adaptive local+local+cloud default.\n    ",
@@ -5711,6 +5779,23 @@
           "name": "scaffold_project"
         },
         {
+          "description": "Capture the session window to a PNG; optionally ask the local vision model a question about it.\n\n        Returns the PNG path and sizes. Pixel coordinates for ui_action refer to this image.\n        The vision answer is untrusted screen-derived text.\n        ",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "question": {
+                "default": "",
+                "title": "Question",
+                "type": "string"
+              }
+            },
+            "title": "screen_captureArguments",
+            "type": "object"
+          },
+          "name": "screen_capture"
+        },
+        {
           "description": "Run a guarded script with its known interpreter and bounded output.",
           "effects": [],
           "execution_class": "pure",
@@ -6938,6 +7023,74 @@
           "name": "typecheck_run"
         },
         {
+          "description": "Perform one input action in the session window.\n\n        action: click | double_click | right_click | move | type | key | scroll.\n        coords: \"normalized\" (0-1000 grid over the window) or \"pixels\" (of the last screen_capture).\n        Clicks need target_label naming the control. keys is one chord like \"ctrl+s\" (no Windows key).\n        Irreversible actions (send, delete, purchase, submit, ...) return confirmation_required\n        until a person approves that exact call at the console.\n        ",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "action": {
+                "title": "Action",
+                "type": "string"
+              },
+              "coords": {
+                "default": "normalized",
+                "title": "Coords",
+                "type": "string"
+              },
+              "keys": {
+                "default": "",
+                "title": "Keys",
+                "type": "string"
+              },
+              "scroll": {
+                "default": 0,
+                "title": "Scroll",
+                "type": "integer"
+              },
+              "target_label": {
+                "default": "",
+                "title": "Target Label",
+                "type": "string"
+              },
+              "text": {
+                "default": "",
+                "title": "Text",
+                "type": "string"
+              },
+              "x": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "X"
+              },
+              "y": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Y"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "title": "ui_actionArguments",
+            "type": "object"
+          },
+          "name": "ui_action"
+        },
+        {
           "description": "Immediately free GPU VRAM by unloading a model (or all of them).\n\n    Args:\n        tier: \"all\" (default), or any configured local tier (\"fast\", \"code\",\n            \"general\", and \"reasoning\"/\"vision\" when bound).\n    ",
           "effects": [],
           "execution_class": "pure",
@@ -7171,6 +7324,17 @@
             "type": "object"
           },
           "name": "web_search"
+        },
+        {
+          "description": "List open windows of allowlisted apps (hwnd, app, title, size); other windows are only counted.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {},
+            "title": "window_listArguments",
+            "type": "object"
+          },
+          "name": "window_list"
         },
         {
           "description": "Execute local work with guarded tools, checklist, validation, and report.\n\n    An optional ``session`` carries each model step across retries and tier\n    escalation in one durable transcript.\n    ",
@@ -9096,6 +9260,72 @@
       "risk": "ask",
       "summary": "Show active cross-subsystem composition bindings.",
       "tool": "composition_bindings"
+    },
+    {
+      "aliases": [],
+      "category": "diagnostics",
+      "name": "/computer_task",
+      "native": false,
+      "params": [
+        {
+          "default": null,
+          "name": "goal",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "default": 10,
+          "name": "max_steps",
+          "required": false,
+          "type": "int"
+        }
+      ],
+      "risk": "execution",
+      "summary": "Let the local vision model drive the session window toward a goal, one gated step at a time.",
+      "tool": "computer_task"
+    },
+    {
+      "aliases": [],
+      "category": "diagnostics",
+      "name": "/computer_use_start",
+      "native": false,
+      "params": [
+        {
+          "default": 0,
+          "name": "hwnd",
+          "required": false,
+          "type": "int"
+        },
+        {
+          "default": "",
+          "name": "app",
+          "required": false,
+          "type": "str"
+        }
+      ],
+      "risk": "dangerous",
+      "summary": "Start a driving session on one allowlisted window (by hwnd, or the first window of app).",
+      "tool": "computer_use_start"
+    },
+    {
+      "aliases": [],
+      "category": "runtime",
+      "name": "/computer_use_status",
+      "native": false,
+      "params": [],
+      "risk": "safe",
+      "summary": "Report whether gated computer use is enabled, the allowlist, and the running driving session.",
+      "tool": "computer_use_status"
+    },
+    {
+      "aliases": [],
+      "category": "diagnostics",
+      "name": "/computer_use_stop",
+      "native": false,
+      "params": [],
+      "risk": "ask",
+      "summary": "End the driving session now and close its indicator.",
+      "tool": "computer_use_stop"
     },
     {
       "aliases": [],
@@ -14518,6 +14748,23 @@
     },
     {
       "aliases": [],
+      "category": "creative",
+      "name": "/screen_capture",
+      "native": false,
+      "params": [
+        {
+          "default": "",
+          "name": "question",
+          "required": false,
+          "type": "str"
+        }
+      ],
+      "risk": "ask",
+      "summary": "Capture the session window to a PNG; optionally ask the local vision model a question about it.",
+      "tool": "screen_capture"
+    },
+    {
+      "aliases": [],
       "category": "execution",
       "name": "/script_run",
       "native": false,
@@ -15992,6 +16239,65 @@
     },
     {
       "aliases": [],
+      "category": "diagnostics",
+      "name": "/ui_action",
+      "native": false,
+      "params": [
+        {
+          "default": null,
+          "name": "action",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "default": null,
+          "name": "x",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": null,
+          "name": "y",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "normalized",
+          "name": "coords",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "target_label",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "text",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "keys",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": 0,
+          "name": "scroll",
+          "required": false,
+          "type": "int"
+        }
+      ],
+      "risk": "execution",
+      "summary": "Perform one input action in the session window.",
+      "tool": "ui_action"
+    },
+    {
+      "aliases": [],
       "category": "runtime",
       "name": "/unload",
       "native": false,
@@ -16310,6 +16616,16 @@
       "risk": "safe",
       "summary": "explain how the previous plain-language turn (or [text]) routed",
       "tool": ""
+    },
+    {
+      "aliases": [],
+      "category": "diagnostics",
+      "name": "/window_list",
+      "native": false,
+      "params": [],
+      "risk": "ask",
+      "summary": "List open windows of allowlisted apps (hwnd, app, title, size); other windows are only counted.",
+      "tool": "window_list"
     },
     {
       "aliases": [
@@ -16883,6 +17199,12 @@
     },
     {
       "default": null,
+      "field": "computer_use",
+      "section": "root",
+      "type": "ComputerUseConfig"
+    },
+    {
+      "default": null,
       "field": "membership",
       "section": "root",
       "type": "MembershipConfig"
@@ -17426,6 +17748,65 @@
       "field": "cancel_timeout_seconds",
       "section": "child_storage",
       "type": "<class 'int'>"
+    },
+    {
+      "default": false,
+      "field": "enabled",
+      "section": "computer_use",
+      "type": "<class 'bool'>"
+    },
+    {
+      "default": [],
+      "field": "allowed_apps",
+      "section": "computer_use",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": [
+        "outlook.exe",
+        "olk.exe",
+        "thunderbird.exe",
+        "slack.exe",
+        "discord.exe",
+        "teams.exe",
+        "ms-teams.exe",
+        "whatsapp.exe",
+        "telegram.exe",
+        "signal.exe"
+      ],
+      "field": "submit_on_enter_apps",
+      "section": "computer_use",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": 900,
+      "field": "session_ttl_seconds",
+      "section": "computer_use",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 60,
+      "field": "max_actions_per_minute",
+      "section": "computer_use",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 500,
+      "field": "max_actions_per_session",
+      "section": "computer_use",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 25,
+      "field": "max_task_steps",
+      "section": "computer_use",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": true,
+      "field": "verify_clicks",
+      "section": "computer_use",
+      "type": "<class 'bool'>"
     },
     {
       "default": [],
@@ -18117,15 +18498,15 @@
   ],
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES plus sonder_runtime.platform.memory_replication_config",
   "counts": {
-    "capabilities": 216,
-    "commands": 332,
-    "configuration": 226,
+    "capabilities": 223,
+    "commands": 339,
+    "configuration": 235,
     "events": 43,
     "native_tools": 66,
     "schemas": 4,
-    "tools": 216
+    "tools": 223
   },
-  "digest": "6df3b188855122e8597cd88b9fa26709d703144ea10e333b1141992ac4e88263",
+  "digest": "638ced4533e3f070fb283a0538f5d2cc6e8fc0f7127c09108b6bca889d0df9fb",
   "events": [
     {
       "name": "session.started",
@@ -20736,9 +21117,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "0e4da095ecb144d71588e348277dc55f7ca972709d4eddb5b67de570fcd8146d",
+    "catalog_digest": "5bc6f6b91c00b111c94059c9372bb792df6e63dd07d0b0745283b94a837e1a11",
     "client": {
-      "digest": "0e4da095ecb144d71588e348277dc55f7ca972709d4eddb5b67de570fcd8146d",
+      "digest": "5bc6f6b91c00b111c94059c9372bb792df6e63dd07d0b0745283b94a837e1a11",
       "events": [
         {
           "name": "approval.denied",
@@ -21944,6 +22325,10 @@
           "command_registry_list",
           "compiler_cache_status",
           "composition_bindings",
+          "computer_task",
+          "computer_use_start",
+          "computer_use_status",
+          "computer_use_stop",
           "consult",
           "context_compaction_plan",
           "context_health",
@@ -22068,6 +22453,7 @@
           "runtime_source_update",
           "runtime_source_update_status",
           "scaffold_project",
+          "screen_capture",
           "script_run",
           "script_search",
           "secret_scan",
@@ -22105,6 +22491,7 @@
           "tune_emotion_vectors",
           "turn_inspect",
           "typecheck_run",
+          "ui_action",
           "unload",
           "update_emotion_vectors",
           "update_system_profile",
@@ -22113,6 +22500,7 @@
           "weather_lookup",
           "web_fetch",
           "web_search",
+          "window_list",
           "workbench_agent",
           "workflow_delete",
           "workflow_list",
@@ -22323,6 +22711,26 @@
             "name": "composition_bindings",
             "schema_available": true,
             "summary": "Show active cross-subsystem composition bindings."
+          },
+          {
+            "name": "computer_task",
+            "schema_available": true,
+            "summary": "Let the local vision model drive the session window toward a goal, one gated step at a time.\n\n        Every step passes the same checks as ui_action; the task pauses and reports when a step\n        needs a person's confirmation. Returns the step transcript.\n        "
+          },
+          {
+            "name": "computer_use_start",
+            "schema_available": true,
+            "summary": "Start a driving session on one allowlisted window (by hwnd, or the first window of app).\n\n        Shows a \"Sonder is driving\" bar with a Stop button and the kill hotkey\n        Ctrl+Alt+Shift+K. Graded dangerous: a person approves it at the console.\n        The session ends on its TTL, the hotkey, Stop, or any mouse/keyboard use by a person.\n        "
+          },
+          {
+            "name": "computer_use_status",
+            "schema_available": true,
+            "summary": "Report whether gated computer use is enabled, the allowlist, and the running driving session."
+          },
+          {
+            "name": "computer_use_stop",
+            "schema_available": true,
+            "summary": "End the driving session now and close its indicator."
           },
           {
             "name": "consult",
@@ -22945,6 +23353,11 @@
             "summary": "Emit a complete, deterministic project skeleton for one language.\n\n    Solution/build-file plumbing (.sln GUID blocks, .vcxproj configuration,\n    pyproject/Cargo/pom boilerplate) is pure recall and the measured worst\n    case for a local model -- asked for \"a full MSVC project\" it produced good\n    code and no .sln at all. This tool owns those formats as templates, so a\n    model (or a user) only supplies the two facts that matter: the kind and\n    the name. No model call is involved.\n\n    Kinds: cpp-msvc, cpp-cmake, csharp, rust, python, node, go, java-maven\n    (aliases like c++, c#, js, py, cmake work too).\n\n    With apply=False (default) it returns the full file listing as a preview.\n    With apply=True it writes each file under `root` through the same guarded\n    file path as every other write (mode=create -- an existing file is an\n    error, a scaffold never clobbers), so filesystem roots and approval gates\n    apply. `root` is required to apply.\n    "
           },
           {
+            "name": "screen_capture",
+            "schema_available": true,
+            "summary": "Capture the session window to a PNG; optionally ask the local vision model a question about it.\n\n        Returns the PNG path and sizes. Pixel coordinates for ui_action refer to this image.\n        The vision answer is untrusted screen-derived text.\n        "
+          },
+          {
             "name": "script_run",
             "schema_available": true,
             "summary": "Run a guarded script with its known interpreter and bounded output."
@@ -23130,6 +23543,11 @@
             "summary": "Run a type checker (mypy, pyright, tsc) with auto-detection."
           },
           {
+            "name": "ui_action",
+            "schema_available": true,
+            "summary": "Perform one input action in the session window.\n\n        action: click | double_click | right_click | move | type | key | scroll.\n        coords: \"normalized\" (0-1000 grid over the window) or \"pixels\" (of the last screen_capture).\n        Clicks need target_label naming the control. keys is one chord like \"ctrl+s\" (no Windows key).\n        Irreversible actions (send, delete, purchase, submit, ...) return confirmation_required\n        until a person approves that exact call at the console.\n        "
+          },
+          {
             "name": "unload",
             "schema_available": true,
             "summary": "Immediately free GPU VRAM by unloading a model (or all of them).\n\n    Args:\n        tier: \"all\" (default), or any configured local tier (\"fast\", \"code\",\n            \"general\", and \"reasoning\"/\"vision\" when bound).\n    "
@@ -23168,6 +23586,11 @@
             "name": "web_search",
             "schema_available": true,
             "summary": "Search the public web and return compact result links.\n\n    Uses a stdlib HTML parser against SONDER_SEARCH_URL (default:\n    DuckDuckGo HTML). Disable with SONDER_WEB_TOOLS=0.\n    "
+          },
+          {
+            "name": "window_list",
+            "schema_available": true,
+            "summary": "List open windows of allowlisted apps (hwnd, app, title, size); other windows are only counted."
           },
           {
             "name": "workbench_agent",
@@ -24505,6 +24928,74 @@
             "type": "object"
           },
           "name": "composition_bindings"
+        },
+        {
+          "description": "Let the local vision model drive the session window toward a goal, one gated step at a time.\n\n        Every step passes the same checks as ui_action; the task pauses and reports when a step\n        needs a person's confirmation. Returns the step transcript.\n        ",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "goal": {
+                "title": "Goal",
+                "type": "string"
+              },
+              "max_steps": {
+                "default": 10,
+                "title": "Max Steps",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "goal"
+            ],
+            "title": "computer_taskArguments",
+            "type": "object"
+          },
+          "name": "computer_task"
+        },
+        {
+          "description": "Start a driving session on one allowlisted window (by hwnd, or the first window of app).\n\n        Shows a \"Sonder is driving\" bar with a Stop button and the kill hotkey\n        Ctrl+Alt+Shift+K. Graded dangerous: a person approves it at the console.\n        The session ends on its TTL, the hotkey, Stop, or any mouse/keyboard use by a person.\n        ",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "app": {
+                "default": "",
+                "title": "App",
+                "type": "string"
+              },
+              "hwnd": {
+                "default": 0,
+                "title": "Hwnd",
+                "type": "integer"
+              }
+            },
+            "title": "computer_use_startArguments",
+            "type": "object"
+          },
+          "name": "computer_use_start"
+        },
+        {
+          "description": "Report whether gated computer use is enabled, the allowlist, and the running driving session.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {},
+            "title": "computer_use_statusArguments",
+            "type": "object"
+          },
+          "name": "computer_use_status"
+        },
+        {
+          "description": "End the driving session now and close its indicator.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {},
+            "title": "computer_use_stopArguments",
+            "type": "object"
+          },
+          "name": "computer_use_stop"
         },
         {
           "description": "Ask several tiers independently and expose agreement as a confidence signal.\n\n    This deliberately returns every answer and an agree/disagree verdict. It\n    never synthesizes them or chooses a winner: measured ensembles did not\n    improve accuracy, while divergence is useful evidence that a caller should\n    verify the answer. Two good answers still yield a verdict even if a third\n    tier fails; if the judge fails, a token-overlap fallback is labeled\n    unknown-confidence.\n\n    By default it contrasts configured LOCAL base/specialist models and joins a\n    cloud model (cloud-general) whenever\n    cloud is enabled (SONDER_ALLOW_CLOUD=1) -- so the cloud is used when\n    available but a disabled cloud never blocks the second opinion.\n\n    Args:\n        prompt: the identical question to ask every tier.\n        tiers: optional comma-separated tier override (e.g. \"code,reasoning\");\n            empty uses the adaptive local+local+cloud default.\n    ",
@@ -28839,6 +29330,23 @@
           "name": "scaffold_project"
         },
         {
+          "description": "Capture the session window to a PNG; optionally ask the local vision model a question about it.\n\n        Returns the PNG path and sizes. Pixel coordinates for ui_action refer to this image.\n        The vision answer is untrusted screen-derived text.\n        ",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "question": {
+                "default": "",
+                "title": "Question",
+                "type": "string"
+              }
+            },
+            "title": "screen_captureArguments",
+            "type": "object"
+          },
+          "name": "screen_capture"
+        },
+        {
           "description": "Run a guarded script with its known interpreter and bounded output.",
           "effects": [],
           "execution_class": "pure",
@@ -30066,6 +30574,74 @@
           "name": "typecheck_run"
         },
         {
+          "description": "Perform one input action in the session window.\n\n        action: click | double_click | right_click | move | type | key | scroll.\n        coords: \"normalized\" (0-1000 grid over the window) or \"pixels\" (of the last screen_capture).\n        Clicks need target_label naming the control. keys is one chord like \"ctrl+s\" (no Windows key).\n        Irreversible actions (send, delete, purchase, submit, ...) return confirmation_required\n        until a person approves that exact call at the console.\n        ",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "action": {
+                "title": "Action",
+                "type": "string"
+              },
+              "coords": {
+                "default": "normalized",
+                "title": "Coords",
+                "type": "string"
+              },
+              "keys": {
+                "default": "",
+                "title": "Keys",
+                "type": "string"
+              },
+              "scroll": {
+                "default": 0,
+                "title": "Scroll",
+                "type": "integer"
+              },
+              "target_label": {
+                "default": "",
+                "title": "Target Label",
+                "type": "string"
+              },
+              "text": {
+                "default": "",
+                "title": "Text",
+                "type": "string"
+              },
+              "x": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "X"
+              },
+              "y": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Y"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "title": "ui_actionArguments",
+            "type": "object"
+          },
+          "name": "ui_action"
+        },
+        {
           "description": "Immediately free GPU VRAM by unloading a model (or all of them).\n\n    Args:\n        tier: \"all\" (default), or any configured local tier (\"fast\", \"code\",\n            \"general\", and \"reasoning\"/\"vision\" when bound).\n    ",
           "effects": [],
           "execution_class": "pure",
@@ -30299,6 +30875,17 @@
             "type": "object"
           },
           "name": "web_search"
+        },
+        {
+          "description": "List open windows of allowlisted apps (hwnd, app, title, size); other windows are only counted.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {},
+            "title": "window_listArguments",
+            "type": "object"
+          },
+          "name": "window_list"
         },
         {
           "description": "Execute local work with guarded tools, checklist, validation, and report.\n\n    An optional ``session`` carries each model step across retries and tier\n    escalation in one durable transcript.\n    ",
@@ -33021,6 +33608,66 @@
           "name": "composition_bindings"
         },
         {
+          "description": "Let the local vision model drive the session window toward a goal, one gated step at a time.\n\n        Every step passes the same checks as ui_action; the task pauses and reports when a step\n        needs a person's confirmation. Returns the step transcript.\n        ",
+          "inputSchema": {
+            "properties": {
+              "goal": {
+                "title": "Goal",
+                "type": "string"
+              },
+              "max_steps": {
+                "default": 10,
+                "title": "Max Steps",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "goal"
+            ],
+            "title": "computer_taskArguments",
+            "type": "object"
+          },
+          "name": "computer_task"
+        },
+        {
+          "description": "Start a driving session on one allowlisted window (by hwnd, or the first window of app).\n\n        Shows a \"Sonder is driving\" bar with a Stop button and the kill hotkey\n        Ctrl+Alt+Shift+K. Graded dangerous: a person approves it at the console.\n        The session ends on its TTL, the hotkey, Stop, or any mouse/keyboard use by a person.\n        ",
+          "inputSchema": {
+            "properties": {
+              "app": {
+                "default": "",
+                "title": "App",
+                "type": "string"
+              },
+              "hwnd": {
+                "default": 0,
+                "title": "Hwnd",
+                "type": "integer"
+              }
+            },
+            "title": "computer_use_startArguments",
+            "type": "object"
+          },
+          "name": "computer_use_start"
+        },
+        {
+          "description": "Report whether gated computer use is enabled, the allowlist, and the running driving session.",
+          "inputSchema": {
+            "properties": {},
+            "title": "computer_use_statusArguments",
+            "type": "object"
+          },
+          "name": "computer_use_status"
+        },
+        {
+          "description": "End the driving session now and close its indicator.",
+          "inputSchema": {
+            "properties": {},
+            "title": "computer_use_stopArguments",
+            "type": "object"
+          },
+          "name": "computer_use_stop"
+        },
+        {
           "description": "Ask several tiers independently and expose agreement as a confidence signal.\n\n    This deliberately returns every answer and an agree/disagree verdict. It\n    never synthesizes them or chooses a winner: measured ensembles did not\n    improve accuracy, while divergence is useful evidence that a caller should\n    verify the answer. Two good answers still yield a verdict even if a third\n    tier fails; if the judge fails, a token-overlap fallback is labeled\n    unknown-confidence.\n\n    By default it contrasts configured LOCAL base/specialist models and joins a\n    cloud model (cloud-general) whenever\n    cloud is enabled (SONDER_ALLOW_CLOUD=1) -- so the cloud is used when\n    available but a disabled cloud never blocks the second opinion.\n\n    Args:\n        prompt: the identical question to ask every tier.\n        tiers: optional comma-separated tier override (e.g. \"code,reasoning\");\n            empty uses the adaptive local+local+cloud default.\n    ",
           "inputSchema": {
             "properties": {
@@ -37105,6 +37752,21 @@
           "name": "scaffold_project"
         },
         {
+          "description": "Capture the session window to a PNG; optionally ask the local vision model a question about it.\n\n        Returns the PNG path and sizes. Pixel coordinates for ui_action refer to this image.\n        The vision answer is untrusted screen-derived text.\n        ",
+          "inputSchema": {
+            "properties": {
+              "question": {
+                "default": "",
+                "title": "Question",
+                "type": "string"
+              }
+            },
+            "title": "screen_captureArguments",
+            "type": "object"
+          },
+          "name": "screen_capture"
+        },
+        {
           "description": "Run a guarded script with its known interpreter and bounded output.",
           "inputSchema": {
             "properties": {
@@ -38258,6 +38920,72 @@
           "name": "typecheck_run"
         },
         {
+          "description": "Perform one input action in the session window.\n\n        action: click | double_click | right_click | move | type | key | scroll.\n        coords: \"normalized\" (0-1000 grid over the window) or \"pixels\" (of the last screen_capture).\n        Clicks need target_label naming the control. keys is one chord like \"ctrl+s\" (no Windows key).\n        Irreversible actions (send, delete, purchase, submit, ...) return confirmation_required\n        until a person approves that exact call at the console.\n        ",
+          "inputSchema": {
+            "properties": {
+              "action": {
+                "title": "Action",
+                "type": "string"
+              },
+              "coords": {
+                "default": "normalized",
+                "title": "Coords",
+                "type": "string"
+              },
+              "keys": {
+                "default": "",
+                "title": "Keys",
+                "type": "string"
+              },
+              "scroll": {
+                "default": 0,
+                "title": "Scroll",
+                "type": "integer"
+              },
+              "target_label": {
+                "default": "",
+                "title": "Target Label",
+                "type": "string"
+              },
+              "text": {
+                "default": "",
+                "title": "Text",
+                "type": "string"
+              },
+              "x": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "X"
+              },
+              "y": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Y"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "title": "ui_actionArguments",
+            "type": "object"
+          },
+          "name": "ui_action"
+        },
+        {
           "description": "Immediately free GPU VRAM by unloading a model (or all of them).\n\n    Args:\n        tier: \"all\" (default), or any configured local tier (\"fast\", \"code\",\n            \"general\", and \"reasoning\"/\"vision\" when bound).\n    ",
           "inputSchema": {
             "properties": {
@@ -38475,6 +39203,15 @@
             "type": "object"
           },
           "name": "web_search"
+        },
+        {
+          "description": "List open windows of allowlisted apps (hwnd, app, title, size); other windows are only counted.",
+          "inputSchema": {
+            "properties": {},
+            "title": "window_listArguments",
+            "type": "object"
+          },
+          "name": "window_list"
         },
         {
           "description": "Execute local work with guarded tools, checklist, validation, and report.\n\n    An optional ``session`` carries each model step across retries and tier\n    escalation in one durable transcript.\n    ",
@@ -40131,6 +40868,78 @@
             "parameters": {
               "properties": {},
               "title": "composition_bindingsArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Let the local vision model drive the session window toward a goal, one gated step at a time.\n\n        Every step passes the same checks as ui_action; the task pauses and reports when a step\n        needs a person's confirmation. Returns the step transcript.\n        ",
+            "name": "computer_task",
+            "parameters": {
+              "properties": {
+                "goal": {
+                  "title": "Goal",
+                  "type": "string"
+                },
+                "max_steps": {
+                  "default": 10,
+                  "title": "Max Steps",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "goal"
+              ],
+              "title": "computer_taskArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Start a driving session on one allowlisted window (by hwnd, or the first window of app).\n\n        Shows a \"Sonder is driving\" bar with a Stop button and the kill hotkey\n        Ctrl+Alt+Shift+K. Graded dangerous: a person approves it at the console.\n        The session ends on its TTL, the hotkey, Stop, or any mouse/keyboard use by a person.\n        ",
+            "name": "computer_use_start",
+            "parameters": {
+              "properties": {
+                "app": {
+                  "default": "",
+                  "title": "App",
+                  "type": "string"
+                },
+                "hwnd": {
+                  "default": 0,
+                  "title": "Hwnd",
+                  "type": "integer"
+                }
+              },
+              "title": "computer_use_startArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Report whether gated computer use is enabled, the allowlist, and the running driving session.",
+            "name": "computer_use_status",
+            "parameters": {
+              "properties": {},
+              "title": "computer_use_statusArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "End the driving session now and close its indicator.",
+            "name": "computer_use_stop",
+            "parameters": {
+              "properties": {},
+              "title": "computer_use_stopArguments",
               "type": "object"
             }
           },
@@ -44594,6 +45403,24 @@
         },
         {
           "function": {
+            "description": "Capture the session window to a PNG; optionally ask the local vision model a question about it.\n\n        Returns the PNG path and sizes. Pixel coordinates for ui_action refer to this image.\n        The vision answer is untrusted screen-derived text.\n        ",
+            "name": "screen_capture",
+            "parameters": {
+              "properties": {
+                "question": {
+                  "default": "",
+                  "title": "Question",
+                  "type": "string"
+                }
+              },
+              "title": "screen_captureArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
             "description": "Run a guarded script with its known interpreter and bounded output.",
             "name": "script_run",
             "parameters": {
@@ -45858,6 +46685,75 @@
         },
         {
           "function": {
+            "description": "Perform one input action in the session window.\n\n        action: click | double_click | right_click | move | type | key | scroll.\n        coords: \"normalized\" (0-1000 grid over the window) or \"pixels\" (of the last screen_capture).\n        Clicks need target_label naming the control. keys is one chord like \"ctrl+s\" (no Windows key).\n        Irreversible actions (send, delete, purchase, submit, ...) return confirmation_required\n        until a person approves that exact call at the console.\n        ",
+            "name": "ui_action",
+            "parameters": {
+              "properties": {
+                "action": {
+                  "title": "Action",
+                  "type": "string"
+                },
+                "coords": {
+                  "default": "normalized",
+                  "title": "Coords",
+                  "type": "string"
+                },
+                "keys": {
+                  "default": "",
+                  "title": "Keys",
+                  "type": "string"
+                },
+                "scroll": {
+                  "default": 0,
+                  "title": "Scroll",
+                  "type": "integer"
+                },
+                "target_label": {
+                  "default": "",
+                  "title": "Target Label",
+                  "type": "string"
+                },
+                "text": {
+                  "default": "",
+                  "title": "Text",
+                  "type": "string"
+                },
+                "x": {
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "X"
+                },
+                "y": {
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Y"
+                }
+              },
+              "required": [
+                "action"
+              ],
+              "title": "ui_actionArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
             "description": "Immediately free GPU VRAM by unloading a model (or all of them).\n\n    Args:\n        tier: \"all\" (default), or any configured local tier (\"fast\", \"code\",\n            \"general\", and \"reasoning\"/\"vision\" when bound).\n    ",
             "name": "unload",
             "parameters": {
@@ -46094,6 +46990,18 @@
                 "query"
               ],
               "title": "web_searchArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "List open windows of allowlisted apps (hwnd, app, title, size); other windows are only counted.",
+            "name": "window_list",
+            "parameters": {
+              "properties": {},
+              "title": "window_listArguments",
               "type": "object"
             }
           },
@@ -46452,13 +47360,13 @@
   },
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "39d01edbd3c78c2670823786e790c2af5360ee11e1010f971d863838137bf9b5",
+    "server.py": "6be05f104304b0db7c2d8556d4eb74bd89badb64f64fdabeaa18f8bc4e1a6ee4",
     "sonder_runtime/application/tools/generated_catalogs.py": "0cb58ae27e9f0e56102282b7e2a5b7b8a9d955a4322055e87d18d3970fe644d8",
     "sonder_runtime/bootstrap/native_mcp.py": "f2bb6490a66ab92fa4599366647f724d02ce33267ad1bb2b973dbc001a29473d",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/domain/operational_capabilities.py": "6f8f2083343ac1b0de076cd4d545b5f99602a9916c185bd15d965ffa0c405fe6",
     "sonder_runtime/interfaces/sdk/discovery.py": "db8aeca8dd84d06cbbf834495db30b211956393375676f23899a28685aea015b",
-    "sonder_runtime/platform/config.py": "028c65a1b656a68749f9aabea884e37292abc96846efe10751884c739d3edda6",
+    "sonder_runtime/platform/config.py": "403953b391b35eaf4de8d99a82c70504a6423b8319536db7aebde11f9cce7b25",
     "sonder_runtime/platform/memory_replication_config.py": "f9fc0a642812bdc456ac082f0f8c52f051822f0160e16882b634895feb0cea61"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
@@ -47676,6 +48584,66 @@
       "parameters": {
         "properties": {},
         "title": "composition_bindingsArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Let the local vision model drive the session window toward a goal, one gated step at a time.\n\n        Every step passes the same checks as ui_action; the task pauses and reports when a step\n        needs a person's confirmation. Returns the step transcript.\n        ",
+      "name": "computer_task",
+      "parameters": {
+        "properties": {
+          "goal": {
+            "title": "Goal",
+            "type": "string"
+          },
+          "max_steps": {
+            "default": 10,
+            "title": "Max Steps",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "goal"
+        ],
+        "title": "computer_taskArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Start a driving session on one allowlisted window (by hwnd, or the first window of app).\n\n        Shows a \"Sonder is driving\" bar with a Stop button and the kill hotkey\n        Ctrl+Alt+Shift+K. Graded dangerous: a person approves it at the console.\n        The session ends on its TTL, the hotkey, Stop, or any mouse/keyboard use by a person.\n        ",
+      "name": "computer_use_start",
+      "parameters": {
+        "properties": {
+          "app": {
+            "default": "",
+            "title": "App",
+            "type": "string"
+          },
+          "hwnd": {
+            "default": 0,
+            "title": "Hwnd",
+            "type": "integer"
+          }
+        },
+        "title": "computer_use_startArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Report whether gated computer use is enabled, the allowlist, and the running driving session.",
+      "name": "computer_use_status",
+      "parameters": {
+        "properties": {},
+        "title": "computer_use_statusArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "End the driving session now and close its indicator.",
+      "name": "computer_use_stop",
+      "parameters": {
+        "properties": {},
+        "title": "computer_use_stopArguments",
         "type": "object"
       }
     },
@@ -51764,6 +52732,21 @@
       }
     },
     {
+      "description": "Capture the session window to a PNG; optionally ask the local vision model a question about it.\n\n        Returns the PNG path and sizes. Pixel coordinates for ui_action refer to this image.\n        The vision answer is untrusted screen-derived text.\n        ",
+      "name": "screen_capture",
+      "parameters": {
+        "properties": {
+          "question": {
+            "default": "",
+            "title": "Question",
+            "type": "string"
+          }
+        },
+        "title": "screen_captureArguments",
+        "type": "object"
+      }
+    },
+    {
       "description": "Run a guarded script with its known interpreter and bounded output.",
       "name": "script_run",
       "parameters": {
@@ -52917,6 +53900,72 @@
       }
     },
     {
+      "description": "Perform one input action in the session window.\n\n        action: click | double_click | right_click | move | type | key | scroll.\n        coords: \"normalized\" (0-1000 grid over the window) or \"pixels\" (of the last screen_capture).\n        Clicks need target_label naming the control. keys is one chord like \"ctrl+s\" (no Windows key).\n        Irreversible actions (send, delete, purchase, submit, ...) return confirmation_required\n        until a person approves that exact call at the console.\n        ",
+      "name": "ui_action",
+      "parameters": {
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "coords": {
+            "default": "normalized",
+            "title": "Coords",
+            "type": "string"
+          },
+          "keys": {
+            "default": "",
+            "title": "Keys",
+            "type": "string"
+          },
+          "scroll": {
+            "default": 0,
+            "title": "Scroll",
+            "type": "integer"
+          },
+          "target_label": {
+            "default": "",
+            "title": "Target Label",
+            "type": "string"
+          },
+          "text": {
+            "default": "",
+            "title": "Text",
+            "type": "string"
+          },
+          "x": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "X"
+          },
+          "y": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Y"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "title": "ui_actionArguments",
+        "type": "object"
+      }
+    },
+    {
       "description": "Immediately free GPU VRAM by unloading a model (or all of them).\n\n    Args:\n        tier: \"all\" (default), or any configured local tier (\"fast\", \"code\",\n            \"general\", and \"reasoning\"/\"vision\" when bound).\n    ",
       "name": "unload",
       "parameters": {
@@ -53132,6 +54181,15 @@
           "query"
         ],
         "title": "web_searchArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "List open windows of allowlisted apps (hwnd, app, title, size); other windows are only counted.",
+      "name": "window_list",
+      "parameters": {
+        "properties": {},
+        "title": "window_listArguments",
         "type": "object"
       }
     },

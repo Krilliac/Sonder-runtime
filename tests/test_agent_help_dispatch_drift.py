@@ -37,19 +37,8 @@ _MIN_DISPATCH_BRANCHES = 90
 # hosted surfaces, so the anchor must not be one of those).
 _UNIVERSAL_ANCHOR = "memory_search"
 
-# Pre-existing gap on the full (non-read-only) agent help block: execution,
-# dependency, VCS and refactor tools that are advertised but still have no
-# ``_agent_dispatch`` branch.  This allowance may only ever shrink, and the
-# test below proves it is disjoint from every read-only surface so it can
-# never be used to hide a repository-agent or hosted-agent regression.
-_KNOWN_UNDISPATCHABLE_HELP_ENTRIES = frozenset({
-    "apply_patch", "build_clean", "build_run",
-    "dependency_add", "dependency_audit", "dependency_remove",
-    "dependency_update", "diff_files", "find_references", "format_code",
-    "git_branch", "git_checkout", "git_cherry_pick", "git_commit",
-    "git_merge", "git_stash", "git_tag", "lint_run", "rename_symbol",
-    "secret_scan", "test_run", "typecheck_run",
-})
+# Registry dispatch closes the old gap; no undispatchable help allowances remain.
+_KNOWN_UNDISPATCHABLE_HELP_ENTRIES = frozenset()
 
 
 def _advertised_tools(help_text):
@@ -91,7 +80,7 @@ def _agent_help_surfaces():
             surfaces[name] = ({}, value)
     flags = _help_flag_names()
     for combination in itertools.product((False, True), repeat=len(flags)):
-        keywords = dict(zip(flags, combination))
+        keywords = dict(zip(flags, combination, strict=True))
         label = "_agent_tool_help(%s)" % ", ".join(
             "%s=%s" % item for item in sorted(keywords.items())
         )
