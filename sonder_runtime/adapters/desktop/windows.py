@@ -82,6 +82,7 @@ def _load():
     sig(user32.ClientToScreen, w.BOOL, HWND, ctypes.POINTER(w.POINT))
     sig(user32.GetForegroundWindow, HWND)
     sig(user32.SetForegroundWindow, w.BOOL, HWND)
+    sig(user32.AttachThreadInput, w.BOOL, w.DWORD, w.DWORD, w.BOOL)
     sig(user32.ShowWindow, w.BOOL, HWND, ctypes.c_int)
     sig(user32.BringWindowToTop, w.BOOL, HWND)
     sig(user32.WindowFromPoint, HWND, w.POINT)
@@ -114,6 +115,7 @@ def _load():
     sig(kernel32.QueryFullProcessImageNameW, w.BOOL, w.HANDLE, w.DWORD, w.LPWSTR,
         ctypes.POINTER(w.DWORD))
     sig(kernel32.GetTickCount, w.DWORD)
+    sig(kernel32.GetCurrentThreadId, w.DWORD)
     sig(dwmapi.DwmGetWindowAttribute, ctypes.c_long, HWND, w.DWORD, ctypes.c_void_p, w.DWORD)
 
     class MOUSEINPUT(ctypes.Structure):
@@ -246,13 +248,21 @@ def focus(hwnd: int) -> None:
             raise TargetMoved("the window is closed")
         if api.user32.IsIconic(handle):
             api.user32.ShowWindow(handle, 9)  # SW_RESTORE
-        if int(api.user32.GetForegroundWindow() or 0) == hwnd:
+        current = int(api.user32.GetForegroundWindow() or 0)
+        if current == hwnd:
             return
-        # Windows lets a process take the foreground right after it has sent
-        # input; a bare Alt tap satisfies that without reaching any window.
-        _send_keys(api, [(0x12, False), (0x12, True)])
-        api.user32.BringWindowToTop(handle)
-        api.user32.SetForegroundWindow(handle)
+        # Join the foreground window's input queue for the switch instead of
+        # injecting input: an Alt tap would land in whatever window is in front
+        # (maybe a non-allowlisted one) and can open its menu. No input is sent.
+        mine = api.kernel32.GetCurrentThreadId()
+        theirs = api.user32.GetWindowThreadProcessId(current, None) if current else 0
+        attached = bool(theirs and theirs != mine and api.user32.AttachThreadInput(mine, theirs, True))
+        try:
+            api.user32.BringWindowToTop(handle)
+            api.user32.SetForegroundWindow(handle)
+        finally:
+            if attached:
+                api.user32.AttachThreadInput(mine, theirs, False)
         if int(api.user32.GetForegroundWindow() or 0) != hwnd:
             raise TargetMoved("Windows refused to bring the window to the front")
 

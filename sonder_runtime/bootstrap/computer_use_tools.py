@@ -38,6 +38,9 @@ _APPLICATION = None
 _CAPTURES_KEPT = 20
 _SETTLE_SECONDS = 0.6
 _VISION_TIMEOUT_SECONDS = 180.0
+# Reading the control under a click must be quick; the session is re-proved
+# after it anyway (a kill switch pressed meanwhile must win).
+_VERIFY_TIMEOUT_SECONDS = 20.0
 IRREVERSIBLE_DECISION = "computer_use_irreversible"
 
 
@@ -75,7 +78,7 @@ def controller() -> SessionController:
     return _CONTROLLER
 
 
-def _vision(image: bytes, prompt: str) -> str:
+def _vision(image: bytes, prompt: str, *, timeout: float = _VISION_TIMEOUT_SECONDS) -> str:
     """Ask the local vision tier about one PNG; the answer is untrusted text."""
     from ..application.context import local_owner_context
     from ..application.ports.vision_gateway import VisionRequest
@@ -84,7 +87,7 @@ def _vision(image: bytes, prompt: str) -> str:
         raise SessionRefused("the vision model is not available in this runtime")
     gateway = _APPLICATION().vision._gateway
     context = local_owner_context(
-        correlation_id=uuid.uuid4().hex, source="mcp", timeout_seconds=_VISION_TIMEOUT_SECONDS,
+        correlation_id=uuid.uuid4().hex, source="mcp", timeout_seconds=timeout,
     )
     request = VisionRequest(prompt=prompt, image=image, media_type="image/png",
                             options={"temperature": 0}, think=False)
@@ -131,7 +134,7 @@ def _verified_label(shot: desktop.Capture, px: int, py: int) -> str:
     nx = round(px * rules.NORMALIZED_SCALE / shot.client_width)
     ny = round(py * rules.NORMALIZED_SCALE / shot.client_height)
     try:
-        text = _vision(shot.png, _VERIFY_PROMPT.format(x=nx, y=ny))
+        text = _vision(shot.png, _VERIFY_PROMPT.format(x=nx, y=ny), timeout=_VERIFY_TIMEOUT_SECONDS)
         return rules.clean_text(json.loads(rules._JSON_OBJECT.search(text).group(0)).get("label"))
     except Exception:
         # A reading we cannot get is not evidence the click is harmless.
@@ -178,6 +181,10 @@ def perform(action: str, *, x=None, y=None, coords="normalized", text="", keys="
             if refusal:
                 return {"ok": False, "confirmation_required": True, "reason": reason,
                         "detail": refusal, "labels_seen": labels}
+        # Click verification and the confirmation gate can take seconds; a kill
+        # hotkey, Stop, or the operator's own input in that time must stop the
+        # action, so the whole session premise is proved again right before input.
+        session = ctl.require_live(cfg.allowed_apps)
         spent = session.budget.admit()
         if spent:
             raise rules.ActionRefused(spent)
