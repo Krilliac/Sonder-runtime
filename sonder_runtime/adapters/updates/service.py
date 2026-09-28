@@ -941,6 +941,20 @@ def _local_file_fetcher_class():
             path = url[7:] if url.startswith("file://") else url
             candidate = Path(path)
             if not candidate.is_file():
+                # Root rotation asks for N.root.json. Publishers ship the
+                # current root as root.json, so serve it when it is exactly
+                # version N; python-tuf still verifies it against N-1's keys.
+                name = candidate.name
+                prefix = name.split(".", 1)[0]
+                if name.endswith(".root.json") and prefix.isdigit():
+                    current = candidate.with_name("root.json")
+                    try:
+                        current_bytes = current.read_bytes()
+                        version = json.loads(current_bytes)["signed"]["version"]
+                    except (OSError, ValueError, KeyError, TypeError):
+                        version = None
+                    if version == int(prefix):
+                        return iter((current_bytes,))
                 raise tuf_exceptions.DownloadHTTPError(
                     f"not found: {path}", 404
                 )

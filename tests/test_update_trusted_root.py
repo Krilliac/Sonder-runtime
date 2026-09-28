@@ -79,3 +79,32 @@ def test_signed_bundle_without_a_configured_trusted_root_is_refused(
     monkeypatch.setenv("SONDER_HOME", str(tmp_path / "empty-home"))
     with pytest.raises(TrustError, match="trusted"):
         _verify(bundle)
+
+
+def test_client_anchored_at_an_older_root_follows_rotation_in_the_bundle(
+    tmp_path, tuf_repo_mod, monkeypatch,
+):
+    import json
+    import shutil
+
+    from tuf.api.metadata import Metadata, Root
+
+    from sonder_runtime.adapters.updates import service
+
+    bundle, root_v1 = _publish(tmp_path, tuf_repo_mod, "vendor")
+    anchor = tmp_path / "anchor-v1.json"
+    shutil.copy(root_v1, anchor)
+    # Rotate: root v2, signed by the v1 root keys, shipped only as the bundle's
+    # root.json (the publisher copies unversioned role files).
+    repo = tmp_path / "vendor" / "repo"
+    rotated = Metadata[Root].from_file(str(repo / "metadata" / "root.json"))
+    rotated.signed.version = 2
+    rotated.signatures.clear()
+    for signer in tuf_repo_mod._load_signers(repo, "root"):
+        rotated.sign(signer, append=True)
+    rotated.to_file(str(bundle / "metadata" / "root.json"))
+
+    monkeypatch.setenv("SONDER_UPDATE_TRUSTED_ROOT", str(anchor))
+    assert _verify(bundle) == "tuf"
+    trusted = service._trusted_metadata_dir() / "root.json"
+    assert json.loads(trusted.read_text(encoding="utf-8"))["signed"]["version"] == 2
