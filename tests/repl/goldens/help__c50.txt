@@ -24,7 +24,7 @@ sonder commands · ### in ## groups
     execution    ##  run, scripts
     filesystem   ##  read, search
     memory       ##  stats, fact
-    persona       #  prefer, emotion
+    persona      ##  prefer, emotion
     planning     ##  todo, checklist
     repo         ##  stash, update
     runtime      ##  env, goal

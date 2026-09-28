@@ -437,6 +437,32 @@ class RuntimeTelemetry:
             "attempt": upcoming,
         }, request_id=turn.turn_id, run_id=turn.turn_id, session_id=turn.session_id)
 
+    def route_overflow(self, fields: Mapping) -> None:
+        """Emit ``route.changed`` for a long-context overflow before its send.
+
+        The overflow is the turn's first attempt, so no previous attempt
+        exists for :meth:`provider_send_finished` to compare with; the rung
+        reports the change itself.  Only labels and counts are exported.
+        """
+        turn = _CURRENT_TURN.get()
+        if turn is None or turn.finished or not isinstance(fields, Mapping):
+            return
+        target = turn.owner if isinstance(turn.owner, RuntimeTelemetry) else self
+        with turn._lock:
+            upcoming = len(turn.attempts) + 1
+        worker = bounded_label(fields.get("to_worker_id"))
+        target._emit("route.changed", {
+            **({"to_worker_id": worker} if worker else {}),
+            "from_provider": provider_id(fields.get("from_provider")),
+            "from_model": bounded_label(fields.get("from_model")),
+            "to_provider": provider_id(fields.get("to_provider")),
+            "to_model": bounded_label(fields.get("to_model")),
+            "reason_code": bounded_label(fields.get("reason_code")) or "context_over_threshold",
+            "estimated_tokens": _non_negative_int(fields.get("estimated_tokens")),
+            "threshold": _non_negative_int(fields.get("threshold")),
+            "attempt": upcoming,
+        }, request_id=turn.turn_id, run_id=turn.turn_id, session_id=turn.session_id)
+
 
 def current_turn() -> TelemetryTurn | None:
     """The telemetry turn bound on this thread, if any."""

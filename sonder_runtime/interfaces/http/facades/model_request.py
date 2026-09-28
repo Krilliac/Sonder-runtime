@@ -237,19 +237,25 @@ class ModelRequestFacade:
         return ModelInvocation(request, canonical)
 
     @staticmethod
-    def render_text(operation: str, text: str, model: str) -> dict[str, Any]:
+    def render_text(
+        operation: str, text: str, model: str,
+        receipt: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Render an already-executed bounded response through the shared codec."""
         if operation not in set(MODEL_ROUTES.values()):
             raise ModelFacadeError("unsupported model operation")
         if not isinstance(text, str) or not text.strip():
             raise ModelFacadeError("model response text is empty")
-        return OpenAICompatibility.render(CanonicalResponse(
+        rendered = OpenAICompatibility.render(CanonicalResponse(
             operation=operation,
             response_id=("chatcmpl" if operation == "chat.completions" else "resp")
             + "-" + uuid.uuid4().hex[:16],
             model=str(model or "sonder"),
             text=text,
         ))
+        if receipt:
+            rendered["sonder_receipt"] = dict(receipt)
+        return rendered
 
 
 __all__ = [

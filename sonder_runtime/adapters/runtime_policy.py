@@ -35,6 +35,7 @@ DEFAULT_ROUTING = _rules.DEFAULT_ROUTING
 NPU_MODES = _rules.NPU_MODES
 NPU_CAPABILITIES = _rules.NPU_CAPABILITIES
 DEFAULT_NPU = _rules.DEFAULT_NPU
+DEFAULT_LONG_CONTEXT_OVERFLOW = _rules.DEFAULT_LONG_CONTEXT_OVERFLOW
 _MODEL_RE = _rules._MODEL_RE
 _LOCK = threading.RLock()
 
@@ -83,6 +84,14 @@ _write_json_atomic = _atomic_json.write_json_atomic
 
 def default_policy(env=None) -> dict:
     return _rules.default_policy(os.environ if env is None else env)
+
+
+def long_context_overflow(policy=None, env=None) -> dict:
+    """Overflow settings in force: the policy section plus env overrides."""
+    policy = load(create=False) if policy is None else policy
+    return _rules.effective_long_context_overflow(
+        policy, os.environ if env is None else env,
+    )
 
 
 def npu_mode(capability, policy=None) -> str:
@@ -192,6 +201,7 @@ def finish_transition(transition_id, token) -> bool:
 def update(
     local_models=None, embedding_model=None, routing=None, npu=None, reset=False,
     source="user update", expected_revision=None, transition_token=None,
+    long_context_overflow=None,
 ) -> dict:
     path = policy_path().resolve()
     with _LOCK, _policy_file_lock(path=path):
@@ -233,6 +243,9 @@ def update(
             "local_models": dict(base["local_models"]),
             "routing": dict(base["routing"]),
             "npu": dict(base.get("npu") or DEFAULT_NPU),
+            "long_context_overflow": dict(
+                base.get("long_context_overflow") or DEFAULT_LONG_CONTEXT_OVERFLOW
+            ),
         }
         if embedding_model is not None:
             candidate["embedding_model"] = embedding_model
@@ -270,6 +283,12 @@ def update(
                 )
             candidate["npu"] = _normalize_npu(
                 {**candidate["npu"], **npu}, candidate["npu"],
+            )
+        if long_context_overflow:
+            if not isinstance(long_context_overflow, dict):
+                raise ValueError("long_context_overflow update must be a JSON object")
+            candidate["long_context_overflow"] = _rules.normalize_long_context_overflow(
+                {**candidate["long_context_overflow"], **long_context_overflow},
             )
         candidate["revision"] = int(current.get("revision") or 0) + 1
         candidate["updated_ts"] = int(time.time())
@@ -323,5 +342,63 @@ def format_policy(policy=None) -> str:
             npu.get("embeddings") or "-",
         )
     )
+    lines.append("  " + format_long_context_overflow(policy))
     lines.append("  cloud tiers remain separate explicit opt-in configuration")
     return "\n".join(lines)
+
+
+def format_long_context_overflow(policy=None, env=None) -> str:
+    """One status line for the long-context overflow settings in force."""
+    policy = load(create=True) if policy is None else policy
+    settings = long_context_overflow(policy, env)
+    model = settings["model"] or (
+        (policy.get("local_models") or {}).get("reasoning") or ""
+    )
+    model_text = (
+        "%s (reasoning tier)" % model if model and not settings["model"]
+        else model or "(unset: bind a reasoning tier or set a model)"
+    )
+    line = "long-context overflow: %s (threshold %d tokens -> %s on the %s pool)" % (
+        "on" if settings["enabled"] else "off",
+        settings["threshold_tokens"], model_text, settings["provider"],
+    )
+    if settings["overrides"]:
+        line += " [environment overrides: %s]" % ", ".join(settings["overrides"])
+    if settings["error"]:
+        line += " [ignored invalid environment: %s]" % settings["error"]
+    return line
+
+
+OVERFLOW_USAGE = (
+    "usage: /runtime overflow [status|on|off|threshold <tokens>|model <local-model>]\n"
+    "  on/off          switch a turn whose estimated prompt exceeds the threshold\n"
+    "                  from its local tier to the overflow model on the Ollama pool\n"
+    "  threshold <n>   estimated prompt tokens that trigger it (at least %d)\n"
+    "  model <name>    the overflow model; 'model' alone uses the reasoning tier's\n"
+    "Cloud models are never accepted. SONDER_LONG_CONTEXT_OVERFLOW, "
+    "SONDER_LONG_CONTEXT_THRESHOLD and SONDER_LONG_CONTEXT_MODEL override the policy."
+    % _rules.OVERFLOW_MIN_THRESHOLD
+)
+
+
+def overflow_command(text: str) -> str:
+    """``/runtime overflow on|off|status|threshold <tokens>|model <name>``."""
+    words = str(text or "").split()
+    action = words[0].lower() if words else "status"
+    if action in ("status", "show") and len(words) <= 1:
+        return format_long_context_overflow()
+    if action == "on" and len(words) == 1:
+        change = {"enabled": True}
+    elif action == "off" and len(words) == 1:
+        change = {"enabled": False}
+    elif action == "threshold" and len(words) == 2:
+        change = {"threshold_tokens": words[1]}
+    elif action == "model" and len(words) <= 2:
+        change = {"model": words[1] if len(words) == 2 else ""}
+    else:
+        return OVERFLOW_USAGE
+    try:
+        policy = update(long_context_overflow=change, source="/runtime overflow")
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        return "long-context overflow not changed: %s" % exc
+    return format_long_context_overflow(policy)

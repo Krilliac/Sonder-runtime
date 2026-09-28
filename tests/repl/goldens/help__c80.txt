@@ -16,7 +16,7 @@ sonder commands · ### in ## groups
     basic        ##    execution    ##    security     ##
     chat          #    filesystem   ##    training      #
     context      ##    memory       ##    updates       #
-    creative     ##    persona       #    web           #
+    creative     ##    persona      ##    web           #
     data          #    planning     ##
 
 code · sonder:latest · manual · ctx #/#.#k

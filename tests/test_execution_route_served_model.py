@@ -6,6 +6,10 @@ Ollama policy model, so the header must not name the policy model for them.
 """
 
 import server
+from sonder_runtime.adapters.inference.sonder_inference_gateway import SonderInferenceUnreachable
+from sonder_runtime.adapters.provider_dispatch.fallback import PreSendFallbackGateway
+from sonder_runtime.application.context import local_owner_context
+from sonder_runtime.application.ports.model_gateway import ModelRequest, ModelResponse
 
 
 def _clear_provider_env(monkeypatch):
@@ -49,3 +53,37 @@ def test_unreadable_inference_config_falls_back_to_the_policy_model(monkeypatch)
     monkeypatch.setenv("SONDER_INFERENCE_TIER_MODELS", "not-a-pair")
     header = server._execution_route_header("workbench", "s", "r", None, "general")
     assert "  tier: general -> sonder:latest" in header
+
+
+def test_routed_work_header_names_ollama_after_inference_fallback(monkeypatch):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setitem(server.TIERS, "code", "sonder:latest")
+    monkeypatch.setenv("SONDER_MODEL_BACKEND", "sonder-inference")
+    monkeypatch.setenv("SONDER_INFERENCE_MODEL", "qwen3:14b")
+    monkeypatch.setenv("SONDER_INFERENCE_FALLBACK", "ollama")
+
+    class UnreachableInference:
+        def generate(self, request, context):
+            raise SonderInferenceUnreachable("connection refused")
+
+    class LocalOllama:
+        def generate(self, request, context):
+            return ModelResponse(text="done", model="sonder:latest", tier=request.tier)
+
+    gateway = PreSendFallbackGateway(UnreachableInference(), fallback=LocalOllama())
+
+    def workbench_agent(**kwargs):
+        gateway.generate(
+            ModelRequest(prompt=kwargs["prompt"], tier=kwargs["tier"]),
+            local_owner_context(correlation_id="route-header", source="mcp"),
+        )
+        return "work complete"
+
+    monkeypatch.setattr(server, "workbench_agent", workbench_agent)
+    output = server.route_work_request("Build the Flutter app.")
+    assert "  tier: code -> sonder:latest (ollama)" in output
+    assert "  tier: code -> qwen3:14b (sonder_inference)" not in output
+
+    monkeypatch.setattr(server, "workbench_agent", lambda **_kwargs: "no model call")
+    next_output = server.route_work_request("Build the Flutter app.")
+    assert "  tier: code -> qwen3:14b (sonder_inference)" in next_output

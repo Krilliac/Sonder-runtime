@@ -1297,6 +1297,12 @@
       "summary": "Inventory guarded project manifests and evidence-backed command candidates."
     },
     {
+      "category": "persona",
+      "name": "/prompts",
+      "risk": "safe",
+      "summary": "List, show, or locate the editable system/agent prompt files; reload re-reads them."
+    },
+    {
       "category": "memory",
       "name": "/quality",
       "risk": "safe",
@@ -1456,7 +1462,7 @@
       "category": "runtime",
       "name": "/runtime",
       "risk": "dangerous",
-      "summary": "Inspect or guarded-edit shared local model mappings and execution-lane tiers; cloud remains separate."
+      "summary": "Inspect or guarded-edit shared local model mappings, execution-lane tiers and the long-context overflow; cloud remains separate."
     },
     {
       "category": "runtime",
