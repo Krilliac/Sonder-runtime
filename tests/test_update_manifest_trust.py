@@ -272,7 +272,8 @@ def test_opener_rejects_loopback_update_host(tmp_path):
     dest = tmp_path / "engine.tar.gz"
     with pytest.raises(TrustError):
         # No opener injected: the default opener must validate the source.
-        resumable_download("http://127.0.0.1:9/engine.tar.gz", dest)
+        resumable_download("http://127.0.0.1:9/engine.tar.gz", dest,
+                           expected_length=1)
     assert not dest.exists()
 
 

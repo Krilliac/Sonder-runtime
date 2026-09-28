@@ -87,8 +87,13 @@ class Authority:
 def service(ports, backup, authority, helper=None):
     pointer, helper = Pointer(), helper or Helper()
     coordinator = DurableActivationCoordinator(pointer, helper, Journal(), verifier)
+    class Ledger:
+        def accept(self, _repository, _chain, _verifier):
+            pass
+
     return (UpdateApplicationService(ports=ports, backup=backup, activation=coordinator,
-                                      verifier=verifier, authority=authority), pointer, helper)
+                                      verifier=verifier, authority=authority,
+                                      metadata_ledger=Ledger(), repository="test"), pointer, helper)
 
 
 def request(update_target):
