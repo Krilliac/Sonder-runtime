@@ -293,6 +293,7 @@ reason -- so this module keeps importing on its own with no cycle.
 """
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import hashlib
 import json
@@ -1251,6 +1252,67 @@ def forget_spent_approval() -> None:
     _SPENT_APPROVAL.set(None)
 
 
+# Every approval spent while one protocol call runs, so a call that failed can
+# give them back (``approval_call_scope``). Separate from ``_SPENT_APPROVAL``,
+# which surfaces clear as soon as the reach decision is made.
+_CALL_SPENDS: contextvars.ContextVar = contextvars.ContextVar(
+    "sonder_call_spends", default=None,
+)
+
+
+# Tools whose failure is known to precede any effect: each validates its whole
+# request first and then applies it atomically, so an error reply means nothing
+# changed. Only these give a spent approval back. A failure is not proof of no
+# effect in general: ``git_merge`` can stop on a conflict after rewriting the
+# index and worktree, and a build fails after it ran -- so this is an allowlist,
+# never a denylist. Add a tool only after reading that its failure is pre-effect.
+RESTORABLE_ON_FAILURE = frozenset({
+    # Validates every binding (installed models, capabilities) before the
+    # single atomic policy write.
+    "runtime_policy_update",
+})
+
+
+class ApprovalCallScope:
+    """The approvals one protocol call spent, and the way to give them back."""
+
+    def __init__(self) -> None:
+        self.spends: list[tuple] = []
+
+    def restore(self) -> int:
+        """Give back what this call spent, because the call failed.
+
+        A surface calls this only when the tool *returned* a failure (a legacy
+        ``ERROR:`` reply, a native ``isError`` result) -- never on a raised
+        error, which can come after the effect (a post-call audit). Only tools
+        in ``RESTORABLE_ON_FAILURE`` are given back. The ledger keeps the
+        original expiry and never reopens a revoked or lapsed approval, and
+        each spend is given back at most once.
+        """
+        spends, self.spends = self.spends, []
+        restored = 0
+        for name, digest, nonce, ledger in spends:
+            if name not in RESTORABLE_ON_FAILURE:
+                continue
+            try:
+                restored += ledger.restore(nonce, digest) is not None
+            except Exception:
+                # Giving an approval back is a courtesy, never a new failure.
+                continue
+        return restored
+
+
+@contextlib.contextmanager
+def approval_call_scope():
+    """Collect the approvals spent while one protocol call runs."""
+    scope = ApprovalCallScope()
+    token = _CALL_SPENDS.set(scope)
+    try:
+        yield scope
+    finally:
+        _CALL_SPENDS.reset(token)
+
+
 def approval_ledger():
     """The one-shot approval ledger the gate consults, or None when there is none.
 
@@ -1561,6 +1623,9 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
                     approval = None
                 if approval is not None:
                     _SPENT_APPROVAL.set((name, digest))
+                    scope = _CALL_SPENDS.get()
+                    if scope is not None:
+                        scope.spends.append((name, digest, getattr(approval, "nonce", ""), ledger))
                     return Decision(
                         ALLOW, active, risk,
                         "one-shot approval %s by %s covers exactly this call "
