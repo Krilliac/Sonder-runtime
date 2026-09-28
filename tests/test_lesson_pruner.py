@@ -333,3 +333,57 @@ def test_truncate_shortens_long_text():
 
 def test_truncate_handles_none():
     assert lesson_pruner._truncate(None) == ""
+
+
+def test_transitive_chain_does_not_prune_lesson_dissimilar_to_keeper():
+    conn = memory_store.connect(":memory:")
+    _seed(conn, "keeper", "the longest lesson is the keeper", [1.0, 0.0])
+    _seed(conn, "bridge", "bridge", [0.95, 0.31225])
+    _seed(conn, "far", "far", [0.805, 0.59327])
+    plan = lesson_pruner.build_plan(conn, threshold=0.93)
+    assert [lid for entry in plan for lid in entry["prune_ids"]] == ["bridge"]
+    assert lesson_pruner.apply_plan(conn, plan) == 1
+    assert memory_store.get_lesson_text(conn, "far") == "far"
+
+
+def test_large_corpus_is_pruned_in_a_bounded_newest_window(monkeypatch):
+    monkeypatch.setattr(lesson_pruner, "MAX_LESSONS", 8)
+    conn = memory_store.connect(":memory:")
+    # Oldest lessons: a duplicate pair that falls outside the window.
+    _seed(conn, "old1", "old lesson", [0.0, 1.0])
+    _seed(conn, "old2", "old lesson again", [0.0, 1.0])
+    for i in range(6):
+        _seed(conn, f"mid{i}", f"distinct lesson {i}", [1.0, float(i + 1)])
+    # Newest lessons: a duplicate pair inside the window.
+    _seed(conn, "new1", "new lesson", [1.0, 0.0])
+    _seed(conn, "new2", "new lesson restated", [1.0, 0.0])
+
+    loaded = lesson_pruner._load_lessons(conn)
+    assert len(loaded) == 8
+    assert {row["id"] for row in loaded} >= {"new1", "new2"}
+    assert not {row["id"] for row in loaded} & {"old1", "old2"}
+    plan = lesson_pruner.build_plan(conn)
+    assert plan  # the fresh duplicate is still pruned; the run is not refused
+
+
+def test_apply_plan_refuses_refreshed_loser_embedding():
+    conn = _store_with_duplicates()
+    plan = lesson_pruner.build_plan(conn)
+    memory_store.refresh_lesson_embedding(
+        conn, "a1", embeddings.to_blob([0.0, 0.0, 1.0]),
+        TEST_EMBEDDING_MODEL, TEST_EMBEDDING_REVISION,
+    )
+    assert lesson_pruner.apply_plan(conn, plan) == 1  # unaffected b pair
+    assert memory_store.get_lesson_text(conn, "a1") == "short lesson"
+    assert memory_store.get_lesson_text(conn, "a2") is not None
+
+
+def test_apply_plan_refuses_refreshed_keeper_embedding():
+    conn = _store_with_duplicates()
+    plan = lesson_pruner.build_plan(conn)
+    memory_store.refresh_lesson_embedding(
+        conn, "a2", embeddings.to_blob([0.0, 0.0, 1.0]),
+        TEST_EMBEDDING_MODEL, TEST_EMBEDDING_REVISION,
+    )
+    assert lesson_pruner.apply_plan(conn, plan) == 1
+    assert memory_store.get_lesson_text(conn, "a1") == "short lesson"

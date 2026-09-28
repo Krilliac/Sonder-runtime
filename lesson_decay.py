@@ -14,6 +14,8 @@ while tests stay offline and deterministic. Wiring into memory_store /
 retriever is done elsewhere; this file is logic only.
 """
 import math
+import itertools
+import heapq
 
 # Default half-life for age decay, in days. After this many days a lesson's
 # age-decayed contribution is halved; after two half-lives it is quartered,
@@ -30,6 +32,8 @@ DEFAULT_USAGE_WEIGHT = 0.05
 # "about the same thing" for contradiction detection. Below this we assume
 # they simply address different topics and cannot contradict each other.
 DEFAULT_SIM_THRESHOLD = 0.8
+MAX_CONTRADICTION_LESSONS = 256
+MAX_CONFLICTS = 100
 
 # Text tokens that flip the polarity of a directive-style lesson. Used only as
 # a fallback when a lesson carries no explicit numeric/signal outcome.
@@ -220,17 +224,20 @@ def detect_contradictions(
     supplies real embedding similarity while tests stay offline. For every
     unordered pair of lessons whose similarity is ``>= sim_threshold`` and
     whose outcome polarities are strictly opposite (one +1, one -1), a
-    conflict record is emitted. Similar-but-agreeing pairs, dissimilar pairs,
+    conflict record is retained up to MAX_CONFLICTS. Similar-but-agreeing pairs, dissimilar pairs,
     and pairs where either side is polarity-neutral are never flagged.
 
     Outcome polarity is resolved from a lesson's numeric ``score``/``reward``,
     else a coarse ``signal`` string, else the directive polarity of its
     ``text``. Returns a list of dicts ``{"a", "b", "similarity", "reason"}``
-    in deterministic (i < j) order. Pure -- inputs are not mutated.
+    in deterministic (i < j) order. Inputs over MAX_CONTRADICTION_LESSONS
+    are rejected before pairwise work. Pure -- inputs are not mutated.
     """
-    items = list(lessons)
+    items = list(itertools.islice(lessons, MAX_CONTRADICTION_LESSONS + 1))
+    if len(items) > MAX_CONTRADICTION_LESSONS:
+        raise ValueError("lesson contradiction work budget exceeded")
     threshold = _finite(sim_threshold)
-    conflicts = []
+    conflicts = []  # Bounded min-heap: keep strongest similarity, then earliest pair.
     for i in range(len(items)):
         a = items[i]
         a_text = _lesson_field(a, "text", "")
@@ -249,5 +256,9 @@ def detect_contradictions(
                 "similar (sim={:.3f} >= {:.3f}) but opposite outcomes "
                 "({:+d} vs {:+d})".format(sim, threshold, a_pol, b_pol)
             )
-            conflicts.append({"a": a, "b": b, "similarity": sim, "reason": reason})
-    return conflicts
+            item = (sim, -i, -j, {"a": a, "b": b, "similarity": sim, "reason": reason})
+            if len(conflicts) < MAX_CONFLICTS:
+                heapq.heappush(conflicts, item)
+            elif item[:3] > conflicts[0][:3]:
+                heapq.heapreplace(conflicts, item)
+    return [item[3] for item in sorted(conflicts, key=lambda item: (-item[1], -item[2]))]

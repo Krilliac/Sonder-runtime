@@ -218,6 +218,9 @@ def contradiction_findings(conn, sim_threshold=None, limit=20):
             unit_by_text[text] = [x / norm for x in vector]
         if len(candidates) < 2:
             continue
+        # _load_lessons orders this bounded window oldest first. Keep its most
+        # recent scored candidates within the pure detector's work budget.
+        candidates = candidates[-lesson_decay.MAX_CONTRADICTION_LESSONS:]
         conflicts = lesson_decay.detect_contradictions(
             candidates,
             # Bind this space's vectors explicitly; the callback is consumed

@@ -2254,7 +2254,7 @@ def all_lesson_tombstones(conn):
     return [dict(row) for row in rows]
 
 
-def tombstone_lesson(conn, lesson_id):
+def tombstone_lesson(conn, lesson_id, *, commit=True):
     """Remove a duplicate lesson while preserving a non-retrievable denial record.
 
     This intentionally differs from ``delete_lesson``: explicit privacy/user
@@ -2283,7 +2283,8 @@ def tombstone_lesson(conn, lesson_id):
             ),
         )
     deleted = _delete_lesson_rows(conn, lesson_id)
-    conn.commit()
+    if commit:
+        conn.commit()
     return deleted
 
 

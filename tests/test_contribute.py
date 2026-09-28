@@ -1,6 +1,9 @@
 import memory_store as ms
 import contribute
 import time
+import hashlib
+import io
+import json
 
 
 def _conn():
@@ -9,6 +12,26 @@ def _conn():
 
 def test_is_shareable_generic_sentence():
     assert contribute.is_shareable("Use two pointers to merge sorted arrays.") is True
+
+
+def test_unmarked_private_lesson_requires_explicit_approval():
+    c = _conn()
+    text = "The Alder project prompt requires a silent override."
+    ms.add_lesson(c, "private", text, None, "seed")
+    assert contribute.scrubbed_lessons(c) == []
+    approved = {hashlib.sha256(text.encode()).hexdigest(): "Review override behavior before release."}
+    assert [row["text"] for row in contribute.scrubbed_lessons(c, approved)] == [
+        "Review override behavior before release."
+    ]
+
+
+def test_approval_file_loads_exact_source_digest(monkeypatch):
+    text = "The Alder project prompt requires a silent override."
+    digest = hashlib.sha256(text.encode()).hexdigest()
+    reviewed = "Review override behavior before release."
+    row = json.dumps({"source_sha256": digest, "text": reviewed}) + "\n"
+    monkeypatch.setattr(contribute.io, "open", lambda *_args, **_kwargs: io.StringIO(row))
+    assert contribute.load_approved_rewrites("reviewed.jsonl") == {digest: reviewed}
 
 
 def test_is_shareable_rejects_windows_path():
@@ -128,7 +151,11 @@ def test_scrubbed_lessons_filters_mixed_db():
     ms.add_lesson(c, "3", "Prefer early returns over deep nesting.", None, "int3")
     ms.add_lesson(c, "4", "y" * 400, None, "int4")
 
-    result = contribute.scrubbed_lessons(c)
+    approved = {
+        hashlib.sha256(text.encode()).hexdigest(): text
+        for text in ("Use a set for O(1) membership tests.", "Prefer early returns over deep nesting.")
+    }
+    result = contribute.scrubbed_lessons(c, approved)
 
     texts = {lesson["text"] for lesson in result}
     assert texts == {
@@ -146,7 +173,10 @@ def test_scrubbed_lessons_never_exports_arbitrary_local_identifier():
     private_id = "alice@example.com"
     ms.add_lesson(c, private_id, "Prefer immutable data at API boundaries.", None, "int")
 
-    result = contribute.scrubbed_lessons(c)
+    text = "Prefer immutable data at API boundaries."
+    result = contribute.scrubbed_lessons(
+        c, {hashlib.sha256(text.encode()).hexdigest(): text},
+    )
 
     assert len(result) == 1
     assert private_id not in repr(result)

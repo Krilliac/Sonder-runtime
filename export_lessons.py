@@ -2,13 +2,14 @@
 
 The raw memory.db is a binary SQLite file (churns every interaction, and will
 eventually hold interactions with private code) so it stays gitignored.  This
-legacy convenience export is intentionally held to the same conservative
-privacy boundary as ``contribute.py``: only short, generic lessons without
-private markers are written.  The generated JSONL is therefore suitable for
-review before committing, but it is never an export of the complete local
-memory corpus. Run: python export_lessons.py
+legacy convenience export uses ``contribute.py``'s explicit review boundary.
+By default it writes no lessons. To export reviewed text, pass --approved-file
+with JSONL rows: {"source_sha256": "<sha256 of exact original text>",
+"text": "<reviewed generic rewrite>"}. The rewrite is screened for known
+private markers and length. Review the resulting JSONL before sharing it.
 """
 import io
+import argparse
 import json
 import os
 import sys
@@ -19,15 +20,13 @@ import sonder_runtime.adapters.memory_store as memory_store  # noqa
 import sonder_paths  # noqa
 
 
-def main(out="lessons.jsonl", db=None):
+def main(out="lessons.jsonl", db=None, approved_rewrites=None):
     # Same store every other tool uses (SONDER_DB/SONDER_HOME); see contribute.
     db = db or sonder_paths.memory_db_path()
     conn = memory_store.connect(db)
     try:
-        # Do not create a second, weaker "safe export" policy here.  Lessons
-        # can be distilled from private interactions, so reuse the explicitly
-        # reviewed contribution filter (including non-identifying export IDs).
-        lessons = contribute.scrubbed_lessons(conn)
+        # Reuse the contribution approval and privacy screen.
+        lessons = contribute.scrubbed_lessons(conn, approved_rewrites)
     finally:
         conn.close()
     with io.open(out, "w", encoding="utf-8", newline="\n") as f:
@@ -37,4 +36,7 @@ def main(out="lessons.jsonl", db=None):
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--approved-file", help="JSONL rows with source_sha256 and reviewed generic text")
+    args = parser.parse_args()
+    main(approved_rewrites=contribute.load_approved_rewrites(args.approved_file))
