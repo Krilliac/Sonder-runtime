@@ -978,6 +978,14 @@ def test_loop_global_controls_require_admin_on_shared_http(action_type):
 @contextmanager
 def _http_server(monkeypatch):
     monkeypatch.setattr(ts, "_maybe_live_reload", lambda: None)
+    # Do what serve.run() does before it binds, so the first request does not
+    # pay it inside the handler (a cold app-graph import is ~5 s and the
+    # operations store is migrated on first use; together they outlasted this
+    # client's 5 s timeout under load).
+    ts._live_telemetry_application()
+    warm_operations = getattr(ts.sonder_lifecycle.get(), "operations", None)
+    if callable(warm_operations):  # some tests install a minimal fake lifecycle
+        warm_operations()
     httpd = ts.ThreadingHTTPServer(("127.0.0.1", 0), ts.Handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()

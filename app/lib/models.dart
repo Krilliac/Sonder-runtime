@@ -196,16 +196,19 @@ class ChatRefusal {
   final String callId;
   final String tool;
   final String reason;
+
+  /// The permission mode that refused the call, as the server reported it.
+  final String mode;
   final List<String> remedies;
 
   const ChatRefusal({
     this.callId = '',
     this.tool = '',
     this.reason = '',
+    this.mode = '',
     this.remedies = const [],
   });
 
-  static final RegExp _callId = RegExp(r'/approve ([0-9a-f]{8,64})\b');
   // Case-sensitive: the server's gates always write lowercase `refused`,
   // while a model answer that merely opens with "Refused connections …"
   // must not lose its rating chips.
@@ -224,27 +227,29 @@ class ChatRefusal {
       callId: RegExp(r'^[0-9a-f]{8,64}$').hasMatch(id) ? id : '',
       tool: _boundedMetadataText(json['tool'], 128),
       reason: _boundedMetadataText(json['reason'], 1024),
+      mode: _boundedMetadataText(json['mode'], 32),
       remedies: remedies,
     );
   }
 
-  /// Text fallback until server S1: the reply starts with `refused` and may
-  /// name `/approve <call id>`. Returns null for any other reply.
+  /// Text fallback for servers without S1: the reply starts with `refused`.
+  /// Returns null for any other reply.
+  ///
+  /// Reply text is model-authored, so it never carries approval authority:
+  /// a `/approve <id>` inside it is ignored and [callId] stays empty. Only
+  /// the server's structured `sonder_receipt.refusal` can offer "Approve
+  /// this call once".
   static ChatRefusal? fromText(String text) {
     if (!_refusedPrefix.hasMatch(text)) return null;
-    final id = _callId.firstMatch(text)?.group(1) ?? '';
     final firstLine = text.trim().split('\n').first;
-    return ChatRefusal(
-      callId: id,
-      reason: _boundedMetadataText(firstLine, 1024),
-      remedies: id.isEmpty ? const [] : ['/approve $id'],
-    );
+    return ChatRefusal(reason: _boundedMetadataText(firstLine, 1024));
   }
 
   Map<String, Object> toJson() => {
         if (callId.isNotEmpty) 'call_id': callId,
         if (tool.isNotEmpty) 'tool': tool,
         if (reason.isNotEmpty) 'reason': reason,
+        if (mode.isNotEmpty) 'mode': mode,
         if (remedies.isNotEmpty) 'remedies': remedies,
       };
 }

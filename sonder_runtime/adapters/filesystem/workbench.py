@@ -759,6 +759,26 @@ def _write_stdin(pipe, payload):
             pass
 
 
+def _abandon_child(proc, threads):
+    """Kill and reap ``proc`` and close its pipes after a failed I/O setup."""
+    try:
+        _terminate_process_tree(proc)
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    for stream in (proc.stdin, proc.stdout, proc.stderr):
+        try:
+            if stream is not None:
+                stream.close()
+        except (OSError, ValueError):
+            pass
+    for thread in threads:
+        thread.join(timeout=2)
+
+
 def _terminate_process_tree(proc):
     if proc.poll() is not None:
         return
@@ -920,24 +940,32 @@ def run_program(
     stderr_bytes = bytearray()
     stdout_state = {"bytes": 0}
     stderr_state = {"bytes": 0}
-    readers = [
-        owned_runtime_thread(
-            target=_drain_pipe,
-            args=(proc.stdout, stdout_bytes, stdout_state, output_limit),
-            daemon=True,
-        ),
-        owned_runtime_thread(
-            target=_drain_pipe,
-            args=(proc.stderr, stderr_bytes, stderr_state, output_limit),
-            daemon=True,
-        ),
-    ]
-    writer = owned_runtime_thread(
-        target=_write_stdin, args=(proc.stdin, input_bytes), daemon=True,
-    )
-    for thread in readers:
-        thread.start()
-    writer.start()
+    started_threads = []
+    try:
+        readers = [
+            owned_runtime_thread(
+                target=_drain_pipe,
+                args=(proc.stdout, stdout_bytes, stdout_state, output_limit),
+                daemon=True,
+            ),
+            owned_runtime_thread(
+                target=_drain_pipe,
+                args=(proc.stderr, stderr_bytes, stderr_state, output_limit),
+                daemon=True,
+            ),
+        ]
+        writer = owned_runtime_thread(
+            target=_write_stdin, args=(proc.stdin, input_bytes), daemon=True,
+        )
+        for thread in (*readers, writer):
+            thread.start()
+            started_threads.append(thread)
+    except BaseException:
+        # The child is already running, detached into its own process group.
+        # If the owned-thread factory refuses a reader or the writer, nothing
+        # would ever wait on, time out, or kill it: reap it here instead.
+        _abandon_child(proc, started_threads)
+        raise
     try:
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
