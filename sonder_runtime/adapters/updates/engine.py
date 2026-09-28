@@ -18,7 +18,7 @@ from pathlib import Path
 
 from ..filesystem.durable_locks import exclusive_file_lock
 from ..persistence import migrations as sonder_migrations
-from . import service as sonder_updates
+import sonder_runtime.adapters.updates.service as sonder_updates
 from ...platform import paths as sonder_paths
 from ...platform import version as sonder_version
 from .service import (
