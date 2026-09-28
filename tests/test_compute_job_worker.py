@@ -29,7 +29,7 @@ from sonder_runtime.application.execution.world_control import (
     OutputWatermark,
 )
 from sonder_runtime.application.ports.jobs import JobIdentity, JobRecord, JobStatus
-from sonder_runtime.domain.common.errors import Conflict, InvalidInput
+from sonder_runtime.domain.common.errors import Conflict, InvalidInput, NotFound
 from sonder_runtime.domain.compute_fabric import WorkloadKind
 from sonder_runtime.adapters.execution.process_jobs import SubprocessJobProvider
 from sonder_runtime.adapters.extensions.memory_limits import (
@@ -37,7 +37,42 @@ from sonder_runtime.adapters.extensions.memory_limits import (
     ProcessContainmentResult,
 )
 from sonder_runtime.adapters.persistence.sqlite.job_registry import SQLiteDurableJobRegistry
-from sonder_runtime.adapters.process_termination import ProcessTreeSupervisor
+from sonder_runtime.adapters.process_termination import ProcessTreeSupervisor
+
+
+@pytest.fixture(autouse=True)
+def _private_spools(tmp_path, monkeypatch):
+    """Keep compute input/artifact spools per test.
+
+    The spools live under the system temp directory; sharing them across runs
+    let leftovers from earlier runs trip the spool directory limit.
+    """
+    import tempfile
+
+    private = tmp_path / "system-temp"
+    private.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(private))
+
+
+def test_stale_input_stages_are_reaped_before_the_spool_limit_is_checked(tmp_path):
+    import time
+
+    from sonder_runtime.application.compute_fabric.spool_budget import (
+        counted_directories, reap_stale_directories,
+    )
+
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    old = time.time() - 7 * 86400
+    for index in range(70):
+        stage = spool / f"cf-stale-{index}"
+        stage.mkdir()
+        os.utime(stage, (old, old))
+    fresh = spool / "cf-live"
+    fresh.mkdir()
+
+    assert reap_stale_directories(spool, max_age_seconds=2 * 86400) == 70
+    assert [path.name for path in counted_directories(spool, max_directories=64)] == ["cf-live"]
 
 
 @pytest.fixture(autouse=True)
@@ -323,6 +358,130 @@ def test_worker_verifies_digest_bound_inputs_before_launch(tmp_path: Path) -> No
         ))
 
 
+def test_worker_rejects_staging_over_configured_disk_budget_before_copy(
+    tmp_path: Path,
+) -> None:
+    import hashlib
+
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "input.bin").write_bytes(b"abc")
+    provider = CapturingProvider()
+    worker = ComputeJobWorker(
+        worker_id="worker-1",
+        catalog={"pytest": _entry()},
+        workspace_mappings={"sonder": tmp_path},
+        provider=provider,
+        max_input_staging_bytes=2,
+    )
+    with pytest.raises(InvalidInput, match="staging.*limit"):
+        worker.submit(_envelope(
+            arguments=("input.bin",),
+            input_artifacts=(DigestBoundInput(
+                "input.bin", 3, hashlib.sha256(b"abc").hexdigest(),
+            ),),
+        ))
+    assert provider.request is None
+
+
+def test_worker_rejects_staging_when_temp_volume_lacks_headroom(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import hashlib
+    from types import SimpleNamespace
+
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "input.bin").write_bytes(b"abc")
+    provider = CapturingProvider()
+    worker = ComputeJobWorker(
+        worker_id="worker-1", catalog={"pytest": _entry()},
+        workspace_mappings={"sonder": tmp_path}, provider=provider,
+    )
+    monkeypatch.setattr(
+        jobs_module.shutil, "disk_usage",
+        lambda _path: SimpleNamespace(free=3),
+    )
+    with pytest.raises(InvalidInput, match="staging.*space"):
+        worker.submit(_envelope(
+            arguments=("input.bin",),
+            input_artifacts=(DigestBoundInput(
+                "input.bin", 3, hashlib.sha256(b"abc").hexdigest(),
+            ),),
+        ))
+    assert provider.request is None
+
+
+def test_worker_counts_existing_input_stages_against_aggregate_limit(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import hashlib
+
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "input.bin").write_bytes(b"abc")
+    stage_root = tmp_path / "stages"
+    stage_root.mkdir()
+    monkeypatch.setattr(
+        ComputeJobWorker, "_input_stage_base", staticmethod(lambda: stage_root),
+    )
+    worker = ComputeJobWorker(
+        worker_id="worker-1", catalog={"pytest": _entry()},
+        workspace_mappings={"sonder": tmp_path}, provider=CapturingProvider(),
+        max_input_staging_bytes=3, max_input_spool_bytes=5,
+    )
+    input_artifacts = (DigestBoundInput(
+        "input.bin", 3, hashlib.sha256(b"abc").hexdigest(),
+    ),)
+    worker.submit(_envelope(arguments=("input.bin",), input_artifacts=input_artifacts))
+    with pytest.raises(InvalidInput, match="staging.*aggregate"):
+        worker.submit(_envelope(
+            idempotency_key="idem-second", arguments=("input.bin",),
+            input_artifacts=input_artifacts,
+        ))
+
+
+def test_terminal_input_stage_is_released_when_artifact_collection_fails(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import hashlib
+
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "input.bin").write_bytes(b"abc")
+    stage_root = tmp_path / "stages"
+    stage_root.mkdir()
+    monkeypatch.setattr(
+        ComputeJobWorker, "_input_stage_base", staticmethod(lambda: stage_root),
+    )
+
+    class CompletedProvider(CapturingProvider):
+        def wait(self, job_id, *, timeout=None):
+            return ProcessJobWait(
+                JobRecord(JobIdentity(job_id, "compute-test", "controller-job", "idem-1"),
+                          status=JobStatus.SUCCEEDED),
+                exit_code=0,
+            )
+
+    worker = ComputeJobWorker(
+        worker_id="worker-1", catalog={"pytest": _entry()},
+        workspace_mappings={"sonder": tmp_path}, provider=CompletedProvider(),
+    )
+    started = worker.submit(_envelope(
+        arguments=("input.bin",),
+        input_artifacts=(DigestBoundInput(
+            "input.bin", 3, hashlib.sha256(b"abc").hexdigest(),
+        ),),
+    ))
+    assert any(stage_root.iterdir())
+    monkeypatch.setattr(worker, "_collect_artifacts", lambda _receipt: (_ for _ in ()).throw(
+        InvalidInput("artifact collection failed")
+    ))
+    with pytest.raises(InvalidInput, match="artifact collection failed"):
+        worker.status(started.remote_job_id)
+    assert not any(path.is_dir() for path in stage_root.iterdir())
+
+
 def test_worker_rejects_opened_digest_input_outside_workspace(
     tmp_path: Path, monkeypatch,
 ) -> None:
@@ -596,6 +755,73 @@ def test_worker_emits_verified_receipts_for_catalog_artifacts(tmp_path: Path) ->
     assert worker.read_artifact(
         started.remote_job_id, "report.json", max_bytes=1024
     ).content == b'{"ok":true}'
+
+
+def test_artifact_spool_quota_preserves_first_receipt_and_denies_next(
+    tmp_path: Path,
+) -> None:
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "report.json").write_bytes(b"abcdefgh")
+
+    class CompletedProvider(CapturingProvider):
+        def wait(self, job_id, *, timeout=None):
+            return ProcessJobWait(
+                JobRecord(JobIdentity(job_id, "compute-test", "controller-job", "idem-1"),
+                          status=JobStatus.SUCCEEDED),
+                exit_code=0,
+            )
+
+    worker = ComputeJobWorker(
+        worker_id="worker-1",
+        catalog={"pytest": replace(_entry(), artifact_paths=("report.json",))},
+        workspace_mappings={"sonder": tmp_path},
+        provider=CompletedProvider(),
+        max_artifact_spool_bytes=8,
+    )
+    first = worker.submit(_envelope())
+    assert worker.status(first.remote_job_id).artifacts[0].size_bytes == 8
+    second = worker.submit(_envelope(idempotency_key="idem-2"))
+    with pytest.raises(InvalidInput, match="artifact spool.*limit"):
+        worker.status(second.remote_job_id)
+    assert worker.read_artifact(first.remote_job_id, "report.json").content == b"abcdefgh"
+
+
+def test_artifact_spool_reclaims_expired_receipt_with_snapshot(
+    tmp_path: Path,
+) -> None:
+    import hashlib
+
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "report.json").write_bytes(b"abcdefgh")
+
+    class CompletedProvider(CapturingProvider):
+        def wait(self, job_id, *, timeout=None):
+            return ProcessJobWait(
+                JobRecord(JobIdentity(job_id, "compute-test", "controller-job", "idem-1"),
+                          status=JobStatus.SUCCEEDED),
+                exit_code=0,
+            )
+
+    worker = ComputeJobWorker(
+        worker_id="worker-1",
+        catalog={"pytest": replace(_entry(), artifact_paths=("report.json",))},
+        workspace_mappings={"sonder": tmp_path}, provider=CompletedProvider(),
+        max_artifact_spool_bytes=8, artifact_retention_seconds=1,
+    )
+    first = worker.submit(_envelope())
+    worker.status(first.remote_job_id)
+    first_stage = worker._artifact_root.path / hashlib.sha256(
+        first.remote_job_id.encode("utf-8")
+    ).hexdigest()
+    os.utime(first_stage / "receipt.json", (0, 0))
+    second = worker.submit(_envelope(idempotency_key="idem-2"))
+    assert worker.status(second.remote_job_id).artifacts[0].size_bytes == 8
+    assert not first_stage.exists()
+    with pytest.raises(NotFound, match="unavailable"):
+        worker.read_artifact(first.remote_job_id, "report.json")
+    assert not first_stage.exists()
 
 
 def test_worker_rejects_preexisting_linked_artifact_spool(tmp_path: Path) -> None:

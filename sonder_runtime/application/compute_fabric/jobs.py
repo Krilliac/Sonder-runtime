@@ -16,6 +16,7 @@ import re
 import shutil
 import stat as stat_module
 import tempfile
+import time
 from threading import RLock
 from typing import Any, Callable, Mapping
 
@@ -31,6 +32,9 @@ from .artifact_spool import (
     ArtifactSpoolError,
     PrivateDirectoryAnchor,
 )
+from .spool_budget import (
+    counted_directories, locked_spool, reap_stale_directories, regular_file_bytes,
+)
 
 
 _IDENTITY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -44,6 +48,12 @@ _REMOTE_JOB_STATES = frozenset({
 })
 MAX_COMPUTE_ARTIFACT_BYTES = 64 * 1024 * 1024
 MAX_COMPUTE_ARTIFACTS = 256
+DEFAULT_MAX_INPUT_STAGING_BYTES = 8 * 1024 * 1024 * 1024
+DEFAULT_MAX_INPUT_SPOOL_BYTES = 32 * 1024 * 1024 * 1024
+DEFAULT_MAX_ARTIFACT_SPOOL_BYTES = 32 * 1024 * 1024 * 1024
+DEFAULT_MAX_ARTIFACT_SPOOL_JOBS = 1024
+DEFAULT_ARTIFACT_RETENTION_SECONDS = 14 * 86400
+MIN_COMPUTE_DISK_HEADROOM_BYTES = 512 * 1024 * 1024
 _ARTIFACT_LOCK_STRIPES = 64
 # Upper bound on journaled cancellation attempts for one compute job.  Each
 # retry needs every earlier attempt settled, so this also bounds the keyed
@@ -521,6 +531,12 @@ class ComputeJobWorker:
         budget: WorkerBudget | Callable[[], WorkerBudget] | None = None,
         reservation_seconds: int = 30,
         effect_binding: AuthenticatedWorkerBinding | None = None,
+        max_input_staging_bytes: int = DEFAULT_MAX_INPUT_STAGING_BYTES,
+        max_input_spool_bytes: int = DEFAULT_MAX_INPUT_SPOOL_BYTES,
+        max_artifact_spool_bytes: int = DEFAULT_MAX_ARTIFACT_SPOOL_BYTES,
+        max_artifact_spool_jobs: int = DEFAULT_MAX_ARTIFACT_SPOOL_JOBS,
+        artifact_retention_seconds: int = DEFAULT_ARTIFACT_RETENTION_SECONDS,
+        min_disk_headroom_bytes: int = MIN_COMPUTE_DISK_HEADROOM_BYTES,
     ) -> None:
         _identity(worker_id, "worker_id")
         if set(catalog) != {entry.entry_id for entry in catalog.values()}:
@@ -535,6 +551,27 @@ class ComputeJobWorker:
         if (capacity is None) != (budget is None):
             raise ValueError("worker capacity and budget must be configured together")
         bounded_positive(reservation_seconds, "reservation_seconds", 300)
+        for name, value, upper in (
+            ("max_input_staging_bytes", max_input_staging_bytes, 1 << 40),
+            ("max_input_spool_bytes", max_input_spool_bytes, 1 << 40),
+            ("max_artifact_spool_bytes", max_artifact_spool_bytes, 1 << 40),
+            ("min_disk_headroom_bytes", min_disk_headroom_bytes, 1 << 40),
+        ):
+            if type(value) is not int or not 1 <= value <= upper:
+                raise ValueError(f"{name} must be within 1..{upper}")
+        if max_input_staging_bytes > max_input_spool_bytes:
+            raise ValueError("per-job input staging limit exceeds spool limit")
+        if type(max_artifact_spool_jobs) is not int or not 1 <= max_artifact_spool_jobs <= 4096:
+            raise ValueError("max_artifact_spool_jobs must be within 1..4096")
+        if (type(artifact_retention_seconds) is not int
+                or not 1 <= artifact_retention_seconds <= 30 * 86400):
+            raise ValueError("artifact_retention_seconds must be within 1..30 days")
+        self._max_input_staging_bytes = max_input_staging_bytes
+        self._max_input_spool_bytes = max_input_spool_bytes
+        self._max_artifact_spool_bytes = max_artifact_spool_bytes
+        self._max_artifact_spool_jobs = max_artifact_spool_jobs
+        self._artifact_retention_seconds = artifact_retention_seconds
+        self._min_disk_headroom_bytes = min_disk_headroom_bytes
         self._capacity = capacity
         self._budget = budget
         self._reservation_seconds = reservation_seconds
@@ -714,15 +751,28 @@ class ComputeJobWorker:
         input_stage = None
         if envelope.input_artifacts:
             try:
-                input_stage, argv = self._stage_inputs(
-                    remote_job_id,
-                    root,
-                    cwd,
-                    argv,
-                    envelope.input_artifacts,
-                )
+                requested = sum(item.size_bytes for item in envelope.input_artifacts)
+                if requested > self._max_input_staging_bytes:
+                    raise ValueError("input staging exceeds the per-job limit")
+                spool = self._input_stage_base()
+                with locked_spool(spool):
+                    # Stages older than any job deadline (<= 1 day) are leftovers.
+                    reap_stale_directories(spool, max_age_seconds=2 * 86400)
+                    stages = tuple(counted_directories(spool, max_directories=64))
+                    if len(stages) >= 64:
+                        raise ValueError("input staging exceeds the stage count limit")
+                    occupied = sum(regular_file_bytes(path) for path in stages)
+                    if occupied + requested > self._max_input_spool_bytes:
+                        raise ValueError("input staging exceeds the aggregate limit")
+                    if shutil.disk_usage(spool).free < requested + self._min_disk_headroom_bytes:
+                        raise ValueError("input staging lacks disk space headroom")
+                    input_stage, argv = self._stage_inputs(
+                        remote_job_id, root, cwd, argv, envelope.input_artifacts,
+                    )
             except ValueError as exc:
                 raise InvalidInput(str(exc)) from exc
+            except OSError as exc:
+                raise InvalidInput("input staging budget is unavailable") from exc
         request = ProcessJobRequest(
             identity=JobIdentity(
                 job_id=remote_job_id,
@@ -754,7 +804,11 @@ class ComputeJobWorker:
             prior = self._by_idempotency.get(envelope.idempotency_key)
             if prior is not None:
                 if prior.request_sha256 != envelope.request_sha256:
+                    if input_stage is not None:
+                        self._remove_input_stage(input_stage)
                     raise Conflict("idempotency key is already bound to another request")
+                if input_stage is not None:
+                    self._remove_input_stage(input_stage)
                 return prior
             # Keep reservation, process creation, and receipt publication in one
             # worker critical section. The provider durably reserves the stable
@@ -833,7 +887,14 @@ class ComputeJobWorker:
             return receipt
         root, cwd, artifact_paths = context
         artifact_lock = self._artifact_lock_for(receipt.remote_job_id)
-        with artifact_lock:
+        with artifact_lock, locked_spool(self._artifact_root.path):
+            used_bytes, jobs = self._artifact_spool_usage_locked(
+                exclude_job=receipt.remote_job_id,
+            )
+            job_key = hashlib.new("sha256", receipt.remote_job_id.encode("utf-8")).hexdigest()
+            if (not (self._artifact_root.path / job_key).exists()
+                    and jobs >= self._max_artifact_spool_jobs):
+                raise InvalidInput("compute artifact spool job limit exceeded")
             with self._artifact_stage(receipt) as stage:
                 durable = self._load_artifact_manifest(stage, receipt)
                 if durable is not None:
@@ -855,6 +916,8 @@ class ComputeJobWorker:
                     try:
                         size_bytes, sha256 = self._snapshot_artifact(
                             stage, root, candidate, snapshot_name,
+                            max_copy_bytes=self._max_artifact_spool_bytes - used_bytes,
+                            min_free_bytes=self._min_disk_headroom_bytes,
                         )
                     except FileNotFoundError:
                         continue
@@ -874,6 +937,7 @@ class ComputeJobWorker:
                         mime_type=mime_type,
                         sha256=sha256,
                     ))
+                    used_bytes += size_bytes
                 self._publish_artifact_manifest(stage, receipt, tuple(artifacts))
                 return self._with_artifacts(receipt, tuple(artifacts))
 
@@ -900,6 +964,50 @@ class ComputeJobWorker:
     def _artifact_stage_base() -> Path:
         return Path(tempfile.gettempdir()) / "sonder-compute-artifacts"
 
+    def _artifact_spool_usage_locked(self, *, exclude_job: str) -> tuple[int, int]:
+        """Count published and interrupted bytes; expire receipts with bytes.
+
+        Retention is seven days by default. Once expired, both the receipt and
+        snapshot are removed; callers must treat the old artifact as unavailable.
+        """
+        root = self._artifact_root.path
+        excluded = hashlib.new("sha256", exclude_job.encode("utf-8")).hexdigest()
+        total = jobs = 0
+        cutoff = time.time() - self._artifact_retention_seconds
+        for directory in counted_directories(root, max_directories=4096):
+            if not re.fullmatch(r"[0-9a-f]{64}", directory.name):
+                raise InvalidInput("compute artifact spool contains an invalid job")
+            marker = directory / "receipt.json"
+            if not marker.exists():
+                marker = directory / "binding.json"
+            if marker.is_symlink() or not marker.is_file():
+                raise InvalidInput("compute artifact spool binding is unavailable")
+            if directory.name != excluded and marker.stat().st_mtime <= cutoff:
+                stage, _ = self._artifact_root.child(directory.name)
+                with stage:
+                    for item in os.scandir(stage.path):
+                        if (not item.is_file(follow_symlinks=False)
+                                or not re.fullmatch(
+                                    r"[0-9a-f]{64}|snapshot-[a-z0-9_]+\.part|binding\.json|receipt\.json",
+                                    item.name,
+                                )):
+                            raise InvalidInput("compute artifact spool contains an unsafe file")
+                        stage.unlink(item.name)
+                os.rmdir(directory)
+                continue
+            jobs += 1
+            with os.scandir(directory) as entries:
+                for item in entries:
+                    if not item.is_file(follow_symlinks=False):
+                        raise InvalidInput("compute artifact spool contains an unsafe file")
+                    if re.fullmatch(r"[0-9a-f]{64}|snapshot-[a-z0-9_]+\.part", item.name):
+                        total += item.stat(follow_symlinks=False).st_size
+                    elif item.name not in {"binding.json", "receipt.json"}:
+                        raise InvalidInput("compute artifact spool contains an unexpected file")
+                    if total > self._max_artifact_spool_bytes:
+                        raise InvalidInput("compute artifact spool exceeds its aggregate limit")
+        return total, jobs
+
     @staticmethod
     def _artifact_snapshot_name(request_sha256: str, name: str) -> str:
         return hashlib.new(
@@ -922,11 +1030,13 @@ class ComputeJobWorker:
         ) % len(self._artifact_locks)
         return self._artifact_locks[stripe]
 
-    def _artifact_stage(self, receipt: RemoteJobReceipt) -> PrivateDirectoryAnchor:
+    def _artifact_stage(self, receipt: RemoteJobReceipt, *, create: bool = True) -> PrivateDirectoryAnchor:
         binding = self._artifact_binding(receipt)
         job_key = hashlib.new(
             "sha256", receipt.remote_job_id.encode("utf-8")
         ).hexdigest()
+        if not create and not (self._artifact_root.path / job_key).is_dir():
+            raise FileNotFoundError("compute artifact snapshot has expired")
         try:
             stage, created = self._artifact_root.child(job_key)
         except (ArtifactSpoolError, OSError) as exc:
@@ -1065,7 +1175,8 @@ class ComputeJobWorker:
         raise OSError("kernel-resolved open file paths are unsupported")
 
     @classmethod
-    def _copy_stable_stream(cls, stream, *, root: Path, target=None) -> tuple[int, str]:
+    def _copy_stable_stream(cls, stream, *, root: Path, target=None,
+                            max_copy_bytes: int = MAX_COMPUTE_ARTIFACT_BYTES) -> tuple[int, str]:
         opened_path = cls._opened_file_path(stream)
         if not opened_path.is_relative_to(root):
             raise InvalidInput("catalog artifact opened outside its configured workspace")
@@ -1076,10 +1187,14 @@ class ComputeJobWorker:
             raise InvalidInput("catalog artifact is not a regular file")
         if before.st_size > MAX_COMPUTE_ARTIFACT_BYTES:
             raise InvalidInput("catalog artifact exceeds the transport limit")
+        if target is not None and before.st_size > max_copy_bytes:
+            raise InvalidInput("compute artifact spool aggregate limit exceeded")
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             total += len(block)
             if total > MAX_COMPUTE_ARTIFACT_BYTES:
                 raise InvalidInput("catalog artifact exceeds the transport limit")
+            if target is not None and total > max_copy_bytes:
+                raise InvalidInput("compute artifact spool aggregate limit exceeded")
             digest.update(block)
             if target is not None:
                 target.write(block)
@@ -1107,6 +1222,9 @@ class ComputeJobWorker:
         root: Path,
         candidate: Path,
         snapshot_name: str,
+        *,
+        max_copy_bytes: int = MAX_COMPUTE_ARTIFACT_BYTES,
+        min_free_bytes: int = MIN_COMPUTE_DISK_HEADROOM_BYTES,
     ) -> tuple[int, str]:
         """Copy one contained stable handle into a private immutable snapshot."""
         descriptor, temporary_name = stage.create_temporary()
@@ -1116,7 +1234,13 @@ class ComputeJobWorker:
                 if not target_path.is_relative_to(stage.path):
                     raise InvalidInput("compute artifact snapshot escaped its private root")
                 with candidate.open("rb") as source:
-                    result = cls._copy_stable_stream(source, root=root, target=target)
+                    size = os.fstat(source.fileno()).st_size
+                    if shutil.disk_usage(stage.path).free < size + min_free_bytes:
+                        raise InvalidInput("compute artifact spool lacks disk space headroom")
+                    result = cls._copy_stable_stream(
+                        source, root=root, target=target,
+                        max_copy_bytes=max_copy_bytes,
+                    )
                 target.flush()
                 os.fsync(target.fileno())
             try:
@@ -1325,16 +1449,20 @@ class ComputeJobWorker:
                 self._by_job[remote_job_id] = refreshed
                 self._by_idempotency[receipt.idempotency_key] = refreshed
             receipt = refreshed
-        receipt = self._project_output(receipt)
-        receipt = self._collect_artifacts(receipt)
-        if receipt.state in {"succeeded", "failed", "cancelled", "interrupted"}:
+        terminal = receipt.state in {"succeeded", "failed", "cancelled", "interrupted"}
+        try:
+            receipt = self._project_output(receipt)
+            receipt = self._collect_artifacts(receipt)
+        finally:
+            if terminal:
+                self._cleanup_input_stage(remote_job_id)
+        if terminal:
             if receipt.state in {"failed", "interrupted"}:
                 logger.error(f"compute job reached terminal failure state: remote_job_id={remote_job_id!r}, state={receipt.state!r}")
                 logger.warning(f"compute job reached terminal failure state: remote_job_id={remote_job_id!r}, state={receipt.state!r}")
             if receipt.output_truncated:
                 logger.warning(f"compute job output was truncated: remote_job_id={remote_job_id!r}")
             logger.info(f"compute job terminal: remote_job_id={remote_job_id!r}, state={receipt.state!r}, artifacts={len(receipt.artifacts)}")
-            self._cleanup_input_stage(remote_job_id)
         with self._lock:
             self._by_job[remote_job_id] = receipt
             self._by_idempotency[receipt.idempotency_key] = receipt
@@ -1368,8 +1496,8 @@ class ComputeJobWorker:
             receipt.request_sha256, artifact.name,
         )
         try:
-            with self._artifact_lock_for(remote_job_id):
-                with self._artifact_stage(receipt) as stage:
+            with self._artifact_lock_for(remote_job_id), locked_spool(self._artifact_root.path):
+                with self._artifact_stage(receipt, create=False) as stage:
                     with stage.open_read(snapshot_name) as stream:
                         opened_path = self._opened_file_path(stream)
                         if not opened_path.is_relative_to(stage.path):

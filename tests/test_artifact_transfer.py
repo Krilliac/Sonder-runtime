@@ -249,6 +249,60 @@ def test_expired_staging_reaper_preserves_published_objects(transfers):
     )
 
 
+def test_expired_uploads_release_admission_slots_on_next_begin(transfers):
+    service, store, grant, context = transfers
+    for index in range(service.limits.active_per_scope):
+        begin(service, context, b"x", f"abandoned-{index}")
+    with store._connection() as conn:
+        conn.execute("UPDATE artifact_uploads SET expires=0")
+    assert begin(service, context, b"y", "replacement")["state"] == "open"
+    with store._connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM artifact_uploads WHERE state='open'"
+        ).fetchone()[0] == 1
+
+
+def test_terminal_upload_retention_reclaims_rows_and_sealed_bytes(
+    transfers, monkeypatch,
+):
+    service, old_store, grant, context = transfers
+    store = SQLiteArtifactTransferStore(
+        old_store.root, max_rows=2, terminal_retention_seconds=60,
+    )
+    service.store = store
+    first = begin(service, context, b"a", "first")["transfer_id"]
+    service.append_chunk(first, 0, digest(b"a"), b"a", context)
+    assert sealed(service, context, first)["state"] == "sealed"
+    second = begin(service, context, b"b", "second")["transfer_id"]
+    service.abort_upload(second, "abort-second", context)
+    with store._connection() as conn:
+        conn.execute(
+            "UPDATE artifact_uploads SET expires=0 WHERE id IN (?, ?)",
+            (first, second),
+        )
+    monkeypatch.setattr(store, "_terminal_retention_seconds", 0)
+    assert begin(service, context, b"c", "third")["state"] == "open"
+    with store._connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM artifact_uploads").fetchone()[0] == 1
+    with pytest.raises(TransferError, match="NOT_FOUND"):
+        service.inspect_upload(first, context)
+    assert not (store.root / grant.scope_id / first / digest(b"a")).exists()
+
+
+def test_aborted_rows_yield_metadata_capacity_before_retention_expires(transfers):
+    service, old_store, grant, context = transfers
+    store = SQLiteArtifactTransferStore(
+        old_store.root, max_rows=2, terminal_retention_seconds=86400,
+    )
+    service.store = store
+    first = begin(service, context, b"", "first")["transfer_id"]
+    service.abort_upload(first, "abort-first", context)
+    begin(service, context, b"x", "second")
+    assert begin(service, context, b"y", "third")["state"] == "open"
+    with pytest.raises(TransferError, match="NOT_FOUND"):
+        service.inspect_upload(first, context)
+
+
 def test_actual_process_exit_between_chunk_fsync_and_sql_commit(transfers):
     import subprocess
     import sys
