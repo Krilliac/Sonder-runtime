@@ -21,6 +21,8 @@ class ActivationJournalEntry:
     evidence_digest: str
     recovery_digest: str = ""
     error_types: tuple[str, ...] = ()
+    helper_nonce: str = ""
+    helper_argv: tuple[str, ...] = ()
 
 
 class ActivationJournal(Protocol):
@@ -41,10 +43,43 @@ class DurableActivationCoordinator:
             raise TypeError("release pointer must provide current and commit")
         self._pointer, self._helper, self._journal = pointer, helper, journal
         self._verifier, self._recovery_sink = verifier, recovery_sink
+        self._reconcile_pending()
+
+    def _reconcile_pending(self) -> None:
+        latest: dict[str, ActivationJournalEntry] = {}
+        for entry in self._journal.entries():
+            latest[entry.activation_id] = entry
+        for entry in latest.values():
+            if entry.phase == "recovery_failed":
+                raise RuntimeError("activation recovery failed; operator recovery required")
+            if entry.phase != "prepared":
+                continue
+            if not entry.helper_nonce:
+                raise RuntimeError("prepared activation lacks recovery nonce")
+            request = ActivationRequest(
+                entry.platform, entry.current_release, entry.target_release,
+                entry.evidence_digest, entry.helper_nonce, entry.helper_argv,
+            )
+            current = self._pointer.current()
+            if current not in (entry.current_release, entry.target_release):
+                raise RuntimeError("activation pointer changed during recovery")
+            recovery = self._recover(request)
+            restored = recovery.pointer_restored and not recovery.error_types
+            self._journal.append(self._entry(
+                entry.activation_id,
+                "recovered" if restored else "recovery_failed",
+                request, recovery_digest=recovery.digest,
+                error_types=recovery.error_types,
+            ))
+            if self._recovery_sink is not None:
+                self._recovery_sink.record(recovery)
+            if not restored:
+                raise ActivationRecoveryError(recovery)
 
     def activate(self, activation_id: str, request: ActivationRequest,
                  evidence: ReleaseEvidencePackage, *,
                  observed_dependencies: Mapping[str, str]) -> str:
+        self._reconcile_pending()
         if not isinstance(activation_id, str) or not activation_id.strip():
             raise ValueError("activation_id must be non-empty")
         if request.release_evidence_digest != evidence.package_digest:
@@ -61,13 +96,14 @@ class DurableActivationCoordinator:
             self._pointer.commit(request.target_release)
         except Exception as activation_error:
             recovery = self._recover(request)
+            restored = recovery.pointer_restored and not recovery.error_types
             self._journal.append(self._entry(
-                activation_id, "recovered" if recovery.pointer_restored else "recovery_failed",
+                activation_id, "recovered" if restored else "recovery_failed",
                 request, recovery_digest=recovery.digest, error_types=recovery.error_types,
             ))
             if self._recovery_sink is not None:
                 self._recovery_sink.record(recovery)
-            if not recovery.pointer_restored:
+            if not restored:
                 raise ActivationRecoveryError(recovery) from activation_error
             raise
         self._journal.append(self._entry(activation_id, "activated", request))
@@ -100,7 +136,7 @@ class DurableActivationCoordinator:
         return ActivationJournalEntry(
             activation_id, phase, request.platform, request.current_release,
             request.target_release, request.release_evidence_digest,
-            recovery_digest, error_types,
+            recovery_digest, error_types, request.helper_nonce, request.helper_argv,
         )
 
 

@@ -1,3 +1,7 @@
+from pathlib import Path
+
+import pytest
+
 from sonder_runtime.adapters.updates import engine
 from sonder_runtime.platform import version
 
@@ -30,3 +34,33 @@ class _StatusRepository:
 
     def list_plans(self, **_kwargs):
         return []
+
+    def accepted_versions(self):
+        return ()
+
+
+def test_installer_bootstrap_pointer_is_allowed_before_managed_activation(monkeypatch):
+    manager = object.__new__(engine.UpdateManager)
+    manager.repository = _StatusRepository()
+    manager.releases_dir = Path("/opt/sonder/releases")
+    manager.current_link = Path("/opt/sonder/current")
+    monkeypatch.setattr(engine.sonder_updates, "_read_pointer", lambda _link: "/opt/sonder/releases/bootstrap")
+
+    manager._assert_activation_consistent()
+
+
+def test_development_release_orders_before_final_release():
+    assert engine._release_order("0.9.0.dev0") < engine._release_order("0.9.0")
+    assert engine._release_order("0.9.0.dev0") < engine._release_order("0.9.0.dev1")
+    assert engine._release_order("0.9.0rc1.dev0") < engine._release_order("0.9.0rc1")
+
+
+def test_managed_release_still_requires_matching_pointer(monkeypatch):
+    manager = object.__new__(engine.UpdateManager)
+    manager.repository = _StatusRepository()
+    manager.repository.release_by_status = lambda _status: {"install_path": "/opt/sonder/releases/managed"}
+    manager.current_link = Path("/opt/sonder/current")
+    monkeypatch.setattr(engine.sonder_updates, "_read_pointer", lambda _link: "/opt/sonder/releases/other")
+
+    with pytest.raises(engine.UpdateError, match="disagree"):
+        manager._assert_activation_consistent()
