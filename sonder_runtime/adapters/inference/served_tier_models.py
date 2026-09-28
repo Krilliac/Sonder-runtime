@@ -9,9 +9,35 @@ to Sonder Inference.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from ..provider_bindings import provider_bindings_from_env
 from .sonder_inference_gateway import config_from_env
+
+
+_OBSERVED: ContextVar[dict[str, str] | None] = ContextVar(
+    "sonder_execution_route_served_models", default=None,
+)
+
+
+@contextmanager
+def observation_scope():
+    """Keep successful provider outcomes within one routed work request."""
+    token = _OBSERVED.set({})
+    try:
+        yield
+    finally:
+        _OBSERVED.reset(token)
+
+
+def record_served_model(tier: str, model: str, provider: str) -> None:
+    """Remember the last successful generation on a tier, when scoped."""
+    observed = _OBSERVED.get()
+    if observed is not None and isinstance(model, str) and model.strip():
+        # Mutate in place: a nested context (copy_context, asyncio task) shares
+        # the scope's dict, so the outcome is visible where the header is built.
+        observed[str(tier)] = "%s (%s)" % (model, provider)
 
 
 def served_prompt_model(
@@ -35,10 +61,10 @@ def served_prompt_model(
 
 
 def served_tier_models(tiers: Mapping[str, str], env: Mapping[str, str] | None = None) -> dict:
-    """``tiers`` with each Sonder Inference tier named ``"<model> (sonder_inference)"``.
+    """Label Inference tiers by configuration or a scoped successful response.
 
-    Any error reading the bindings returns the policy map unchanged: this only
-    labels output, so it must never fail the caller.
+    If bindings cannot be read, keep policy labels except for successful calls
+    observed in this routed request. Labeling must never fail the caller.
     """
     served = dict(tiers)
     try:
@@ -53,5 +79,8 @@ def served_tier_models(tiers: Mapping[str, str], env: Mapping[str, str] | None =
                 model = settings.tier_models.get(name, settings.model)
                 served[name] = "%s (sonder_inference)" % model
     except Exception:
-        return dict(tiers)
+        served = dict(tiers)
+    observed = _OBSERVED.get()
+    if observed:
+        served.update({tier: label for tier, label in observed.items() if tier in served})
     return served
