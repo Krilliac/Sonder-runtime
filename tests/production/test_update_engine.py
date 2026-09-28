@@ -96,6 +96,41 @@ def test_import_verifies_and_reports_available(env):
     assert plan["source_kind"] == "offline"
 
 
+def test_first_managed_upgrade_accepts_installer_bootstrap_pointer(env):
+    bootstrap = env / "releases" / "installer-bootstrap"
+    bootstrap.mkdir(parents=True)
+    sonder_updates.switch_active_pointer(env / "current", bootstrap)
+    manager = _manager(env)
+
+    plan = _import_ok(manager, env, version="1.1.0")
+    assert plan["status"] == "available"
+    done = manager.install(
+        plan["update_id"], confirm=confirm_nonce_for(plan),
+        allow_unverified=True, skip_backup=True,
+    )
+    assert done["status"] == "committed"
+    assert manager.repository.release_by_status("active")["version"] == "1.1.0"
+    assert "1.1.0" in _pointer_text(env / "current")
+
+
+def test_default_dev_bundle_does_not_block_later_upgrades(env):
+    manager = _manager(env)
+    source = _mini_source(env, "default-dev-src")
+    bundle = env / "default-dev-bundle"
+    build_bundle(source, bundle)
+    first = manager.import_offline(bundle, allow_unverified=True)
+    assert ".dev" in first["target_version"]
+    manager.install(first["update_id"], confirm=confirm_nonce_for(first),
+                    allow_unverified=True, skip_backup=True)
+
+    final_version = first["target_version"].split(".dev", 1)[0]
+    later = _import_ok(manager, env, version=final_version)
+    assert later["status"] == "available"
+    done = manager.install(later["update_id"], confirm=confirm_nonce_for(later),
+                           allow_unverified=True, skip_backup=True)
+    assert done["status"] == "committed"
+
+
 def test_import_rejects_tampered_archive(env):
     manager = _manager(env)
     source = _mini_source(env, "tampered-src")
@@ -357,6 +392,85 @@ def test_operator_rollback_switches_to_previous(env):
     assert "5.0.0" in _pointer_text(env / "current")
     demoted = manager.repository.release_by_status("previous")
     assert demoted["version"] == "5.1.0"
+
+
+def test_older_bundle_cannot_import_or_install_after_newer_release(env):
+    manager = _manager(env)
+    newer = _import_ok(manager, env, version="5.2.0")
+    older = _import_ok(manager, env, version="5.1.0")
+    manager.install(newer["update_id"], confirm=confirm_nonce_for(newer),
+                    allow_unverified=True, skip_backup=True)
+    with pytest.raises(sonder_updates.UpdateError, match="older|downgrade"):
+        manager.install(older["update_id"], confirm=confirm_nonce_for(older),
+                        allow_unverified=True)
+    assert manager.repository.release_by_status("active")["version"] == "5.2.0"
+    assert "5.2.0" in _pointer_text(env / "current")
+    source = _mini_source(env, "late-old-src")
+    bundle = env / "late-old-bundle"
+    build_bundle(source, bundle, version="5.0.0")
+    with pytest.raises(sonder_updates.UpdateError, match="older|downgrade"):
+        manager.import_offline(bundle, allow_unverified=True)
+
+
+def test_interrupted_install_reconciles_pointer_to_recorded_active_release(env, monkeypatch):
+    manager = _manager(env)
+    first = _import_ok(manager, env, version="5.3.0")
+    manager.install(first["update_id"], confirm=confirm_nonce_for(first),
+                    allow_unverified=True, skip_backup=True)
+    original = manager._switch_pointer
+    second = _import_ok(manager, env, version="5.4.0")
+
+    def interrupted_switch(target):
+        original(target)
+        raise KeyboardInterrupt("simulated process interruption")
+
+    monkeypatch.setattr(manager, "_switch_pointer", interrupted_switch)
+    with pytest.raises(KeyboardInterrupt):
+        manager.install(second["update_id"], confirm=confirm_nonce_for(second),
+                        allow_unverified=True, skip_backup=True)
+    recovered = _manager(env)
+    assert recovered.repository.release_by_status("active")["version"] == "5.3.0"
+    assert "5.3.0" in _pointer_text(env / "current")
+
+
+def test_interrupted_rollback_reconciles_under_same_activation_lock(env, monkeypatch):
+    manager = _manager(env)
+    first = _import_ok(manager, env, version="5.5.0")
+    manager.install(first["update_id"], confirm=confirm_nonce_for(first),
+                    allow_unverified=True, skip_backup=True)
+    second = _import_ok(manager, env, version="5.6.0")
+    manager.install(second["update_id"], confirm=confirm_nonce_for(second),
+                    allow_unverified=True, skip_backup=True)
+    previous = manager.repository.release_by_status("previous")
+    original = manager._switch_pointer
+
+    def interrupted_switch(target):
+        original(target)
+        raise KeyboardInterrupt("simulated rollback interruption")
+
+    monkeypatch.setattr(manager, "_switch_pointer", interrupted_switch)
+    with pytest.raises(KeyboardInterrupt):
+        manager.rollback(confirm=previous["release_id"][-8:])
+    recovered = _manager(env)
+    assert recovered.repository.release_by_status("active")["version"] == "5.6.0"
+    assert "5.6.0" in _pointer_text(env / "current")
+
+
+def test_operator_rollback_does_not_lower_installed_version_floor(env):
+    manager = _manager(env)
+    first = _import_ok(manager, env, version="5.7.0")
+    manager.install(first["update_id"], confirm=confirm_nonce_for(first),
+                    allow_unverified=True, skip_backup=True)
+    second = _import_ok(manager, env, version="5.8.0")
+    manager.install(second["update_id"], confirm=confirm_nonce_for(second),
+                    allow_unverified=True, skip_backup=True)
+    previous = manager.repository.release_by_status("previous")
+    manager.rollback(confirm=previous["release_id"][-8:])
+    source = _mini_source(env, "after-rollback-src")
+    bundle = env / "after-rollback-bundle"
+    build_bundle(source, bundle, version="5.7.1")
+    with pytest.raises(sonder_updates.UpdateError, match="older"):
+        manager.import_offline(bundle, allow_unverified=True)
 
 
 def test_rollback_refused_when_previous_release_missing(env):

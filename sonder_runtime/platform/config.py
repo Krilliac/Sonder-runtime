@@ -46,6 +46,7 @@ from sonder_runtime.platform.artifact_mobility_source_config import (
     artifact_mobility_source_errors,
 )
 from sonder_runtime.platform.app_control_config import AppControlConfig, app_control_errors
+from sonder_runtime.platform.computer_use_config import ComputerUseConfig, computer_use_errors
 from sonder_runtime.platform.control_state_rehearsal_config import (
     ControlStateRehearsalConfig,
     control_state_rehearsal_errors,
@@ -631,6 +632,7 @@ class SonderConfig:
     )
     child_storage: ChildStorageConfig = field(default_factory=ChildStorageConfig)
     app_control: AppControlConfig = field(default_factory=AppControlConfig)
+    computer_use: ComputerUseConfig = field(default_factory=ComputerUseConfig)
     membership: MembershipConfig = field(default_factory=MembershipConfig)
     control_state_rehearsal: ControlStateRehearsalConfig = field(
         default_factory=ControlStateRehearsalConfig
@@ -761,6 +763,10 @@ class SonderConfig:
             "max_request_bytes": self.memory_replication.max_request_bytes,
             "max_response_bytes": self.memory_replication.max_response_bytes,
             "max_batch_records": self.memory_replication.max_batch_records,
+        }
+        out['computer_use'] = {
+            item.name: getattr(self.computer_use, item.name)
+            for item in fields(self.computer_use)
         }
         out['child_storage'] = {
             item.name: ('<configured>' if self.child_storage.binding_file else '<unset>')
@@ -949,6 +955,7 @@ _SECTION_TYPES = {
     "artifact_mobility": ArtifactMobilityConfig,
     "child_storage": ChildStorageConfig,
     "app_control": AppControlConfig,
+    "computer_use": ComputerUseConfig,
     "control_state_rehearsal": ControlStateRehearsalConfig,
     "state": StateConfig,
     "context": ContextConfig,
@@ -1768,6 +1775,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         errors.append(str(error))
     errors.extend(child_storage_errors(config))
     errors.extend(app_control_errors(config))
+    errors.extend(computer_use_errors(config))
     errors.extend(artifact_transfer_errors(config))
     errors.extend(memory_replication_errors(config))
     errors.extend(artifact_mobility_source_errors(config))

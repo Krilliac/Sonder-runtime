@@ -56,6 +56,8 @@ class TufLikeMetadata:
     signature: str
     previous_digest: str = ""
     target_digests: tuple[tuple[str, str], ...] = ()
+    prior_signer: str = ""
+    prior_signature: str = ""
 
     def __post_init__(self) -> None:
         if self.role not in {"root", "timestamp", "snapshot", "targets"}:
@@ -68,6 +70,10 @@ class TufLikeMetadata:
         _text(self.signature, "metadata signature")
         if self.previous_digest:
             _hash(self.previous_digest, "metadata previous_digest")
+        if bool(self.prior_signer) != bool(self.prior_signature):
+            raise ValueError("root rotation requires both prior signer and signature")
+        if self.prior_signer and self.role != "root":
+            raise ValueError("prior signature is only valid for root rotation")
         names = [name for name, _ in self.target_digests]
         if len(names) != len(set(names)) or any(not name for name in names):
             raise ValueError("metadata target names must be unique and non-empty")
@@ -118,13 +124,18 @@ class TufLikeMetadataChain:
     def digest(self) -> str:
         return _digest(tuple(item.digest for item in self.entries))
 
-    def verify(
+    def verify_integrity(
         self,
         verifier: Callable[[bytes, str, str], bool],
         *,
         now: datetime | None = None,
         max_targets: int = 1024,
     ) -> None:
+        """Signatures, expiry and target bounds only (no rollback ledger).
+
+        For a publisher checking its own output. A client accepting metadata
+        must use ``verify``, which also enforces the rollback ledger.
+        """
         if type(max_targets) is not int or max_targets < 1:
             raise MetadataChainError("max_targets must be positive")
         current_time = now or datetime.now(timezone.utc)
@@ -140,6 +151,26 @@ class TufLikeMetadataChain:
         targets = self.entries[-1].target_digests
         if len(targets) > max_targets:
             raise MetadataChainError("metadata target count exceeds bound")
+
+    def verify(
+        self,
+        verifier: Callable[[bytes, str, str], bool],
+        *,
+        repository: str,
+        ledger: "MetadataLedger",
+        now: datetime | None = None,
+        max_targets: int = 1024,
+    ) -> None:
+        """Client acceptance: integrity plus the repository rollback ledger."""
+        self.verify_integrity(verifier, now=now, max_targets=max_targets)
+        if not repository or ledger is None:
+            raise MetadataChainError("trusted repository ledger is required")
+        ledger.accept(repository, self, verifier)
+
+
+class MetadataLedger(Protocol):
+    def accept(self, repository: str, chain: TufLikeMetadataChain,
+               verifier: Callable[[bytes, str, str], bool]) -> None: ...
 
 
 class UpdatePhase(Enum):
@@ -237,11 +268,15 @@ class BoundedUpdateState:
             raise ValueError("downloaded artifact digest mismatch")
         return self._move(UpdatePhase.DOWNLOADED, artifact_digest=digest)
 
-    def verify(self, verifier: Callable[[bytes, str, str], bool], *, now: datetime | None = None) -> UpdateSnapshot:
+    def verify(self, verifier: Callable[[bytes, str, str], bool], *,
+               repository: str, ledger: MetadataLedger,
+               now: datetime | None = None) -> UpdateSnapshot:
         if self.snapshot.phase is not UpdatePhase.DOWNLOADED:
             raise ValueError("verification requires downloaded update")
-        self.snapshot.target.metadata.verify(verifier, now=now)
         self.snapshot.target.evidence.verify(verifier)
+        self.snapshot.target.metadata.verify(
+            verifier, now=now, repository=repository, ledger=ledger,
+        )
         return self._move(UpdatePhase.VERIFIED)
 
     def stage(self, port: UpdatePort, artifact: bytes) -> UpdateSnapshot:
@@ -293,7 +328,7 @@ class BoundedUpdateState:
 
 
 __all__ = [
-    "BoundedUpdateState", "MetadataChainError", "TufLikeMetadata",
+    "BoundedUpdateState", "MetadataChainError", "MetadataLedger", "TufLikeMetadata",
     "TufLikeMetadataChain", "UpdatePhase", "UpdatePort", "UpdateSnapshot",
     "UpdateTarget",
 ]
