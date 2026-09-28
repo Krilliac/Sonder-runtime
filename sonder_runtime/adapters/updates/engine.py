@@ -17,11 +17,11 @@ import sys
 from pathlib import Path
 
 from ..filesystem.durable_locks import exclusive_file_lock
-import sonder_runtime.adapters.persistence.migrations as sonder_migrations
-import sonder_runtime.adapters.updates.service as sonder_updates
-import sonder_runtime.platform.paths as sonder_paths
-import sonder_runtime.platform.version as sonder_version
-from sonder_runtime.adapters.updates.service import (
+from ..persistence import migrations as sonder_migrations
+from . import service as sonder_updates
+from ...platform import paths as sonder_paths
+from ...platform import version as sonder_version
+from .service import (
     BundleManifest,
     CANCELLABLE_STATES,
     CompatibilityError,
@@ -52,10 +52,11 @@ def confirm_nonce_for(plan: dict) -> str:
     return plan["update_id"][-8:]
 
 
-def _release_order(version: str) -> tuple[tuple[int, ...], tuple[int, int]]:
-    """Order numeric releases and alpha/beta/rc previews without guessing."""
+def _release_order(version: str) -> tuple[tuple[int, ...], tuple[int, int, int, int]]:
+    """Order numeric releases and development/alpha/beta/rc previews."""
     match = re.fullmatch(
-        r"v?(\d+(?:\.\d+){1,3})(?:(?:-|\.)?(a|alpha|b|beta|rc)[.-]?(\d+))?(?:\+[A-Za-z0-9.-]+)?",
+        r"v?(\d+(?:\.\d+){1,3})(?:(?:-|\.)?(a|alpha|b|beta|rc)[.-]?(\d+))?"
+        r"(?:\.dev(\d+))?(?:\+[A-Za-z0-9.-]+)?",
         version, re.IGNORECASE,
     )
     if match is None:
@@ -64,7 +65,10 @@ def _release_order(version: str) -> tuple[tuple[int, ...], tuple[int, int]]:
     number += (0,) * (4 - len(number))
     stage = (match.group(2) or "").lower()
     rank = {"a": 0, "alpha": 0, "b": 1, "beta": 1, "rc": 2, "": 3}[stage]
-    return number, (rank, int(match.group(3) or 0))
+    dev = match.group(4)
+    if dev is not None and not stage:
+        rank = -1
+    return number, (rank, int(match.group(3) or 0), int(dev is None), int(dev or 0))
 
 
 class UpdateManager:
@@ -98,7 +102,7 @@ class UpdateManager:
     def _ops(self):
         if self._operations is None:
             try:
-                from sonder_runtime.adapters.persistence.operations_store import OperationsStore
+                from ..persistence.operations_store import OperationsStore
 
                 self._operations = OperationsStore()
             except Exception:
@@ -218,6 +222,11 @@ class UpdateManager:
 
     def _assert_activation_consistent(self) -> None:
         active = self.repository.release_by_status("active")
+        # The host installer creates current before the update repository has
+        # ever recorded an activation. Preserve that bootstrap pointer until
+        # the first managed release is committed.
+        if active is None and not self.repository.accepted_versions():
+            return
         expected = active["install_path"] if active else None
         if sonder_updates._read_pointer(self.current_link) != expected:
             raise UpdateError("active release pointer and records disagree; recovery required")

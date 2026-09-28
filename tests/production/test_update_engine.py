@@ -96,6 +96,41 @@ def test_import_verifies_and_reports_available(env):
     assert plan["source_kind"] == "offline"
 
 
+def test_first_managed_upgrade_accepts_installer_bootstrap_pointer(env):
+    bootstrap = env / "releases" / "installer-bootstrap"
+    bootstrap.mkdir(parents=True)
+    sonder_updates.switch_active_pointer(env / "current", bootstrap)
+    manager = _manager(env)
+
+    plan = _import_ok(manager, env, version="1.1.0")
+    assert plan["status"] == "available"
+    done = manager.install(
+        plan["update_id"], confirm=confirm_nonce_for(plan),
+        allow_unverified=True, skip_backup=True,
+    )
+    assert done["status"] == "committed"
+    assert manager.repository.release_by_status("active")["version"] == "1.1.0"
+    assert "1.1.0" in _pointer_text(env / "current")
+
+
+def test_default_dev_bundle_does_not_block_later_upgrades(env):
+    manager = _manager(env)
+    source = _mini_source(env, "default-dev-src")
+    bundle = env / "default-dev-bundle"
+    build_bundle(source, bundle)
+    first = manager.import_offline(bundle, allow_unverified=True)
+    assert ".dev" in first["target_version"]
+    manager.install(first["update_id"], confirm=confirm_nonce_for(first),
+                    allow_unverified=True, skip_backup=True)
+
+    final_version = first["target_version"].split(".dev", 1)[0]
+    later = _import_ok(manager, env, version=final_version)
+    assert later["status"] == "available"
+    done = manager.install(later["update_id"], confirm=confirm_nonce_for(later),
+                           allow_unverified=True, skip_backup=True)
+    assert done["status"] == "committed"
+
+
 def test_import_rejects_tampered_archive(env):
     manager = _manager(env)
     source = _mini_source(env, "tampered-src")
