@@ -302,11 +302,21 @@ def throughput_probe(path: str | os.PathLike) -> dict[str, Any]:
     )
     assert process.stdout is not None
     output = bytearray()
-    reader = owned_runtime_thread(
-        target=_bounded_worker_output, args=(process.stdout, output),
-        name="sonder-storage-probe-result", daemon=True,
-    )
-    reader.start()
+    try:
+        reader = owned_runtime_thread(
+            target=_bounded_worker_output, args=(process.stdout, output),
+            name="sonder-storage-probe-result", daemon=True,
+        )
+        reader.start()
+    except BaseException:
+        # No reader means no deadline wait and no kill: reap the probe here.
+        process.kill()
+        try:
+            process.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            pass
+        process.stdout.close()
+        raise
     remaining = max(0.0, PROBE_TIMEOUT_SECONDS - (time.monotonic() - started))
     try:
         return_code = process.wait(timeout=remaining)

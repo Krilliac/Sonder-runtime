@@ -25,6 +25,7 @@ import itertools
 import json
 import secrets
 import socket
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -138,6 +139,18 @@ class _Subscription:
                 producer._cond.notify_all()
 
 
+# ``mono_ns`` is advertised as the host-monotonic clock shared by every
+# producer on this host, so Observatory merges Runtime and Inference streams by
+# it.  On Windows that clock is QueryPerformanceCounter (MSVC steady_clock,
+# which Inference uses); CPython before 3.13 implements time.monotonic_ns with
+# GetTickCount64 (15.6 ms steps, offset tens of ms from QPC), while
+# time.perf_counter_ns is QPC on every Windows CPython.  Elsewhere
+# time.monotonic_ns is CLOCK_MONOTONIC, the same clock steady_clock reads.
+host_monotonic_ns: Callable[[], int] = (
+    time.perf_counter_ns if sys.platform == "win32" else time.monotonic_ns
+)
+
+
 class ObservatoryProducer:
     """Bounded Observatory producer: TelemetrySink in, TelemetryFeed out."""
 
@@ -149,7 +162,7 @@ class ObservatoryProducer:
         max_subscribers: int = DEFAULT_MAX_SUBSCRIBERS,
         node_id: str | None = None,
         instance_hex: str | None = None,
-        monotonic_ns: Callable[[], int] = time.monotonic_ns,
+        monotonic_ns: Callable[[], int] = host_monotonic_ns,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         hex12 = instance_hex or secrets.token_hex(6)

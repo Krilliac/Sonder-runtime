@@ -73,8 +73,11 @@ def test_replay_rejects_tampered_durable_event(tmp_path) -> None:
 def test_replay_rejects_bounded_prefix_as_not_crash_safe(tmp_path) -> None:
     repo = SQLiteSessionRepository(tmp_path / "session.db", max_read_limit=100)
     _snapshot(repo)
+    # Four events are committed; a bound of three can only read a prefix.  (A
+    # bound of exactly four reads the whole chain and is replayable.)
     with pytest.raises(IntegrityFailure, match="exceeds replay bound"):
-        crash_safe_replay(repo, "s1", max_events=4)
+        crash_safe_replay(repo, "s1", max_events=3)
+    assert crash_safe_replay(repo, "s1", max_events=4).recovered_sequence == 4
 
 
 def test_replay_rejects_integrity_report_for_a_different_snapshot(tmp_path) -> None:
