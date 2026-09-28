@@ -1252,6 +1252,19 @@ _CALL_SPENDS: contextvars.ContextVar = contextvars.ContextVar(
 )
 
 
+# Tools whose failure is known to precede any effect: each validates its whole
+# request first and then applies it atomically, so an error reply means nothing
+# changed. Only these give a spent approval back. A failure is not proof of no
+# effect in general: ``git_merge`` can stop on a conflict after rewriting the
+# index and worktree, and a build fails after it ran -- so this is an allowlist,
+# never a denylist. Add a tool only after reading that its failure is pre-effect.
+RESTORABLE_ON_FAILURE = frozenset({
+    # Validates every binding (installed models, capabilities) before the
+    # single atomic policy write.
+    "runtime_policy_update",
+})
+
+
 class ApprovalCallScope:
     """The approvals one protocol call spent, and the way to give them back."""
 
@@ -1261,18 +1274,17 @@ class ApprovalCallScope:
     def restore(self) -> int:
         """Give back what this call spent, because the call failed.
 
-        A surface calls this only for a failed call (a legacy ``ERROR:`` reply
-        or a raised error, a native ``isError`` receipt), so the operator's
-        retry runs without approving again. ``execution`` tools are never
-        restored: a build or script that fails has still run on the host,
-        which is the one effective use the approval allowed. The ledger keeps
-        the original expiry and never reopens a revoked or lapsed approval,
-        and each spend is given back at most once.
+        A surface calls this only when the tool *returned* a failure (a legacy
+        ``ERROR:`` reply, a native ``isError`` result) -- never on a raised
+        error, which can come after the effect (a post-call audit). Only tools
+        in ``RESTORABLE_ON_FAILURE`` are given back. The ledger keeps the
+        original expiry and never reopens a revoked or lapsed approval, and
+        each spend is given back at most once.
         """
         spends, self.spends = self.spends, []
         restored = 0
         for name, digest, nonce, ledger in spends:
-            if risk_of(name) == "execution" or name in NATIVE_EXECUTION_TOOLS:
+            if name not in RESTORABLE_ON_FAILURE:
                 continue
             try:
                 restored += ledger.restore(nonce, digest) is not None

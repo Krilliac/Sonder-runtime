@@ -823,7 +823,9 @@ def native_tool_registry() -> InMemoryToolRegistry:
 
 # A call interrupted part-way may have taken effect; only a finished failure
 # gives its one-shot approval back.
-_INTERRUPTED_ERRORS = frozenset({"Cancelled", "DeadlineExceeded"})
+_INTERRUPTED_ERRORS = frozenset({
+    "Cancelled", "DeadlineExceeded", "CANCELLED", "DEADLINE_EXCEEDED",
+})
 
 
 def _restoring_failed_approvals(execute):
@@ -832,11 +834,9 @@ def _restoring_failed_approvals(execute):
 
     def handler(name: str, arguments: dict) -> dict:
         with permission_policy.approval_call_scope() as spent:
-            try:
-                result = execute(name, arguments)
-            except Exception:
-                spent.restore()
-                raise
+            # A raised error (e.g. a post-call audit failure) can follow the
+            # effect, so only a returned failure gives the approval back.
+            result = execute(name, arguments)
             if (isinstance(result, dict) and result.get("isError")
                     and result.get("error") not in _INTERRUPTED_ERRORS):
                 spent.restore()

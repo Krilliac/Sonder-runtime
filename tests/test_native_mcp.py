@@ -878,6 +878,8 @@ def test_native_failed_call_gives_its_one_shot_approval_back(monkeypatch, tmp_pa
     monkeypatch.setattr(pm, "_approval_ledger", lambda: ledger)
     monkeypatch.setattr(pm, "_rule_lookup", lambda _tool: None)
     monkeypatch.setitem(pm._STATE, "mode", pm.MANUAL)
+    # Restoring is an allowlist; admit compute_cancel for this surface test.
+    monkeypatch.setattr(pm, "RESTORABLE_ON_FAILURE", pm.RESTORABLE_ON_FAILURE | {"compute_cancel"})
     arguments = {"controller_job_id": "controller-9", "reason": "operator stop"}
     issued = ledger.issue("compute_cancel", pm.call_digest("compute_cancel", arguments),
                           approver="console operator")

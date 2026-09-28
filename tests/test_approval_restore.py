@@ -144,3 +144,35 @@ def test_mcp_an_effective_call_spends_the_approval_for_good(ledger, outside):
     assert not result.is_error, result
     assert target.read_text(encoding="utf-8") == "hello"
     assert ledger.get(issued.nonce).spent
+
+
+# -- review findings (2026-09-28) ---------------------------------------------
+
+def test_a_tool_off_the_allowlist_is_never_restored(ledger):
+    # git_merge can stop on a conflict after rewriting the worktree: a failure
+    # is not proof of no effect, so only allowlisted tools give approvals back.
+    args = {"root": ".", "branch": "feature"}
+    assert "git_merge" not in pm.RESTORABLE_ON_FAILURE
+    issued = _issue(ledger, "git_merge", args)
+    with pm.approval_call_scope() as spent:
+        assert pm.decide("git_merge", interactive=False, surface="mcp", arguments=args).allowed
+        assert spent.restore() == 0
+    assert ledger.get(issued.nonce).spent
+
+
+def test_mcp_a_raised_error_keeps_the_approval_spent(ledger, monkeypatch):
+    # A raise can follow the effect (a post-call audit), so it is not given back.
+    args = {"local_models_json": '{"code": "x"}'}
+    issued = _issue(ledger, "runtime_policy_update", args)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("audit failed after the write")
+
+    monkeypatch.setattr(server, "runtime_policy_update", boom)
+    tool = server.mcp._tool_manager.get_tool("runtime_policy_update")
+    monkeypatch.setattr(tool, "fn", boom)
+    with pytest.raises(Exception):
+        result = _mcp("runtime_policy_update", args)
+        if getattr(result, "is_error", False):
+            raise RuntimeError("reported as error")
+    assert ledger.get(issued.nonce).spent
