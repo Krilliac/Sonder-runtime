@@ -340,6 +340,9 @@ class ConversationContent extends StatelessWidget {
         selectable: true,
         softLineBreak: true,
         fitContent: !fullWidthCode,
+        // Model-authored Markdown never fetches: see [markdownImageAllowed].
+        imageBuilder: (uri, title, alt) =>
+            _MarkdownImage(uri: uri, alt: alt ?? title ?? ''),
         // Used only for fenced/indented blocks: a plain span with no
         // background, so the block has no per-line stripes.
         syntaxHighlighter: _PlainCodeHighlighter(blockCode),
@@ -371,6 +374,83 @@ class ConversationContent extends StatelessWidget {
           blockSpacing: 10,
           listIndent: 22,
         ));
+  }
+}
+
+/// Largest inline `data:` image rendered from Markdown, in bytes.
+const markdownDataImageMaxBytes = 2 * 1024 * 1024;
+
+/// Whether a Markdown image at [uri] may be rendered.
+///
+/// Markdown in this app is written by a model (and by whatever a tool fed
+/// it), so an image must not cause a request: an `http(s)` image is a
+/// beacon that leaks conversation data, and on Windows a `file://host/…` or
+/// UNC path opens an SMB connection that sends the user's credentials. Only
+/// a bounded inline `data:image/…` URI is rendered, from memory; everything
+/// else is shown as a placeholder naming the URL.
+bool markdownImageAllowed(Uri uri) {
+  if (uri.scheme != 'data') return false;
+  final data = uri.data;
+  if (data == null || !data.mimeType.startsWith('image/')) return false;
+  // Base64 expands 3 bytes to 4 characters; bound before decoding.
+  return uri.toString().length <= markdownDataImageMaxBytes * 4 ~/ 3 + 256;
+}
+
+/// A Markdown image: a `data:` image from memory, or a placeholder.
+class _MarkdownImage extends StatelessWidget {
+  final Uri uri;
+  final String alt;
+  const _MarkdownImage({required this.uri, required this.alt});
+
+  @override
+  Widget build(BuildContext context) {
+    if (markdownImageAllowed(uri)) {
+      try {
+        final bytes = uri.data!.contentAsBytes();
+        if (bytes.length <= markdownDataImageMaxBytes) {
+          return Image.memory(bytes,
+              semanticLabel: alt.isEmpty ? null : alt,
+              errorBuilder: (context, _, __) => _placeholder(context));
+        }
+      } on FormatException {
+        // Malformed data URI: fall through to the placeholder.
+      }
+    }
+    return _placeholder(context);
+  }
+
+  Widget _placeholder(BuildContext context) {
+    final tokens = SonderTokens.of(context);
+    final shown = uri.scheme == 'data'
+        ? 'inline data'
+        : (uri.toString().length > 200
+            ? '${uri.toString().substring(0, 200)}…'
+            : uri.toString());
+    final label = alt.isEmpty ? 'Image not loaded' : 'Image not loaded: $alt';
+    return Container(
+      key: const Key('markdown-image-blocked'),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+          color: tokens.raised,
+          borderRadius: BorderRadius.circular(SonderRadius.row),
+          border: Border.all(color: tokens.hairline)),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(Icons.image_not_supported_outlined, size: 16, color: tokens.muted),
+        const SizedBox(width: 6),
+        Flexible(
+          child: Text.rich(
+            TextSpan(children: [
+              TextSpan(text: label),
+              TextSpan(
+                  text: '  $shown',
+                  style: tokens.mono(12, color: tokens.muted)),
+            ]),
+            style: Theme.of(context).textTheme.bodySmall,
+            semanticsLabel: '$label. $shown',
+          ),
+        ),
+      ]),
+    );
   }
 }
 

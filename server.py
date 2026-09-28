@@ -3049,15 +3049,15 @@ def _selfmod_operator_lease(run_id):
             if not selfmod.heartbeat(run_id, owner):
                 return
 
-    heartbeat_thread = owned_runtime_thread(
-        target=heartbeat_worker, name="sonder-selfmod-heartbeat", daemon=True,
-    )
-    heartbeat_thread.start()
-    try:
+    heartbeat_thread = None
+    try:  # a refused heartbeat worker must still release the claimed lease
+        heartbeat_thread = owned_runtime_thread(target=heartbeat_worker, name="sonder-selfmod-heartbeat", daemon=True)
+        heartbeat_thread.start()
         yield owner
     finally:
         heartbeat_stop.set()
-        heartbeat_thread.join(timeout=2)
+        if heartbeat_thread is not None and heartbeat_thread.is_alive():
+            heartbeat_thread.join(timeout=2)
         with contextlib.suppress(Exception):
             selfmod.release(run_id, owner)
 
@@ -5549,10 +5549,8 @@ def prewarm_model(tier: str = "") -> bool:
 
     Model cold-load dominates first-token latency (tens of seconds for a 7B
     on CPU). Firing an empty keep-alive load concurrently with the host's
-    DB/recall/augmentation work overlaps that cost, like a CPU prefetching a
-    line it predicts the pipeline will need. Local tiers only, best-effort,
-    one in-flight load per model, and never fatal: a failed prewarm just
-    means the real call pays the normal cost.
+    DB/recall/augmentation work overlaps that cost. Local tiers only,
+    best-effort, one in-flight load per model, and never fatal.
     """
     if not sonder_speculation.prewarm_enabled():
         return False
@@ -5584,9 +5582,11 @@ def prewarm_model(tier: str = "") -> bool:
         finally:
             prewarm_gate.finish(model)
 
-    owned_runtime_thread(
-        target=_load, daemon=True, name="sonder-prewarm"
-    ).start()
+    try:  # a refused worker must not leave the model marked in flight forever
+        owned_runtime_thread(target=_load, daemon=True, name="sonder-prewarm").start()
+    except BaseException:
+        prewarm_gate.finish(model)
+        return False
     return True
 
 
@@ -21613,10 +21613,8 @@ def _agent_turn(
             )
         else:
             ensure_not_cancelled()
-            # Retire a matching speculation: if the model committed to the
-            # exact read-only call the host already ran during generation,
-            # reuse its buffered observation instead of dispatching again.
-            _retired = _spec_engine.resolve(call_signature)
+            # Retire a matching speculation (a non-read-only commit drops them all).
+            _retired = _spec_engine.resolve(call_signature, tool_name)
             if _retired is not None:
                 tool_dispatched = True
                 observation = _retired.observation
@@ -23278,7 +23276,7 @@ def route_work_request(
     turn: the execution-mode router and the lane it chooses each build their
     own system prompt, and both go to a model. See _stable_system_context.
     """
-    with _stable_system_context():
+    with _stable_system_context(), _served_models.observation_scope():
         return _route_work_request(
             prompt, project=project, _classified_intent=_classified_intent,
             _admitted_decision=_admitted_decision,
