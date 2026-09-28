@@ -4,10 +4,25 @@ from __future__ import annotations
 
 import io
 import json
+import time
 import urllib.error
 import urllib.request
 
 from .client_request import build_chat_request, require_secure_key_transport
+
+# Per socket operation (connect, send, each read) -- a server that stops
+# talking raises ``TimeoutError`` after this long.
+REQUEST_TIMEOUT_SECONDS = 120.0
+# Whole exchange, so a body dripped out a byte at a time cannot keep the
+# client blocked indefinitely.  Generous: a local model may be slow.
+REQUEST_DEADLINE_SECONDS = 900.0
+# A chat completion is one JSON object; a larger body is never buffered.
+RESPONSE_BODY_LIMIT = 8 * 1024 * 1024
+_READ_CHUNK = 65_536
+
+
+class ClientResponseLimitError(RuntimeError):
+    """The server's response broke the client's size or time ceiling."""
 
 
 class _AuthenticatedRedirectRefusal(urllib.request.HTTPRedirectHandler):
@@ -56,7 +71,36 @@ def _open(request):
     ):
         handlers.append(urllib.request.ProxyHandler({}))
     opener = urllib.request.build_opener(*handlers)
-    return opener.open(request)
+    return opener.open(request, timeout=REQUEST_TIMEOUT_SECONDS)
+
+
+def _read_limited(response, deadline):
+    """Read the body up to ``RESPONSE_BODY_LIMIT`` bytes before ``deadline``.
+
+    ``read1`` returns after one receive, so a slow drip is checked against
+    the deadline between chunks; each receive is itself bounded by the
+    socket timeout.  Reads at most ``limit + 1`` bytes so overflow is seen.
+    """
+    limit = RESPONSE_BODY_LIMIT
+    read = getattr(response, "read1", None) or response.read
+    chunks = []
+    total = 0
+    while total <= limit:
+        if time.monotonic() > deadline:
+            raise ClientResponseLimitError(
+                "server response exceeded the %.0fs deadline"
+                % REQUEST_DEADLINE_SECONDS
+            )
+        chunk = read(min(_READ_CHUNK, limit + 1 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    if total > limit:
+        raise ClientResponseLimitError(
+            "server response exceeds %d bytes; refusing to parse it" % limit
+        )
+    return b"".join(chunks)
 
 
 def send_chat_prompt(server, api_key, prompt, *, request_builder=None):
@@ -66,7 +110,9 @@ def send_chat_prompt(server, api_key, prompt, *, request_builder=None):
     retains its historical request-construction seam for callers and tests.
     Whatever the builder returns, a request carrying ``Authorization`` is
     sent only over https or loopback http and is never redirected.
-    Network and JSON errors intentionally propagate unchanged to the caller.
+    Network and JSON errors intentionally propagate unchanged to the caller;
+    a response over ``RESPONSE_BODY_LIMIT`` bytes or still arriving after
+    ``REQUEST_DEADLINE_SECONDS`` raises :class:`ClientResponseLimitError`.
     """
     builder = request_builder or build_chat_request
     url, headers, body = builder(server, api_key, prompt)
@@ -75,10 +121,11 @@ def send_chat_prompt(server, api_key, prompt, *, request_builder=None):
     )
     if request.has_header("Authorization"):
         require_secure_key_transport(request.full_url)
+    deadline = time.monotonic() + REQUEST_DEADLINE_SECONDS
     with _open(request) as response:
-        raw = response.read().decode("utf-8")
+        raw = _read_limited(response, deadline).decode("utf-8")
     payload = json.loads(raw)
     return payload["choices"][0]["message"]["content"]
 
 
-__all__ = ["send_chat_prompt"]
+__all__ = ["ClientResponseLimitError", "send_chat_prompt"]

@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "1b178d9c0fa675b82c42f258b77e6f63627f182d894f2bdfc3cc0aa2821376f0",
+    "catalog_digest": "0e4da095ecb144d71588e348277dc55f7ca972709d4eddb5b67de570fcd8146d",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "1b178d9c0fa675b82c42f258b77e6f63627f182d894f2bdfc3cc0aa2821376f0",
+      "catalog_digest": "0e4da095ecb144d71588e348277dc55f7ca972709d4eddb5b67de570fcd8146d",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -13626,6 +13626,16 @@
     },
     {
       "aliases": [],
+      "category": "persona",
+      "name": "/prompts",
+      "native": true,
+      "params": [],
+      "risk": "safe",
+      "summary": "List, show, or locate the editable system/agent prompt files; reload re-reads them.",
+      "tool": ""
+    },
+    {
+      "aliases": [],
       "category": "memory",
       "name": "/quality",
       "native": true,
@@ -14340,7 +14350,7 @@
       "native": true,
       "params": [],
       "risk": "dangerous",
-      "summary": "Inspect or guarded-edit shared local model mappings and execution-lane tiers; cloud remains separate.",
+      "summary": "Inspect or guarded-edit shared local model mappings, execution-lane tiers and the long-context overflow; cloud remains separate.",
       "tool": ""
     },
     {
@@ -18108,14 +18118,14 @@
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES plus sonder_runtime.platform.memory_replication_config",
   "counts": {
     "capabilities": 216,
-    "commands": 331,
+    "commands": 332,
     "configuration": 226,
     "events": 43,
     "native_tools": 66,
     "schemas": 4,
     "tools": 216
   },
-  "digest": "3c50123f631e9606b41ce3044140b34c4e950556311f5e4479ce9dac589fddb3",
+  "digest": "bf51bc6aa0a17b26b59d398b7692cf265467c7b3ce6de35f71be3b57cce733d1",
   "events": [
     {
       "name": "session.started",
@@ -20726,9 +20736,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "1b178d9c0fa675b82c42f258b77e6f63627f182d894f2bdfc3cc0aa2821376f0",
+    "catalog_digest": "0e4da095ecb144d71588e348277dc55f7ca972709d4eddb5b67de570fcd8146d",
     "client": {
-      "digest": "1b178d9c0fa675b82c42f258b77e6f63627f182d894f2bdfc3cc0aa2821376f0",
+      "digest": "0e4da095ecb144d71588e348277dc55f7ca972709d4eddb5b67de570fcd8146d",
       "events": [
         {
           "name": "approval.denied",
@@ -46442,9 +46452,9 @@
   },
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "82b1bdf8e775c4b525850ad09cc5800b3a540c7d543f66be21294d19d09e1517",
+    "server.py": "da9e09d1fc0422441e581151f9784a454aaf369b31a71beb8e36b15f5ac0d8f8",
     "sonder_runtime/application/tools/generated_catalogs.py": "0cb58ae27e9f0e56102282b7e2a5b7b8a9d955a4322055e87d18d3970fe644d8",
-    "sonder_runtime/bootstrap/native_mcp.py": "1ebb1ae1ef7a1f2632cc95a0fc3271c34b6c94ea6c1c2541fbe8b757d3997270",
+    "sonder_runtime/bootstrap/native_mcp.py": "f2bb6490a66ab92fa4599366647f724d02ce33267ad1bb2b973dbc001a29473d",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/domain/operational_capabilities.py": "6f8f2083343ac1b0de076cd4d545b5f99602a9916c185bd15d965ffa0c405fe6",
     "sonder_runtime/interfaces/sdk/discovery.py": "db8aeca8dd84d06cbbf834495db30b211956393375676f23899a28685aea015b",

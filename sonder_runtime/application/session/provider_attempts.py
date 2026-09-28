@@ -54,6 +54,22 @@ def report_provider_fallback(from_provider, to_provider, reason_code) -> None:
         pass
 
 
+def report_route_overflow(fields) -> None:
+    """Tell the observer a turn moved to the long-context overflow model.
+
+    ``fields`` are the content-free ``route.changed`` attributes the overflow
+    decision builds.  Observers without ``route_overflow`` ignore it; it never
+    raises.
+    """
+    hook = getattr(_attempt_observer, "route_overflow", None)
+    if not callable(hook):
+        return
+    try:
+        hook(dict(fields or {}))
+    except Exception:
+        pass
+
+
 def _count(value):
     return value if type(value) is int and value >= 0 else None
 
@@ -257,7 +273,7 @@ def dispatch_provider(provider, operation, payload, send):
     try:
         result = _observed(provider, operation, payload, send)
     except Exception as error:
-        code = error.code if isinstance(error, SonderError) else InternalFailure.code
+        code = telemetry_error_code(error)
         try:
             capture.finish_provider_attempt(pending, attempt, error_code=code)
         except Exception as capture_error:

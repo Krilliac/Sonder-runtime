@@ -524,23 +524,28 @@ def test_runtime_update_neutralizes_checkout_filter_processes(monkeypatch, tmp_p
             "state": "behind", "clean": True, "trusted_remote": True,
         }
 
-    def fake_checked(_root, arguments, **_kwargs):
+    real_spawn = git_tools._spawn_git
+
+    def fake_spawn(root, arguments, **kwargs):
+        if arguments[:1] == ["config"]:
+            # Keep the real driver probe: the overrides come from real config.
+            return real_spawn(root, arguments, **kwargs)
         calls.append(list(arguments))
         return {"stdout": "", "stderr": "", "returncode": 0, "timed_out": False,
                 "elapsed_ms": 1, "truncated": False, "output_bytes": 0, "output_limit": 65536}
 
     monkeypatch.setattr(git_tools, "runtime_update_status", fake_status)
-    monkeypatch.setattr(git_tools, "_checked_git", fake_checked)
+    monkeypatch.setattr(git_tools, "_spawn_git", fake_spawn)
     monkeypatch.setattr(git_tools, "_require_repository_root", lambda *_args, **_kwargs: repo)
     monkeypatch.setattr(
         git_tools, "_runtime_remote_url",
         lambda _root: "https://github.com/Krilliac/Sonder-runtime.git",
     )
-    # Keep the real filter probe, which uses _run_git rather than _checked_git.
     result = git_tools.runtime_update(repo)
     merge = next(call for call in calls if "merge" in call)
     assert "filter.hostile.process=" in merge
     assert "filter.hostile.smudge=cat" in merge
+    assert "core.fsmonitor=false" in merge
     assert "--no-overwrite-ignore" in merge
     assert result["updated"] is True
 

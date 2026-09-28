@@ -15,6 +15,22 @@ from . import ollama_endpoint
 logger = logging.getLogger(__name__)
 
 _configured_request_timeout: float = 300.0
+# One non-streaming chat reply; a larger successful body is never buffered.
+RESPONSE_BODY_LIMIT = 16 * 1024 * 1024
+_READ_CHUNK = 65_536
+
+
+def _read_bounded(stream, limit: int) -> bytes:
+    """Read at most ``limit + 1`` bytes so an oversize body is detectable."""
+    chunks: list[bytes] = []
+    total = 0
+    while total <= limit:
+        chunk = stream.read(min(_READ_CHUNK, limit + 1 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks)
 
 
 def configure_typed_request_timeout(seconds: int | None) -> None:
@@ -95,9 +111,17 @@ class OllamaVisionGateway:
             url, data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
             headers={"Content-Type": "application/json"}, method="POST",
         )
+        limit = RESPONSE_BODY_LIMIT
         try:
             with ollama_endpoint.open_url(request, timeout=timeout or _configured_request_timeout) as response:
-                return json.loads(response.read().decode("utf-8"))
+                raw = _read_bounded(response, limit)
+            if len(raw) > limit:
+                raise DependencyUnavailable(
+                    "local Ollama vision response exceeds %d bytes" % limit
+                )
+            return json.loads(raw.decode("utf-8"))
+        except DependencyUnavailable:
+            raise
         except Exception as exc:
             logger.warning(
                 f"Ollama vision request failed: url={url!r}, "

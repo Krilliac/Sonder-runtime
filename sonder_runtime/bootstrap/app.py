@@ -1406,6 +1406,7 @@ def build_application(
                 if not any(root == current.resolve() or current.resolve() in root.parents
                            for current in allowed_roots()):
                     raise PermissionError("configured workspace grant was removed")
+            from ..adapters import prompt_store
             from .strategy import (
                 compose_workbench_strategy_observer,
                 try_compose_strategy_memory,
@@ -1431,6 +1432,7 @@ def build_application(
                 strategy_observer=compose_workbench_strategy_observer(
                     strategy_trace, strategy_memory, strategy_rollout, lane_store,
                 ),
+                prompts=prompt_store.render,
             )
         return interactive_lanes
 

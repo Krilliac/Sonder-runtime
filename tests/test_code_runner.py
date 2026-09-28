@@ -104,6 +104,8 @@ def test_detached_console_receives_scrubbed_environment(monkeypatch, tmp_path):
         return Proc()
 
     monkeypatch.setattr(code_runner.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(code_runner, "_attach_windows_job", lambda proc, **kwargs: object())
+    monkeypatch.setattr(code_runner, "_resume_windows_process", lambda proc: None)
     out = code_runner._launch_console("launch.bat", str(tmp_path), "python", 10)
 
     assert out["ok"] is True
@@ -306,6 +308,8 @@ def test_run_code_window_launches_python_console(monkeypatch, tmp_path):
     monkeypatch.setattr(code_runner.os, "name", "nt", raising=False)
     monkeypatch.setenv(code_runner.RUN_WINDOW_DIR_ENV, str(tmp_path))
     monkeypatch.setattr(code_runner.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(code_runner, "_attach_windows_job", lambda proc, **kwargs: object())
+    monkeypatch.setattr(code_runner, "_resume_windows_process", lambda proc: None)
 
     out = code_runner.run_code_window("print('hello window')", language="python")
 
