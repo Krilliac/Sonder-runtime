@@ -1,7 +1,7 @@
 """Concrete argv process provider wired to the typed tree supervisor."""
 from __future__ import annotations
 
-from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
+from ...platform.runtime_threads import Thread as owned_runtime_thread
 
 import os
 import hashlib
@@ -20,9 +20,10 @@ from ...application.execution.effect_journal import (
 from ...application.execution.worker_bindings import AuthenticatedWorkerBinding, journaled_effect, _digest
 from ...application.jobs.durable_registry import (
     DurableJobRegistry, OutputAppend, ProcessTreeCleanupContract,
+    ProcessTreeCleanupRequest, ProcessTreeCleanupReceipt,
 )
 from ...application.jobs.session_lifecycle import JobRegistryLifecycleAdapter
-from ...application.execution.world_control import OutputStream
+from ...application.execution.world_control import OutputStream, OutputWatermark
 from .durable_output import DurableExecutionOutput
 from .output_batching import OutputBatcher, OutputBatchPolicy
 from ...application.ports.jobs import JobStatus
@@ -168,6 +169,7 @@ class SubprocessJobProvider:
             raise ValueError("inline_output_bytes must be positive")
         self._registry = registry
         self._jobs = JobRegistryService(registry, process_cleanup=process_cleanup, lifecycle=lifecycle)
+        self._process_cleanup = process_cleanup
         self._launcher = launcher or subprocess.Popen
         self._platform = platform_name or os.name
         self._output = output
@@ -199,6 +201,7 @@ class SubprocessJobProvider:
         self._unresolved_scopes: dict[str, dict[str, Any]] = {}
         self._output_threads: dict[str, tuple[threading.Thread, ...]] = {}
         self._output_batchers: dict[str, OutputBatcher] = {}
+        self._spill_owners: set[str] = set()
         self._output_failures: dict[str, str] = {}
         self._output_failure_lock = threading.Lock()
         self._timer_lock = threading.RLock()
@@ -333,6 +336,7 @@ class SubprocessJobProvider:
             metadata=persisted_metadata,
         )
         process = None
+        process_instance_identity = None
         memory_token = None if prepared_scope is None else prepared_scope.token
         launch_lock = threading.RLock()
         with self._timer_lock:
@@ -441,6 +445,11 @@ class SubprocessJobProvider:
                     containment = self._quiesce_containment(
                         request.identity.job_id, force=True,
                     )
+                    if containment is None and self._platform == "posix" and process_exited:
+                        containment = self._quiesce_exited_group(
+                            request.identity.job_id, process.pid, process.pid,
+                            process_instance_identity,
+                        )
                 except Exception:
                     containment = ProcessContainmentResult(
                         False, detail="process launch containment cleanup failed",
@@ -532,6 +541,12 @@ class SubprocessJobProvider:
         except subprocess.TimeoutExpired:
             return ProcessJobWait(self._registry.poll(job_id), None, timed_out=True)
         containment = self._quiesce_containment(job_id, force=True)
+        if containment is None and self._platform == "posix":
+            view = self._registry.view(job_id)
+            containment = self._quiesce_exited_group(
+                job_id, view.process_id, view.process_group_id,
+                (view.metadata or {}).get("process_instance_identity") or None,
+            )
         if containment is not None and not containment.complete:
             records = self._jobs.request_cancellation(
                 job_id,
@@ -698,6 +713,17 @@ class SubprocessJobProvider:
             ):
                 self._jobs.request_cancellation(job_id, reason, max_descendants=limit)
         containment = self._quiesce_containment(job_id, force=True)
+        if containment is None and self._platform == "posix" and job_id in self._failed_launches:
+            process = self._processes.get(job_id)
+            if process_exited and process is not None:
+                containment = self._quiesce_exited_group(
+                    job_id, process.pid, process.pid,
+                    (self._registry.view(job_id).metadata or {}).get("process_instance_identity") or None,
+                )
+            else:
+                containment = ProcessContainmentResult(
+                    False, detail="failed launch root exit is unproven",
+                )
         if not process_exited or (containment is not None and not containment.complete):
             records = self._jobs.request_cancellation(
                 job_id,
@@ -1111,6 +1137,27 @@ class SubprocessJobProvider:
             )
         return result
 
+    def _quiesce_exited_group(
+        self, job_id: str, process_id: int, process_group_id: int | None,
+        process_identity: str | None,
+    ) -> ProcessContainmentResult:
+        try:
+            receipt = self._process_cleanup.cleanup(ProcessTreeCleanupRequest(
+                job_id, process_id, process_group_id,
+                max_descendants=self._limits.get(job_id, 64),
+                reason="root process exited", root_exited=True,
+                process_identity=process_identity or None,
+            ))
+        except Exception as exc:
+            return ProcessContainmentResult(
+                False, detail=f"process-group cleanup failed: {type(exc).__name__}",
+            )
+        if not isinstance(receipt, ProcessTreeCleanupReceipt) or receipt.job_id != job_id:
+            return ProcessContainmentResult(
+                False, detail="process-group cleanup returned invalid proof",
+            )
+        return ProcessContainmentResult(receipt.complete, detail=receipt.detail)
+
     def _restore_scope_owner(self, job_id: str, metadata: dict[str, Any]) -> bool:
         if job_id in self._memory_tokens:
             self._unresolved_scopes.pop(job_id, None)
@@ -1225,16 +1272,44 @@ class SubprocessJobProvider:
         self, job_id: str, stream: OutputStream, pipe: Any, batcher: OutputBatcher,
     ) -> None:
         try:
-            for chunk in iter(pipe.readline, ""):
-                if chunk and not batcher.put(stream, chunk):
-                    # Persistence stopped; like a failed per-line commit,
-                    # the reader stops and the failure (if any) is recorded.
+            fragments: list[str] = []
+            size = 0
+            discard = False
+            bound = batcher.policy.max_line_bytes
+            while True:
+                try:
+                    # The size argument bounds the allocation even when a
+                    # child never writes a newline.  UTF-8 can use four bytes
+                    # per character, so check bytes before joining fragments.
+                    chunk = pipe.readline(
+                        max(1, (bound - size) // 4 + 1) if not discard else 4096
+                    )
+                except (OSError, ValueError):
+                    # Teardown may close a pipe while its reader is waking.
                     return
-        except (OSError, ValueError):
-            # Process teardown can close a pipe while its reader is waking.
-            # The durable job status and already-published watermark remain
-            # authoritative; do not turn a normal close into a false failure.
-            return
+                if not chunk:
+                    if fragments and not discard and not batcher.put(stream, "".join(fragments)):
+                        return
+                    return
+                if discard:
+                    if chunk.endswith("\n"):
+                        discard = False
+                    continue
+                size += len(chunk.encode("utf-8"))
+                if size > bound:
+                    self._remember_output_failure(
+                        job_id, ValueError("output line exceeds line byte bound"),
+                    )
+                    fragments.clear()
+                    size = 0
+                    discard = not chunk.endswith("\n")
+                    continue
+                fragments.append(chunk)
+                if chunk.endswith("\n"):
+                    if not batcher.put(stream, "".join(fragments)):
+                        return
+                    fragments.clear()
+                    size = 0
         except Exception as exc:
             # Thread exceptions otherwise disappear after a traceback while
             # wait() reports a successful job.  Keep only the exception type:
@@ -1246,10 +1321,8 @@ class SubprocessJobProvider:
             batcher.writer_done()
 
     def _persistence_stopped(self, job_id: str, exc: BaseException) -> None:
-        # Same classification as the former per-line reader: an OSError or
-        # ValueError ended output quietly, anything else fails the job.
-        if isinstance(exc, (OSError, ValueError)):
-            return
+        # Every persister exception means output may be missing. Pipe-close
+        # errors are handled only in the reader, before persistence begins.
         if isinstance(exc, Exception):
             self._remember_output_failure(job_id, exc)
 
@@ -1281,6 +1354,7 @@ class SubprocessJobProvider:
 
     def _forget_output_threads(self, job_id: str) -> None:
         self._output_threads.pop(job_id, None)
+        self._spill_owners.discard(job_id)
         with self._timer_lock:
             self._output_batchers.pop(job_id, None)
 
@@ -1291,31 +1365,47 @@ class SubprocessJobProvider:
 
     def _persist_output(self, job_id: str, batch) -> None:
         """Publish lines through one registry call, spilling each oversized line."""
-        entries: list[OutputAppend] = []
-        for stream, payload in batch:
-            if not payload:
-                continue
-            encoded_size = len(payload.encode("utf-8"))
-            spill = None
-            inline = payload
-            if encoded_size > self._inline_output_bytes:
-                if self._output is not None:
-                    spill = self._output.spill_text(payload, owner_id=job_id)
-                inline = payload[: self._inline_output_bytes]
-            entries.append(OutputAppend(stream, inline, spill))
-        if not entries:
-            return
-        append_many = getattr(self._registry, "append_outputs", None)
-        if callable(append_many):
-            append_many(job_id, entries)
-        else:
-            for entry in entries:
-                self._registry.append_output(job_id, entry.stream, entry.data, spill=entry.spill)
-        if self._jobs._lifecycle is not None:
-            page = self._registry.stream(job_id, max_events=1, max_bytes=self._inline_output_bytes)
-            if page.events:
-                record = self._registry.poll(job_id)
-                self._jobs._lifecycle.record_output(record, page.events[-1])
+        try:
+            entries: list[OutputAppend] = []
+            for stream, payload in batch:
+                if not payload:
+                    continue
+                encoded_size = len(payload.encode("utf-8"))
+                spill = None
+                inline = payload
+                if encoded_size > self._inline_output_bytes:
+                    if self._output is not None:
+                        spill = self._output.spill_text(payload, owner_id=job_id)
+                        self._spill_owners.add(job_id)
+                    inline = payload[: self._inline_output_bytes]
+                entries.append(OutputAppend(stream, inline, spill))
+            if not entries:
+                return
+            append_many = getattr(self._registry, "append_outputs", None)
+            if callable(append_many):
+                append_many(job_id, entries)
+            else:
+                for entry in entries:
+                    self._registry.append_output(job_id, entry.stream, entry.data, spill=entry.spill)
+            if self._jobs._lifecycle is not None:
+                page = self._registry.stream(job_id, max_events=1, max_bytes=self._inline_output_bytes)
+                if page.events:
+                    record = self._registry.poll(job_id)
+                    self._jobs._lifecycle.record_output(record, page.events[-1])
+        finally:
+            if self._output is not None and job_id in self._spill_owners:
+                self._reap_output_spills(job_id)
+
+    def _reap_output_spills(self, job_id: str) -> None:
+        digests: list[str] = []
+        after = OutputWatermark(0)
+        while True:
+            page = self._registry.stream(job_id, after=after, max_events=256, max_bytes=1 << 20)
+            digests.extend(event.spill.digest for event in page.events if event.spill is not None)
+            if not page.has_more:
+                break
+            after = page.next_watermark
+        self._output.reap_owner(job_id, tuple(digests))
 
     def _take_output_failure(self, job_id: str) -> str | None:
         with self._output_failure_lock:

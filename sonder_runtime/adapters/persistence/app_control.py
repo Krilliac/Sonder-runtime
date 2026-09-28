@@ -1442,3 +1442,41 @@ class AppControlTransaction:
         if rows and not values:
             raise CapacityExceeded("binding exceeds page byte bound")
         return BindingPage(tuple(values), last if len(values) < len(rows) else None)
+
+    def list_grant_bindings(
+        self, *, principal_id, runtime_id, grant, after_position=0,
+        limit=50, max_bytes=65536
+    ):
+        """Page only the current grant; cursors count scoped rows, not global positions."""
+        self._check()
+        principal(principal_id)
+        identifier(runtime_id)
+        if type(grant) is not GrantSnapshot:
+            raise ValueError("typed grant required")
+        positive(limit, self._store.limits.page_cap)
+        positive(max_bytes, 65536)
+        if type(after_position) is not int or not 0 <= after_position < 2**63:
+            raise ValueError("invalid page cursor")
+        values = []
+        seen = used = 0
+        for (binding_id,) in self._conn.execute(
+            "SELECT id FROM app_host_bindings WHERE principal=? AND runtime=? "
+            "ORDER BY position", (principal_id, runtime_id)
+        ):
+            value = self.read_binding(principal_id=principal_id, binding_id=binding_id)
+            if value.runtime_id != runtime_id:
+                raise StoreUnavailable("binding runtime scope corruption")
+            if value.grant != grant:
+                continue
+            if seen < after_position:
+                seen += 1
+                continue
+            size = len(_encode(value).encode("utf8"))
+            if len(values) == limit or used + size > max_bytes:
+                if not values:
+                    raise CapacityExceeded("binding exceeds page byte bound")
+                return BindingPage(tuple(values), seen)
+            values.append(value)
+            used += size
+            seen += 1
+        return BindingPage(tuple(values), None)
