@@ -5,8 +5,10 @@ actually runs it (optionally with an appended assertion-based check) in a
 subprocess, so pass/fail is grounded in real execution rather than a model's
 own say-so.
 """
+import contextlib
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -24,6 +26,8 @@ _FILE_FIRST_LINE_RE = re.compile(
 )
 DEFAULT_TIMEOUT = 8
 MAX_TIMEOUT = 60
+# Inline `python -c` runner limit, well under Windows' ~32K command line.
+_MAX_INLINE_RUNNER_CHARS = 24_000
 RUNNABLE_FENCE_LANGS = {
     "python": "python",
     "py": "python",
@@ -250,10 +254,13 @@ def run_code_detail(
     timeout = clamp_timeout(timeout)
     interp = interp or sys.executable
     src = code + (("\n\n" + extra) if extra else "")
+    # Candidate code can read its own source through __file__. Keep the check
+    # and completion token out of that file, while still detecting early exit.
+    sentinel = "__SONDER_CHECKS_DONE_%s__" % secrets.token_hex(16) if extra else ""
     fd, path = tempfile.mkstemp(suffix=".py")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(src)
+            f.write(code)
         try:
             if compile_first:
                 try:
@@ -268,13 +275,33 @@ def run_code_detail(
                         "timed_out": False,
                         "error": "",
                     }
+            command = [interp, path]
+            if sentinel:
+                runner = (
+                    "import runpy as _sonder_runpy\n"
+                    "_sonder_vars = _sonder_runpy.run_path(%r, run_name='__main__')\n"
+                    "exec(%r, _sonder_vars)\n"
+                    "import sys as _sonder_sys\n"
+                    "_sonder_sys.__stdout__.write(%r)\n"
+                    "_sonder_sys.__stdout__.flush()\n"
+                ) % (path, extra, "\n" + sentinel + "\n")
+                command = [interp, "-c", runner]
+            runner_path = None
+            if sentinel and len(runner) > _MAX_INLINE_RUNNER_CHARS:
+                # Windows caps a command line near 32K characters; a large check
+                # suite runs from a second file instead (readable by the
+                # candidate, so this path only guards against accidental exits).
+                rfd, runner_path = tempfile.mkstemp(suffix=".py")
+                with os.fdopen(rfd, "w", encoding="utf-8") as rf:
+                    rf.write(runner)
+                command = [interp, runner_path]
             # Generated code is untrusted model output: give it a throwaway
             # cwd so a relative-path write cannot land wherever this process
             # happens to be running (for the nightly job, the source tree).
             scratch = _scratch_cwd()
             try:
                 p = subprocess.run(
-                    [interp, path],
+                    command,
                     input=stdin or "",
                     capture_output=True,
                     text=True,
@@ -284,11 +311,23 @@ def run_code_detail(
                 )
             finally:
                 shutil.rmtree(scratch, ignore_errors=True)
+                if runner_path:
+                    with contextlib.suppress(OSError):
+                        os.unlink(runner_path)
+            stdout, stderr = p.stdout or "", p.stderr or ""
+            checks_finished = not sentinel or sentinel in stdout
+            if sentinel:
+                stdout = stdout.replace("\n" + sentinel + "\n", "").replace(sentinel, "")
+                if not checks_finished:
+                    stderr += (
+                        "\nthe program exited before the appended checks "
+                        "finished; they did not run"
+                    )
             return {
-                "ok": p.returncode == 0,
+                "ok": p.returncode == 0 and checks_finished,
                 "returncode": p.returncode,
-                "stdout": (p.stdout or "").strip(),
-                "stderr": (p.stderr or "").strip(),
+                "stdout": stdout.strip(),
+                "stderr": stderr.strip(),
                 "timeout": timeout,
                 "timed_out": False,
                 "error": "",

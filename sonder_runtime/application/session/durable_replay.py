@@ -196,8 +196,10 @@ def crash_safe_replay(
             or report.first_sequence != (events[0].sequence if events else None)
             or report.last_sequence != (events[-1].sequence if events else None)):
         raise IntegrityFailure("session integrity report does not match replay snapshot")
-    if len(events) == read_limit:
-        # A bounded read cannot prove that the tail was reached safely.
+    if len(events) == read_limit and repository.read_range(
+            session_id, start_sequence=events[-1].sequence + 1, limit=1):
+        # A full bounded read reached the tail only when nothing follows it;
+        # an event after it (even one appended since) fails closed.
         raise IntegrityFailure("session history exceeds replay bound")
     domain = _domain_events(events)
     replay = replay_session(domain)

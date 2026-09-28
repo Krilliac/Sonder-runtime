@@ -368,7 +368,13 @@ def mutate_sqlite(path, sql, parameters, *, mode="preview",
         conn = lease["conn"]
     else:
         try:
-            conn = sqlite3.connect(uri, uri=True, timeout=0, isolation_level=None)
+            # A retained preview connection is applied later from whichever
+            # MCP worker thread receives the apply call.  It is only ever used
+            # by one thread at a time: the lease is popped under a lock.
+            conn = sqlite3.connect(
+                uri, uri=True, timeout=0, isolation_level=None,
+                check_same_thread=False,
+            )
         except sqlite3.Error as exc:
             raise SqliteMutateError("SQLite open failed: %s" % exc) from exc
     transaction = False
@@ -519,4 +525,7 @@ def mutate_sqlite(path, sql, parameters, *, mode="preview",
         except sqlite3.Error:
             pass
         if not retained_preview:
-            conn.close()
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass

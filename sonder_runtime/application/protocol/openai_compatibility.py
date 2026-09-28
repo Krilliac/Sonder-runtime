@@ -66,10 +66,17 @@ def _messages(value: Any) -> tuple[dict[str, str], ...]:
             raise CompatibilityError(
                 "messages[%d].role must be system, user, or assistant" % index
             )
-        result.append({"role": role, "content": _text(item.get("content"),
-                                                          "messages[%d].content" % index)})
-    if not any(item["role"] == "user" for item in result):
+        content = item.get("content")
+        if not isinstance(content, str):
+            raise CompatibilityError("messages[%d].content must be a string" % index)
+        result.append({"role": role, "content": content})
+    # Clients commonly send an empty system prompt or an empty prior assistant
+    # turn; the chat adapter drops empty history turns.  Only the message being
+    # answered -- the last user message -- must carry text.
+    users = [item for item in result if item["role"] == "user"]
+    if not users:
         raise CompatibilityError("messages must contain a user message")
+    _text(users[-1]["content"], "the last user message content")
     return tuple(result)
 
 

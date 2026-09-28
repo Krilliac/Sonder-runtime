@@ -63,10 +63,12 @@ def test_envelope_satisfies_the_observatory_event_schema():
 
 
 def test_mono_ns_is_the_host_monotonic_clock():
-    before = time.monotonic_ns()
+    from sonder_runtime.adapters.observability.observatory_producer import host_monotonic_ns
+
+    before = host_monotonic_ns()
     producer = ObservatoryProducer(version="v", node_id="h")
     producer.emit(_event())
-    after = time.monotonic_ns()
+    after = host_monotonic_ns()
     envelope = _lines(producer.subscribe())[0]
     assert before <= envelope["mono_ns"] <= after
     assert re.fullmatch(r"rt-[0-9a-f]{12}", producer.instance_id)
