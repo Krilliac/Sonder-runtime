@@ -111,6 +111,10 @@ class FakeRuntimeData implements RuntimeDataSource {
   EcosystemReading ecosystemReading;
   Object? ecosystemError;
   int ecosystemReads = 0;
+
+  /// The `/v1/models` read (ids and per-row routing); empty by default.
+  ModelCatalog catalog = const ModelCatalog();
+  Object? catalogError;
   final List<String> cancelled = [];
 
   /// When set, cancel requests wait on it (a slow server).
@@ -185,6 +189,12 @@ class FakeRuntimeData implements RuntimeDataSource {
     rediscoveries++;
     if (rediscoverError != null) throw rediscoverError!;
     return rediscovered ?? const ToolInventory();
+  }
+
+  @override
+  Future<ModelCatalog> modelCatalog() async {
+    if (catalogError != null) throw catalogError!;
+    return catalog;
   }
 
   @override

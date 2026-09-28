@@ -361,6 +361,122 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('Models panel names the provider each route is bound to',
+      (tester) async {
+    await pumpRuntime(tester,
+        info: healthySystemInfo(),
+        data: FakeRuntimeData(
+            ecosystemReading: EcosystemReading.parse(
+                ecosystemJson(inference: inferenceStatusJson()))));
+    await tester.tap(find.text('Models').first);
+    await tester.pumpAndSettle();
+    expect(find.text('code - Sonder Inference'), findsOneWidget);
+    expect(find.text('code - local'), findsNothing);
+    expect(find.textContaining('Sonder Inference serves'), findsOneWidget);
+    expect(find.textContaining('Ollama hosts and runs the local model weights'),
+        findsNothing);
+  });
+
+  testWidgets('Models panel claims only the routes the runtime offers',
+      (tester) async {
+    // healthySystemInfo offers the `code` route only; every tier is bound.
+    await pumpRuntime(tester,
+        info: healthySystemInfo(),
+        data: FakeRuntimeData(
+            ecosystemReading: EcosystemReading.parse(
+                ecosystemJson(inference: inferenceStatusJson()))));
+    await tester.tap(find.text('Models').first);
+    await tester.pumpAndSettle();
+    expect(
+        find.textContaining(
+            'Sonder Inference serves the code route with mock:tiny.'),
+        findsOneWidget);
+    // The Sonder Inference panel still lists every configured binding; the
+    // Models explanation claims only the offered routes.
+    final panel = tester
+        .widget<Text>(find.textContaining('Sonder Runtime routes requests'));
+    expect(panel.data, isNot(contains('reasoning')));
+    expect(panel.data, isNot(contains('vision')));
+  });
+
+  testWidgets('Models panel falls back to /v1/models rows for non-admins',
+      (tester) async {
+    await pumpRuntime(tester,
+        info: healthySystemInfo(),
+        data: FakeRuntimeData(
+            ecosystemError: SonderException(
+                SonderApi.adminRequiredMessage,
+                httpStatus: 403))
+          ..catalog = const ModelCatalog(ids: [
+            'sonder',
+            'code'
+          ], origins: {
+            'code': ModelOrigin(
+                kind: 'route',
+                provider: 'sonder_inference',
+                servedModel: 'qwen3:14b'),
+          }));
+    await tester.tap(find.text('Models').first);
+    await tester.pumpAndSettle();
+    expect(find.text('code - Sonder Inference'), findsOneWidget);
+    expect(
+        find.textContaining(
+            'Sonder Inference serves the code route with qwen3:14b.'),
+        findsOneWidget);
+  });
+
+  testWidgets('Models panel keeps the old wording when all is on Ollama',
+      (tester) async {
+    await pumpRuntime(tester,
+        info: healthySystemInfo(),
+        data: FakeRuntimeData(
+            ecosystemReading: EcosystemReading.parse(ecosystemAllOllama())));
+    await tester.tap(find.text('Models').first);
+    await tester.pumpAndSettle();
+    expect(find.text('code - local'), findsOneWidget);
+    expect(find.textContaining('Ollama hosts and runs the local model weights'),
+        findsOneWidget);
+  });
+
+  group('local server row', () {
+    test('launcher-detected server reads Reachable', () {
+      expect(
+          localServerRow(
+              launcherDetected: true,
+              serverUrl: 'http://127.0.0.1:11435',
+              connected: true),
+          ('Reachable on 127.0.0.1:11435', true));
+    });
+    test('connected to 127.0.0.1:11435 without the launcher identity', () {
+      expect(
+          localServerRow(
+              launcherDetected: false,
+              serverUrl: 'http://127.0.0.1:11435',
+              connected: true),
+          ('Connected on 127.0.0.1:11435 (not launcher-managed)', true));
+      expect(
+          localServerRow(
+              launcherDetected: false,
+              serverUrl: 'http://localhost:11435/',
+              connected: true),
+          ('Connected on 127.0.0.1:11435 (not launcher-managed)', true));
+    });
+    test('not connected, or connected elsewhere, is Not detected', () {
+      for (final (url, connected) in [
+        ('http://127.0.0.1:11435', false),
+        ('http://192.168.1.20:11435', true),
+        ('http://127.0.0.1:8080', true),
+      ]) {
+        expect(
+            localServerRow(
+                launcherDetected: false,
+                serverUrl: url,
+                connected: connected),
+            ('Not detected on 127.0.0.1:11435', false));
+      }
+    });
+  });
+
   testWidgets('ecosystem 403 keeps the rest of Runtime working',
       (tester) async {
     await pumpRuntime(tester,

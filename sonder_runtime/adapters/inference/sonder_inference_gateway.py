@@ -143,7 +143,7 @@ CAPABILITIES = frozenset({GATEWAY_CAPABILITY_CHAT, GATEWAY_CAPABILITY_FIXED_ENDP
 STATUS_KEYS = (
     "provider", "state", "healthy", "checked_at", "detail", "capabilities",
     "base_url", "version", "api_version", "models", "synthetic", "identity",
-    "telemetry", "fallback", "fallback_count",
+    "telemetry", "fallback", "fallback_count", "tier_models",
 )
 
 _BIND_ADDRESS_REWRITES = {"0.0.0.0": "127.0.0.1", "::": "::1"}
@@ -1071,6 +1071,15 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
 
     # -- status ------------------------------------------------------------
 
+    @staticmethod
+    def _tier_models(settings: SonderInferenceConfig) -> dict[str, str]:
+        """The model each tier's request names (``select_model`` without options)."""
+        return {tier: settings.tier_models.get(tier, settings.model) for tier in PROVIDER_TIERS}
+
+    def served_tier_models(self) -> Mapping[str, Mapping[str, str]]:
+        """``{provider: {tier: model}}`` from configuration alone (no I/O)."""
+        return {PROVIDER_ID: self._tier_models(self.settings())}
+
     def provider_status(self) -> Mapping[str, Mapping[str, object]]:
         """Content-free status for doctor, the ecosystem route and the app."""
         entry: dict[str, object] = {key: None for key in STATUS_KEYS}
@@ -1082,6 +1091,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         try:
             settings = self.settings()
             entry["base_url"] = settings.display_base_url
+            entry["tier_models"] = self._tier_models(settings)
             snap = self.health(settings=settings)
         except SonderInferenceUnreachable as exc:
             entry["detail"] = _bounded(exc.summary)

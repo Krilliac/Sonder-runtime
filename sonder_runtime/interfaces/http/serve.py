@@ -129,6 +129,7 @@ from sonder_runtime.interfaces.http.facades.a2a_jsonrpc import (
 from sonder_runtime.interfaces.http.facades.control_plane import ControlPlaneFacade
 from sonder_runtime.interfaces.http.facades.approvals import refusal_receipt
 from sonder_runtime.interfaces.http.facades.extensions import dispatch_extension_route
+from sonder_runtime.interfaces.http.facades.model_catalog import annotate_model_rows
 from sonder_runtime.interfaces.http.facades.model_request import (
     ModelFacadeError,
     ModelRequestFacade,
@@ -4056,14 +4057,12 @@ def _openai_model_rows():
     except Exception:
         records = ()
 
-    # ``sonder`` is a runtime route ID, not weights.  Tier IDs are retained for
-    # compatibility, then exact live catalog names make valid installed models
-    # discoverable to standard OpenAI clients.  Do not nevertheless advertise
-    # a local tier that a legacy/manual policy points at an explicitly
-    # non-chat-capable catalog record: `/runtime set` now rejects that state,
-    # while this keeps pre-existing policy files honest too.  Missing or
-    # capability-less metadata remains listed rather than converting a catalog
-    # outage into a false claim that the whole runtime has no model routes.
+    # ``sonder`` is a runtime route ID, not weights. Tier IDs are kept for
+    # compatibility; exact live catalog names make installed models discoverable
+    # to OpenAI clients. A local tier a legacy policy points at a non-chat catalog
+    # record is not advertised (`/runtime set` rejects that state; this keeps old
+    # policy files honest). Missing or capability-less metadata stays listed, so
+    # a catalog outage is never a false claim that no model routes exist.
     add("sonder", "local")
     for tier_name, model in server.available_tiers().items():
         cloud = server._is_cloud_tier(tier_name, model)
@@ -4079,7 +4078,8 @@ def _openai_model_rows():
         if cloud and not server.cloud_allowed():
             continue
         add(name, "cloud" if cloud else "local")
-    return rows
+    return annotate_model_rows(rows, {"sonder", *server.available_tiers()}, serve_target=server._serve_target,  # per-row provider ids
+                               bridge_provider=server._bridge_provider_for_tier, gateway=getattr(_live_telemetry_application(), "model_gateway", None))
 
 
 def _reasoning_audience():

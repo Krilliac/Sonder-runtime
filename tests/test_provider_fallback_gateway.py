@@ -186,6 +186,15 @@ def test_status_reports_fallback_and_count_and_forwards_metadata():
         gateway.embed(["x"], _ctx())
 
 
+def test_served_tier_models_describe_the_primary():
+    primary, _ = _primary()
+    gateway = PreSendFallbackGateway(primary, fallback=FakeOllama())
+    assert gateway.served_tier_models() == primary.served_tier_models()
+    assert set(gateway.served_tier_models()["sonder_inference"]) == {
+        "fast", "general", "code", "reasoning", "vision",
+    }
+
+
 def test_default_is_no_fallback_and_the_error_names_the_fix():
     bindings = provider_bindings_from_env({
         "SONDER_MODEL_BACKEND": "sonder-inference", "SONDER_EMBEDDING_PROVIDER": "ollama",

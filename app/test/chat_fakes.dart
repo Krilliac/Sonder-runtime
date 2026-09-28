@@ -89,6 +89,11 @@ class FakeChatBackend implements ChatBackend {
   Object? modeWriteError;
   List<String> models = const ['sonder'];
 
+  /// The provider bindings (`GET /v1/sonder/ecosystem`); the default is a
+  /// runtime without the route.
+  EcosystemReading ecosystem = const EcosystemReading.unsupportedRuntime();
+  Object? ecosystemError;
+
   WorkRun Function(String id)? workRun;
   WorkRun Function(String id)? cancelWorkRunResult;
   ApprovalOutcome approvalOutcome =
@@ -131,6 +136,20 @@ class FakeChatBackend implements ChatBackend {
 
   @override
   Future<List<String>> listModels() async => models;
+
+  /// Per-row routing fields of `/v1/models`, keyed by lower-case id.
+  Map<String, ModelOrigin> origins = const {};
+
+  @override
+  Future<ModelCatalog> modelCatalog() async =>
+      ModelCatalog(ids: models, origins: origins);
+
+  @override
+  Future<EcosystemReading> ecosystemStatus() async {
+    final err = ecosystemError;
+    if (err != null) throw err;
+    return ecosystem;
+  }
 
   @override
   Future<CommandCatalog> fetchCommands() async =>
