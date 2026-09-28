@@ -71,6 +71,7 @@ def test_run_program_reaps_child_when_io_thread_is_refused(
             proc.wait(timeout=10)
 
 
+@pytest.mark.real_prewarm  # exercises server.prewarm_model itself (see #583)
 def test_prewarm_releases_inflight_marker_when_worker_is_refused(monkeypatch):
     import server
 
