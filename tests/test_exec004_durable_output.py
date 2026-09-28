@@ -83,6 +83,29 @@ def test_reaping_expired_output_references_recovers_spill_quota(tmp_path):
     assert output.read(fresh, max_bytes=8) == b"abcdefgh"
 
 
+def test_reaping_duplicate_spills_keeps_one_blob_per_live_digest(monkeypatch):
+    connection = sqlite3.connect(":memory:")
+
+    @contextmanager
+    def memory_connection(_store):
+        with connection:
+            yield connection
+
+    monkeypatch.setattr(SQLiteSpillStore, "_connect", memory_connection)
+    try:
+        store = SQLiteSpillStore("unused", max_owner_bytes=12, max_total_bytes=12)
+        output = DurableExecutionOutput(store, max_bytes=8)
+        references = [output.spill_text("1234", owner_id="job-1") for _ in range(3)]
+
+        # Three retained events may share this digest, but one blob backs all of them.
+        assert output.reap_owner("job-1", tuple(ref.digest for ref in references)) == 2
+        assert all(output.read(ref, max_bytes=8) == b"1234" for ref in references)
+        fresh = output.spill_text("abcdefgh", owner_id="job-1")
+        assert output.read(fresh, max_bytes=8) == b"abcdefgh"
+    finally:
+        connection.close()
+
+
 def test_spill_quota_and_reference_reaping_with_memory_connection(monkeypatch):
     connection = sqlite3.connect(":memory:")
 

@@ -247,10 +247,17 @@ class SQLiteSpillStore:
         live = set(live_digests)
         with self._lock, self._connect() as connection:
             rows = connection.execute(
-                "SELECT spill_id,digest FROM execution_spill WHERE owner_id=? AND state=?",
+                "SELECT spill_id,digest FROM execution_spill WHERE owner_id=? AND state=? "
+                "ORDER BY rowid DESC",
                 (owner_id, SpillState.COMMITTED.value),
             ).fetchall()
-            stale = [(spill_id,) for spill_id, digest in rows if digest not in live]
+            retained: set[str] = set()
+            stale = []
+            for spill_id, digest in rows:
+                if digest not in live or digest in retained:
+                    stale.append((spill_id,))
+                else:
+                    retained.add(digest)
             connection.executemany("DELETE FROM execution_spill WHERE spill_id=?", stale)
             return len(stale)
 
