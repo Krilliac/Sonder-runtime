@@ -17,11 +17,21 @@ into the domain error taxonomy — callers never see ``urllib`` or HTTP details.
 
 Configuration (resolved lazily at call time, never at import/construction):
 ``SONDER_OPENAI_BASE_URL``, ``SONDER_OPENAI_API_KEY``, ``SONDER_OPENAI_MODEL``,
-``SONDER_OPENAI_EMBED_MODEL``.
+``SONDER_OPENAI_EMBED_MODEL``, ``SONDER_OPENAI_ALLOW_HTTP_NETWORKS``.
+
+Transport: a non-loopback endpoint must use ``https`` -- prompts and the
+bearer key never cross a network in plaintext -- unless its host is a private
+IP literal inside a network the operator listed in
+``SONDER_OPENAI_ALLOW_HTTP_NETWORKS`` (comma/semicolon separated CIDRs; only
+private ranges are honoured, host names never are).  The default transports
+never follow a redirect, reach a loopback endpoint directly (an ambient
+``http_proxy`` would otherwise receive the request), and read a successful
+body only up to a fixed byte ceiling.
 """
 from __future__ import annotations
 
 import http.client
+import ipaddress
 import json
 import logging
 import socket
@@ -78,13 +88,51 @@ _DEFAULT_TIMEOUT = 300
 # only ever inspected for a machine-readable code, never stored or relayed.
 ERROR_BODY_LIMIT = 16_384
 GET_BODY_LIMIT = 1_048_576
+# A non-streaming completion or embedding batch is one JSON object; a larger
+# successful body is not a response this runtime will buffer.
+POST_BODY_LIMIT = 16 * 1024 * 1024
+_READ_CHUNK = 65_536
+ENV_ALLOW_HTTP_NETWORKS = "SONDER_OPENAI_ALLOW_HTTP_NETWORKS"
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 
 
-_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirect())
+def _opener_for(url: str):
+    """A non-redirecting opener; loopback URLs also bypass every proxy.
+
+    urllib has no implicit loopback bypass: with ``http_proxy`` (or a system
+    proxy) set and no matching ``no_proxy`` entry, a request to
+    ``http://localhost`` -- prompt, bearer key and all -- goes to the proxy
+    host.  Remote endpoints keep proxy support (they are https, so the proxy
+    only sees a CONNECT tunnel).  Built per call so the proxy decision reflects
+    the current environment rather than the one at import time.
+    """
+    handlers: list = [_NoRedirect()]
+    if (urlsplit(url).hostname or "").lower() in _LOOPBACK_HOSTS:
+        handlers.append(urllib.request.ProxyHandler({}))
+    return urllib.request.build_opener(*handlers)
+
+
+def _read_bounded(stream, limit: int) -> bytes:
+    """Read at most ``limit + 1`` bytes so an oversize body is detectable."""
+    chunks: list[bytes] = []
+    total = 0
+    while total <= limit:
+        chunk = stream.read(min(_READ_CHUNK, limit + 1 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks)
+
+
+def _split_networks(raw: str) -> tuple[str, ...]:
+    return tuple(
+        item.strip() for item in str(raw or "").replace(";", ",").split(",")
+        if item.strip()
+    )
 
 # Hook shapes (all optional, all additive; see OpenAICompatibleGateway).
 ExtraHeaders = Callable[[OperationContext], Mapping[str, str]]
@@ -108,6 +156,8 @@ class OpenAICompatibleConfig:
     api_key: str = ""
     model: str = ""
     embed_model: str = ""
+    # CIDRs whose private IP-literal hosts may be reached over plain http.
+    plaintext_networks: tuple[str, ...] = ()
 
 
 def _config_from_env() -> OpenAICompatibleConfig:
@@ -118,6 +168,7 @@ def _config_from_env() -> OpenAICompatibleConfig:
         api_key=os.environ.get("SONDER_OPENAI_API_KEY", "").strip(),
         model=os.environ.get("SONDER_OPENAI_MODEL", "").strip(),
         embed_model=os.environ.get("SONDER_OPENAI_EMBED_MODEL", "").strip(),
+        plaintext_networks=_split_networks(os.environ.get(ENV_ALLOW_HTTP_NETWORKS, "")),
     )
 
 
@@ -210,6 +261,51 @@ class OpenAICompatibleGateway:
                 "endpoint %r is non-loopback but this operation context does "
                 "not allow cloud" % cfg.base_url
             )
+
+    def _require_secure_transport(self, cfg: OpenAICompatibleConfig) -> None:
+        """Refuse plaintext http to anything but loopback or a trusted private host.
+
+        Applies to every request -- prompt-bearing or not -- because every
+        request can carry the bearer key.  Cloud consent does not relax it:
+        consent is about where prompts go, not about sending them in clear.
+        """
+        parts = urlsplit(cfg.base_url)
+        scheme = (parts.scheme or "").lower()
+        if scheme == "https" or self._is_loopback(cfg.base_url):
+            return
+        if scheme != "http":
+            raise InvalidInput(
+                "OpenAI-compatible endpoint must use http or https, got %r" % scheme
+            )
+        if self._trusted_plaintext_host(parts.hostname or "", cfg.plaintext_networks):
+            return
+        raise Forbidden(
+            "OpenAI-compatible endpoint %s is not loopback and uses plaintext "
+            "http; use an https:// base URL, or list its private network in %s "
+            "to allow http to that private IP address"
+            % (parts.hostname or cfg.base_url, ENV_ALLOW_HTTP_NETWORKS)
+        )
+
+    @staticmethod
+    def _trusted_plaintext_host(host: str, networks: Sequence[str]) -> bool:
+        try:
+            address = ipaddress.ip_address(host.strip("[]"))
+        except ValueError:
+            return False  # a host name: DNS, not the operator, picks the peer
+        if not address.is_private or address.is_global:
+            return False
+        for entry in networks:
+            try:
+                network = ipaddress.ip_network(str(entry).strip(), strict=False)
+            except ValueError as exc:
+                raise InvalidInput(
+                    "%s entry is not a CIDR: %r" % (ENV_ALLOW_HTTP_NETWORKS, entry)
+                ) from exc
+            if not network.is_private:
+                continue  # only private ranges can be trusted for plaintext
+            if address.version == network.version and address in network:
+                return True
+        return False
 
     @staticmethod
     def _check_liveness(
@@ -388,6 +484,7 @@ class OpenAICompatibleGateway:
         self, path: str, payload: dict, cfg: OpenAICompatibleConfig, timeout,
         *, context: OperationContext | None = None,
     ) -> dict:
+        self._require_secure_transport(cfg)
         url = cfg.base_url.rstrip("/") + path
         logger.debug(f"OpenAICompatibleGateway._post: url={url!r}, timeout={timeout}")
         transport = self._transport or self._default_transport
@@ -500,6 +597,7 @@ class OpenAICompatibleGateway:
         endpoint policy before calling it.
         """
         cfg = cfg or self._resolved_config()
+        self._require_secure_transport(cfg)
         url = cfg.base_url.rstrip("/") + path
         headers = self._headers(cfg)
         headers.pop("Content-Type", None)
@@ -542,7 +640,7 @@ class OpenAICompatibleGateway:
         # to whatever host the Location names.  A 3xx is returned as-is.
         req = urllib.request.Request(url, headers=headers, method="GET")
         try:
-            with _NO_REDIRECT_OPENER.open(req, timeout=timeout or _DEFAULT_TIMEOUT) as resp:
+            with _opener_for(url).open(req, timeout=timeout or _DEFAULT_TIMEOUT) as resp:
                 return int(resp.status), resp.read(GET_BODY_LIMIT + 1)
         except urllib.error.HTTPError as exc:
             try:
@@ -555,8 +653,14 @@ class OpenAICompatibleGateway:
     def _default_transport(url: str, payload: dict, headers: dict, timeout) -> dict:
         body = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=timeout or _DEFAULT_TIMEOUT) as resp:
-            raw = resp.read()
+        # Never follow a redirect: urllib would turn the POST into a GET and
+        # copy the Authorization header to whatever origin Location names.  A
+        # 3xx surfaces as an HTTPError and maps to DependencyUnavailable.
+        limit = POST_BODY_LIMIT
+        with _opener_for(url).open(req, timeout=timeout or _DEFAULT_TIMEOUT) as resp:
+            raw = _read_bounded(resp, limit)
+        if len(raw) > limit:
+            raise DependencyUnavailable("endpoint response exceeds %d bytes" % limit)
         try:
             return json.loads(raw)
         except ValueError as exc:

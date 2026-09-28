@@ -11,12 +11,14 @@ import ctypes.wintypes
 import glob
 import json
 import locale
+import logging
 import ntpath
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import threading
 from sonder_runtime.platform import logging as sonder_logging
 from sonder_runtime.platform import paths as sonder_paths
 from sonder_runtime.application.workflows import loop as workflow_loop
@@ -125,6 +127,16 @@ MAX_LOOP_DELAY_SECONDS = 10.0
 MAX_PROJECT_FILES = 80
 MAX_PROJECT_BYTES = 750000
 RUN_WINDOW_DIR_ENV = "SONDER_RUN_WINDOW_DIR"
+# Lifecycle quota for detached /runwindow consoles.  ``timeout`` bounds only
+# the compile/launch step; these bound what keeps running afterwards: how
+# many consoles may be open at once, how long each (with every process it
+# started) may live, how many processes its Job Object admits, and how many
+# generated run directories are retained on disk.
+RUN_WINDOW_MAX_LIVE = 4
+RUN_WINDOW_LIFETIME_SECONDS = 3600
+RUN_WINDOW_MAX_PROCESSES = 32
+RUN_WINDOW_MAX_RETAINED_DIRS = 16
+_RUN_WINDOW_PREFIX = "sonder-window-"
 
 
 def _child_environment():
@@ -351,9 +363,16 @@ def _terminate_windows_descendants(root_pid):
         kernel32.CloseHandle(snapshot)
 
 
-def _attach_windows_job(proc):
-    """Put a runner process in a kill-on-close Windows Job Object."""
+def _attach_windows_job(proc, *, active_process_limit=None):
+    """Put a runner process in a kill-on-close Windows Job Object.
+
+    ``active_process_limit`` additionally caps how many processes the job
+    may hold at once (JOB_OBJECT_LIMIT_ACTIVE_PROCESS).
+    """
     if os.name != "nt":
+        return None
+    process_handle = getattr(proc, "_handle", None)
+    if process_handle is None:
         return None
     try:
         kernel32 = ctypes.windll.kernel32
@@ -406,6 +425,9 @@ def _attach_windows_job(proc):
 
         info = ExtendedLimit()
         info.BasicLimitInformation.LimitFlags = 0x2000  # KILL_ON_JOB_CLOSE
+        if active_process_limit is not None:
+            info.BasicLimitInformation.LimitFlags |= 0x0008  # ACTIVE_PROCESS
+            info.BasicLimitInformation.ActiveProcessLimit = max(1, int(active_process_limit))
         kernel32.SetInformationJobObject.restype = ctypes.wintypes.BOOL
         kernel32.AssignProcessToJobObject.restype = ctypes.wintypes.BOOL
         if not kernel32.SetInformationJobObject(
@@ -413,7 +435,7 @@ def _attach_windows_job(proc):
         ):
             kernel32.CloseHandle(job)
             return None
-        if not kernel32.AssignProcessToJobObject(job, proc._handle):
+        if not kernel32.AssignProcessToJobObject(job, process_handle):
             kernel32.CloseHandle(job)
             return None
         return job
@@ -427,6 +449,58 @@ def _close_windows_job(job):
             ctypes.windll.kernel32.CloseHandle(job)
         except (AttributeError, OSError):
             pass
+
+
+def _resume_windows_process(proc):
+    """Resume the initial thread of a process started with CREATE_SUSPENDED."""
+    kernel32 = ctypes.windll.kernel32
+
+    class ThreadEntry(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", ctypes.wintypes.DWORD),
+            ("cntUsage", ctypes.wintypes.DWORD),
+            ("th32ThreadID", ctypes.wintypes.DWORD),
+            ("th32OwnerProcessID", ctypes.wintypes.DWORD),
+            ("tpBasePri", ctypes.wintypes.LONG),
+            ("tpDeltaPri", ctypes.wintypes.LONG),
+            ("dwFlags", ctypes.wintypes.DWORD),
+        ]
+
+    kernel32.CreateToolhelp32Snapshot.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.DWORD]
+    kernel32.CreateToolhelp32Snapshot.restype = ctypes.wintypes.HANDLE
+    kernel32.Thread32First.argtypes = [ctypes.wintypes.HANDLE, ctypes.POINTER(ThreadEntry)]
+    kernel32.Thread32First.restype = ctypes.wintypes.BOOL
+    kernel32.Thread32Next.argtypes = [ctypes.wintypes.HANDLE, ctypes.POINTER(ThreadEntry)]
+    kernel32.Thread32Next.restype = ctypes.wintypes.BOOL
+    kernel32.OpenThread.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.BOOL,
+                                   ctypes.wintypes.DWORD]
+    kernel32.OpenThread.restype = ctypes.wintypes.HANDLE
+    kernel32.ResumeThread.argtypes = [ctypes.wintypes.HANDLE]
+    kernel32.ResumeThread.restype = ctypes.wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
+    kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000004, 0)  # TH32CS_SNAPTHREAD
+    if not snapshot or snapshot == ctypes.c_void_p(-1).value:
+        raise OSError("could not enumerate suspended console threads")
+    try:
+        entry = ThreadEntry()
+        entry.dwSize = ctypes.sizeof(ThreadEntry)
+        found = kernel32.Thread32First(snapshot, ctypes.byref(entry))
+        while found:
+            if entry.th32OwnerProcessID == proc.pid:
+                thread = kernel32.OpenThread(0x0002, False, entry.th32ThreadID)
+                if not thread:
+                    break
+                try:
+                    if kernel32.ResumeThread(thread) != 1:
+                        raise OSError("could not resume suspended console thread")
+                    return
+                finally:
+                    kernel32.CloseHandle(thread)
+            found = kernel32.Thread32Next(snapshot, ctypes.byref(entry))
+        raise OSError("could not find suspended console thread")
+    finally:
+        kernel32.CloseHandle(snapshot)
 
 
 def _decode_child_output(raw):
@@ -526,13 +600,170 @@ def _run_process(cmd, cwd, stdin, timeout, language):
     return _completed_result(completed, language, cwd, timeout)
 
 
-def _persistent_run_dir():
+class _WindowRegistry:
+    """Detached /runwindow consoles this runtime launched and still owns.
+
+    Each console's process tree sits in a Job Object (kill-on-close, bounded
+    process count) and has a lifetime timer; when the timer fires the tree
+    is torn down.  A console the user closed is reaped on the next launch,
+    which closes its job and so ends anything it left running.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._windows = {}
+
+    def reap(self):
+        with self._lock:
+            self._reap_locked()
+
+    def _reap_locked(self):
+        for key, window in list(self._windows.items()):
+            poll = getattr(window["proc"], "poll", None)
+            if poll is not None and poll() is not None:
+                self._release_locked(key)
+
+    def _release_locked(self, key):
+        window = self._windows.pop(key, None)
+        if window is None:
+            return
+        window["timer"].cancel()
+        _close_windows_job(window["job"])
+        try:
+            window["proc"]._sonder_job_handle = None
+        except AttributeError:
+            pass
+
+    def live_count(self):
+        with self._lock:
+            self._reap_locked()
+            return len(self._windows)
+
+    def live_dirs(self):
+        with self._lock:
+            return {os.path.realpath(w["run_dir"]) for w in self._windows.values()}
+
+    def launch(self, start, run_dir):
+        """Start one console via ``start()`` if the live quota allows it."""
+        with self._lock:
+            self._reap_locked()
+            if len(self._windows) >= RUN_WINDOW_MAX_LIVE:
+                return None
+            proc = start()
+            job = _attach_windows_job(proc, active_process_limit=RUN_WINDOW_MAX_PROCESSES)
+            if not job:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                except (OSError, subprocess.SubprocessError):
+                    logging.getLogger(__name__).warning(
+                        "could not terminate uncontained runwindow console", exc_info=True)
+                raise OSError("could not attach runwindow console to a bounded Windows job")
+            try:
+                _resume_windows_process(proc)
+            except Exception as exc:  # noqa: BLE001 - never leave a failed resume registered
+                _close_windows_job(job)
+                try:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                except (OSError, subprocess.SubprocessError):
+                    pass
+                raise OSError("could not resume contained runwindow console") from exc
+            try:
+                proc._sonder_job_handle = job
+            except AttributeError:
+                pass
+            key = id(proc)
+            timer = threading.Timer(
+                RUN_WINDOW_LIFETIME_SECONDS, self._expire, args=(key,))
+            timer.daemon = True
+            self._windows[key] = {
+                "proc": proc, "job": job, "timer": timer, "run_dir": run_dir,
+            }
+            timer.start()
+            return proc
+
+    def _expire(self, key):
+        with self._lock:
+            window = self._windows.get(key)
+            if window is None:
+                return
+            try:
+                _terminate_process_tree(window["proc"])
+            except Exception:  # noqa: BLE001 - teardown is best effort; the job still closes
+                logging.getLogger(__name__).warning(
+                    "runwindow lifetime teardown failed", exc_info=True)
+            self._release_locked(key)
+
+
+_WINDOWS = _WindowRegistry()
+
+
+def _run_window_base():
     base = os.environ.get(RUN_WINDOW_DIR_ENV, "").strip()
     if not base:
         home = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
         base = os.path.join(home, "sonder", "runs")
+    return base
+
+
+def _prune_run_dirs(base, keep):
+    """Delete the oldest generated run dirs so at most ``keep`` remain.
+
+    Only ``sonder-window-*`` directories are considered, never symlinks,
+    and never the run directory of a console this runtime still owns.
+    Returns how many generated run directories remain afterwards.
+    """
+    live = _WINDOWS.live_dirs()
+    entries = []
+    try:
+        with os.scandir(base) as listing:
+            for entry in listing:
+                if not entry.name.startswith(_RUN_WINDOW_PREFIX):
+                    continue
+                if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                    continue
+                try:
+                    entries.append((entry.stat(follow_symlinks=False).st_mtime_ns, entry.path))
+                except OSError:
+                    continue
+    except OSError:
+        return 0
+    entries.sort()
+    remaining = len(entries)
+    for _mtime, path in entries:
+        if remaining <= keep:
+            break
+        if os.path.realpath(path) in live:
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+        if not os.path.exists(path):
+            remaining -= 1
+    return remaining
+
+
+def _persistent_run_dir():
+    base = _run_window_base()
     os.makedirs(base, exist_ok=True)
-    return tempfile.mkdtemp(prefix="sonder-window-", dir=base)
+    # Leave room for the directory about to be created.
+    if _prune_run_dirs(base, RUN_WINDOW_MAX_RETAINED_DIRS - 1) >= RUN_WINDOW_MAX_RETAINED_DIRS:
+        raise _RunWindowQuota(
+            "%d /runwindow run directories under %s are still in use; close "
+            "open consoles or remove old run directories"
+            % (RUN_WINDOW_MAX_RETAINED_DIRS, base)
+        )
+    return tempfile.mkdtemp(prefix=_RUN_WINDOW_PREFIX, dir=base)
+
+
+class _RunWindowQuota(RuntimeError):
+    """A /runwindow lifecycle quota refused a new console."""
+
+
+def _live_quota_message():
+    return (
+        "%d /runwindow consoles are already open (limit %d); close one before "
+        "launching another" % (RUN_WINDOW_MAX_LIVE, RUN_WINDOW_MAX_LIVE)
+    )
 
 
 def _bat_quote(value):
@@ -557,20 +788,26 @@ def _launch_console(launcher, cwd, language, timeout):
             timeout,
             "/runwindow is only available on Windows consoles",
         )
-    try:
-        proc = subprocess.Popen(
+    def start():
+        return subprocess.Popen(
             ["cmd", "/k", launcher],
             cwd=cwd,
-            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+            creationflags=(getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+                           | getattr(subprocess, "CREATE_SUSPENDED", 0x00000004)),
             env=_child_environment(),
             # A detached window is still executing model-authored code.  It
             # has no legitimate reason to inherit the host's other handles.
             close_fds=True,
         )
+
+    try:
+        proc = _WINDOWS.launch(start, os.path.dirname(launcher) or cwd)
     except FileNotFoundError:
         return _error_result(language, cwd, timeout, "cmd.exe not found")
     except OSError as exc:
         return _error_result(language, cwd, timeout, str(exc))
+    if proc is None:
+        return _error_result(language, cwd, timeout, _live_quota_message())
     return {
         "ok": True,
         "returncode": None,
@@ -583,6 +820,8 @@ def _launch_console(launcher, cwd, language, timeout):
         "detached": True,
         "pid": proc.pid,
         "run_dir": os.path.dirname(launcher),
+        # ``timeout`` bounded compile/launch only; this bounds the console.
+        "window_lifetime": RUN_WINDOW_LIFETIME_SECONDS,
     }
 
 
@@ -847,6 +1086,11 @@ def run_code_window(code, language="python", timeout=DEFAULT_TIMEOUT, cwd=None):
 
     Unlike run_code(), this deliberately keeps the generated run directory so an
     interactive console app or compiled executable stays available after launch.
+    ``timeout`` bounds compilation and launch only.  The console itself is
+    bounded by the /runwindow lifecycle quota: at most ``RUN_WINDOW_MAX_LIVE``
+    open at once, each torn down (with every process it started) after
+    ``RUN_WINDOW_LIFETIME_SECONDS``, its process tree capped by a Job Object,
+    and only the newest ``RUN_WINDOW_MAX_RETAINED_DIRS`` run dirs retained.
     """
     if not (code or "").strip():
         raise ValueError("code is empty")
@@ -857,7 +1101,13 @@ def run_code_window(code, language="python", timeout=DEFAULT_TIMEOUT, cwd=None):
         return _error_result(language, cwd, timeout, "/runwindow is only available on Windows consoles")
 
     cfg = SUPPORTED_LANGUAGES[language]
-    run_dir = _persistent_run_dir()
+    if _WINDOWS.live_count() >= RUN_WINDOW_MAX_LIVE:
+        fallback_cwd = resolve_cwd(cwd) if cwd else os.path.realpath(_run_window_base())
+        return _error_result(language, fallback_cwd, timeout, _live_quota_message())
+    try:
+        run_dir = _persistent_run_dir()
+    except _RunWindowQuota as exc:
+        return _error_result(language, _run_window_base(), timeout, str(exc))
     cwd = resolve_cwd(cwd) if cwd else os.path.realpath(run_dir)
     path = os.path.join(run_dir, "snippet" + cfg["suffix"])
     with open(path, "w", encoding="utf-8") as f:
@@ -933,6 +1183,12 @@ def format_window_result(result):
     if result.get("detached"):
         lines.append("run dir: %s" % result.get("run_dir"))
         lines.append("note: close the launched console window when you are done.")
+        if result.get("window_lifetime"):
+            lines.append(
+                "note: the timeout covered compile/launch only; the console and "
+                "every process it started are closed after %ss."
+                % result["window_lifetime"]
+            )
     elif result.get("run_dir"):
         lines.append("run dir: %s" % result.get("run_dir"))
     return "\n".join(line for line in lines if line)
