@@ -1467,9 +1467,17 @@ class OllamaWorkerPool:
         needs the pool's catalog: a model counts as installed when any member
         holds it. The first member (the primary) wins a name both hold. An
         unreachable member is skipped; if none answers, the last error is raised.
+        Only members the scheduler could route to count -- the same
+        admissibility ``_choose`` applies (not probationary, expired or draining,
+        no compatibility error) -- so a model is never "installed" on a worker
+        that could not serve it.
         """
         with self._condition:
-            origins = [state.endpoint.origin for state in self._states]
+            now = self._clock()
+            origins = [
+                state.endpoint.origin for state in self._states
+                if self._membership_admissible(state, now) and not state.compatibility_error
+            ]
         merged: dict[str, dict] = {}
         answered, last_error = False, None
         for origin in origins:

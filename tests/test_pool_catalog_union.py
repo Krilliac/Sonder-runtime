@@ -63,3 +63,17 @@ def test_policy_update_accepts_models_spread_across_the_pool(monkeypatch):
     monkeypatch.setattr(server, "_pool_member_tags", lambda origin: CATALOGS[origin])
     names = {name for name, _record in server._runtime_installed_model_records()}
     assert {"hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q3_K_XL", "qwen3.6:35b"} <= names
+
+
+def test_a_member_the_scheduler_cannot_route_to_is_left_out(monkeypatch):
+    pool = _pool()
+    node1 = next(s for s in pool._states if s.endpoint.origin == NODE1)
+    monkeypatch.setattr(pool, "_membership_admissible",
+                        lambda state, now: state is not node1)
+    names = [row["name"] for row in pool.catalog_union(lambda origin: CATALOGS[origin])["models"]]
+    assert "qwen3.6:35b" not in names, "a probationary/expired/draining worker's models do not count"
+    node1_ok = next(s for s in pool._states if s.endpoint.origin == NODE1)
+    monkeypatch.setattr(pool, "_membership_admissible", lambda state, now: True)
+    node1_ok.compatibility_error = "incompatible"
+    names = [row["name"] for row in pool.catalog_union(lambda origin: CATALOGS[origin])["models"]]
+    assert "qwen3.6:35b" not in names
