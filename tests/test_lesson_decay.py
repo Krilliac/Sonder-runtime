@@ -6,6 +6,7 @@ fake function, so every assertion is reproducible.
 import math
 
 import lesson_decay
+import pytest
 
 
 # --- decayed_score --------------------------------------------------------
@@ -115,6 +116,36 @@ def _fake_similarity(pairs):
     def sim(a, b):
         return pairs.get(frozenset((a, b)), 0.0)
     return sim
+
+
+def test_contradiction_scan_refuses_oversized_input_before_pairwise_work():
+    lessons = ({"id": str(i), "text": str(i), "score": (-1) ** i} for i in range(257))
+    with pytest.raises(ValueError, match="budget"):
+        lesson_decay.detect_contradictions(lessons, lambda _a, _b: 1.0)
+
+
+def test_contradiction_scan_caps_conflicts_before_full_pairwise_work():
+    lessons = [{"id": str(i), "text": str(i), "score": (-1) ** i} for i in range(256)]
+    calls = []
+
+    def similar(_a, _b):
+        calls.append(1)
+        return 1.0
+
+    conflicts = lesson_decay.detect_contradictions(lessons, similar)
+    assert len(conflicts) == 100
+    assert len(calls) == 128 * 128  # bounded by the 256-lesson input cap
+
+
+def test_contradiction_cap_keeps_strong_late_pair():
+    lessons = [{"id": str(i), "text": str(i), "score": (-1) ** i} for i in range(22)]
+
+    def similar(a, b):
+        return 1.0 if {a, b} == {"20", "21"} else 0.8
+
+    conflicts = lesson_decay.detect_contradictions(lessons, similar)
+    assert len(conflicts) == 100
+    assert any({row["a"]["id"], row["b"]["id"]} == {"20", "21"} for row in conflicts)
 
 
 def test_detect_flags_similar_opposite_signal_pair():

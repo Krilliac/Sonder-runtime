@@ -68,6 +68,31 @@ def test_conflicting_lessons_detected_from_grounded_outcomes():
     conn.close()
 
 
+def test_audit_bounds_large_scored_embedding_space_and_keeps_recent_conflict():
+    conn = memory_store.connect(":memory:")
+    try:
+        for index in range(255):
+            lesson_id = f"older-{index}"
+            _add_embedded_lesson(
+                conn, lesson_id, f"Older unrelated lesson {index}.", [0.0, 1.0]
+            )
+            _score(conn, lesson_id, f"use-{index}", "older", "accepted", 0.8, "caller")
+
+        _add_embedded_lesson(conn, "recent-yes", "Retry recent timeouts.", [1.0, 0.0])
+        _add_embedded_lesson(conn, "recent-no", "Avoid retrying recent timeouts.", [0.999, 0.02])
+        _score(conn, "recent-yes", "use-yes", "retry", "accepted", 0.8, "caller")
+        _score(conn, "recent-no", "use-no", "retry", "rejected", -0.5, "caller")
+
+        report = memory_quality.audit(conn)
+        assert report["conflicting_lesson_pairs"] == 1
+        assert {
+            report["samples"]["conflicts"][0]["a_id"],
+            report["samples"]["conflicts"][0]["b_id"],
+        } == {"recent-yes", "recent-no"}
+    finally:
+        conn.close()
+
+
 def test_conflict_claims_fail_closed_without_embedding_provenance():
     conn = memory_store.connect(":memory:")
     _add_embedded_lesson(
