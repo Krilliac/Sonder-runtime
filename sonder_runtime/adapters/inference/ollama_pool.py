@@ -1459,6 +1459,35 @@ class OllamaWorkerPool:
                 results[endpoint.worker_id] = "error: %s" % _safe_error(error)
         return results
 
+    def catalog_union(self, fetch_tags: Callable[[str], object]) -> dict:
+        """One ``/api/tags``-shaped catalog holding every member's models.
+
+        A pooled request reaches whichever member the scheduler picks, so a
+        catalog read through ``request`` describes one host. Tier validation
+        needs the pool's catalog: a model counts as installed when any member
+        holds it. The first member (the primary) wins a name both hold. An
+        unreachable member is skipped; if none answers, the last error is raised.
+        """
+        with self._condition:
+            origins = [state.endpoint.origin for state in self._states]
+        merged: dict[str, dict] = {}
+        answered, last_error = False, None
+        for origin in origins:
+            try:
+                payload = fetch_tags(origin)
+            except Exception as error:
+                logger.warning(f"catalog read skipped a worker: {_safe_error(error)!r}")
+                last_error = error
+                continue
+            answered = True
+            for row in (payload or {}).get("models") or ():
+                name = isinstance(row, dict) and (row.get("name") or row.get("model"))
+                if name and name not in merged:
+                    merged[name] = row
+        if not answered and last_error is not None:
+            raise last_error
+        return {"models": list(merged.values())}
+
     def _capacity(self, state: _WorkerState) -> int:
         if state.capabilities is None:
             return self._max_inflight
