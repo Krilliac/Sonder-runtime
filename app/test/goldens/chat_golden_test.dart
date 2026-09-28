@@ -78,6 +78,27 @@ final _conversation = <ChatMessage>[
   const ChatMessage(role: Role.assistant, content: _refusal),
 ];
 
+// Refusal text alone carries no approval authority (#576): the Approve
+// button, and so the approval sheet, only exist for a turn whose server
+// receipt names the refused call. FakeChatBackend's pending ledger holds
+// call 3f9a12c0, so the sheet draws from that server entry.
+final _approvableConversation = <ChatMessage>[
+  ..._conversation.take(3),
+  const ChatMessage(
+    role: Role.assistant,
+    content: _refusal,
+    responseMetadata: ChatResponseMetadata(
+      status: 'refused',
+      refusal: ChatRefusal(
+        callId: '3f9a12c0',
+        tool: 'write_file',
+        reason: 'nobody is here to answer the ask',
+        mode: 'manual',
+      ),
+    ),
+  ),
+];
+
 SystemInfo _info() => SystemInfo.fromJson({
       'context': {'context_limit': 8192, 'estimated_tokens': 2100},
       'agents': {'active_agents': 1},
@@ -187,7 +208,7 @@ void main() {
     testWidgets('approval_sheet_desk_$t', (tester) async {
       final backend = FakeChatBackend()..mode = permissionModeFor('manual');
       await pumpChat(tester, backend,
-          size: _desk, themeMode: theme, prefs: _seed(_conversation));
+          size: _desk, themeMode: theme, prefs: _seed(_approvableConversation));
       await tester.pump(const Duration(milliseconds: 100));
       await tester.tap(find.byKey(const Key('refusal-approve')));
       await tester.pumpAndSettle();

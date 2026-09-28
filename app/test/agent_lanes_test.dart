@@ -7,6 +7,11 @@ import 'package:sonder_runtime/api.dart';
 import 'package:sonder_runtime/agent_lanes.dart';
 
 void main() {
+  // The fixture server is plain HTTP off this device: the person has
+  // explicitly allowed it to receive the key (see cleartext_key_test.dart).
+  setUpAll(() => CleartextKeyPolicy.allowOnly(['test:80']));
+  tearDownAll(() => CleartextKeyPolicy.allowOnly(const []));
+
   test('authorization failure never falls back to a different server',
       () async {
     var requests = 0;
