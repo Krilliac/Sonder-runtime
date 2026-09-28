@@ -821,6 +821,30 @@ def native_tool_registry() -> InMemoryToolRegistry:
     return InMemoryToolRegistry(sorted(_NATIVE_TOOLS, key=lambda item: item.name))
 
 
+# A call interrupted part-way may have taken effect; only a finished failure
+# gives its one-shot approval back.
+_INTERRUPTED_ERRORS = frozenset({"Cancelled", "DeadlineExceeded"})
+
+
+def _restoring_failed_approvals(execute):
+    """Wrap a native tool handler so a failed call does not use its approval."""
+    from ..adapters.security.permission_policy import permission_policy
+
+    def handler(name: str, arguments: dict) -> dict:
+        with permission_policy.approval_call_scope() as spent:
+            try:
+                result = execute(name, arguments)
+            except Exception:
+                spent.restore()
+                raise
+            if (isinstance(result, dict) and result.get("isError")
+                    and result.get("error") not in _INTERRUPTED_ERRORS):
+                spent.restore()
+            return result
+
+    return handler
+
+
 def run_native_mcp(application, *, input_stream: TextIO | None = None,
                    output_stream: TextIO | None = None,
                    task_handler=None, close_compute_on_exit: bool = False,
@@ -1417,7 +1441,7 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
             capabilities=capabilities,
         ),
         tool_catalog=discovery_tools if discovery is not None else registry,
-        tool_handler=execute,
+        tool_handler=_restoring_failed_approvals(execute),
         task_handler=task_handler,
         server_info_version=runtime_version(),
     )
