@@ -32,6 +32,7 @@ from .selfmod import init_selfmod_db
 from .training import init_training_db
 from .updates import add_outbox_to_updates_db, add_epoch_marker as updates_epoch
 
+from ..migrations import migration_lock
 from ....domain.common.errors import MigrationRequired
 
 
@@ -75,6 +76,8 @@ def require_epoch_2(sonder_home: Path) -> None:
     """Fail closed unless every adopted domain database is at epoch 2."""
     memory_db = sonder_home / "memory.db"
     if not memory_db.exists():
+        if any((sonder_home / name).exists() for name in _LEGACY_STATE):
+            raise MigrationRequired("Legacy state exists without memory.db")
         return  # Fresh install — will create epoch 2 directly
     epochs = {name: check_epoch(sonder_home / name) for name in EPOCH2_DATABASES}
     invalid = tuple(name for name, epoch in epochs.items() if epoch != EPOCH)
@@ -84,6 +87,27 @@ def require_epoch_2(sonder_home: Path) -> None:
             f"(invalid databases: {', '.join(invalid)}). "
             "Run the designated bridge release/migration before upgrading."
         )
+
+
+# Every store a pre-SPEC-5 home could hold; none of them means nothing to adopt.
+_LEGACY_STATE = EPOCH2_DATABASES + (
+    "autopilot.db", "fleet.db", "queued_actions.db", "updates.db", "jobs.db",
+)
+
+
+def stamp_fresh_home(sonder_home: Path, version: str = "fresh-install") -> bool:
+    """Create a brand-new home at epoch 2; ``False`` when any state exists.
+
+    ``require_epoch_2`` lets a home without ``memory.db`` through as a fresh
+    install, so the caller must stamp it before creating any store: a store
+    created without the marker makes the next start refuse the home.  This
+    is the bridge's fresh-install path (no legacy data, nothing to back up).
+    """
+    with migration_lock(sonder_home=sonder_home):
+        if any((sonder_home / name).exists() for name in _LEGACY_STATE):
+            return False
+        run_bridge_migration(sonder_home, version=version)
+        return True
 
 
 def _sha256_file(path: Path) -> str:
