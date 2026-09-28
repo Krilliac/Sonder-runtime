@@ -171,8 +171,10 @@ def test_mcp_a_raised_error_keeps_the_approval_spent(ledger, monkeypatch):
     monkeypatch.setattr(server, "runtime_policy_update", boom)
     tool = server.mcp._tool_manager.get_tool("runtime_policy_update")
     monkeypatch.setattr(tool, "fn", boom)
-    with pytest.raises(Exception):
-        result = _mcp("runtime_policy_update", args)
-        if getattr(result, "is_error", False):
-            raise RuntimeError("reported as error")
+    raised = None
+    try:
+        _mcp("runtime_policy_update", args)
+    except Exception as exc:  # the transport's own error type wraps the raise
+        raised = exc
+    assert raised is not None, "the tool's raise must reach the caller, not be restored as a failure"
     assert ledger.get(issued.nonce).spent
