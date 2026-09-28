@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+from functools import lru_cache
 from dataclasses import dataclass, fields as dataclass_fields
 from enum import Enum
 from types import MappingProxyType
@@ -247,12 +248,13 @@ CAPABILITIES: Mapping[str, ToolCapability] = MappingProxyType(
 )
 
 
-def dispatch_names(dispatch: Callable) -> frozenset[str]:
-    """Extract literal ``tool_name`` branches from the authoritative dispatcher."""
+@lru_cache(maxsize=16)
+def _dispatch_shape(dispatch: Callable) -> tuple[frozenset[str], bool]:
+    """Cache only source structure, never the mutable registered inventory."""
     try:
         tree = ast.parse(inspect.getsource(dispatch))
     except (OSError, TypeError, SyntaxError):
-        return frozenset()
+        return frozenset(), False
     names: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Compare) or len(node.ops) != 1:
@@ -268,6 +270,32 @@ def dispatch_names(dispatch: Callable) -> frozenset[str]:
                 item.value for item in comparator.elts
                 if isinstance(item, ast.Constant) and isinstance(item.value, str)
             )
+    # The terminal generic adapter is intentionally one call site rather than
+    # 80 duplicated branches.  Expand its registry-backed reachability here so
+    # drift checks measure the executable surface rather than AST syntax.
+    generic = any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "_generic_agent_dispatch"
+        and node.func.attr == "dispatch"
+        for node in ast.walk(tree)
+    )
+    return frozenset(names), generic
+
+
+def dispatch_names(dispatch: Callable, *, include_generic: bool = True) -> frozenset[str]:
+    """Resolve explicit branches and the live registry-backed terminal adapter."""
+    literal, generic = _dispatch_shape(dispatch)
+    names = set(literal)
+    if generic and include_generic:
+        try:
+            from sonder_runtime.bootstrap import generic_agent_dispatch
+            registry = dispatch.__globals__.get("mcp")
+            operators = dispatch.__globals__.get("_AGENT_SYSTEM_OPERATOR_TOOLS", ())
+            names.update(generic_agent_dispatch.reachable_names(registry, operators))
+        except (ImportError, AttributeError, TypeError):
+            pass
     return frozenset(names)
 
 

@@ -528,6 +528,8 @@ from sonder_runtime.domain.agent_escalation_identity import (
 from sonder_runtime.domain.agent_help_parsing import (
     help_advertised_tools as _agent_help_advertised_tools,
 )
+from sonder_runtime.bootstrap import generic_agent_dispatch as _generic_agent_dispatch
+from sonder_runtime.bootstrap.computer_use_chat import route as _computer_use_route
 import sonder_speculation
 import consult as consult_flow
 import code_improve
@@ -17378,6 +17380,9 @@ def _agent_tool_help(
     here at all.
     """
     help_text = REPOSITORY_AGENT_TOOL_HELP if read_only else AGENT_TOOL_HELP
+    existing = _agent_help_advertised_tools(help_text)
+    generated = _generic_agent_dispatch.generated_help_lines(mcp, existing, _AGENT_SYSTEM_OPERATOR_TOOLS)
+    help_text = help_text.rstrip() + "\n" + "\n".join(generated) + "\n" if generated else help_text
     denied = frozenset(
         name for name in _agent_help_advertised_tools(help_text)
         if _agent_run_tool_refusal(
@@ -19424,8 +19429,7 @@ def _agent_dispatch(
                 root=args.get("root", "."),
                 timeout=args.get("timeout", 30),
             )
-    return "ERROR: unknown tool '%s'." % tool_name
-
+    return _generic_agent_dispatch.dispatch(tool_name, args, mcp, _AGENT_SYSTEM_OPERATOR_TOOLS, run_refusal=_agent_run_tool_refusal, read_only=read_only, project_bound=bool(repository_extra_roots), allow_web=allow_web, allow_location=allow_location, unsafe=unsafe)
 
 
 
@@ -19583,7 +19587,7 @@ def _cloud_agent_tool_policy_error(tool_name, *, unsafe=False):
     """Keep host-data denial absolute; unsafe bypasses nested models only."""
     return _cloud_agent_tool_policy_error_impl(
         tool_name, unsafe=unsafe,
-        local_only_tools=_CLOUD_AGENT_LOCAL_ONLY_TOOLS,
+        local_only_tools=_CLOUD_AGENT_LOCAL_ONLY_TOOLS | _generic_agent_dispatch.generic_only_names(mcp, _AGENT_SYSTEM_OPERATOR_TOOLS, tool_capabilities.dispatch_names(_agent_dispatch, include_generic=False)),
         nested_model_tools=_CLOUD_AGENT_NESTED_MODEL_TOOLS,
     )
 
@@ -26913,6 +26917,14 @@ def run_mcp(*, safety_checked: bool = False) -> None:
                 OLLAMA_POOL.drain(timeout_seconds=5.0)
         finally:
             _close_server_owned_application(timeout=5)
+
+
+from sonder_runtime.bootstrap.computer_use_tools import register as _register_computer_use  # noqa: E402
+_register_computer_use(mcp, _record_direct_tool, lambda: _application())
+
+
+def route_computer_use(text):
+    return _computer_use_route(text, sys.modules[__name__])  # HTTP chat's desktop route
 
 
 if __name__ == "__main__" and not globals().get("_MCP_HOT_RELOAD_EXEC"):
