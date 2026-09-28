@@ -43,6 +43,11 @@ def test_computer_use_phrases_route_to_gated_tools(text, tool):
         "write a story about my computer",
         "explain how to use my computer to open notepad",
         "write about chrome",
+        # Found by the 2026-09-28 router bake-off: automation *code* that
+        # names an app is a coding request, not a desktop action.
+        "write a Selenium test that fills in the login form in Chrome",
+        "write a macro in Excel VBA that bolds the header row",
+        "type a Playwright script that clicks Save in edge",
     ],
 )
 def test_coding_and_file_requests_do_not_route_to_computer_use(text):

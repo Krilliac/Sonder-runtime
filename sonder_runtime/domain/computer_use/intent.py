@@ -26,7 +26,8 @@ _SCREEN_RE = re.compile(
 _CODING_RE = re.compile(
     r"\b(?:python|code|coding|function|handler|file|repo(?:sitory)?|"
     r"parser|type\s+hints?|source\s+file|pull\s+request|commit|"
-    r"screenshot|documentation|docs?)\b", re.I,
+    r"screenshot|documentation|docs?|tests?|selenium|playwright|puppeteer|"
+    r"macros?|vba|scripts?|sql|regex)\b", re.I,
 )
 _APPS = (r"(?:notepad|paint|calculator|calc|explorer|browser|chrome|edge|"
          r"microsoft word|excel|terminal|powershell|cmd|outlook|discord|slack)(?:\.exe)?(?= |$)")
