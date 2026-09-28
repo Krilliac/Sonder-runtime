@@ -87,6 +87,10 @@ class _ManagedThread(_NativeThread):
             self._owner._admit()
             if self._owner_started:
                 raise RuntimeError("threads can only be started once")
+            # Capacity is reserved at start, not creation: a thread object
+            # that is never started owns no native thread and must not hold
+            # a slot forever.
+            self._owner._reserve_thread(self)
             self._owner_started = True
         try:
             super().start()
@@ -222,15 +226,23 @@ class OwnedRuntimeThreads:
             self._failed()
         return success
 
+    def _thread_capacity_available(self):
+        self._threads = [thread for thread in self._threads if not (thread._owner_finished and not thread.is_alive())]
+        return len(self._threads) + self._reserved_workers < self._max_threads
+
+    def _reserve_thread(self, thread):
+        if not self._thread_capacity_available():
+            raise ThreadOwnershipRefused("runtime thread capacity exhausted")
+        self._threads.append(thread)
+
     def thread(self, *args, **kwargs):
+        # Early refusal only; the slot itself is reserved by ``start()`` so
+        # refused or abandoned (never-started) threads release nothing.
         with self._lock:
             self._admit()
-            self._threads = [thread for thread in self._threads if not (thread._owner_finished and not thread.is_alive())]
-            if len(self._threads) + self._reserved_workers >= self._max_threads:
+            if not self._thread_capacity_available():
                 raise ThreadOwnershipRefused("runtime thread capacity exhausted")
-            thread = _ManagedThread(self, *args, **kwargs)
-            self._threads.append(thread)
-            return thread
+            return _ManagedThread(self, *args, **kwargs)
 
     def pool(self, *args, **kwargs):
         options = inspect.signature(_NativePool).bind(*args, **kwargs)

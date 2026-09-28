@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-import re
 import shutil
 import signal
 import subprocess
@@ -18,6 +17,7 @@ import time
 from datetime import datetime, timezone
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
+from sonder_runtime.adapters import git_program_guard
 from sonder_runtime.adapters.git_mutation_guard import guard_git_mutation
 import sonder_logging
 
@@ -118,6 +118,27 @@ def _terminate(proc):
 
 def _run_git(root, arguments, *, timeout=DEFAULT_TIMEOUT,
              max_output=DEFAULT_OUTPUT_BYTES):
+    """Run one fixed Git argv with repository host programs neutralized.
+
+    Every git_tools command goes through here, so ``status``/``diff`` never
+    run a repository-chosen ``core.fsmonitor``, hook, filter, merge driver or
+    textconv (see :mod:`git_program_guard`).  When the driver configuration
+    cannot be read the command is refused, not run with a driver in place.
+    """
+    try:
+        overrides = git_program_guard.neutralized_git_arguments(
+            lambda probe: _spawn_git(root, probe, timeout=timeout, max_output=65_536),
+        )
+    except git_program_guard.GitProgramConfigError as exc:
+        raise PermissionError("refusing to run git: %s" % exc) from exc
+    return _spawn_git(
+        root, [*overrides, *list(arguments)],
+        timeout=timeout, max_output=max_output,
+    )
+
+
+def _spawn_git(root, arguments, *, timeout=DEFAULT_TIMEOUT,
+               max_output=DEFAULT_OUTPUT_BYTES):
     """Run one fixed Git argv and return bounded decoded process evidence."""
     executable = shutil.which("git")
     if not executable:
@@ -454,9 +475,6 @@ def _runtime_update_unguarded(root, *, timeout):
     _checked_git(
         Path(before["root"]),
         [
-         *_neutralized_filter_arguments(
-             Path(before["root"]), timeout=timeout, max_output=65_536,
-         ),
          "-c", "core.hooksPath=" + hooks_path,
          "-c", "core.sshCommand=",
          "merge", "--ff-only", "--no-edit", "--no-overwrite-ignore",
@@ -485,7 +503,6 @@ def _runtime_mutation_arguments(root, subcommand):
     """Keep checkout filters and hooks inert for runtime recovery actions."""
     hooks_path = str(Path(root) / ".sonder-disabled-git-hooks")
     return [
-        *_neutralized_filter_arguments(Path(root), timeout=MAX_TIMEOUT, max_output=65_536),
         "-c", "core.hooksPath=" + hooks_path,
         "-c", "core.sshCommand=",
         *subcommand,
@@ -606,45 +623,6 @@ def _resolve_diff_path(root, path, *, extra_roots):
     return relative.as_posix()
 
 
-_FILTER_COMMAND_RE = re.compile(r"^(filter\..*)\.(?:clean|smudge|process)$", re.IGNORECASE)
-
-
-def _neutralized_filter_arguments(root, *, timeout, max_output):
-    """Return command-line overrides for every configured checkout filter."""
-    result = _run_git(
-        root,
-        ["config", "--null", "--name-only", "--get-regexp", r"^filter\..*\.(clean|smudge|process)$"],
-        timeout=timeout, max_output=min(max_output, 65_536),
-    )
-    if result["timed_out"]:
-        raise TimeoutError("git filter configuration probe timed out")
-    if result["returncode"] not in {0, 1}:
-        detail = (result["stderr"] or result["stdout"]).strip()
-        raise ValueError("git filter configuration probe failed: %s" % (detail or "no diagnostic"))
-    if result["truncated"]:
-        raise PermissionError("git filter configuration is too large to neutralize safely")
-    drivers = set()
-    for key in result["stdout"].split("\x00"):
-        key = key.strip()
-        if not key:
-            continue
-        match = _FILTER_COMMAND_RE.fullmatch(key)
-        if not match:
-            raise PermissionError("unexpected Git filter configuration key: %s" % key)
-        drivers.add(match.group(1))
-    overrides = []
-    for driver in sorted(drivers, key=lambda value: (value.casefold(), value)):
-        # `process=` disables the long-running protocol; fixed passthrough
-        # commands replace repository-controlled clean/smudge programs.
-        overrides.extend([
-            "-c", "%s.process=" % driver,
-            "-c", "%s.clean=cat" % driver,
-            "-c", "%s.smudge=cat" % driver,
-            "-c", "%s.required=false" % driver,
-        ])
-    return overrides
-
-
 def repo_diff(root=".", *, staged=False, path="", context=3,
               timeout=DEFAULT_TIMEOUT, max_output=DEFAULT_OUTPUT_BYTES,
               extra_roots="", bypass=False):
@@ -654,9 +632,6 @@ def repo_diff(root=".", *, staged=False, path="", context=3,
     relative = _resolve_diff_path(top, path, extra_roots=extra_roots)
     context = _bounded_int(context, 3, 0, MAX_DIFF_CONTEXT)
     arguments = [
-        *_neutralized_filter_arguments(
-            top, timeout=timeout, max_output=max_output,
-        ),
         "-c", "color.ui=false", "-c", "core.pager=cat",
         "--no-pager", "--literal-pathspecs", "diff", "--no-ext-diff",
         "--no-textconv",

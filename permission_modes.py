@@ -298,6 +298,7 @@ import hashlib
 import json
 import logging
 import os
+import tempfile
 import threading
 from dataclasses import dataclass
 
@@ -388,6 +389,12 @@ NATIVE_MCP_WORK = {
     "compute_submit": "execution",
     "agent_lane": "execution",
     "compute_cancel": "mutation",
+    # Readers of an already placed job: its status, and one bounded,
+    # digest-verified artifact returned inline (nothing written, nothing
+    # launched). Graded so native MCP can put them through the same decision
+    # as submit/cancel instead of skipping it.
+    "compute_status": "safe",
+    "compute_artifact_fetch": "safe",
     # Developer tools (bootstrap/developer_tools.py). ``tool_inventory`` runs
     # only fixed read-only version switches of allowlisted host tools;
     # ``output_digest`` reads a guarded file window or the caller's own
@@ -826,6 +833,8 @@ def _load() -> None:
                 saved = json.load(handle)
         except (OSError, ValueError):
             return
+        if not isinstance(saved, dict):
+            return
         mode = str(saved.get("mode", "")).strip()
         if mode in _MATRIX:
             _STATE["mode"] = mode
@@ -834,14 +843,88 @@ def _load() -> None:
         # resuming it days later is exactly the surprise to avoid.
 
 
-def _save() -> None:
+class ModePersistenceError(ValueError):
+    """A mode change could not be saved, so it was not (fully) made.
+
+    A ``ValueError`` on purpose: every surface that reports a refused mode
+    change -- the ``permission_mode`` tool and ``POST /v1/permission-mode``
+    both catch ``ValueError`` -- reports this one too, instead of claiming a
+    change the next start would silently undo.
+    """
+
+
+def _write_state(mode: str) -> None:
+    """Replace the saved mode atomically; raises ``OSError`` on any failure.
+
+    The temporary sibling is named ``<file>.tmp-*``, which the file-tool
+    guard's control-plane inventory protects alongside the file itself.
+    """
+    path = _state_path()
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    handle, temporary = tempfile.mkstemp(
+        prefix=os.path.basename(path) + ".tmp-", dir=directory,
+    )
     try:
-        path = _state_path()
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as handle:
-            json.dump({"mode": _STATE["mode"]}, handle)
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump({"mode": mode}, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def _discard_saved_state() -> bool:
+    """Remove the saved mode so the next start uses DEFAULT_MODE."""
+    try:
+        os.remove(_state_path())
+    except FileNotFoundError:
+        return True
     except OSError:
-        pass
+        return False
+    return True
+
+
+def _save(previous: str) -> None:
+    """Persist ``_STATE["mode"]`` (caller holds ``_LOCK``), failing closed.
+
+    A write that fails used to be ignored, so a lowered mode came back as the
+    old, higher one at the next start. Now:
+
+    * a raise that cannot be saved is rolled back and refused;
+    * a lowering stays in effect for this session (the safe direction), the
+      stale saved mode is removed so the next start falls back to
+      DEFAULT_MODE rather than the higher mode, and the caller is told.
+    """
+    mode = _STATE["mode"]
+    try:
+        _write_state(mode)
+        return
+    except OSError as exc:
+        failure = "%s: %s" % (type(exc).__name__, exc)
+    order = {name: index for index, name in enumerate(MODES)}
+    if order.get(mode, len(MODES)) > order.get(previous, -1):
+        _STATE["mode"] = previous
+        raise ModePersistenceError(
+            "permission mode not changed: saving %s failed (%s); the mode "
+            "stays %s" % (mode, failure, previous)
+        )
+    if _discard_saved_state():
+        restart = "the next start will use %s" % DEFAULT_MODE
+    else:
+        restart = (
+            "the saved mode (%s) could not be removed either, so the next "
+            "start may restore it" % previous
+        )
+    raise ModePersistenceError(
+        "permission mode is %s for this session only: saving it failed (%s); "
+        "%s" % (mode, failure, restart)
+    )
 
 
 # --- mode state -----------------------------------------------------------
@@ -935,8 +1018,9 @@ def set_mode(name: str) -> str:
     _load()
     match = resolve_mode(name)
     with _LOCK:
+        previous = _STATE["mode"]
         _STATE["mode"] = match
-    _save()
+        _save(previous)
     return match
 
 
@@ -944,10 +1028,11 @@ def cycle_mode(step: int = 1) -> str:
     """Advance to the next mode. Backs the Shift+Tab keybinding."""
     _load()
     with _LOCK:
-        index = MODES.index(_STATE["mode"])
+        previous = _STATE["mode"]
+        index = MODES.index(previous)
         _STATE["mode"] = MODES[(index + step) % len(MODES)]
         new = _STATE["mode"]
-    _save()
+        _save(previous)
     return new
 
 

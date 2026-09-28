@@ -229,11 +229,15 @@ drift from the wire format.
 
 ## Known limitations
 
-- **The project-local guard ignores roots that are the filesystem root, the
-  home directory, or an ancestor of home.** Treating them as project roots
-  would mark every installed tool as planted. As a result, a home-wide file root
-  is not defended: a binary planted anywhere under home and placed first on
-  `PATH` would be probed with its fixed version argument.
+- **Roots that are the filesystem root, the home directory, or an ancestor of
+  home are "broad".** Treating everything under them as project-local would
+  mark every installed tool as planted, so under a broad root a path is
+  project-local only when the runtime user could modify it (write, delete or
+  re-ACL the file, or replace it in its directory). A binary planted through a
+  home-wide root is therefore never executed; the cost is that tools installed
+  per-user under that root (for example `%LOCALAPPDATA%\Programs`) are
+  recorded but not run while such a root is configured. Only the file and its
+  immediate directory are probed, not every ancestor.
 - **Version text is evidence, not attestation.** Any executable can print any
   banner. A matching version does not prove what the binary is.
 - **Discovery reads the environment of the runtime process.** A service started

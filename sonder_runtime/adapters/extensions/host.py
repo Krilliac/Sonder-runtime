@@ -14,6 +14,7 @@ code in-process.
 from __future__ import annotations
 
 from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
+from sonder_runtime.platform.runtime_threads import ThreadOwnershipRefused
 
 from dataclasses import dataclass
 import json
@@ -277,8 +278,13 @@ class ExtensionHost:
             except OSError as exc:
                 result_queue.put(("error", ExtensionHostCrashed("extension stdout read failed")))
 
-        thread = owned_runtime_thread(target=reader, name="sonder-extension-reader", daemon=True)
-        thread.start()
+        try:
+            thread = owned_runtime_thread(target=reader, name="sonder-extension-reader", daemon=True)
+            thread.start()
+        except ThreadOwnershipRefused as exc:
+            # Surface as a host failure so launch/call discard the child
+            # instead of keeping one whose response nobody read.
+            raise ExtensionHostError("extension reader worker was refused") from exc
         try:
             kind, value = result_queue.get(timeout=timeout)
         except queue.Empty as exc:

@@ -334,6 +334,9 @@ def live_control_plane_inventory(*, additional=None):
             _canonical(Path(override).absolute()) if override else home / name
         )
     atomic.append(home / "workflows.json")
+    # The persisted permission mode (permission_modes._state_path). Written
+    # atomically through a ``.tmp-`` sibling, which ``protects`` also covers.
+    atomic.append(home / "permission_mode.json")
     # Live emotion-vector tuning is saved beside it (the bundled default in
     # the checkout is covered by the workspace entry above).
     atomic.append(home / "emotion_vectors.json")

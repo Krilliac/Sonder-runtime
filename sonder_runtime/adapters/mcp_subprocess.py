@@ -120,8 +120,16 @@ class McpSubprocessProvider:
             except BaseException as exc:
                 result.append(exc)
 
-        worker = owned_runtime_thread(target=communicate, name="sonder-mcp-provider", daemon=True)
-        worker.start()
+        try:
+            worker = owned_runtime_thread(target=communicate, name="sonder-mcp-provider", daemon=True)
+            worker.start()
+        except BaseException:
+            # No worker will ever exchange with, time out, or reap the child:
+            # terminate it here and release the active-exchange slot.
+            receipt = self._terminate(process, "provider worker refused")
+            self._process = None
+            self._emit("failed", process.returncode, receipt)
+            raise
         termination_requested = False
         call_deadline = time.monotonic() + self._timeout
         try:
