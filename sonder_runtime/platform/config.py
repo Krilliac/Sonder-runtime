@@ -354,6 +354,12 @@ class ComputeConfig:
     worker_memory_budget_bytes: int | None = None
     worker_max_jobs: int = 1
     worker_reservation_seconds: int = 30
+    max_input_staging_bytes: int = 8 * 1024 * 1024 * 1024
+    max_input_spool_bytes: int = 32 * 1024 * 1024 * 1024
+    max_artifact_spool_bytes: int = 32 * 1024 * 1024 * 1024
+    max_artifact_spool_jobs: int = 1024
+    artifact_retention_seconds: int = 14 * 86400
+    min_disk_headroom_bytes: int = 512 * 1024 * 1024
     allow_remote: bool = False
     node_id: str = "local"
     snapshot_ttl_seconds: int = 30
@@ -686,6 +692,12 @@ class SonderConfig:
             "worker_memory_budget_bytes": self.compute.worker_memory_budget_bytes,
             "worker_max_jobs": self.compute.worker_max_jobs,
             "worker_reservation_seconds": self.compute.worker_reservation_seconds,
+            "max_input_staging_bytes": self.compute.max_input_staging_bytes,
+            "max_input_spool_bytes": self.compute.max_input_spool_bytes,
+            "max_artifact_spool_bytes": self.compute.max_artifact_spool_bytes,
+            "max_artifact_spool_jobs": self.compute.max_artifact_spool_jobs,
+            "artifact_retention_seconds": self.compute.artifact_retention_seconds,
+            "min_disk_headroom_bytes": self.compute.min_disk_headroom_bytes,
             "allow_remote": self.compute.allow_remote,
             "node_id": self.compute.node_id,
             "snapshot_ttl_seconds": self.compute.snapshot_ttl_seconds,
@@ -1113,13 +1125,20 @@ def _apply_compute_section(
         "allow_remote", "node_id", "snapshot_ttl_seconds", "probe_timeout_ms",
         "nodes", "jobs", "worker_host_id", "worker_memory_budget_bytes",
         "worker_max_jobs", "worker_reservation_seconds",
+        "max_input_staging_bytes", "max_input_spool_bytes",
+        "max_artifact_spool_bytes", "max_artifact_spool_jobs",
+        "artifact_retention_seconds", "min_disk_headroom_bytes",
     }
     for key in raw:
         if key not in known:
             errors.append(f"unknown key [compute].{key}")
 
     capacity_values = {}
-    for key in ("worker_host_id", "worker_memory_budget_bytes", "worker_max_jobs", "worker_reservation_seconds"):
+    for key in ("worker_host_id", "worker_memory_budget_bytes", "worker_max_jobs",
+                "worker_reservation_seconds", "max_input_staging_bytes",
+                "max_input_spool_bytes", "max_artifact_spool_bytes",
+                "max_artifact_spool_jobs", "artifact_retention_seconds",
+                "min_disk_headroom_bytes"):
         value = raw.get(key, getattr(current, key))
         expected = str if key == "worker_host_id" else int
         if key == "worker_memory_budget_bytes" and value is None and key not in raw:
@@ -2108,12 +2127,22 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         ("worker_memory_budget_bytes", 0, 1 << 50),
         ("worker_max_jobs", 1, 1024),
         ("worker_reservation_seconds", 1, 300),
+        ("max_input_staging_bytes", 1, 1 << 40),
+        ("max_input_spool_bytes", 1, 1 << 40),
+        ("max_artifact_spool_bytes", 1, 1 << 40),
+        ("max_artifact_spool_jobs", 1, 4096),
+        ("artifact_retention_seconds", 1, 30 * 86400),
+        ("min_disk_headroom_bytes", 1, 1 << 40),
     ):
         value = getattr(compute, key)
         if key == "worker_memory_budget_bytes" and value is None:
             continue
         if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
             errors.append(f"[compute].{key} must be within {minimum}..{maximum}")
+    if (type(compute.max_input_staging_bytes) is int
+            and type(compute.max_input_spool_bytes) is int
+            and compute.max_input_staging_bytes > compute.max_input_spool_bytes):
+        errors.append("[compute].max_input_staging_bytes exceeds max_input_spool_bytes")
     job_ids = [job.job_id for job in compute.jobs]
     if len(job_ids) != len(set(job_ids)):
         errors.append("[compute].jobs contains duplicate job identities")

@@ -149,7 +149,9 @@ class ArtifactTransferBinding:
         config = self._current()
         self._check_store_roots(config)
         settings = (str(private_store_path(config)), config.artifact_transfer.max_object_bytes,
-                    config.artifact_transfer.total_bytes, config.artifact_transfer.ttl_seconds)
+                    config.artifact_transfer.total_bytes, config.artifact_transfer.ttl_seconds,
+                    config.artifact_transfer.max_rows,
+                    config.artifact_transfer.terminal_retention_seconds)
         with self._lock:
             if self._service is not None:
                 if settings != self._service_settings:
@@ -158,7 +160,10 @@ class ArtifactTransferBinding:
             from sonder_runtime.adapters.persistence.artifact_transfer import SQLiteArtifactTransferStore
             from sonder_runtime.application.artifacts.transfer import ArtifactTransferService, TransferLimits
             self._service = ArtifactTransferService(
-                SQLiteArtifactTransferStore(private_store_path(config)), authorizer=self.authorize,
+                SQLiteArtifactTransferStore(
+                    private_store_path(config), max_rows=settings[4],
+                    terminal_retention_seconds=settings[5],
+                ), authorizer=self.authorize,
                 limits=TransferLimits(max_object_bytes=settings[1], total_bytes=settings[2],
                                       ttl_seconds=settings[3]),
             )

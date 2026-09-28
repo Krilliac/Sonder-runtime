@@ -17582,6 +17582,18 @@
       "type": "<class 'int'>"
     },
     {
+      "default": 4096,
+      "field": "max_rows",
+      "section": "artifact_transfer",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 604800,
+      "field": "terminal_retention_seconds",
+      "section": "artifact_transfer",
+      "type": "<class 'int'>"
+    },
+    {
       "default": true,
       "field": "enabled",
       "section": "backup",
@@ -18488,13 +18500,13 @@
   "counts": {
     "capabilities": 223,
     "commands": 339,
-    "configuration": 233,
+    "configuration": 235,
     "events": 43,
     "native_tools": 66,
     "schemas": 4,
     "tools": 223
   },
-  "digest": "e9f06eaa12883a8c86e58acbfc4ebbaeecf8966db23b44499e303c17198148e1",
+  "digest": "1a474dbf6af805448c491b90b1efe9bbf3606e36591562b8c8db97f15dc72c1f",
   "events": [
     {
       "name": "session.started",
@@ -47354,7 +47366,7 @@
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/domain/operational_capabilities.py": "6f8f2083343ac1b0de076cd4d545b5f99602a9916c185bd15d965ffa0c405fe6",
     "sonder_runtime/interfaces/sdk/discovery.py": "db8aeca8dd84d06cbbf834495db30b211956393375676f23899a28685aea015b",
-    "sonder_runtime/platform/config.py": "00063bc84b61da49fef8ce1d423bc2a2d3c05e5d4388d48c631759a3c59f244d",
+    "sonder_runtime/platform/config.py": "403953b391b35eaf4de8d99a82c70504a6423b8319536db7aebde11f9cce7b25",
     "sonder_runtime/platform/memory_replication_config.py": "f9fc0a642812bdc456ac082f0f8c52f051822f0160e16882b634895feb0cea61"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
