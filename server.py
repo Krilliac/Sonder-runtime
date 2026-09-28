@@ -23375,8 +23375,15 @@ def _route_work_request(
     )
 
 
+def _pool_member_tags(origin: str) -> dict:
+    with OLLAMA_POOL.open_url(urllib.request.Request(f"{origin}/api/tags"), timeout=15) as resp:
+        return json.loads(_read_ollama_response_bytes(resp).decode("utf-8"))
+
+
 def _runtime_installed_model_records() -> tuple[tuple[str, dict], ...]:
-    """Read one coherent local catalog snapshot for policy validation."""
+    """One catalog snapshot for policy validation: every pool member's models."""
+    if OLLAMA_POOL.enabled:
+        return _installed_catalog_records(OLLAMA_POOL.catalog_union(_pool_member_tags))
     return _installed_catalog_records(_get("/api/tags"))
 
 
