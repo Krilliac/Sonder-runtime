@@ -42,6 +42,9 @@ class PermissionPolicyProvider:
     def forget_spent_approval(self) -> None:
         _engine().forget_spent_approval()
 
+    def approval_call_scope(self):
+        return _engine().approval_call_scope()
+
     def approval_ledger(self):
         return _engine().approval_ledger()
 

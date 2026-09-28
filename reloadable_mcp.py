@@ -880,10 +880,19 @@ class _ReloadableMCPServerMixin:
 
         gate_arguments = (server._agent_lane_gate_arguments(arguments)
                           if name == "agent_lane" else arguments)
-        with server.approved_call_reach(name, gate_arguments):
+        import permission_modes
+
+        # A tool that *returned* a failure did not use its one-shot approval
+        # (for tools whose failures precede any effect; see
+        # permission_modes.RESTORABLE_ON_FAILURE). A raised error is not given
+        # back: it can come after the effect.
+        with (permission_modes.approval_call_scope() as spent,
+              server.approved_call_reach(name, gate_arguments)):
             _refuse_if_gated(name, gate_arguments)
-            result = await super().call_tool(name, arguments, context)
-        return _flag_legacy_error_reply(result)
+            result = _flag_legacy_error_reply(await super().call_tool(name, arguments, context))
+            if getattr(result, "is_error", False):
+                spent.restore()
+        return result
 
     async def list_resources(self):
         self.refresh_if_changed()

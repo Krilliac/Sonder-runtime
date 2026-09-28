@@ -382,6 +382,31 @@ class ApprovalLedger:
             ).fetchone()
         return self._approval(spent)
 
+    def restore(self, nonce: str, digest: str) -> Approval | None:
+        """Give back an approval spent on a call that did not take effect.
+
+        Only a spent, unrevoked, unexpired approval for exactly ``digest``
+        reopens, and it keeps its original expiry: restoring never extends an
+        approval, and a withdrawn or lapsed one stays dead. The caller decides
+        whether the call took effect (``permission_modes.restore_spent_approval``).
+        """
+        nonce = str(nonce or "").strip()
+        digest = str(digest or "").strip().lower()
+        now = time.time()
+        with self._write() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE approvals SET consumed_ts=NULL, consumed_surface=''
+                WHERE nonce=? AND digest=? AND consumed_ts IS NOT NULL
+                      AND revoked_ts IS NULL AND expires_ts > ?
+                """,
+                (nonce, digest, now),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = conn.execute("SELECT * FROM approvals WHERE nonce=?", (nonce,)).fetchone()
+        return self._approval(row)
+
     def revoke(self, nonce: str) -> Approval | None:
         """Withdraw an open approval; returns it, or None if there is none open."""
         nonce = str(nonce or "").strip()
