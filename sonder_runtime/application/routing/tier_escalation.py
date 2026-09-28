@@ -97,6 +97,9 @@ class Rung:
     model: str
     cloud: bool = False
     augment: bool = True
+    # Why the rung exists when it is not a plain tier attempt; the
+    # long-context overflow marks its rung ``long_context_overflow``.
+    route: str = ""
 
     def label(self) -> str:
         return "%s (%s)" % (self.tier, self.model)

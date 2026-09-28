@@ -124,7 +124,7 @@ def test_research_dispatch_is_web_tool_only(monkeypatch):
         "approximate_location_lookup",
     )
     assert "text_search" not in kwargs["tool_allowlist"]
-    assert kwargs["system"] == server._RESEARCH_AGENT_SYSTEM
+    assert kwargs["system"] == server._prompts.render("web_research_agent")
     assert kwargs["max_steps"] == 5
 
 
@@ -160,9 +160,9 @@ def test_agent_impl_accepts_research_system_override(monkeypatch):
     monkeypatch.setattr(server, "_make_generate", fake_generate)
 
     try:
-        server._agent_impl("q", system=server._RESEARCH_AGENT_SYSTEM)
+        server._agent_impl("q", system=server._prompts.render("web_research_agent"))
     except RuntimeError:
         pass
 
-    assert captured["system"] == server._RESEARCH_AGENT_SYSTEM
+    assert captured["system"] == server._prompts.render("web_research_agent")
     assert "workspace_inventory" not in captured["system"]

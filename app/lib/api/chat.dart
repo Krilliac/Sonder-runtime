@@ -69,6 +69,7 @@ ChatResponseMetadata chatMetadataFrom(
     'tool_calls': activity['tool_calls'],
     'work_run_id': work['work_run_id'],
     'work_status': work['status'],
+    'overflow': receipt['overflow'],
     if (refusalJson != null) 'refusal': refusalJson,
   });
 }

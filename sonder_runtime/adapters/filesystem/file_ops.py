@@ -55,6 +55,10 @@ DEFAULT_ROOTS_FILE = "file_roots.local"
 CONTROL_CONFIG_FILES = {
     "file_roots.local", "permissions.json", "workflows.json",
     "emotion_vectors.json", "system_profile.md",
+    # The persisted autonomy mode. Raising it is attended-only
+    # (permission_modes.unattended_escalation_refusal); a mutation-class write
+    # of this file would restore ``auto`` at the next start and bypass that.
+    "permission_mode.json",
 }
 SECRET_FILES = {
     ".credentials.json", ".netrc", ".token", "auth.json",
@@ -89,6 +93,20 @@ CREDENTIAL_READ_PAIRS = frozenset({(".docker", "config.json"), (".git", "config"
 # execution in the runtime process at the next start, which is exactly what the
 # root-level clause exists to prevent.
 RUNTIME_PACKAGE_DIRS = ("sonder_runtime",)
+# First-party code outside that package which the runtime imports or runs:
+# selfmod imports ``scripts.selfmod_linux_isolation``/``scripts.selfmod_oracle``
+# into its own process, the nightly jobs execute ``scripts/*.py`` and
+# ``scripts/run-nightly.ps1``, migrations run at store open, and the selfmod /
+# nightly gates run pytest, which imports ``tests/conftest.py``. Any of these
+# written by an ordinary mutation-class call is code execution with runtime
+# privileges at the next run -- the same hole the root-level clause closes.
+FIRST_PARTY_CODE_DIRS = ("scripts", "migrations")
+FIRST_PARTY_CODE_FILES = (("tests", "conftest.py"),)
+# Launchers and scripts a host shell runs directly.
+EXECUTABLE_SCRIPT_SUFFIXES = frozenset({".py", ".cmd", ".bat", ".ps1", ".psm1", ".sh"})
+# Repository metadata a later git command executes from (hooks, config with
+# core.fsmonitor / filter / diff / merge drivers). Never an ordinary mutation.
+GIT_METADATA_DIRECTORIES = frozenset({".git"})
 _BATCH_WRITE_LOCK = threading.RLock()
 
 
@@ -407,7 +425,9 @@ def _is_secret_path(path: Path) -> bool:
     # keeps archive/scan/compare exclusions from drifting behind it.
     if name in SECRET_FILES or name in CREDENTIAL_READ_FILES or suffix in SECRET_SUFFIXES:
         return True
-    if name == ".env" or name.startswith(".env."):
+    if name in {".env", ".envrc"} or name.startswith(".env.") or suffix == ".env":
+        # ``secrets.env`` / ``prod.env`` / ``sonder.env`` carry the same
+        # KEY=VALUE credentials as ``.env``; only the name differs.
         return True
     return (
         suffix in {".cfg", ".ini", ".json", ".toml", ".txt", ".yaml", ".yml"}
@@ -436,21 +456,47 @@ def _is_protected_mutation_path(path: Path) -> bool:
     path = _resolve_best_effort(path)
     if _is_sensitive_control_path(path):
         return True
-    if path.suffix.lower() != ".py":
+    suffix = path.suffix.lower()
+    if suffix not in EXECUTABLE_SCRIPT_SUFFIXES:
         return False
     root = _resolve_best_effort(workspace_root())
-    # Sonder's own modules: directly in the install root, or anywhere inside
-    # its first-party package (see RUNTIME_PACKAGE_DIRS). A *nested user
-    # project* under the root stays editable -- only the package Sonder itself
-    # imports is added, so this closes the hole without widening the guard over
+    # Sonder's own modules and launchers: directly in the install root, or
+    # inside its first-party code directories (RUNTIME_PACKAGE_DIRS for
+    # ``.py``, FIRST_PARTY_CODE_DIRS for any script). A *nested user project*
+    # under the root stays editable -- only code Sonder itself imports or runs
+    # is added, so this closes the hole without widening the guard over
     # ordinary workspace code.
     if path.parent == root:
         return True
-    return any(_is_inside(path, root / name) for name in RUNTIME_PACKAGE_DIRS)
+    if any(path == root / parent / name for parent, name in FIRST_PARTY_CODE_FILES):
+        return True
+    if any(_is_inside(path, root / name) for name in FIRST_PARTY_CODE_DIRS):
+        return True
+    return suffix == ".py" and any(
+        _is_inside(path, root / name) for name in RUNTIME_PACKAGE_DIRS
+    )
+
+
+def _git_metadata_component(path: Path) -> str:
+    """The repository-metadata component of *path* ("" when there is none)."""
+    for part in path.parts:
+        if part.casefold() in GIT_METADATA_DIRECTORIES:
+            return part
+    return ""
 
 
 def _require_mutation_access(path: Path, developer_authorized: bool) -> None:
-    if _is_protected_mutation_path(path) and not developer_authorized:
+    if developer_authorized:
+        return
+    if _git_metadata_component(path) or _git_metadata_component(_resolve_best_effort(path)):
+        # A hook, or a core.fsmonitor / filter / merge-driver entry, written
+        # here is a host program the next git command runs: execution reached
+        # through a mutation-class call. Refused like other control state.
+        raise PermissionError(
+            "refusing to mutate git repository metadata %s "
+            "without an authenticated developer token" % path
+        )
+    if _is_protected_mutation_path(path):
         # The path goes before the phrase: "token: <path>" reads as a
         # credential to the output redactor, and this message is shown and
         # audited through it on every surface.

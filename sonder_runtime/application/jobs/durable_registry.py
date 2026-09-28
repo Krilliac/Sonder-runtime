@@ -80,6 +80,7 @@ class ProcessTreeCleanupRequest:
     max_descendants: int = 64
     reason: str = "job cancelled"
     process_identity: str | None = None
+    root_exited: bool = False
 
     def __post_init__(self) -> None:
         if not self.job_id.strip() or self.process_id <= 0:
@@ -92,6 +93,8 @@ class ProcessTreeCleanupRequest:
             raise ValueError("cleanup reason is required")
         if self.process_identity is not None and not self.process_identity.strip():
             raise ValueError("process identity must be non-empty when provided")
+        if type(self.root_exited) is not bool:
+            raise ValueError("root_exited must be a Boolean")
 
 
 @dataclass(frozen=True, slots=True)
