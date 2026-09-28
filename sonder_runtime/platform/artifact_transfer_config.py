@@ -21,6 +21,8 @@ class ArtifactTransferConfig:
     quota_bytes: int = 1024 * 1024 * 1024
     total_bytes: int = 2 * 1024 * 1024 * 1024
     ttl_seconds: int = 3600
+    max_rows: int = 4096
+    terminal_retention_seconds: int = 7 * 86400
 
 
 def _is_exact_string(value: object) -> bool:
@@ -56,7 +58,8 @@ def artifact_transfer_errors(config) -> list[str]:
     bounds = {"grant_revision": (1, 2**63 - 1), "expires_at": (0, 2**53 - 1),
               "max_object_bytes": (0, 64 * 1024**3),
               "quota_bytes": (1, 128 * 1024**3), "total_bytes": (1, 128 * 1024**3),
-              "ttl_seconds": (1, 86400)}
+              "ttl_seconds": (1, 86400), "max_rows": (1, 4096),
+              "terminal_retention_seconds": (0, 30 * 86400)}
     for name, (low, high) in bounds.items():
         value = getattr(section, name)
         if type(value) is not int or not low <= value <= high:
