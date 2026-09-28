@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable
 
+from ..persistence.owned_sqlite import connect as owned_sqlite_connect
 from ...application.updates.bounded_state import (
     MetadataChainError, TufLikeMetadata, TufLikeMetadataChain,
 )
@@ -24,7 +25,7 @@ class SqliteMetadataLedger:
             )
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._path, timeout=30)
+        conn = owned_sqlite_connect(self._path, timeout=30)
         conn.execute("PRAGMA busy_timeout = 30000")
         conn.execute("PRAGMA synchronous = FULL")
         return conn
