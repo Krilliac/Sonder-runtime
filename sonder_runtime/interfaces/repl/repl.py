@@ -1394,11 +1394,7 @@ def _banner_state(strict, persona, project, tier=None, *, session_id="",
     except Exception:
         model = "unknown"
     endpoint, live = _endpoint()
-    try:
-        source = server.runtime_source_update_status_data(refresh=False)
-        source = source if isinstance(source, dict) else {}
-    except Exception:
-        source = {}
+    source = _banner_source()
     mode, elevated, reason, blurb = _mode_fields(_permission_mode_snapshot())
     if notices is None:
         try:
@@ -1413,6 +1409,57 @@ def _banner_state(strict, persona, project, tier=None, *, session_id="",
         project=str(project or ""), session_id=str(session_id or ""),
         mode_blurb=blurb,
     )
+
+
+# The banner's source line reads local Git state -- about nine subprocesses,
+# seconds on a busy disk -- and the prompt used to wait for all of it in
+# silence. ``prefetch_banner_source`` starts that read while the application
+# graph is still being built; the banner then waits only briefly for it.
+_BANNER_SOURCE_WAIT_SECONDS = 1.5
+_banner_prefetch = {"thread": None, "value": None}
+
+
+def _read_banner_source():
+    try:
+        source = server.runtime_source_update_status_data(refresh=False)
+        return source if isinstance(source, dict) else {}
+    except Exception:
+        return {}
+
+
+def prefetch_banner_source():
+    """Start the banner's Git status read in the background (once)."""
+    if _banner_prefetch["thread"] is not None:
+        return _banner_prefetch["thread"]
+
+    def read():
+        _banner_prefetch["value"] = _read_banner_source()
+
+    thread = owned_runtime_thread(target=read, daemon=True, name="sonder-banner-source")
+    _banner_prefetch["thread"] = thread
+    thread.start()
+    return thread
+
+
+def discard_banner_prefetch():
+    """Forget an unconsumed prefetch so it never outlives its REPL session."""
+    _banner_prefetch["thread"] = None
+    _banner_prefetch["value"] = None
+
+
+def _banner_source():
+    """The prefetched source status once, else a fresh read (``/about``).
+
+    A prefetch still running after the short wait yields an empty status; the
+    banner then omits the update line rather than holding the prompt.
+    """
+    thread = _banner_prefetch["thread"]
+    if thread is None:
+        return _read_banner_source()
+    thread.join(_BANNER_SOURCE_WAIT_SECONDS)
+    value = _banner_prefetch["value"]
+    discard_banner_prefetch()
+    return value or {}
 
 
 def _startup_banner(strict, persona, project, tier=None, **kwargs):

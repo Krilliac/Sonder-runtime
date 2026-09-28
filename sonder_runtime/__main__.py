@@ -1328,6 +1328,9 @@ def _configure_repl_logging(config, *, machine_output: bool, stdin=None, stdout=
 
 
 def cmd_repl(args) -> int:
+    if not args.json and sys.stderr.isatty():
+        # Startup takes seconds; say so at once instead of sitting silent.
+        print("Starting Sonder...", file=sys.stderr, flush=True)
     try:
         config = _load_config(args)
     except sonder_config.ConfigError as exc:
@@ -1348,6 +1351,8 @@ def cmd_repl(args) -> int:
     from sonder_runtime.bootstrap.legacy_interfaces import configure_legacy_interfaces
 
     configure_legacy_interfaces()
+    if not args.json:
+        sonder_repl.prefetch_banner_source()
     from sonder_runtime.bootstrap.app import (
         close_default_runtime_resources, default_app,
     )
@@ -1364,6 +1369,7 @@ def cmd_repl(args) -> int:
         else:
             sonder_repl.main()
     finally:
+        sonder_repl.discard_banner_prefetch()
         if owned_application is not None:
             close_default_runtime_resources(timeout=5)
     return 0
