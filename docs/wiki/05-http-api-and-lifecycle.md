@@ -107,6 +107,17 @@ chat capability; embedding- or vision-only entries are omitted. Cloud models
 appear only after the operator enables cloud use, so clients must treat the
 response as the live allowlist rather than a static catalog.
 
+Each row also carries an additive `sonder` object so a client without
+administrator access can label routes: a route is
+`{"kind": "route", "provider": "sonder_inference", "served_model": "qwen3:14b"}`
+(resolved as a chat turn resolves it: `sonder` follows the chat policy tier,
+and the model is that tier's `SONDER_INFERENCE_TIER_MODELS` entry or the
+default when the rung is bridged, else the Ollama target), and an exact model
+is `{"kind": "model", "provider": "ollama"}` because exact pins always run on
+Ollama. Only provider and model ids appear; `provider`/`served_model` are
+null when they cannot be resolved. Endpoint URLs and health stay on the
+admin-only ecosystem route.
+
 The administrator `/v1/sonder/status` projection includes `deployment` with
 the configured members, canonical `profile_id` (`single-pc` or `two-pc`), local
 control-state scope, and per-capability `available`/`reason` values. A preferred

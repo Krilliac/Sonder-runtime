@@ -123,6 +123,25 @@ class ProviderDispatchGateway:
                 status[name] = {"provider": name, "state": "unknown"}
         return status
 
+    def served_tier_models(self) -> Mapping[str, Mapping[str, str]]:
+        """``{provider: {tier: model}}`` from providers that know it without I/O.
+
+        A provider that does not report it, or fails to, is left out: callers
+        show no served model rather than a guess.
+        """
+        served: dict[str, Mapping[str, str]] = {}
+        for name in sorted(self._providers):
+            reporter = getattr(self._providers[name], "served_tier_models", None)
+            if not callable(reporter):
+                continue
+            try:
+                reported = reporter()
+            except Exception:  # noqa: BLE001 - display metadata never fails a caller
+                continue
+            if isinstance(reported, Mapping):
+                served.update({str(k): dict(v) for k, v in reported.items() if isinstance(v, Mapping)})
+        return served
+
     def capability_health(self, provider: str | None = None):
         """Delegate to one provider (the default generation provider if unset)."""
         name = provider or self._default_generation_provider

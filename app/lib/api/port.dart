@@ -7,6 +7,8 @@ library;
 
 import '../api.dart' show SystemInfo, CommandCatalog, PermissionMode;
 import '../models.dart';
+import '../runtime/ecosystem.dart' show EcosystemReading;
+import '../runtime/model_catalog.dart' show ModelCatalog;
 import 'approvals.dart';
 import 'chat.dart';
 import 'sessions.dart';
@@ -19,6 +21,8 @@ abstract interface class SonderApiPort {
   SonderEndpoint get endpoint;
 
   Future<List<String>> listModels();
+  Future<ModelCatalog> modelCatalog();
+  Future<EcosystemReading> ecosystemStatus();
   Future<SystemInfo> systemInfo();
   Future<CommandCatalog> fetchCommands();
   Future<PermissionMode?> fetchPermissionMode();

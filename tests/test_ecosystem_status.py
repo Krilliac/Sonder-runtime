@@ -104,6 +104,17 @@ def test_document_matches_contract_section_9_key_for_key():
     assert any("synthetic" in warning for warning in observatory["warnings"])
 
 
+def test_per_tier_served_models_pass_through_additively():
+    served = {"fast": "qwen3:14b", "general": "qwen3:14b", "code": "qwen3:14b",
+              "reasoning": "deepseek-r1:14b", "vision": "qwen3:14b"}
+    gateway = SimpleNamespace(provider_status=lambda: {
+        "sonder_inference": {**_inference_status(), "tier_models": served},
+    })
+    document = _build(_bindings("sonder_inference"), gateway)
+    assert document["providers"]["status"]["sonder_inference"]["tier_models"] == served
+    assert document["schema"] == ECOSYSTEM_SCHEMA
+
+
 def test_gateway_without_provider_status_reports_unknown():
     document = _build(_bindings(), SimpleNamespace())
     assert document["providers"]["status"] == {
