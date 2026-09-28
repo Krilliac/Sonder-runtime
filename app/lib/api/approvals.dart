@@ -10,10 +10,18 @@
 /// (`/approve <call id>`), so the sheet can show it with a Copy action.
 library;
 
+import 'dart:convert';
+
 import 'transport.dart';
 
 final RegExp _callId = RegExp(r'^[0-9a-f]{8,64}$');
 final RegExp _nonce = RegExp(r'^[A-Za-z0-9_.:-]{4,128}$');
+final RegExp _digest = RegExp(r'^[0-9a-f]{64}$');
+
+String _digestOrEmpty(Object? value) {
+  final text = value?.toString().trim().toLowerCase() ?? '';
+  return _digest.hasMatch(text) ? text : '';
+}
 
 DateTime? _ts(Object? value) {
   final n = value is num ? value.toDouble() : double.tryParse('$value');
@@ -27,6 +35,10 @@ DateTime? _ts(Object? value) {
 /// A call a permission gate refused because nobody could be asked.
 class PendingApproval {
   final String callId;
+
+  /// The full call digest (tool plus canonical arguments). Sent back with
+  /// an approval so the server refuses it if the call is not this one.
+  final String digest;
   final String tool;
 
   /// Redacted argument preview, as the server renders it.
@@ -36,6 +48,7 @@ class PendingApproval {
 
   const PendingApproval({
     required this.callId,
+    this.digest = '',
     this.tool = '',
     this.preview = '',
     this.mode = '',
@@ -45,6 +58,7 @@ class PendingApproval {
   factory PendingApproval.fromJson(Map<String, dynamic> json) =>
       PendingApproval(
         callId: boundedResponseMetadata(json['call_id'], 64),
+        digest: _digestOrEmpty(json['digest']),
         tool: boundedResponseMetadata(json['tool'], 128),
         preview: boundedResponseMetadata(json['preview'], 2048),
         mode: boundedResponseMetadata(json['mode'], 32),
@@ -152,15 +166,22 @@ class ApprovalsApi {
 
   /// Pending calls and open approvals, or null when the server has no
   /// approvals route (approve from the console instead).
-  Future<ApprovalsSnapshot?> list() async {
-    final body = await _call('GET', '/v1/approvals');
+  Future<ApprovalsSnapshot?> list({int limit = 20}) async {
+    final bounded = limit.clamp(1, 200);
+    final body = await _call('GET', '/v1/approvals?limit=$bounded');
     return body == null ? null : ApprovalsSnapshot.fromJson(body);
   }
 
   /// Approve exactly [callId] once, valid for [ttl]. Sends one POST with a
   /// fresh Idempotency-Key; never retried automatically.
+  ///
+  /// [tool] and [digest], when given, bind the approval to the call the
+  /// person was shown: the server answers 409 instead of approving if the
+  /// pending call under [callId] is a different tool or arguments.
   Future<IssuedApproval> approve(String callId,
-      {Duration ttl = const Duration(minutes: 15)}) async {
+      {Duration ttl = const Duration(minutes: 15),
+      String tool = '',
+      String digest = ''}) async {
     if (!_callId.hasMatch(callId)) {
       throw SonderException('That is not a call id.', code: 'INVALID_ID');
     }
@@ -168,7 +189,11 @@ class ApprovalsApi {
       'POST',
       '/v1/approvals/$callId',
       extraHeaders: {'Idempotency-Key': newIdempotencyKey('approve')},
-      body: '{"ttl_seconds": ${ttl.inSeconds}}',
+      body: jsonEncode({
+        'ttl_seconds': ttl.inSeconds,
+        if (tool.isNotEmpty) 'tool': tool,
+        if (_digest.hasMatch(digest)) 'digest': digest,
+      }),
     );
     if (body == null) {
       throw SonderException(consoleFallback(callId),

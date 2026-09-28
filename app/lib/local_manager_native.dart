@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -779,13 +780,18 @@ class LocalManager {
       final safeUpdaterCmd =
           File('${system.path}${Platform.pathSeparator}sonder-safe-update.cmd');
       if (Platform.isWindows && await safeUpdaterCmd.exists()) {
-        final safe = await Process.run(
+        final safe = await runBoundedProcess(
           'cmd.exe',
           ['/c', safeUpdaterCmd.path],
           workingDirectory: system.path,
-          environment: processEnvironment(),
-        ).timeout(const Duration(minutes: 8));
-        final output = _processOutput(safe);
+          environment: _gitEnvironment(),
+          timeout: _safeUpdateTimeout,
+        );
+        if (safe.timedOut) {
+          return LocalActionResult(
+              false, updateTimeoutMessage(_safeUpdateTimeout));
+        }
+        final output = safe.output;
         return LocalActionResult(
           safe.exitCode == 0,
           output.isEmpty
@@ -794,13 +800,18 @@ class LocalManager {
         );
       }
       if (await safeUpdater.exists()) {
-        final safe = await Process.run(
+        final safe = await runBoundedProcess(
           Platform.isWindows ? 'python.exe' : 'python3',
           [safeUpdater.path, '--repo', system.path],
           workingDirectory: system.path,
-          environment: processEnvironment(),
-        ).timeout(const Duration(minutes: 8));
-        final output = _processOutput(safe);
+          environment: _gitEnvironment(),
+          timeout: _safeUpdateTimeout,
+        );
+        if (safe.timedOut) {
+          return LocalActionResult(
+              false, updateTimeoutMessage(_safeUpdateTimeout));
+        }
+        final output = safe.output;
         return LocalActionResult(
           safe.exitCode == 0,
           output.isEmpty
@@ -809,20 +820,32 @@ class LocalManager {
         );
       }
       final status = await _runGit(system, ['status', '--porcelain']);
-      final hadLocalChanges = (status.stdout as String).trim().isNotEmpty;
+      if (status.timedOut) {
+        return LocalActionResult(
+            false, updateTimeoutMessage(const Duration(minutes: 3)));
+      }
+      final hadLocalChanges = status.stdout.trim().isNotEmpty;
       final result = await _runGit(
         system,
         ['pull', '--rebase', '--autostash'],
         timeout: const Duration(minutes: 5),
       );
-      var output = _processOutput(result);
+      if (result.timedOut) {
+        return LocalActionResult(
+            false, updateTimeoutMessage(const Duration(minutes: 5)));
+      }
+      var output = result.output;
       if (result.exitCode != 0 && _looksLikeMissingUpstream(output)) {
         final fallback = await _runGit(
           system,
           ['pull', '--rebase', '--autostash', 'origin', 'main'],
           timeout: const Duration(minutes: 5),
         );
-        output = _processOutput(fallback);
+        if (fallback.timedOut) {
+          return LocalActionResult(
+              false, updateTimeoutMessage(const Duration(minutes: 5)));
+        }
+        output = fallback.output;
         return LocalActionResult(
           fallback.exitCode == 0,
           _gitUpdateMessage(output, fallback.exitCode, hadLocalChanges),
@@ -837,18 +860,7 @@ class LocalManager {
     }
   }
 
-  static Future<ProcessResult> _runGit(
-    Directory system,
-    List<String> args, {
-    Duration timeout = const Duration(minutes: 3),
-  }) {
-    return Process.run(
-      'git',
-      args,
-      workingDirectory: system.path,
-      environment: processEnvironment(),
-    ).timeout(timeout);
-  }
+  static const _safeUpdateTimeout = Duration(minutes: 8);
 
   static String _processOutput(ProcessResult result) {
     return [
@@ -857,6 +869,136 @@ class LocalManager {
       if ((result.stderr as String).trim().isNotEmpty)
         (result.stderr as String).trim(),
     ].join('\n');
+  }
+
+  static Future<BoundedProcessResult> _runGit(
+    Directory system,
+    List<String> args, {
+    Duration timeout = const Duration(minutes: 3),
+  }) {
+    return runBoundedProcess(
+      'git',
+      args,
+      workingDirectory: system.path,
+      environment: _gitEnvironment(),
+      timeout: timeout,
+    );
+  }
+
+  /// Git must never wait on a credential prompt nobody can see.
+  static Map<String, String> _gitEnvironment() => {
+        ...processEnvironment(),
+        'GIT_TERMINAL_PROMPT': '0',
+      };
+
+  /// What an update that ran out of time says. The process tree was
+  /// stopped; a safe updater or `pull --autostash` may have stashed local
+  /// edits before it stalled, and only the stopped process knew that.
+  static String updateTimeoutMessage(Duration timeout) =>
+      'The update did not finish within ${timeout.inMinutes} minutes and was '
+      'stopped. Local edits may have been saved in Git: run `git stash list` '
+      'in the bundled local-system folder before updating again.';
+
+  /// Runs [executable] with stdin closed, collecting its output. Past
+  /// [timeout] the whole process tree is killed ([onKillTree], default
+  /// [killProcessTree]) instead of being left running while the app moves
+  /// on, so a retry cannot race an orphaned updater or clone.
+  static Future<BoundedProcessResult> runBoundedProcess(
+    String executable,
+    List<String> args, {
+    required String workingDirectory,
+    Map<String, String>? environment,
+    required Duration timeout,
+    Future<void> Function(int pid)? onKillTree,
+  }) async {
+    // On Unix, give each bounded command its own session so a timeout can
+    // signal its whole process group, including any git subprocesses. The
+    // setsid shim needs python3; a machine without it (a first install) runs
+    // the command directly and a timeout kills only that process.
+    Process process;
+    var grouped = false;
+    if (Platform.isWindows) {
+      process = await Process.start(
+        executable,
+        args,
+        workingDirectory: workingDirectory,
+        environment: environment,
+      );
+    } else {
+      try {
+        process = await Process.start(
+          'python3',
+          [
+            '-c',
+            'import os,sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])',
+            executable,
+            ...args,
+          ],
+          workingDirectory: workingDirectory,
+          environment: environment,
+        );
+        grouped = true;
+      } on ProcessException {
+        process = await Process.start(
+          executable,
+          args,
+          workingDirectory: workingDirectory,
+          environment: environment,
+        );
+      }
+    }
+    try {
+      await process.stdin.close();
+    } catch (_) {}
+    final stdout = StringBuffer();
+    final stderr = StringBuffer();
+    final outDone = process.stdout
+        .transform(systemEncoding.decoder)
+        .forEach(stdout.write)
+        .catchError((Object _) {});
+    final errDone = process.stderr
+        .transform(systemEncoding.decoder)
+        .forEach(stderr.write)
+        .catchError((Object _) {});
+    int exitCode;
+    var timedOut = false;
+    try {
+      exitCode = await process.exitCode.timeout(timeout);
+    } on TimeoutException {
+      timedOut = true;
+      try {
+        await (onKillTree ??
+            (Platform.isWindows || grouped
+                ? killProcessTree
+                : (int pid) async =>
+                    Process.killPid(pid, ProcessSignal.sigkill)))(process.pid);
+      } catch (_) {}
+      process.kill(ProcessSignal.sigkill);
+      exitCode = await process.exitCode
+          .timeout(const Duration(seconds: 10), onTimeout: () => -1);
+    }
+    await Future.wait([outDone, errDone])
+        .timeout(const Duration(seconds: 5), onTimeout: () => const []);
+    return BoundedProcessResult(
+      exitCode: exitCode,
+      stdout: stdout.toString(),
+      stderr: stderr.toString(),
+      timedOut: timedOut,
+    );
+  }
+
+  /// Kills [pid] and its children: `taskkill /T /F` on Windows; on Unix,
+  /// [pid] is the process-group leader created by [runBoundedProcess].
+  static Future<void> killProcessTree(int pid) async {
+    if (Platform.isWindows) {
+      await Process.run('taskkill', ['/T', '/F', '/PID', '$pid'])
+          .timeout(const Duration(seconds: 10));
+    } else {
+      // A negative pid signals the whole group; fall back to the leader alone.
+      if (!Process.killPid(-pid, ProcessSignal.sigkill)) {
+        Process.killPid(pid, ProcessSignal.sigkill);
+      }
+    }
   }
 
   static bool _looksLikeMissingUpstream(String output) {
@@ -893,12 +1035,20 @@ class LocalManager {
     if (await next.exists()) await next.delete(recursive: true);
     if (await backup.exists()) await backup.delete(recursive: true);
 
-    final clone = await Process.run(
+    final clone = await runBoundedProcess(
       'git',
       ['clone', '--depth=1', _repoUrl, next.path],
       workingDirectory: parent.path,
-      environment: processEnvironment(),
-    ).timeout(const Duration(minutes: 5));
+      environment: _gitEnvironment(),
+      timeout: const Duration(minutes: 5),
+    );
+    if (clone.timedOut) {
+      return const LocalActionResult(
+        false,
+        'Could not download update: the download did not finish within 5 '
+        'minutes and was stopped.',
+      );
+    }
     if (clone.exitCode != 0) {
       return LocalActionResult(
         false,
@@ -906,12 +1056,57 @@ class LocalManager {
       );
     }
 
-    await system.rename(backup.path);
-    await next.rename(system.path);
+    await swapInBundledSystem(system, next, backup);
     return const LocalActionResult(
       true,
       'Updated local-system from Git. Restart any running server window to use the new files.',
     );
+  }
+
+  /// Moves [next] into [system]'s place, keeping the live tree in [backup]
+  /// until the new one is installed. If the second rename fails (Defender or
+  /// the indexer holding the fresh clone), the live tree is renamed back,
+  /// with brief retries for transient sharing violations, and the original
+  /// error is rethrown. The backup is deleted only after the new tree is in
+  /// place.
+  static Future<void> swapInBundledSystem(
+    Directory system,
+    Directory next,
+    Directory backup, {
+    Future<void> Function(Directory from, String to)? rename,
+  }) async {
+    final move =
+        rename ?? (Directory from, String to) async => await from.rename(to);
+    await move(system, backup.path);
+    try {
+      await move(next, system.path);
+    } catch (_) {
+      Object? restoreError;
+      for (var attempt = 0; attempt < 5; attempt++) {
+        try {
+          await move(backup, system.path);
+          restoreError = null;
+          break;
+        } catch (e) {
+          restoreError = e;
+          await Future<void>.delayed(
+              Duration(milliseconds: 200 * (attempt + 1)));
+        }
+      }
+      if (restoreError != null) {
+        throw FileSystemException(
+            'The update could not be installed and the previous local-system '
+            'could not be moved back. It is intact at ${backup.path}; rename '
+            'it to ${system.path}.',
+            backup.path);
+      }
+      rethrow;
+    }
+    try {
+      await backup.delete(recursive: true);
+    } catch (_) {
+      // A leftover backup is removed before the next update.
+    }
   }
 
   /// Environment names never handed to the Observatory process: it asks for
@@ -1141,4 +1336,27 @@ class LocalManager {
       message: observatoryGuidance,
     );
   }
+}
+
+/// The outcome of [LocalManager.runBoundedProcess].
+class BoundedProcessResult {
+  final int exitCode;
+  final String stdout;
+  final String stderr;
+
+  /// The process outlived its timeout and its tree was killed.
+  final bool timedOut;
+
+  const BoundedProcessResult({
+    required this.exitCode,
+    this.stdout = '',
+    this.stderr = '',
+    this.timedOut = false,
+  });
+
+  /// Trimmed stdout then stderr, one per line.
+  String get output => [
+        if (stdout.trim().isNotEmpty) stdout.trim(),
+        if (stderr.trim().isNotEmpty) stderr.trim(),
+      ].join('\n');
 }

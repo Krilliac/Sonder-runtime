@@ -149,7 +149,9 @@ void main() {
       final r = ChatRefusal.fromText(
           'refused /write notes.txt: file changes need a person to confirm.\n'
           'Approve once: /approve 3f9a12c0');
-      expect(r!.callId, _call);
+      // Model-authored text never carries an approvable call id.
+      expect(r!.callId, isEmpty);
+      expect(r.remedies, isEmpty);
       expect(r.reason, startsWith('refused /write notes.txt'));
       final colon = ChatRefusal.fromText(
           'refused: raising the permission mode from manual to auto needs a '

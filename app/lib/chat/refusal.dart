@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 import '../ui/approval_sheet.dart'
     show ApprovalReceipt, ApprovalRequest, showApprovalSheet;
+import '../api/approvals.dart' show PendingApproval;
 import '../workspace_ui.dart' show StatusKind, WorkspaceNotice;
 import 'backend.dart';
 import 'classify.dart';
@@ -11,13 +12,22 @@ export 'classify.dart' show RefusalInfo, refusalOf, classifyReply, ReplyKind;
 
 /// A refused call, rendered as a notice rather than an answer (P1-2): no
 /// rating chips, the refused subject in the title, the server's reason as
-/// detail, and "Approve this call once" only when the call id is known.
+/// detail, and "Approve this call once" only when the server's receipt names
+/// the call.
+///
+/// Before the sheet opens, the pending call is looked up on the server
+/// ([onLookup]); the sheet shows the server's tool and redacted arguments,
+/// and the approval is bound to that tool and digest. Nothing the model wrote
+/// decides what is approved.
 class RefusalNotice extends StatefulWidget {
   final RefusalInfo refusal;
 
+  /// Reads the server's record of the pending call. Null hides the approve
+  /// action (no lookup, no approval).
+  final Future<PendingCallLookup> Function(String callId)? onLookup;
+
   /// Sends the approval. Null hides the approve action.
-  final Future<ApprovalOutcome> Function(String callId, Duration ttl)?
-      onApprove;
+  final ApproveCallback? onApprove;
 
   /// Opens the mode picker.
   final VoidCallback? onChangeMode;
@@ -28,6 +38,7 @@ class RefusalNotice extends StatefulWidget {
   const RefusalNotice({
     super.key,
     required this.refusal,
+    this.onLookup,
     this.onApprove,
     this.onChangeMode,
     this.onRetry,
@@ -42,18 +53,40 @@ class _RefusalNoticeState extends State<RefusalNotice> {
   Duration _ttl = const Duration(minutes: 15);
   bool _busy = false;
 
+  /// The server's tool name for the approved call, for the receipt.
+  String _approvedTool = '';
+
   Future<void> _approve() async {
     final callId = widget.refusal.callId;
+    final lookup = widget.onLookup;
     final approve = widget.onApprove;
-    if (callId.isEmpty || approve == null || _busy) return;
-    final ttl = await showRefusalApprovalSheet(context, widget.refusal);
+    if (callId.isEmpty || lookup == null || approve == null || _busy) return;
+    setState(() => _busy = true);
+    final found = await lookup(callId);
+    if (!mounted) return;
+    final call = found.call;
+    if (call == null) {
+      setState(() {
+        _busy = false;
+        _outcome = ApprovalOutcome(
+            found.status == ApprovalStatus.approved
+                ? ApprovalStatus.failed
+                : found.status,
+            message: found.message);
+      });
+      return;
+    }
+    setState(() => _busy = false);
+    final ttl = await showApprovalSheet(context,
+        request: approvalRequestForPending(call, widget.refusal));
     if (ttl == null || !mounted) return;
     setState(() => _busy = true);
-    final outcome = await approve(callId, ttl);
+    final outcome = await approve(callId, ttl, call.tool, call.digest);
     if (!mounted) return;
     setState(() {
       _busy = false;
       _ttl = ttl;
+      _approvedTool = call.tool;
       _outcome = outcome;
     });
   }
@@ -62,7 +95,9 @@ class _RefusalNoticeState extends State<RefusalNotice> {
   Widget build(BuildContext context) {
     final r = widget.refusal;
     final title = r.subject.isNotEmpty ? r.subject : 'this request';
-    final canApprove = r.callId.isNotEmpty && widget.onApprove != null;
+    final canApprove = r.callId.isNotEmpty &&
+        widget.onLookup != null &&
+        widget.onApprove != null;
     final outcome = _outcome;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -104,7 +139,9 @@ class _RefusalNoticeState extends State<RefusalNotice> {
       case ApprovalStatus.approved:
         return ApprovalReceipt(
           key: const Key('approval-approved'),
-          tool: r.subject.isEmpty ? 'call' : r.subject,
+          tool: _approvedTool.isNotEmpty
+              ? _approvedTool
+              : (r.subject.isEmpty ? 'call' : r.subject),
           callId: r.callId,
           nonce: outcome.nonce,
           ttl: outcome.ttlSeconds > 0
@@ -152,12 +189,26 @@ class _RefusalNoticeState extends State<RefusalNotice> {
   }
 }
 
-/// The §2.5 approval sheet for [r], drawn by lane B's [ApprovalSheet]:
-/// exactly one call, once. Returns the chosen validity, or null when
-/// cancelled.
-Future<Duration?> showRefusalApprovalSheet(
-        BuildContext context, RefusalInfo r) =>
-    showApprovalSheet(context, request: approvalRequestFor(r));
+/// Sends one approval for `callId`, bound to the server's `tool` and
+/// `digest` for that call.
+typedef ApproveCallback = Future<ApprovalOutcome> Function(
+    String callId, Duration ttl, String tool, String digest);
+
+/// The approval sheet for the server's own record of a pending call. The
+/// tool, arguments and mode come from `GET /v1/approvals`; only the
+/// receipt's reason is carried over from the refusal.
+ApprovalRequest approvalRequestForPending(
+        PendingApproval call, RefusalInfo r) =>
+    ApprovalRequest(
+      tool: call.tool.isEmpty ? 'call' : call.tool,
+      callId: call.callId,
+      arguments:
+          call.preview.isEmpty ? const [] : [('arguments', call.preview)],
+      mode: call.mode.isNotEmpty
+          ? call.mode
+          : (r.mode.isEmpty ? 'the current' : r.mode),
+      reason: r.reason.isEmpty ? null : r.reason,
+    );
 
 /// The approval sheet's view model for a refusal.
 ApprovalRequest approvalRequestFor(RefusalInfo r) => ApprovalRequest(

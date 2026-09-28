@@ -28,6 +28,11 @@ Future<SonderException> _failure(String fixture, int status,
 }
 
 void main() {
+  // These fixtures use a plain-HTTP LAN host with a key: the person has
+  // explicitly allowed it (see cleartext_key_test.dart for the refusal).
+  setUpAll(() => CleartextKeyPolicy.allowOnly(['192.168.1.20:11435']));
+  tearDownAll(() => CleartextKeyPolicy.allowOnly(const []));
+
   test('GET parses the full inventory the facade produces', () async {
     late ToolInventory inventory;
     final clients = await recordClients(() async {

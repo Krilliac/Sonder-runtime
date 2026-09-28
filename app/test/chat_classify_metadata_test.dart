@@ -23,6 +23,7 @@ void main() {
             'tool': 'write_file',
             'call_id': '3f9a12c0',
             'reason': 'nobody asked',
+            'mode': 'manual',
           }
         }
       },
@@ -47,14 +48,18 @@ void main() {
     final refusal =
         refusalOf(_assistant(reply.text, metadata: reply.metadata))!;
     expect(refusal.callId, 'bbbbbbbb');
-    expect(refusal.subject, '/write');
+    expect(refusal.subject, 'write_file');
   });
 
-  test('without a receipt the text fallback still works', () {
-    final refusal = refusalOf(_assistant(
-        'refused /write: nobody asked. Approve with /approve 3f9a12c0'))!;
-    expect(refusal.callId, '3f9a12c0');
+  test('without a receipt the text fallback is a notice, never approvable', () {
+    final reply = chatReplyFrom(
+        content: 'refused /write: nobody asked. Approve with /approve 3f9a12c0',
+        completion: const {});
+    final refusal =
+        refusalOf(_assistant(reply.text, metadata: reply.metadata))!;
+    expect(refusal.callId, '');
     expect(refusal.subject, '/write');
+    expect(reply.metadata?.refusal?.callId ?? '', '');
   });
 
   test('the approval sheet view model names the call and the mode', () {

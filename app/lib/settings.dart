@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'account_session.dart';
+import 'api/transport.dart' show CleartextKeyPolicy;
 import 'local_manager_models.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -82,6 +83,7 @@ class Settings {
   static const _kLauncherToken = 'sonder_launcher_token';
   static const _kObservatoryExecutable = 'sonder_observatory_executable';
   static const _kObservatoryWebUrl = 'sonder_observatory_web_url';
+  static const _kCleartextKeyHosts = 'sonder_cleartext_key_hosts';
   static const _credentials = PlatformCredentialStore();
 
   /// Test-only override: widget tests do not load desktop/mobile plugins, and
@@ -125,6 +127,11 @@ class Settings {
   /// never guesses one.
   String observatoryWebUrl;
 
+  /// Plain-HTTP, non-loopback `host:port`s the person explicitly allowed to
+  /// receive the deployment API key unencrypted. Applied to
+  /// [CleartextKeyPolicy] on load and save; not a secret.
+  List<String> cleartextKeyHosts;
+
   Settings({
     this.serverUrl = 'http://127.0.0.1:11435',
     this.apiKey = '',
@@ -139,6 +146,7 @@ class Settings {
     this.launcherToken = '',
     this.observatoryExecutable = '',
     this.observatoryWebUrl = '',
+    this.cleartextKeyHosts = const [],
   });
 
   bool get isConfigured => serverUrl.trim().isNotEmpty;
@@ -215,7 +223,11 @@ class Settings {
     } catch (_) {
       account = null;
     }
+    final cleartextKeyHosts =
+        p.getStringList(_kCleartextKeyHosts) ?? const <String>[];
+    CleartextKeyPolicy.allowOnly(cleartextKeyHosts);
     return Settings(
+      cleartextKeyHosts: cleartextKeyHosts,
       accountSession: account,
       serverUrl: p.getString(_kServer) ?? 'http://127.0.0.1:11435',
       apiKey: apiKey,
@@ -330,6 +342,8 @@ class Settings {
     await p.setString(_kLauncherUrl, launcherUrl.trim());
     await p.setString(_kObservatoryExecutable, observatoryExecutable.trim());
     await p.setString(_kObservatoryWebUrl, observatoryWebUrl.trim());
+    await p.setStringList(_kCleartextKeyHosts, cleartextKeyHosts);
+    CleartextKeyPolicy.allowOnly(cleartextKeyHosts);
     return SettingsSaveResult(
       credentialsStored: stored || !needed,
       memoryOnly: memoryOnly && needed,

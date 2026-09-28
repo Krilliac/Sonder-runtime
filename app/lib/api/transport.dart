@@ -473,6 +473,70 @@ String newIdempotencyKey([String prefix = 'app']) {
   return '$prefix-$hex';
 }
 
+/// Whether a deployment API key may be sent to a server URL.
+///
+/// A bearer key over plain HTTP off this device is readable (and replayable)
+/// by anyone on the network path. So the key is sent only over HTTPS, to a
+/// loopback host (`localhost`, `127.0.0.0/8`, `::1`), or to a plain-HTTP
+/// `host:port` the person explicitly allowed in Settings. Settings loads and
+/// saves the allowed set; nothing else adds to it.
+class CleartextKeyPolicy {
+  CleartextKeyPolicy._();
+
+  static Set<String> _allowed = const {};
+
+  /// The `host:port` a plain-HTTP [url] is allowed under, or '' when [url]
+  /// is not a plain-HTTP URL with a host.
+  static String hostKeyOf(String url) {
+    final uri = Uri.tryParse(url.trim());
+    if (uri == null || uri.scheme.toLowerCase() != 'http' || uri.host.isEmpty) {
+      return '';
+    }
+    return '${uri.host.toLowerCase()}:${uri.port}';
+  }
+
+  /// Replace the explicitly allowed plain-HTTP hosts (`host:port`).
+  static void allowOnly(Iterable<String> hostKeys) {
+    _allowed = {
+      for (final k in hostKeys)
+        if (k.trim().isNotEmpty) k.trim().toLowerCase()
+    };
+  }
+
+  static Set<String> get allowedHosts => Set.unmodifiable(_allowed);
+
+  /// True when [host] is loopback: `localhost`, `127.x.x.x` or `::1`.
+  static bool isLoopbackHost(String host) {
+    final h = host.toLowerCase();
+    return h == 'localhost' ||
+        h == '::1' ||
+        h == '[::1]' ||
+        h == '0:0:0:0:0:0:0:1' ||
+        RegExp(r'^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$').hasMatch(h);
+  }
+
+  /// True when [url] is plain HTTP to a non-loopback host, i.e. a key would
+  /// cross the network unencrypted.
+  static bool isCleartextRemote(String url) {
+    final uri = Uri.tryParse(url.trim());
+    return uri != null &&
+        uri.scheme.toLowerCase() == 'http' &&
+        uri.host.isNotEmpty &&
+        !isLoopbackHost(uri.host);
+  }
+
+  /// Whether a deployment key may be attached to requests for [url].
+  static bool allows(String url) {
+    final uri = Uri.tryParse(url.trim());
+    if (uri == null || uri.host.isEmpty) return false;
+    final scheme = uri.scheme.toLowerCase();
+    if (scheme == 'https') return true;
+    if (scheme != 'http') return false;
+    if (isLoopbackHost(uri.host)) return true;
+    return _allowed.contains(hostKeyOf(url));
+  }
+}
+
 /// Where requests go and which credentials they carry.
 class SonderEndpoint {
   final String baseUrl;
@@ -494,10 +558,15 @@ class SonderEndpoint {
 
   /// Request headers. [keyOverride] replaces the API key and drops the
   /// account token (the local fallback gets no credentials at all).
+  ///
+  /// The deployment key is attached only where [CleartextKeyPolicy] allows:
+  /// HTTPS, loopback, or a plain-HTTP host the person explicitly allowed in
+  /// Settings. Otherwise the request goes without it (and the server's 401
+  /// says so) rather than exposing the key on the network.
   Map<String, String> headers([String? keyOverride]) {
     final h = <String, String>{'Content-Type': 'application/json'};
     final key = keyOverride ?? apiKey;
-    if (key.trim().isNotEmpty) {
+    if (key.trim().isNotEmpty && CleartextKeyPolicy.allows(baseUrl)) {
       h['Authorization'] = 'Bearer ${key.trim()}';
     }
     if (keyOverride == null && accountSession?.matches(baseUrl) == true) {
