@@ -181,6 +181,32 @@ def test_provider_status_aggregates_and_marks_silent_providers_unknown():
     }
 
 
+class ServedGateway(RecordingGateway):
+    def __init__(self, name, served):
+        super().__init__(name)
+        self.served = served
+
+    def served_tier_models(self):
+        return self.served
+
+
+def test_served_tier_models_aggregate_providers_that_report_them():
+    prism = ServedGateway("prism", {"openai_compatible": {"fast": "m1", "general": "m2"}})
+    gateway = _gateway(RecordingGateway("ollama"), prism)
+    assert gateway.served_tier_models() == {
+        "openai_compatible": {"fast": "m1", "general": "m2"},
+    }
+
+
+def test_served_tier_models_skip_a_provider_that_fails():
+    class Broken(RecordingGateway):
+        def served_tier_models(self):
+            raise RuntimeError("boom")
+
+    gateway = _gateway(RecordingGateway("ollama"), Broken("prism"))
+    assert gateway.served_tier_models() == {}
+
+
 def test_capability_health_passes_through_to_one_provider():
     reporting = StatusGateway("prism", {"provider": "openai_compatible", "state": "ready"})
     gateway = _gateway(RecordingGateway("ollama"), reporting)

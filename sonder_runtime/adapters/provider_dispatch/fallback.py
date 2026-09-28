@@ -102,6 +102,10 @@ class PreSendFallbackGateway:
     def routing_identity(self, model: str | None = None):
         return self._primary.routing_identity(model)
 
+    def served_tier_models(self) -> Mapping[str, Mapping[str, str]]:
+        reporter = getattr(self._primary, "served_tier_models", None)
+        return reporter() if callable(reporter) else {}
+
     def provider_status(self) -> Mapping[str, Mapping[str, object]]:
         reporter = getattr(self._primary, "provider_status", None)
         if callable(reporter):
