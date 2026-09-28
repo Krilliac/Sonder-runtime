@@ -1215,11 +1215,14 @@ def cmd_serve(args) -> int:
         config.ollama.request_timeout_seconds,
     )
     from sonder_runtime.adapters.persistence.sqlite.bridge_migration import (
-        require_epoch_2,
+        require_epoch_2, stamp_fresh_home,
     )
     from sonder_runtime.domain.common.errors import MigrationRequired
 
     try:
+        # Stamp a truly fresh home before migrations create its stores, then
+        # gate both new and existing homes before opening the listener.
+        stamp_fresh_home(runtime_paths.default_home())
         require_epoch_2(runtime_paths.default_home())
     except MigrationRequired as exc:
         print(

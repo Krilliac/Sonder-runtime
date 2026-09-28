@@ -55,6 +55,28 @@ DEFAULT_ROUTING = {
 NPU_MODES = ("off", "shadow", "prefer")
 NPU_CAPABILITIES = ("routing", "embeddings")
 DEFAULT_NPU = {"mode": "off", "routing": "", "embeddings": ""}
+# Opt-in long-context overflow: a turn whose estimated prompt exceeds the
+# threshold moves from its local tier to a model that keeps its speed at long
+# context (for example a mixture-of-experts on the Ollama pool).  Off by
+# default.  An empty model means "the bound reasoning tier's model", so the
+# default assumes no model family.  Only the Ollama pool provider is accepted
+# and, like every other policy model, never a cloud model.
+OVERFLOW_PROVIDERS = ("ollama",)
+OVERFLOW_MIN_THRESHOLD = 4096
+OVERFLOW_MAX_THRESHOLD = 1_048_576
+DEFAULT_LONG_CONTEXT_OVERFLOW = {
+    "enabled": False,
+    "threshold_tokens": 32768,
+    "model": "",
+    "provider": "ollama",
+}
+OVERFLOW_ENV = {
+    "enabled": "SONDER_LONG_CONTEXT_OVERFLOW",
+    "threshold_tokens": "SONDER_LONG_CONTEXT_THRESHOLD",
+    "model": "SONDER_LONG_CONTEXT_MODEL",
+}
+_TRUE_TOKENS = frozenset({"1", "true", "yes", "on", "enabled"})
+_FALSE_TOKENS = frozenset({"0", "false", "no", "off", "disabled"})
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$")
 
 
@@ -132,6 +154,7 @@ def default_policy(env) -> dict:
         "embedding_model": seed_embedding_model(env),
         "routing": dict(DEFAULT_ROUTING),
         "npu": dict(DEFAULT_NPU),
+        "long_context_overflow": dict(DEFAULT_LONG_CONTEXT_OVERFLOW),
         "updated_ts": 0,
         "source": "environment seed",
     }
@@ -164,6 +187,107 @@ def normalize_npu(raw, base) -> dict:
             )
         npu[capability] = value
     return npu
+
+
+def _overflow_bool(value, where: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value if value is not None else "").strip().lower()
+    if text in _TRUE_TOKENS:
+        return True
+    if text in _FALSE_TOKENS:
+        return False
+    raise ValueError("%s must be on or off" % where)
+
+
+def _overflow_threshold(value, where: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError("%s must be an integer" % where)
+    try:
+        threshold = int(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError("%s must be an integer" % where) from exc
+    if not OVERFLOW_MIN_THRESHOLD <= threshold <= OVERFLOW_MAX_THRESHOLD:
+        raise ValueError(
+            "%s must be between %d and %d tokens"
+            % (where, OVERFLOW_MIN_THRESHOLD, OVERFLOW_MAX_THRESHOLD)
+        )
+    return threshold
+
+
+def _overflow_model(value) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if is_cloud_name(text):
+        raise ValueError("long-context overflow cannot use a cloud model")
+    return validate_model(text, "")
+
+
+def normalize_long_context_overflow(raw, base=None) -> dict:
+    """Validate the ``long_context_overflow`` policy section."""
+    if raw in (None, ""):
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ValueError("runtime policy long_context_overflow must be an object")
+    unknown = set(raw) - set(DEFAULT_LONG_CONTEXT_OVERFLOW)
+    if unknown:
+        raise ValueError(
+            "unknown long_context_overflow key(s): %s" % ", ".join(sorted(unknown))
+        )
+    defaults = base if isinstance(base, dict) else DEFAULT_LONG_CONTEXT_OVERFLOW
+    merged = {**DEFAULT_LONG_CONTEXT_OVERFLOW, **defaults, **raw}
+    provider = str(merged.get("provider") or "ollama").strip().lower()
+    if provider not in OVERFLOW_PROVIDERS:
+        raise ValueError(
+            "long-context overflow provider must be one of: %s"
+            % ", ".join(OVERFLOW_PROVIDERS)
+        )
+    return {
+        "enabled": _overflow_bool(merged.get("enabled"), "long-context overflow enabled"),
+        "threshold_tokens": _overflow_threshold(
+            merged.get("threshold_tokens"), "long-context overflow threshold",
+        ),
+        "model": _overflow_model(merged.get("model")),
+        "provider": provider,
+    }
+
+
+def effective_long_context_overflow(policy, env) -> dict:
+    """The overflow settings in force: the policy section, then env overrides.
+
+    ``SONDER_LONG_CONTEXT_OVERFLOW``, ``SONDER_LONG_CONTEXT_THRESHOLD`` and
+    ``SONDER_LONG_CONTEXT_MODEL`` override the policy while they are set, so
+    an operator can force the feature per process.  An invalid override is
+    ignored and reported in ``error``; it never enables anything.  The
+    result lists which keys the environment supplied in ``overrides``.
+    """
+    section = policy.get("long_context_overflow") if isinstance(policy, dict) else None
+    try:
+        settings = normalize_long_context_overflow(section)
+    except ValueError:
+        settings = dict(DEFAULT_LONG_CONTEXT_OVERFLOW)
+    overrides = []
+    errors = []
+    env = env or {}
+    parsers = {
+        "enabled": lambda value: _overflow_bool(value, OVERFLOW_ENV["enabled"]),
+        "threshold_tokens": lambda value: _overflow_threshold(
+            value, OVERFLOW_ENV["threshold_tokens"],
+        ),
+        "model": _overflow_model,
+    }
+    for key, variable in OVERFLOW_ENV.items():
+        raw = str(env.get(variable, "") or "").strip()
+        if not raw:
+            continue
+        try:
+            settings[key] = parsers[key](raw)
+        except ValueError as exc:
+            errors.append(str(exc))
+            continue
+        overrides.append(key)
+    return {**settings, "overrides": tuple(overrides), "error": "; ".join(errors)}
 
 
 def normalize(payload, defaults=None) -> dict:
@@ -209,6 +333,9 @@ def normalize(payload, defaults=None) -> dict:
         "embedding_model": embedding_model,
         "routing": routing,
         "npu": normalize_npu(payload.get("npu"), base.get("npu")),
+        "long_context_overflow": normalize_long_context_overflow(
+            payload.get("long_context_overflow"), base.get("long_context_overflow"),
+        ),
         "updated_ts": max(0, int(payload.get("updated_ts") or 0)),
         "source": str(payload.get("source") or "runtime policy")[:120],
     }
@@ -245,6 +372,6 @@ def npu_mode(capability, policy) -> str:
 
 def disk_payload(policy: dict) -> dict:
     return {key: policy[key] for key in (
-        "version", "revision", "local_models", "embedding_model", "routing", "npu", "updated_ts",
-        "source",
+        "version", "revision", "local_models", "embedding_model", "routing", "npu",
+        "long_context_overflow", "updated_ts", "source",
     )}

@@ -14,8 +14,8 @@ import uuid
 
 from ...application.artifacts.transfer import ArtifactRange, TransferError
 from ...application.compute_fabric.artifact_spool import PrivateDirectoryAnchor
-from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
-from sonder_runtime.adapters.filesystem.durable_locks import LockTimeout, exclusive_descriptor_lock
+from .owned_sqlite import connect as owned_sqlite_connect
+from ..filesystem.durable_locks import LockTimeout, exclusive_descriptor_lock
 
 
 def _command(value):
@@ -31,7 +31,16 @@ class SQLiteArtifactTransferStore:
     unbounded verifier or silently multiplies temporary disk reservations.
     """
 
-    def __init__(self, root):
+    def __init__(self, root, *, max_rows=4096, terminal_retention_seconds=7 * 86400):
+        if type(max_rows) is not int or not 1 <= max_rows <= 4096:
+            raise TransferError("INVALID_BOUND")
+        if (type(terminal_retention_seconds) is not int
+                or not 0 <= terminal_retention_seconds <= 30 * 86400):
+            raise TransferError("INVALID_BOUND")
+        self._max_rows = max_rows
+        # Terminal receipts and sealed bytes expire together after this grace
+        # period beyond the upload deadline. Replays after pruning are new work.
+        self._terminal_retention_seconds = terminal_retention_seconds
         self.root = Path(root).absolute()
         self._safe_root()
         with PrivateDirectoryAnchor.open_base(self.root) as anchor:
@@ -145,6 +154,8 @@ class SQLiteArtifactTransferStore:
         ).fetchone()
         if row is None:
             raise TransferError("NOT_FOUND")
+        if row["state"] == "pruning":
+            raise TransferError("NOT_FOUND")
         if mobility is not None and (row["mobility_verifier"] is not None) != mobility:
             raise TransferError("MOBILITY_PROTOCOL")
         if upload and row["state"] not in ("sealed", "aborted"):
@@ -206,6 +217,7 @@ class SQLiteArtifactTransferStore:
         encoded = json.dumps(spec, sort_keys=True, separators=(",", ":"))
         with self._mutation(), self._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._maintain_locked(conn)
             prior = conn.execute(
                 "SELECT * FROM artifact_uploads WHERE scope=? AND command=?",
                 (grant.scope_id, command_id),
@@ -232,7 +244,7 @@ class SQLiteArtifactTransferStore:
             ).fetchall()
             if (
                 conn.execute("SELECT COUNT(*) FROM artifact_uploads").fetchone()[0]
-                >= 4096
+                >= self._max_rows
             ):
                 raise TransferError("CAPACITY")
             if (
@@ -272,6 +284,7 @@ class SQLiteArtifactTransferStore:
             raise TransferError("FORBIDDEN")
         with self._mutation(), self._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._maintain_locked(conn)
             prior = conn.execute(
                 "SELECT * FROM artifact_uploads WHERE scope=? AND command=?",
                 (grant.scope_id, command_id),
@@ -298,7 +311,7 @@ class SQLiteArtifactTransferStore:
             active = conn.execute(
                 "SELECT scope FROM artifact_uploads WHERE state IN ('open','verifying')"
             ).fetchall()
-            if conn.execute("SELECT COUNT(*) FROM artifact_uploads").fetchone()[0] >= 4096:
+            if conn.execute("SELECT COUNT(*) FROM artifact_uploads").fetchone()[0] >= self._max_rows:
                 raise TransferError("CAPACITY")
             if used + reservation > limits.total_bytes or scoped + reservation > grant.quota_bytes:
                 raise TransferError("QUOTA")
@@ -651,30 +664,90 @@ class SQLiteArtifactTransferStore:
             )
             return self._receipt(self._row(conn, identity, grant, mobility=mobility))
 
+    def _reap_expired_locked(self, conn, *, limit):
+        rows = conn.execute(
+            """SELECT * FROM artifact_uploads
+            WHERE expires<=? AND state IN ('open','verifying','failed')
+            ORDER BY expires LIMIT ?""",
+            (time.time(), limit),
+        ).fetchall()
+        for row in rows:
+            with self._directories(row) as (_, stage):
+                self._remove_temporaries(stage)
+                for item in os.scandir(stage.path):
+                    if re.fullmatch("[0-9a-f]{16}|[0-9a-f]{64}", item.name):
+                        stage.unlink(item.name)
+                self._fsync_directory(stage)
+            conn.execute(
+                "UPDATE artifact_uploads SET state='aborted',reserved=0,revision=revision+1 WHERE id=?",
+                (row["id"],),
+            )
+        return len(rows)
+
+    def _maintain_locked(self, conn):
+        """Reap expired stages and prune terminal metadata under the writer lock.
+
+        A committed pruning tombstone makes interrupted filesystem cleanup
+        resumable. Sealed receipts and their bytes share one retention deadline.
+        """
+        self._reap_expired_locked(conn, limit=self._max_rows)
+        cutoff = time.time() - self._terminal_retention_seconds
+        rows = list(conn.execute(
+            """SELECT * FROM artifact_uploads
+            WHERE state='pruning' OR (state IN ('aborted','sealed') AND expires<=?)
+            ORDER BY expires LIMIT ?""",
+            (cutoff, self._max_rows),
+        ).fetchall())
+        # An abort flood must not occupy the lifetime row ceiling until its
+        # receipt expires. Under pressure, discard the oldest aborted replays;
+        # sealed artifacts still honor their full retention period.
+        row_count = conn.execute("SELECT COUNT(*) FROM artifact_uploads").fetchone()[0]
+        needed = max(0, row_count - len(rows) - self._max_rows + 1)
+        if needed:
+            selected = {row["id"] for row in rows}
+            for row in conn.execute(
+                "SELECT * FROM artifact_uploads WHERE state='aborted' ORDER BY expires LIMIT ?",
+                (self._max_rows,),
+            ):
+                if row["id"] not in selected:
+                    rows.append(row)
+                    needed -= 1
+                    if not needed:
+                        break
+        for row in rows:
+            if row["state"] != "pruning":
+                conn.execute(
+                    "UPDATE artifact_uploads SET state='pruning' WHERE id=?", (row["id"],)
+                )
+                conn.commit()
+                conn.execute("BEGIN IMMEDIATE")
+            with self._directories(row) as (_, stage):
+                self._remove_temporaries(stage)
+                for item in os.scandir(stage.path):
+                    if not re.fullmatch("[0-9a-f]{16}|[0-9a-f]{64}", item.name):
+                        raise TransferError("UNSAFE_STORE")
+                    if not item.is_file(follow_symlinks=False):
+                        raise TransferError("UNSAFE_STORE")
+                    stage.unlink(item.name)
+                self._fsync_directory(stage)
+            # The anchored stage has been emptied and closed; no recursive
+            # removal can traverse an unexpected child.
+            os.rmdir(self.root / row["scope"] / row["id"])
+            try:
+                os.rmdir(self.root / row["scope"])
+            except OSError:
+                # Other retained transfers may still occupy this scope.
+                pass
+            conn.execute("DELETE FROM artifact_chunks WHERE upload_id=?", (row["id"],))
+            conn.execute("DELETE FROM artifact_uploads WHERE id=?", (row["id"],))
+
     def reap_expired(self, *, limit=8):
-        """Trusted local maintenance only; never deletes sealed objects or their receipts."""
+        """Trusted local maintenance; admission also invokes this cleanup."""
         if type(limit) is not int or not 1 <= limit <= 64:
             raise TransferError("INVALID_BOUND")
         with self._mutation(), self._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            rows = conn.execute(
-                """SELECT * FROM artifact_uploads
-                WHERE expires<=? AND state IN ('open','verifying','failed')
-                ORDER BY expires LIMIT ?""",
-                (time.time(), limit),
-            ).fetchall()
-            for row in rows:
-                with self._directories(row) as (_, stage):
-                    self._remove_temporaries(stage)
-                    for item in os.scandir(stage.path):
-                        if re.fullmatch("[0-9a-f]{16}|[0-9a-f]{64}", item.name):
-                            stage.unlink(item.name)
-                    self._fsync_directory(stage)
-                conn.execute(
-                    "UPDATE artifact_uploads SET state='aborted',reserved=0,revision=revision+1 WHERE id=?",
-                    (row["id"],),
-                )
-            return len(rows)
+            return self._reap_expired_locked(conn, limit=limit)
 
     def artifact(self, identity, grant):
         with self._connection() as conn:

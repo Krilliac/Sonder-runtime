@@ -83,6 +83,21 @@ def _isolate_emotion_vectors_state(_isolate_runtime_home):
 
 
 @pytest.fixture(autouse=True)
+def _no_incidental_prewarm(request, monkeypatch):
+    """Keep incidental HTTP chat tests from prewarming a real local model.
+
+    Every served chat calls server.prewarm_model, which starts a thread that
+    loads the tier's model from the configured Ollama -- on a developer machine
+    the real one. Those threads outlived their tests, reached the live Ollama,
+    and competed with later tests (an intermittent 5 s client timeout in
+    test_serve_auth). Tests that exercise prewarm opt back in with
+    @pytest.mark.real_prewarm.
+    """
+    if request.node.get_closest_marker("real_prewarm") is None:
+        monkeypatch.setenv("SONDER_PREWARM", "0")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_routing_environment(monkeypatch):
     """Restore deployment routing variables after every test.
 

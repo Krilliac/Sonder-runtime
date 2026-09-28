@@ -281,3 +281,35 @@ print('refused')
     result = subprocess.run([sys.executable, "-c", script, module_name], cwd=Path(__file__).resolve().parents[1], env=environment, capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr[-2000:]
     assert result.stdout.strip() == "refused"
+
+
+def test_never_started_thread_does_not_hold_capacity():
+    owner = OwnedRuntimeThreads(cleanup=lambda: True, max_threads=1)
+    for _ in range(5):
+        # Created but never started (for example: the caller refused the
+        # work after asking for a worker). No native thread exists, so the
+        # slot must stay available.
+        owner.thread(target=lambda: None)
+    thread = owner.thread(target=lambda: None)
+    thread.start()
+    thread.join(2)
+    assert owner.close(timeout=1).clean
+
+
+def test_capacity_is_reserved_at_start_not_creation():
+    release = Event()
+    owner = OwnedRuntimeThreads(cleanup=lambda: True, max_threads=1)
+    first = owner.thread(target=lambda: release.wait(5))
+    second = owner.thread(target=lambda: None)
+    first.start()
+    try:
+        with pytest.raises(ThreadOwnershipRefused):
+            second.start()
+        with pytest.raises(ThreadOwnershipRefused):
+            owner.thread(target=lambda: None)
+    finally:
+        release.set()
+        first.join(2)
+    second.start()
+    second.join(2)
+    assert owner.close(timeout=1).clean
