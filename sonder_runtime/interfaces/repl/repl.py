@@ -1416,6 +1416,9 @@ def _banner_state(strict, persona, project, tier=None, *, session_id="",
 # silence. ``prefetch_banner_source`` starts that read while the application
 # graph is still being built; the banner then waits only briefly for it.
 _BANNER_SOURCE_WAIT_SECONDS = 1.5
+# Set by ``sonder_runtime.__main__`` when it wrote the "Starting Sonder..."
+# line (no newline); erased in place just before the banner is drawn.
+startup_notice_pending = False
 _banner_prefetch = {"thread": None, "value": None}
 
 
@@ -3966,6 +3969,11 @@ def main(*, machine_output=False):
     if not machine_output:
         _init_terminal()
         banner = _startup_banner(strict, persona, project, active_tier)
+        global startup_notice_pending
+        if startup_notice_pending:
+            startup_notice_pending = False
+            sys.stderr.write("\r\x1b[K")
+            sys.stderr.flush()
         if _stdout_is_interactive():
             if banner:
                 print(banner)

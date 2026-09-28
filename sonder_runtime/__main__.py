@@ -1327,13 +1327,29 @@ def _configure_repl_logging(config, *, machine_output: bool, stdin=None, stdout=
     return plan
 
 
+_STARTUP_NOTICE = "Starting Sonder..."
+_ERASE_LINE = "\r\x1b[K"
+
+
+def _erase_startup_notice(shown: bool) -> None:
+    if shown:
+        sys.stderr.write(_ERASE_LINE)
+        sys.stderr.flush()
+
+
 def cmd_repl(args) -> int:
-    if not args.json and sys.stderr.isatty():
-        # Startup takes seconds; say so at once instead of sitting silent.
-        print("Starting Sonder...", file=sys.stderr, flush=True)
+    # Startup takes seconds; say so at once instead of sitting silent. No
+    # newline: the line is erased in place before the banner (or an error), so
+    # the finished screen is unchanged. A dumb terminal cannot erase; skip it.
+    notice = (not args.json and sys.stderr.isatty()
+              and os.environ.get("TERM", "") != "dumb")
+    if notice:
+        sys.stderr.write(_STARTUP_NOTICE)
+        sys.stderr.flush()
     try:
         config = _load_config(args)
     except sonder_config.ConfigError as exc:
+        _erase_startup_notice(notice)
         print(str(exc), file=sys.stderr)
         return 2
     _configure_typed_home(config)
@@ -1345,9 +1361,12 @@ def cmd_repl(args) -> int:
             busy_timeout_ms=config.state.sqlite_busy_timeout_ms
         )
     except sonder_migrations.MigrationError as exc:
+        _erase_startup_notice(notice)
         print(f"migration failed: {exc}", file=sys.stderr)
         return 1
     import sonder_runtime.interfaces.repl.repl as sonder_repl
+
+    sonder_repl.startup_notice_pending = notice
     from sonder_runtime.bootstrap.legacy_interfaces import configure_legacy_interfaces
 
     configure_legacy_interfaces()
