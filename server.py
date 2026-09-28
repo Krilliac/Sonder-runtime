@@ -4841,7 +4841,7 @@ def _transport_error_detail(error) -> str:
 # Compatibility alias: endpoint display formatting is owned by the packaged
 # Ollama endpoint policy, while legacy server callers retain the zero-argument
 # private helper contract.
-_ollama_display = functools.partial(ollama_endpoint.safe_display, BASE)
+_ollama_display = lambda: ollama_endpoint.safe_display(BASE)  # noqa: E731 - reads BASE per call
 
 
 def _require_ollama_endpoint(*, cloud: bool = False) -> None:

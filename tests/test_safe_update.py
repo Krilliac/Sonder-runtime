@@ -1,5 +1,9 @@
+import os
 import shutil
 import subprocess
+import sys
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -9,6 +13,13 @@ import safe_update
 # create a directory in the global object namespace), so these tests run in
 # the separately reported medium-integrity selfmod gate.
 pytestmark = pytest.mark.requires_medium_integrity
+
+
+@pytest.fixture
+def checkout_tmp_path():
+    """Keep the Windows updater integration case inside this checkout."""
+    with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as root:
+        yield Path(root)
 
 
 def git(cwd, *args):
@@ -136,3 +147,218 @@ def test_unidentifiable_stash_fails_closed_before_rebase(tmp_path, monkeypatch):
     assert "sonder gui update backup" in out
     # No rebase happened: README still at the old commit.
     assert (clone / "README.md").read_text(encoding="utf-8") == "one\n"
+
+
+def _rebase_in_progress(clone):
+    git_dir = clone / ".git"
+    return (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists()
+
+
+def test_conflicting_rebase_is_aborted_and_checkout_restored(tmp_path):
+    """A failed rebase of local (selfmod) commits must not strand the checkout.
+
+    Previously the script printed "run: git rebase --abort" and exited,
+    leaving HEAD detached mid-rebase, conflict markers in the live sources,
+    and the user's edits only in the stash.
+    """
+    if shutil.which("git") is None:
+        return
+    clone = _seed_repos(tmp_path)
+    (clone / "README.md").write_text("local selfmod\n", encoding="utf-8")
+    git(clone, "commit", "-am", "selfmod: local change")
+    pre_head = git(clone, "rev-parse", "HEAD").stdout.strip()
+    (clone / "local.txt").write_text("keep me\n", encoding="utf-8")
+
+    assert safe_update.main(["--repo", str(clone)]) == 1
+
+    assert not _rebase_in_progress(clone)
+    assert git(clone, "rev-parse", "HEAD").stdout.strip() == pre_head
+    assert git(clone, "symbolic-ref", "--short", "HEAD").stdout.strip() == "main"
+    readme = (clone / "README.md").read_text(encoding="utf-8")
+    assert readme == "local selfmod\n"
+    assert "<<<<<<<" not in readme
+    assert (clone / "local.txt").read_text(encoding="utf-8") == "keep me\n"
+    assert "sonder gui update backup" not in git(clone, "stash", "list").stdout
+
+
+def test_keep_failed_rebase_is_an_explicit_opt_in(tmp_path):
+    if shutil.which("git") is None:
+        return
+    clone = _seed_repos(tmp_path)
+    (clone / "README.md").write_text("local selfmod\n", encoding="utf-8")
+    git(clone, "commit", "-am", "selfmod: local change")
+
+    assert safe_update.main(["--repo", str(clone), "--keep-failed-rebase"]) == 1
+
+    assert _rebase_in_progress(clone)
+    git(clone, "rebase", "--abort")
+
+
+def test_git_calls_are_bounded_by_a_timeout(monkeypatch):
+    seen = {}
+
+    def hung(cmd, **kwargs):
+        seen.update(kwargs)
+        raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+
+    monkeypatch.setattr(safe_update.subprocess, "run", hung)
+
+    code, out = safe_update.run(["fetch", "origin", "main"], ".")
+
+    assert isinstance(seen.get("timeout"), (int, float)) and seen["timeout"] > 0
+    assert code != 0
+    assert "timed out" in out
+
+
+def _seed_with_cmd_script(tmp_path):
+    """Seed repos whose tracked tree carries sonder-safe-update.cmd.
+
+    The Windows script updates the checkout it lives in (``%~dp0``), so it
+    must be a tracked file; an untracked copy would be stashed mid-run.
+    """
+    from pathlib import Path
+
+    origin = tmp_path / "origin"
+    work = tmp_path / "work"
+    clone = tmp_path / "clone"
+    script = Path(safe_update.__file__).with_name("sonder-safe-update.cmd")
+    git(tmp_path, "init", "--bare", "--initial-branch=main", origin.name)
+    git(tmp_path, "clone", str(origin), str(work))
+    git(work, "config", "user.email", "test@example.com")
+    git(work, "config", "user.name", "Test User")
+    git(work, "config", "core.autocrlf", "false")
+    (work / "sonder-safe-update.cmd").write_bytes(
+        script.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+    )
+    (work / "README.md").write_text("one\n", encoding="utf-8")
+    git(work, "add", "README.md", "sonder-safe-update.cmd")
+    git(work, "commit", "-m", "one")
+    git(work, "push", "origin", "main")
+    git(tmp_path, "clone", "-c", "core.autocrlf=false", str(origin), str(clone))
+    git(clone, "config", "user.email", "test@example.com")
+    git(clone, "config", "user.name", "Test User")
+    (work / "README.md").write_text("two\n", encoding="utf-8")
+    git(work, "commit", "-am", "two")
+    git(work, "push", "origin", "main")
+    return clone
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="cmd.exe script")
+def test_windows_script_aborts_conflicting_rebase_and_restores(tmp_path):
+    if shutil.which("git") is None:
+        return
+    clone = _seed_with_cmd_script(tmp_path)
+    (clone / "README.md").write_text("local selfmod\n", encoding="utf-8")
+    git(clone, "commit", "-am", "selfmod: local change")
+    pre_head = git(clone, "rev-parse", "HEAD").stdout.strip()
+    (clone / "local.txt").write_text("keep me\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        ["cmd.exe", "/d", "/c", str(clone / "sonder-safe-update.cmd")],
+        cwd=str(tmp_path), text=True, capture_output=True, timeout=300, check=False,
+    )
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "checkout restored to " + pre_head in proc.stdout
+    assert not _rebase_in_progress(clone)
+    assert git(clone, "rev-parse", "HEAD").stdout.strip() == pre_head
+    assert git(clone, "symbolic-ref", "--short", "HEAD").stdout.strip() == "main"
+    assert (clone / "README.md").read_text(encoding="utf-8") == "local selfmod\n"
+    assert (clone / "local.txt").read_text(encoding="utf-8") == "keep me\n"
+    assert "sonder gui update backup" not in git(clone, "stash", "list").stdout
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="cmd.exe script")
+def test_windows_script_success_path_restores_edits_and_drops_only_its_stash(
+    tmp_path,
+):
+    if shutil.which("git") is None:
+        return
+    clone = _seed_with_cmd_script(tmp_path)
+    (clone / "other.txt").write_text("foreign\n", encoding="utf-8")
+    git(clone, "stash", "push", "--include-untracked", "-m", "other session backup")
+    (clone / "local.txt").write_text("keep me\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        ["cmd.exe", "/d", "/c", str(clone / "sonder-safe-update.cmd")],
+        cwd=str(tmp_path), text=True, capture_output=True, timeout=300, check=False,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert (clone / "README.md").read_text(encoding="utf-8") == "two\n"
+    assert (clone / "local.txt").read_text(encoding="utf-8") == "keep me\n"
+    stashes = git(clone, "stash", "list").stdout
+    assert "other session backup" in stashes
+    assert "sonder gui update backup" not in stashes
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="cmd.exe script")
+def test_windows_script_identifies_own_stash_after_concurrent_push(checkout_tmp_path):
+    """A foreign stash pushed before lookup must stay untouched."""
+    tmp_path = checkout_tmp_path
+    script = Path(safe_update.__file__).with_name("sonder-safe-update.cmd")
+    # A batch script must use CALL when its Git executable is a test .cmd shim.
+    (tmp_path / script.name).write_text(
+        script.read_text(encoding="utf-8").replace("git ", "call git "),
+        encoding="utf-8",
+    )
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    (shim / "git.cmd").write_text(
+        "@echo off\n"
+        "echo %*>> calls.log\n"
+        'if "%1 %2"=="rev-parse --is-inside-work-tree" goto inside\n'
+        'if "%1 %2"=="rev-parse HEAD" goto head\n'
+        'if "%1 %2"=="symbolic-ref --quiet" goto branch\n'
+        'if "%1 %2"=="status --porcelain" goto status\n'
+        'if "%1 %2"=="stash push" goto push\n'
+        'if "%1 %2 %3 %4"=="rev-parse -q --verify refs/stash" goto foreign\n'
+        'if "%1 %2"=="stash list" goto list\n'
+        "exit /b 0\n"
+        ":inside\n"
+        "echo true\n"
+        "exit /b 0\n"
+        ":head\n"
+        "echo prehead\n"
+        "exit /b 0\n"
+        ":branch\n"
+        "echo main\n"
+        "exit /b 0\n"
+        ":status\n"
+        "echo M local.txt\n"
+        "exit /b 0\n"
+        ":push\n"
+        "echo %5> stash-message.txt\n"
+        "exit /b 0\n"
+        ":foreign\n"
+        "echo FOREIGN\n"
+        "exit /b 0\n"
+        ":list\n"
+        "if exist listed-once.txt goto hashes\n"
+        "echo yes> listed-once.txt\n"
+        "set /p STASH_MSG=< stash-message.txt\n"
+        "echo FOREIGN:On main: other session backup\n"
+        "echo OURS:On main: %STASH_MSG%\n"
+        "exit /b 0\n"
+        ":hashes\n"
+        "echo FOREIGN\n"
+        "echo OURS\n"
+        "exit /b 0\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["PATH"] = str(shim) + os.pathsep + env["PATH"]
+    env["TEMP"] = str(tmp_path)
+    env["TMP"] = str(tmp_path)
+    proc = subprocess.run(
+        ["cmd.exe", "/d", "/c", str(tmp_path / script.name)],
+        cwd=str(tmp_path), env=env, text=True, capture_output=True,
+        timeout=300, check=False,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "stash apply OURS" in calls
+    assert "stash apply FOREIGN" not in calls
+    assert 'stash drop "stash@{1}"' in calls
+    assert 'stash drop "stash@{0}"' not in calls

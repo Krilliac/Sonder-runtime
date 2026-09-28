@@ -10,9 +10,12 @@
   preflight and migrate so the checkout is ready for `serve`, `repl`, or `mcp`.
 
   Idempotent and non-destructive by default: an existing venv is reused, not
-  overwritten. Pass -Force to recreate it. This only ever touches
-  <repo>\venv and per-user Sonder state (SONDER_HOME); it never modifies
-  system PATH, installs a service, or touches Git history.
+  overwritten. Pass -Force to recreate it. This only ever touches the venv
+  (<repo>\venv unless -VenvPath names another) and per-user Sonder state
+  (SONDER_HOME); it never modifies system PATH, installs a service, or
+  touches Git history. -Force deletes -VenvPath only when it is an existing
+  virtual environment (pyvenv.cfg present) and never the checkout, a folder
+  containing it, a drive root, a profile or system folder, or a link.
 
   This is a convenience wrapper, not a new install path: every step it runs
   is a documented, independently supported command, so a step can always be
@@ -27,7 +30,8 @@
   every launcher script's default lookup (sonder-runtime.cmd).
 
 .PARAMETER Force
-  Delete and recreate an existing venv instead of reusing it.
+  Delete and recreate an existing venv instead of reusing it. Refused unless
+  the target is a real virtual environment (see DESCRIPTION).
 
 .PARAMETER ManagedRuntime
   Also provision <repo>\venv-managed, a separate Windows CPython 3.12 venv
@@ -71,6 +75,47 @@ function Invoke-Step {
   }
 }
 
+function Assert-SafeVenvRemoval {
+  # -Force runs Remove-Item -Recurse on a caller-supplied path. Refuse
+  # anything that is not provably a disposable virtual environment, so a
+  # mistyped `-VenvPath . -Force` cannot delete the checkout or a profile.
+  param([string] $Path, [string] $RepoRoot, [switch] $AllowMissingMarker)
+  $resolver = $ExecutionContext.SessionState.Path
+  $full = $resolver.GetUnresolvedProviderPathFromPSPath($Path).TrimEnd('\', '/')
+  $repoFull = $resolver.GetUnresolvedProviderPathFromPSPath($RepoRoot).TrimEnd('\', '/')
+  $item = Get-Item -LiteralPath $full -Force
+  if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+    throw "refusing to delete ${full}: it is a symbolic link or junction, not a venv"
+  }
+  if (-not $item.PSIsContainer) {
+    throw "refusing to delete ${full}: it is not a directory"
+  }
+  $driveRoot = [System.IO.Path]::GetPathRoot($item.FullName)
+  if ([string]::IsNullOrEmpty($full) -or
+      ($driveRoot -and [string]::Equals($full, $driveRoot.TrimEnd('\', '/'), [StringComparison]::OrdinalIgnoreCase))) {
+    throw "refusing to delete ${full}: it is a drive root"
+  }
+  $protected = @($repoFull)
+  foreach ($name in @('USERPROFILE', 'HOME', 'LOCALAPPDATA', 'APPDATA', 'SystemRoot', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramData', 'TEMP', 'TMP')) {
+    $value = [Environment]::GetEnvironmentVariable($name)
+    if (-not [string]::IsNullOrWhiteSpace($value)) {
+      $protected += $resolver.GetUnresolvedProviderPathFromPSPath($value).TrimEnd('\', '/')
+    }
+  }
+  foreach ($candidate in $protected) {
+    if ([string]::Equals($full, $candidate, [StringComparison]::OrdinalIgnoreCase)) {
+      throw "refusing to delete ${full}: it is the checkout or a profile/system folder"
+    }
+  }
+  if ($repoFull.StartsWith($full + '\', [StringComparison]::OrdinalIgnoreCase)) {
+    throw "refusing to delete ${full}: it contains the Sonder checkout"
+  }
+  if (-not $AllowMissingMarker -and
+      -not (Test-Path -LiteralPath (Join-Path $full 'pyvenv.cfg') -PathType Leaf)) {
+    throw "refusing to delete ${full}: it is not a virtual environment (no pyvenv.cfg); remove it yourself if that is intended"
+  }
+}
+
 $repo = Split-Path -Parent $PSScriptRoot
 $requirementsFile = Join-Path $repo 'requirements-runtime.txt'
 if (-not (Test-Path -LiteralPath $requirementsFile -PathType Leaf) -or
@@ -79,8 +124,9 @@ if (-not (Test-Path -LiteralPath $requirementsFile -PathType Leaf) -or
 }
 Set-Location -LiteralPath $repo
 
+$defaultVenv = Join-Path $repo 'venv'
 if ([string]::IsNullOrWhiteSpace($VenvPath)) {
-  $VenvPath = Join-Path $repo 'venv'
+  $VenvPath = $defaultVenv
 }
 
 # Resolve an interpreter the same way the rest of the toolchain does: an
@@ -117,9 +163,15 @@ if ($ManagedRuntime) {
 }
 Write-Host "[sonder] using $versionText ($py $($pyArgs -join ' '))"
 
+# The default <repo>\venv may be a half-created venv with no pyvenv.cfg;
+# any other -VenvPath must prove it is a venv before -Force deletes it.
+$isDefaultVenv = [string]::Equals(
+  $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($VenvPath).TrimEnd('\', '/'),
+  $defaultVenv.TrimEnd('\', '/'), [StringComparison]::OrdinalIgnoreCase)
 if (Test-Path -LiteralPath $VenvPath) {
   if ($Force) {
     Write-Host "[sonder] removing existing venv at $VenvPath (-Force)..."
+    Assert-SafeVenvRemoval -Path $VenvPath -RepoRoot $repo -AllowMissingMarker:$isDefaultVenv
     Remove-Item -LiteralPath $VenvPath -Recurse -Force
   } else {
     Write-Host "[sonder] reusing existing venv at $VenvPath (pass -Force to recreate)"
@@ -139,6 +191,10 @@ if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
 # which both Windows and POSIX accept.
 Invoke-Step -Description 'upgrading pip' -FilePath $venvPython -Arguments @('-m', 'pip', 'install', '--quiet', '--upgrade', 'pip')
 Invoke-Step -Description 'installing runtime dependencies' -FilePath $venvPython -Arguments @('-m', 'pip', 'install', '--quiet', '-r', $requirementsFile)
+# requirements-runtime.txt pins top-level releases only; pip resolves the
+# transitive closure at install time without a hash lock. Refuse an
+# inconsistent resolution (docs/runbooks/install-workstation-local.md).
+Invoke-Step -Description 'verifying installed runtime dependencies' -FilePath $venvPython -Arguments @('-m', 'pip', 'check')
 
 if ($ManagedRuntime) {
   # This opt-in owner has its own interpreter environment. Reusing the main
@@ -146,12 +202,15 @@ if ($ManagedRuntime) {
   $managedVenv = Join-Path $repo 'venv-managed'
   $managedPython = Join-Path $managedVenv 'Scripts\python.exe'
   if ((Test-Path -LiteralPath $managedVenv) -and $Force) {
+    Assert-SafeVenvRemoval -Path $managedVenv -RepoRoot $repo -AllowMissingMarker
     Write-Host "[sonder] removing managed runtime venv at $managedVenv (-Force)..."
     Remove-Item -LiteralPath $managedVenv -Recurse -Force
   }
   if (-not (Test-Path -LiteralPath $managedVenv)) {
     Invoke-Step -Description "creating dedicated managed runtime venv at $managedVenv" -FilePath $py -Arguments (@($pyArgs) + @('-m', 'venv', $managedVenv))
     Invoke-Step -Description 'installing managed runtime pins' -FilePath $managedPython -Arguments @('-m', 'pip', 'install', '--quiet', '-r', $requirementsFile)
+    # Never seal an inconsistent transitive resolution as the trusted profile.
+    Invoke-Step -Description 'verifying managed runtime dependencies' -FilePath $managedPython -Arguments @('-m', 'pip', 'check')
     Invoke-Step -Description 'sealing managed runtime profile' -FilePath $managedPython -Arguments @('-m', 'sonder_runtime.adapters.execution.runtime_profile', 'seal')
   } else {
     if (-not (Test-Path -LiteralPath $managedPython -PathType Leaf)) {
