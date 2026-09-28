@@ -28,6 +28,7 @@ export 'api/transport.dart'
         SonderException,
         CancelToken,
         SonderEndpoint,
+        CleartextKeyPolicy,
         describeServerError,
         responseException,
         isPreRequestConnectFailure,
