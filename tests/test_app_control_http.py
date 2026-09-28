@@ -1215,6 +1215,38 @@ def test_actual_http_two_account_binding_isolation(http_control, control):
     )
 
 
+def test_binding_pages_do_not_disclose_other_project_positions(control):
+    binding, token, _, _, catalog, entry = control
+    second = {**entry, "grant_id": "grant2", "project": "project2"}
+    catalog.write_text(
+        json.dumps(dict(version=1, grants=[entry, second])), encoding="utf8"
+    )
+    first_token = invoke(
+        binding, token, "enroll",
+        dict(command_id="enroll1", project="project1", password="test-password"),
+    )[1]["control_token"]
+    second_token = invoke(
+        binding, token, "enroll",
+        dict(command_id="enroll2", project="project2", password="test-password"),
+    )[1]["control_token"]
+    for command_id, credential in (("create1", second_token), ("create2", first_token)):
+        assert invoke(
+            binding, token, "create_binding", dict(command_id=command_id), credential
+        )[0] == 200
+
+    # The first project's only row is its first page; the cursor must not
+    # reflect the preceding row owned by the second project.
+    status, page = invoke(binding, token, "list_bindings", {"limit": 1}, first_token)
+    assert status == 200
+    assert len(page["items"]) == 1
+    assert page["next_position"] is None
+
+    status, page = invoke(binding, token, "list_bindings", {"limit": 1}, second_token)
+    assert status == 200
+    assert len(page["items"]) == 1
+    assert page["next_position"] is None
+
+
 def test_wire_does_not_publish_second_response_after_writer_failure(control):
     from contextlib import nullcontext
     from email.message import Message

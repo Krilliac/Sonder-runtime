@@ -1008,21 +1008,21 @@ class AppControlBinding:
             payload = {**payload, "limit": limit, "after_position": cursor}
         if action == "list_bindings":
             page = self.store.atomic(
-                lambda tx: tx.list_bindings(
-                    principal_id=_principal(account),
+                lambda tx: tx.list_grant_bindings(
+                    principal_id=session.principal_id,
+                    runtime_id=session.runtime_id,
+                    grant=session.grant,
                     after_position=payload.get("after_position", 0),
                     limit=payload.get("limit", 50),
                 )
             )
-            # The control session is bound to exactly one immutable project.
-            items = [
-                _binding(v)
-                for v in page.items
-                if v.runtime_id == session.runtime_id and v.grant == session.grant
-            ]
             return (
                 200,
-                dict(ok=True, items=items, next_position=page.next_position),
+                dict(
+                    ok=True,
+                    items=[_binding(v) for v in page.items],
+                    next_position=page.next_position,
+                ),
             ), grant
         if action == "recovery":
             return (200, self._recovery(account, session, payload)), grant

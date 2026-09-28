@@ -18,7 +18,7 @@ POST /enroll: {command_id,project,password,replace_session_id?}. Returns201 {ok:
 
 POST /bindings: {command_id,title?,local_history_alias?}. Both labels are bounded display metadata. Returns200 {ok:true,receipt:{command_id,action,result_code,entity_id,entity_revision,selection_epoch}}. entity_id is the new binding ID. All command receipts use this fixed shape; optional numeric values are null when irrelevant. A binding's canonical host_conversation_id is server-issued app-session:<binding ID>. A caller chat ID cannot claim an existing host conversation.
 
-GET /bindings?after_position=0&limit=50: {ok:true,items:[{binding_id,host_conversation_id,project,title,local_history_alias,revision,expires_at,revoked}],next_position}. Page limit is capped by host configuration; default is min(50,cap). next_position is null at exhaustion. Records are scoped to account/runtime/exact project grant.
+GET /bindings?after_position=0&limit=50: {ok:true,items:[{binding_id,host_conversation_id,project,title,local_history_alias,revision,expires_at,revoked}],next_position}. Page limit is capped by host configuration; default is min(50,cap). next_position is null at exhaustion. Records and cursors are scoped to account/runtime/exact project grant; after_position counts rows within that scope.
 
 GET /selection: {ok:true,selection:{selection_id,epoch,binding_id,binding_revision}|null}. null means the new control session has epoch0. A cleared selection has its incremented epoch and null binding fields. Use this read to reconcile current selection; exact command retries preserve their original payload.
 
