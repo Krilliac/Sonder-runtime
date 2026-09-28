@@ -206,6 +206,13 @@ _CATEGORY_BY_TOOL = {
     "weather_lookup": "web",
     "approximate_location_lookup": "web",
     "local_service_probe": "system",
+    "computer_use_status": "system",
+    "computer_use_start": "system",
+    "computer_use_stop": "system",
+    "window_list": "system",
+    "screen_capture": "creative",
+    "ui_action": "system",
+    "computer_task": "system",
     "diagnostics": "system",
     "status": "system",
     "unload": "system",
@@ -376,6 +383,9 @@ _DANGEROUS = frozenset({
     # control-plane path is refused before `/login` and succeeds after it, with
     # nothing else changed. That is `elevate` wearing a different name.
     "admin_login",
+    # Starting a desktop driving session hands Sonder the mouse and keyboard
+    # of one application window until it ends; a person approves each start.
+    "computer_use_start",
 })
 
 # Reads the server's own policy sets do not cover. Those two sets answer
@@ -395,6 +405,7 @@ _DANGEROUS = frozenset({
 # it. It is not a place to park a tool that merely looks harmless: the
 # ``ask`` default above is the right answer for anything unverified.
 _READ_ONLY = frozenset({
+    "computer_use_status",
     "task_list", "task_show", "checklist_show", "admin_status",
     "admin_whoami", "autopilot_status", "calibration_status", "learn_tiers",
     "live_reload_status", "mcp_runtime_status", "reasoning_show",

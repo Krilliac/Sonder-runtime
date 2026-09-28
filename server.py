@@ -27037,5 +27037,9 @@ def run_mcp(*, safety_checked: bool = False) -> None:
             _close_server_owned_application(timeout=5)
 
 
+from sonder_runtime.bootstrap.computer_use_tools import register as _register_computer_use  # noqa: E402
+_register_computer_use(mcp, _record_direct_tool)
+
+
 if __name__ == "__main__" and not globals().get("_MCP_HOT_RELOAD_EXEC"):
     run_mcp()
