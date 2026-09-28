@@ -1243,6 +1243,12 @@ def build_application(
                 capacity=get_job_registry(),
                 budget=worker_budget,
                 reservation_seconds=effective_config.compute.worker_reservation_seconds,
+                max_input_staging_bytes=effective_config.compute.max_input_staging_bytes,
+                max_input_spool_bytes=effective_config.compute.max_input_spool_bytes,
+                max_artifact_spool_bytes=effective_config.compute.max_artifact_spool_bytes,
+                max_artifact_spool_jobs=effective_config.compute.max_artifact_spool_jobs,
+                artifact_retention_seconds=effective_config.compute.artifact_retention_seconds,
+                min_disk_headroom_bytes=effective_config.compute.min_disk_headroom_bytes,
                 effect_binding=worker_binding(
                     family="compute",
                     scope="compute-jobs",
@@ -1400,6 +1406,7 @@ def build_application(
                 if not any(root == current.resolve() or current.resolve() in root.parents
                            for current in allowed_roots()):
                     raise PermissionError("configured workspace grant was removed")
+            from ..adapters import prompt_store
             from .strategy import (
                 compose_workbench_strategy_observer,
                 try_compose_strategy_memory,
@@ -1425,6 +1432,7 @@ def build_application(
                 strategy_observer=compose_workbench_strategy_observer(
                     strategy_trace, strategy_memory, strategy_rollout, lane_store,
                 ),
+                prompts=prompt_store.render,
             )
         return interactive_lanes
 
