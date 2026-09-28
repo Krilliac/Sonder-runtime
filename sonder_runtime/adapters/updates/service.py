@@ -954,6 +954,54 @@ def _local_file_fetcher_class():
     return _LocalFileFetcher
 
 
+TRUSTED_ROOT_ENV = "SONDER_UPDATE_TRUSTED_ROOT"
+
+
+def _trusted_root_path() -> Path:
+    """The operator-installed TUF root that anchors every offline bundle.
+
+    ``SONDER_UPDATE_TRUSTED_ROOT`` names it explicitly; otherwise it is
+    ``<SONDER_HOME>/updates/trusted_root.json``. A bundle's own
+    ``metadata/root.json`` is never a trust anchor: whoever builds a bundle
+    would then choose the keys that verify it.
+    """
+    configured = os.environ.get(TRUSTED_ROOT_ENV, "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    from sonder_runtime.platform import paths as platform_paths
+
+    return platform_paths.default_home() / "updates" / "trusted_root.json"
+
+
+def _trusted_metadata_dir() -> Path:
+    """Persistent TUF metadata for the configured trust anchor.
+
+    Keyed by the anchor's digest so replacing the operator root starts a fresh
+    chain. Persisting it lets root rotation build on previously accepted
+    roots and makes python-tuf refuse metadata older than versions it has
+    already accepted (a replayed older bundle).
+    """
+    root_path = _trusted_root_path()
+    if not root_path.is_file():
+        raise TrustError(
+            f"no trusted TUF root is configured: install the vendor's "
+            f"root.json at {root_path} or set {TRUSTED_ROOT_ENV}; a bundle's "
+            f"own root.json is never trusted"
+        )
+    anchor = root_path.read_bytes()
+    from sonder_runtime.platform import paths as platform_paths
+
+    cache = (
+        platform_paths.default_home() / "updates" / "tuf-metadata"
+        / hashlib.sha256(anchor).hexdigest()[:16]
+    )
+    cache.mkdir(parents=True, exist_ok=True)
+    trusted = cache / "root.json"
+    if not trusted.is_file():
+        trusted.write_bytes(anchor)
+    return cache
+
+
 def _verify_with_tuf(bundle_dir: Path, manifest: BundleManifest) -> str:
     """Full TUF verification of the archive target from local metadata."""
     import tempfile
@@ -962,17 +1010,14 @@ def _verify_with_tuf(bundle_dir: Path, manifest: BundleManifest) -> str:
 
     _LocalFileFetcher = _local_file_fetcher_class()
 
-    root = bundle_dir / "metadata" / "root.json"
-    if not root.is_file():
+    if not (bundle_dir / "metadata" / "root.json").is_file():
         raise TrustError("TUF metadata directory lacks root.json")
+    metadata_cache = _trusted_metadata_dir()
     archive_info = manifest.get("archive") or {}
     target_name = archive_info.get("name", "")
     if not target_name:
         raise TrustError("manifest lacks archive target name")
     with tempfile.TemporaryDirectory(prefix="sonder-tuf-") as tmp:
-        metadata_cache = Path(tmp) / "metadata"
-        metadata_cache.mkdir()
-        trusted_root = root.read_bytes()
         try:
             targets_dir = (
                 bundle_dir / "targets"
@@ -980,6 +1025,8 @@ def _verify_with_tuf(bundle_dir: Path, manifest: BundleManifest) -> str:
                 else bundle_dir
             )
             updater = Updater(
+                # Trusted, persistent metadata anchored at the operator root;
+                # the bundle only supplies newer metadata to verify against it.
                 metadata_dir=str(metadata_cache),
                 metadata_base_url=str(bundle_dir / "metadata") + "/",
                 target_dir=str(Path(tmp) / "targets"),
@@ -989,7 +1036,9 @@ def _verify_with_tuf(bundle_dir: Path, manifest: BundleManifest) -> str:
                 # needs a missing N.root.json to read as 404 so it
                 # terminates. _LocalFileFetcher provides both.
                 fetcher=_LocalFileFetcher(),
-                bootstrap=trusted_root,
+                # None: start from the cache's root.json (the operator anchor
+                # or a root already rotated from it), never the bundle's.
+                bootstrap=None,
             )
             updater.refresh()
             info = updater.get_targetinfo(target_name)

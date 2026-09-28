@@ -32,6 +32,18 @@ def _mini_src(tmp_path):
     return src
 
 
+@pytest.fixture(autouse=True)
+def _trusted_repo_root(tmp_path, monkeypatch):
+    """Install each test repository's root as the operator trust anchor.
+
+    Offline bundles are verified against an operator-installed root, never the
+    bundle's own (see tests/test_update_trusted_root.py).
+    """
+    monkeypatch.setenv(
+        "SONDER_UPDATE_TRUSTED_ROOT", str(tmp_path / "repo" / "metadata" / "root.json"),
+    )
+
+
 @pytest.fixture()
 def published(tmp_path):
     tuf_repo.init_repo(tmp_path / "repo")
