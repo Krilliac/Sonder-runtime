@@ -456,6 +456,9 @@ CREDENTIAL_ARGUMENTS = frozenset({"token", "approval", "bypass", "developer_auth
 BULK_ARGUMENTS = frozenset({
     "content", "patch", "operations", "operations_json", "old", "new", "text",
     "prompt", "code", "stdin", "args_json", "inputs_json",
+    # Compute job inputs may carry arbitrary credentials even under innocuous
+    # environment variable names or command-line flags.
+    "environment", "arguments",
 })
 
 CALL_ID_CHARS = 16

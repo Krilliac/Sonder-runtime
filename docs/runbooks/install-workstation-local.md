@@ -14,8 +14,16 @@ powershell -NoProfile -File packaging\install_workstation_local.ps1
 It creates `venv\`, installs `requirements-runtime.txt`, optionally creates
 the `sonder:latest` Ollama alias (`-SkipModelAlias` to skip), then runs
 `preflight --skip-ollama` and `migrate`. Reruns reuse the existing venv
-unless `-Force` is passed. Every step is also documented below in case the
-script is unavailable or a manual run is preferred.
+unless `-Force` is passed. `-Force` deletes the venv only when it is a real
+virtual environment (`pyvenv.cfg` present; the default `venv\` is exempt so
+a half-created one can be rebuilt) and refuses the checkout, any folder
+containing it, drive roots, profile/system folders and links. After
+installing, the script runs `pip check`: `requirements-runtime.txt` pins only
+top-level releases and transitive dependencies resolve at install time
+without hashes (no lock generator exists yet), so an inconsistent resolution
+fails the install instead of being sealed as a managed profile. Every step is
+also documented below in case the script is unavailable or a manual run is
+preferred.
 
 For the opt-in Windows foreground `ManagedRuntimeOwner`, provision a separate
 interpreter closure with `-ManagedRuntime` (Windows CPython 3.12):
