@@ -119,6 +119,7 @@ jobs:
           uv pip install -r requirements-dev.txt -r requirements-update.txt --system
           python -m pytest -q -rs -p no:cacheprovider \
             tests/production/test_tuf_publisher.py tests/test_update_manifest_trust.py \
+            tests/test_update_trusted_root.py \
             --junitxml="$RUNNER_TEMP/update-trust.xml"
           python - "$RUNNER_TEMP/update-trust.xml" <<'PY'
           import sys

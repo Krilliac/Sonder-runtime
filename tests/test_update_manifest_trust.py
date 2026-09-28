@@ -31,6 +31,18 @@ from sonder_runtime.adapters.updates.service import (
 pytestmark = pytest.mark.integration
 
 
+@pytest.fixture(autouse=True)
+def _trusted_repo_root(tmp_path, monkeypatch):
+    """Install each test repository's root as the operator trust anchor.
+
+    Offline bundles are verified against an operator-installed root, never the
+    bundle's own (see tests/test_update_trusted_root.py).
+    """
+    monkeypatch.setenv(
+        "SONDER_UPDATE_TRUSTED_ROOT", str(tmp_path / "repo" / "metadata" / "root.json"),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

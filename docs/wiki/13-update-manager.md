@@ -17,8 +17,13 @@ threshold keys:
 | snapshot | 1 of 1 | binds metadata versions |
 | timestamp | 1 of 1 | freshness / freeze protection |
 
-The client ships an initial trusted `root.json`; rotation is a
-sequentially-versioned, threshold-signed root. Verification uses
+The operator installs the vendor's initial trusted `root.json` at
+`<SONDER_HOME>/updates/trusted_root.json` (or points
+`SONDER_UPDATE_TRUSTED_ROOT` at it); signed bundles are refused until it
+exists, and a bundle's own `metadata/root.json` is never a trust anchor.
+Accepted metadata persists under `<SONDER_HOME>/updates/tuf-metadata/`, so
+rotation is a sequentially-versioned, threshold-signed root chained from that
+anchor and older metadata is refused. Verification uses
 python-tuf — no custom signature code. Bundles without TUF metadata are
 refused unless an explicit double gate (`--allow-unverified` **and**
 `SONDER_UPDATE_ALLOW_UNSIGNED=1`) is set, which is documented as

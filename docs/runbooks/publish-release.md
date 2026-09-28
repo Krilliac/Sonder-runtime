@@ -31,7 +31,10 @@ python tools/tuf_repo.py init /secure/sonder-tuf-repo
 
 This writes `metadata/{root,targets,snapshot,timestamp}.json` and the
 private keys under `keystore/` (mode 0600). Vendor the resulting
-`metadata/root.json` into the client as its initial trusted root. Root
+`metadata/root.json` to each client as its initial trusted root: install it
+at `<SONDER_HOME>/updates/trusted_root.json` (or set
+`SONDER_UPDATE_TRUSTED_ROOT`). Clients refuse signed bundles until it is
+installed and never trust a bundle's own `root.json`. Root
 rotation is a new sequentially-versioned `root.json` signed by the old
 root's threshold — never a key swap in place.
 
