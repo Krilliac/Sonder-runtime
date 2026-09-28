@@ -19,6 +19,7 @@ from pathlib import Path
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
 from sonder_runtime.application.testing.legacy_runs import retired_extra_args
+from sonder_runtime.adapters import git_program_guard
 from sonder_runtime.adapters.git_mutation_guard import (
     ConcurrentGitMutation,
     guard_git_mutation,
@@ -258,10 +259,71 @@ def _git():
     return shutil.which("git") or "git"
 
 
-def _run_git(root, args, *, timeout=10):
+def _git_env():
     env = _child_env()
     env["GIT_TERMINAL_PROMPT"] = "0"
-    return _run([_git()] + args, cwd=root, timeout=timeout, env=env)
+    return env
+
+
+def _neutralized_git_arguments(root, *, timeout, env):
+    """``-c`` overrides that keep repository config from launching programs.
+
+    ``acceptEdits`` lets these mutation-class git tools run unattended while
+    running host programs still asks. Hooks, ``core.fsmonitor``, filter,
+    merge and textconv drivers and signing programs are replaced by the
+    shared :mod:`git_program_guard` list (also used by the read-only
+    ``git_tools``). Raises ``ValueError`` when the driver configuration cannot
+    be read, so the caller refuses rather than running git with a driver left
+    in place.
+    """
+    overrides = git_program_guard.neutralized_git_arguments(
+        lambda arguments: _run([_git()] + arguments, cwd=root, timeout=timeout, env=env),
+    )
+    # ``git add`` (git_commit) inspects populated submodules with a child git
+    # that reads each submodule's own config; neutralize those drivers too.
+    return overrides + git_program_guard.submodule_driver_overrides(
+        lambda relative, arguments: _git_probe_at(
+            root, relative, arguments, timeout=timeout, env=env,
+        ),
+    )
+
+
+def _git_probe_at(root, relative, arguments, *, timeout, env):
+    """Run one guard probe in the repository checked out at ``relative``.
+
+    Unlike ``_run`` the output is not trimmed: the submodule listing is
+    parsed, not displayed.  ``None`` means no repository is checked out there.
+    """
+    directory = Path(root) / relative if relative else Path(root)
+    if relative and not (directory / ".git").exists():
+        return None
+    try:
+        proc = subprocess.run(
+            [_git(), *arguments], cwd=str(directory), timeout=timeout,
+            capture_output=True, stdin=subprocess.DEVNULL, env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return {"timed_out": True, "returncode": -1, "stdout": "", "stderr": ""}
+    except FileNotFoundError:
+        return {"returncode": -1, "stdout": "", "stderr": "git was not found"}
+    return {
+        "returncode": proc.returncode,
+        "stdout": proc.stdout.decode("utf-8", errors="surrogateescape"),
+        "stderr": proc.stderr.decode("utf-8", errors="replace"),
+    }
+
+
+def _run_git(root, args, *, timeout=10):
+    env = _git_env()
+    try:
+        overrides = _neutralized_git_arguments(root, timeout=timeout, env=env)
+    except ValueError as exc:
+        return {
+            "ok": False, "returncode": -1, "timed_out": False, "elapsed_ms": 0,
+            "stdout": "", "stderr": "refusing to run git: %s" % exc,
+            "command": [_git()] + list(args),
+        }
+    return _run([_git()] + overrides + list(args), cwd=root, timeout=timeout, env=env)
 
 
 # ---------------------------------------------------------------------------
@@ -932,6 +994,72 @@ def build_clean(root=".", timeout=30, extra_roots=""):
 # Refactoring helpers
 # ---------------------------------------------------------------------------
 
+def _refactor_source_files(root, glob):
+    """Yield ``(path, rel)`` for regular files the refactoring helpers read.
+
+    Dot-directories are skipped only BELOW the root.  Testing the absolute
+    path skipped every file whenever the root itself had a dot-prefixed
+    ancestor (``~/.claude/worktrees/...``), so both helpers matched nothing.
+    """
+    for path in root.glob(glob):
+        try:
+            rel_path = path.relative_to(root)
+        except ValueError:
+            continue
+        if any(part.startswith(".") for part in rel_path.parts):
+            continue
+        if not path.is_file() or path.stat().st_size > 2_000_000:
+            continue
+        yield path, str(rel_path)
+
+
+def _read_source(path):
+    # newline="" keeps each file's own line endings through a rewrite.
+    with open(path, encoding="utf-8", newline="") as handle:
+        return handle.read()
+
+
+def _apply_staged_rewrites(staged):
+    """Write every staged rewrite, or none of them.
+
+    Each new content is first written to a temporary file beside its target;
+    only when all are staged are they swapped in with ``os.replace``.  If any
+    step fails, staged files are removed and already-swapped targets are
+    restored to their original content, so a failure never leaves a
+    half-renamed tree.
+    """
+    import tempfile
+
+    temps = []
+    applied = []
+    try:
+        for path, _original, new_content in staged:
+            fd, temp = tempfile.mkstemp(dir=path.parent, prefix="." + path.name + ".", suffix=".rename")
+            temps.append(temp)
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+                handle.write(new_content)
+            shutil.copymode(path, temp)
+        for (path, original, _new), temp in zip(staged, temps, strict=True):
+            os.replace(temp, path)
+            applied.append((path, original))
+    except BaseException as error:
+        for temp in temps:
+            with contextlib.suppress(OSError):
+                os.unlink(temp)
+        unrestored = []
+        for path, original in reversed(applied):
+            try:
+                with open(path, "w", encoding="utf-8", newline="") as handle:
+                    handle.write(original)
+            except OSError:
+                unrestored.append(path)
+        if unrestored:
+            raise OSError(
+                "rename rollback could not restore %d file(s)" % len(unrestored)
+            ) from error
+        raise
+
+
 def rename_symbol(root=".", old_name="", new_name="", glob="**/*.py", dry_run=True, timeout=30, extra_roots=""):
     root = _resolve_root(root, extra_roots)
     if not old_name or not new_name:
@@ -939,16 +1067,12 @@ def rename_symbol(root=".", old_name="", new_name="", glob="**/*.py", dry_run=Tr
 
     files_changed = []
     preview = []
+    staged = []
     pattern = re.compile(r'\b' + re.escape(old_name) + r'\b')
 
-    for path in root.glob(glob):
-        if not path.is_file() or path.stat().st_size > 2_000_000:
-            continue
-        rel = str(path.relative_to(root))
-        if any(part.startswith(".") for part in path.parts):
-            continue
+    for path, rel in _refactor_source_files(root, glob):
         try:
-            content = path.read_text(encoding="utf-8")
+            content = _read_source(path)
         except (UnicodeDecodeError, OSError):
             continue
         matches = list(pattern.finditer(content))
@@ -961,9 +1085,20 @@ def rename_symbol(root=".", old_name="", new_name="", glob="**/*.py", dry_run=Tr
             line_no = content[:m.start()].count("\n") + 1
             line = content.splitlines()[line_no - 1].strip()
             preview.append({"file": rel, "line": line_no, "text": line})
+        staged.append((path, content, new_content))
 
-        if not dry_run:
-            path.write_text(new_content, encoding="utf-8")
+    if not dry_run and staged:
+        try:
+            _apply_staged_rewrites(staged)
+        except OSError as exc:
+            return {
+                "ok": False,
+                "error": "rename failed and was rolled back: %s" % exc,
+                "dry_run": dry_run,
+                "old_name": old_name,
+                "new_name": new_name,
+                "files_changed": 0,
+            }
 
     return {
         "ok": True,
@@ -984,12 +1119,7 @@ def extract_references(root=".", symbol="", glob="**/*.py", timeout=30, extra_ro
 
     pattern = re.compile(r'\b' + re.escape(symbol) + r'\b')
     refs = []
-    for path in root.glob(glob):
-        if not path.is_file() or path.stat().st_size > 2_000_000:
-            continue
-        rel = str(path.relative_to(root))
-        if any(part.startswith(".") for part in path.parts):
-            continue
+    for path, rel in _refactor_source_files(root, glob):
         try:
             content = path.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):

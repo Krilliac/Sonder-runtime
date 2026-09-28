@@ -408,7 +408,9 @@ Behavior toggles: `SONDER_SPECULATION` (0 disables speculative execution),
 `SONDER_METRICS`, `OLLAMA_HOST`.
 
 Update/publish (optional): `SONDER_RELEASES_DIR`, `SONDER_CURRENT_LINK`,
-`SONDER_UPDATE_ALLOW_UNSIGNED` (dev only), `SONDER_BRANCH_PREDICTOR`.
+`SONDER_UPDATE_ALLOW_UNSIGNED` (dev only), `SONDER_UPDATE_TRUSTED_ROOT` (path to
+the operator-installed TUF root; default `<SONDER_HOME>/updates/trusted_root.json`),
+`SONDER_BRANCH_PREDICTOR`.
 
 `python -m sonder_runtime diagnostics` prints a redacted bundle of the
 effective configuration, schema state, and preflight for support.

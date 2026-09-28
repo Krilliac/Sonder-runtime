@@ -5,8 +5,10 @@ actually runs it (optionally with an appended assertion-based check) in a
 subprocess, so pass/fail is grounded in real execution rather than a model's
 own say-so.
 """
+import contextlib
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -24,6 +26,8 @@ _FILE_FIRST_LINE_RE = re.compile(
 )
 DEFAULT_TIMEOUT = 8
 MAX_TIMEOUT = 60
+# Inline `python -c` runner limit, well under Windows' ~32K command line.
+_MAX_INLINE_RUNNER_CHARS = 24_000
 RUNNABLE_FENCE_LANGS = {
     "python": "python",
     "py": "python",
@@ -250,10 +254,13 @@ def run_code_detail(
     timeout = clamp_timeout(timeout)
     interp = interp or sys.executable
     src = code + (("\n\n" + extra) if extra else "")
+    # Candidate code can read its own source through __file__. Keep the check
+    # and completion token out of that file, while still detecting early exit.
+    sentinel = "__SONDER_CHECKS_DONE_%s__" % secrets.token_hex(16) if extra else ""
     fd, path = tempfile.mkstemp(suffix=".py")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(src)
+            f.write(code)
         try:
             if compile_first:
                 try:
@@ -268,13 +275,33 @@ def run_code_detail(
                         "timed_out": False,
                         "error": "",
                     }
+            command = [interp, path]
+            if sentinel:
+                runner = (
+                    "import runpy as _sonder_runpy\n"
+                    "_sonder_vars = _sonder_runpy.run_path(%r, run_name='__main__')\n"
+                    "exec(%r, _sonder_vars)\n"
+                    "import sys as _sonder_sys\n"
+                    "_sonder_sys.__stdout__.write(%r)\n"
+                    "_sonder_sys.__stdout__.flush()\n"
+                ) % (path, extra, "\n" + sentinel + "\n")
+                command = [interp, "-c", runner]
+            runner_path = None
+            if sentinel and len(runner) > _MAX_INLINE_RUNNER_CHARS:
+                # Windows caps a command line near 32K characters; a large check
+                # suite runs from a second file instead (readable by the
+                # candidate, so this path only guards against accidental exits).
+                rfd, runner_path = tempfile.mkstemp(suffix=".py")
+                with os.fdopen(rfd, "w", encoding="utf-8") as rf:
+                    rf.write(runner)
+                command = [interp, runner_path]
             # Generated code is untrusted model output: give it a throwaway
             # cwd so a relative-path write cannot land wherever this process
             # happens to be running (for the nightly job, the source tree).
             scratch = _scratch_cwd()
             try:
                 p = subprocess.run(
-                    [interp, path],
+                    command,
                     input=stdin or "",
                     capture_output=True,
                     text=True,
@@ -284,11 +311,23 @@ def run_code_detail(
                 )
             finally:
                 shutil.rmtree(scratch, ignore_errors=True)
+                if runner_path:
+                    with contextlib.suppress(OSError):
+                        os.unlink(runner_path)
+            stdout, stderr = p.stdout or "", p.stderr or ""
+            checks_finished = not sentinel or sentinel in stdout
+            if sentinel:
+                stdout = stdout.replace("\n" + sentinel + "\n", "").replace(sentinel, "")
+                if not checks_finished:
+                    stderr += (
+                        "\nthe program exited before the appended checks "
+                        "finished; they did not run"
+                    )
             return {
-                "ok": p.returncode == 0,
+                "ok": p.returncode == 0 and checks_finished,
                 "returncode": p.returncode,
-                "stdout": (p.stdout or "").strip(),
-                "stderr": (p.stderr or "").strip(),
+                "stdout": stdout.strip(),
+                "stderr": stderr.strip(),
                 "timeout": timeout,
                 "timed_out": False,
                 "error": "",
@@ -432,11 +471,184 @@ def _run_cmd(cmd, timeout, cwd=None):
             shutil.rmtree(disposable, ignore_errors=True)
 
 
+# Appended checks run after the candidate code, so code that terminates the
+# process successfully first (process.exit(0), PowerShell ``exit 0``,
+# std::exit(0), Environment.Exit(0)) would pass without one check running.
+# As in ``run_code_detail`` for Python, a per-run random sentinel is emitted
+# only after the checks finish; a run without it fails, and the sentinel is
+# stripped from the reported output.
+_CHECKS_NOT_FINISHED = (
+    "the program exited before the appended checks finished; they did not run"
+)
+
+
+def _checks_sentinel():
+    return "__SONDER_CHECKS_DONE_%s__" % secrets.token_hex(16)
+
+
+def _sentinel_literal(sentinel):
+    # A double-quoted newline-sentinel-newline literal, valid in JS, C++ and
+    # C#; the sentinel itself is ASCII letters, digits and underscores only.
+    return '"\\n%s\\n"' % sentinel
+
+
+def _finish_checked_run(result, sentinel):
+    ok, out = result
+    if not sentinel:
+        return ok, out
+    finished = sentinel in out
+    out = out.replace("\n" + sentinel + "\n", "").replace(sentinel, "").strip()
+    if not finished:
+        out = (out + "\n" + _CHECKS_NOT_FINISHED).strip()
+    return ok and finished, out
+
+
+def _javascript_checked_source(code, extra, sentinel):
+    # fs.writeSync is synchronous, so the sentinel cannot be lost to a
+    # buffered stream or reordered after a later process.exit().
+    return "%s\n\n%s\n;require('fs').writeSync(1, %s);\n" % (
+        code, extra, _sentinel_literal(sentinel),
+    )
+
+
+def _powershell_checked_source(code, extra, sentinel):
+    # A final check statement that failed without terminating (Write-Error,
+    # a failing native command) leaves $? false; capture it before the
+    # sentinel write and fail the run instead of letting it read as a pass.
+    return (
+        "%s\n\n%s\n"
+        "$__sonder_checks_ok = $?\n"
+        "[Console]::Out.Write(\"`n%s`n\"); [Console]::Out.Flush()\n"
+        "if (-not $__sonder_checks_ok) { exit 1 }\n"
+    ) % (code, extra, sentinel)
+
+
+_CPP_MAIN_RE = re.compile(r"\bint\s+main\s*\(([^)]*)\)\s*\{")
+_CSHARP_MAIN_RE = re.compile(r"\bstatic\s+(?:async\s+)?[\w.<>]+\s+(Main)\s*\(")
+
+
+def _matching_brace(source, open_index):
+    """Index of the ``}`` closing the ``{`` at ``open_index`` (C-like lexing)."""
+    depth, index, length = 0, open_index, len(source)
+    while index < length:
+        char = source[index]
+        pair = source[index:index + 2]
+        if pair == "//":
+            index = source.find("\n", index)
+            if index < 0:
+                return -1
+            continue
+        if pair == "/*":
+            index = source.find("*/", index + 2)
+            if index < 0:
+                return -1
+            index += 2
+            continue
+        if char in "\"'":
+            index += 1
+            while index < length and source[index] != char:
+                index += 2 if source[index] == "\\" else 1
+            index += 1
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return -1
+
+
+def _cpp_checked_source(code, extra, sentinel):
+    """Run the checks' ``main`` as a function, then emit the sentinel.
+
+    Returns ``None`` when the checks define no ``int main(...)`` (nothing to
+    instrument).  ``return 0;`` is added at the end of the renamed body
+    because falling off a non-``main`` function is undefined.
+    """
+    match = _CPP_MAIN_RE.search(extra)
+    if not match:
+        return None
+    close = _matching_brace(extra, match.end() - 1)
+    if close < 0:
+        return None
+    entry = "__sonder_checks_main_%s" % secrets.token_hex(8)
+    params = match.group(1).strip()
+    takes_args = bool(params) and params != "void"
+    renamed = (
+        extra[:match.start()] + "int %s(%s) {" % (entry, match.group(1))
+        + extra[match.end():close] + "\nreturn 0;\n" + extra[close:]
+    )
+    wrapper = (
+        "\n#include <cstdio>\n"
+        "int main(int argc, char** argv) {\n"
+        "    (void)argc; (void)argv;\n"
+        "    int sonder_checks_rc = %s(%s);\n"
+        "    std::fputs(%s, stdout);\n"
+        "    std::fflush(stdout);\n"
+        "    return sonder_checks_rc;\n"
+        "}\n"
+    ) % (entry, "argc, argv" if takes_args else "", _sentinel_literal(sentinel))
+    return "%s\n\n%s\n%s" % (code, renamed, wrapper)
+
+
+def _csharp_checked_source(code, extra, sentinel):
+    """Invoke the checks' ``Main`` through a wrapper entry point.
+
+    Returns ``None`` when the checks define no ``static ... Main(`` method.
+    """
+    match = _CSHARP_MAIN_RE.search(extra)
+    if not match:
+        return None
+    entry = "SonderChecksMain_%s" % secrets.token_hex(8)
+    renamed = extra[:match.start(1)] + entry + extra[match.end(1):]
+    wrapper = (
+        "\ninternal static class SonderChecksEntry_%(tag)s {\n"
+        "    public static int Main(string[] args) {\n"
+        "        System.Reflection.MethodInfo target = null;\n"
+        "        foreach (System.Type type in typeof(SonderChecksEntry_%(tag)s).Assembly.GetTypes()) {\n"
+        "            System.Reflection.MethodInfo found = type.GetMethod(\"%(entry)s\",\n"
+        "                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public\n"
+        "                | System.Reflection.BindingFlags.NonPublic);\n"
+        "            if (found != null) { target = found; break; }\n"
+        "        }\n"
+        "        object result;\n"
+        "        try {\n"
+        "            result = target.Invoke(null, target.GetParameters().Length == 0\n"
+        "                ? null : new object[] { args });\n"
+        "        } catch (System.Reflection.TargetInvocationException error) {\n"
+        "            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(\n"
+        "                error.InnerException).Throw();\n"
+        "            throw;\n"
+        "        }\n"
+        "        int code = 0;\n"
+        "        System.Threading.Tasks.Task task = result as System.Threading.Tasks.Task;\n"
+        "        if (task != null) {\n"
+        "            task.GetAwaiter().GetResult();\n"
+        "            System.Threading.Tasks.Task<int> valued = task as System.Threading.Tasks.Task<int>;\n"
+        "            if (valued != null) code = valued.Result;\n"
+        "        } else if (result is int) {\n"
+        "            code = (int)result;\n"
+        "        }\n"
+        "        System.Console.Out.Write(%(marker)s);\n"
+        "        System.Console.Out.Flush();\n"
+        "        return code;\n"
+        "    }\n"
+        "}\n"
+    ) % {"tag": entry[-16:], "entry": entry, "marker": _sentinel_literal(sentinel)}
+    return "%s\n\n%s\n%s" % (code, renamed, wrapper)
+
+
 def _run_javascript(code, extra, timeout, execute):
     node = shutil.which("node")
     if not node:
         return _missing("node")
-    src = code + (("\n\n" + extra) if extra else "")
+    sentinel = _checks_sentinel() if extra and execute else ""
+    if sentinel:
+        src = _javascript_checked_source(code, extra, sentinel)
+    else:
+        src = code + (("\n\n" + extra) if extra else "")
     fd, path = tempfile.mkstemp(suffix=".js")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -444,7 +656,7 @@ def _run_javascript(code, extra, timeout, execute):
         ok, out = _run_cmd([node, "--check", path], timeout)
         if not ok or not execute:
             return (ok, "compiled" if ok else ("compile failed\n" + out).strip())
-        return _run_cmd([node, path], timeout)
+        return _finish_checked_run(_run_cmd([node, path], timeout), sentinel)
     finally:
         os.unlink(path)
 
@@ -453,7 +665,11 @@ def _run_powershell(code, extra, timeout, execute):
     exe = shutil.which("pwsh") or shutil.which("powershell")
     if not exe:
         return _missing("pwsh/powershell")
-    src = code + (("\n\n" + extra) if extra else "")
+    sentinel = _checks_sentinel() if extra and execute else ""
+    if sentinel:
+        src = _powershell_checked_source(code, extra, sentinel)
+    else:
+        src = code + (("\n\n" + extra) if extra else "")
     fd, path = tempfile.mkstemp(suffix=".ps1")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -477,7 +693,10 @@ def _run_powershell(code, extra, timeout, execute):
             if ok:
                 return True, "compiled"
             return False, ("compile failed\n" + out).strip()
-        return _run_cmd([exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path], timeout)
+        return _finish_checked_run(
+            _run_cmd([exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path], timeout),
+            sentinel,
+        )
     finally:
         os.unlink(path)
 
@@ -486,7 +705,12 @@ def _run_cpp(code, extra, timeout, execute):
     compiler = shutil.which("g++") or shutil.which("clang++") or shutil.which("cl")
     if not compiler:
         return _missing("g++/clang++/cl")
-    src = code + (("\n\n" + extra) if extra else "")
+    sentinel = _checks_sentinel() if extra and execute else ""
+    src = _cpp_checked_source(code, extra, sentinel) if sentinel else None
+    if src is None:
+        # Checks without an ``int main`` cannot be instrumented.
+        sentinel = ""
+        src = code + (("\n\n" + extra) if extra else "")
     with tempfile.TemporaryDirectory() as td:
         source = os.path.join(td, "main.cpp")
         exe = os.path.join(td, "main.exe" if os.name == "nt" else "main")
@@ -507,13 +731,18 @@ def _run_cpp(code, extra, timeout, execute):
             ok, out = _run_cmd([compiler, "-std=c++17", source, "-o", exe], timeout, cwd=td)
         if not ok or not execute:
             return (ok, "compiled" if ok else ("compile failed\n" + out).strip())
-        return _run_cmd([exe], timeout, cwd=td)
+        return _finish_checked_run(_run_cmd([exe], timeout, cwd=td), sentinel)
 
 
 def _run_csharp(code, extra, timeout, execute):
     compiler = shutil.which("csc")
     dotnet = shutil.which("dotnet")
-    src = code + (("\n\n" + extra) if extra else "")
+    sentinel = _checks_sentinel() if extra and execute else ""
+    src = _csharp_checked_source(code, extra, sentinel) if sentinel else None
+    if src is None:
+        # Checks without a ``Main`` cannot be instrumented.
+        sentinel = ""
+        src = code + (("\n\n" + extra) if extra else "")
     with tempfile.TemporaryDirectory() as td:
         source = os.path.join(td, "Program.cs")
         exe = os.path.join(td, "Program.exe")
@@ -523,7 +752,7 @@ def _run_csharp(code, extra, timeout, execute):
             ok, out = _run_cmd([compiler, "/nologo", "/out:" + exe, source], timeout, cwd=td)
             if not ok or not execute:
                 return (ok, "compiled" if ok else ("compile failed\n" + out).strip())
-            return _run_cmd([exe], timeout, cwd=td)
+            return _finish_checked_run(_run_cmd([exe], timeout, cwd=td), sentinel)
         if dotnet:
             project = os.path.join(td, "App.csproj")
             with open(project, "w", encoding="utf-8") as f:
@@ -531,7 +760,10 @@ def _run_csharp(code, extra, timeout, execute):
             ok, out = _run_cmd([dotnet, "build", project, "--nologo", "-v:q"], timeout, cwd=td)
             if not ok or not execute:
                 return (ok, "compiled" if ok else ("compile failed\n" + out).strip())
-            return _run_cmd([dotnet, "run", "--project", project, "--no-build"], timeout, cwd=td)
+            return _finish_checked_run(
+                _run_cmd([dotnet, "run", "--project", project, "--no-build"], timeout, cwd=td),
+                sentinel,
+            )
         return _missing("csc/dotnet")
 
 
