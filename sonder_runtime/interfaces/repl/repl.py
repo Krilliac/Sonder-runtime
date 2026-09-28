@@ -4732,6 +4732,13 @@ def main(*, machine_output=False):
                     _print_chat_result(work_refusal, started_at, label="Sonder")
                     continue
 
+                # Explicit desktop requests use the gated computer-use agent;
+                # keep them out of the workspace classifier and plain chat.
+                computer_reply = server.route_computer_use(line)
+                if computer_reply is not None:
+                    _print_chat_result(computer_reply, time.monotonic(), label="Sonder computer use")
+                    continue
+
                 if intents.classify_work(line) and not web_intents.explicit_search(line):
                     if not workspace_root:
                         embedded_path, remainder = _split_existing_workspace_prefix(line)
