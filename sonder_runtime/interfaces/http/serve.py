@@ -98,7 +98,6 @@ from sonder_runtime.application.chat.handoff_receipts import (
     ChatWorkReceiptService,
     ChatWorkResult,
 )
-from sonder_runtime.bootstrap.computer_use_chat import route as route_computer_use
 from sonder_runtime.application.execution.world_control import OutputWatermark
 from sonder_runtime.application.extensions.facade import ExtensionAuthority
 from sonder_runtime.application.ports.model_gateway import ModelRequest
@@ -7543,11 +7542,8 @@ class Handler(BaseHTTPRequestHandler):
                             natural_model["prompt"], tiers=natural_model["tiers"],
                             project=storage_project, require_all_tiers=True,
                         )
-                    if (structured_schema is None and allow_control_routes and reply is None
-                            and not natural_model):
-                        reply = route_computer_use(prompt)
                     if structured_schema is None and allow_control_routes and reply is None:
-                        reply = server.chat_web_response(
+                        reply = (None if natural_model else server.route_computer_use(prompt)) or server.chat_web_response(  # desktop requests: gated computer use first
                             prompt,
                             history=history,
                             tier=model_selector or "code",

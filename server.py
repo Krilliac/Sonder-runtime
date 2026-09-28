@@ -529,6 +529,7 @@ from sonder_runtime.domain.agent_help_parsing import (
     help_advertised_tools as _agent_help_advertised_tools,
 )
 from sonder_runtime.bootstrap import generic_agent_dispatch as _generic_agent_dispatch
+from sonder_runtime.bootstrap.computer_use_chat import route as route_computer_use  # noqa: F401 (HTTP chat)
 import sonder_speculation
 import consult as consult_flow
 import code_improve
