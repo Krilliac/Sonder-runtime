@@ -282,6 +282,17 @@ failing that `OLLAMA_KV_CACHE_TYPE`, also affects the default, and
 `SONDER_REASONING` / `SONDER_VISION` also accept `none` (or `off`) to leave
 that specialist tier unbound, in which case reasoning/vision work falls back
 to a base tier.
+
+`SONDER_EMBED_ON_CPU=1` is opt-in. It asks Ollama to keep the embedding model
+on the CPU (`num_gpu: 0`). Use it when the chat model nearly fills VRAM:
+
+- **Without it:** a GPU-loaded embedder evicts the chat model, so every memory
+  or routing embedding forces a chat-model reload. Measured 2026-09-28 at
+  about 20 s for Qwen3.8 27B on a 16 GB card.
+- **With it:** the embedder stays resident beside the chat model, at about
+  25 ms per embedding.
+
+It pairs with Ollama's `OLLAMA_MAX_LOADED_MODELS` of 2 or more.
 `SONDER_MODEL_ESCALATION` (default on; `0`/`off` disables) lets the default
 route step up to the next distinct bound local model when its first model
 fails or answers nothing, at most twice per turn; explicit tiers and model
