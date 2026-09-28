@@ -28,6 +28,8 @@ class VisionRequest:
     media_type: str
     tier: str = "vision"
     options: Mapping[str, str | int | float | bool] = field(default_factory=dict)
+    # None keeps the model default; False asks a thinking model to answer directly.
+    think: bool | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.prompt, str) or not self.prompt.strip():

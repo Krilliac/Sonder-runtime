@@ -90,6 +90,8 @@ class OllamaVisionGateway:
             "stream": False,
             "options": dict(request.options),
         }
+        if request.think is not None:
+            payload["think"] = bool(request.think)
         url = endpoint + "/api/chat"
         logger.debug(f"OllamaVisionGateway.analyze: posting to {url!r}, model={target.model!r}, timeout={timeout}")
         data = (

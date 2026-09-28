@@ -30,6 +30,7 @@ MCP_TOOL_MANIFEST = {
     "archive_list/archive_extract": "Prevalidate bounded ZIP/TAR manifests or transactionally extract them to a new non-overwriting workspace directory.",
     "archive_create": "Transactionally create a bounded deterministic ZIP/TAR from explicit guarded project inputs without overwriting.",
     "artifact_risk_inspect": "Statically inspect guarded PDFs, PE/ELF/Mach-O executables, scripts, or opaque binaries for bounded risk indicators without executing or returning content.",
+    "computer_use_status/window_list/computer_use_start/computer_use_stop/screen_capture/ui_action/computer_task": "Opt-in gated desktop computer use on Windows: list allowlisted windows, start a console-approved driving session with a visible indicator and Ctrl+Alt+Shift+K kill switch, capture the window for the local vision model, and send gated mouse/keyboard input; irreversible actions need a person's approval each time (docs/computer-use.md).",
     "process_list/process_memory_risk_inspect": "Opt-in bounded Windows process metadata and fixed-indicator memory-risk inspection; never returns command lines, paths, addresses, strings, or raw bytes.",
     "log_inspect": "Inspect one guarded text log with fixed level/timestamp/source extraction, failure clusters, repeats, and bounded context.",
     "scaffold_project": "Write a complete deterministic project skeleton (cpp-msvc .sln/.vcxproj, cpp-cmake, csharp, rust, python, node, typescript, go, java-maven) -- never hand-write solution/build plumbing.",

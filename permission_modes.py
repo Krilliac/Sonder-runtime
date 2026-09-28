@@ -422,6 +422,11 @@ NATIVE_MCP_WORK = {
     # own name, so an operator can deny network builds with one rule while
     # still allowing builds, and an approval of one never covers the other.
     "build_network": "execution",
+    # Not a tool: the second decision a desktop action takes when it looks
+    # irreversible (send, delete, purchase, ...; domain/computer_use/rules.py).
+    # ``dangerous`` so an allow rule or ``auto`` for ``ui_action`` never covers
+    # it; a person approves each such action once, at the console.
+    "computer_use_irreversible": "dangerous",
     # Crash and profile digests (bootstrap/debug_tools.py). ``crash_triage``
     # and ``profile_digest`` run pure readers over guarded files and launch
     # nothing; ``debug_run_result`` polls the caller's own run and cannot
@@ -584,6 +589,9 @@ EXECUTION_TOOLS = frozenset({
     "campaign_generate_compile_execute_record", "campaign_repo_repair",
     "self_heal_repair", "scaffold_project", "compiler_cache_status",
     "crash_digest", "profile_capture_digest",
+    # Desktop input (bootstrap/computer_use_tools.py): each call injects mouse
+    # or keyboard input into a live application window.
+    "ui_action", "computer_task",
 })
 
 # The same class, for work that no *registered tool* fronts. ``EXECUTION_TOOLS``
