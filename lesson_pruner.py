@@ -4,12 +4,13 @@ Clusters lessons in the memory_store by embedding cosine similarity and
 reports (dry-run default) or deletes the redundant ones in each cluster,
 keeping a single best representative.
 
-Read-only against memory_store's schema -- the only mutation this module
-performs is via memory_store.delete_lesson, and only when explicitly told
-to apply a plan (dry_run=False / --apply). Building and reviewing a plan
-never touches the database.
+Building a plan is read-only. Applying it tombstones a loser only when the
+keeper and loser still match the planned vectors and remain near-duplicates.
+Only the newest MAX_LESSONS lessons are loaded and compared per run.
 """
 import argparse
+import hashlib
+import itertools
 
 import sonder_runtime.adapters.embeddings as embeddings
 import sonder_runtime.adapters.memory_store as memory_store
@@ -20,6 +21,9 @@ import sonder_paths
 # not a duplicate floor): two lessons about the same topic can legitimately
 # share phrasing without being redundant. 0.93 targets true restatements.
 DEFAULT_THRESHOLD = 0.93
+# Newest lessons considered per run: ~524k same-space comparisons, about
+# 100 s of pure-Python cosine at 2,560 dims (measured 2026-09-27).
+MAX_LESSONS = 1024
 
 
 def _load_lessons(conn):
@@ -30,9 +34,15 @@ def _load_lessons(conn):
     for them. Provenance is loaded with each vector so clustering can keep
     incompatible embedding spaces isolated.
     """
+    # Bounded work: consider only the newest MAX_LESSONS lessons (fresh
+    # restatements are where near-duplicates appear), oldest first within the
+    # window so keeper choice stays deterministic. A larger store is pruned in
+    # this window rather than not at all.
     rows = conn.execute(
-        "SELECT id, text, embedding, embedding_model, embedding_revision, "
-        "embedding_dim, ts FROM lessons ORDER BY ts ASC, rowid ASC"
+        "SELECT * FROM (SELECT id, text, embedding, embedding_model, "
+        "embedding_revision, embedding_dim, ts, rowid AS _rid FROM lessons "
+        "ORDER BY ts DESC, rowid DESC LIMIT ?) ORDER BY ts ASC, _rid ASC",
+        (MAX_LESSONS,),
     ).fetchall()
     out = []
     for r in rows:
@@ -125,15 +135,17 @@ class _UnionFind:
 def cluster_near_duplicates(lessons, threshold=DEFAULT_THRESHOLD, cosine_fn=embeddings.cosine):
     """Single-linkage clustering of lessons whose pairwise cosine >= threshold.
 
-    O(n^2) comparisons -- fine for the hundreds-to-low-thousands of lessons
-    this store holds; revisit (e.g. LSH/bucket by a cheap prefilter) if the
-    corpus grows past ~10k. `lessons` is the shape _load_lessons returns
+    O(n^2) comparisons within the hard MAX_LESSONS work budget.
+    `lessons` is the shape _load_lessons returns
     (dicts with at least id/vector). Comparisons are restricted to the exact
     normalized (model, revision, actual dimension) embedding space. Returns
     only clusters with 2+ members (i.e. actual duplicate groups) -- singletons
     are dropped.
     """
-    comparable = [lesson for lesson in lessons if _clusterable_lesson(lesson)]
+    bounded = list(itertools.islice(lessons, MAX_LESSONS + 1))
+    if len(bounded) > MAX_LESSONS:
+        raise ValueError("lesson pruning work budget exceeded")
+    comparable = [lesson for lesson in bounded if _clusterable_lesson(lesson)]
     if not comparable:
         return []
     uf = _UnionFind([lesson["id"] for lesson in comparable])
@@ -155,16 +167,6 @@ def cluster_near_duplicates(lessons, threshold=DEFAULT_THRESHOLD, cosine_fn=embe
         groups.setdefault(root, []).append(les)
 
     return [g for g in groups.values() if len(g) > 1]
-
-
-def _max_pair_sim(cluster, cosine_fn=embeddings.cosine):
-    best = 0.0
-    for i in range(len(cluster)):
-        for j in range(i + 1, len(cluster)):
-            s = cosine_fn(cluster[i]["vector"], cluster[j]["vector"])
-            if s > best:
-                best = s
-    return best
 
 
 def choose_keeper(cluster):
@@ -190,17 +192,34 @@ def build_plan(conn, threshold=DEFAULT_THRESHOLD, cosine_fn=embeddings.cosine):
     plan = []
     for cluster in clusters:
         keeper = choose_keeper(cluster)
-        losers = [lesson for lesson in cluster if lesson["id"] != keeper["id"]]
+        proven = [
+            (lesson, cosine_fn(keeper["vector"], lesson["vector"]))
+            for lesson in cluster if lesson["id"] != keeper["id"]
+        ]
+        eligible = [(lesson, sim) for lesson, sim in proven if sim >= threshold]
+        losers = [lesson for lesson, _sim in eligible]
+        if not losers:
+            continue
         plan.append({
             "keeper_id": keeper["id"],
             "keeper_text": keeper["text"],
             "prune_ids": [lesson["id"] for lesson in losers],
             "prune_texts": [lesson["text"] for lesson in losers],
-            "cluster_size": len(cluster),
-            "max_sim": round(_max_pair_sim(cluster, cosine_fn), 4),
+            "cluster_size": len(losers) + 1,
+            "max_sim": round(max(sim for _lesson, sim in eligible), 4),
+            "threshold": threshold,
+            "keeper_state": _lesson_state(keeper),
+            "prune_states": [_lesson_state(lesson) for lesson in losers],
         })
     plan.sort(key=lambda e: -e["max_sim"])
     return plan
+
+
+def _lesson_state(lesson):
+    return (
+        lesson["text"], hashlib.sha256(lesson["embedding"]).hexdigest(),
+        lesson["embedding_model"], lesson["embedding_revision"], lesson["embedding_dim"],
+    )
 
 
 def _truncate(text, n=70):
@@ -225,12 +244,46 @@ def format_report(plan):
 
 
 def apply_plan(conn, plan, delete_fn=memory_store.tombstone_lesson):
-    """Prune every loser while retaining a rejected-value tombstone."""
+    """Revalidate both vectors under a write lock before each tombstone."""
     deleted = 0
     for entry in plan:
-        for lid in entry["prune_ids"]:
-            if delete_fn(conn, lid):
-                deleted += 1
+        # strict=False: a plan without recorded states authorizes no deletion.
+        for lid, expected_loser in zip(entry["prune_ids"], entry.get("prune_states", []), strict=False):
+            if "keeper_state" not in entry or "threshold" not in entry:
+                continue  # Legacy/unverified plans cannot authorize deletion.
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                keeper = conn.execute(
+                    "SELECT text, embedding, embedding_model, embedding_revision, embedding_dim "
+                    "FROM lessons WHERE id=?", (entry["keeper_id"],),
+                ).fetchone()
+                loser = conn.execute(
+                    "SELECT text, embedding, embedding_model, embedding_revision, embedding_dim "
+                    "FROM lessons WHERE id=?", (lid,),
+                ).fetchone()
+                if keeper is None or loser is None:
+                    conn.rollback()
+                    continue
+                if (_lesson_state(keeper) != entry["keeper_state"]
+                        or _lesson_state(loser) != expected_loser):
+                    conn.rollback()
+                    continue
+                keeper_vector = embeddings.from_blob(keeper[1])
+                loser_vector = embeddings.from_blob(loser[1])
+                if (not embeddings.valid_vector(keeper_vector)
+                        or not embeddings.valid_vector(loser_vector)
+                        or embeddings.cosine(keeper_vector, loser_vector) < entry["threshold"]):
+                    conn.rollback()
+                    continue
+                if delete_fn is memory_store.tombstone_lesson:
+                    removed = delete_fn(conn, lid, commit=False)
+                else:
+                    removed = delete_fn(conn, lid)
+                conn.commit()
+                deleted += bool(removed)
+            except Exception:
+                conn.rollback()
+                raise
     return deleted
 
 
