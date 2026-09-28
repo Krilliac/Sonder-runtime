@@ -2352,6 +2352,8 @@ DANGEROUS_HTTP_SLASH_COMMANDS = frozenset({
     # reasoning through it, and an omission justified by a refusal must not
     # outlive the refusal.
     "/cot", "/chainofthought", "/thoughts",
+    # Shows operator prompt overrides and state-home paths.
+    "/prompts",
     "/filepolicy", "/files", "/find", "/read", "/write", "/append", "/edit",
     "/delete", "/master", "/pass", "/good", "/accept", "/accepted", "/used",
     "/copied", "/edited", "/fail", "/bad", "/trace", "/strict", "/run",
@@ -3247,6 +3249,8 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         return server.sonder_stats()
     if cmd == "/context":
         return server.context_health()
+    if cmd == "/prompts":
+        return server.control_command(stripped, project=project)
     if cmd in ("/contextsize", "/ctxsize"):
         if arg.strip():
             return server.set_context_size(arg.strip())

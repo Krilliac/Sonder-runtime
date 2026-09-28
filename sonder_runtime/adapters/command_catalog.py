@@ -320,7 +320,7 @@ _CATEGORY_BY_SLASH = {
     "/workspace": "filesystem", "/workspace-create": "filesystem", "/workspacecreate": "filesystem",
     "/sessions": "basic", "/replay": "basic", "/resume": "basic",
     "/version": "basic",
-    "/model": "chat", "/persona": "persona", "/consult": "chat",
+    "/model": "chat", "/persona": "persona", "/prompts": "persona", "/consult": "chat",
     "/route": "chat", "/refactor": "dev", "/scaffold": "dev",
     "/fact": "memory", "/facts": "memory", "/lessons": "memory",
     "/learn": "memory", "/good": "memory", "/bad": "memory",

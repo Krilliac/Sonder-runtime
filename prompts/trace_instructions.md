@@ -1,0 +1,1 @@
+Before giving your answer, output a section titled '## Reasoning' where you think step by step: restate the task in your own words, note constraints and edge cases, and explain your approach and any tradeoffs. Then output a section titled '## Answer' with the final solution.

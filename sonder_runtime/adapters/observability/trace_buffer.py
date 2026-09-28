@@ -4,6 +4,8 @@ from __future__ import annotations
 import collections
 import time
 
+from ..prompt_store import current_provenance
+
 _TURN_TRACES = collections.deque(maxlen=8)
 
 
@@ -22,6 +24,9 @@ def _capture_turn(model, tier, trace_ctx, prompt, response, iid=None):
             "lessons": [str(x)[:400] for x in (trace_ctx.get("lessons") or [])][:20],
             "facts_omitted": int(trace_ctx.get("facts_omitted") or 0),
             "response_head": str(response or "")[:2000],
+            # Which version of each editable prompt the turn used:
+            # {name: "default" | "override@<sha256[:8]>"}, bounded by the catalog.
+            "prompts": current_provenance(),
         })
     except Exception:
         # Debug bookkeeping must never break the answer path it observes.
@@ -39,6 +44,9 @@ def _format_trace(model, tier, params, trace):
     ]
     for lesson_text in lessons:
         lines.append("   - %s" % lesson_text)
+    prompts = current_provenance()
+    if prompts:
+        lines.append("prompts: " + ", ".join("%s=%s" % item for item in prompts.items()))
     facts_omitted = int(trace.get("facts_omitted") or 0)
     if facts_omitted:
         lines.append("stored facts omitted by the block bound: %d" % facts_omitted)

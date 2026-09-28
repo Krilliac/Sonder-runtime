@@ -195,9 +195,8 @@ from sonder_runtime.application.context_health import (
 )
 from sonder_runtime.domain.common.errors import InvalidInput
 from sonder_runtime.domain.common.errors import SonderError as _SonderError
-from sonder_runtime.domain.runtime_identity import (
-    runtime_identity_block as _runtime_identity_block,
-)
+from sonder_runtime.adapters import prompt_store as _prompts
+from sonder_runtime.adapters.prompt_store import runtime_identity_block as _runtime_identity_block
 from sonder_runtime.domain.model_capabilities import (
     fanout_capabilities as _fanout_capabilities,
 )
@@ -1450,14 +1449,6 @@ def _open_db_readonly():
     return conn
 
 
-TRACE_SYSTEM = (
-    "Before giving your answer, output a section titled '## Reasoning' where you "
-    "think step by step: restate the task in your own words, note constraints and "
-    "edge cases, and explain your approach and any tradeoffs. Then output a section "
-    "titled '## Answer' with the final solution."
-)
-
-
 def _deployment_authenticates_callers() -> bool:
     """Compatibility delegate for the packaged deployment-auth policy."""
     return _deployment_authenticates_callers_policy()
@@ -2490,11 +2481,12 @@ def _stable_system_context():
     if getattr(_SYSTEM_CONTEXT, "parts", None) is not None:
         yield
         return
-    _SYSTEM_CONTEXT.parts = _read_system_context()
-    try:
-        yield
-    finally:
-        _SYSTEM_CONTEXT.parts = None
+    with _prompts.turn_scope():  # editable prompts are pinned for the turn too
+        _SYSTEM_CONTEXT.parts = _read_system_context()
+        try:
+            yield
+        finally:
+            _SYSTEM_CONTEXT.parts = None
 
 
 def _build_system(system, trace, persona, model="", cloud=False, provider=None):
@@ -2516,7 +2508,8 @@ def _build_system(system, trace, persona, model="", cloud=False, provider=None):
     """
     effective_system = system
     if trace:
-        effective_system = "%s\n\n%s" % (system, TRACE_SYSTEM) if system else TRACE_SYSTEM
+        trace_text = _prompts.render("trace_instructions")
+        effective_system = "%s\n\n%s" % (system, trace_text) if system else trace_text
     if cloud:
         return _join_system_parts(
             _runtime_identity_block(model, cloud=True), effective_system,
@@ -3121,13 +3114,9 @@ def _execute_selfmod_run(run_id, explicit_tests=None, *, unisolated=False, opera
                 run_id, "record_reproducer_before", {"command": reproducer},
                 lambda: selfmod.record_reproducer_before(run_id, reproducer),
             )
-            prompt = (
-                "Implement this bounded self-improvement only inside the isolated workspace.\n"
-                "Objective: %s\nEvidence: %s\nAcceptance criteria: %s\n"
-                "Authorized files (no others may change): %s\nWorkspace: %s\n"
-                "Inspect first, then use guarded file tools. Do not approve, deploy, alter tests outside scope, "
-                "change permissions, install dependencies, invoke selfmod, or touch the live repository."
-                % (run["objective"], "; ".join(run["evidence"]), "; ".join(run["criteria"]), ", ".join(run["files"]), workspace)
+            prompt = _prompts.render(
+                "selfmod_editor", objective=run["objective"], evidence="; ".join(run["evidence"]),
+                criteria="; ".join(run["criteria"]), files=", ".join(run["files"]), workspace=workspace,
             )
             # The run's lease already fences its record; this fences the editing
             # agent's effects on the same lease, so a worker that lost the run
@@ -3751,6 +3740,8 @@ def control_command(prompt: str, history=None, session="", project="",
         return sonder_stats()
     if cmd == "/context":
         return context_health()
+    if cmd == "/prompts":
+        return _prompts.command(arg)
     if cmd in ("/contextsize", "/ctxsize"):
         return set_context_size(arg.strip()) if arg.strip() else context_policy_status()
     if cmd in ("/compact", "/compaction"):
@@ -6559,6 +6550,7 @@ def _route_chat_web(prompt, session, project, location_consent):
     return reply
 
 
+@_prompts.turn_scoped
 @_capture_named_provider_request
 def _sonder_impl_serialized(
     prompt: str,
@@ -6988,6 +6980,7 @@ def sonder(
     return _append_activity(result, response=response, replace=True)
 
 
+@_prompts.turn_scoped
 @_capture_named_provider_request
 def _answer_with_history_impl(
     prompt,
@@ -11369,6 +11362,7 @@ def turn_inspect(index: int = 0, full_prompt: bool = False, token: str = "") -> 
     ]
     lines += ["    " + line for line in (turn["prompt"] or "(none)").splitlines()[:20]]
     lines += ["", "  lessons retrieved: %d" % len(turn["lessons"])]
+    lines += ["  prompts: " + (", ".join("%s=%s" % i for i in turn.get("prompts", {}).items()) or "(none recorded)")]
     lines += ["    - " + text for text in turn["lessons"]]
     lines += ["", "  exact prompt sent to the model:"]
     lines += ["    " + line for line in (prompt_text or "(none)").splitlines()]
@@ -16158,21 +16152,6 @@ def _chat_location(
     return location
 
 
-# System prompt for web-routed research runs (chat_web_response): web tools
-# only, no workspace discovery, stop as soon as the results answer.
-_RESEARCH_AGENT_SYSTEM = (
-    "You are answering a live-information question with public web tools. "
-    "Use web_search to locate an authoritative source unless the user already "
-    "supplied its URL. ALWAYS call web_fetch on the best source before "
-    "answering, even if a search snippet looks sufficient. Never fill a "
-    "missing version, price, office-holder, or "
-    "date from model memory. Workspace and file tools are outside this run's "
-    "allowlist. Cite fetched URLs in the final answer. As soon as the fetched "
-    "source answers the question, return {\"final\": ...} immediately instead "
-    "of calling more tools."
-)
-
-
 def chat_web_response(
     prompt: str,
     history=None,
@@ -16297,7 +16276,7 @@ def chat_web_response(
             "web_search", "web_fetch", "weather_lookup",
             "approximate_location_lookup",
         ),
-        system=_RESEARCH_AGENT_SYSTEM,
+        system=_prompts.render("web_research_agent"),
     )
 
 
@@ -18029,17 +18008,7 @@ def _agent_negative_claim_review(
     # trio here is what made 100% of the hosted reviewer's vocabulary dead.
     vocabulary = _agent_claim_review_vocabulary(cloud)
     system = _build_system(
-        "You are a local evidence reviewer. Return exactly one JSON object and no "
-        "prose or chain-of-thought. Decide only accept or continue. Accept a negative "
-        "existence claim only when tool evidence searched the exact shortest useful "
-        "anchor across the relevant scope. Reject a paraphrased/descriptive search "
-        "query, a clipped read that did not reach the target, or a scope mismatch. "
-        "Never rewrite the answer or invent evidence; continue must return exactly "
-        "one structured read-only evidence action using %s. No other tool is "
-        "available on this run: if none of them can settle the claim, return "
-        "continue with an empty tool and say so in the reason -- never accept a "
-        "claim you could not check."
-        % ", ".join(vocabulary),
+        _prompts.render("claim_reviewer", tools=", ".join(vocabulary)),
         False,
         "",
         model=model,
@@ -20587,13 +20556,7 @@ def _agent_turn(
         )
         return refusal
     if cloud:
-        default_agent_system = (
-            "You are a hosted tool-using coding agent. Use only the tools listed "
-            "in the task transcript; host policy may withhold private machine or "
-            "workspace capabilities. Never invent tool results. Use web tools "
-            "for current external information and cite fetched URLs in the final "
-            "answer. Lead with the outcome and disclose failures."
-        )
+        default_agent_system = _prompts.render("agent_hosted")
     else:
         # Composing the application installs the host capability-summary hook
         # the brief below reads. It never probes the host here, and a failure
@@ -20602,21 +20565,11 @@ def _agent_turn(
             _application()
         except Exception:
             pass
-        default_agent_system = (
-            "You are a local tool-using coding agent. Inspect real workspace evidence before making claims. "
-            "For action tasks, use tools instead of merely describing commands. Prefer workspace_inventory, directory_tree, "
-            "text_search, file_read_range, and program_search for discovery; use guarded file tools for "
-            "mutations; validate every mutation with workspace_run, script_run, file_read_range, "
-            "image_inspect, artifact_verify, or another path-specific checker before returning final. "
-            "After editing a script, run that exact path "
-            "with script_run; an equivalent run_code snippet does not validate the on-disk file. "
-            "Never invent tool results. "
-            "Use web tools for current external information and cite fetched URLs in the final answer. "
-            "Your final answer must lead with the outcome, mention changed paths and checks, and disclose failures. "
-            # One deterministic line about the host, so a local model picks the
-            # right command shape instead of guessing. Never send this private
-            # machine inventory to a hosted agent.
-            + _local_agent_brief(project_scope)
+        # $host_brief: one deterministic line about the host, so a local model
+        # picks the right command shape instead of guessing. Never send this
+        # private machine inventory to a hosted agent.
+        default_agent_system = _prompts.render(
+            "agent_local", host_brief=_local_agent_brief(project_scope),
         )
     # Hosted agents receive only the explicitly supplied/default hosted
     # system text. _build_system also appends mutable local profile, emotion,
@@ -22430,10 +22383,7 @@ def _autopilot_json_model(run: dict, role: str, prompt: str, validator) -> dict:
     if model is None or cloud or tier_label not in autopilot_controller.LOCAL_TIERS:
         raise RuntimeError("autopilot requires an available local model tier")
     system = _build_system(
-        "You are Sonder's bounded autonomous %s. Return exactly one JSON "
-        "object, with no markdown or private chain-of-thought. Make concrete "
-        "decisions from the supplied state. Never expand policy, tools, roots, "
-        "budgets, or completion rules." % role,
+        _prompts.render("autopilot_system", role=role),
         False,
         "",
         model=model,
@@ -22470,20 +22420,8 @@ def _autopilot_plan_model(run: dict) -> dict:
         if run.get("adaptive", True) else 0
     )
     initial_limit = max(3, min(6, max_tasks - reserve))
-    prompt = (
-        "Create a short executable plan for this autonomous goal.\n"
-        "Objective: {objective}\nProject: {project}\nPolicy: {policy}\n"
-        "Web: {web}\nAdaptive checkpoints: {adaptive}\n"
-        "Initial task limit: {initial_limit}\nOverall task ledger limit: {max_tasks}\n"
-        "Replan budget: {max_replans}\nAllowed tools: {tools}\n\n"
-        "Use measurable success criteria. Order inspection before mutation and "
-        "always finish with grounded validation. Under observe policy, do not "
-        "create implementation tasks. Keep the initial plan within its smaller "
-        "limit so adaptive review has room to replace stale pending work. JSON schema:\n"
-        '{{"summary":"...","success_criteria":["..."],"tasks":['
-        '{{"title":"...","kind":"inspect|research|implement|validate|report",'
-        '"instruction":"specific bounded action"}}]}}'
-    ).format(
+    prompt = _prompts.render(
+        "autopilot_planner",
         objective=run.get("objective", ""),
         project=run.get("project") or "default",
         policy=run.get("policy", "workspace"),
@@ -22537,35 +22475,13 @@ def _autopilot_review_model(run: dict, issue: str) -> dict:
                 task.get("output", ""), limit=6,
             ),
         })
-    prompt = (
-        "Review the bounded run and select the next decision.\n"
-        "Objective: %s\nHost gate/issue: %s\nFailures: %s/%s\n"
-        "Task budget: %s/%s\nAdaptive checkpoints: %s\nReplans: %s/%s\n"
-        "Ledger: %s\n\n"
-        "Use complete only when the host gate says all requirements passed. "
-        "At an adaptive checkpoint, use continue when the pending plan remains "
-        "correct, replan only when new evidence makes it stale, or pause when "
-        "operator judgment is genuinely required. Use retry only after a failure. "
-        "At every adaptive checkpoint, assess every pending task by ID. A task is "
-        "stale when completed evidence contradicts its premise or says its work is "
-        "already unnecessary. A stale task forbids continue: choose replan, omit "
-        "the contradicted work, and retain necessary validation/reporting. "
-        "The host preserves tasks marked keep and supersedes only tasks marked "
-        "stale. Every replan must include only necessary new replacement tasks; "
-        "tasks may be empty when removing stale work is sufficient and a kept "
-        "validation task remains. JSON schema:\n"
-        '{"decision":"complete|continue|retry|replan|pause","reason":"...",'
-        '"instruction":"corrected retry instruction or empty",'
-        '"pending_assessment":[{"id":"task-00","verdict":"keep|stale",'
-        '"reason":"evidence comparison"}],'
-        '"tasks":[{"title":"...","kind":"inspect|research|implement|validate|report",'
-        '"instruction":"..."}]}'
-    ) % (
-        run.get("objective", ""), issue, run.get("failures", 0),
-        run.get("max_failures", 3), len(run.get("plan") or []),
-        run.get("max_tasks", 12), run.get("checkpoints", 0),
-        run.get("replans", 0), run.get("max_replans", 0),
-        json.dumps(ledger, ensure_ascii=False),
+    prompt = _prompts.render(
+        "autopilot_reviewer",
+        objective=run.get("objective", ""), issue=issue, failures=run.get("failures", 0),
+        max_failures=run.get("max_failures", 3), task_count=len(run.get("plan") or []),
+        max_tasks=run.get("max_tasks", 12), checkpoints=run.get("checkpoints", 0),
+        replans=run.get("replans", 0), max_replans=run.get("max_replans", 0),
+        ledger=json.dumps(ledger, ensure_ascii=False),
     )
 
     is_checkpoint = str(issue or "").startswith("adaptive checkpoint")
@@ -22654,16 +22570,8 @@ def _autopilot_work_model(
     run: dict, task: dict, prior: str, *, strategy_memory=None,
 ) -> autopilot_controller.HostTaskResult | str:
     allowed = _autopilot_allowed_tools(run)
-    prompt = (
-        "Autopilot objective: {objective}\n"
-        "Current bounded task: {task_id} [{kind}] {title}\n"
-        "Instruction: {instruction}\n"
-        "Success criteria:\n{criteria}\n"
-        "Prior task evidence:\n{prior}\n\n"
-        "Complete only this task using host tools. Inspect before mutation, do "
-        "not broaden scope, and validate every persistent change. If blocked, "
-        "report the exact blocker; do not claim success."
-    ).format(
+    prompt = _prompts.render(
+        "autopilot_worker",
         objective=run.get("objective", ""),
         task_id=task.get("id", ""),
         kind=task.get("kind", ""),
@@ -23151,30 +23059,14 @@ def _execution_route_model(
     if model is None or cloud or tier_label not in LOCAL_TIERS:
         raise RuntimeError("local execution router model is unavailable")
     system = _build_system(
-        "You are Sonder's execution-mode router. Return exactly one JSON "
-        "object and no prose or chain-of-thought. You may choose only workbench "
-        "or autopilot and only fast, code, or general local tiers. Workbench is a "
-        "foreground task with at most 12 tool steps. "
-        "Autopilot is a persistent multi-stage goal with planning, evidence review, "
-        "replanning, and validation. Never alter permissions, roots, tier mappings, "
-        "or tools.",
+        _prompts.render("execution_router_system"),
         False,
         "",
         model=model,
         cloud=False,
     )
-    route_prompt = (
-        "Choose the smallest reliable execution mode for this developer-authorized "
-        "work request. Prefer workbench when the task is self-contained and likely "
-        "to finish in one bounded tool loop. Prefer autopilot when it has several "
-        "dependent phases, needs durable progress, or requires discovery followed "
-        "by implementation and independent validation. Choose fast only for tiny "
-        "mechanical/read tasks, code for repository/code/tool work, and general for "
-        "prose-heavy explanation or review.\n"
-        "Project: %s\nRequest: %s\n"
-        'JSON schema: {"mode":"workbench|autopilot","tier":"fast|code|general",'
-        '"reason":"brief evidence-based reason","confidence":0.0}'
-        % (project or "default", str(prompt or "")[:12000])
+    route_prompt = _prompts.render(
+        "execution_router", project=project or "default", request=str(prompt or "")[:12000],
     )
     gen = _make_generate(model, system, 0.0, 240, 4096, cloud=False)
     correction = ""

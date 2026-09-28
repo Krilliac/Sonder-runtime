@@ -4,21 +4,14 @@ import re
 import contribute
 import sonder_runtime.adapters.embeddings as embeddings
 import sonder_runtime.adapters.memory_store as memory_store
+from sonder_runtime.adapters import prompt_store as _prompts
 
 DUP_THRESHOLD = 0.92
-DISTILL_SYSTEM = (
-    "You extract ONE concrete, reusable engineering lesson from a solved coding "
-    "task. The lesson must name the specific technique, data structure, API, "
-    "algorithm, or pitfall that mattered — something a developer could act on "
-    "without ever seeing this task. Output a single imperative sentence, no "
-    "preamble, no markdown.\n"
-    "BANNED (too vague to store): 'efficiently', 'effectively', 'properly', "
-    "'appropriately', 'best practices', 'clean/readable code', 'use the standard "
-    "library', 'manage state'. If you can only produce something that generic, "
-    "output the single word NONE.\n"
-    "Good: 'Use collections.deque for O(1) pops from both ends of a queue.'\n"
-    "Bad:  'Use appropriate data structures efficiently.'"
-)
+# Former constant name -> editable prompt (prompts/<name>.md).
+_PROMPT_CONSTANTS = {
+    "DISTILL_SYSTEM": "reflection_distill_system",
+    "PITFALL_SYSTEM": "reflection_pitfall_system",
+}
 
 # A distilled lesson is worthless if it's a platitude — better to store nothing
 # than to pollute retrieval with "use classes efficiently". These patterns catch
@@ -72,23 +65,11 @@ def _looks_vague(text):
 
 
 def distill(task, response, signal, offload_fn):
-    prompt = (
-        "A coding task was completed with outcome '%s'.\n\n"
-        "TASK:\n%s\n\nSOLUTION:\n%s\n\n"
-        "Extract ONE concrete, reusable lesson (max 25 words) that names the "
-        "specific technique, API, data structure, algorithm, or pitfall that made "
-        "this solution work. It must be actionable on a DIFFERENT future task.\n"
-        "Do NOT restate a rule the TASK itself already imposed - a constraint the "
-        "caller supplied is not something learned from the solution.\n"
-        "Do NOT state a rule that only holds for this task's platform, word size, "
-        "language version, or file as if it held everywhere. If the insight is "
-        "conditional, say the condition; if it cannot be stated without the "
-        "condition, output NONE.\n"
-        "If no such specific insight exists, output NONE. No preamble."
-        % (signal, task, response)
+    prompt = _prompts.render(
+        "reflection_distill", signal=signal, task=task, response=response,
     )
     text = offload_fn(
-        prompt=prompt, tier="code", system=DISTILL_SYSTEM,
+        prompt=prompt, tier="code", system=_prompts.render("reflection_distill_system"),
         temperature=0.0, num_predict=60,
     )
     text = (text or "").strip()
@@ -200,17 +181,6 @@ def exact_text_exists(text, conn):
 # plainly-code errors, which cost every pitfall the first live wave should
 # have produced. A worked example replaces it: small models follow a
 # demonstrated shape far more reliably than a described one.
-PITFALL_SYSTEM = (
-    "You extract ONE concrete, reusable pitfall from a coding attempt that "
-    "FAILED. Name the specific construct, API, or syntax that broke and the "
-    "concrete thing to write instead.\n"
-    "Answer with ONE sentence on ONE line. No preamble, no code fences, no "
-    "before/after diff, no bullet list.\n"
-    "Example error: Cannot bind parameter 'RemainingScripts' from "
-    "$x | ForEach-Object { ... } -join ' '\n"
-    "Example answer: Parenthesise a pipeline before applying -join, because "
-    "-join otherwise binds as an argument to ForEach-Object."
-)
 
 
 def distill_pitfall(task, response, error, offload_fn):
@@ -218,16 +188,11 @@ def distill_pitfall(task, response, error, offload_fn):
     detail = _readable_error(error)
     if not detail:
         return ""
-    prompt = (
-        "A coding attempt FAILED. Extract ONE reusable pitfall.\n\n"
-        "TASK:\n%s\n\nATTEMPTED SOLUTION:\n%s\n\nOBSERVED ERROR:\n%s\n\n"
-        "Name the exact construct that broke and what to write instead, as "
-        "one sentence on one line. It must be actionable on a DIFFERENT "
-        "future task."
-        % (task, response, detail[:1200])
+    prompt = _prompts.render(
+        "reflection_pitfall", task=task, response=response, error=detail[:1200],
     )
     text = offload_fn(
-        prompt=prompt, tier="code", system=PITFALL_SYSTEM,
+        prompt=prompt, tier="code", system=_prompts.render("reflection_pitfall_system"),
         temperature=0.0, num_predict=70,
     )
     return _one_sentence_lesson(text, detail, response)
@@ -545,3 +510,11 @@ def maybe_add_lesson(conn, interaction_id, task, response, signal, offload_fn,
         embedding_dim=candidate["embedding_dim"],
     )
     return lesson_id
+
+
+def __getattr__(attribute):
+    # These names used to be string constants; the text now lives in an
+    # editable prompt file, so each read returns the current version.
+    if attribute in _PROMPT_CONSTANTS:
+        return _prompts.render(_PROMPT_CONSTANTS[attribute])
+    raise AttributeError("module %r has no attribute %r" % (__name__, attribute))

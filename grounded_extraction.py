@@ -56,23 +56,17 @@ Two narrower limits, stated rather than glossed:
   stop.
 """
 
+from sonder_runtime.adapters import prompt_store as _prompts
+
 VALUE_KEY = "value"
 QUOTE_KEY = "quote"
 
 # How much of an offending span a rejection message repeats back.
 _PREVIEW_CHARS = 80
 
-EXTRACTION_SYSTEM = (
-    "You extract facts that are stated in the SOURCE text, and nothing else. "
-    "Every field is an object with two keys: \"value\", the extracted value, and "
-    "\"quote\", the span of the SOURCE that states it. Copy the quote CHARACTER "
-    "FOR CHARACTER out of the SOURCE: do not correct spelling, punctuation or "
-    "capitalisation, do not change spacing or line breaks, do not paraphrase, and "
-    "do not join text from two different places into one quote. Use nothing you "
-    "know from outside the SOURCE. If the SOURCE does not state a field, you have "
-    "no quote for it -- omit it if it is optional. A field whose quote is not "
-    "found in the SOURCE is thrown away."
-)
+# The extraction system prompt is editable: prompts/grounded_extraction_system.md.
+# ``EXTRACTION_SYSTEM`` stays readable (module __getattr__) for existing callers.
+_PROMPT_CONSTANTS = {"EXTRACTION_SYSTEM": "grounded_extraction_system"}
 
 
 class GroundingError(ValueError):
@@ -222,3 +216,11 @@ def verify_grounding(data, source):
     if problems:
         raise GroundingError("ungrounded extraction: %s" % "; ".join(problems))
     return grounded
+
+
+def __getattr__(attribute):
+    # These names used to be string constants; the text now lives in an
+    # editable prompt file, so each read returns the current version.
+    if attribute in _PROMPT_CONSTANTS:
+        return _prompts.render(_PROMPT_CONSTANTS[attribute])
+    raise AttributeError("module %r has no attribute %r" % (__name__, attribute))

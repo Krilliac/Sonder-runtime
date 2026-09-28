@@ -176,6 +176,7 @@ _DISPLAY_ONLY_BRANCHES = {
     "/strict": "session output toggle (apply_strict)",
     "/model": "chooses which model answers; no tool call",
     "/persona": "chooses the persona; reads personas.names()",
+    "/prompts": "lists/shows editable prompt files (prompt_store.command); reload only clears a read cache",
     "/route": "reports which tier would answer (tier_router.route); routes nothing",
     "/new": "starts a new session id (memory_store.new_id)",
     "/clear": "terminal presentation clear only; no runtime/tool mutation",

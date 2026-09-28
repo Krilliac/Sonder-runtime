@@ -13,7 +13,7 @@ sonder commands · ### in ## groups
   groups · /help <group> · /help all · /help status
     admin         #    filesystem   ##
     agents       ##    memory       ##
-    basic        ##    persona       #
+    basic        ##    persona      ##
     chat          #    planning     ##
     context      ##    repo         ##
     creative     ##    runtime      ##

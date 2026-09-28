@@ -502,7 +502,7 @@
   "adaptive_training.py": 3066,
   "master_orchestrator.py": 3026,
   "selfmod.py": 2568,
-  "server.py": 27050,
+  "server.py": 26942,
   "sonder_launcher.py": 2485,
   "sonder_runtime/interfaces/http/serve.py": 8360
  }
