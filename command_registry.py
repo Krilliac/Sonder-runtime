@@ -28,6 +28,12 @@ COMMANDS = [
         "summary": "Show context, summary, memory, and session health.",
     },
     {
+        "name": "/prompts",
+        "category": "inspect",
+        "risk": "safe",
+        "summary": "List, show, or locate the editable system/agent prompt files; reload re-reads them.",
+    },
+    {
         "name": "/contextsize",
         "category": "context",
         "risk": "safe",
@@ -79,7 +85,7 @@ COMMANDS = [
         "name": "/runtime",
         "category": "system",
         "risk": "ask",
-        "summary": "Inspect or guarded-edit shared local model mappings and execution-lane tiers; cloud remains separate.",
+        "summary": "Inspect or guarded-edit shared local model mappings, execution-lane tiers and the long-context overflow; cloud remains separate.",
     },
     {
         "name": "/updatecheck",
