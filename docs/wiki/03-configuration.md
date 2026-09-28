@@ -449,7 +449,9 @@ Behavior toggles: `SONDER_SPECULATION` (0 disables speculative execution),
 `SONDER_METRICS`, `OLLAMA_HOST`.
 
 Update/publish (optional): `SONDER_RELEASES_DIR`, `SONDER_CURRENT_LINK`,
-`SONDER_UPDATE_ALLOW_UNSIGNED` (dev only), `SONDER_BRANCH_PREDICTOR`.
+`SONDER_UPDATE_ALLOW_UNSIGNED` (dev only), `SONDER_UPDATE_TRUSTED_ROOT` (path to
+the operator-installed TUF root; default `<SONDER_HOME>/updates/trusted_root.json`),
+`SONDER_BRANCH_PREDICTOR`.
 
 `python -m sonder_runtime diagnostics` prints a redacted bundle of the
 effective configuration, schema state, and preflight for support.
@@ -463,3 +465,41 @@ secret file is `sonder.env`. `SONDER_CONFIG` and `SONDER_SECRETS`, then the
 explicit `--config` and `--secrets` flags, select a different file. This same
 resolved configuration is now applied by `serve`, `repl`, and `mcp`; command
 line flags remain only explicit, higher-precedence one-shot overrides.
+
+## Editing system and agent prompts
+
+Every system or agent prompt that Sonder sends to a model is a Markdown file:
+personas, the agent and research system prompts, the Autopilot and router
+prompts, the lesson distillers, the model-identity block and the rest. The
+shipped defaults are in [`prompts/`](../../prompts/README.md) in the
+repository. To change one, don't edit the repository copy. Put a file with
+the same relative name in the override directory:
+
+- `SONDER_PROMPTS_DIR`, when set, is searched first.
+- `<Sonder state home>/prompts/` (for example
+  `%LOCALAPPDATA%\sonder\prompts\personas\coder.md`) is searched next.
+
+Overrides are read again on the next turn, the same way `system_profile.md`
+is, so they take effect without a restart or a code change. Within one turn
+the text doesn't change. The console command `/prompts` is read-only:
+
+| Command | Shows |
+|---|---|
+| `/prompts` or `/prompts list` | Every prompt, with `default` or `override@<hash>` |
+| `/prompts show <name>` | The text in effect and its placeholders |
+| `/prompts path <name>` | Where an override for that prompt goes |
+| `/prompts reload` | Clears the read cache |
+
+On the HTTP surface, `/prompts` requires developer authority.
+
+Some prompts are templates with `$name` placeholders. An override must keep
+exactly the same set of placeholders, and `$$` produces a literal `$`. Sonder
+ignores an override and uses the shipped default, with one logged warning, if
+the override is empty, larger than 64 KiB, not UTF-8, unreadable, resolves
+outside its directory, or has the wrong placeholders. A bad edit never breaks
+a chat. Each chat turn's trace records which prompt versions it used; see
+`turn_inspect`.
+
+`ollama_alias_system.md` is baked into the `sonder` Ollama alias, so a change
+to it applies only when the alias is rebuilt. For the full list of prompts
+and the rules for each, see [`prompts/README.md`](../../prompts/README.md).

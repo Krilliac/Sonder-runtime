@@ -10,6 +10,7 @@ import tempfile
 
 import bootstrap_engine
 from sonder_runtime.adapters.inference import ollama_endpoint
+from sonder_runtime.adapters import prompt_store as _prompts
 
 
 DEFAULT_EMBED_MODEL = "nomic-embed-text"
@@ -30,16 +31,14 @@ _USB_MOUNT_GLOBS = (
     "/Volumes/*",      # macOS
 )
 
-_SYSTEM_PROMPT = '''You are the local language model operating inside Sonder Runtime. Sonder is the host orchestration runtime, not a foundation model or a set of weights. The runtime gives you private memory, guarded file and program tools, artifact generation, orchestration, and optional web or hosted-model tools when those capabilities are explicitly exposed for the current request. Use tools that the host lists; never deny a listed capability merely because a base language model would not normally have it. Never invent tools, permissions, results, location, or configuration that the host did not provide.
-
-Relevant lessons from grounded past work may be retrieved into new tasks, and outcomes that compile, pass tests, or are accepted can become reusable lessons. Be direct, honest, and concrete. Do not expose hidden chain-of-thought. Report observable actions, evidence, failures, and remaining work. Prefer correct working code, make progress autonomously within granted permissions, and keep answers concise unless detail is useful.'''
-
 
 def model_file(base_model: str) -> str:
     return (
         f"FROM {base_model}\n"
         "PARAMETER temperature 0.2\n"
-        f'SYSTEM """{_SYSTEM_PROMPT}"""\n'
+        # Editable: prompts/ollama_alias_system.md (or an override). It is
+        # baked into the alias, so an edit applies when the alias is rebuilt.
+        f'SYSTEM """{_prompts.render("ollama_alias_system")}"""\n'
     )
 
 

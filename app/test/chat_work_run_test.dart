@@ -41,6 +41,64 @@ void main() {
         isNull);
   });
 
+  test('the current server wording is recognised too', () {
+    final ref = workRunOf(const ChatMessage(
+        role: Role.assistant,
+        content: 'Work is still running as work run $_runId (wall-clock '
+            'budget 900 s); check on it or cancel it from your client.'))!;
+    expect(ref.id, _runId);
+    expect(ref.budgetSeconds, 900);
+  });
+
+  test('a short answer that merely mentions a work run is an answer', () {
+    for (final text in [
+      'The work run $_runId finished and changed two files.',
+      'You asked about work run $_runId: it edited the shader cache.',
+      'See /v1/work-runs/$_runId for the record.',
+      // Hand-off wording that does not lead the reply is not a hand-off.
+      'Earlier you saw: Work is still running as work run $_runId '
+          '(wall-clock budget 1800 s).',
+    ]) {
+      final m = ChatMessage(role: Role.assistant, content: text);
+      expect(workRunOf(m), isNull, reason: text);
+      expect(classifyReply(m), ReplyKind.answer, reason: text);
+    }
+  });
+
+  test('a receipt that names a settled run is authoritative over the text', () {
+    const m = ChatMessage(
+      role: Role.assistant,
+      content: _pending,
+      responseMetadata:
+          ChatResponseMetadata(workRunId: _runId, workStatus: 'returned'),
+    );
+    expect(workRunOf(m), isNull);
+  });
+
+  testWidgets('a mentioned run keeps the answer visible and is not polled',
+      (tester) async {
+    final backend = FakeChatBackend();
+    var polled = 0;
+    backend.workRun = (id) {
+      polled++;
+      return WorkRun(id: id, status: 'succeeded', output: 'RUN OUTPUT');
+    };
+    await pumpChat(tester, backend);
+    await tester.enterText(find.byType(TextField), 'what did it change?');
+    await tester.testTextInput.receiveAction(TextInputAction.send);
+    await tester.pump();
+    backend.lastTurn
+        .done('The work run $_runId finished and changed two files.');
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 3));
+    expect(find.byKey(const Key('work-run-card')), findsNothing);
+    expect(find.textContaining('changed two files', findRichText: true),
+        findsOneWidget);
+    expect(find.textContaining('RUN OUTPUT', findRichText: true), findsNothing);
+    expect(polled, 0);
+    await unmountChat(tester);
+  });
+
   testWidgets('a running turn shows the card, never the raw route text',
       (tester) async {
     final backend = FakeChatBackend();
