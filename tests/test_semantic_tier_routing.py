@@ -151,3 +151,13 @@ def test_typed_feature_export_reaches_router(monkeypatch, include_typed_runtime)
     config = load_config(env={}, overrides={"features.semantic_tier_routing": "true"})
     entry._export_runtime_environment(config, include_typed_runtime=include_typed_runtime)
     assert tier_router.route("hello", semantic_classifier=_signal)["signal"] == "semantic"
+
+
+def test_last_resort_fallback_keeps_the_callers_tier_order():
+    """Review on #594: dropping vision must not reorder an ordered tier list."""
+    import tier_router
+
+    first = tier_router.route("hello", ["fast", "cloud-code"], semantic_enabled=False)
+    second = tier_router.route("hello", ["cloud-code", "fast"], semantic_enabled=False)
+    assert (first["tier"], second["tier"]) == ("fast", "cloud-code")
+    assert tier_router.route("hello", ["vision", "fast"], semantic_enabled=False)["tier"] == "fast"

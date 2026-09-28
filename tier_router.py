@@ -149,7 +149,8 @@ def route(prompt: str, available_tiers=None, *, semantic_enabled=None,
     tier, reason = _PREFERENCE[kind]
     signal = "lexical"
     if available_tiers is not None:
-        available_tiers = set(available_tiers) - {"vision"}
+        # Keep the caller's order: the last-resort fallback takes the first entry.
+        available_tiers = [tier_name for tier_name in available_tiers if tier_name != "vision"]
     enabled = (env_bool(os.environ.get("SONDER_SEMANTIC_TIER_ROUTING", "0"))
                if semantic_enabled is None else semantic_enabled is True)
     if kind == "general" and enabled:
