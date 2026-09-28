@@ -47,6 +47,19 @@ class ProcessTreeSupervisor:
     def cleanup(self, request: ProcessTreeCleanupRequest) -> ProcessTreeCleanupReceipt:
         if not isinstance(request, ProcessTreeCleanupRequest):
             raise TypeError("request must be a ProcessTreeCleanupRequest")
+        if request.root_exited and self._platform == "posix":
+            if request.process_identity is not None:
+                state, observed_identity = self._process_probe(
+                    request.process_id, request.process_identity,
+                )
+                if state != PROCESS_DEAD or observed_identity not in (
+                    None, request.process_identity,
+                ):
+                    return ProcessTreeCleanupReceipt(
+                        request.job_id, False, complete=False,
+                        detail="root process identity is no longer owned by this job",
+                    )
+            return self._confirm_exited_group(request)
         if request.process_identity is not None:
             state, observed_identity = self._process_probe(
                 request.process_id,
@@ -75,7 +88,7 @@ class ProcessTreeSupervisor:
         )
 
     def _confirm_exited_group(self, request):
-        """Observe absence after root reaping without authorizing any signal."""
+        """Prove absence after root reaping; kill surviving group members."""
         if request.process_group_id != request.process_id:
             return ProcessTreeCleanupReceipt(
                 request.job_id, False, complete=False,
@@ -89,10 +102,27 @@ class ProcessTreeSupervisor:
                 detail="recorded process group is absent after root exit",
             )
         except OSError:
+            return ProcessTreeCleanupReceipt(
+                request.job_id, False, complete=False,
+                detail="root exited but process-group absence is unproven",
+            )
+        if request.process_identity is None:
+            return ProcessTreeCleanupReceipt(
+                request.job_id, False, complete=False,
+                detail="root identity is unavailable; live group cannot be signalled safely",
+            )
+        try:
+            self._os.killpg(request.process_group_id, self._signal.SIGKILL)
+        except ProcessLookupError:
             pass
+        except OSError as exc:
+            return ProcessTreeCleanupReceipt(
+                request.job_id, True, complete=False,
+                detail=f"process-group termination failed: {type(exc).__name__}",
+            )
         return ProcessTreeCleanupReceipt(
-            request.job_id, False, complete=False,
-            detail="root exited but process-group absence is unproven",
+            request.job_id, True, complete=False,
+            detail="surviving process group was signalled; absence awaits proof",
         )
 
     def _windows_cleanup(self, request: ProcessTreeCleanupRequest) -> ProcessTreeCleanupReceipt:
