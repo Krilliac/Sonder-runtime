@@ -11,12 +11,35 @@ So the routing rule is not "hard vs easy" -- it is "are the facts in the prompt
 or not". This classifier reads that signal from the request text and returns a
 tier suggestion, with the reason, so the choice is legible rather than magic.
 
-Deliberately a lexical classifier, not a model call: routing must be cheap and
+The primary classifier is deliberately lexical: routing must be cheap and
 must not itself depend on the model whose weakness it is compensating for.
+Transformation, recall, and reasoning always win. Only the otherwise-general
+case can opt into a local embedding backstop with SONDER_SEMANTIC_TIER_ROUTING=1
+or [features] semantic_tier_routing=true. Default OFF; no generation model or
+remote endpoint is used for this signal. Vision requires an image and is never
+selected by this text-only router.
+
+The signal is a trained linear head over nomic-embed-text (logistic regression
+on the bake-off bank plus locally generated synthetic prompts; no user data),
+shipped as sonder_runtime/adapters/data/semantic_tier_head.json;
+SONDER_SEMANTIC_TIER_HEAD points at an operator's own head instead. Measured
+2026-09-28 live against local Ollama on the 96 text prompts of the held-out
+split: this lexical-first hybrid 81.2% (lexical alone 29.2%); the head decided
+70, 66 correctly; 47 ms median. It abstains unless the top probability beats
+the runner-up by 0.3 (fixed before measuring). Without a head matching the
+embedding model, the adapter falls back to centroids over the bank (84.2% as a
+pure classifier in the bake-off; its 0.05 cosine gate is uncalibrated).
+Cold centroids warm lazily; any failure or one-second deadline yields the
+original lexical fallback. The returned signal and reason expose the choice.
 """
 from __future__ import annotations
 
+import math
+import os
 import re
+
+from sonder_runtime.domain.routing.semantic_tier import MIN_MARGIN
+from sonder_runtime.platform.config_environment import env_bool
 
 # Verbs whose object is usually PRESENT in the prompt -- you transform text you
 # were given. Strong local-model territory.
@@ -89,15 +112,53 @@ _PREFERENCE = {
 }
 
 
-def route(prompt: str, available_tiers=None) -> dict:
+def _semantic_signal(prompt, classifier, embedder):
+    """Lazy adapter boundary; injected callbacks keep routing tests offline."""
+    try:
+        if classifier is None:
+            from sonder_runtime.adapters.semantic_tier import semantic_signal
+
+            result = semantic_signal(prompt, embedder=embedder)
+        else:
+            result = classifier(prompt)
+        if not isinstance(result, dict):
+            return None
+        margin = result.get("margin")
+        if (result.get("tier") not in {"fast", "general", "code", "reasoning"}
+                or isinstance(margin, bool) or not isinstance(margin, (int, float))
+                or not math.isfinite(margin) or not MIN_MARGIN <= margin <= 2
+                or not isinstance(result.get("model"), str) or not result["model"]):
+            return None
+        return result
+    except Exception:
+        return None
+
+
+def route(prompt: str, available_tiers=None, *, semantic_enabled=None,
+          semantic_classifier=None, embedder=None) -> dict:
     """Suggest a tier for `prompt`.
 
-    Returns {"kind", "tier", "reason", "fallback_used"}. If the preferred tier
+    Returns {"kind", "tier", "reason", "fallback_used", "signal"}. If the preferred tier
     is not among `available_tiers`, falls back to a present one and says so --
     a router that names an unconfigured tier would just fail the next call.
+    Optional keyword injections do not change existing positional callers.
+    An unavailable semantic winner abstains rather than promoting a runner-up.
+    With no text-capable tier configured, retain the historical "code" sentinel.
     """
     kind = classify(prompt)
     tier, reason = _PREFERENCE[kind]
+    signal = "lexical"
+    if available_tiers is not None:
+        available_tiers = set(available_tiers) - {"vision"}
+    enabled = (env_bool(os.environ.get("SONDER_SEMANTIC_TIER_ROUTING", "0"))
+               if semantic_enabled is None else semantic_enabled is True)
+    if kind == "general" and enabled:
+        semantic = _semantic_signal(prompt, semantic_classifier, embedder)
+        if semantic and (available_tiers is None or semantic["tier"] in available_tiers):
+            tier = semantic["tier"]
+            reason = (f"semantic tier={tier}; margin={semantic['margin']:.3f}; "
+                      f"embedding model={semantic['model']}")
+            signal = "semantic"
     fallback_used = False
     if available_tiers is not None and tier not in available_tiers:
         fallback_used = True
@@ -109,4 +170,4 @@ def route(prompt: str, available_tiers=None) -> dict:
             tier = next(iter(available_tiers), "code")
         reason += " (preferred tier unavailable; using %s)" % tier
     return {"kind": kind, "tier": tier, "reason": reason,
-            "fallback_used": fallback_used}
+            "fallback_used": fallback_used, "signal": signal}

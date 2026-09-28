@@ -387,6 +387,7 @@ class FeaturesConfig:
     expose_reasoning: bool = False
     allow_private_cot: bool = False
     location_consent: bool = False
+    semantic_tier_routing: bool = False
 
 
 @dataclass(frozen=True)
@@ -1617,6 +1618,10 @@ def _apply_environment(
     if "SONDER_LOCATION_CONSENT" in env:
         features = replace(
             features, location_consent=_env_bool(env["SONDER_LOCATION_CONSENT"])
+        )
+    if "SONDER_SEMANTIC_TIER_ROUTING" in env:
+        features = replace(
+            features, semantic_tier_routing=_env_bool(env["SONDER_SEMANTIC_TIER_ROUTING"])
         )
     if env.get("SONDER_API_KEY", "").strip():
         secrets = replace(secrets, api_key=env["SONDER_API_KEY"].strip())

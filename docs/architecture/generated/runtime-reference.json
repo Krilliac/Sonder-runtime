@@ -17596,6 +17596,12 @@
       "type": "bool"
     },
     {
+      "default": false,
+      "field": "semantic_tier_routing",
+      "section": "features",
+      "type": "bool"
+    },
+    {
       "default": "static",
       "field": "mode",
       "section": "membership",
@@ -18119,13 +18125,13 @@
   "counts": {
     "capabilities": 216,
     "commands": 332,
-    "configuration": 226,
+    "configuration": 227,
     "events": 43,
     "native_tools": 66,
     "schemas": 4,
     "tools": 216
   },
-  "digest": "bf51bc6aa0a17b26b59d398b7692cf265467c7b3ce6de35f71be3b57cce733d1",
+  "digest": "4de22bb29adb6a777129427770830577f889e7fb5d1f860077328ab410661e70",
   "events": [
     {
       "name": "session.started",
@@ -46458,7 +46464,7 @@
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/domain/operational_capabilities.py": "6f8f2083343ac1b0de076cd4d545b5f99602a9916c185bd15d965ffa0c405fe6",
     "sonder_runtime/interfaces/sdk/discovery.py": "db8aeca8dd84d06cbbf834495db30b211956393375676f23899a28685aea015b",
-    "sonder_runtime/platform/config.py": "028c65a1b656a68749f9aabea884e37292abc96846efe10751884c739d3edda6",
+    "sonder_runtime/platform/config.py": "77211f3dc75ab268ed144080604e013002e0275b1b0dd06b2947f84a4256edb9",
     "sonder_runtime/platform/memory_replication_config.py": "f9fc0a642812bdc456ac082f0f8c52f051822f0160e16882b634895feb0cea61"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
