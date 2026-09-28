@@ -5552,7 +5552,7 @@ def prewarm_model(tier: str = "") -> bool:
     DB/recall/augmentation work overlaps that cost. Local tiers only,
     best-effort, one in-flight load per model, and never fatal.
     """
-    if not sonder_speculation.speculation_enabled():
+    if not sonder_speculation.prewarm_enabled():
         return False
     try:
         model, cloud, _augment, tier_label = _serve_target(tier or "sonder", None)

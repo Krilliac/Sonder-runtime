@@ -293,6 +293,7 @@ def test_missing_embeddings_on_a_bridged_turn_degrade_loudly(monkeypatch, caplog
     assert any("memory_recall_embeddings" in r.getMessage() for r in caplog.records)
 
 
+@pytest.mark.real_prewarm
 def test_prewarm_skips_tiers_served_by_another_provider(monkeypatch):
     monkeypatch.setattr(server.sonder_speculation, "speculation_enabled", lambda: True)
     monkeypatch.setattr(server, "_serve_target",
