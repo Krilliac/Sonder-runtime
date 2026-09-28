@@ -1,5 +1,6 @@
 import hashlib
 import sqlite3
+from contextlib import contextmanager
 
 import pytest
 
@@ -58,3 +59,53 @@ def test_spill_write_and_output_bounds_fail_without_partial_commit(tmp_path):
     output = DurableExecutionOutput(store, max_bytes=3)
     with pytest.raises(ValueError, match="spill bound"):
         output.spill_text("1234", owner_id="job-1")
+
+
+def test_committed_spills_have_owner_and_store_byte_quotas(tmp_path):
+    store = SQLiteSpillStore(tmp_path / "output.sqlite", max_owner_bytes=8, max_total_bytes=12)
+    output = DurableExecutionOutput(store, max_bytes=8)
+    output.spill_text("12345678", owner_id="job-1")
+    with pytest.raises(ValueError, match="owner.*quota"):
+        output.spill_text("x", owner_id="job-1")
+    output.spill_text("1234", owner_id="job-2")
+    with pytest.raises(ValueError, match="store.*quota"):
+        output.spill_text("x", owner_id="job-3")
+
+
+def test_reaping_expired_output_references_recovers_spill_quota(tmp_path):
+    store = SQLiteSpillStore(tmp_path / "output.sqlite", max_owner_bytes=8, max_total_bytes=8)
+    output = DurableExecutionOutput(store, max_bytes=8)
+    stale = output.spill_text("12345678", owner_id="job-1")
+    assert output.reap_owner("job-1", ()) == 1
+    with pytest.raises(DurableSpillIntegrityError):
+        output.read(stale, max_bytes=8)
+    fresh = output.spill_text("abcdefgh", owner_id="job-2")
+    assert output.read(fresh, max_bytes=8) == b"abcdefgh"
+
+
+def test_spill_quota_and_reference_reaping_with_memory_connection(monkeypatch):
+    connection = sqlite3.connect(":memory:")
+
+    @contextmanager
+    def memory_connection(_store):
+        with connection:
+            yield connection
+
+    monkeypatch.setattr(SQLiteSpillStore, "_connect", memory_connection)
+    try:
+        store = SQLiteSpillStore("unused", max_owner_bytes=8, max_total_bytes=12)
+        output = DurableExecutionOutput(store, max_bytes=8)
+        first = output.spill_text("12345678", owner_id="one")
+        with pytest.raises(ValueError, match="owner.*quota"):
+            output.spill_text("x", owner_id="one")
+        output.spill_text("1234", owner_id="two")
+        with pytest.raises(ValueError, match="store.*quota"):
+            output.spill_text("x", owner_id="three")
+        assert output.reap_owner("one", ()) == 1
+        with pytest.raises(DurableSpillIntegrityError):
+            output.read(first, max_bytes=8)
+        assert output.spill_text("12345678", owner_id="three").size == 8
+        with pytest.raises(DurableSpillIntegrityError):
+            output.read(first, max_bytes=8)
+    finally:
+        connection.close()

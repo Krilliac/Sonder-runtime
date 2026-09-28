@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
-from sonder_runtime.adapters.persistence.owned_sqlite import transaction as owned_sqlite_transaction
+from ..persistence.owned_sqlite import transaction as owned_sqlite_transaction
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -20,8 +20,8 @@ from threading import Lock
 from typing import Any
 from uuid import uuid4
 
-from sonder_runtime.application.execution.world_control import SpillReference
-from sonder_runtime.application.ports.artifact_store import (
+from ...application.execution.world_control import SpillReference
+from ...application.ports.artifact_store import (
     ArtifactHandle, SpillHandle, SpillSnapshot, SpillSpec, SpillState,
 )
 
@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS execution_spill (
     digest TEXT,
     payload BLOB,
     expires_at TEXT,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    owner_id TEXT
 )
 """
 
@@ -84,12 +85,24 @@ class _SQLiteSpillHandle:
 class SQLiteSpillStore:
     """Durable, bounded implementation of the typed ``SpillStore`` port."""
 
-    def __init__(self, db_path: str | Path):
+    def __init__(
+        self, db_path: str | Path, *, max_owner_bytes: int = 8 << 20,
+        max_total_bytes: int = 64 << 20,
+    ):
+        if type(max_owner_bytes) is not int or max_owner_bytes < 1:
+            raise ValueError("max_owner_bytes must be positive")
+        if type(max_total_bytes) is not int or max_total_bytes < max_owner_bytes:
+            raise ValueError("max_total_bytes must be at least max_owner_bytes")
         self._path = Path(db_path)
+        self._max_owner_bytes = max_owner_bytes
+        self._max_total_bytes = max_total_bytes
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = Lock()
         with self._connect() as connection:
             connection.execute(_DDL)
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(execution_spill)")}
+            if "owner_id" not in columns:
+                connection.execute("ALTER TABLE execution_spill ADD COLUMN owner_id TEXT")
 
     @contextmanager
     def _connect(self):
@@ -98,6 +111,9 @@ class SQLiteSpillStore:
             yield connection
 
     def begin(self, spec: SpillSpec) -> SpillHandle:
+        return self._begin(spec, owner_id=None)
+
+    def _begin(self, spec: SpillSpec, *, owner_id: str | None) -> SpillHandle:
         if not isinstance(spec, SpillSpec):
             raise TypeError("spec must be a SpillSpec")
         spill_id = f"spill-{uuid4().hex}"
@@ -109,10 +125,10 @@ class SQLiteSpillStore:
             ).isoformat()
         with self._lock, self._connect() as connection:
             connection.execute(
-                "INSERT INTO execution_spill(spill_id,state,max_bytes,media_type,name,expires_at,created_at) "
-                "VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO execution_spill(spill_id,state,max_bytes,media_type,name,expires_at,created_at,owner_id) "
+                "VALUES (?,?,?,?,?,?,?,?)",
                 (spill_id, SpillState.OPEN.value, spec.max_bytes, spec.media_type,
-                 spec.name, expires_at, _now()),
+                 spec.name, expires_at, _now(), owner_id),
             )
         return _SQLiteSpillHandle(self, spill_id)
 
@@ -137,8 +153,10 @@ class SQLiteSpillStore:
         if not isinstance(chunk, bytes):
             raise TypeError("spill chunks must be bytes")
         with self._lock, self._connect() as connection:
+            # Serialize quota admission across store instances and processes.
+            connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT state,max_bytes,size_bytes,payload FROM execution_spill WHERE spill_id=?",
+                "SELECT state,max_bytes,size_bytes,payload,owner_id FROM execution_spill WHERE spill_id=?",
                 (spill_id,),
             ).fetchone()
             if row is None:
@@ -148,6 +166,21 @@ class SQLiteSpillStore:
             payload = bytes(row[3] or b"") + chunk
             if len(payload) > row[1]:
                 raise ValueError("spill exceeds max_bytes")
+            total = connection.execute(
+                "SELECT COALESCE(SUM(size_bytes),0) FROM execution_spill "
+                "WHERE state IN (?,?) AND spill_id!=?",
+                (SpillState.OPEN.value, SpillState.COMMITTED.value, spill_id),
+            ).fetchone()[0]
+            if total + len(payload) > self._max_total_bytes:
+                raise ValueError("spill store byte quota exceeded")
+            if row[4] is not None:
+                owner_total = connection.execute(
+                    "SELECT COALESCE(SUM(size_bytes),0) FROM execution_spill "
+                    "WHERE owner_id=? AND state IN (?,?) AND spill_id!=?",
+                    (row[4], SpillState.OPEN.value, SpillState.COMMITTED.value, spill_id),
+                ).fetchone()[0]
+                if owner_total + len(payload) > self._max_owner_bytes:
+                    raise ValueError("spill owner byte quota exceeded")
             connection.execute(
                 "UPDATE execution_spill SET payload=?,size_bytes=? WHERE spill_id=?",
                 (sqlite3.Binary(payload), len(payload), spill_id),
@@ -207,6 +240,20 @@ class SQLiteSpillStore:
             )
             return cursor.rowcount
 
+    def reap_owner(self, owner_id: str, live_digests: tuple[str, ...]) -> int:
+        """Drop this owner's blobs whose durable output references were pruned."""
+        if not owner_id:
+            raise ValueError("owner_id is required")
+        live = set(live_digests)
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                "SELECT spill_id,digest FROM execution_spill WHERE owner_id=? AND state=?",
+                (owner_id, SpillState.COMMITTED.value),
+            ).fetchall()
+            stale = [(spill_id,) for spill_id, digest in rows if digest not in live]
+            connection.executemany("DELETE FROM execution_spill WHERE spill_id=?", stale)
+            return len(stale)
+
 
 @dataclass(frozen=True, slots=True)
 class DurableExecutionOutput:
@@ -224,7 +271,7 @@ class DurableExecutionOutput:
         payload = text.encode("utf-8")
         if len(payload) > self.max_bytes:
             raise ValueError("output exceeds spill bound")
-        handle = self.store.begin(SpillSpec(self.max_bytes, media_type=media_type))
+        handle = self.store._begin(SpillSpec(self.max_bytes, media_type=media_type), owner_id=owner_id)
         try:
             handle.write(payload)
             artifact = handle.commit()
@@ -235,21 +282,26 @@ class DurableExecutionOutput:
             handle.close()
         return SpillReference(artifact.sha256, text[: self.preview_chars], artifact.size_bytes, media_type, owner_id)
 
+    def reap_owner(self, owner_id: str, live_digests: tuple[str, ...]) -> int:
+        return self.store.reap_owner(owner_id, live_digests)
+
     def read(self, reference: SpillReference, *, max_bytes: int) -> bytes:
         if not isinstance(reference, SpillReference):
             raise TypeError("reference must be a SpillReference")
         if type(max_bytes) is not int or max_bytes < 0:
             raise ValueError("max_bytes must be a non-negative integer")
-        handle = self._find(reference.digest)
+        handle = self._find(reference.digest, reference.owner_id)
         if handle.size_bytes != reference.size:
             raise DurableSpillIntegrityError("spill reference size does not match stored artifact")
         return self.store.read(handle, max_bytes=max_bytes)
 
-    def _find(self, digest: str) -> ArtifactHandle:
+    def _find(self, digest: str, owner_id: str) -> ArtifactHandle:
         with self.store._connect() as connection:
             row = connection.execute(
-                "SELECT spill_id,size_bytes,digest,media_type,name,state FROM execution_spill WHERE digest=?",
-                (digest,),
+                "SELECT spill_id,size_bytes,digest,media_type,name,state FROM execution_spill "
+                "WHERE digest=? AND (owner_id=? OR owner_id IS NULL) "
+                "ORDER BY owner_id IS NULL LIMIT 1",
+                (digest, owner_id),
             ).fetchone()
         if row is None or row[5] != SpillState.COMMITTED.value:
             raise DurableSpillIntegrityError("spill reference is not backed by a committed artifact")
