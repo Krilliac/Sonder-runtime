@@ -74,7 +74,8 @@ def test_hash_mismatch_rejected(tmp_path):
     dest = tmp_path / "e.tar.gz"
     opener = _opener([(None, lambda: _FakeResponse(payload))])
     with pytest.raises(TrustError):
-        resumable_download("http://m/e", dest, expected_sha256="00" * 32,
+        resumable_download("http://m/e", dest, expected_length=len(payload),
+                           expected_sha256="00" * 32,
                            opener=opener)
 
 
@@ -84,6 +85,22 @@ def test_length_mismatch_rejected(tmp_path):
     with pytest.raises(UpdateError):
         resumable_download("http://m/e", dest, expected_length=999,
                            opener=opener)
+
+
+def test_stream_rejects_oversized_chunk_before_writing(tmp_path):
+    dest = tmp_path / "bounded.tar.gz"
+    opener = _opener([(None, lambda: _FakeResponse(b"x" * 32))])
+    with pytest.raises(UpdateError, match="length|limit"):
+        resumable_download("http://m/e", dest, expected_length=8,
+                           chunk_size=32, opener=opener)
+    assert not dest.exists()
+    assert not dest.with_name(dest.name + ".partial").exists()
+
+
+def test_download_requires_signed_expected_length(tmp_path):
+    with pytest.raises(UpdateError, match="expected download length"):
+        resumable_download("http://m/e", tmp_path / "unbounded.tar.gz",
+                           opener=_opener([(None, lambda: _FakeResponse(b"x"))]))
 
 
 def test_resume_with_matching_validators(tmp_path):
@@ -100,6 +117,7 @@ def test_resume_with_matching_validators(tmp_path):
     ])
     result = resumable_download(
         "http://m/e", dest, validators={"etag": "v1"},
+        expected_length=len(full),
         expected_sha256=_hash(full), opener=opener,
     )
     assert dest.read_bytes() == full
@@ -118,6 +136,7 @@ def test_changed_validators_discard_partial_and_restart(tmp_path):
     opener = _opener([(None, lambda: _FakeResponse(full))])
     result = resumable_download(
         "http://m/e", dest, validators={"etag": "NEW"},
+        expected_length=len(full),
         expected_sha256=_hash(full), opener=opener,
     )
     assert dest.read_bytes() == full
@@ -135,6 +154,7 @@ def test_server_ignores_range_falls_back_to_full(tmp_path):
     opener = _opener([("bytes=100-", lambda: _FakeResponse(full, status=200))])
     result = resumable_download(
         "http://m/e", dest, validators={"etag": "v1"},
+        expected_length=len(full),
         expected_sha256=_hash(full), opener=opener,
     )
     assert dest.read_bytes() == full

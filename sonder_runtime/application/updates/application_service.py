@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Callable, Mapping
 
 from ..ports.updates import UpdateAuthority, UpdateBackup, UpdatePort
-from .bounded_state import BoundedUpdateState, UpdateSnapshot, UpdateTarget
+from .bounded_state import BoundedUpdateState, MetadataLedger, UpdateSnapshot, UpdateTarget
 from .durable_activation import DurableActivationCoordinator
 from .release_evidence import ActivationRequest, ReleaseEvidencePackage
 
@@ -63,10 +63,13 @@ class UpdateApplicationService:
         activation: DurableActivationCoordinator,
         verifier: Callable[[bytes, str, str], bool],
         authority: UpdateAuthority,
+        metadata_ledger: MetadataLedger,
+        repository: str,
     ) -> None:
         for name, value in (("ports", ports), ("backup", backup),
                             ("activation", activation), ("verifier", verifier),
-                            ("authority", authority)):
+                            ("authority", authority), ("metadata_ledger", metadata_ledger),
+                            ("repository", repository)):
             if value is None:
                 raise TypeError(f"{name} is required")
         if not callable(getattr(authority, "authorize", None)):
@@ -78,6 +81,7 @@ class UpdateApplicationService:
         self._ports, self._backup = ports, backup
         self._activation, self._verifier = activation, verifier
         self._authority = authority
+        self._metadata_ledger, self._repository = metadata_ledger, repository
 
     def prepare(self, target: UpdateTarget, *, now: datetime | None = None) -> PreparedUpdate:
         """Download, authenticate, stage, health-check, then verify backup."""
@@ -87,7 +91,8 @@ class UpdateApplicationService:
         artifact = recording.artifact
         if artifact is None:
             raise ValueError("download port did not return an artifact")
-        state.verify(self._verifier, now=now)
+        state.verify(self._verifier, now=now, repository=self._repository,
+                     ledger=self._metadata_ledger)
         state.stage(self._ports, artifact)
         state.health_gate(self._ports)
         if not self._authority.authorize(target):

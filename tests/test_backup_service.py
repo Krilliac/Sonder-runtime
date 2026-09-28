@@ -134,7 +134,10 @@ def test_legacy_gateway_resolves_live_adapter_module(monkeypatch):
 
 
 def test_update_engine_routes_backup_through_application_service():
-    source = inspect.getsource(sonder_update_engine.UpdateManager.install)
+    # install() takes the update lock and delegates to _install_locked().
+    source = inspect.getsource(sonder_update_engine.UpdateManager.install) + inspect.getsource(
+        sonder_update_engine.UpdateManager._install_locked
+    )
     assert "default_app().backup.create(target)" in source
     assert "sonder_backup.create_backup" not in source
 

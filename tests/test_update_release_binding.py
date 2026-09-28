@@ -119,7 +119,11 @@ def _health_checked_state():
     ports = Ports(artifact)
     state = BoundedUpdateState(update_target)
     state.download(ports)
-    state.verify(verifier, now=NOW)
+    class Ledger:
+        def accept(self, _repository, _chain, _verifier):
+            pass
+
+    state.verify(verifier, now=NOW, repository="test", ledger=Ledger())
     state.stage(ports, artifact)
     state.health_gate(ports)
     return state, update_target, artifact

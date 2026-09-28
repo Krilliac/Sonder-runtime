@@ -10,16 +10,18 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-import sonder_runtime.adapters.persistence.migrations as sonder_migrations
+from ..filesystem.durable_locks import exclusive_file_lock
+from ..persistence import migrations as sonder_migrations
 import sonder_runtime.adapters.updates.service as sonder_updates
-import sonder_runtime.platform.paths as sonder_paths
-import sonder_runtime.platform.version as sonder_version
-from sonder_runtime.adapters.updates.service import (
+from ...platform import paths as sonder_paths
+from ...platform import version as sonder_version
+from .service import (
     BundleManifest,
     CANCELLABLE_STATES,
     CompatibilityError,
@@ -50,6 +52,25 @@ def confirm_nonce_for(plan: dict) -> str:
     return plan["update_id"][-8:]
 
 
+def _release_order(version: str) -> tuple[tuple[int, ...], tuple[int, int, int, int]]:
+    """Order numeric releases and development/alpha/beta/rc previews."""
+    match = re.fullmatch(
+        r"v?(\d+(?:\.\d+){1,3})(?:(?:-|\.)?(a|alpha|b|beta|rc)[.-]?(\d+))?"
+        r"(?:\.dev(\d+))?(?:\+[A-Za-z0-9.-]+)?",
+        version, re.IGNORECASE,
+    )
+    if match is None:
+        raise UpdateError(f"release version {version!r} cannot be ordered safely")
+    number = tuple(int(part) for part in match.group(1).split("."))
+    number += (0,) * (4 - len(number))
+    stage = (match.group(2) or "").lower()
+    rank = {"a": 0, "alpha": 0, "b": 1, "beta": 1, "rc": 2, "": 3}[stage]
+    dev = match.group(4)
+    if dev is not None and not stage:
+        rank = -1
+    return number, (rank, int(match.group(3) or 0), int(dev is None), int(dev or 0))
+
+
 class UpdateManager:
     def __init__(
         self,
@@ -71,13 +92,17 @@ class UpdateManager:
         self._drain_hook = drain_hook
         self._restart_hook = restart_hook
         self._health_timeout = health_timeout
+        if self._activation_intent_path().exists():
+            self.releases_dir.mkdir(parents=True, exist_ok=True)
+            with exclusive_file_lock(self._activation_lock_path(), purpose="update activation"):
+                self._reconcile_activation_locked()
 
     # -- helpers -----------------------------------------------------------
 
     def _ops(self):
         if self._operations is None:
             try:
-                from sonder_runtime.adapters.persistence.operations_store import OperationsStore
+                from ..persistence.operations_store import OperationsStore
 
                 self._operations = OperationsStore()
             except Exception:
@@ -103,6 +128,109 @@ class UpdateManager:
             return active["release_id"]
         return "rel_source_checkout"
 
+    def _require_forward_release(self, version: str) -> None:
+        accepted_versions = self.repository.accepted_versions()
+        if not accepted_versions:
+            return
+        candidate = _release_order(version)
+        for accepted in accepted_versions:
+            if candidate < _release_order(accepted):
+                raise UpdateError(
+                    f"bundle {version} is older than accepted release {accepted}; "
+                    "use the explicit rollback workflow"
+                )
+
+    def _activation_lock_path(self) -> Path:
+        return self.releases_dir / ".activation.lock"
+
+    def _activation_intent_path(self) -> Path:
+        return self.releases_dir / ".activation-intent.json"
+
+    def _sync_release_dir(self) -> None:
+        try:
+            descriptor = os.open(self.releases_dir, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except OSError:
+            # Windows does not allow fsync on a directory handle.
+            if os.name != "nt":
+                raise
+
+    def _write_activation_intent(self, intent: dict) -> None:
+        path = self._activation_intent_path()
+        temporary = path.with_name(path.name + f".tmp-{os.getpid()}")
+        try:
+            with temporary.open("w", encoding="utf-8") as stream:
+                json.dump(intent, stream, sort_keys=True)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+            self._sync_release_dir()
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _clear_activation_intent(self) -> None:
+        self._activation_intent_path().unlink()
+        self._sync_release_dir()
+
+    def _reconcile_activation_locked(self) -> None:
+        path = self._activation_intent_path()
+        if not path.exists():
+            return
+        try:
+            intent = json.loads(path.read_text(encoding="utf-8"))
+            old_id, new_id = intent["from_release_id"], intent["to_release_id"]
+            old_path, new_path = intent["from_path"], intent["to_path"]
+            if not new_id or not new_path:
+                raise ValueError("incomplete activation intent")
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise UpdateError("activation intent cannot be reconciled") from exc
+        active = self.repository.release_by_status("active")
+        active_id = active["release_id"] if active else None
+        pointer = sonder_updates._read_pointer(self.current_link)
+        if active_id not in (old_id, new_id) or pointer not in (old_path, new_path):
+            raise UpdateError("activation pointer and release records need operator recovery")
+        desired = new_path if active_id == new_id else old_path
+        if pointer != desired:
+            if desired is None:
+                if self.current_link.is_symlink():
+                    self.current_link.unlink()
+                self.current_link.with_name(self.current_link.name + ".pointer").unlink(missing_ok=True)
+            else:
+                self._switch_pointer(Path(desired))
+            if sonder_updates._read_pointer(self.current_link) != desired:
+                raise UpdateError("activation pointer could not be reconciled")
+        update_id = intent.get("update_id")
+        if update_id:
+            plan = self.repository.get_plan(update_id)
+            if plan["status"] == "health_check":
+                if active_id == new_id:
+                    self.repository.advance(plan, "committed")
+                else:
+                    plan = self.repository.advance(plan, "rolling_back",
+                                                   error_code="ACTIVATION_INTERRUPTED")
+                    self.repository.advance(plan, "failed")
+        self._clear_activation_intent()
+
+    def _reconcile_if_needed(self) -> None:
+        if self._activation_intent_path().exists():
+            with exclusive_file_lock(self._activation_lock_path(), purpose="update activation"):
+                self._reconcile_activation_locked()
+
+    def _assert_activation_consistent(self) -> None:
+        active = self.repository.release_by_status("active")
+        # The host installer creates current before the update repository has
+        # ever recorded an activation. Preserve that bootstrap pointer until
+        # the first managed release is committed.
+        if active is None and not self.repository.accepted_versions():
+            return
+        expected = active["install_path"] if active else None
+        if sonder_updates._read_pointer(self.current_link) != expected:
+            raise UpdateError("active release pointer and records disagree; recovery required")
+
     # -- import / check ----------------------------------------------------
 
     def import_offline(
@@ -114,11 +242,14 @@ class UpdateManager:
         idempotency_key: str | None = None,
     ) -> dict:
         """Verify an offline bundle and persist an AVAILABLE/BLOCKED plan."""
+        self._reconcile_if_needed()
+        self._assert_activation_consistent()
         bundle = Path(bundle_dir).expanduser().resolve()
         manifest = BundleManifest.load(bundle / "manifest.json")
         trust_mode = verify_bundle_trust(
             bundle, manifest, allow_unverified=allow_unverified
         )
+        self._require_forward_release(manifest["version"])
         archive_info = manifest.get("archive") or {}
         archive = self._locate_archive(bundle, archive_info)
         actual = _sha256_file(archive)
@@ -201,6 +332,19 @@ class UpdateManager:
     # -- install -----------------------------------------------------------
 
     def install(
+        self, update_id: str, *, confirm: str,
+        allow_unverified: bool = False, skip_backup: bool = False,
+    ) -> dict:
+        self.releases_dir.mkdir(parents=True, exist_ok=True)
+        with exclusive_file_lock(self._activation_lock_path(), purpose="update activation"):
+            self._reconcile_activation_locked()
+            self._assert_activation_consistent()
+            return self._install_locked(
+                update_id, confirm=confirm, allow_unverified=allow_unverified,
+                skip_backup=skip_backup,
+            )
+
+    def _install_locked(
         self,
         update_id: str,
         *,
@@ -219,6 +363,7 @@ class UpdateManager:
                 "required nonce"
             )
         manifest, bundle = self._manifest_for(plan)
+        self._require_forward_release(manifest["version"])
         ops = self._ops()
         owner = f"update-{os.getpid()}"
         if ops is not None:
@@ -426,7 +571,16 @@ class UpdateManager:
                 )
 
             # Atomic pointer switch (R-M10).
+            self._require_forward_release(manifest["version"])
             step += 1
+            active = self.repository.release_by_status("active")
+            release_id = f"rel_{plan['update_id'][4:]}"
+            self._write_activation_intent({
+                "kind": "install", "update_id": update_id,
+                "from_release_id": active["release_id"] if active else None,
+                "from_path": sonder_updates._read_pointer(self.current_link),
+                "to_release_id": release_id, "to_path": str(final_dir),
+            })
             previous_target = self._switch_pointer(final_dir)
             self.repository.record_step(
                 update_id, step, "activate", "ok",
@@ -437,24 +591,21 @@ class UpdateManager:
             )
 
             # Book-keeping: releases table, then COMMITTED.
-            active = self.repository.release_by_status("active")
-            if active:
-                self.repository.set_release_status(
-                    active["release_id"], "previous"
-                )
-            release_id = f"rel_{plan['update_id'][4:]}"
-            self.repository.record_release(
-                release_id=release_id,
+            self.repository.commit_activation(
+                expected_active_id=active["release_id"] if active else None,
+                target_release_id=release_id,
+                new_release=dict(
                 version=manifest["version"],
                 commit_sha=manifest["commit_sha"],
                 platform_name=manifest["platform"],
                 architecture=manifest["architecture"],
                 install_path=str(final_dir),
-                status="active",
                 manifest_sha256=plan["target_manifest_sha256"],
                 state_schema=manifest["state_schema"],
+                ),
             )
             plan = self.repository.advance(plan, "committed")
+            self._clear_activation_intent()
             self._event(
                 "UPDATE_COMMITTED", f"release {manifest['version']} active",
                 {"version": manifest["version"], "release_id": release_id},
@@ -644,6 +795,13 @@ class UpdateManager:
     # -- rollback (operator-initiated, R-M11) ------------------------------
 
     def rollback(self, *, confirm: str) -> dict:
+        self.releases_dir.mkdir(parents=True, exist_ok=True)
+        with exclusive_file_lock(self._activation_lock_path(), purpose="update activation"):
+            self._reconcile_activation_locked()
+            self._assert_activation_consistent()
+            return self._rollback_locked(confirm=confirm)
+
+    def _rollback_locked(self, *, confirm: str) -> dict:
         active = self.repository.release_by_status("active")
         previous = self.repository.release_by_status("previous")
         if previous is None:
@@ -659,11 +817,17 @@ class UpdateManager:
                 f"previous release directory {target} is missing; "
                 "state restore from backup is required"
             )
+        self._write_activation_intent({
+            "kind": "rollback", "from_release_id": active["release_id"] if active else None,
+            "from_path": sonder_updates._read_pointer(self.current_link),
+            "to_release_id": previous["release_id"], "to_path": str(target),
+        })
         self._switch_pointer(target)
-        # Demote first: the partial unique index allows exactly one 'active'.
-        if active:
-            self.repository.set_release_status(active["release_id"], "previous")
-        self.repository.set_release_status(previous["release_id"], "active")
+        self.repository.commit_activation(
+            expected_active_id=active["release_id"] if active else None,
+            target_release_id=previous["release_id"],
+        )
+        self._clear_activation_intent()
         self._event(
             "UPDATE_ROLLED_BACK",
             f"operator rollback to {previous['version']}",

@@ -78,7 +78,8 @@ class ReleaseEvidencePublication:
         now=None,
         expected_target_names: tuple[str, ...] = ("manifest.json", "sbom.json", "tests.json", "release-evidence.json", "SHA256SUMS"),
     ) -> None:
-        self.metadata.verify(verifier, now=now)
+        # Publisher-side self-check: integrity only (clients add the rollback ledger).
+        self.metadata.verify_integrity(verifier, now=now)
         self.package.verify(verifier)
         if self.manifest.package_digest != self.package.package_digest:
             raise ValueError("publication package digest mismatch")

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import platform as _platform
 import shutil
@@ -477,6 +478,8 @@ def resumable_download(
     expected_sha256: str | None = None,
     validators: dict | None = None,
     chunk_size: int = 1 << 20,
+    max_bytes: int = 4 * (1 << 30),
+    max_seconds: float = 300.0,
     opener=None,
 ) -> dict:
     """Download ``url`` to ``destination`` resuming a prior ``.partial`` file.
@@ -484,14 +487,24 @@ def resumable_download(
     SPEC-4 section 9: HTTP Range is used only when the server's validators
     (ETag / Last-Modified) match those persisted from the interrupted
     attempt, so a changed upstream never resumes onto stale bytes — the
-    partial is discarded and the download restarts. Length and SHA-256 are
-    verified after assembly. Returns evidence describing the transfer.
+    partial is discarded and the download restarts. The caller must supply
+    the signed target length; the stream is bounded before every write, and
+    length and SHA-256 are verified after assembly. Returns transfer evidence.
 
     ``opener`` is injected for testing; it takes (url, headers) and returns
     a context-manager response with ``.status``, ``.headers``, ``.read``.
     The default opener validates the source is a public host and pins the
     connection (V2 SSRF hardening).
     """
+    if type(expected_length) is not int or expected_length < 0:
+        raise UpdateError("a signed expected download length is required")
+    if type(max_bytes) is not int or max_bytes < 1 or expected_length > max_bytes:
+        raise UpdateError("download length exceeds the absolute limit")
+    if (type(chunk_size) is not int or chunk_size < 1 or
+            isinstance(max_seconds, bool) or not isinstance(max_seconds, (int, float)) or
+            not math.isfinite(max_seconds) or max_seconds <= 0):
+        raise ValueError("download chunk size and deadline must be positive")
+    deadline = time.monotonic() + max_seconds
     dest = Path(destination)
     dest.parent.mkdir(parents=True, exist_ok=True)
     partial = dest.with_name(dest.name + ".partial")
@@ -505,6 +518,10 @@ def resumable_download(
             prior_validators = {}
 
     have = partial.stat().st_size if partial.exists() else 0
+    if have > expected_length:
+        partial.unlink()
+        sidecar.unlink(missing_ok=True)
+        raise UpdateError("partial download exceeds signed length")
     resume = False
     if have and validators and prior_validators:
         # Resume only when every recorded validator still matches.
@@ -533,12 +550,25 @@ def resumable_download(
             have = 0
         if validators:
             sidecar.write_text(json.dumps(dict(validators)), encoding="utf-8")
-        with open(partial, mode) as sink:
-            while True:
-                chunk = response.read(chunk_size)
-                if not chunk:
-                    break
-                sink.write(chunk)
+        written = have
+        try:
+            with open(partial, mode) as sink:
+                while True:
+                    if time.monotonic() >= deadline:
+                        raise UpdateError("download exceeded total deadline")
+                    chunk = response.read(chunk_size)
+                    if time.monotonic() >= deadline:
+                        raise UpdateError("download exceeded total deadline")
+                    if not chunk:
+                        break
+                    if written + len(chunk) > expected_length:
+                        raise UpdateError("download exceeds signed length")
+                    sink.write(chunk)
+                    written += len(chunk)
+        except UpdateError:
+            partial.unlink(missing_ok=True)
+            sidecar.unlink(missing_ok=True)
+            raise
 
     total = partial.stat().st_size
     if expected_length is not None and total != expected_length:
@@ -1428,3 +1458,61 @@ class UpdateRepository:
             "manifest_sha256",
         )
         return dict(zip(keys, row))
+
+    def accepted_versions(self) -> tuple[str, ...]:
+        """Installed releases remain the monotonic floor after rollback."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT version FROM installed_release WHERE status != 'failed'"
+            ).fetchall()
+        finally:
+            conn.close()
+        return tuple(row[0] for row in rows)
+
+    def commit_activation(
+        self, *, expected_active_id: str | None,
+        target_release_id: str, new_release: dict | None = None,
+    ) -> None:
+        """Change both release statuses in one SQLite transaction."""
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            active = conn.execute(
+                "SELECT release_id FROM installed_release WHERE status = 'active'"
+            ).fetchone()
+            if (active[0] if active else None) != expected_active_id:
+                raise ConcurrencyConflict("active release changed during activation")
+            if expected_active_id:
+                conn.execute(
+                    "UPDATE installed_release SET status = 'previous' WHERE release_id = ?",
+                    (expected_active_id,),
+                )
+            if new_release is None:
+                changed = conn.execute(
+                    "UPDATE installed_release SET status = 'active', activated_at_utc = ?"
+                    " WHERE release_id = ? AND status = 'previous'",
+                    (_utc_now(), target_release_id),
+                )
+                if changed.rowcount != 1:
+                    raise UpdateError("rollback release is no longer previous")
+            else:
+                conn.execute(
+                    "INSERT INTO installed_release (release_id, version, commit_sha,"
+                    " platform, architecture, install_path, activated_at_utc, status,"
+                    " manifest_sha256, state_schema_json)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+                    (
+                        target_release_id, new_release["version"],
+                        new_release["commit_sha"], new_release["platform_name"],
+                        new_release["architecture"], new_release["install_path"],
+                        _utc_now(), new_release["manifest_sha256"],
+                        json.dumps(new_release["state_schema"]),
+                    ),
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()

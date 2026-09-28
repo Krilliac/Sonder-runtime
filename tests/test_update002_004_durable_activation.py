@@ -7,6 +7,7 @@ import pytest
 
 from sonder_runtime.adapters.updates.activation_journal import JsonActivationJournal
 from sonder_runtime.application.updates.durable_activation import DurableActivationCoordinator
+from sonder_runtime.application.updates.durable_activation import ActivationJournalEntry
 from sonder_runtime.application.updates.release_evidence import (
     ActivationRecoveryError, ActivationRequest, ReleaseEvidencePackage,
     RollbackCompatibility, SbomComponent, SignedReleaseManifest, TestEvidence,
@@ -93,3 +94,42 @@ def test_incomplete_rollback_is_fail_closed(tmp_path: Path):
             "a1", _request(package), package,
             observed_dependencies={"python": "3.12", "tuf": "3.0"})
     assert journal.entries()[-1].phase == "recovery_failed"
+
+
+def test_restart_recovers_prepared_activation_before_new_work(tmp_path: Path):
+    journal = JsonActivationJournal(tmp_path / "activation.jsonl")
+    package = _package()
+    request = _request(package)
+    journal.append(ActivationJournalEntry(
+        "interrupted", "prepared", request.platform, request.current_release,
+        request.target_release, request.release_evidence_digest,
+        helper_nonce=request.helper_nonce,
+    ))
+    pointer, helper = Pointer(value="rel-2"), Helper()
+    _coordinator(pointer, helper, journal)
+    assert pointer.current() == "rel-1"
+    assert journal.entries()[-1].phase == "recovered"
+    assert [call[0] for call in helper.calls] == ["rollback"]
+
+
+def test_journal_fsyncs_and_refuses_corrupt_record(tmp_path: Path, monkeypatch):
+    import os
+
+    journal_path = tmp_path / "activation.jsonl"
+    journal = JsonActivationJournal(journal_path)
+    synced = []
+    real_fsync = os.fsync
+
+    def observe_fsync(fd):
+        synced.append(fd)
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", observe_fsync)
+    journal.append(ActivationJournalEntry(
+        "a1", "prepared", "linux", "rel-1", "rel-2", "evidence", helper_nonce="nonce",
+    ))
+    assert synced
+    raw = journal_path.read_bytes().replace(b"rel-2", b"rel-3")
+    journal_path.write_bytes(raw)
+    with pytest.raises(ValueError, match="checksum|corrupt"):
+        journal.entries()
