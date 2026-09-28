@@ -79,6 +79,15 @@ def test_facade_invokes_injected_gateway_and_renders_both_protocols():
     assert chat.render()["choices"][0]["message"]["content"] == "answer"
 
 
+def test_rendered_responses_envelope_preserves_overflow_receipt():
+    receipt = {"overflow": {"status": "switched", "notice": "long-context overflow"}}
+    response = ModelRequestFacade.render_text(
+        "responses", "answer", "overflow-model", receipt=receipt,
+    )
+    assert response["object"] == "response"
+    assert response["sonder_receipt"] == receipt
+
+
 def test_facade_invoke_uses_typed_completion_boundary_without_repeating_hooks():
     calls = []
     events = []
