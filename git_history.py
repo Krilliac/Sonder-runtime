@@ -10,6 +10,7 @@ import threading
 import time
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
+from sonder_runtime.adapters import git_program_guard
 
 
 MAX_LOG_COUNT = 100
@@ -228,7 +229,37 @@ def _reader(
         stream.close()
 
 
+def _decoded(result: dict) -> dict:
+    return {
+        **result,
+        "stdout": result["stdout"].decode("utf-8", errors="replace"),
+        "stderr": result["stderr"].decode("utf-8", errors="replace"),
+    }
+
+
 def _run_git(root: Path, arguments: list[str], *, timeout, max_bytes) -> dict:
+    """Run one history command with repository host programs neutralized.
+
+    ``core.fsmonitor``, hooks, filter/merge/textconv drivers and signing
+    programs named by repository config are replaced by the shared
+    :mod:`git_program_guard` list; unreadable driver configuration refuses.
+    """
+    try:
+        overrides = git_program_guard.neutralized_git_arguments(
+            lambda probe: _decoded(_spawn_git(
+                root, probe, timeout=timeout, max_bytes=65_536, check=False,
+            )),
+        )
+    except git_program_guard.GitProgramConfigError as exc:
+        raise GitHistoryError("refusing to run git: %s" % exc) from exc
+    return _spawn_git(
+        root, [*overrides, *arguments], timeout=timeout, max_bytes=max_bytes,
+    )
+
+
+def _spawn_git(
+    root: Path, arguments: list[str], *, timeout, max_bytes, check=True,
+) -> dict:
     timeout = _bounded_timeout(timeout)
     max_bytes = _bounded_int(
         max_bytes, DEFAULT_OUTPUT_BYTES, 1024, MAX_OUTPUT_BYTES,
@@ -318,7 +349,7 @@ def _run_git(root: Path, arguments: list[str], *, timeout, max_bytes) -> dict:
     truncated = len(stdout) > max_bytes or len(stderr) > MAX_STDERR_BYTES
     stdout = bytes(stdout[:max_bytes])
     stderr = bytes(stderr[:MAX_STDERR_BYTES])
-    if process.returncode and not truncated:
+    if check and process.returncode and not truncated:
         detail = stderr.decode("utf-8", errors="replace").strip()
         raise GitHistoryError(
             "git history command failed%s"
@@ -326,6 +357,7 @@ def _run_git(root: Path, arguments: list[str], *, timeout, max_bytes) -> dict:
         )
     return {
         "argv": argv,
+        "returncode": process.returncode,
         "stdout": stdout,
         "stderr": stderr,
         "truncated": truncated,

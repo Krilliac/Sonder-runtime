@@ -54,6 +54,25 @@ class FakeChatBackend implements ChatBackend {
   final List<String> workRunGets = [];
   final List<String> workRunCancels = [];
   final List<(String, Duration)> approvals = [];
+
+  /// `(tool, digest)` sent with each approval, in order.
+  final List<(String, String)> approvalBindings = [];
+
+  /// The server's pending approvals ledger, by call id.
+  Map<String, PendingApproval> pendingCalls = {
+    '3f9a12c0': const PendingApproval(
+      callId: '3f9a12c0',
+      digest:
+          '3f9a12c0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      tool: 'write_file',
+      preview: 'path=notes.txt content=hello',
+      mode: 'manual',
+    ),
+  };
+
+  /// Overrides the lookup result (e.g. unsupported, forbidden).
+  PendingCallLookup? lookupOverride;
+  final List<String> lookups = [];
   int statusCalls = 0;
   int activeStatusCalls = 0;
   int maxConcurrentStatus = 0;
@@ -171,9 +190,24 @@ class FakeChatBackend implements ChatBackend {
   Future<List<WorkRun>> listWorkRuns() async => runningWork;
 
   @override
+  Future<PendingCallLookup> lookupPendingCall(String callId) async {
+    lookups.add(callId);
+    final override = lookupOverride;
+    if (override != null) return override;
+    final call = pendingCalls[callId];
+    return call == null
+        ? const PendingCallLookup(ApprovalStatus.failed,
+            message: 'No refused call is waiting for approval.')
+        : PendingCallLookup(ApprovalStatus.approved, call: call);
+  }
+
+  @override
   Future<ApprovalOutcome> approveCall(String callId,
-      {Duration ttl = const Duration(minutes: 15)}) async {
+      {Duration ttl = const Duration(minutes: 15),
+      String tool = '',
+      String digest = ''}) async {
     approvals.add((callId, ttl));
+    approvalBindings.add((tool, digest));
     return approvalOutcome;
   }
 

@@ -114,6 +114,11 @@ class ChatController extends ChangeNotifier {
   Timer? _liveTimer;
   bool _pollInFlight = false;
   bool _modeInFlight = false;
+
+  /// Bumped when the server/key/account changes. A status, mode or model
+  /// read that started under an older generation is discarded on return,
+  /// and its in-flight flag no longer blocks the new identity's reads.
+  int _backendGeneration = 0;
   bool _paused = false;
   bool _started = false;
   bool _disposed = false;
@@ -206,6 +211,9 @@ class ChatController extends ChangeNotifier {
   void updateBackend(ChatBackend next, {required bool identityChanged}) {
     _backend = next;
     if (identityChanged) {
+      _backendGeneration++;
+      _pollInFlight = false;
+      _modeInFlight = false;
       _modeReadOnly = false;
       _mode = null;
       _lastKnownMode = null;
@@ -262,19 +270,24 @@ class ChatController extends ChangeNotifier {
     _pollInFlight = true;
     _pollTimer?.cancel();
     statusRequests++;
+    final generation = _backendGeneration;
+    final backend = _backend;
     try {
-      final info = await _backend.systemInfo();
-      if (_disposed) return;
+      final info = await backend.systemInfo();
+      if (_disposed || generation != _backendGeneration) return;
       status.value = info;
       _setConnection(ConnectionStatus(
-          ConnState.connected, ConnectionStatus.hostOf(_backend.serverUrl)));
+          ConnState.connected, ConnectionStatus.hostOf(backend.serverUrl)));
     } catch (e) {
-      if (_disposed) return;
+      if (_disposed || generation != _backendGeneration) return;
       status.value = null;
-      _setConnection(ConnectionStatus.fromError(e, _backend.serverUrl));
+      _setConnection(ConnectionStatus.fromError(e, backend.serverUrl));
     } finally {
-      _pollInFlight = false;
-      _schedulePoll();
+      // A stale poll neither clears the new identity's flag nor reschedules.
+      if (generation == _backendGeneration) {
+        _pollInFlight = false;
+        _schedulePoll();
+      }
     }
   }
 
@@ -300,10 +313,11 @@ class ChatController extends ChangeNotifier {
   // -- Models and commands ---------------------------------------------------
 
   Future<void> refreshModels() async {
+    final generation = _backendGeneration;
     try {
       final backend = _backend;
       final catalog = await backend.modelCatalog();
-      if (_disposed) return;
+      if (_disposed || generation != _backendGeneration) return;
       if (identical(backend, _backend)) _origins = catalog.origins;
       final models = catalog.ids;
       if (models.isEmpty) return;
@@ -347,9 +361,12 @@ class ChatController extends ChangeNotifier {
   }
 
   Future<void> refreshCommands() async {
+    final generation = _backendGeneration;
     try {
       final next = await _backend.fetchCommands();
-      if (_disposed || next.isEmpty) return;
+      if (_disposed || generation != _backendGeneration || next.isEmpty) {
+        return;
+      }
       catalog = next;
       catalogFromServer = true;
       _notify();
@@ -364,6 +381,7 @@ class ChatController extends ChangeNotifier {
     if (_modeInFlight || _disposed) return;
     _modeInFlight = true;
     _modeTimer?.cancel();
+    final generation = _backendGeneration;
     PermissionMode? next;
     try {
       final mode = await _backend.fetchPermissionMode();
@@ -371,10 +389,14 @@ class ChatController extends ChangeNotifier {
     } catch (_) {
       next = null;
     } finally {
-      _modeInFlight = false;
-      _scheduleModePoll();
+      if (generation == _backendGeneration) {
+        _modeInFlight = false;
+        _scheduleModePoll();
+      }
     }
-    if (_disposed) return;
+    // A mode read from the previous server/account is never applied: a
+    // stale high mode would make a real raise look like a lowering.
+    if (_disposed || generation != _backendGeneration) return;
     if (next != null) _lastKnownMode = next;
     if (next?.mode == _mode?.mode &&
         next?.elevated == _mode?.elevated &&
@@ -401,19 +423,29 @@ class ChatController extends ChangeNotifier {
       return (ModeChangeOutcome.readOnly, modeReadOnlyText);
     }
     if (target == current.mode) return (ModeChangeOutcome.unchanged, '');
+    final generation = _backendGeneration;
     if (isModeRaise(current.mode, target)) {
       final ok = await confirm(current.mode, target);
-      if (!ok || _disposed) return (ModeChangeOutcome.declined, '');
+      // A confirmation given for the previous server/account is not one for
+      // the new identity.
+      if (!ok || _disposed || generation != _backendGeneration) {
+        return (ModeChangeOutcome.declined, '');
+      }
     }
     _switchingMode = true;
     _notify();
     try {
       final next = await _backend.setPermissionMode(target);
-      if (_disposed) return (ModeChangeOutcome.changed, '');
+      if (_disposed || generation != _backendGeneration) {
+        return (ModeChangeOutcome.changed, '');
+      }
       _mode = next.isUsable ? next : null;
       if (_mode != null) _lastKnownMode = _mode;
       return (ModeChangeOutcome.changed, '');
     } on SonderException catch (e) {
+      if (_disposed || generation != _backendGeneration) {
+        return (ModeChangeOutcome.changed, '');
+      }
       final err = normalizeModeError(e);
       if (err.httpStatus == 403 || err.code == 'FORBIDDEN') {
         _modeReadOnly = true;
@@ -427,6 +459,9 @@ class ChatController extends ChangeNotifier {
         'Could not change mode: ${err.message}'
       );
     } catch (e) {
+      if (_disposed || generation != _backendGeneration) {
+        return (ModeChangeOutcome.changed, '');
+      }
       _mode = null;
       unawaited(refreshPermissionMode());
       return (ModeChangeOutcome.failed, 'Could not change mode.');
@@ -758,8 +793,22 @@ class ChatController extends ChangeNotifier {
   }
 
   /// Re-add the pending row when returning to the thread whose turn is live.
+  ///
+  /// [_setEntries] gives every row a fresh id, so the turn's user row is
+  /// found again: it is the thread's last user message, since nothing else
+  /// can be sent to this thread while its turn is live. Stop then restores
+  /// the prompt and rotates a cancelled first turn's session.
   void _restorePendingRow() {
-    if (_entries.isNotEmpty && _entries.last.message.pending) return;
+    for (final e in _entries.reversed) {
+      if (e.message.role == Role.user) {
+        _userId = e.id;
+        break;
+      }
+    }
+    if (_entries.isNotEmpty && _entries.last.message.pending) {
+      _pendingId = _entries.last.id;
+      return;
+    }
     _add(const ChatMessage(role: Role.assistant, content: '', pending: true));
     _pendingId = _entries.last.id;
   }

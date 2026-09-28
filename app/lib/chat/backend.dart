@@ -42,8 +42,15 @@ abstract class ChatBackend {
   Future<WorkRun> cancelWorkRun(String id);
   Future<List<WorkRun>> listWorkRuns();
 
-  /// Approve exactly one refused call once (`POST /v1/approvals/<call_id>`).
-  Future<ApprovalOutcome> approveCall(String callId, {Duration ttl});
+  /// The server's own record of the pending call [callId]
+  /// (`GET /v1/approvals`): its tool, digest and redacted arguments. The
+  /// approval sheet is drawn only from this, never from reply text.
+  Future<PendingCallLookup> lookupPendingCall(String callId);
+
+  /// Approve exactly one refused call once (`POST /v1/approvals/<call_id>`),
+  /// bound to the [tool] and [digest] the person was shown.
+  Future<ApprovalOutcome> approveCall(String callId,
+      {Duration ttl, String tool, String digest});
 
   /// Release anything held (open turns, clients).
   void dispose() {}
@@ -107,6 +114,18 @@ abstract class ChatTurn {
 }
 
 enum ApprovalStatus { approved, unsupported, forbidden, failed }
+
+/// The result of [ChatBackend.lookupPendingCall]. [call] is set only when
+/// [status] is [ApprovalStatus.approved], meaning "found and approvable".
+class PendingCallLookup {
+  final ApprovalStatus status;
+  final PendingApproval? call;
+  final String message;
+
+  const PendingCallLookup(this.status, {this.call, this.message = ''});
+
+  bool get found => call != null;
+}
 
 class ApprovalOutcome {
   final ApprovalStatus status;
@@ -220,10 +239,37 @@ class SonderApiChatBackend implements ChatBackend {
   Future<List<WorkRun>> listWorkRuns() => _workRuns((r) => r.list());
 
   @override
-  Future<ApprovalOutcome> approveCall(String callId,
-      {Duration ttl = const Duration(minutes: 15)}) async {
+  Future<PendingCallLookup> lookupPendingCall(String callId) async {
     try {
-      final issued = await api.approvals.approve(callId, ttl: ttl);
+      final snapshot = await api.approvals.list(limit: 200);
+      if (snapshot == null) {
+        return const PendingCallLookup(ApprovalStatus.unsupported);
+      }
+      for (final call in snapshot.pending) {
+        if (call.callId == callId) {
+          return PendingCallLookup(ApprovalStatus.approved, call: call);
+        }
+      }
+      return PendingCallLookup(ApprovalStatus.failed,
+          message: 'No refused call $callId is waiting for approval on this '
+              'server. It may already have run, been approved, or aged out.');
+    } on SonderException catch (e) {
+      if (e.httpStatus == 401 || e.httpStatus == 403) {
+        return const PendingCallLookup(ApprovalStatus.forbidden,
+            message: 'Approvals need a developer or admin account.');
+      }
+      return PendingCallLookup(ApprovalStatus.failed, message: e.message);
+    }
+  }
+
+  @override
+  Future<ApprovalOutcome> approveCall(String callId,
+      {Duration ttl = const Duration(minutes: 15),
+      String tool = '',
+      String digest = ''}) async {
+    try {
+      final issued = await api.approvals
+          .approve(callId, ttl: ttl, tool: tool, digest: digest);
       return ApprovalOutcome(ApprovalStatus.approved,
           nonce: issued.nonce,
           ttlSeconds:

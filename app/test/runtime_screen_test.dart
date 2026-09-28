@@ -66,6 +66,11 @@ Future<void> pumpFrames(WidgetTester tester) async {
 }
 
 void main() {
+  // These fixtures use a plain-HTTP LAN host with a key: the person has
+  // explicitly allowed it (see cleartext_key_test.dart for the refusal).
+  setUpAll(() => CleartextKeyPolicy.allowOnly(['pc.test:11435']));
+  tearDownAll(() => CleartextKeyPolicy.allowOnly(const []));
+
   group('status vocabulary mirrors style.py', () {
     test('glyphs and words', () {
       // style.py _UNICODE_GLYPHS + NOTICE_KINDS and plan §2.1.

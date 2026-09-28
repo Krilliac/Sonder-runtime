@@ -120,6 +120,31 @@ def _label(path: Path, sid_name: str, mask: int) -> None:
     )
 
 
+def _require_state_secrets_not_low_readable() -> None:
+    """Label Sonder's state secrets no-read-up; refuse if any stays readable.
+
+    The candidate token keeps this user's SID, and a file's default medium
+    label only forbids writing up, so without this a candidate could read
+    ``secrets.env``, ``fleet-principal.json`` or the stores by absolute path
+    (the environment redirection hides the location, not the file). This is
+    the Windows counterpart of the Linux supervisor's
+    ``require_not_candidate_readable`` gate. It covers Sonder's own state
+    home only; other per-user credential stores and network egress are not
+    restricted by this supervisor.
+    """
+    from sonder_runtime.platform import paths as runtime_paths
+    from sonder_runtime.platform import private_files
+
+    home = runtime_paths.default_home()
+    remaining = private_files.protect_state_from_low_integrity(home)
+    if remaining:
+        raise RuntimeError(
+            "low-integrity isolation refused: %d Sonder state secret file(s) "
+            "remain readable at low integrity (for example %s)"
+            % (len(remaining), Path(remaining[0]).name)
+        )
+
+
 def _low_token():
     import win32api
     import win32con
@@ -364,6 +389,7 @@ def _run_low_integrity(
     except ImportError as exc:
         raise RuntimeError("pywin32 is required for low-integrity selfmod isolation") from exc
 
+    _require_state_secrets_not_low_readable()
     protected = [Path(item).resolve() for item in protected_paths]
     before = {str(path): _digest(path) for path in protected if path.is_file()}
     work = _short_work_dir()

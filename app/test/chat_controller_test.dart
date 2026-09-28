@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -262,6 +264,34 @@ void main() {
     c.dispose();
   });
 
+  testWidgets('a stale mode write error cannot change the new backend mode',
+      (tester) async {
+    for (final error in <Object>[
+      SonderException('{message: denied, code: FORBIDDEN}'),
+      SonderException('old backend failed'),
+      StateError('old backend failed'),
+    ]) {
+      final old = _DelayedModeWriteBackend()
+        ..mode = permissionModeFor('manual');
+      final c = await _start(tester, old);
+      final write = c.requestModeChange('auto', confirm: (_, __) async => true);
+      await tester.pump();
+
+      final next = FakeChatBackend(serverUrl: 'http://new-host:11435')
+        ..mode = permissionModeFor('plan');
+      c.updateBackend(next, identityChanged: true);
+      await tester.pump();
+      expect(c.permissionMode?.mode, 'plan');
+
+      old.modeWrite.completeError(error);
+      await write;
+      await tester.pump();
+      expect(c.permissionMode?.mode, 'plan');
+      expect(c.modeReadOnly, isFalse);
+      c.dispose();
+    }
+  });
+
   testWidgets('raising asks first; lowering does not', (tester) async {
     final backend = FakeChatBackend()..mode = permissionModeFor('manual');
     final c = await _start(tester, backend);
@@ -288,4 +318,101 @@ void main() {
     expect(asked, ['manual->auto']);
     c.dispose();
   });
+
+  testWidgets(
+      'late polls from the old server are dropped and the new one '
+      'refreshes at once', (tester) async {
+    final old = _GatedBackend(serverUrl: 'http://old-host:11435');
+    final c = await _start(tester, old);
+    await tester.pump();
+    expect(old.status.isCompleted, isFalse);
+
+    final next = FakeChatBackend(serverUrl: 'http://new-host:11435')
+      ..mode = permissionModeFor('manual')
+      ..models = const ['new-model'];
+    c.updateBackend(next, identityChanged: true);
+    await tester.pump();
+    // The new identity's poll and mode read are not blocked by the old ones.
+    expect(next.statusCalls, 1);
+    expect(c.permissionMode?.mode, 'manual');
+    expect(c.connection.value.isOffline, isFalse);
+
+    // The old server answers late: a timeout, a high mode, its models.
+    old.status.completeError(TimeoutException('old host'));
+    old.modeGate.complete(permissionModeFor('auto'));
+    old.modelsGate.complete(const ['old-model']);
+    await tester.pump();
+    await tester.pump();
+    expect(c.permissionMode?.mode, 'manual');
+    expect(c.connection.value.isOffline, isFalse);
+    expect(c.models, isNot(contains('old-model')));
+
+    // A raise on the new server is still confirmed.
+    final asked = <String>[];
+    await c.requestModeChange('auto', confirm: (from, to) async {
+      asked.add('$from->$to');
+      return false;
+    });
+    expect(asked, ['manual->auto']);
+    c.dispose();
+  });
+
+  testWidgets(
+      'Stop after switching away and back restores the prompt and rotates',
+      (tester) async {
+    final backend = FakeChatBackend();
+    final c = await _start(tester, backend);
+    final threadA = c.currentThread;
+    final first = c.send('first question');
+    await tester.pump();
+
+    c.newChat();
+    await tester.pump();
+    c.switchThread(threadA);
+    await tester.pump();
+
+    final restored = c.cancel();
+    await tester.pump();
+    await first;
+    expect(restored, 'first question');
+    expect(c.entries, isEmpty);
+    expect(c.currentThread.messages, isEmpty);
+
+    final second = c.send('next');
+    await tester.pump();
+    expect(backend.lastTurn.request.sessionId, '${threadA.id}-1');
+    expect(backend.lastTurn.request.historyMode, 'client');
+    backend.lastTurn.done('ok');
+    await tester.pump();
+    await second;
+    c.dispose();
+  });
+}
+
+class _DelayedModeWriteBackend extends FakeChatBackend {
+  final modeWrite = Completer<PermissionMode>();
+
+  @override
+  Future<PermissionMode> setPermissionMode(String next) {
+    modePosts.add(next);
+    return modeWrite.future;
+  }
+}
+
+/// A backend whose status, mode and model reads wait until completed.
+class _GatedBackend extends FakeChatBackend {
+  _GatedBackend({super.serverUrl});
+
+  final status = Completer<SystemInfo>();
+  final modeGate = Completer<PermissionMode?>();
+  final modelsGate = Completer<List<String>>();
+
+  @override
+  Future<SystemInfo> systemInfo() => status.future;
+
+  @override
+  Future<PermissionMode?> fetchPermissionMode() => modeGate.future;
+
+  @override
+  Future<List<String>> listModels() => modelsGate.future;
 }

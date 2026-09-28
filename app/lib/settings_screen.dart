@@ -76,9 +76,9 @@ ConnectionDiagnosis diagnoseReachable(String serverUrl,
     return ConnectionDiagnosis(
       ServerReachability.needsHttps,
       'Reachable at $host ($count), but sign-in needs HTTPS off this device.',
-      detail: 'The API key works over this address. For accounts, serve the '
-          'PC over HTTPS (Tailscale Serve or a TLS proxy that keeps the Host '
-          'header).',
+      detail: 'The API key is withheld over plain HTTP unless you allow this '
+          'host below. For keys and accounts, serve the PC over HTTPS '
+          '(Tailscale Serve or a TLS proxy that keeps the Host header).',
     );
   }
   final summary = routing.connectionSummary(models);
@@ -251,6 +251,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late bool _allowHosted;
   late bool _keepServerRunning;
   late bool _allowApproximateLocation;
+
+  /// Plain-HTTP hosts allowed to receive the API key (see
+  /// [CleartextKeyPolicy]); edited only by the explicit per-host checkbox.
+  late Set<String> _cleartextKeyHosts;
   AccountSession? _account;
   bool _obscureKey = true;
   bool _obscureLauncherToken = true;
@@ -283,6 +287,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _allowHosted = widget.settings.allowHosted;
     _keepServerRunning = widget.settings.keepServerRunning;
     _allowApproximateLocation = widget.settings.allowApproximateLocation;
+    _cleartextKeyHosts = {...widget.settings.cleartextKeyHosts};
     _trackedControllers = [
       _server,
       _key,
@@ -405,6 +410,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         launcherToken: _launcherToken.text,
         observatoryExecutable: _observatoryExecutable.text.trim(),
         observatoryWebUrl: _observatoryWebUrl.text.trim(),
+        cleartextKeyHosts: _cleartextKeyHosts.toList()..sort(),
         model: _model.text.trim().isEmpty
             ? Settings.defaultModel
             : _model.text.trim(),
@@ -423,6 +429,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _status = null;
       _connection = null;
     });
+    // Testing uses this screen's unsaved per-host choice, then restores the
+    // saved policy whatever happens.
+    final savedHosts = CleartextKeyPolicy.allowedHosts;
+    CleartextKeyPolicy.allowOnly(_cleartextKeyHosts);
     try {
       final account = _account?.matches(_server.text) == true ? _account : null;
       final catalog =
@@ -439,8 +449,54 @@ class _SettingsScreenState extends State<SettingsScreen> {
       setState(
           () => _connection = diagnoseConnectionError(error, _server.text));
     } finally {
+      CleartextKeyPolicy.allowOnly(savedHosts);
       if (mounted) setState(() => _testing = false);
     }
+  }
+
+  /// Plain HTTP to another device with a key typed: the key would cross the
+  /// network unencrypted, so it is withheld unless this host is allowed.
+  bool get _cleartextKeyAtRisk =>
+      _key.text.trim().isNotEmpty &&
+      CleartextKeyPolicy.isCleartextRemote(_server.text);
+
+  Widget _cleartextKeyChoice() {
+    final hostKey = CleartextKeyPolicy.hostKeyOf(_server.text);
+    final allowed = _cleartextKeyHosts.contains(hostKey);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SizedBox(height: 10),
+        WorkspaceNotice(
+          key: const Key('settings-cleartext-key-warning'),
+          tone: NoticeTone.warning,
+          message: allowed
+              ? 'The API key is sent to $hostKey over unencrypted HTTP. '
+                  'Anyone on the network path can read and reuse it.'
+              : 'The API key is not sent to $hostKey: this address uses '
+                  'unencrypted HTTP. Use HTTPS, or allow this host below.',
+        ),
+        CheckboxListTile(
+          key: const Key('settings-cleartext-key-allow'),
+          contentPadding: EdgeInsets.zero,
+          controlAffinity: ListTileControlAffinity.leading,
+          value: allowed,
+          title: Text('Send the API key to $hostKey over unencrypted HTTP'),
+          subtitle: const Text('Only on a network you trust. Applies to this '
+              'host and port only.'),
+          onChanged: hostKey.isEmpty
+              ? null
+              : (v) => setState(() {
+                    if (v == true) {
+                      _cleartextKeyHosts.add(hostKey);
+                    } else {
+                      _cleartextKeyHosts.remove(hostKey);
+                    }
+                    _dirty = true;
+                  }),
+        ),
+      ],
+    );
   }
 
   Future<void> _copyServerSetting(String setting) async {
@@ -947,6 +1003,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           ),
                         ),
                       ),
+                      if (_cleartextKeyAtRisk) _cleartextKeyChoice(),
                       if (_keyringWarning != null) ...[
                         const SizedBox(height: 10),
                         WorkspaceNotice(

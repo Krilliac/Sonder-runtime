@@ -32,6 +32,7 @@ from ...application.ports.model_gateway import (
 )
 from ...domain.common.errors import Cancelled, DeadlineExceeded, SonderError
 from ..inference.sonder_inference_gateway import SonderInferenceUnreachable
+from ..inference.served_tier_models import record_served_model
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +121,9 @@ class PreSendFallbackGateway:
 
     def generate(self, request: ModelRequest, context: OperationContext) -> ModelResponse:
         try:
-            return self._primary.generate(request, context)
+            response = self._primary.generate(request, context)
+            record_served_model(request.tier, response.model, self._primary_id)
+            return response
         except SonderInferenceUnreachable as exc:
             # The primary never executed the request, but the caller may have
             # given up meanwhile; never start new work for a dead operation.
@@ -148,7 +151,9 @@ class PreSendFallbackGateway:
                 context, cloud_allowed=False, remote_ollama_allowed=False,
             )
             try:
-                return self._fallback.generate(request, local_only)
+                response = self._fallback.generate(request, local_only)
+                record_served_model(request.tier, response.model, self._fallback_id)
+                return response
             except SonderError as fallback_error:
                 combined = _with_primary_cause(
                     fallback_error, self._fallback_id, primary_cause,

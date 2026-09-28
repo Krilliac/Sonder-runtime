@@ -1230,14 +1230,19 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
                 permission_policy.forget_spent_approval()
         if canonical_name in _COMPUTE_NAMES:
             logger.debug(f"routing to compute handler: {canonical_name!r}")
-            if canonical_name in {"compute_submit", "compute_cancel"}:
-                from ..adapters.security.permission_policy import permission_policy
+            # Every compute tool, reads included: compute_status and
+            # compute_artifact_fetch return job state and private artifact
+            # bytes, so operator rules and the mode matrix must apply to them
+            # exactly as to submit/cancel.
+            from ..adapters.security.permission_policy import permission_policy
 
+            try:
                 decision = permission_policy.decide_for_caller(
                     canonical_name,
                     interactive=False,
                     gate_control_exempt=False,
                     surface="native-mcp",
+                    arguments=canonical_arguments,
                 )
                 if (
                     decision is not None
@@ -1249,9 +1254,14 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
                         "output": "compute host control denied by runtime permission policy",
                         "isError": True,
                         "error": "permission_denied",
-                        "evidence": {"tool": canonical_name},
+                        "evidence": {
+                            "tool": canonical_name,
+                            "call_id": getattr(decision, "call_id", ""),
+                        },
                     }
-            return compute_result(canonical_name, canonical_arguments)
+                return compute_result(canonical_name, canonical_arguments)
+            finally:
+                permission_policy.forget_spent_approval()
         typed_tools = getattr(application, "tools", None)
         typed_route = canonical_name in _TYPED_TOOL_NAMES and typed_tools is not None
         if not typed_route:
