@@ -5554,7 +5554,7 @@ def prewarm_model(tier: str = "") -> bool:
     one in-flight load per model, and never fatal: a failed prewarm just
     means the real call pays the normal cost.
     """
-    if not sonder_speculation.speculation_enabled():
+    if not sonder_speculation.prewarm_enabled():
         return False
     try:
         model, cloud, _augment, tier_label = _serve_target(tier or "sonder", None)

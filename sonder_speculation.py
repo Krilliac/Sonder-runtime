@@ -701,6 +701,18 @@ def speculation_enabled() -> bool:
     )
 
 
+def prewarm_enabled() -> bool:
+    """Model prewarm runs when speculation does, unless SONDER_PREWARM is off.
+
+    Prewarm spends an Ollama load on a prediction; operators (and the test
+    suite, whose incidental HTTP chats would otherwise reach the machine's
+    real Ollama) can switch it off without disabling agent-loop speculation.
+    """
+    return speculation_enabled() and os.environ.get("SONDER_PREWARM", "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+
+
 def reset_for_tests() -> None:
     global _default
     with _default_lock:
