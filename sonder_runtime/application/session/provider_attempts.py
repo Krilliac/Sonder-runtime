@@ -54,6 +54,22 @@ def report_provider_fallback(from_provider, to_provider, reason_code) -> None:
         pass
 
 
+def report_route_overflow(fields) -> None:
+    """Tell the observer a turn moved to the long-context overflow model.
+
+    ``fields`` are the content-free ``route.changed`` attributes the overflow
+    decision builds.  Observers without ``route_overflow`` ignore it; it never
+    raises.
+    """
+    hook = getattr(_attempt_observer, "route_overflow", None)
+    if not callable(hook):
+        return
+    try:
+        hook(dict(fields or {}))
+    except Exception:
+        pass
+
+
 def _count(value):
     return value if type(value) is int and value >= 0 else None
 

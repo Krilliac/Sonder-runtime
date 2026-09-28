@@ -14,6 +14,7 @@ import 'controller.dart';
 import '../ui/status_line.dart';
 import 'live_line.dart';
 import 'refusal.dart';
+import 'route_overflow_chip.dart';
 import 'work_run_card.dart';
 
 /// Counters for performance tests (P2-17). Debug-only bookkeeping.
@@ -447,6 +448,13 @@ class TranscriptTurn extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        if (m?.overflow != null) ...[
+          Align(
+            alignment: Alignment.centerLeft,
+            child: RouteOverflowChip(overflow: m!.overflow!),
+          ),
+          const SizedBox(height: 8),
+        ],
         ConversationContent(content: parsed.answer, fullWidthCode: true),
         if (message.reasoning.trim().isNotEmpty) ...[
           const SizedBox(height: 8),
