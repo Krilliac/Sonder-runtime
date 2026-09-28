@@ -18,7 +18,10 @@ The implementation is deliberately split across two persistence paths:
   post-adoption checker proves every epoch marker, receipt, ledger, and cleanup
   invariant. Ordinary `migrate` and `serve` do not silently perform adoption.
   `serve` now applies the epoch gate before migration or listener binding and
-  directs pre-epoch homes to this explicit command.
+  directs pre-epoch homes to this explicit command. A brand-new home (no
+  store at all) has nothing to adopt: `serve` stamps it at epoch 2 through
+  the bridge's fresh-install path (`stamp_fresh_home`) before migrations
+  create any store, so the same home serves again after a restart.
   The gate checks the complete adopted database set, so partial epoch-2 state
   cannot pass startup by stamping only `memory.db`.
 

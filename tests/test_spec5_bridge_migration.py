@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 import pytest
 
+from sonder_runtime.adapters.persistence.migrations import _FileLock
 from sonder_runtime.adapters.persistence.sqlite.bridge_migration import (
     EPOCH,
     check_epoch,
@@ -120,6 +123,30 @@ class TestRequireEpoch2:
 
 
 class TestBridgeMigration:
+    def test_fresh_stamp_waits_for_process_shared_migration_lock(self, sonder_home):
+        child = None
+        script = (
+            "import sys; from pathlib import Path; "
+            "from sonder_runtime.adapters.persistence.sqlite.bridge_migration "
+            "import stamp_fresh_home; print(stamp_fresh_home(Path(sys.argv[1])))"
+        )
+        with _FileLock(sonder_home / "locks" / "migrations.lock"):
+            child = subprocess.Popen(
+                [sys.executable, "-c", script, str(sonder_home)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            try:
+                stdout, stderr = child.communicate(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+            else:
+                pytest.fail(f"fresh stamp bypassed migration lock: {stdout!r} {stderr!r}")
+        assert child is not None
+        stdout, stderr = child.communicate(timeout=30)
+        assert child.returncode == 0, stderr
+        assert stdout.strip() == "True"
+        assert check_epoch(sonder_home / "memory.db") == EPOCH
+
     def test_new_install_creates_epoch_2(self, sonder_home):
         receipt = run_bridge_migration(sonder_home)
         assert receipt.epoch == EPOCH

@@ -427,8 +427,11 @@ class _FileLock:
                 self._handle = None
 
 
-def migration_lock(timeout: float = 30.0) -> _FileLock:
-    lock_dir = platform_paths.ensure_home() / "locks"
+def migration_lock(
+    timeout: float = 30.0, *, sonder_home: Path | None = None,
+) -> _FileLock:
+    home = sonder_home if sonder_home is not None else platform_paths.ensure_home()
+    lock_dir = home / "locks"
     return _FileLock(lock_dir / "migrations.lock", timeout=timeout)
 
 
@@ -509,4 +512,10 @@ def migrate_all(*, busy_timeout_ms: int = 5000) -> dict[str, StoreStatus]:
 
 
 def status_all() -> dict[str, StoreStatus]:
-    return {store: status(store, path) for store, path in store_db_paths().items()}
+    # Read-only: preflight, diagnostics and health call this before (or
+    # instead of) migrating.  Opening each store read-write created a
+    # marker-less memory.db on a fresh home ahead of the epoch gate.
+    return {
+        store: status_read_only(store, path)
+        for store, path in store_db_paths().items()
+    }
