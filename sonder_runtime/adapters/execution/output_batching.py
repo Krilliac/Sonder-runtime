@@ -13,11 +13,9 @@ these holds:
 
 Unpersisted output is bounded, which is also the crash-loss bound: readers
 block while the pending batch plus the batch being committed holds
-``max_lines`` lines or ``max_bytes`` bytes.  So at most ``max_lines`` lines
-and ``max_bytes`` bytes (plus the one line that crossed the byte bound) are
-queued, and each reader blocked in ``put`` holds one more line it has already
-read.  Read-but-not-durable output is therefore at most that window plus one
-line per reader (two: stdout and stderr).  A crash of the runtime loses at
+``max_lines`` lines or ``max_bytes`` bytes. Each line is independently capped
+by ``max_line_bytes`` before entering the batcher, so the one line that crosses
+the batch byte bound is bounded too. A crash of the runtime loses at
 most that; every earlier line is already committed, and because each batch
 commits atomically and in order the registry always holds an exact, gap-free
 prefix of each stream as read.
@@ -48,6 +46,7 @@ from ...application.jobs.durable_registry import MAX_OUTPUT_APPEND_BATCH
 # live output visibly incremental when the child goes quiet.
 OUTPUT_BATCH_MAX_LINES = 1024
 OUTPUT_BATCH_MAX_BYTES = 256 * 1024
+OUTPUT_LINE_MAX_BYTES = 1 << 20
 OUTPUT_BATCH_MAX_DELAY_SECONDS = 0.05
 
 
@@ -58,6 +57,7 @@ class OutputBatchPolicy:
     max_lines: int = OUTPUT_BATCH_MAX_LINES
     max_bytes: int = OUTPUT_BATCH_MAX_BYTES
     max_delay_seconds: float = OUTPUT_BATCH_MAX_DELAY_SECONDS
+    max_line_bytes: int = OUTPUT_LINE_MAX_BYTES
 
     def __post_init__(self) -> None:
         if (
@@ -78,6 +78,8 @@ class OutputBatchPolicy:
             or not 0 < self.max_delay_seconds <= 60
         ):
             raise ValueError("max_delay_seconds must be within (0, 60]")
+        if type(self.max_line_bytes) is not int or not 1 <= self.max_line_bytes <= OUTPUT_LINE_MAX_BYTES:
+            raise ValueError("max_line_bytes must be within 1..1 MiB")
 
 
 class OutputBatcher:
@@ -131,6 +133,8 @@ class OutputBatcher:
         """Queue one line; ``False`` once persistence has stopped."""
         size = len(data.encode("utf-8"))
         policy = self._policy
+        if size > policy.max_line_bytes:
+            raise ValueError("output line exceeds line byte bound")
         with self._cond:
             while not self._stopped:
                 lines = len(self._pending) + self._inflight_lines
@@ -252,5 +256,6 @@ class OutputBatcher:
 
 __all__ = [
     "OUTPUT_BATCH_MAX_BYTES", "OUTPUT_BATCH_MAX_DELAY_SECONDS", "OUTPUT_BATCH_MAX_LINES",
+    "OUTPUT_LINE_MAX_BYTES",
     "OutputBatchPolicy", "OutputBatcher",
 ]

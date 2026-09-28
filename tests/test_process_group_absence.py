@@ -35,6 +35,35 @@ def test_dead_root_with_absent_group_can_complete_without_sigkill():
     assert calls == [(42, 0)]
 
 
+def test_reaped_root_with_live_group_is_signalled_but_not_certified_clean():
+    calls = []
+    supervisor = ProcessTreeSupervisor(
+        os_module=SimpleNamespace(name="posix", killpg=lambda group, sig: calls.append((group, sig))),
+        signal_module=SimpleNamespace(SIGKILL=9), platform_name="posix",
+        process_probe=lambda *_args: ("dead", None),
+    )
+    request = ProcessTreeCleanupRequest(
+        "group-job", 42, 42, root_exited=True, process_identity="owner",
+    )
+    receipt = supervisor.cleanup(request)
+    assert calls == [(42, 0), (42, 9)]
+    assert receipt.complete is False
+
+
+def test_reaped_root_with_reused_pid_never_signals_new_group():
+    calls = []
+    supervisor = ProcessTreeSupervisor(
+        os_module=SimpleNamespace(name="posix", killpg=lambda *args: calls.append(args)),
+        platform_name="posix",
+        process_probe=lambda *_args: ("alive", "replacement"),
+    )
+    receipt = supervisor.cleanup(ProcessTreeCleanupRequest(
+        "group-job", 42, 42, process_identity="owner", root_exited=True,
+    ))
+    assert receipt.complete is False
+    assert calls == []
+
+
 @pytest.mark.parametrize("error", [PermissionError, OSError])
 def test_dead_root_group_probe_error_is_incomplete(error):
     calls = []

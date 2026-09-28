@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import io
 import subprocess
 import sys
 import time
@@ -347,6 +348,64 @@ def test_start_registers_process_identity_and_posix_group_for_cleanup():
     assert launch["kwargs"]["start_new_session"] is True
     assert launch["kwargs"]["env"]["SONDER_TEST"] == "1"
     assert launch["kwargs"]["cwd"] == str(Path("C:/workspace"))
+
+
+def test_unscoped_root_exit_keeps_ownership_until_group_cleanup_is_proven():
+    cleanup = _Cleanup(complete=False)
+    provider, _ = _provider(cleanup, _Process())
+    provider.start(_request("unscoped-descendant"))
+
+    waited = provider.wait("unscoped-descendant")
+
+    assert waited.record.status is JobStatus.CANCELLATION_REQUESTED
+    assert not waited.record.is_terminal
+    assert "unscoped-descendant" in provider._processes
+    assert cleanup.requests[0].process_group_id == 77
+
+
+def test_unscoped_attach_failure_keeps_ownership_of_unproven_group(monkeypatch):
+    registry = DurableJobRegistry()
+    cleanup = _Cleanup(complete=False)
+    provider = SubprocessJobProvider(
+        registry, process_cleanup=cleanup, launcher=lambda *_args, **_kwargs: _Process(),
+        memory_limiter=_MemoryLimiter(), platform_name="posix",
+        max_concurrent_processes=1, process_identity_resolver=lambda _pid: "stable",
+    )
+    def refuse_attach(*_args, **_kwargs):
+        raise RuntimeError("attach failed")
+    monkeypatch.setattr(registry, "attach_process", refuse_attach)
+    with pytest.raises(RuntimeError, match="attach failed"):
+        provider.start(_request("unscoped-attach-failure"))
+    assert registry.poll("unscoped-attach-failure").status is JobStatus.CANCELLATION_REQUESTED
+    assert "unscoped-attach-failure" in provider._processes
+    assert "unscoped-attach-failure" in provider._process_slot_owners
+    cleanup.complete = True
+    assert provider.cancel("unscoped-attach-failure").cleanup_completed
+    assert "unscoped-attach-failure" not in provider._process_slot_owners
+
+
+def test_persister_value_error_fails_zero_exit_job():
+    class OutputProcess(_Process):
+        def __init__(self):
+            super().__init__()
+            self.stdout = io.StringIO("x" * 100 + "\n")
+            self.stderr = io.StringIO("")
+
+    class RefusingOutput:
+        def spill_text(self, text, *, owner_id):
+            raise ValueError("spill bound exceeded")
+
+    provider = SubprocessJobProvider(
+        DurableJobRegistry(), process_cleanup=_Cleanup(complete=True),
+        launcher=lambda *_args, **_kwargs: OutputProcess(),
+        memory_limiter=_MemoryLimiter(), process_identity_resolver=lambda _pid: "stable",
+        platform_name="posix", output=RefusingOutput(), inline_output_bytes=8,
+    )
+    provider.start(_request("persister-value-error"))
+    waited = provider.wait("persister-value-error")
+    assert waited.exit_code == 0
+    assert waited.record.status is JobStatus.FAILED
+    assert waited.record.error == "process output persistence failed (ValueError)"
 
 
 def test_start_scrubs_parent_control_secrets_before_request_overlay(monkeypatch):
@@ -1093,8 +1152,18 @@ def test_worker_enforces_deadline_without_controller_polling(tmp_path):
 def test_terminal_cleanup_retry_reaps_root_after_posix_kill_race(monkeypatch):
     process = _ReapedAfterTimeoutProcess()
     probe_results = iter(((PROCESS_ALIVE, "stable"), (PROCESS_DEAD, None)))
+    killed = []
+
+    def killpg(group, sig):
+        # Like POSIX: once SIGKILL has reached the group, probing it (signal 0)
+        # finds no members, which is the proof the cleanup now requires.
+        if sig == 0 and killed:
+            raise ProcessLookupError(group)
+        if sig != 0:
+            killed.append(sig)
+
     cleanup = ProcessTreeSupervisor(
-        os_module=SimpleNamespace(name="posix", killpg=lambda _group, _signal: None),
+        os_module=SimpleNamespace(name="posix", killpg=killpg),
         signal_module=SimpleNamespace(SIGKILL=9),
         platform_name="posix",
         process_probe=lambda _pid, _expected: next(

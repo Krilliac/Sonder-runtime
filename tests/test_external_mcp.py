@@ -107,6 +107,21 @@ def test_structured_result_is_preferred_and_every_call_is_one_shot():
     assert "q" not in events.events[-1][1]["detail"]
 
 
+@pytest.mark.parametrize("failure_stage", ["transport", "credential"])
+def test_upstream_exception_secret_never_enters_logs(failure_stage, caplog):
+    secret = "upstream-secret-value"
+    transport = RecordingTransport([RuntimeError(secret)])
+    server = _server(credential_env="SONDER_TEST_MCP_TOKEN")
+    bridge = ExternalMcpBridge(
+        (server,), transport=transport, events=RecordingEvents(),
+        secret_resolver=(lambda _name: (_ for _ in ()).throw(RuntimeError(secret)))
+        if failure_stage == "credential" else (lambda _name: "credential"),
+    )
+    with pytest.raises(ExternalMcpError):
+        asyncio.run(bridge.call("docs", "lookup", {}, context=_context()))
+    assert secret not in caplog.text
+
+
 def test_allowlists_and_read_only_capability_default_fail_closed():
     events = RecordingEvents()
     transport = RecordingTransport([])

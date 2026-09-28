@@ -20,8 +20,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Mapping, Protocol
 
-from sonder_runtime.application.context import OperationContext
-from sonder_runtime.application.ports.event_sink import EventSink
+from ..application.context import OperationContext
+from ..application.ports.event_sink import EventSink
 
 logger = logging.getLogger(__name__)
 
@@ -295,12 +295,11 @@ class ExternalMcpBridge:
                 except Exception as exc:
                     logger.error(
                         f"external MCP credential resolution failed, "
-                        f"server={server_name!r}",
-                        exc_info=True,
+                        f"server={server_name!r} error_type={type(exc).__name__}",
                     )
                     raise ExternalMcpError(
                         "CREDENTIAL_UNAVAILABLE", "external MCP credential is unavailable"
-                    ) from exc
+                    ) from None
                 if not isinstance(credential, str) or not credential:
                     logger.warning(
                         f"external MCP credential resolved to empty/invalid value, "
@@ -340,17 +339,17 @@ class ExternalMcpBridge:
                 # Upstream text may contain headers, URLs, arguments, or secrets.
                 logger.error(
                     f"external MCP transport invoke failed, "
-                    f"server={server_name!r} tool={tool_name!r}",
-                    exc_info=True,
+                    f"server={server_name!r} tool={tool_name!r} "
+                    f"error_type={type(exc).__name__}",
                 )
-                raise ExternalMcpError("TRANSPORT_ERROR", "external MCP transport failed") from exc
+                raise ExternalMcpError("TRANSPORT_ERROR", "external MCP transport failed") from None
 
             try:
                 value, structured, is_error = _normalise_result(raw_result)
-            except Exception as exc:
+            except Exception:
                 raise ExternalMcpError(
                     "INVALID_RESULT", "external MCP returned an invalid result"
-                ) from exc
+                ) from None
             result_bytes = _json_size(value, "INVALID_RESULT")
             result_ratio = result_bytes / server.max_result_bytes if server.max_result_bytes else 1.0
             if result_ratio >= 0.8 and result_bytes <= server.max_result_bytes:
@@ -381,7 +380,6 @@ class ExternalMcpBridge:
             logger.error(
                 f"external MCP call failed server={server_name!r} tool={tool_name!r} "
                 f"error_code={exc.code!r} elapsed_ms={int((time.monotonic() - started) * 1000)}",
-                exc_info=True,
             )
             logger.debug(
                 f"external MCP call failed server={server_name!r} tool={tool_name!r} "
