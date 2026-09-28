@@ -372,6 +372,17 @@ def _record_npu_fallback_handler(handled):
         pass
 
 
+def _embed_on_cpu() -> bool:
+    """Whether SONDER_EMBED_ON_CPU asks Ollama to keep the embedder off the GPU.
+
+    Opt-in. On a GPU the chat model nearly fills, a GPU-loaded embedder evicts
+    it and every embedding costs a chat-model reload (measured 2026-09-28:
+    ~20 s for Qwen3.8 27B on 16 GB). On CPU (``num_gpu: 0``) the embedder stays
+    resident beside it at ~25 ms per embedding.
+    """
+    return os.environ.get("SONDER_EMBED_ON_CPU", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def embed(text, timeout=30, base=None, model=None):
     _EMBED_STATE.vector = None
     _EMBED_STATE.revision = None
@@ -474,7 +485,10 @@ def embed(text, timeout=30, base=None, model=None):
             if _npu_prefer_active():
                 _EMBED_STATE.fallback_reason = "npu_unavailable"
                 npu_fallback_pending = True
-        payload = json.dumps({"model": selected_model, "prompt": prompt}).encode("utf-8")
+        body = {"model": selected_model, "prompt": prompt}
+        if _embed_on_cpu():
+            body["options"] = {"num_gpu": 0}
+        payload = json.dumps(body).encode("utf-8")
         req = urllib.request.Request(
             "%s/api/embeddings" % selected_base,
             data=payload,
