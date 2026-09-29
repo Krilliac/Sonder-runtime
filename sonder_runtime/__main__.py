@@ -18,6 +18,7 @@ Commands:
     smoke         minimal end-to-end check without a real model
     control-state-rehearsal  collect disposable provider evidence without promotion
     eval-history  inspect or explicitly record precomputed evaluation evidence
+    openrouter    list OpenRouter models / account credits, map a tier to a model
 """
 from __future__ import annotations
 
@@ -2047,6 +2048,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.error = lambda message: parser.exit(2, "artifact-mobility: INVALID_REQUEST\n")
     _add_mobility_arguments(p)
 
+    from sonder_runtime.bootstrap.openrouter_cli import add_parser as add_openrouter_parser
+
+    add_openrouter_parser(sub)
     return parser
 
 

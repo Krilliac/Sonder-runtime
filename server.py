@@ -26921,6 +26921,8 @@ def run_mcp(*, safety_checked: bool = False) -> None:
 
 from sonder_runtime.bootstrap.computer_use_tools import register as _register_computer_use  # noqa: E402
 _register_computer_use(mcp, _record_direct_tool, lambda: _application())
+from sonder_runtime.bootstrap.openrouter_tools import register as _register_openrouter  # noqa: E402
+_register_openrouter(mcp, _record_direct_tool)
 
 
 def route_computer_use(text):

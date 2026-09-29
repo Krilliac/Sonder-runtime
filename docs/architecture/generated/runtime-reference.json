@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "5bc6f6b91c00b111c94059c9372bb792df6e63dd07d0b0745283b94a837e1a11",
+    "catalog_digest": "0f7f8ca2ddd1ed0703c946f6640c5a25eb32aa27e597a2a91959b45e5d5f07c2",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "5bc6f6b91c00b111c94059c9372bb792df6e63dd07d0b0745283b94a837e1a11",
+      "catalog_digest": "0f7f8ca2ddd1ed0703c946f6640c5a25eb32aa27e597a2a91959b45e5d5f07c2",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -4648,6 +4648,44 @@
             "type": "object"
           },
           "name": "ollama_pool_admin_status"
+        },
+        {
+          "description": "Show OpenRouter credits remaining, this key's limit and usage. Read-only; needs cloud opt-in.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {},
+            "title": "openrouter_accountArguments",
+            "type": "object"
+          },
+          "name": "openrouter_account"
+        },
+        {
+          "description": "List OpenRouter models this key may use: id, context, USD per 1M prompt/completion tokens, tool and structured-output support. Read-only; needs cloud opt-in.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "limit": {
+                "default": 50,
+                "title": "Limit",
+                "type": "integer"
+              },
+              "search": {
+                "default": "",
+                "title": "Search",
+                "type": "string"
+              },
+              "tools": {
+                "default": false,
+                "title": "Tools",
+                "type": "boolean"
+              }
+            },
+            "title": "openrouter_modelsArguments",
+            "type": "object"
+          },
+          "name": "openrouter_models"
         },
         {
           "description": "Summarize a guarded log file or your own test-run job output.\n\n    The structured form of ``tail -1 out.txt; grep -E \"^(FAILED|ERROR) \" out.txt``:\n    final line, recognized run summary (pytest, unittest, cargo, go, ctest,\n    jest, vitest, dotnet, maven, gradle, make), failure lines, first parsed\n    compiler/test errors, repeated-error groups, and a short tail. Pass exactly\n    one of ``path`` (inside allowed roots; credential stores refused) or\n    ``job_id``. Everything is redacted and bounded.\n    ",
@@ -13236,6 +13274,45 @@
     },
     {
       "aliases": [],
+      "category": "web",
+      "name": "/openrouter_account",
+      "native": false,
+      "params": [],
+      "risk": "safe",
+      "summary": "Show OpenRouter credits remaining, this key's limit and usage.",
+      "tool": "openrouter_account"
+    },
+    {
+      "aliases": [],
+      "category": "web",
+      "name": "/openrouter_models",
+      "native": false,
+      "params": [
+        {
+          "default": "",
+          "name": "search",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": false,
+          "name": "tools",
+          "required": false,
+          "type": "bool"
+        },
+        {
+          "default": 50,
+          "name": "limit",
+          "required": false,
+          "type": "int"
+        }
+      ],
+      "risk": "safe",
+      "summary": "List OpenRouter models this key may use: id, context, USD per 1M prompt/completion tokens, tool and structured-output support.",
+      "tool": "openrouter_models"
+    },
+    {
+      "aliases": [],
       "category": "dev",
       "name": "/output_digest",
       "native": false,
@@ -18504,15 +18581,15 @@
   ],
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES plus sonder_runtime.platform.memory_replication_config",
   "counts": {
-    "capabilities": 223,
-    "commands": 339,
+    "capabilities": 225,
+    "commands": 341,
     "configuration": 236,
     "events": 43,
     "native_tools": 66,
     "schemas": 4,
-    "tools": 223
+    "tools": 225
   },
-  "digest": "028133c39c39ce0881ad0884887a11e5cbc92c3ad0840e0b539d39fbb071920a",
+  "digest": "fed863a52d0cfc4fc719d768cbf389bcb80831f506a4a23e002a19c219d4205e",
   "events": [
     {
       "name": "session.started",
@@ -21123,9 +21200,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "5bc6f6b91c00b111c94059c9372bb792df6e63dd07d0b0745283b94a837e1a11",
+    "catalog_digest": "0f7f8ca2ddd1ed0703c946f6640c5a25eb32aa27e597a2a91959b45e5d5f07c2",
     "client": {
-      "digest": "5bc6f6b91c00b111c94059c9372bb792df6e63dd07d0b0745283b94a837e1a11",
+      "digest": "0f7f8ca2ddd1ed0703c946f6640c5a25eb32aa27e597a2a91959b45e5d5f07c2",
       "events": [
         {
           "name": "approval.denied",
@@ -22425,6 +22502,8 @@
           "npu_status",
           "offload",
           "ollama_pool_admin_status",
+          "openrouter_account",
+          "openrouter_models",
           "output_digest",
           "parallel_generate_run",
           "parallel_generate_run_languages",
@@ -23187,6 +23266,16 @@
             "name": "ollama_pool_admin_status",
             "schema_available": true,
             "summary": "Read an administrator-only cached worker page; optionally refresh one bounded stale batch.\n\n    Page size is 1..128 and the full JSON page is at most 65,536 UTF-8 bytes.\n    Remote probes retain configured consent and HTTPS policy. Callers cannot\n    change configured probe batch size or parallelism. Cursors belong to one\n    administrator and roster generation. Local-open direct use is permitted.\n    "
+          },
+          {
+            "name": "openrouter_account",
+            "schema_available": true,
+            "summary": "Show OpenRouter credits remaining, this key's limit and usage. Read-only; needs cloud opt-in."
+          },
+          {
+            "name": "openrouter_models",
+            "schema_available": true,
+            "summary": "List OpenRouter models this key may use: id, context, USD per 1M prompt/completion tokens, tool and structured-output support. Read-only; needs cloud opt-in."
           },
           {
             "name": "output_digest",
@@ -28205,6 +28294,44 @@
             "type": "object"
           },
           "name": "ollama_pool_admin_status"
+        },
+        {
+          "description": "Show OpenRouter credits remaining, this key's limit and usage. Read-only; needs cloud opt-in.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {},
+            "title": "openrouter_accountArguments",
+            "type": "object"
+          },
+          "name": "openrouter_account"
+        },
+        {
+          "description": "List OpenRouter models this key may use: id, context, USD per 1M prompt/completion tokens, tool and structured-output support. Read-only; needs cloud opt-in.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "limit": {
+                "default": 50,
+                "title": "Limit",
+                "type": "integer"
+              },
+              "search": {
+                "default": "",
+                "title": "Search",
+                "type": "string"
+              },
+              "tools": {
+                "default": false,
+                "title": "Tools",
+                "type": "boolean"
+              }
+            },
+            "title": "openrouter_modelsArguments",
+            "type": "object"
+          },
+          "name": "openrouter_models"
         },
         {
           "description": "Summarize a guarded log file or your own test-run job output.\n\n    The structured form of ``tail -1 out.txt; grep -E \"^(FAILED|ERROR) \" out.txt``:\n    final line, recognized run summary (pytest, unittest, cargo, go, ctest,\n    jest, vitest, dotnet, maven, gradle, make), failure lines, first parsed\n    compiler/test errors, repeated-error groups, and a short tail. Pass exactly\n    one of ``path`` (inside allowed roots; credential stores refused) or\n    ``job_id``. Everything is redacted and bounded.\n    ",
@@ -36697,6 +36824,40 @@
           "name": "ollama_pool_admin_status"
         },
         {
+          "description": "Show OpenRouter credits remaining, this key's limit and usage. Read-only; needs cloud opt-in.",
+          "inputSchema": {
+            "properties": {},
+            "title": "openrouter_accountArguments",
+            "type": "object"
+          },
+          "name": "openrouter_account"
+        },
+        {
+          "description": "List OpenRouter models this key may use: id, context, USD per 1M prompt/completion tokens, tool and structured-output support. Read-only; needs cloud opt-in.",
+          "inputSchema": {
+            "properties": {
+              "limit": {
+                "default": 50,
+                "title": "Limit",
+                "type": "integer"
+              },
+              "search": {
+                "default": "",
+                "title": "Search",
+                "type": "string"
+              },
+              "tools": {
+                "default": false,
+                "title": "Tools",
+                "type": "boolean"
+              }
+            },
+            "title": "openrouter_modelsArguments",
+            "type": "object"
+          },
+          "name": "openrouter_models"
+        },
+        {
           "description": "Summarize a guarded log file or your own test-run job output.\n\n    The structured form of ``tail -1 out.txt; grep -E \"^(FAILED|ERROR) \" out.txt``:\n    final line, recognized run summary (pytest, unittest, cargo, go, ctest,\n    jest, vitest, dotnet, maven, gradle, make), failure lines, first parsed\n    compiler/test errors, repeated-error groups, and a short tail. Pass exactly\n    one of ``path`` (inside allowed roots; credential stores refused) or\n    ``job_id``. Everything is redacted and bounded.\n    ",
           "inputSchema": {
             "properties": {
@@ -44246,6 +44407,46 @@
         },
         {
           "function": {
+            "description": "Show OpenRouter credits remaining, this key's limit and usage. Read-only; needs cloud opt-in.",
+            "name": "openrouter_account",
+            "parameters": {
+              "properties": {},
+              "title": "openrouter_accountArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "List OpenRouter models this key may use: id, context, USD per 1M prompt/completion tokens, tool and structured-output support. Read-only; needs cloud opt-in.",
+            "name": "openrouter_models",
+            "parameters": {
+              "properties": {
+                "limit": {
+                  "default": 50,
+                  "title": "Limit",
+                  "type": "integer"
+                },
+                "search": {
+                  "default": "",
+                  "title": "Search",
+                  "type": "string"
+                },
+                "tools": {
+                  "default": false,
+                  "title": "Tools",
+                  "type": "boolean"
+                }
+              },
+              "title": "openrouter_modelsArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
             "description": "Summarize a guarded log file or your own test-run job output.\n\n    The structured form of ``tail -1 out.txt; grep -E \"^(FAILED|ERROR) \" out.txt``:\n    final line, recognized run summary (pytest, unittest, cargo, go, ctest,\n    jest, vitest, dotnet, maven, gradle, make), failure lines, first parsed\n    compiler/test errors, repeated-error groups, and a short tail. Pass exactly\n    one of ``path`` (inside allowed roots; credential stores refused) or\n    ``job_id``. Everything is redacted and bounded.\n    ",
             "name": "output_digest",
             "parameters": {
@@ -47366,7 +47567,7 @@
   },
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "6be05f104304b0db7c2d8556d4eb74bd89badb64f64fdabeaa18f8bc4e1a6ee4",
+    "server.py": "95b10a29c2cf99a3382fda91077772d34be1b83955ae8e5392a4370891cf6fd4",
     "sonder_runtime/application/tools/generated_catalogs.py": "0cb58ae27e9f0e56102282b7e2a5b7b8a9d955a4322055e87d18d3970fe644d8",
     "sonder_runtime/bootstrap/native_mcp.py": "70ff163345c30e4b379a77af0eaddbe8a51d3d93e001b68d538f09f5c6c4ee9f",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
@@ -51673,6 +51874,40 @@
           }
         },
         "title": "ollama_pool_admin_statusArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Show OpenRouter credits remaining, this key's limit and usage. Read-only; needs cloud opt-in.",
+      "name": "openrouter_account",
+      "parameters": {
+        "properties": {},
+        "title": "openrouter_accountArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "List OpenRouter models this key may use: id, context, USD per 1M prompt/completion tokens, tool and structured-output support. Read-only; needs cloud opt-in.",
+      "name": "openrouter_models",
+      "parameters": {
+        "properties": {
+          "limit": {
+            "default": 50,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "search": {
+            "default": "",
+            "title": "Search",
+            "type": "string"
+          },
+          "tools": {
+            "default": false,
+            "title": "Tools",
+            "type": "boolean"
+          }
+        },
+        "title": "openrouter_modelsArguments",
         "type": "object"
       }
     },

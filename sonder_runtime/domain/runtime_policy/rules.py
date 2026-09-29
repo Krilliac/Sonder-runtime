@@ -5,12 +5,17 @@ I/O concern. These functions read no environment and touch no files —
 callers pass the environment mapping explicitly. The root module now
 delegates here; behavior is unchanged.
 
-The policy intentionally cannot configure cloud models, permissions,
-filesystem roots, or credentials.
+The policy intentionally cannot configure cloud models for the local tiers,
+permissions, filesystem roots, credentials, or cloud consent.  Its one
+cloud-adjacent section, ``provider_models``, only names which model an
+already-bound, already-consented hosted provider (OpenRouter) serves per tier:
+it can never bind a tier to that provider, supply its key, or enable cloud.
 """
 from __future__ import annotations
 
 import re
+
+from ..openrouter_policy import OpenRouterPolicyError, validate_model_id
 
 VERSION = 1
 # Tiers that are always bound to a model. These are the router's fallback
@@ -75,6 +80,10 @@ OVERFLOW_ENV = {
     "threshold_tokens": "SONDER_LONG_CONTEXT_THRESHOLD",
     "model": "SONDER_LONG_CONTEXT_MODEL",
 }
+# Hosted providers whose per-tier model choice the policy may carry.  The
+# binding itself (SONDER_<TIER>_PROVIDER), the API key and cloud consent stay
+# in host configuration.
+PROVIDER_MODEL_PROVIDERS = ("openrouter",)
 _TRUE_TOKENS = frozenset({"1", "true", "yes", "on", "enabled"})
 _FALSE_TOKENS = frozenset({"0", "false", "no", "off", "disabled"})
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$")
@@ -155,6 +164,7 @@ def default_policy(env) -> dict:
         "routing": dict(DEFAULT_ROUTING),
         "npu": dict(DEFAULT_NPU),
         "long_context_overflow": dict(DEFAULT_LONG_CONTEXT_OVERFLOW),
+        "provider_models": {},
         "updated_ts": 0,
         "source": "environment seed",
     }
@@ -290,6 +300,49 @@ def effective_long_context_overflow(policy, env) -> dict:
     return {**settings, "overrides": tuple(overrides), "error": "; ".join(errors)}
 
 
+def normalize_provider_models(raw) -> dict:
+    """Validate ``provider_models``: ``{provider: {tier: model id}}``.
+
+    An empty model removes that tier's mapping; an empty provider map is
+    dropped, so the section stays absent until an operator uses it.
+    """
+    if raw in (None, ""):
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("runtime policy provider_models must be an object")
+    result: dict[str, dict[str, str]] = {}
+    for provider, tiers in raw.items():
+        name = str(provider or "").strip().lower()
+        if name not in PROVIDER_MODEL_PROVIDERS:
+            raise ValueError(
+                "runtime policy provider_models supports only: %s"
+                % ", ".join(PROVIDER_MODEL_PROVIDERS)
+            )
+        if tiers in (None, ""):
+            continue
+        if not isinstance(tiers, dict):
+            raise ValueError("runtime policy provider_models.%s must be an object" % name)
+        mapping: dict[str, str] = {}
+        for tier, model in tiers.items():
+            tier_name = str(tier or "").strip().lower()
+            if tier_name not in LOCAL_TIERS:
+                raise ValueError(
+                    "runtime policy provider_models.%s names unknown tier %r (tiers: %s)"
+                    % (name, tier, ", ".join(LOCAL_TIERS))
+                )
+            if model is None or not str(model).strip():
+                continue
+            try:
+                mapping[tier_name] = validate_model_id(
+                    str(model), "provider_models.%s.%s" % (name, tier_name),
+                )
+            except OpenRouterPolicyError as exc:
+                raise ValueError(str(exc)) from exc
+        if mapping:
+            result[name] = {tier: mapping[tier] for tier in LOCAL_TIERS if tier in mapping}
+    return result
+
+
 def normalize(payload, defaults=None) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("runtime policy must be a JSON object")
@@ -336,6 +389,7 @@ def normalize(payload, defaults=None) -> dict:
         "long_context_overflow": normalize_long_context_overflow(
             payload.get("long_context_overflow"), base.get("long_context_overflow"),
         ),
+        "provider_models": normalize_provider_models(payload.get("provider_models")),
         "updated_ts": max(0, int(payload.get("updated_ts") or 0)),
         "source": str(payload.get("source") or "runtime policy")[:120],
     }
@@ -371,7 +425,12 @@ def npu_mode(capability, policy) -> str:
 
 
 def disk_payload(policy: dict) -> dict:
-    return {key: policy[key] for key in (
+    payload = {key: policy[key] for key in (
         "version", "revision", "local_models", "embedding_model", "routing", "npu",
         "long_context_overflow", "updated_ts", "source",
     )}
+    # Written only once an operator maps a hosted provider's tier, so a
+    # policy file that never used it keeps its existing shape.
+    if policy.get("provider_models"):
+        payload["provider_models"] = policy["provider_models"]
+    return payload

@@ -26,6 +26,11 @@ _ALIASES = {
     "sonder_inference": "sonder_inference",
     "sonder-infer": "sonder_inference",
     "inference": "sonder_inference",
+    # Hosted and metered: usable only with SONDER_ALLOW_CLOUD=1, a key and a
+    # cloud-allowing operation context (see OpenRouterGateway).
+    "openrouter": "openrouter",
+    "open-router": "openrouter",
+    "open_router": "openrouter",
 }
 # "sonder" names the logical chat tier and the local model alias, so it must
 # never silently select a transport.  It stays an unknown-provider error with
@@ -47,6 +52,7 @@ PROVIDER_LABEL_IDS = MappingProxyType({
     "ollama": "ollama",
     "openai-compatible": "openai_compatible",
     "sonder-inference": "sonder_inference",
+    "openrouter": "openrouter",
 })
 
 

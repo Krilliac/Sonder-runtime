@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 372,
+      "file_count": 373,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -201,6 +201,7 @@
         "sonder_runtime/adapters/inference/openai_compat.py",
         "sonder_runtime/adapters/inference/openai_compat_gateway.py",
         "sonder_runtime/adapters/inference/openai_protocol_probe.py",
+        "sonder_runtime/adapters/inference/openrouter_gateway.py",
         "sonder_runtime/adapters/inference/overflow_availability.py",
         "sonder_runtime/adapters/inference/overflow_route.py",
         "sonder_runtime/adapters/inference/prewarm_gate.py",
@@ -812,7 +813,7 @@
       ]
     },
     {
-      "file_count": 65,
+      "file_count": 67,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -868,6 +869,8 @@
         "sonder_runtime/bootstrap/memory_replication.py",
         "sonder_runtime/bootstrap/model_gateways.py",
         "sonder_runtime/bootstrap/native_mcp.py",
+        "sonder_runtime/bootstrap/openrouter_cli.py",
+        "sonder_runtime/bootstrap/openrouter_tools.py",
         "sonder_runtime/bootstrap/owned_http_runtime.py",
         "sonder_runtime/bootstrap/prepared_workbench.py",
         "sonder_runtime/bootstrap/provider_bindings.py",
@@ -883,7 +886,7 @@
       ]
     },
     {
-      "file_count": 260,
+      "file_count": 261,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1060,6 +1063,7 @@
         "sonder_runtime/domain/native_tool_policy.py",
         "sonder_runtime/domain/natural_model_request.py",
         "sonder_runtime/domain/ollama_policy.py",
+        "sonder_runtime/domain/openrouter_policy.py",
         "sonder_runtime/domain/operational_capabilities.py",
         "sonder_runtime/domain/permission_context.py",
         "sonder_runtime/domain/profiling/__init__.py",
