@@ -412,6 +412,12 @@ class ToolGateway:
                     receipt_key=receipt.request_id,
                     detail=receipt.error,
                     success=receipt.success,
+                    # The redacted response the caller saw, so a mock replay
+                    # can substitute it instead of re-invoking the tool.
+                    response={
+                        "success": receipt.success, "output": receipt.output,
+                        "error_code": receipt.error_code, "error": receipt.error,
+                    },
                 )
         except BaseException as error:
             if journal_binding is not None and journal_intent is not None:
