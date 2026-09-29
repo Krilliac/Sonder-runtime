@@ -62,6 +62,25 @@ def _redact(value: Any, redactor: TelemetryRedactor) -> Any:
     return value
 
 
+_RETENTION_ENVELOPE_KEYS = frozenset({"privacy_class", "redacted"})
+
+
+def retention_envelope(privacy_class: str) -> dict[str, object]:
+    """The payload that replaces an event withheld by a retention marker."""
+    return {"privacy_class": privacy_class, "redacted": True}
+
+
+def is_retention_withheld(payload: Mapping[str, object]) -> bool:
+    """True only for the exact retention replacement envelope.
+
+    Generic credential redaction rewrites values but keeps the payload's own
+    keys (``content``, ``call_id`` ...), so it never matches this shape even
+    when the original payload happened to carry ``redacted: true``.
+    """
+    return (isinstance(payload, Mapping) and set(payload) == _RETENTION_ENVELOPE_KEYS
+            and payload.get("redacted") is True and isinstance(payload.get("privacy_class"), str))
+
+
 @dataclass(frozen=True, slots=True)
 class SessionEventRecord:
     """Stable export envelope retaining every field needed for replay."""
@@ -226,7 +245,7 @@ class SessionQueryEngine:
         privacy_class = (privacy_targets or {}).get(event.sequence)
         if privacy_class is None:
             return record
-        return replace(record, payload={"privacy_class": privacy_class, "redacted": True}, redacted=True)
+        return replace(record, payload=retention_envelope(privacy_class), redacted=True)
 
     @staticmethod
     def _fingerprint(session_id: str, event_type: str | None, text: str | None,
@@ -350,13 +369,12 @@ class SessionQueryEngine:
             role = roles.get(event.event_type)
             if role is None:
                 continue
-            if event.redacted and event.payload.get("redacted") is True:
+            if event.redacted and is_retention_withheld(event.payload):
                 # A retention marker replaced the whole payload.  Keep the turn
                 # (role, sequence, event type) so replay/trajectory consumers
                 # see the true turn order and count, but expose only the
                 # privacy class -- the original content and ids are withheld.
-                privacy_class = event.payload.get("privacy_class")
-                label = privacy_class if isinstance(privacy_class, str) and privacy_class else "withheld"
+                label = event.payload["privacy_class"] or "withheld"
                 result.append(TranscriptRecord(role, f"[redacted: {label}]", event.event_type,
                                                event.sequence, redacted=True))
                 continue
@@ -369,5 +387,5 @@ class SessionQueryEngine:
         return tuple(result)
 
 
-__all__ = ["QueryExportError", "DefaultExportRedactor", "SessionEventRecord", "TranscriptRecord", "SessionQueryPage",
+__all__ = ["is_retention_withheld", "retention_envelope", "QueryExportError", "DefaultExportRedactor", "SessionEventRecord", "TranscriptRecord", "SessionQueryPage",
            "SessionExport", "SessionQueryEngine"]

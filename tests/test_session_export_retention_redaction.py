@@ -94,3 +94,58 @@ def test_list_sessions_title_never_shows_redacted_turn(tmp_path):
     assert titles == {"s1": "second question", "s2": ""}
     assert SECRET not in str(result.body)
     assert "redacted" not in str(titles)
+
+
+def _tool_session(tmp_path, withheld: tuple[int, ...]):
+    repo = SQLiteSessionRepository(tmp_path / "sessions.db", max_read_limit=100)
+    repo.append("s1", "user.message", {"content": "look it up", "turn_id": "t1"})
+    repo.append("s1", "tool.call", {"call_id": "c1", "name": "search", "turn_id": "t1",
+                                    "content": SECRET})
+    repo.append("s1", "tool.result", {"call_id": "c1", "name": "search", "turn_id": "t1",
+                                      "content": SECRET + "-result"})
+    repo.append("s1", "tool.call", {"call_id": "c2", "name": "fetch", "turn_id": "t1",
+                                    "content": "{}"})
+    repo.append("s1", "tool.result", {"call_id": "c2", "name": "fetch", "turn_id": "t1",
+                                      "content": "ok"})
+    if withheld:
+        repo.append("s1", "session.retention.applied", {"targets": [
+            {"sequence": sequence, "privacy_class": "private"} for sequence in withheld]})
+    return repo
+
+
+@pytest.mark.parametrize("withheld", [(2, 3), (2,), (3,)], ids=["pair", "call-only", "result-only"])
+def test_trajectory_survives_withheld_tool_events(tmp_path, withheld):
+    result = HttpSessionFacade(_tool_session(tmp_path, withheld)).trajectory("s1")
+
+    assert result.status_code == 200, result.body
+    steps = result.body["steps"]
+    assert SECRET not in str(result.body)
+    # One action, one step: the withheld event never splits or strands it,
+    # and the unaffected second action is still fully projected and paired.
+    assert len(steps) == 2
+    first, second = steps
+    assert (second["call_id"], second["tool"], second["status"]) == ("c2", "fetch", "completed")
+    assert first["status"] == "withheld"
+    assert (first["requested_sequence"], first["completed_sequence"]) == (2, 3)
+    assert (first["result_sha256"], first["result_bytes"]) == (None, None)
+    if 2 in withheld:
+        # The action itself was withheld: nothing identifying it survives.
+        assert "search" not in str(result.body)
+        assert (first["call_id"], first["tool"], first["arguments_sha256"]) == ("", "", "")
+    else:
+        # Only the observation was withheld; the visible call keeps its metadata.
+        assert (first["call_id"], first["tool"]) == ("c1", "search")
+
+
+def test_generic_redaction_is_not_mistaken_for_retention(tmp_path):
+    repo = SQLiteSessionRepository(tmp_path / "sessions.db", max_read_limit=100)
+    repo.append("s1", "user.message",
+                {"content": "token=super-secret", "redacted": True, "turn_id": "t1"})
+
+    [item] = SessionQueryEngine(repo).export_transcript("s1")
+
+    assert item.redacted is False
+    assert item.content == "token=[REDACTED]"
+    assert item.turn_id == "t1"
+    title = HttpSessionFacade(repo).list_sessions().body["sessions"][0]["title"]
+    assert title == "token=[REDACTED]"
