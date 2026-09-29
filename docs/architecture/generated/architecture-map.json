@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 372,
+      "file_count": 373,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -203,6 +203,7 @@
         "sonder_runtime/adapters/inference/openai_protocol_probe.py",
         "sonder_runtime/adapters/inference/overflow_availability.py",
         "sonder_runtime/adapters/inference/overflow_route.py",
+        "sonder_runtime/adapters/inference/prefix_cache.py",
         "sonder_runtime/adapters/inference/prewarm_gate.py",
         "sonder_runtime/adapters/inference/residency_feedback.py",
         "sonder_runtime/adapters/inference/served_tier_models.py",
@@ -421,7 +422,7 @@
       ]
     },
     {
-      "file_count": 385,
+      "file_count": 386,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -677,6 +678,7 @@
         "sonder_runtime/application/ports/workflows.py",
         "sonder_runtime/application/preferences/__init__.py",
         "sonder_runtime/application/preferences/use_cases.py",
+        "sonder_runtime/application/prefix_cache_report.py",
         "sonder_runtime/application/preflight/__init__.py",
         "sonder_runtime/application/preflight/use_cases.py",
         "sonder_runtime/application/promotion/__init__.py",
