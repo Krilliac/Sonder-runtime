@@ -170,3 +170,40 @@ def test_redactor_failure_is_fail_closed(monkeypatch):
     )
     assert "hunter2" not in rendered
     assert "USER: [REDACTION_FAILED]" in rendered
+
+
+def test_configured_secret_value_is_redacted_without_a_label(monkeypatch, tmp_path):
+    # A bare configured secret has no shape a pattern can see; the export must
+    # use the same value-aware runtime redactor as durable capture.
+    monkeypatch.setenv("SONDER_API_KEY", "plainvalue-7f3a9c")
+    _seed(monkeypatch, tmp_path, [("my key is plainvalue-7f3a9c ok", "noted")])
+    out = server.session_export("S1")
+    assert "plainvalue-7f3a9c" not in out
+    assert "USER: my key is [REDACTED] ok" in out
+
+
+def test_graph_config_secret_value_is_redacted(monkeypatch, tmp_path):
+    import dataclasses
+    from types import SimpleNamespace
+
+    @dataclasses.dataclass
+    class _Secrets:
+        api_key: str = "graph-held-secret-91b2"
+
+    monkeypatch.setattr(
+        server, "_APP_GRAPH",
+        SimpleNamespace(config=SimpleNamespace(secrets=_Secrets(), private_source_paths=())),
+    )
+    _seed(monkeypatch, tmp_path, [("hi", "value graph-held-secret-91b2 here")])
+    out = server.session_export("S1")
+    assert "graph-held-secret-91b2" not in out
+    assert "ASSISTANT: value [REDACTED] here" in out
+
+
+def test_injected_redactor_is_applied_then_export_policy(monkeypatch):
+    rendered = transcript_export.format_session_transcript(
+        "S1", {"title": "t", "project": "p"},
+        [{"task": "zeta password=hunter2", "response": "ok"}],
+        redact=lambda text: text.replace("zeta", "[REDACTED]"),
+    )
+    assert "USER: [REDACTED] password=[REDACTED]" in rendered

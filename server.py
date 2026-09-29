@@ -16831,7 +16831,9 @@ def session_export(session: str = "", limit: int = 50) -> str:
         turns = memory_store.session_turns(conn, session_id)[-limit:]
     finally:
         conn.close()
-    return session_transcript_export.format_session_transcript(session_id, sess, turns)
+    # Same value-aware redactor durable capture uses (graph config or env secrets).
+    redact = sonder_logging.redactor_for_config(getattr(_APP_GRAPH, "config", None)).redact
+    return session_transcript_export.format_session_transcript(session_id, sess, turns, redact=redact)
 
 
 @mcp.tool()
