@@ -176,7 +176,8 @@ def test_public_docs_label_prerelease_and_do_not_offer_ungated_tagging():
     assert "branches: [main]" in workflow
     assert "claude/mobile-desktop-app-gui-gzlhn5" not in workflow
     assert "README.md#quick-start" in client
-    assert "README.md#why-sonder" in client
+    assert "README.md#key-capabilities" in client
+    assert "README.md#why-sonder" not in client
     assert "README.md#install--run" not in client
     assert "README.md#interfaces" not in client
 
