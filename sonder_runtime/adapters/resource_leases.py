@@ -8,13 +8,21 @@ the policy asks for:
 * owner liveness: ``probe_process`` on the recorded owner pid (and identity);
   a probe that cannot decide counts as alive, so an unreadable owner is never
   declared dead;
-* cleanup evidence, per resource kind: for a ``port`` the port answers neither
-  a bind nor a connect test on the loopback host; for everything else the
-  lease's metadata names what would still be holding it -- ``pid`` (a process
-  that must be proven dead), ``port`` (a port that must be proven free) and
-  ``path`` (a file or directory that must be gone). A lease whose metadata
-  names none of these has no cleanup evidence and is never reclaimed; its
-  owner releases it. Callers may register a kind-specific check instead.
+* cleanup evidence, per resource kind: for a ``port`` the port can be bound
+  again on ``127.0.0.1`` (and on the wildcard address); for everything else
+  the lease's metadata names what would still be holding it -- ``pid`` (a
+  process that must be proven dead, checked against ``pid_identity`` when
+  recorded), ``port`` (a port that must be proven free) and ``path`` (a file
+  or directory that must be gone). A ``desktop_session`` lease that records
+  no indicator ``pid`` yet is proven released by its owner's death alone:
+  the indicator is only ever launched by that owner and exits with it. Any
+  other lease whose metadata names none of these has no cleanup evidence and
+  is never reclaimed; its owner releases it. Callers may register a
+  kind-specific check instead.
+
+The database is opened (and its table created) on first use, not on
+construction, so wiring a registry into a consumer costs nothing until a
+lease is actually taken.
 
 Every mutation runs inside ``BEGIN IMMEDIATE`` so two processes racing for the
 same resource serialize on the database lock: exactly one wins.
@@ -33,7 +41,7 @@ from typing import Callable, Iterable, Mapping
 
 from ..domain.common.errors import DependencyUnavailable
 from ..domain.resource_leases import (
-    KIND_PORT, RESOURCE_LEASE_BUSY, RESOURCE_LEASE_EXHAUSTED, RESOURCE_LEASE_NOT_FOUND,
+    KIND_DESKTOP_SESSION, KIND_PORT, RESOURCE_LEASE_BUSY, RESOURCE_LEASE_EXHAUSTED, RESOURCE_LEASE_NOT_FOUND,
     RESOURCE_LEASE_NOT_OWNER, ResourceLease, lease_error, reclaim_decision,
     validate_kind, validate_metadata, validate_port_range, validate_text, validate_ttl,
 )
@@ -107,8 +115,7 @@ class SqliteResourceLeaseRegistry:
         self._path_exists = path_exists
         self._port_range = validate_port_range(port_range)
         self._evidence: dict[str, CleanupEvidence] = dict(evidence or {})
-        with self._connection() as conn:
-            conn.execute(_SCHEMA)
+        self._schema_ready = False
 
     # -- storage -----------------------------------------------------------
 
@@ -120,6 +127,9 @@ class SqliteResourceLeaseRegistry:
                 try:
                     conn = sqlite_connect(registry._path, timeout=10.0, busy_timeout_ms=10000)
                     conn.isolation_level = None
+                    if not registry._schema_ready:
+                        conn.execute(_SCHEMA)
+                        registry._schema_ready = True
                     conn.execute("BEGIN IMMEDIATE")
                 except sqlite3.Error as exc:
                     raise DependencyUnavailable("resource lease store unavailable: %s" % exc) from None
@@ -177,7 +187,7 @@ class SqliteResourceLeaseRegistry:
                 logger.debug("cleanup evidence check failed for %s", lease.resource, exc_info=True)
                 return False
         proofs: list[bool] = []
-        if lease.kind == KIND_PORT and lease.key.isdigit():
+        if lease.kind == KIND_PORT and lease.key.isascii() and lease.key.isdigit():
             proofs.append(self._port_free(int(lease.key)))
         meta = lease.metadata
         pid = meta.get("pid")
@@ -190,6 +200,9 @@ class SqliteResourceLeaseRegistry:
         path = meta.get("path")
         if isinstance(path, str) and path:
             proofs.append(not self._path_exists(path))
+        if not proofs and lease.kind == KIND_DESKTOP_SESSION:
+            # No indicator was recorded: nothing but the owner can be driving.
+            return _owner_dead(lease, self._probe)
         return bool(proofs) and all(proofs)
 
     def _try_reclaim(self, conn, held: ResourceLease) -> tuple[bool, str]:
@@ -230,6 +243,7 @@ class SqliteResourceLeaseRegistry:
         if kind == KIND_PORT:
             port = _port_key(key)
             validate_port_range((port, port))
+            key = str(port)  # "047000" and "47000" are the same port
         with self._connection() as conn:
             held = self._row(conn, kind, key)
             if held is not None and held.owner_id == owner_id:
@@ -241,7 +255,7 @@ class SqliteResourceLeaseRegistry:
                 if not reclaimed:
                     raise lease_error(RESOURCE_LEASE_BUSY, "%s is held by %s (%s)"
                                       % (held.resource, held.owner_id, reason))
-            if kind == KIND_PORT and not self._port_free(int(key)):
+            if kind == KIND_PORT and not self._port_free(port):
                 raise lease_error(RESOURCE_LEASE_BUSY,
                                   "port %s is in use outside the lease registry" % key)
             lease = self._new_lease(kind, key, owner_id, ttl, owner_pid, owner_identity, meta)
@@ -289,7 +303,7 @@ class SqliteResourceLeaseRegistry:
     def heartbeat(self, kind: str, key: str, owner_id: str, *,
                   ttl_seconds: float | None = None) -> ResourceLease:
         """Extend the owner's lease by its TTL from now; only the owner may."""
-        kind, key = validate_kind(kind), validate_text("key", key)
+        kind, key = _normal_key(kind, key)
         ttl = validate_ttl(ttl_seconds) if ttl_seconds is not None else None
         with self._connection() as conn:
             held = self._require_owned(conn, kind, key, owner_id)
@@ -299,7 +313,7 @@ class SqliteResourceLeaseRegistry:
 
     def release(self, kind: str, key: str, owner_id: str) -> bool:
         """Drop the owner's lease. False when nothing is held; refuses other owners."""
-        kind, key = validate_kind(kind), validate_text("key", key)
+        kind, key = _normal_key(kind, key)
         with self._connection() as conn:
             held = self._row(conn, kind, key)
             if held is None:
@@ -320,8 +334,9 @@ class SqliteResourceLeaseRegistry:
         return held
 
     def holder(self, kind: str, key: str) -> ResourceLease | None:
+        kind, key = _normal_key(kind, key)
         with self._connection() as conn:
-            return self._row(conn, validate_kind(kind), validate_text("key", key))
+            return self._row(conn, kind, key)
 
     def leases(self, kind: str | None = None) -> tuple[ResourceLease, ...]:
         with self._connection() as conn:
@@ -348,9 +363,16 @@ class SqliteResourceLeaseRegistry:
 
 
 def _port_key(key: str) -> int:
-    if not key.isdigit():
+    if not (key.isascii() and key.isdigit()):
         raise lease_error("INVALID_INPUT", "a port lease key is the port number")
     return int(key)
+
+
+def _normal_key(kind: str, key: str) -> tuple[str, str]:
+    kind, key = validate_kind(kind), validate_text("key", key)
+    if kind == KIND_PORT and key.isascii() and key.isdigit():
+        key = str(int(key))
+    return kind, key
 
 
 __all__ = ["DEFAULT_PORT_RANGE", "LOOPBACK_HOST", "SqliteResourceLeaseRegistry", "port_is_free"]
