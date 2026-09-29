@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from collections.abc import Mapping
+from dataclasses import replace
 import hashlib
 import hmac
 import json
 from pathlib import Path
 from threading import Lock
+from time import monotonic
 
 from sonder_runtime.adapters.persistence.owned_sqlite import transaction as owned_sqlite_transaction
 from sonder_runtime.application.execution.effect_journal import EffectJournalError
@@ -34,13 +37,18 @@ class SQLiteRuntimeCheckpointRepository:
     """Append-only generations with expected-generation compare-and-set."""
 
     def __init__(self, db_path: str | Path, *, seal_key: bytes | str,
-                 max_payload_bytes: int = 256 * 1024, effect_journal=None) -> None:
+                 max_payload_bytes: int = 256 * 1024, effect_journal=None,
+                 workspace_reality=None, workspace_roots=()) -> None:
         if type(max_payload_bytes) is not int or not 1024 <= max_payload_bytes <= 256 * 1024:
             raise ValueError("max_payload_bytes must be between 1024 and 262144")
         self._path = Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._max_payload_bytes = max_payload_bytes
         self._effect_journal = effect_journal
+        self._workspace_reality = workspace_reality
+        self._workspace_roots = tuple(str(Path(root).resolve()) for root in workspace_roots)
+        if len(self._workspace_roots) > 16:
+            raise ValueError("checkpoint workspace root bound exceeded")
         if effect_journal is not None and (
             not isinstance(getattr(effect_journal, "database_path", None), Path)
             or effect_journal.database_path.resolve() != self._path.resolve()
@@ -76,6 +84,16 @@ class SQLiteRuntimeCheckpointRepository:
             raise CheckpointError("expected_generation must be at least -1")
         if checkpoint.generation != expected_generation + 1:
             raise CheckpointConflict("checkpoint generation must immediately follow expected_generation")
+        if self._workspace_reality is not None and self._workspace_roots:
+            deadline = monotonic() + 10.0
+            snapshots = {
+                root: snapshot for root in self._workspace_roots
+                if (snapshot := self._workspace_reality.capture(root, deadline_monotonic=deadline)) is not None
+            }
+            if snapshots:
+                checkpoint = replace(checkpoint, repository_state={
+                    **checkpoint.repository_state, "workspace_snapshots": snapshots,
+                })
         payload = canonical_json(checkpoint.sealed())
         if len(payload) > self._max_payload_bytes:
             raise CheckpointError("checkpoint exceeds repository payload bound")
@@ -166,7 +184,21 @@ class SQLiteRuntimeCheckpointRepository:
                     return RestoreResult(RestoreStatus.CORRUPT, detail="checkpoint effect binding is missing")
                 if effect_error is not None:
                     return RestoreResult(RestoreStatus.CORRUPT, detail=effect_error)
-            return RestoreResult(RestoreStatus.RESTORED, checkpoint=checkpoint)
+            deltas = []
+            if self._workspace_reality is not None:
+                deadline = monotonic() + 10.0
+                snapshots = checkpoint.repository_state.get("workspace_snapshots", {})
+                for root in self._workspace_roots:
+                    snapshot = snapshots.get(root) if isinstance(snapshots, Mapping) else None
+                    delta = self._workspace_reality.revalidate(root, snapshot, deadline_monotonic=deadline)
+                    if delta is not None:
+                        deltas.append({"workspace_root": root, **delta})
+            if deltas:
+                # Only the active restore projection loses evidence. The sealed
+                # archive remains an exact record of what was previously known.
+                checkpoint = replace(checkpoint, verification={})
+            return RestoreResult(RestoreStatus.RESTORED, checkpoint=checkpoint,
+                                 resume_delta=tuple(deltas))
         except (CheckpointError, ValueError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
             return RestoreResult(RestoreStatus.CORRUPT, detail=f"checkpoint rejected: {type(exc).__name__}")
 

@@ -1,5 +1,10 @@
 # Issue 515 — Effect intent/outcome journal and worker recovery
 
+Workspace freshness is a separate recovery check: see the
+[resume reality barrier](RESUME-REALITY-BARRIER.md). It preserves the journal's
+settlement/replay rules while requiring inspection and, where necessary,
+re-planning before a restored worker can mutate changed repository inputs.
+
 The typed tool gateway now has a live journal boundary for mutating calls. A
 worker binds `JournalBinding` for its run, worker identity, owner epoch, and
 scope. Immediately before the gateway invokes a call with a non-empty effect
