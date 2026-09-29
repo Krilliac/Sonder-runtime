@@ -301,7 +301,7 @@ import logging
 import os
 import tempfile
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 # --- modes ----------------------------------------------------------------
 
@@ -1436,11 +1436,20 @@ def decide(tool_name: str, *, interactive: bool = True,
     ``approval_ledger`` overrides the module-level ``_approval_ledger`` hook
     for this call, the way ``rule_lookup`` overrides ``_rule_lookup``.
     """
+    from sonder_runtime.adapters.security.powershell_gate import inspect_tool_call, loop_arguments
+
+    inspection = inspect_tool_call(tool_name, loop_arguments(arguments) if surface == "loop" else arguments)
+    opaque_powershell = inspection is not None and not inspection.inspectable
     decision = _decide(
         tool_name, interactive=interactive, mode=mode, rule_lookup=rule_lookup,
         requires_elevation=requires_elevation, arguments=arguments, fence=fence,
         approval_ledger=approval_ledger, surface=surface, live=record,
+        opaque_powershell=opaque_powershell,
     )
+    if opaque_powershell:
+        decision = replace(decision, reason=(
+            "PowerShell requires approval: %s; %s" % (inspection.reason, decision.reason)
+        ))
     if record and not interactive and _worth_a_receipt(decision):
         _observe(decision, surface)
     return decision
@@ -1503,13 +1512,16 @@ def _ledger_for(approval_ledger):
 
 def _decide(tool_name: str, *, interactive: bool, mode: str | None,
             rule_lookup, requires_elevation: bool, arguments=None, fence=None,
-            approval_ledger=None, surface: str = "", live: bool = True) -> Decision:
+            approval_ledger=None, surface: str = "", live: bool = True,
+            opaque_powershell: bool = False) -> Decision:
     active = mode or current_mode()
     if active not in _MATRIX:
         # Report the mode actually applied. Echoing an unknown name back in the
         # Decision put a mode that was never in effect into the audit trail.
         active = DEFAULT_MODE
     risk = risk_of(tool_name)
+    if opaque_powershell and risk != UNCLASSIFIED:
+        risk = "dangerous"
     name = str(tool_name or "").lstrip("/")
     digest = call_digest(name, arguments)
     call = call_id(digest)

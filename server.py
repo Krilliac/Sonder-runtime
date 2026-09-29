@@ -227,6 +227,7 @@ from sonder_runtime.domain.interaction_footer import (
 from sonder_runtime.domain.campaign_environment import (
     environment_failure as _campaign_environment_failure,
 )
+from sonder_runtime.adapters.security import powershell_gate as _powershell_gate
 from sonder_runtime.domain.learning_tier import (
     canonical_learn_tier as _canonical_learn_tier,
     should_learn as _should_learn_policy,
@@ -3718,7 +3719,7 @@ def control_command(prompt: str, history=None, session="", project="",
         return "refused %s: %s" % (cmd, exc)
     chain_tools = command_catalog.narrow_branch_tools(cmd, arg, chain_tools)
     refusal = _control_tool_refusal(
-        chain_tools, cmd, operator_approved=bool(operator_approved),
+        chain_tools, cmd, operator_approved=bool(operator_approved), arguments=_powershell_gate.runnable_powershell(_latest_runnable_block(history)) if cmd == "/run" else None,
     )
     if refusal:
         return refusal
@@ -7723,8 +7724,8 @@ def parallel_generate_run_languages(
                     "output": "no %s code block returned" % lang,
                     "seconds": 0,
                 }
-            ok, out = grounding.run_language_code(
-                code,
+            ok, out = _powershell_gate.run_generated_code(
+                grounding.run_language_code, code,
                 language=lang,
                 extra=check,
                 timeout=timeout,
@@ -7764,7 +7765,7 @@ def parallel_generate_run_languages(
         % (passed, len(results), elapsed, tier, max_workers)
     ]
     for r in results:
-        status = "PASS" if r.get("ok") else "FAIL"
+        status = "PASS" if r.get("ok") else "SKIP" if isinstance(r.get("output"), _powershell_gate.ApprovalRequired) else "FAIL"
         lines.append("[%s] %s [%s]" % (status, r.get("name"), r.get("language")))
         out = (r.get("output") or "").strip()
         if out:
@@ -7892,8 +7893,8 @@ def campaign_generate_compile_execute_record(
                 ok = False
                 out = "no %s code block returned" % lang
             else:
-                ok, out = grounding.run_language_code(
-                    code,
+                ok, out = _powershell_gate.run_generated_code(
+                    grounding.run_language_code, code,
                     language=lang,
                     timeout=timeout,
                     execute=True,
@@ -7905,11 +7906,12 @@ def campaign_generate_compile_execute_record(
             record_msg = ""
             pitfall_note = ""
             env_failure = (not ok) and _campaign_environment_failure(out)
+            approval_required = isinstance(out, _powershell_gate.ApprovalRequired)
             if ok and iid:
                 with _CAMPAIGN_LEARN_LOCK:
                     record_msg = record_outcome(iid, "tests_passed")
-            elif env_failure:
-                # Host toolchain breakage: the model was never judged, so no
+            elif env_failure or approval_required:
+                # Toolchain or approval skip: the model was never judged, so no
                 # outcome and no pitfall are recorded against it.
                 pass
             elif attempt == repair_rounds and record_failures and iid:
@@ -7932,8 +7934,9 @@ def campaign_generate_compile_execute_record(
                 "record": record_msg,
                 "pitfall_error": pitfall_note,
                 "env_skipped": env_failure,
+                "approval_required": approval_required,
             })
-            if ok or env_failure:
+            if ok or env_failure or approval_required:
                 break
             last_note = (out or "unknown failure")[:1200]
         final = attempts[-1]
@@ -8010,7 +8013,7 @@ def campaign_generate_compile_execute_record(
     if drain["drained"]:
         lines.append(_drain_summary_text(drain))
     for r in results:
-        status = "PASS" if r["ok"] else "FAIL"
+        status = "PASS" if r["ok"] else "SKIP" if r["attempts"][-1].get("approval_required") else "FAIL"
         lines.append("[%s] %s attempts=%d iid=%s" % (
             status, r["name"], len(r["attempts"]), r.get("iid") or "-"))
         final_out = (r["attempts"][-1].get("output") or "").strip()
@@ -15227,7 +15230,7 @@ _LOOP_ACTION_TYPES = (
 
 
 
-def _loop_permission_refusal(action_type):
+def _loop_permission_refusal(action_type, arguments=None):
     """Gate a model-authored `loop`/`workflow_run` action, or None to proceed.
 
     `_loop_dispatch` is the third place a *model* chooses what runs -- the
@@ -15245,7 +15248,7 @@ def _loop_permission_refusal(action_type):
     if str(action_type or "").strip().lower() not in _LOOP_ACTION_TYPES:
         return None
     tool = _loop_action_tool(action_type)
-    decision = permission_modes.decide(tool, interactive=False, surface="loop")
+    decision = permission_modes.decide(tool, interactive=False, surface="loop", arguments=_powershell_gate.loop_gate_arguments(tool, arguments))
     if decision.allowed:
         return None
     return {
@@ -15267,7 +15270,7 @@ def _loop_dispatch(action):
         k: v for k, v in (action or {}).items()
         if k not in {"code", "content", "files"}
     }
-    refusal = _loop_permission_refusal(action_type)
+    refusal = _loop_permission_refusal(action_type, action)
     if refusal is not None:
         # A refused action never entered the queue.  Recording it as a normal
         # successful tool call made activity consumers report it as completed

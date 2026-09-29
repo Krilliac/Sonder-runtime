@@ -59,6 +59,7 @@ from sonder_runtime.interfaces.repl import style as S
 from sonder_runtime.application.ports import repl_notices
 from sonder_runtime.adapters.command_catalog import command_catalog
 from sonder_runtime.adapters.security.permission_policy import permission_policy
+from sonder_runtime.adapters.security import powershell_gate
 from sonder_runtime.adapters.repl_services import project_scaffold
 from sonder_runtime.adapters.optional_slash_menu import load_optional_slash_menu
 from sonder_runtime.interfaces.repl.facades import (
@@ -762,7 +763,7 @@ def _severity(risk):
     return _RISK_RANK.get(risk, -1)
 
 
-def _gate_tools(tools, label, command_line=None):
+def _gate_tools(tools, label, command_line=None, arguments=None):
     """Strictest decision across ``tools``; returns ``(may_run, refusal_text)``.
 
     The console is the one surface that *can* have a human attached, so ``ask``
@@ -800,6 +801,7 @@ def _gate_tools(tools, label, command_line=None):
         # copy of the check and the fifth was written without it.
         decision = permission_policy.decide_for_caller(
             tool, interactive=interactive, gate_control_exempt=True, surface="repl",
+            arguments=arguments if isinstance(arguments, dict) else None,
         )
         if decision is None:
             continue
@@ -895,12 +897,12 @@ def _help_policy_note(topic):
     return ("\n" + "\n".join(dict.fromkeys(notes))) if notes else ""
 
 
-def _permission_gate(tool):
+def _permission_gate(tool, arguments=None):
     """Gate one tool dispatched as ``/<tool_name>`` through _run_catalogued."""
-    return _gate_tools((tool,), "/" + tool)
+    return _gate_tools((tool,), "/" + tool, arguments=arguments)
 
 
-def _named_command_gate(cmd, argument=""):
+def _named_command_gate(cmd, argument="", arguments=None):
     """Gate a hand-written console branch (``/write``, ``/delete``, ``/mkdir``).
 
     ``_run_catalogued`` is only the *fallback* path: roughly fifty named
@@ -951,7 +953,9 @@ def _named_command_gate(cmd, argument=""):
     # read from being prompted for -- or, piped, refused for -- a write it
     # cannot perform.
     tools = command_catalog.narrow_branch_tools(cmd, argument, tools)
-    return _gate_tools(tools, cmd, ("%s %s" % (cmd, argument or "")).strip())
+    return _gate_tools(
+        tools, cmd, ("%s %s" % (cmd, argument or "")).strip(), arguments=arguments,
+    )
 
 
 def _mode_command(argument):
@@ -1010,7 +1014,7 @@ def _run_catalogued(line, cmd):
                 accepts_token = False
             if accepts_token:
                 kwargs.setdefault("token", CURRENT_TOKEN)
-            may_run, refusal = _permission_gate(tool)
+            may_run, refusal = _permission_gate(tool, powershell_gate.powershell_arguments(tool, kwargs))
             if not may_run:
                 return refusal
             try:
@@ -4132,8 +4136,15 @@ def main(*, machine_output=False):
                     if rating == "nothing":
                         print("(nothing to rate yet)")
                         continue
+                    # /run aliases bind their PowerShell block; other calls keep no arguments.
+                    gate_arguments = powershell_gate.slash_run_arguments(
+                        cmd, lambda source=last_run_source or last_response: (source,),
+                        grounding.extract_runnable_code_block,
+                    )
                     may_run, refusal = (
-                        (True, "") if rating == "rate" else _named_command_gate(cmd, arg)
+                        (True, "") if rating == "rate" else
+                        _named_command_gate(cmd, arg, arguments=gate_arguments)
+                        if gate_arguments is not None else _named_command_gate(cmd, arg)
                     )
                     if not may_run:
                         print(_refusal_notice(line, refusal))
