@@ -383,13 +383,22 @@ Every physical action should bind at least:
 - operation/root/worker identity and inherited budget;
 - capture-source/device identity, display topology and target display;
 - pre-action frame digest, monotonic timestamp and freshness bound;
-- semantic target when available plus coordinates/keys actually dispatched;
+- semantic target when available plus coordinates and non-secret keys actually
+  dispatched;
 - active-window/process identity when the platform can attest it;
 - policy classification and the exact approval requirement;
 - hardware-approval receipt/nonce when required;
-- HID device identity and bounded action sequence;
+- HID device identity and bounded action sequence, with secret input redacted;
 - post-action observation digest and verifier outcome;
 - cancellation/effect-uncertainty state.
+
+Receipts never retain secret material. Typing a password, token or other
+credential is a separate opaque, host-owned credential-input operation that
+resolves a credential-broker handle inside the host and dispatches it directly
+to the actuator. The model never sees the value. The receipt records only the
+scoped handle, the field target, the input length class and a keyed digest that
+cannot be reversed from audit storage. The operator surface shows the same
+redacted form.
 
 A stale frame, changed display topology, focus/window drift, unknown HID state,
 missing required approval, mismatched action receipt or unverifiable target must
