@@ -21,6 +21,8 @@ from pathlib import Path
 
 from sonder_runtime.platform import paths as sonder_paths
 from sonder_runtime.adapters.process_liveness import pid_alive as _process_pid_alive
+from sonder_runtime.application.artifacts.readiness import ArtifactReadiness
+from sonder_runtime.application.artifacts.fanin import encode_readiness
 
 MAX_PROMPT_CHARS = 16_000
 MAX_ANSWER_CHARS = 64_000
@@ -109,6 +111,7 @@ CREATE TABLE IF NOT EXISTS fanout_results (
  answer_chars INTEGER NOT NULL DEFAULT 0, answer_truncated INTEGER NOT NULL DEFAULT 0,
  answer_truncation_known INTEGER NOT NULL DEFAULT 0, thinking_chars INTEGER NOT NULL DEFAULT 0,
  done_reason TEXT NOT NULL DEFAULT '',
+ readiness_json TEXT NOT NULL DEFAULT '',
  failure_class TEXT, retry_after_ts REAL, started_ts REAL, finished_ts REAL, updated_ts REAL NOT NULL,
  PRIMARY KEY(run_id, model), FOREIGN KEY(run_id) REFERENCES fanout_runs(id) ON DELETE CASCADE
 );
@@ -213,6 +216,7 @@ def _ensure_schema(path: str) -> None:
                     ("answer_truncation_known", "INTEGER NOT NULL DEFAULT 0"),
                     ("thinking_chars", "INTEGER NOT NULL DEFAULT 0"),
                     ("done_reason", "TEXT NOT NULL DEFAULT ''"),
+                    ("readiness_json", "TEXT NOT NULL DEFAULT ''"),
                     # NULL is intentional for legacy rows: old receipts did
                     # not carry enough metadata to classify a failure safely.
                     ("failure_class", "TEXT"),
@@ -696,6 +700,15 @@ def record_result(run_id: str, model: str, owner_id: str, status: str, *, answer
     )
     persisted_thinking_chars = _metric_count(thinking_chars, MAX_THINKING_CHARS)
     persisted_done_reason = _done_reason(done_reason)
+    # Publish evidence atomically with the terminal output; never backfill old
+    # rows from bytes observed by the consumer. Truncated provider/storage
+    # output is deliberately not sealed as a completed artifact.
+    readiness_json = ""
+    if (status == "answered" and not answer_truncated
+            and persisted_done_reason not in ("length", "max_tokens", "max_output_tokens")):
+        readiness_json = encode_readiness(ArtifactReadiness.from_content(
+            str(model), str(run_id), safe_answer,
+        ))
     persisted_failure_class = normalize_failure_class(failure_class) if status in ("failed", "unknown") else None
     try:
         persisted_retry_after_ts = float(retry_after_ts) if retry_after_ts is not None else None
@@ -721,10 +734,10 @@ def record_result(run_id: str, model: str, owner_id: str, status: str, *, answer
         if (run is None or run["cancel_requested"] or run["owner_id"] != owner_id
                 or run["status"] != "running" or run["lease_until"] is None
                 or run["lease_until"] < now): return None
-        changed = conn.execute("""UPDATE fanout_results SET status=?,answer=?,error=?,elapsed_ms=?,answer_chars=?,answer_truncated=?,answer_truncation_known=1,thinking_chars=?,done_reason=?,failure_class=?,retry_after_ts=?,finished_ts=?,updated_ts=?,owner_id='',owner_pid=0,owner_host='',lease_until=NULL
+        changed = conn.execute("""UPDATE fanout_results SET status=?,answer=?,error=?,elapsed_ms=?,answer_chars=?,answer_truncated=?,answer_truncation_known=1,thinking_chars=?,done_reason=?,readiness_json=?,failure_class=?,retry_after_ts=?,finished_ts=?,updated_ts=?,owner_id='',owner_pid=0,owner_host='',lease_until=NULL
                                WHERE run_id=? AND model=? AND owner_id=? AND status='running'""",
                                 (status, safe_answer, safe_error, elapsed, persisted_answer_chars,
-                                int(answer_truncated), persisted_thinking_chars, persisted_done_reason,
+                                int(answer_truncated), persisted_thinking_chars, persisted_done_reason, readiness_json,
                                 persisted_failure_class, persisted_retry_after_ts, now,
                                 now, str(run_id), str(model), str(owner_id))).rowcount
         if not changed: return None
@@ -785,7 +798,7 @@ def resume_run(run_id: str, *, include_failed: bool = False, retry_unknown: bool
         row = conn.execute("SELECT * FROM fanout_runs WHERE id=?", (str(run_id),)).fetchone()
         if row is None or row["status"] not in TERMINAL_RUNS:
             return None
-        changed = conn.execute("UPDATE fanout_results SET status='pending',answer='',error='',elapsed_ms=NULL,dispatch_started=0,dispatch_state_known=1,answer_chars=0,answer_truncated=0,answer_truncation_known=0,thinking_chars=0,done_reason='',failure_class=NULL,retry_after_ts=NULL,started_ts=NULL,finished_ts=NULL,owner_id='',owner_pid=0,owner_host='',lease_until=NULL,updated_ts=? WHERE run_id=? AND status IN (%s)" % marks, (now, str(run_id), *statuses)).rowcount
+        changed = conn.execute("UPDATE fanout_results SET status='pending',answer='',readiness_json='',error='',elapsed_ms=NULL,dispatch_started=0,dispatch_state_known=1,answer_chars=0,answer_truncated=0,answer_truncation_known=0,thinking_chars=0,done_reason='',failure_class=NULL,retry_after_ts=NULL,started_ts=NULL,finished_ts=NULL,owner_id='',owner_pid=0,owner_host='',lease_until=NULL,updated_ts=? WHERE run_id=? AND status IN (%s)" % marks, (now, str(run_id), *statuses)).rowcount
         if not changed:
             return None
         conn.execute("UPDATE fanout_runs SET status='queued',cancel_requested=0,owner_id='',owner_pid=0,owner_host='',lease_until=NULL,finished_ts=NULL,updated_ts=? WHERE id=?", (now, str(run_id)))

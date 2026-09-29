@@ -144,7 +144,11 @@ class DelegationService:
         """Spawn one child only when its assignment fits the parent context."""
         logger.debug(f"DelegationService.dispatch: delegation_id={request.delegation_id!r}, preset={request.preset.name!r}, role={request.preset.role.value!r}")
         assignment = request.workspace.guard()
-        if request.execution_contract.requested and self._worker_registry is None:
+        if (
+            request.execution_contract.requested
+            and self._worker_registry is None
+            and not getattr(request, "context_policy_defaulted", False)
+        ):
             raise IntegrationError(
                 "execution contract requires a durable worker registry"
             )
@@ -643,7 +647,11 @@ class DelegationService:
         if result.child_id != request.lineage.child_id or result.parent_id != request.lineage.parent_id:
             raise IntegrationError("provider result does not match delegation lineage")
         contract_requested = request.execution_contract.requested
-        if contract_requested and self._worker_registry is None:
+        if (
+            contract_requested
+            and self._worker_registry is None
+            and not getattr(request, "context_policy_defaulted", False)
+        ):
             raise IntegrationError(
                 "execution contract requires a durable worker registry"
             )

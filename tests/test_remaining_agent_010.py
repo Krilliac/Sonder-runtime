@@ -106,6 +106,35 @@ def test_full_role_workflow_routes_presets_and_builds_durable_lineage(tmp_path):
     )
 
 
+def test_scoped_review_dispatch_keeps_editor_diff_and_tests_without_rationale(tmp_path):
+    provider, _, workspace, context = _setup(tmp_path)
+    service = AgentWorkflowService(DelegationService(provider), roles=(
+        AgentRole.EDITOR, AgentRole.VERIFIER, AgentRole.REVIEWER,
+    ))
+    dispatch = service.start(
+        workflow_id="scoped", root_id="root", parent_id="root",
+        prompt="Return one from value().", workspace=workspace, context=context,
+    )
+    editor_output = "IMPLEMENTER_RATIONALE: trust my shortcut.\n```diff\n+return 1\n```"
+    verifier = service.advance(
+        dispatch, _success(dispatch, editor_output),
+        artifacts=("candidate.patch",), context=context,
+    ).next_dispatch
+    assert verifier is not None
+    reviewer = service.advance(
+        verifier, _success(verifier, "VERIFIER_RATIONALE: I agree with the implementer."),
+        verification=("pytest: 3 passed",), context=context,
+    ).next_dispatch
+    assert reviewer is not None
+    for request in (verifier.request, reviewer.request):
+        assert request.execution_contract.context_policy.value == "scoped"
+        assert "Return one from value()." in request.prompt
+        assert "+return 1" in request.prompt and "candidate.patch" in request.prompt
+        assert "RATIONALE" not in request.prompt
+    assert "pytest: 3 passed" in reviewer.request.prompt
+    assert provider.requests[-1][0].prompt == reviewer.request.prompt
+
+
 def test_sequential_roles_share_durable_parent_and_can_use_independent_presets(tmp_path):
     from sonder_runtime.adapters.persistence.durable_continuation import (
         SQLiteDurableContinuationRepository,
