@@ -21,6 +21,7 @@ class BackendCapability(str, Enum):
     STRUCTURED = "structured"
     CANCELLATION = "cancellation"
     TOOL_NATIVE = "tool_native"
+    TOOLS_WITH_SCHEMA = "tools_with_schema"
     TOOL_FALLBACK = "tool_fallback"
     TOOL_SEQUENTIAL = "tool_sequential"
     TOOL_PARALLEL = "tool_parallel"
@@ -226,6 +227,8 @@ def backend_requirements(required: frozenset[Capability], *, measured: bool = Fa
         requirements.update(semantic[capability] for capability in required if capability in semantic)
         if Capability.TOOLS in required:
             requirements.add(BackendCapability.TOOL_SEQUENTIAL)
+            if Capability.STRUCTURED in required:
+                requirements.add(BackendCapability.TOOLS_WITH_SCHEMA)
     return frozenset(requirements)
 
 

@@ -63,8 +63,16 @@ def build_runtime(
     route_identity_for: Callable[[GatewayRoute], BackendIdentity | None] | None = None,
     route_bindings: Mapping[LogicalRole, RoleBinding] | None = None,
     route_health: Mapping[str, ProviderHealth] | None = None,
+    production_route_policy: bool = False,
 ) -> Runtime:
     """Assemble the graph; host opt-in gates every public model gateway call."""
+    production_evidence = None
+    if production_route_policy:
+        if route_evidence is None or any(value is not None for value in (
+            route_identity_for, route_bindings, route_health,
+        )):
+            raise ValueError("production request routing requires only the evidence store")
+        production_evidence, route_evidence = route_evidence, None
     if route_evidence is None:
         if route_identity_for is not None or route_bindings is not None or route_health is not None:
             raise ValueError("identity-bound routing requires all host-owned route inputs")
@@ -94,6 +102,18 @@ def build_runtime(
         if not matched:
             raise ValueError("identity-bound route differs from the configured provider")
     gateway: ModelGateway = build_model_gateway(bindings)
+    if production_evidence is not None:
+        from ..application.routing.evidence_gateway import CapabilityEvidenceGateway
+        from .inference.capability_evidence import (
+            capability_routing_mode,
+            request_identity,
+            request_identity_key,
+        )
+
+        gateway = CapabilityEvidenceGateway(
+            gateway, production_evidence, request_identity, mode=capability_routing_mode(),
+            identity_key_for=request_identity_key,
+        )
     if route_evidence is None:
         model_routes = ModelGatewayFacade(gateway)
     else:

@@ -1788,6 +1788,24 @@ def _add_mobility_arguments(parser):
         mp.set_defaults(func=cmd_artifact_mobility)
 
 
+def cmd_capabilities(args) -> int:
+    from sonder_runtime.adapters.inference.capability_refresh import refresh_capabilities
+
+    config = _load_config(args)
+    try:
+        result = refresh_capabilities(
+            origin=config.ollama.url, home=config.state.home or None,
+            models=args.model, timeout_seconds=args.timeout,
+            context_tokens=args.context_tokens,
+        )
+    except (OSError, ValueError, TypeError):
+        _emit({"status": "failed", "reason": "capability_refresh_configuration_or_storage_error"},
+              as_json=args.json)
+        return 1
+    _emit(result, as_json=args.json)
+    return 0 if all(item["status"] == "measured" for item in result["models"]) else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = _ProductionArgumentParser(
         prog="python -m sonder_runtime",
@@ -1812,6 +1830,15 @@ def build_parser() -> argparse.ArgumentParser:
                 "--skip-ollama", action="store_true",
                 help="do not probe the Ollama endpoint",
             )
+
+    p = sub.add_parser("capabilities", help="refresh measured local model capability evidence")
+    capabilities_sub = p.add_subparsers(dest="capability_command", required=True)
+    cp = capabilities_sub.add_parser("refresh", help="probe configured local Ollama models")
+    common(cp)
+    cp.add_argument("--model", action="append", default=[], help="configured model subset (repeatable)")
+    cp.add_argument("--timeout", type=float, default=120.0, help="wall seconds per model, maximum 300")
+    cp.add_argument("--context-tokens", type=int, default=None, help="num_ctx used by probes and identity")
+    cp.set_defaults(func=cmd_capabilities)
 
     p = sub.add_parser("preflight", help="run startup checks, do not bind")
     common(p, ollama_flag=True)

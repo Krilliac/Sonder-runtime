@@ -49,6 +49,7 @@ from sonder_runtime.domain.inference_membership import (
 from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.platform.logging import Redactor
 from sonder_runtime.platform.metrics import MetricsRegistry, default_registry
+from sonder_runtime.application.routing.identity_cache import IdentityObservationCache
 
 logger = logging.getLogger(__name__)
 
@@ -572,6 +573,9 @@ class OllamaWorkerPool:
         capability_probe_timeout_seconds: float = 2.0,
         status_page_size: int = _DEFAULT_STATUS_PAGE_SIZE,
         capability_prober: Callable[[str], object] | None = None,
+        recent_evidence=None,
+        identity_for=None,
+        capability_routing: str = "advisory",
         clock: Callable[[], float] = time.monotonic,
         time_fn: Callable[[], float] | None = None,
         metrics: MetricsRegistry | None = None,
@@ -599,6 +603,9 @@ class OllamaWorkerPool:
             raise ValueError("capability probe timeout must be within (0, 30] seconds")
         if not 1 <= status_page_size <= _MAX_STATUS_PAGE_SIZE:
             raise ValueError("status page size must be within 1..128")
+        capability_routing = str(capability_routing or "advisory").strip().casefold()
+        if capability_routing not in {"advisory", "strict", "off"}:
+            raise ValueError("capability routing must be advisory, strict, or off")
         all_origins = (primary_origin, *worker_origins)
         normalized_origins = []
         seen = set()
@@ -653,6 +660,9 @@ class OllamaWorkerPool:
         self._probe_timeout = float(capability_probe_timeout_seconds)
         self._status_page_size = int(status_page_size)
         self._capability_prober = capability_prober
+        self._recent_evidence = recent_evidence
+        self._identity_for = identity_for
+        self._capability_routing = capability_routing
         self._clock = time_fn or clock
         self._cursor = 0
         self._probe_cursor = 0
@@ -662,6 +672,7 @@ class OllamaWorkerPool:
         self._draining = False
         self._condition = threading.Condition(threading.RLock())
         self._probe_lock = threading.Lock()
+        self._identity_cache = IdentityObservationCache(clock=self._clock)
         self._metrics = {
             "logical_requests": 0,
             "dispatches": 0,
@@ -693,6 +704,31 @@ class OllamaWorkerPool:
         self._external_source = None
         self._active_probe_states = ()
         self._last_model_miss_refresh = None
+
+    @staticmethod
+    def _identity_cache_key(origin, model, payload):
+        try:
+            from .capability_evidence import identity_context_tokens
+            context_tokens = identity_context_tokens(payload)
+        except (AttributeError, TypeError, ValueError, OSError):
+            options = payload.get("options") if isinstance(payload, Mapping) else None
+            if not isinstance(options, Mapping):
+                options = {}
+            context_tokens = options.get(
+                "num_ctx", payload.get("num_ctx") if isinstance(payload, Mapping) else None,
+            )
+        return (origin, model, context_tokens)
+
+    def _observe_identity_cached(self, origin, model, payload):
+        """Resolve worker identity once per evidence revision and 60s window."""
+        if self._identity_for is None:
+            return None
+        key = self._identity_cache_key(origin, model, payload)
+        return self._identity_cache.observe(
+            key,
+            lambda: self._identity_for(origin, model, payload),
+            evidence=self._recent_evidence,
+        )
 
     @property
     def membership_limit(self) -> int:
@@ -867,6 +903,11 @@ class OllamaWorkerPool:
     @property
     def capability_ttl_seconds(self) -> float:
         return self._capability_ttl
+
+    @property
+    def capability_routing(self) -> str:
+        """Configured evidence policy for request admission."""
+        return self._capability_routing
 
     def refresh_membership_capabilities(self, *, renew_within_seconds: float = 0.0) -> None:
         """Probe membership workers that are stale or would expire soon.
@@ -1503,6 +1544,7 @@ class OllamaWorkerPool:
 
     def _choose(
         self, *, model: str | None, excluded: set[str], now: float,
+        evidence_allowed: set[str] | None = None,
     ) -> _WorkerState | None:
         candidates = [
             state for state in self._states
@@ -1510,6 +1552,7 @@ class OllamaWorkerPool:
             and self._membership_admissible(state, now)
             and not state.compatibility_error
             and self._supports_model(state, model)
+            and (evidence_allowed is None or state.endpoint.worker_id in evidence_allowed)
             and state.cooldown_until <= now
             and not state.half_open_inflight
             and state.inflight < self._capacity(state)
@@ -1551,6 +1594,8 @@ class OllamaWorkerPool:
         model: str | None,
         excluded: set[str],
         admission_timeout: float,
+        evidence_allowed: set[str] | None = None,
+        evidence_reason: str = "",
     ) -> _WorkerState:
         logger.debug(f"_acquire: model={model!r}, excluded={excluded}, timeout={admission_timeout:.3f}s")
         deadline = time.monotonic() + admission_timeout
@@ -1563,7 +1608,8 @@ class OllamaWorkerPool:
                     self._metrics["drain_rejections"] += 1
                     raise WorkerPoolDraining("Ollama worker pool is draining")
                 now = self._clock()
-                state = self._choose(model=model, excluded=excluded, now=now)
+                state = self._choose(model=model, excluded=excluded, now=now,
+                                     evidence_allowed=evidence_allowed)
                 if state is not None:
                     if self._metrics_observer is not None:
                         self._worker_metric_label(state)
@@ -1580,11 +1626,18 @@ class OllamaWorkerPool:
                     and self._membership_admissible(state, now)
                     and not state.compatibility_error
                     and self._supports_model(state, model)
+                    and (evidence_allowed is None
+                         or state.endpoint.worker_id in evidence_allowed)
                 ]
                 if not remaining_states:
                     if queued:
                         self._waiters -= 1
                     available = [state for state in self._states if self._membership_admissible(state, now)]
+                    if evidence_allowed is not None and not evidence_allowed and available:
+                        raise WorkerCapabilityUnavailable(
+                            "no Ollama worker passed required capability evidence%s"
+                            % ((": " + evidence_reason) if evidence_reason else "")
+                        )
                     if model and available:
                         raise WorkerCapabilityUnavailable(
                             "no Ollama worker advertises model %r" % model
@@ -1670,6 +1723,60 @@ class OllamaWorkerPool:
             self._prune_drained()
             self._condition.notify_all()
 
+    def request_primary(self, sender, *, model=None, payload=None, origin=None):
+        """Gate the single-host/local-only path without enabling remote failover.
+
+        ``origin`` is the caller's primary base URL; it defaults to the pool's
+        configured primary so the dispatch target never changes under the gate.
+        """
+        from sonder_runtime.application.routing.request_capabilities import (
+            check_request_evidence,
+            request_requirements,
+        )
+
+        origin = origin or self._configured_origins[0]
+        if self._capability_routing == "off" or self._recent_evidence is None:
+            return sender(origin)
+        required = request_requirements(payload)
+        if not required:
+            return sender(origin)
+
+        def observe():
+            identity = None
+            try:
+                should_observe = self._capability_routing == "strict"
+                if self._capability_routing == "advisory":
+                    should_observe = self._recent_evidence.has_fresh_failure(
+                        "ollama", model, required,
+                    )
+                if should_observe:
+                    identity = self._observe_identity_cached(origin, model, payload)
+                allowed, reason = check_request_evidence(
+                    self._recent_evidence, model, required, backend="ollama", identity=identity,
+                    mode=self._capability_routing,
+                )
+            except (AttributeError, TypeError, ValueError, OSError):
+                if self._capability_routing == "advisory":
+                    allowed, reason = True, "unverified: backend_identity_missing"
+                else:
+                    allowed, reason = False, "backend_identity_missing"
+                identity = None
+            if not allowed:
+                if self._capability_routing == "advisory":
+                    logger.warning("fallback_used: primary capability evidence refused: %s", reason)
+                else:
+                    raise WorkerCapabilityUnavailable("primary capability route refused: " + reason)
+            logger.info("capability routing primary mode=%s: %s", self._capability_routing, reason)
+            return identity
+
+        before = observe()
+        result = sender(origin)
+        if self._capability_routing == "strict":
+            after = observe()
+            if after != before:
+                raise WorkerCapabilityUnavailable("backend identity changed during model dispatch")
+        return result
+
     def request(
         self,
         sender: Callable[[str], object],
@@ -1677,6 +1784,13 @@ class OllamaWorkerPool:
         model: str | None = None,
         admission_timeout_seconds: float | None = None,
         idempotent: bool = False,
+        payload=None,
+        required_capabilities=None,
+        tools=False,
+        structured_output=False,
+        has_image=False,
+        approx_tokens=0,
+        long_context=False,
     ):
         """Admit and send one logical request with pre-response failover only."""
         model = str(model or "").strip() or None
@@ -1691,6 +1805,99 @@ class OllamaWorkerPool:
         admission_deadline = time.monotonic() + admission_timeout
         if model:
             self._refresh_for_model(model, admission_timeout=admission_timeout)
+        evidence_allowed = None
+        evidence_reason = ""
+        required = frozenset(required_capabilities or ())
+        check_evidence = None
+        if self._recent_evidence is not None and self._capability_routing != "off":
+            requirements_error = False
+            try:
+                from sonder_runtime.application.routing.request_capabilities import (
+                    check_request_evidence,
+            request_requirements,
+                )
+                check_evidence = check_request_evidence
+                required |= request_requirements(
+                    payload, tools=tools, structured_output=structured_output,
+                    has_image=has_image, approx_tokens=approx_tokens,
+                    long_context=long_context,
+                )
+            except (ImportError, TypeError, ValueError):
+                requirements_error = bool(
+                    required_capabilities or tools or structured_output or has_image
+                    or long_context or approx_tokens or payload is not None
+                )
+                required = frozenset(required_capabilities or ())
+            if requirements_error:
+                raise WorkerCapabilityUnavailable("request capability requirements are invalid")
+            if required or requirements_error:
+                # Evidence reads and host identity resolution stay outside the
+                # pool condition lock; selection receives an immutable allow set.
+                with self._condition:
+                    states = tuple(state for state in self._states
+                                   if not state.compatibility_error
+                                   and self._supports_model(state, model)
+                                   and state.cooldown_until <= self._clock()
+                                   and self._membership_admissible(state, self._clock()))
+                evidence_allowed = set()
+                refusals = []
+                evidence_deadline = time.monotonic() + min(admission_timeout, 5.0)
+                for index, candidate in enumerate(states):
+                    if time.monotonic() >= evidence_deadline:
+                        remaining = states[index:]
+                        if self._capability_routing == "advisory":
+                            evidence_allowed.update(
+                                item.endpoint.worker_id for item in remaining
+                            )
+                        refusals.append(
+                            "unverified: capability identity discovery budget exhausted"
+                        )
+                        break
+                    if not model:
+                        if self._capability_routing == "advisory":
+                            evidence_allowed.add(candidate.endpoint.worker_id)
+                        refusals.append(
+                            f"{candidate.endpoint.worker_id}: unverified: model identity unavailable"
+                        )
+                        continue
+                    try:
+                        identity = None
+                        should_observe = self._capability_routing == "strict"
+                        if self._capability_routing == "advisory":
+                            should_observe = self._recent_evidence.has_fresh_failure(
+                                "ollama", model, required,
+                            )
+                        if should_observe:
+                            identity = self._observe_identity_cached(
+                                candidate.endpoint.origin, model, payload,
+                            )
+                        allowed, why = check_request_evidence(
+                            self._recent_evidence, model, required,
+                            backend="ollama", identity=identity,
+                            mode=self._capability_routing,
+                        )
+                    except (AttributeError, ImportError, TypeError, ValueError, OSError, RuntimeError):
+                        if self._capability_routing == "advisory":
+                            allowed, why = True, "unverified: recent capability evidence unavailable"
+                        else:
+                            allowed, why = False, "recent capability evidence unavailable"
+                    if allowed:
+                        evidence_allowed.add(candidate.endpoint.worker_id)
+                        logger.info("worker %s capability route: %s", candidate.endpoint.worker_id, why)
+                    else:
+                        refusals.append(f"{candidate.endpoint.worker_id}: {why}")
+                evidence_reason = "; ".join(refusals)
+                if (self._capability_routing == "advisory"
+                        and states and not evidence_allowed):
+                    evidence_allowed = None
+                    evidence_reason = "fallback_used: all eligible workers have measured capability failures; " + evidence_reason
+                    logger.warning("%s", evidence_reason)
+                if required:
+                    logger.info(
+                        "capability routing mode=%s model=%s: %s",
+                        self._capability_routing, model or "unknown",
+                        evidence_reason or "eligible: evidence passed or unverified",
+                    )
         attempted: set[str] = set()
         last_error = None
         while True:
@@ -1704,6 +1911,8 @@ class OllamaWorkerPool:
                     admission_timeout=max(
                         0.0, admission_deadline - time.monotonic(),
                     ),
+                    evidence_allowed=evidence_allowed,
+                    evidence_reason=evidence_reason,
                 )
             except (WorkerPoolUnavailable, WorkerCapabilityUnavailable):
                 if last_error is not None:
@@ -1724,7 +1933,61 @@ class OllamaWorkerPool:
                 self._metrics["dispatches"] += 1
             attempted.add(state.endpoint.worker_id)
             logger.debug(f"pool.request: dispatching to {state.endpoint.worker_id}, model={model!r}")
+            identity = None
+            if check_evidence is not None and required:
+                try:
+                    should_observe = self._capability_routing == "strict"
+                    if self._capability_routing == "advisory":
+                        should_observe = self._recent_evidence.has_fresh_failure(
+                            "ollama", model, required,
+                        )
+                    if should_observe:
+                        identity = self._observe_identity_cached(
+                            state.endpoint.origin, model, payload,
+                        )
+                    still_allowed, why = check_evidence(
+                        self._recent_evidence, model, required,
+                        backend="ollama", identity=identity,
+                        mode=self._capability_routing,
+                    )
+                except (AttributeError, TypeError, ValueError, OSError, RuntimeError):
+                    if self._capability_routing == "advisory":
+                        still_allowed, why = True, "unverified: recent capability evidence unavailable"
+                    else:
+                        still_allowed, why = False, "recent capability evidence unavailable"
+                if not still_allowed:
+                    if self._capability_routing == "advisory":
+                        alternatives = (evidence_allowed or set()) - attempted
+                        if alternatives:
+                            evidence_allowed.discard(state.endpoint.worker_id)
+                            self._finish(
+                                state,
+                                error=WorkerCapabilityUnavailable(
+                                    f"worker capability evidence changed: {why}"
+                                ),
+                                count_failure=False,
+                            )
+                            evidence_reason = why
+                            continue
+                        logger.warning(
+                            "fallback_used: capability evidence refused worker %s: %s",
+                            state.endpoint.worker_id, why,
+                        )
+                        evidence_allowed = None
+                    else:
+                        evidence_allowed.discard(state.endpoint.worker_id)
+                if not still_allowed and self._capability_routing == "strict":
+                    self._finish(
+                        state,
+                        error=WorkerCapabilityUnavailable(
+                            f"worker capability evidence changed: {why}"
+                        ),
+                        count_failure=False,
+                    )
+                    evidence_reason = why
+                    continue
             started = self._clock()
+            dispatch_identity = identity
             try:
                 result = sender(state.endpoint.origin)
             except Exception as error:
@@ -1750,6 +2013,43 @@ class OllamaWorkerPool:
                 continue
             latency_ms = max(0.0, (self._clock() - started) * 1000.0)
             logger.debug(f"pool.request: success from {state.endpoint.worker_id} in {latency_ms:.1f}ms")
+            if check_evidence is not None and required:
+                try:
+                    if self._capability_routing == "strict":
+                        identity = self._observe_identity_cached(
+                            state.endpoint.origin, model, payload,
+                        )
+                        still_allowed, why = check_evidence(
+                            self._recent_evidence, model, required,
+                            backend="ollama", identity=identity,
+                            mode=self._capability_routing,
+                        )
+                    else:
+                        # Advisory mode intentionally has no post-dispatch identity
+                        # observation.  A failed preflight remains a conservative
+                        # routing hint; dispatch itself is already complete.
+                        still_allowed, why = True, "unverified" if identity is None else ""
+                    if identity != dispatch_identity and (
+                        self._capability_routing == "strict"
+                        or identity is not None and dispatch_identity is not None
+                    ):
+                        still_allowed, why = False, "backend_identity_changed"
+                except (AttributeError, TypeError, ValueError, OSError, RuntimeError):
+                    still_allowed = self._capability_routing == "advisory"
+                    why = "unverified: recent capability evidence unavailable"
+                if still_allowed and why:
+                    logger.info("worker %s capability route after response: %s", state.endpoint.worker_id, why)
+                if not still_allowed:
+                    self._finish(
+                        state,
+                        error=WorkerCapabilityUnavailable(
+                            f"worker capability evidence changed after response: {why}"
+                        ),
+                        count_failure=False,
+                    )
+                    raise WorkerCapabilityUnavailable(
+                        f"worker capability evidence changed after response: {why}"
+                    )
             self._finish(state, error=None, latency_ms=latency_ms)
             return result
 
@@ -2252,6 +2552,27 @@ def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
             _DEFAULT_FAILURE_THRESHOLD, maximum=_MAX_FAILURE_THRESHOLD,
         )
     )
+    recent_evidence = identity_for = None
+    capability_routing = "advisory"
+    if environment is None:
+        # The production composition root binds persisted evidence and the
+        # host identity resolver. Direct constructors remain legacy-compatible.
+        from .capability_evidence import (
+            capability_routing_mode,
+            load_production_evidence,
+            ollama_identity,
+        )
+        recent_evidence = load_production_evidence()
+        identity_for = ollama_identity
+        capability_routing = capability_routing_mode()
+    else:
+        # Explicit environments are used by tests and process-local callers;
+        # resolve the same setting without consulting process globals.
+        try:
+            from .capability_evidence import capability_routing_mode
+            capability_routing = capability_routing_mode(environment)
+        except (ImportError, AttributeError):
+            capability_routing = "advisory"
     return OllamaWorkerPool(
         primary_origin,
         worker_origins,
@@ -2290,6 +2611,9 @@ def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
         capability_prober=_default_capability_prober(
             allow_remote=allow_remote, timeout=probe_timeout_ms / 1000.0,
         ),
+        recent_evidence=recent_evidence,
+        identity_for=identity_for,
+        capability_routing=capability_routing,
         metrics=default_registry(),
     )
 
