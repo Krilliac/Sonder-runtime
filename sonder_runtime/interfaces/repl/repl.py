@@ -1419,7 +1419,10 @@ _BANNER_SOURCE_WAIT_SECONDS = 1.5
 # Set by ``sonder_runtime.__main__`` when it wrote the "Starting Sonder..."
 # line (no newline); erased in place just before the banner is drawn.
 startup_notice_pending = False
-_banner_prefetch = {"thread": None, "value": None}
+# The current prefetch slot. Each prefetch gets its own slot, and its worker
+# writes only there, so a discarded worker finishing late cannot publish into
+# a later REPL session's prefetch.
+_banner_prefetch = {"slot": None}
 
 
 def _read_banner_source():
@@ -1432,22 +1435,23 @@ def _read_banner_source():
 
 def prefetch_banner_source():
     """Start the banner's Git status read in the background (once)."""
-    if _banner_prefetch["thread"] is not None:
-        return _banner_prefetch["thread"]
+    if _banner_prefetch["slot"] is not None:
+        return _banner_prefetch["slot"]["thread"]
+    slot = {"thread": None, "value": None}
 
     def read():
-        _banner_prefetch["value"] = _read_banner_source()
+        slot["value"] = _read_banner_source()
 
     thread = owned_runtime_thread(target=read, daemon=True, name="sonder-banner-source")
-    _banner_prefetch["thread"] = thread
+    slot["thread"] = thread
+    _banner_prefetch["slot"] = slot
     thread.start()
     return thread
 
 
 def discard_banner_prefetch():
     """Forget an unconsumed prefetch so it never outlives its REPL session."""
-    _banner_prefetch["thread"] = None
-    _banner_prefetch["value"] = None
+    _banner_prefetch["slot"] = None
 
 
 def _banner_source():
@@ -1456,13 +1460,12 @@ def _banner_source():
     A prefetch still running after the short wait yields an empty status; the
     banner then omits the update line rather than holding the prompt.
     """
-    thread = _banner_prefetch["thread"]
-    if thread is None:
+    slot = _banner_prefetch["slot"]
+    if slot is None:
         return _read_banner_source()
-    thread.join(_BANNER_SOURCE_WAIT_SECONDS)
-    value = _banner_prefetch["value"]
+    slot["thread"].join(_BANNER_SOURCE_WAIT_SECONDS)
     discard_banner_prefetch()
-    return value or {}
+    return slot["value"] or {}
 
 
 def _startup_banner(strict, persona, project, tier=None, **kwargs):
