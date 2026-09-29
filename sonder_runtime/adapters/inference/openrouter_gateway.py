@@ -95,6 +95,7 @@ from ...domain.openrouter_policy import (
 )
 from ...domain.security.redaction import redact_text
 from ...platform.metrics import default_registry
+from ...platform.runtime_threads import Thread as owned_runtime_thread
 from ..model_request_admission import HostModelRequestAdmission
 from ..provider_bindings import PROVIDER_TIERS
 from .openai_compat_gateway import (
@@ -886,7 +887,7 @@ class OpenRouterGateway(OpenAICompatibleGateway):
                 self._call.stop = None
 
         started = time.monotonic()
-        thread = threading.Thread(
+        thread = owned_runtime_thread(
             target=contextvars.copy_context().run, args=(worker,),
             name="openrouter-stream", daemon=True,
         )
