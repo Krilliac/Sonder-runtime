@@ -1,7 +1,7 @@
 # Registering Sonder with Claude Code
 
 Assumes you have already cloned Sonder and created its venv (see the
-[Quickstart](../../README.md#quickstart)). Below, `<SONDER_DIR>` is the
+[Quickstart](../../README.md#quick-start)). Below, `<SONDER_DIR>` is the
 absolute path to your checkout.
 
 ## The easy way
