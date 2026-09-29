@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 372,
+      "file_count": 373,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -382,6 +382,7 @@
         "sonder_runtime/adapters/security/recovery_evidence.py",
         "sonder_runtime/adapters/security/unsafe_lab.py",
         "sonder_runtime/adapters/semantic_tier.py",
+        "sonder_runtime/adapters/session_atif_export.py",
         "sonder_runtime/adapters/session_turn_claims.py",
         "sonder_runtime/adapters/storage.py",
         "sonder_runtime/adapters/subagents.py",
@@ -421,7 +422,7 @@
       ]
     },
     {
-      "file_count": 385,
+      "file_count": 386,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -735,6 +736,7 @@
         "sonder_runtime/application/selfmod/verification_lifecycle.py",
         "sonder_runtime/application/session/__init__.py",
         "sonder_runtime/application/session/archive.py",
+        "sonder_runtime/application/session/atif.py",
         "sonder_runtime/application/session/capture.py",
         "sonder_runtime/application/session/checkpoint_privacy.py",
         "sonder_runtime/application/session/checkpoints.py",
