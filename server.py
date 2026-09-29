@@ -93,8 +93,8 @@ from sonder_runtime.domain.model_usage import usage_count as _model_usage_count
 from sonder_runtime.domain.model_usage import (
     merge_reasoning_response_usage as _merge_reasoning_response_usage,
 )
-from sonder_runtime.domain.memory.authoritative_fact_metadata import (
-    fact_metadata_from_inputs as _surface_fact_metadata,
+from sonder_runtime.domain.memory.fact_validity import (
+    fact_write_inputs as _surface_fact_metadata,
 )
 from sonder_runtime.domain.model_usage_formatting import (
     usage_source as _model_usage_source,
@@ -14439,13 +14439,17 @@ def sonder_remember_fact(
     model carries itself (toolchain, conventions, key paths, gotchas). No `project`
     stores it under the "default" project. Use sonder(..., project="<name>") to
     scope which facts apply to a call.
+
+    Optional ``valid_from``/``valid_until`` (ISO-8601 with timezone) bound when
+    the fact is true; expired facts are no longer recalled. ``supersedes=<id>``
+    closes that earlier fact's interval as this one is stored (replace a fact).
     """
     _maybe_live_reload()
     text = (text or "").strip()
     if not text:
         return "ERROR: empty fact."
     try:
-        metadata = _surface_fact_metadata(
+        metadata, validity = _surface_fact_metadata(
             entities_json, decision_json, valid_from, valid_until,
             supersedes, provenance_json,
         )
@@ -14476,7 +14480,9 @@ def sonder_remember_fact(
                 "replaced." % (project_id, n, duplicate.get("id"))
             )
         try:
-            uow.memory.add_fact(fact_id, project_id, text, blob, metadata=metadata)
+            uow.memory.add_fact(
+                fact_id, project_id, text, blob, metadata=metadata, validity=validity,
+            )
         except ValueError as exc:
             # A configured authoritative source owns one exact project scope.
             # Keep the external tool boundary stable while refusing a scope
@@ -16654,10 +16660,11 @@ def memory_search(query: str, limit: int = 10) -> str:
             text = memory_store.get_lesson_text(conn, lesson_id)
             if text:
                 lessons.append({"id": lesson_id, "text": text})
+        current, instants = memory_store.current_fact_params()  # expired facts stay out
         facts = [dict(r) for r in conn.execute(
-            "SELECT id, project, text FROM facts WHERE text LIKE ? ESCAPE '\\' "
-            "ORDER BY ts DESC, rowid DESC LIMIT ?",
-            (like, limit),
+            "SELECT id, project, text FROM facts WHERE text LIKE ? ESCAPE '\\' AND "
+            + current + " ORDER BY ts DESC, rowid DESC LIMIT ?",
+            (like, *instants, limit),
         ).fetchall()]
         preferences = [dict(r) for r in conn.execute(
             "SELECT id, scope, key, text, confidence, evidence_count FROM preferences "

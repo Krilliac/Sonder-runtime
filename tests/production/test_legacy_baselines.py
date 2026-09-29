@@ -14,7 +14,7 @@ pytestmark = pytest.mark.integration
 # the expectation from the same function the code reads would assert nothing.
 # Adding a migration is meant to touch this list.
 _EXPECTED_MIGRATIONS = {
-    "memory": ("0001_baseline", "0002_outcomes_source"),
+    "memory": ("0001_baseline", "0002_outcomes_source", "0003_fact_validity"),
     "autopilot": ("0001_baseline",),
     "fleet": ("0001_baseline",),
 }
