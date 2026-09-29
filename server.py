@@ -9287,7 +9287,7 @@ def memory_quality_report(sample_limit: int = 5) -> str:
     sample_limit = _safe_limit_policy(sample_limit, 5, 20)
     conn = _open_db()
     try:
-        report = memory_quality.audit(conn)
+        report = memory_quality.audit_with_write_quality(conn)
     finally:
         conn.close()
     return memory_quality.format_audit(report, sample_limit=sample_limit)
