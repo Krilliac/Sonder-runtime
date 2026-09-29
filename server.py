@@ -5515,9 +5515,9 @@ def _post(
 
     if local_only and not ollama_endpoint.is_loopback(BASE):
         raise ollama_pool.WorkerPoolUnavailable("local-only inference requires a loopback primary")
-    if local_only or not OLLAMA_POOL.enabled:
-        return OLLAMA_POOL.request_primary(send, model=payload.get("model"), payload=payload)
     model_hint = payload.get("model") if isinstance(payload, dict) else None
+    if local_only or not OLLAMA_POOL.enabled:
+        return OLLAMA_POOL.request_primary(send, model=model_hint, payload=payload, origin=BASE)
     if path in {"/api/chat", "/api/generate"}:  # never fail behind our own prewarm
         prewarm_gate.await_prewarm(model_hint, min(request_timeout, _PREWARM_LOAD_TIMEOUT))
     return OLLAMA_POOL.request(send, model=model_hint, idempotent=idempotent, payload=payload)

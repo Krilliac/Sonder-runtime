@@ -1723,14 +1723,18 @@ class OllamaWorkerPool:
             self._prune_drained()
             self._condition.notify_all()
 
-    def request_primary(self, sender, *, model=None, payload=None):
-        """Gate the single-host/local-only path without enabling remote failover."""
+    def request_primary(self, sender, *, model=None, payload=None, origin=None):
+        """Gate the single-host/local-only path without enabling remote failover.
+
+        ``origin`` is the caller's primary base URL; it defaults to the pool's
+        configured primary so the dispatch target never changes under the gate.
+        """
         from sonder_runtime.application.routing.request_capabilities import (
             check_request_evidence,
             request_requirements,
         )
 
-        origin = self._configured_origins[0]
+        origin = origin or self._configured_origins[0]
         if self._capability_routing == "off" or self._recent_evidence is None:
             return sender(origin)
         required = request_requirements(payload)

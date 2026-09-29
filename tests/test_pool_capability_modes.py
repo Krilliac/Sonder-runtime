@@ -301,3 +301,27 @@ def test_pool_only_strict_reobserves_after_dispatch_spans_ttl(tmp_path, mode, me
 
     assert getattr(pool, method)(send, model="m", payload={"format": "json"}) == PRIMARY
     assert len(calls) == (1 if mode == "advisory" else 2)
+
+
+@pytest.mark.parametrize("mode", ["advisory", "strict", "off"])
+@pytest.mark.parametrize("payload", [None, {"prompt": "plain"}, {"format": {"type": "object"}}])
+def test_request_primary_dispatches_to_caller_origin(tmp_path, mode, payload):
+    """server._post passes its BASE; the gate must never retarget the dispatch."""
+    caller = "http://localhost:11434"
+    probed = []
+
+    def identity_for(origin, *_):
+        probed.append(origin)
+        return identity()  # same backend reachable under both spellings
+
+    pool, store = pool_for(tmp_path, mode=mode, identity_for=identity_for)
+    passing(store)
+    probed.clear()
+    sent = []
+    pool.request_primary(sent.append, model="m", payload=payload, origin=caller)
+    pool.request_primary(sent.append, model="m", payload=payload)
+    assert sent == [caller, PRIMARY]
+    if mode == "strict" and payload and "format" in payload:
+        assert caller in probed  # identity is observed where the request goes
+    else:
+        assert probed == []  # advisory/off and plain requests never probe

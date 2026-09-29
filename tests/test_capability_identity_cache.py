@@ -110,18 +110,20 @@ def test_advisory_all_pass_and_unknown_evidence_have_zero_identity_calls(tmp_pat
     assert calls == []
 
 
-@pytest.mark.parametrize("record", [
-    _record(passed=(), failed=(Cap.STRUCTURED,), checked_at=time.time() - 86_401,
-            identity=_identity()),
-    _record(passed=(), failed=(Cap.STRUCTURED,), checked_at=time.time() + 60,
-            identity=_identity()),
-    _record(passed=(), failed=(Cap.STRUCTURED,), synthetic=True, identity=_identity()),
-    _record(passed=(), failed=(Cap.STRUCTURED,), identity=None),
-    _record(passed=(Cap.STRUCTURED,), failed=(Cap.CHAT,), identity=_identity()),
-])
-def test_advisory_unusable_or_irrelevant_failures_have_zero_identity_calls(tmp_path, record):
+# Records are built when the test runs, not at collection: a timestamp taken at
+# collection time drifts across a long suite (a "future" record becomes fresh).
+@pytest.mark.parametrize("make_record", [
+    lambda: _record(passed=(), failed=(Cap.STRUCTURED,), checked_at=time.time() - 86_401,
+                    identity=_identity()),
+    lambda: _record(passed=(), failed=(Cap.STRUCTURED,), checked_at=time.time() + 3_600,
+                    identity=_identity()),
+    lambda: _record(passed=(), failed=(Cap.STRUCTURED,), synthetic=True, identity=_identity()),
+    lambda: _record(passed=(), failed=(Cap.STRUCTURED,), identity=None),
+    lambda: _record(passed=(Cap.STRUCTURED,), failed=(Cap.CHAT,), identity=_identity()),
+], ids=["stale", "future", "synthetic", "no-identity", "irrelevant-failure"])
+def test_advisory_unusable_or_irrelevant_failures_have_zero_identity_calls(tmp_path, make_record):
     store = load_production_evidence(tmp_path)
-    store.save(record)
+    store.save(make_record())
     gateway, calls = _gateway(store, _identity)
     for _ in range(3):
         gateway.generate(_request(), _context())
