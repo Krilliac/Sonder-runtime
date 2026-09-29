@@ -218,10 +218,10 @@ Cite the full path, never the bare number.
 
 ---
 
-## 3. Honest boundaries — the README's own list, restated faithfully
+## 3. Limitations — the README's own list, restated faithfully
 
-Any outward positioning piece must include these, in substance (README, "Honest
-boundaries" section; SECURITY.md, "What this software does, stated plainly"):
+Any outward positioning piece must include these, in substance (README, "Limitations"
+section; SECURITY.md, "What this software does, stated plainly"):
 
 1. "A small local model is not a frontier model." Delegate bounded transformations,
    give it the facts, review its work.
@@ -347,14 +347,14 @@ paragraph, README edit:
       suite version + model digest named?
 - [ ] Are all ecosystem comparisons labeled *background knowledge, 2026-08, unverified
       against those projects' current state* — never phrased as measured fact?
-- [ ] Does the piece include the honest-boundaries substance (section 3), including
+- [ ] Does the piece include the limitations substance (section 3), including
       the SECURITY.md executes-code-by-design framing if remote access is mentioned?
 - [ ] Is the claim about `app-vX.Y.Z` (gated) rather than `app-latest` (mutable)?
 - [ ] Privacy gates clean: `check_history_privacy.py --require-clean` passes, and no
       example output contains anything the 20 `PRIVATE_RULES` in `contribute.py`
       would redact?
 - [ ] Is anything unproven labeled `open` or `candidate` rather than asserted?
-- [ ] Does nothing contradict README "Honest boundaries", ARCHITECTURE.md, or
+- [ ] Does nothing contradict README "Limitations", ARCHITECTURE.md, or
       SECURITY.md? (Those documents win over marketing instinct, always.)
 
 ---

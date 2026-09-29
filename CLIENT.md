@@ -35,7 +35,7 @@ weights because those stay on the host.
 3. **Integrated with Claude Code, via MCP.** `server.py` is registered as
    the `sonder-runtime` MCP server; Claude Code calls `sonder(...)`,
    `offload(...)`, etc. directly as tools. See [README.md →
-   Why Sonder](README.md#why-sonder).
+   Key capabilities](README.md#key-capabilities).
 
 This doc covers #1.
 
