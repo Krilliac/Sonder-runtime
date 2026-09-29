@@ -11,7 +11,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
 from typing import Any, Iterator, Mapping, Protocol
@@ -55,6 +55,18 @@ class DivergentEffectReplay(EffectJournalError):
             "refusing a divergent replay"
         )
         self.intent_id = intent_id
+
+
+class _NoResponse:
+    """Sentinel: the caller captured no tool response for this outcome."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "NO_RESPONSE"
+
+
+NO_RESPONSE = _NoResponse()
 
 
 class EffectState(str, Enum):
@@ -109,6 +121,12 @@ class EffectOutcome:
     detail: str = ""
     worker_id: str = ""
     owner_epoch: int | None = None
+    # Optional captured tool response (additive).  A journal that records
+    # responses stores its canonical digest, and optionally its content, in
+    # the same transaction as the outcome so a later mock replay can
+    # substitute it.  Excluded from equality and repr: it is evidence, not
+    # outcome identity, and may be large.
+    response: object = field(default=NO_RESPONSE, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.state not in {EffectState.COMPLETED, EffectState.FAILED, EffectState.UNCERTAIN}:
@@ -266,12 +284,13 @@ class JournalBinding:
         return stored
 
     def complete(self, intent: EffectIntent, *, outcome_digest: str,
-                 receipt_key: str, detail: str = "", success: bool = True) -> EffectIntent:
+                 receipt_key: str, detail: str = "", success: bool = True,
+                 response: object = NO_RESPONSE) -> EffectIntent:
         return self.journal.outcome(EffectOutcome(
             intent.intent_id,
             EffectState.COMPLETED if success else EffectState.FAILED,
             outcome_digest, receipt_key, detail,
-            self.worker_id, self.owner_epoch,
+            self.worker_id, self.owner_epoch, response,
         ))
 
     def mark_uncertain(self, intent: EffectIntent, *, detail: str) -> EffectIntent:
@@ -344,6 +363,6 @@ def bound(binding: JournalBinding) -> Iterator[JournalBinding]:
 __all__ = ["DivergentEffectReplay", "EffectIntent", "EffectJournal", "EffectJournalError",
            "EffectJournalPage",
            "EffectJournalReader", "EffectOutcome",
-           "EffectReconciliationVerifier", "EffectState", "JournalBinding",
+           "EffectReconciliationVerifier", "EffectState", "JournalBinding", "NO_RESPONSE",
            "ReconciliationProof", "RecoveryDecision", "SettledEffectReplay", "bound",
            "current", "settled_receipt", "settled_receipts"]

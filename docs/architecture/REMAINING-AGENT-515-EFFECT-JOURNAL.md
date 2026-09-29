@@ -1509,3 +1509,100 @@ Limits:
   covers the window between them; no single transaction spans both.
 - No master-spec checkbox changes. LOOP-008, AGENT-006 and SESSION-007 stay
   unverified.
+
+## Tamper-evident hash chain and tool-response replay (2026-09-29)
+
+Motivation: a mocked replay of a tool-using run can only substitute tool
+responses that were recorded, and an audit trail is only useful if an edit to
+it can be localised. This slice adds both properties to the SQLite journal.
+It is additive. Checkpoint generations, `effect_high_water`, the settled
+prefix, fences and every existing read or write API keep their behaviour.
+
+**Hash chain.** `effect_journal` rows change state in place, so the chain is
+kept in a separate append-only table, `effect_journal_chain`. Every journal
+write (`begin`, `outcome`, `outcome_and_checkpoint`, `uncertain` /
+`latch_uncertainty`, `recover` orphaning, `reconcile`) appends one record in
+the same transaction. The record holds the canonical JSON of the row after
+the write (its 14 columns plus the response digest), `prev_hash`, and
+`row_hash = sha256(chain_seq, kind, intent_id, prev_hash, content)`. A write
+that rolls back leaves no record. An idempotent replay writes nothing, so it
+appends nothing. `chain_seq` is contiguous, so deleting or reordering a record
+breaks the walk.
+
+**Legacy segment.** When the journal is first opened after the upgrade,
+existing rows are read once, never rewritten. Each row's content hash goes
+into `effect_journal_legacy`. Chain record 1 is an `anchor` that pins the
+legacy row count and a digest over that table. The anchor is written only
+while both tables are empty, so a deleted anchor is never re-created silently.
+A legacy row later written through the journal (for example a pre-upgrade
+intent that settles) joins the chain from that write. Reopening an already
+chained journal only reads, so startup never waits on a peer's write lock.
+A pre-chain runtime that writes to the same database after the upgrade
+(for example during a rolling downgrade) leaves rows that `verify_chain`
+reports as inserted or edited outside the journal; that is the intended
+signal, not data loss, and the rows keep working for every #515 read.
+
+**Verification.** `SQLiteEffectJournal.verify_chain()` returns a
+`ChainVerification` whose `first_break` names the chain position, the intent
+and the reason. It detects:
+
+- an edited, deleted or inserted chain record;
+- a legacy table that no longer matches the anchor;
+- a journal row that differs from its latest chained record or from its
+  legacy snapshot (edit);
+- a chained or legacy row that no longer exists (delete);
+- a row with no chain record (insert outside the journal);
+- stored response content that does not match its digest.
+
+`chain_head()` returns `(chain_seq, row_hash)` so the head can be recorded
+elsewhere. The chain is tamper-*evident* only: someone who can rewrite the
+whole database can rebuild a consistent chain unless the head is also kept
+outside the database.
+
+**Tool responses.** `EffectOutcome` gains an optional `response` field. It is
+excluded from equality and repr, and its default `NO_RESPONSE` means nothing
+was captured. `JournalBinding.complete(..., response=...)` passes it through.
+The typed tool gateway now passes the redacted response its caller saw,
+`{success, output, error_code, error}`. The journal stores
+`sha256(canonical JSON)` in `effect_tool_response` in the outcome's
+transaction, using the gateway's canonical form (sorted keys, compact,
+`default=str`). The journal has never stored response payloads, so full
+content is opt-in: `SQLiteEffectJournal(record_response_content=True,
+max_response_bytes=...)`. Production composition does not enable it yet, so
+production keeps digests only. A response that cannot be encoded writes no
+response record and never blocks the outcome. Content over the size bound
+keeps only its digest.
+
+**Mock replay.** `journal.tool_response_replay(run_id)` (built on
+`recorded_responses`, which is paged and read-only) returns a
+`ToolResponseReplay`:
+
+- Iterating it yields `RecordedToolResponse`s in journal sequence order.
+- `missing` lists every position that cannot be substituted, with one of these
+  reasons: `unresolved`, `response_not_recorded`, `content_not_recorded`,
+  `content_digest_mismatch` or `sequence_gap`.
+- `substitute(request_digest)` walks the positions in order. It refuses with
+  `ReplayResponseMissing` at a missing position and with `ReplayDivergence`
+  when a request differs from the recorded one.
+
+Effects that do not come from the gateway (process, compute, subagent,
+build-fix) carry no response and are reported as `response_not_recorded`.
+
+Write-path overhead was measured on Node1 over 10k rows. Each row was one
+`begin` plus one `outcome`, compared with the `origin/main` journal:
+
+- **CPU in the transaction.** Measured on an in-memory database, median of 5
+  runs, so fsync is excluded:
+  - baseline: 12.2 µs per row;
+  - with the chain: 68.4 µs per row (+56 µs, about 28 µs per chained write);
+  - with the chain and a 512-byte response recorded as content: 105.9 µs per
+    row.
+  - `verify_chain` over the 10k rows took 240 to 283 ms.
+- **Durable path as production runs it.** Each call is its own committed
+  transaction on disk, median of 3 interleaved rounds:
+  - baseline: 9,334 µs per row;
+  - with the chain: 10,618 µs per row;
+  - with the chain and a response digest: 10,270 µs per row;
+  - with the chain and response content: 9,514 µs per row.
+  - Commit fsync dominates these numbers. Their spread between rounds is
+    wider than the chain's added CPU.
