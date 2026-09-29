@@ -281,6 +281,48 @@ def test_subagent_cycles_are_not_followed():
     assert validate_atif(doc) == []
 
 
+def test_embedded_subagents_are_capped_across_all_depths():
+    from sonder_runtime.application.session.atif import MAX_EMBEDDED_SUBAGENTS
+
+    calls = []
+
+    def loader(subagent_id):
+        # Every child delegates to two more: unbounded breadth without a cap.
+        calls.append(subagent_id)
+        return (subagent_id, _records([
+            ("user.message", {"content": "work " + subagent_id}),
+            ("subagent.spawned", {"subagent_id": subagent_id + ".a"}),
+            ("subagent.spawned", {"subagent_id": subagent_id + ".b"}),
+        ], session=subagent_id))
+
+    fanout = MAX_EMBEDDED_SUBAGENTS + 5
+    records = _records([("subagent.spawned", {"subagent_id": "c%02d" % i}) for i in range(fanout)])
+    doc = session_events_to_atif(records, session_id="root", load_subagent=loader)
+    assert len(calls) == MAX_EMBEDDED_SUBAGENTS
+
+    def embedded(trajectory):
+        return sum(1 + embedded(sub) for sub in trajectory.get("subagent_trajectories", ()))
+
+    assert embedded(doc) == MAX_EMBEDDED_SUBAGENTS
+    exhausted = [s for s in doc["steps"]
+                 if s["observation"]["results"][0]["extra"].get("subagent_budget_exhausted")]
+    assert exhausted and all("subagent_trajectory_ref" not in s["observation"]["results"][0]
+                             for s in exhausted)
+    assert validate_atif(doc) == []
+
+
+def test_only_spec_enum_values_bypass_redaction():
+    records = _records([("user.message", {"content": "hi"})])
+    doc = session_events_to_atif(
+        records, session_id="s",
+        extra={"source": "password: swordfish99", "schema_version": "api_key=sk-abcdef0123456789abcdef"},
+    )
+    assert doc["steps"][0]["source"] == "user"
+    assert doc["schema_version"] == ATIF_SCHEMA_VERSION
+    text = json.dumps(doc)
+    assert "swordfish99" not in text and "sk-abcdef0123456789abcdef" not in text
+
+
 # ------------------------------------------------------------- redaction ----
 
 def test_atif_never_contains_secrets(tmp_path):

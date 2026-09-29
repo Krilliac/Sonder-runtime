@@ -95,8 +95,16 @@ def build_session_repo(path):
     return repo
 
 
-def build_memory_db(server_module, db_path):
-    """A remembered-conversation session for the ``session_export`` MCP tool."""
+def build_memory_db(server_module, db_path, *, secrets: bool = True):
+    """A remembered-conversation session for the ``session_export`` MCP tool.
+
+    ``secrets=False`` keeps credential shapes out of the turns: the parity
+    golden pins the default *text* transcript byte-for-byte, and that output
+    is expected to gain its own redaction independently of the ATIF format,
+    so the golden must not depend on how secrets are rendered.
+    """
+    task = "hello, password=%s" % PASSWORD if secrets else "hello there"
+    answer = "answer %s" % SECRET if secrets else "answer two"
     import memory_store
 
     server_module._DB_PATH = str(db_path)
@@ -104,10 +112,10 @@ def build_memory_db(server_module, db_path):
     try:
         memory_store.touch_session(conn, "S-parity", "proj")
         memory_store.set_session_title(conn, "S-parity", "parity demo")
-        memory_store.log_interaction(conn, "I1", "hello, password=%s" % PASSWORD, "",
+        memory_store.log_interaction(conn, "I1", task, "",
                                      "hi back", "code", session_id="S-parity",
                                      tokens_in=11, tokens_out=3)
-        memory_store.log_interaction(conn, "I2", "second", "", "answer %s" % SECRET,
+        memory_store.log_interaction(conn, "I2", "second", "", answer,
                                      "code", session_id="S-parity")
     finally:
         conn.close()
@@ -139,7 +147,7 @@ def default_exports(tmp_dir):
         [facade.export(" ").status_code, facade.export(" ").body], sort_keys=True)
     import server
 
-    build_memory_db(server, tmp_dir / "mem.db")
+    build_memory_db(server, tmp_dir / "mem.db", secrets=False)
     out["mcp.session_export:S-parity"] = server.session_export("S-parity")
     out["mcp.session_export:S-parity:limit1"] = server.session_export("S-parity", limit=1)
     out["mcp.session_export:missing"] = server.session_export("nope")

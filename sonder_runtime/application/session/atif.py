@@ -43,6 +43,9 @@ ATIF_SCHEMA_VERSION = "ATIF-v1.7"
 ATIF_FORMAT = "atif"
 DEFAULT_AGENT_NAME = "sonder"
 MAX_SUBAGENT_DEPTH = 4
+# Total child sessions embedded in one document (all depths): each costs a
+# bounded export read, so breadth is capped as well as depth.
+MAX_EMBEDDED_SUBAGENTS = 16
 _MAX_WALK_DEPTH = 64
 
 _USER_EVENTS = frozenset({"user.message", "message.received"})
@@ -84,8 +87,12 @@ SubagentLoader = Callable[[str], "tuple[str, Sequence[SessionEventRecord]] | Non
 # --------------------------------------------------------------------------
 
 _EXPORT_REDACTOR = DefaultExportRedactor()
-# Fixed enum/version values carry no content and must stay spec-exact.
-_VERBATIM_KEYS = frozenset({"schema_version", "source"})
+# Fixed enum/version values carry no content and must stay spec-exact; any
+# other value under these keys (e.g. inside ``extra``) is redacted as usual.
+_VERBATIM_VALUES = {
+    "schema_version": frozenset("ATIF-v1.%d" % minor for minor in range(0, 9)),
+    "source": frozenset({"system", "user", "agent"}),
+}
 
 
 def _redact_text(text: str) -> str:
@@ -117,7 +124,7 @@ def redact_atif(document: Any, _depth: int = 0) -> Any:
     if isinstance(document, Mapping):
         out: dict[str, object] = {}
         for key, value in document.items():
-            if key in _VERBATIM_KEYS and isinstance(value, str):
+            if isinstance(value, str) and value in _VERBATIM_VALUES.get(key, ()):
                 out[key] = value
             elif key == "arguments" and isinstance(value, Mapping):
                 out[key] = _redact_arguments(value)
@@ -246,10 +253,16 @@ class _Attempt:
     responded: bool = False
 
 
+@dataclass(slots=True)
+class _EmbedBudget:
+    remaining: int = MAX_EMBEDDED_SUBAGENTS
+
+
 class _Builder:
     def __init__(self, session_id: str, agent: AtifAgent, loader: SubagentLoader | None,
-                 depth: int, visited: frozenset[str]) -> None:
+                 depth: int, visited: frozenset[str], budget: _EmbedBudget | None = None) -> None:
         self.session_id = session_id
+        self.budget = budget if budget is not None else _EmbedBudget()
         self.agent = agent
         self.loader = loader
         self.depth = depth
@@ -523,7 +536,7 @@ class _Builder:
                                "arguments": arguments}]
         result: dict[str, Any] = {"source_call_id": call_id, "content": "spawned",
                                   "extra": {"status": "spawned"}}
-        embedded = self._embed(subagent_id)
+        embedded = self._embed(subagent_id, result["extra"])
         if embedded is not None:
             result["subagent_trajectory_ref"] = [{
                 "trajectory_id": embedded["trajectory_id"],
@@ -552,9 +565,13 @@ class _Builder:
             if ref:
                 result["extra"]["result_ref"] = ref
 
-    def _embed(self, subagent_id: str) -> dict[str, Any] | None:
+    def _embed(self, subagent_id: str, extra: dict[str, object]) -> dict[str, Any] | None:
         if self.loader is None or self.depth >= MAX_SUBAGENT_DEPTH:
             return None
+        if self.budget.remaining <= 0:
+            extra["subagent_budget_exhausted"] = True
+            return None
+        self.budget.remaining -= 1
         loaded = self.loader(subagent_id)
         if loaded is None:
             return None
@@ -563,7 +580,8 @@ class _Builder:
             item["trajectory_id"] == child_session for item in self.subagents
         ):
             return None
-        builder = _Builder(child_session, self.agent, self.loader, self.depth + 1, self.visited)
+        builder = _Builder(child_session, self.agent, self.loader, self.depth + 1, self.visited,
+                           self.budget)
         for child_record in child_records:
             builder.feed(child_record)
         if not builder.steps:
@@ -729,7 +747,7 @@ _ALLOWED = {
     "final_metrics": {"total_prompt_tokens", "total_completion_tokens", "total_cached_tokens",
                       "total_cost_usd", "total_steps", "extra"},
 }
-_SCHEMA_VERSIONS = frozenset("ATIF-v1.%d" % minor for minor in range(0, 9))
+_SCHEMA_VERSIONS = _VERBATIM_VALUES["schema_version"]
 _AGENT_ONLY = ("model_name", "reasoning_effort", "reasoning_content", "tool_calls", "metrics")
 
 
@@ -896,6 +914,6 @@ def validate_atif(document: object, where: str = "trajectory") -> list[str]:
 
 
 __all__ = [
-    "ATIF_FORMAT", "ATIF_SCHEMA_VERSION", "AtifAgent", "AtifExportError",
+    "ATIF_FORMAT", "ATIF_SCHEMA_VERSION", "AtifAgent", "AtifExportError", "MAX_EMBEDDED_SUBAGENTS",
     "interaction_turns_to_atif", "redact_atif", "session_events_to_atif", "validate_atif",
 ]
