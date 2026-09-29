@@ -33,6 +33,7 @@ from statistics import NormalDist
 from types import MappingProxyType
 from typing import Any
 
+from .integrity import result_violations
 from .proposal_lifecycle import (
     EvaluationMode,
     EvaluationResult,
@@ -343,9 +344,16 @@ def evaluate_promotion_gate(
             and canary.sample_count >= policy.min_canary_samples
             and all(result.passed for result in results if result.mode is EvaluationMode.CANARY)
         )
+    # Evidence that records a failed cheat trial or a protected write is not
+    # a score about the candidate (``integrity``).  Clean evidence carries no
+    # violation marker and adds no gate, so its decision is unchanged.
+    violations = result_violations(results)
+    if violations:
+        gates["evaluation_integrity"] = False
     reasons = tuple(f"gate_failed:{name}" for name, ok in sorted(gates.items()) if not ok)
     if not offline:
         reasons = ("no_offline_results",) + reasons
+    reasons += tuple(item.reason_code for item in violations)
     return PromotionGateDecision(
         policy.kind, policy.digest, samples, successes, pass_rate, lower_bound, replay_equivalent,
         MappingProxyType(dict(sorted(gates.items()))), reasons,
