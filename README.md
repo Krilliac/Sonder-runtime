@@ -108,27 +108,37 @@ it once to set up the local model.
 
 ## Quick start
 
-From a source checkout, using the venv interpreter from the install step:
+From a source checkout, run the venv interpreter created in the install step:
 
 ```bash
-python -m sonder_runtime doctor      # read-only health report
-python -m sonder_runtime repl        # interactive terminal REPL
+# Linux/macOS
+./venv/bin/python -m sonder_runtime doctor      # read-only health report
+./venv/bin/python -m sonder_runtime repl        # interactive terminal REPL
 ```
 
-On Windows, `sonder.cmd` in the checkout or bundle root launches the REPL. In
-the REPL, `/help` lists commands, `/model` lists and switches models, and
-`/runtime` shows the tier-to-model policy.
+```powershell
+# Windows PowerShell
+.\venv\Scripts\python.exe -m sonder_runtime doctor
+.\venv\Scripts\python.exe -m sonder_runtime repl
+```
 
-To serve the OpenAI-compatible API on loopback:
+On Windows, `sonder.cmd` in the checkout or bundle root also launches the REPL;
+it uses the checkout's `venv` when present. In the REPL, `/help` lists
+commands, `/model` lists and switches models, and `/runtime` shows the
+tier-to-model policy.
+
+To serve the OpenAI-compatible API on loopback (Linux/macOS shown; on Windows
+use `.\venv\Scripts\python.exe`):
 
 ```bash
-python -m sonder_runtime serve
+./venv/bin/python -m sonder_runtime serve
 curl http://127.0.0.1:11435/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"sonder","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
-To run as an MCP server, use `python -m sonder_runtime mcp`. Client
+To run as an MCP server, use `./venv/bin/python -m sonder_runtime mcp`
+(Windows: `.\venv\Scripts\python.exe -m sonder_runtime mcp`). Client
 configuration examples are in [integrations/](integrations/README.md).
 
 More detail: [getting started](docs/wiki/02-getting-started.md),
