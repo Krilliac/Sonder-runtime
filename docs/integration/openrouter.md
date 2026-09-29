@@ -108,6 +108,11 @@ $env:SONDER_CODE_PROVIDER = 'openrouter'
 $env:SONDER_REASONING_PROVIDER = 'openrouter'
 ```
 
+A tier bound to OpenRouter gets the same hosted-data boundary as a
+`cloud-*` tier: its requests carry only request-scoped instructions and the
+runtime identity, never the local profile, emotion vectors, active goal, or
+recalled memory, lessons and facts.
+
 `SONDER_MODEL_BACKEND=openrouter` binds every tier. OpenRouter does not serve
 embeddings through this gateway, so keep `SONDER_EMBEDDING_PROVIDER=ollama`
 (the default when only tiers are bound). `python -m sonder_runtime preflight`

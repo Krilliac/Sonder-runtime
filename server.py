@@ -2514,9 +2514,9 @@ def _build_system(system, trace, persona, model="", cloud=False, provider=None):
     if trace:
         trace_text = _prompts.render("trace_instructions")
         effective_system = "%s\n\n%s" % (system, trace_text) if system else trace_text
-    if cloud:
+    if cloud or _provider_bridge.is_hosted(provider):  # hosted: no local profile/goal
         return _join_system_parts(
-            _runtime_identity_block(model, cloud=True), effective_system,
+            _runtime_identity_block(model, cloud, provider), effective_system,
         )
     if persona and persona.strip():
         persona_prompt = personas.get(persona)
@@ -4165,6 +4165,7 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
     qv = embeddings.embed(prompt)
     if not embeddings.valid_vector(qv):
         qv = None
+    augment = augment and not _provider_bridge.hosted_rung_active()  # no local memory to hosted rungs
     if qv is None and augment and _provider_bridge.active_rung() is not None:
         # Recall ranks by the Ollama embedder even when generation runs on
         # another provider; say so instead of silently recalling less.

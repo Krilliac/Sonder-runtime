@@ -195,3 +195,71 @@ def test_prompt_identity_never_claims_a_local_model_for_openrouter():
     fields = runtime_identity_fields("anthropic/claude-sonnet-4", provider="openrouter")
     assert "OpenRouter" in fields["where"] and "this machine" in fields["where"]
     assert "not on this machine" in fields["where"]
+
+
+def test_hosted_rung_flag_follows_the_bound_provider():
+    from sonder_runtime.application.chat import provider_bridge
+
+    assert provider_bridge.hosted_rung_active() is False
+    with provider_bridge.bind_rung("openrouter", "code"):
+        assert provider_bridge.hosted_rung_active() is True
+    with provider_bridge.bind_rung("sonder_inference", "code"):
+        assert provider_bridge.hosted_rung_active() is False
+
+
+def test_openrouter_rung_system_prompt_has_no_local_control_plane_context(monkeypatch):
+    """A local tier bound to OpenRouter gets the hosted-data boundary, like cloud-*."""
+    import server
+
+    monkeypatch.setattr(server, "_read_system_context",
+                        lambda: ("LOCAL-PROFILE", "LOCAL-EMOTIONS", "LOCAL-GOAL"))
+    local = server._build_system("base rules", False, "", model="qwen3:8b", cloud=False)
+    hosted = server._build_system("base rules", False, "", model="anthropic/claude-sonnet-4",
+                                  cloud=False, provider="openrouter")
+    assert "LOCAL-PROFILE" in local  # non-vacuity: the local path does include it
+    for marker in ("LOCAL-PROFILE", "LOCAL-EMOTIONS", "LOCAL-GOAL"):
+        assert marker not in hosted
+    assert "base rules" in hosted and "OpenRouter" in hosted
+
+
+def test_answer_skips_memory_augmentation_on_a_hosted_rung(monkeypatch):
+    """Recall, lessons and facts never reach an OpenRouter-bound rung."""
+    import server
+    from sonder_runtime.application.chat import provider_bridge
+
+    class Stop(Exception):
+        pass
+
+    touched = []
+
+    def local_memory(*args, **kwargs):
+        touched.append("memory")
+        raise Stop()
+
+    class App:
+        class recall:
+            retrieve = staticmethod(local_memory)
+
+    def generate(*args, **kwargs):
+        def run(*call_args, **call_kwargs):
+            touched.append("generate")
+            raise Stop()
+        return run
+
+    monkeypatch.setattr(server.embeddings, "embed", lambda prompt: None)
+    monkeypatch.setattr(server, "_application", lambda: App)
+    monkeypatch.setattr(server, "_preference_facts", local_memory)
+    monkeypatch.setattr(server, "_make_generate", generate)
+
+    def answer():
+        with pytest.raises(Stop):
+            server._answer(None, "hello", "m/x", "", 0.2, 64, 0, None, "proj", None,
+                           tier="code", augment=True)
+
+    with provider_bridge.bind_rung("sonder_inference", "code"):
+        answer()
+    assert touched == ["memory"]  # non-vacuity: a local rung does recall
+    touched.clear()
+    with provider_bridge.bind_rung("openrouter", "code"):
+        answer()
+    assert touched == ["generate"]
