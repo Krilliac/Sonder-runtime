@@ -17,6 +17,7 @@ import re
 from types import MappingProxyType
 from typing import Any, Mapping, Protocol
 
+from .integrity import result_violations
 
 SCHEMA = "sonder.evaluation-proposal-lifecycle.v1"
 MAX_DIMENSIONS = 32
@@ -624,6 +625,14 @@ class ProposalLifecycle:
 
     def approve(self, proposal_id: str, evidence_digest: str, *, allow_ungated_legacy: bool = False) -> Proposal:
         proposal = self.get(proposal_id)
+        # A failed cheat trial or a protected write in any recorded result
+        # refuses promotion on every path, gated or legacy, and says why.
+        violations = result_violations(self.recorded_results(proposal_id))
+        if violations:
+            raise EvaluationLifecycleError(
+                "promotion refused: evaluation integrity violation: "
+                + "; ".join(item.reason_code for item in violations[:8])
+            )
         gated = self._gated.get(proposal_id)
         if proposal.promotion_kind:
             if allow_ungated_legacy:
