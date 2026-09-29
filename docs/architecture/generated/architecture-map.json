@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 372,
+      "file_count": 374,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -379,6 +379,8 @@
         "sonder_runtime/adapters/security/permission_evaluator.py",
         "sonder_runtime/adapters/security/permission_policy.py",
         "sonder_runtime/adapters/security/permission_receipts.py",
+        "sonder_runtime/adapters/security/powershell_ast.py",
+        "sonder_runtime/adapters/security/powershell_gate.py",
         "sonder_runtime/adapters/security/recovery_evidence.py",
         "sonder_runtime/adapters/security/unsafe_lab.py",
         "sonder_runtime/adapters/semantic_tier.py",

@@ -1,0 +1,116 @@
+{
+  "builtin_controls": 339,
+  "commands_executed": 0,
+  "corpus": "docs/architecture/powershell-ast-corpus.jsonl",
+  "extraction_counts": {
+    "common-benign-control": 6,
+    "markdown-powershell-fence": 45,
+    "ps1-source": 6,
+    "python-string-literal": 379,
+    "structured-string": 6,
+    "text-command-line": 112,
+    "text-inline": 932
+  },
+  "gate_measurement": {
+    "baseline_run_code": {
+      "action": "allow",
+      "risk": "execution"
+    },
+    "benign_controls": {
+      "Get-ChildItem": {
+        "after_action": "allow",
+        "after_reason": "auto mode allows commands that run programs",
+        "after_risk": "execution",
+        "baseline_action": "allow",
+        "baseline_risk": "execution",
+        "inspectable": true
+      },
+      "Test-Path .": {
+        "after_action": "allow",
+        "after_reason": "auto mode allows commands that run programs",
+        "after_risk": "execution",
+        "baseline_action": "allow",
+        "baseline_risk": "execution",
+        "inspectable": true
+      },
+      "git diff --check": {
+        "after_action": "allow",
+        "after_reason": "auto mode allows commands that run programs",
+        "after_risk": "execution",
+        "baseline_action": "allow",
+        "baseline_risk": "execution",
+        "inspectable": true
+      },
+      "git status --short": {
+        "after_action": "allow",
+        "after_reason": "auto mode allows commands that run programs",
+        "after_risk": "execution",
+        "baseline_action": "allow",
+        "baseline_risk": "execution",
+        "inspectable": true
+      },
+      "python -V": {
+        "after_action": "allow",
+        "after_reason": "auto mode allows commands that run programs",
+        "after_risk": "execution",
+        "baseline_action": "allow",
+        "baseline_risk": "execution",
+        "inspectable": true
+      },
+      "python -m pytest --collect-only": {
+        "after_action": "allow",
+        "after_reason": "auto mode allows commands that run programs",
+        "after_risk": "execution",
+        "baseline_action": "allow",
+        "baseline_risk": "execution",
+        "inspectable": true
+      }
+    },
+    "builtin_changed": 0,
+    "builtin_controls": 339,
+    "commands_executed": 0,
+    "corpus_changed": 562,
+    "fully_inspectable_changed": 0,
+    "generator_initial_approval_prompts": {
+      "campaign_generate_compile_execute_record": {
+        "after": 0,
+        "before": 0
+      },
+      "parallel_generate_run_languages": {
+        "after": 0,
+        "before": 0
+      }
+    },
+    "native_batch": {
+      "batches": 86,
+      "fallbacks": 0,
+      "timeouts": 0
+    },
+    "reason_counts": {
+      "PowerShell requires approval: PowerShell command reads unseen stdin; auto mode asks before destructive or administrative commands": 109,
+      "PowerShell requires approval: blocked command: Invoke-Expression; auto mode asks before destructive or administrative commands": 1,
+      "PowerShell requires approval: dynamic PowerShell argument; auto mode asks before destructive or administrative commands": 2,
+      "PowerShell requires approval: dynamic PowerShell file; auto mode asks before destructive or administrative commands": 8,
+      "PowerShell requires approval: dynamic Start-Process file; auto mode asks before destructive or administrative commands": 6,
+      "PowerShell requires approval: dynamic command name; auto mode asks before destructive or administrative commands": 8,
+      "PowerShell requires approval: dynamic member name; auto mode asks before destructive or administrative commands": 1,
+      "PowerShell requires approval: encoded PowerShell command; auto mode asks before destructive or administrative commands": 2,
+      "PowerShell requires approval: external PowerShell script needs inspection; auto mode asks before destructive or administrative commands": 20,
+      "PowerShell requires approval: missing PowerShell command; auto mode asks before destructive or administrative commands": 1,
+      "PowerShell requires approval: nested parse error; auto mode asks before destructive or administrative commands": 3,
+      "PowerShell requires approval: opaque PowerShell command operand; auto mode asks before destructive or administrative commands": 1,
+      "PowerShell requires approval: parse error; auto mode asks before destructive or administrative commands": 397,
+      "PowerShell requires approval: splatting executable operands; auto mode asks before destructive or administrative commands": 2,
+      "PowerShell requires approval: unknown PowerShell host option; auto mode asks before destructive or administrative commands": 1,
+      "auto mode allows commands that run programs": 810
+    }
+  },
+  "helper_sha256": "1dd5a99b2819a704470338b1d7d3bca3140ecb9816c98e322504146ee64e51cb",
+  "kind_counts": {
+    "candidate": 368,
+    "command": 1004
+  },
+  "method": "Native AST batches followed by the real permission decider; no candidate execution.",
+  "tracked_files_scanned": 4549,
+  "unique_candidates": 1372
+}

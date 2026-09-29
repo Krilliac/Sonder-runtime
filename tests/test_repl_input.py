@@ -441,7 +441,7 @@ def test_catalogued_fanout_status_reuses_the_logged_in_repl_token(monkeypatch):
         sonder_repl.command_catalog, "parse_invocation",
         lambda _line: ("model_fanout_status", {"run_id": "fan-123"}),
     )
-    monkeypatch.setattr(sonder_repl, "_permission_gate", lambda _tool: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_permission_gate", lambda _tool, _arguments=None: (True, ""))
     monkeypatch.setattr(
         sonder_repl.server, "model_fanout_status",
         lambda run_id, token="": captured.update(run_id=run_id, token=token) or "receipt",
@@ -1332,7 +1332,7 @@ def _drive_workspace_repl(monkeypatch, lines, seen):
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
     monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
-    monkeypatch.setattr(sonder_repl, "_permission_gate", lambda _tool: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_permission_gate", lambda _tool, _arguments=None: (True, ""))
     monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
