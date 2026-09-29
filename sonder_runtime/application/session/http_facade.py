@@ -15,6 +15,7 @@ from typing import Mapping
 
 from ...domain.common.errors import IntegrityFailure, InvalidInput
 from ..ports.session_repository import SessionRepository
+from .atif import ATIF_FORMAT, AtifAgent, AtifExportError, session_events_to_atif
 from .durable_replay import crash_safe_replay
 from .continuity import SessionContinuityService
 from .fork import ForkBoundary
@@ -42,7 +43,8 @@ class HttpSessionFacade:
 
     def __init__(self, repository: SessionRepository, *, max_page_size: int = 100,
                  max_scan: int = 1_000, max_replay_events: int = 10_000,
-                 continuity: SessionContinuityService | None = None) -> None:
+                 continuity: SessionContinuityService | None = None,
+                 agent_version: str = "unknown") -> None:
         if isinstance(max_replay_events, bool) or not isinstance(max_replay_events, int) or not 1 <= max_replay_events <= 100_000:
             raise ValueError("max_replay_events must be between 1 and 100000")
         self._query = SessionQueryEngine(repository, max_page_size=max_page_size,
@@ -50,6 +52,7 @@ class HttpSessionFacade:
         self._repository = repository
         self._max_replay_events = max_replay_events
         self._continuity = continuity or SessionContinuityService(repository, max_events=max_replay_events)
+        self._agent = AtifAgent(version=agent_version or "unknown")
 
     @staticmethod
     def _ok(body: Mapping[str, object]) -> HttpSessionResult:
@@ -81,8 +84,17 @@ class HttpSessionFacade:
 
     def export(self, session_id: str, *, start_sequence: int = 1,
                end_sequence: int | None = None,
-               max_events: int = 1_000) -> HttpSessionResult:
-        """Return a bounded, redacted replay-compatible export."""
+               max_events: int = 1_000, format: str | None = None) -> HttpSessionResult:
+        """Return a bounded, redacted replay-compatible export.
+
+        ``format`` selects the body: omitted, ``""`` or ``"sonder"`` is the
+        unchanged ``sonder.http-session-export.v1`` envelope; ``"atif"`` is an
+        ATIF-v1.7 trajectory document built from the same redacted events.
+        Any other value is rejected rather than silently served the default.
+        """
+        chosen = (format or "").strip().lower()
+        if chosen not in ("", "sonder", ATIF_FORMAT):
+            return self._error(400, "invalid_session_export")
         try:
             exported = self._query.export_events(
                 session_id, start_sequence=start_sequence, end_sequence=end_sequence,
@@ -90,10 +102,48 @@ class HttpSessionFacade:
             )
         except QueryExportError:
             return self._error(400, "invalid_session_export")
+        if chosen == ATIF_FORMAT:
+            return self._atif(exported, max_events=max_events)
         return self._ok({
             "schema": "sonder.http-session-export.v1",
             **exported.to_dict(),
         })
+
+    _SUBAGENT_PREFIXES = ("", "child-session-")
+
+    def _atif(self, exported, *, max_events: int) -> HttpSessionResult:
+        """Project one redacted export into ATIF, embedding linked children."""
+        def load_subagent(subagent_id: str):
+            # A delegated child is linked by its ``subagent.*`` id; durable
+            # child runners store it as its own session (optionally under the
+            # ``child-session-`` namespace).  Children get the same bounded,
+            # redacted export as the parent, never a raw read.
+            for prefix in self._SUBAGENT_PREFIXES:
+                candidate = prefix + subagent_id
+                try:
+                    child = self._query.export_events(candidate, max_events=max_events,
+                                                      include_integrity=False)
+                except (QueryExportError, IntegrityFailure, InvalidInput, ValueError):
+                    continue
+                if child.events:
+                    return candidate, child.events
+            return None
+
+        integrity = exported.integrity
+        try:
+            document = session_events_to_atif(
+                exported.events, session_id=exported.session_id, agent=self._agent,
+                load_subagent=load_subagent,
+                extra={
+                    "sonder_export_schema": "sonder.session-export.v1",
+                    "truncated": exported.truncated,
+                    "integrity_valid": None if integrity is None else integrity.valid,
+                    "redaction_applied": any(event.redacted for event in exported.events),
+                },
+            )
+        except AtifExportError:
+            return self._error(409, "session_atif_unavailable")
+        return self._ok(document)
 
     TITLE_CHARS = 80
     _TITLE_SCAN_EVENTS = 16

@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "5bc6f6b91c00b111c94059c9372bb792df6e63dd07d0b0745283b94a837e1a11",
+    "catalog_digest": "eac30f1bf0e475be5ef188a21aaee572956facbcea55a11d864bed6755e43825",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "5bc6f6b91c00b111c94059c9372bb792df6e63dd07d0b0745283b94a837e1a11",
+      "catalog_digest": "eac30f1bf0e475be5ef188a21aaee572956facbcea55a11d864bed6755e43825",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -5972,11 +5972,16 @@
           "name": "self_heal_repair"
         },
         {
-          "description": "Export a remembered conversation session as readable transcript text.",
+          "description": "Export a remembered conversation session as readable transcript text (format=\"atif\": ATIF-v1.7 JSON).",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
             "properties": {
+              "format": {
+                "default": "",
+                "title": "Format",
+                "type": "string"
+              },
               "limit": {
                 "default": 50,
                 "title": "Limit",
@@ -15008,10 +15013,16 @@
           "name": "limit",
           "required": false,
           "type": "int"
+        },
+        {
+          "default": "",
+          "name": "format",
+          "required": false,
+          "type": "str"
         }
       ],
       "risk": "ask",
-      "summary": "Export a remembered conversation session as readable transcript text.",
+      "summary": "Export a remembered conversation session as readable transcript text (format=\"atif\": ATIF-v1.7 JSON).",
       "tool": "session_export"
     },
     {
@@ -18512,7 +18523,7 @@
     "schemas": 4,
     "tools": 223
   },
-  "digest": "028133c39c39ce0881ad0884887a11e5cbc92c3ad0840e0b539d39fbb071920a",
+  "digest": "5fd185c63a08b048ee4ed3d7448a5bc58847f389dd49cdc0e17dddc7902f9d18",
   "events": [
     {
       "name": "session.started",
@@ -21123,9 +21134,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "5bc6f6b91c00b111c94059c9372bb792df6e63dd07d0b0745283b94a837e1a11",
+    "catalog_digest": "eac30f1bf0e475be5ef188a21aaee572956facbcea55a11d864bed6755e43825",
     "client": {
-      "digest": "5bc6f6b91c00b111c94059c9372bb792df6e63dd07d0b0745283b94a837e1a11",
+      "digest": "eac30f1bf0e475be5ef188a21aaee572956facbcea55a11d864bed6755e43825",
       "events": [
         {
           "name": "approval.denied",
@@ -23391,7 +23402,7 @@
           {
             "name": "session_export",
             "schema_available": true,
-            "summary": "Export a remembered conversation session as readable transcript text."
+            "summary": "Export a remembered conversation session as readable transcript text (format=\"atif\": ATIF-v1.7 JSON)."
           },
           {
             "name": "set_context_size",
@@ -29529,11 +29540,16 @@
           "name": "self_heal_repair"
         },
         {
-          "description": "Export a remembered conversation session as readable transcript text.",
+          "description": "Export a remembered conversation session as readable transcript text (format=\"atif\": ATIF-v1.7 JSON).",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
             "properties": {
+              "format": {
+                "default": "",
+                "title": "Format",
+                "type": "string"
+              },
               "limit": {
                 "default": 50,
                 "title": "Limit",
@@ -37939,9 +37955,14 @@
           "name": "self_heal_repair"
         },
         {
-          "description": "Export a remembered conversation session as readable transcript text.",
+          "description": "Export a remembered conversation session as readable transcript text (format=\"atif\": ATIF-v1.7 JSON).",
           "inputSchema": {
             "properties": {
+              "format": {
+                "default": "",
+                "title": "Format",
+                "type": "string"
+              },
               "limit": {
                 "default": 50,
                 "title": "Limit",
@@ -45608,10 +45629,15 @@
         },
         {
           "function": {
-            "description": "Export a remembered conversation session as readable transcript text.",
+            "description": "Export a remembered conversation session as readable transcript text (format=\"atif\": ATIF-v1.7 JSON).",
             "name": "session_export",
             "parameters": {
               "properties": {
+                "format": {
+                  "default": "",
+                  "title": "Format",
+                  "type": "string"
+                },
                 "limit": {
                   "default": 50,
                   "title": "Limit",
@@ -47366,7 +47392,7 @@
   },
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "6be05f104304b0db7c2d8556d4eb74bd89badb64f64fdabeaa18f8bc4e1a6ee4",
+    "server.py": "240662d1105d1c4efc75fe7f563e0f9ff7f7a7eda5063e76c0ce6381e66a961c",
     "sonder_runtime/application/tools/generated_catalogs.py": "0cb58ae27e9f0e56102282b7e2a5b7b8a9d955a4322055e87d18d3970fe644d8",
     "sonder_runtime/bootstrap/native_mcp.py": "70ff163345c30e4b379a77af0eaddbe8a51d3d93e001b68d538f09f5c6c4ee9f",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
@@ -52919,10 +52945,15 @@
       }
     },
     {
-      "description": "Export a remembered conversation session as readable transcript text.",
+      "description": "Export a remembered conversation session as readable transcript text (format=\"atif\": ATIF-v1.7 JSON).",
       "name": "session_export",
       "parameters": {
         "properties": {
+          "format": {
+            "default": "",
+            "title": "Format",
+            "type": "string"
+          },
           "limit": {
             "default": 50,
             "title": "Limit",

@@ -91,6 +91,10 @@ instruction.
 
 - `/stats` — lessons, interactions, outcomes, token ledgers by tier.
 - `memory_search`, `memory_export`, `session_export` — inspect local memory.
+  `session_export(format="atif")` renders the remembered session as an
+  ATIF-v1.7 trajectory (one user and one agent step per turn, recorded token
+  counts as step metrics, every string redacted); the default text transcript
+  is unchanged.
 - `learning_health_status` — outcome coverage, signal quality, distillation
   yield, the evidence-level findings above, and the attribution lane's own
   session counters (`grounded_outcomes`: noted / attributed / self-blocked /
