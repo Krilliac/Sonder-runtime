@@ -1,0 +1,150 @@
+{"id": "b000", "text": "hi", "label": "fast", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b001", "text": "thanks!", "label": "fast", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b002", "text": "good morning", "label": "fast", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b003", "text": "how are you?", "label": "fast", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b004", "text": "lol", "label": "fast", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b005", "text": "what's up", "label": "fast", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b006", "text": "ok cool", "label": "fast", "split": "bank", "source": "handwritten", "edge": false}
+{"id": "b007", "text": "thank you so much", "label": "fast", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b008", "text": "bye for now", "label": "fast", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b009", "text": "nice", "label": "fast", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b010", "text": "yes please", "label": "fast", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b011", "text": "hey Sonder", "label": "fast", "split": "bank", "source": "handwritten", "edge": false}
+{"id": "b012", "text": "are you there?", "label": "fast", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b013", "text": "that's awesome", "label": "fast", "split": "bank", "source": "handwritten", "edge": false}
+{"id": "b014", "text": "you're funny", "label": "fast", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b015", "text": "good night", "label": "fast", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b016", "text": "cheers", "label": "fast", "split": "bank", "source": "handwritten", "edge": false}
+{"id": "b017", "text": "hmm", "label": "fast", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b018", "text": "sounds good", "label": "fast", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b019", "text": "sorry, typo", "label": "fast", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b020", "text": "I passed my exam!", "label": "fast", "split": "bank", "source": "handwritten", "edge": false}
+{"id": "b021", "text": "how's it going?", "label": "fast", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b022", "text": "I'm bored", "label": "fast", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b023", "text": "what's your name?", "label": "fast", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b024", "text": "see you tomorrow", "label": "fast", "split": "bank", "source": "handwritten", "edge": false}
+{"id": "b025", "text": "happy friday!", "label": "fast", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b026", "text": "tell me a joke", "label": "fast", "split": "test", "source": "handwritten", "edge": true}
+{"id": "b027", "text": "what's 2+2", "label": "fast", "split": "test", "source": "handwritten", "edge": true}
+{"id": "b028", "text": "what day is it today?", "label": "fast", "split": "test", "source": "handwritten", "edge": true}
+{"id": "b029", "text": "quick one: is a tomato a fruit?", "label": "fast", "split": "test", "source": "handwritten", "edge": true}
+{"id": "b030", "text": "explain photosynthesis", "label": "general", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b031", "text": "write a cover letter for a barista job", "label": "general", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b032", "text": "summarize the causes of World War I", "label": "general", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b033", "text": "what's the difference between a virus and a bacterium?", "label": "general", "split": "bank", "source": "handwritten", "edge": false}
+{"id": "b034", "text": "write a birthday message for my mom", "label": "general", "split": "bank", "source": "handwritten", "edge": false}
+{"id": "b035", "text": "draft an email asking my professor for a deadline extension", "label": "general", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b036", "text": "what are the pros and cons of remote work?", "label": "general", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b037", "text": "translate 'where is the train station' into Spanish", "label": "general", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b038", "text": "explain the plot of Hamlet", "label": "general", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b039", "text": "give me tips for better sleep", "label": "general", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b040", "text": "write a haiku about autumn", "label": "general", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b041", "text": "how does a bill become law in the US?", "label": "general", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b042", "text": "describe the water cycle for a 10-year-old", "label": "general", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b043", "text": "rewrite this to sound more formal: we gotta ship it soon", "label": "general", "split": "bank", "source": "handwritten", "edge": false}
+{"id": "b044", "text": "what is inflation?", "label": "general", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b045", "text": "write a product description for a bamboo toothbrush", "label": "general", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b046", "text": "give me a brief history of the Roman Empire", "label": "general", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b047", "text": "recommend some sci-fi books like Dune", "label": "general", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b048", "text": "write a short story about a lonely lighthouse keeper", "label": "general", "split": "bank", "source": "handwritten", "edge": false}
+{"id": "b049", "text": "explain the difference between affect and effect", "label": "general", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b050", "text": "how do vaccines work?", "label": "general", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b051", "text": "outline a blog post about minimalism", "label": "general", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b052", "text": "proofread this: their going to the store tomorow", "label": "general", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b053", "text": "summarize this: The city council voted 7-2 to expand bike lanes downtown next year.", "label": "general", "split": "bank", "source": "handwritten", "edge": false}
+{"id": "b054", "text": "what are good questions to ask at the end of a job interview?", "label": "general", "split": "bank", "source": "handwritten", "edge": false}
+{"id": "b055", "text": "write a LinkedIn post announcing my new job", "label": "general", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b056", "text": "explain what an API is to a non-technical manager", "label": "general", "split": "test", "source": "handwritten", "edge": true}
+{"id": "b057", "text": "explain what machine learning is in simple terms", "label": "general", "split": "test", "source": "handwritten", "edge": true}
+{"id": "b058", "text": "explain quantum entanglement simply", "label": "general", "split": "test", "source": "handwritten", "edge": true}
+{"id": "b059", "text": "should I pay off my car loan early or keep saving? just general thoughts", "label": "general", "split": "test", "source": "handwritten", "edge": true}
+{"id": "b060", "text": "write a Python function to reverse a linked list", "label": "code", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b061", "text": "fix this error: TypeError: 'NoneType' object is not subscriptable", "label": "code", "split": "bank", "source": "handwritten", "edge": false}
+{"id": "b062", "text": "how do I center a div in CSS?", "label": "code", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b063", "text": "write a SQL query to find the top 5 customers by revenue", "label": "code", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b064", "text": "convert this to TypeScript: function add(a,b){return a+b}", "label": "code", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b065", "text": "explain what this regex does: ^\\d{3}-\\d{4}$", "label": "code", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b066", "text": "why does my React useEffect run twice?", "label": "code", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b067", "text": "write unit tests for a fizzbuzz function", "label": "code", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b068", "text": "refactor this class to use dependency injection", "label": "code", "split": "bank", "source": "handwritten", "edge": false}
+{"id": "b069", "text": "how do I resolve a git merge conflict?", "label": "code", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b070", "text": "write a bash script to back up my home folder", "label": "code", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b071", "text": "implement binary search in Rust", "label": "code", "split": "bank", "source": "handwritten", "edge": false}
+{"id": "b072", "text": "my Docker container exits immediately, here's the Dockerfile: FROM node:20 CMD npm start", "label": "code", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b073", "text": "add type hints to this function: def f(x, y): return x * y", "label": "code", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b074", "text": "write a FastAPI endpoint for creating users", "label": "code", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b075", "text": "explain async/await in C# with an example", "label": "code", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b076", "text": "optimize this loop: for i in range(len(a)): total += a[i]", "label": "code", "split": "bank", "source": "handwritten", "edge": false}
+{"id": "b077", "text": "how do I read a CSV with pandas?", "label": "code", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b078", "text": "segfault in my C++ code when I push_back into a vector while iterating it", "label": "code", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b079", "text": "write a regex to validate email addresses", "label": "code", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b080", "text": "set up ESLint with Prettier in a Vite project", "label": "code", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b081", "text": "write a CMakeLists.txt for a library plus a test executable", "label": "code", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b082", "text": "implement an LRU cache in Java", "label": "code", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b083", "text": "my Python script hangs forever on queue.get(), why?", "label": "code", "split": "bank", "source": "handwritten", "edge": false}
+{"id": "b084", "text": "write a GitHub Actions workflow that runs pytest", "label": "code", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b085", "text": "explain Rust borrow checker error E0502", "label": "code", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b086", "text": "parse this JSON into a Go struct", "label": "code", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b087", "text": "what's the time complexity of quicksort?", "label": "code", "split": "test", "source": "handwritten", "edge": true}
+{"id": "b088", "text": "what does git rebase -i do?", "label": "code", "split": "bank", "source": "handwritten", "edge": true}
+{"id": "b089", "text": "is Python or Go better for a CLI tool?", "label": "code", "split": "test", "source": "handwritten", "edge": true}
+{"id": "b090", "text": "A train leaves at 3pm going 60 mph; another leaves the same station at 4pm going 80 mph. When does the second catch the first?", "label": "reasoning", "split": "bank", "source": "handwritten", "edge": false}
+{"id": "b091", "text": "prove that the square root of 2 is irrational", "label": "reasoning", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b092", "text": "Three boxes are labelled apples, oranges, and mixed, and every label is wrong. You may draw one fruit from one box. How do you relabel them?", "label": "reasoning", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b093", "text": "how many distinct ways can the letters of BANANA be arranged?", "label": "reasoning", "split": "bank", "source": "handwritten", "edge": false}
+{"id": "b094", "text": "A bat and a ball cost $1.10 total, the bat costs $1.00 more than the ball. How much is the ball? Explain.", "label": "reasoning", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b095", "text": "what's the probability of getting at least one six in four rolls of a fair die?", "label": "reasoning", "split": "bank", "source": "handwritten", "edge": false}
+{"id": "b096", "text": "compute the integral of x*e^x dx step by step", "label": "reasoning", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b097", "text": "If all bloops are razzies and all razzies are lazzies, are all bloops definitely lazzies?", "label": "reasoning", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b098", "text": "find the next number and explain the rule: 2, 6, 12, 20, 30, ?", "label": "reasoning", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b099", "text": "A farmer has 17 sheep and all but 9 run away. How many are left? Walk through it.", "label": "reasoning", "split": "bank", "source": "handwritten", "edge": false}
+{"id": "b100", "text": "On an island knights always tell the truth and knaves always lie. A says 'B is a knave', B says 'A and I are the same type'. What are they?", "label": "reasoning", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b101", "text": "solve the wolf, goat and cabbage river crossing puzzle step by step", "label": "reasoning", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b102", "text": "how many handshakes happen if 25 people each shake hands with everyone else once?", "label": "reasoning", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b103", "text": "Tasks: A takes 3 days, B takes 2 days after A, C takes 4 days after A, D takes 1 day after B and C. What's the critical path and total duration?", "label": "reasoning", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b104", "text": "prove there are infinitely many prime numbers", "label": "reasoning", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b105", "text": "Monty Hall problem: should I switch doors? Justify with probabilities.", "label": "reasoning", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b106", "text": "derive the quadratic formula from ax^2+bx+c=0", "label": "reasoning", "split": "bank", "source": "handwritten", "edge": false}
+{"id": "b107", "text": "If 5 machines make 5 widgets in 5 minutes, how long do 100 machines take to make 100 widgets? Reason it out.", "label": "reasoning", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b108", "text": "solve the system x + y = 10 and x - y = 4, show the steps", "label": "reasoning", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b109", "text": "Fermi estimate: roughly how many piano tuners work in Chicago? Show your assumptions.", "label": "reasoning", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b110", "text": "what's the expected number of fair coin flips until two heads in a row?", "label": "reasoning", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b111", "text": "list the optimal moves to solve a 4-disk Tower of Hanoi", "label": "reasoning", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b112", "text": "is 1001 prime? show your reasoning", "label": "reasoning", "split": "bank", "source": "handwritten", "edge": false}
+{"id": "b113", "text": "Schedule 5 exams into 3 time slots so that no student has two at once: Alice takes 1,2; Bob takes 2,3; Cara takes 3,4; Dan takes 4,5; Eve takes 1,5.", "label": "reasoning", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b114", "text": "$5000 grows at 4% compounded annually for 12 years; how much is it, showing each step?", "label": "reasoning", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b115", "text": "Two people are 120 miles apart and walk towards each other at 3 mph and 5 mph; a dog runs between them at 10 mph. How far does the dog run?", "label": "reasoning", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b116", "text": "plan a 7-day Japan trip on a $3000 budget, with a day-by-day cost breakdown that stays under budget", "label": "reasoning", "split": "test", "source": "handwritten", "edge": true}
+{"id": "b117", "text": "design a step-by-step plan to migrate our monolith to microservices over 6 months, with dependencies and risks", "label": "reasoning", "split": "test", "source": "handwritten", "edge": true}
+{"id": "b118", "text": "I have 3 meetings, 2 deadlines and a dentist appointment this week; build me an optimal schedule given I can only focus 4 hours a day", "label": "reasoning", "split": "test", "source": "handwritten", "edge": true}
+{"id": "b119", "text": "should I pay off my 6% loan or invest at an expected 7% return? work through the math including taxes and risk", "label": "reasoning", "split": "test", "source": "handwritten", "edge": true}
+{"id": "b120", "text": "what's in this image? [image attached]", "label": "vision", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b121", "text": "describe this screenshot [screenshot attached]", "label": "vision", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b122", "text": "read the text in this photo of a receipt", "label": "vision", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b123", "text": "what breed is the dog in this picture?", "label": "vision", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b124", "text": "transcribe the handwriting in the attached image", "label": "vision", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b125", "text": "what does this chart show? [image]", "label": "vision", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b126", "text": "identify the plant in this photo", "label": "vision", "split": "bank", "source": "handwritten", "edge": false}
+{"id": "b127", "text": "count the people in this picture", "label": "vision", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b128", "text": "what color is the car in the image?", "label": "vision", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b129", "text": "extract the table from this screenshot into CSV", "label": "vision", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b130", "text": "translate the sign in this photo", "label": "vision", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b131", "text": "rate my outfit in this pic", "label": "vision", "split": "bank", "source": "handwritten", "edge": false}
+{"id": "b132", "text": "what landmark is this? [photo attached]", "label": "vision", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b133", "text": "write alt text for the attached image", "label": "vision", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b134", "text": "what font is used in this logo image?", "label": "vision", "split": "bank", "source": "handwritten", "edge": false}
+{"id": "b135", "text": "which of these two product photos looks more professional?", "label": "vision", "split": "bank", "source": "handwritten", "edge": false}
+{"id": "b136", "text": "turn this whiteboard photo into meeting notes", "label": "vision", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b137", "text": "caption this photo for Instagram", "label": "vision", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b138", "text": "is this image AI-generated?", "label": "vision", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b139", "text": "what dish is in this picture, and how would I cook it?", "label": "vision", "split": "bank", "source": "handwritten", "edge": false}
+{"id": "b140", "text": "what kind of bird is this? [image]", "label": "vision", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b141", "text": "describe the floor plan in this image", "label": "vision", "split": "bank", "source": "handwritten", "edge": false}
+{"id": "b142", "text": "identify the components on this PCB photo", "label": "vision", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b143", "text": "what does the graph in this screenshot say about sales?", "label": "vision", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b144", "text": "look at the attached photo: is my bike chain installed correctly?", "label": "vision", "split": "test", "source": "handwritten", "edge": false}
+{"id": "b145", "text": "here's a screenshot of my error, what's wrong? [image attached]", "label": "vision", "split": "test", "source": "handwritten", "edge": true}
+{"id": "b146", "text": "solve the math problem in this photo", "label": "vision", "split": "test", "source": "handwritten", "edge": true}
+{"id": "b147", "text": "turn this hand-drawn wireframe photo into HTML", "label": "vision", "split": "test", "source": "handwritten", "edge": true}
+{"id": "b148", "text": "does this circuit diagram look correct? [image]", "label": "vision", "split": "test", "source": "handwritten", "edge": true}
+{"id": "b149", "text": "what's wrong with my UI layout in this screenshot?", "label": "vision", "split": "test", "source": "handwritten", "edge": true}
