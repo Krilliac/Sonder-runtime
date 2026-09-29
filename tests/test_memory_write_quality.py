@@ -64,6 +64,7 @@ def test_leading_or_backward_reference_is_unresolved(text):
     "Node1 is currently at 10.77.0.2 (verified 2026-08-17).",  # dated
     "As of September 2026 the latest CMake is 4.1.",        # dated
     "Python 3.12 is the venv interpreter since 2025.",      # dated version
+    "As of v2.4 the runtime currently defaults to WAL.",    # version-anchored
     "Reward thresholds sit at 0.71 for distillation.",      # bare decimal, not a version
 ])
 def test_timeless_or_dated_text_is_not_flagged_time_sensitive(text):
@@ -76,6 +77,8 @@ def test_timeless_or_dated_text_is_not_flagged_time_sensitive(text):
     "Unreal builds need UE 5.8 installed.",
     "Pin requests==2.31.0 in the lock file.",
     "The runtime now defaults to WAL journaling.",
+    "As of now the runtime defaults to WAL journaling.",  # "as of" without a date
+    "The latest ruff is required as of today.",
 ])
 def test_time_sensitive_text_without_a_date_is_flagged(text):
     assert wq.UNDATED_TIME_SENSITIVE in wq.classify(text)

@@ -104,7 +104,13 @@ instruction.
   own grades), **stale lessons** (positive evidence at least two half-lives
   old whose age-decayed effective score fell below a floor — experimental,
   diagnostics only), and **duplicate facts** (per-project only; removal stays
-  with `sonder_forget_fact`).
+  with `sonder_forget_fact`). A trailing **write quality** section counts
+  facts and lessons that are not atomic (several chained claims), not
+  self-contained (open with an unresolved "this"/"it"/"the above"), mention
+  something time-sensitive ("currently", "latest", a version) without a date,
+  or fall outside the length bounds. It is lexical, local and report-only:
+  samples carry ids and reason names, never text, and `memory_quality_repair`
+  never acts on these findings.
 - `memory_privacy_review`/`_repair` — redacted privacy findings and removal.
 - `memory_embedding_backfill` — refresh stale/missing vectors.
 

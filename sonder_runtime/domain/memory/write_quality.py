@@ -2,10 +2,9 @@
 
 Pure classification of one fact or lesson string -- no I/O, no SQLite, no
 model call -- so the memory quality report can say how much of the store is
-written in a shape that retrieval can use. Badly written memory entries fail
-far more often than well written ones (24% vs 2% in arXiv 2607.21962), and the
-four properties checked here are the ones that paper's error analysis ties to
-those failures:
+written in a shape that retrieval can use. An entry retrieved into a later
+prompt is read without the conversation that wrote it, so the four properties
+checked here are the ones that make it usable on its own:
 
 * ``multi_claim``   -- the text is not atomic: it chains several claims, so a
   retrieval that matches one of them drags the others along unasked.
@@ -101,7 +100,10 @@ _VERSION = re.compile(
 )
 _DATED = re.compile(
     r"\b(?:19|20)\d{2}-\d{2}(?:-\d{2})?\b"      # 2026-08-17, 2026-08
-    r"|\bas of\b|\bsince\s+(?:v?\d|(?:19|20)\d{2})"
+    # "as of" needs a concrete anchor after it: "as of now" is not a date.
+    r"|\bas of\s+(?:v?\d|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)"
+    r"|q[1-4]\b|(?:version|release|commit)\b)"
+    r"|\bsince\s+(?:v?\d|(?:19|20)\d{2})"
     r"|\b(?:in|during|until|before|after)\s+(?:19|20)\d{2}\b"
     r"|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+"
     r"(?:\d{1,2},?\s+)?(?:19|20)\d{2}\b"
