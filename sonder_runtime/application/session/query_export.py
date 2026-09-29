@@ -138,10 +138,15 @@ class TranscriptRecord:
     sequence: int
     turn_id: str = ""
     name: str = ""
+    # True when a retention marker withheld this turn: ``content`` is then a
+    # placeholder, never the original text, and must not be shown as prose
+    # (e.g. as a session title).
+    redacted: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return {"role": self.role, "content": self.content, "event_type": self.event_type,
-                "sequence": self.sequence, "turn_id": self.turn_id, "name": self.name}
+                "sequence": self.sequence, "turn_id": self.turn_id, "name": self.name,
+                "redacted": self.redacted}
 
 
 @dataclass(frozen=True, slots=True)
@@ -343,9 +348,22 @@ class SessionQueryEngine:
         result = []
         for event in events:
             role = roles.get(event.event_type)
-            if role is None or not isinstance(event.payload.get("content", ""), str):
+            if role is None:
                 continue
-            result.append(TranscriptRecord(role, event.payload["content"], event.event_type,
+            if event.redacted and event.payload.get("redacted") is True:
+                # A retention marker replaced the whole payload.  Keep the turn
+                # (role, sequence, event type) so replay/trajectory consumers
+                # see the true turn order and count, but expose only the
+                # privacy class -- the original content and ids are withheld.
+                privacy_class = event.payload.get("privacy_class")
+                label = privacy_class if isinstance(privacy_class, str) and privacy_class else "withheld"
+                result.append(TranscriptRecord(role, f"[redacted: {label}]", event.event_type,
+                                               event.sequence, redacted=True))
+                continue
+            content = event.payload.get("content")
+            if not isinstance(content, str):
+                continue
+            result.append(TranscriptRecord(role, content, event.event_type,
                                            event.sequence, str(event.payload.get("turn_id", "")),
                                            str(event.payload.get("name", ""))))
         return tuple(result)
