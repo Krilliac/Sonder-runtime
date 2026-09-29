@@ -1081,7 +1081,20 @@ def host_is_elevated() -> bool:
 # --- classification -------------------------------------------------------
 
 
-def risk_of(tool_name: str) -> str:
+def _host_traits_for(tool_name: str):
+    """Return the host-owned traits for a built-in, when the registry provides them.
+
+    Kept lazy for the same reason as ``command_catalog``: this root compatibility
+    module must remain importable without importing the packaged application.
+    """
+    try:
+        from sonder_runtime.domain.tools.builtin_traits import builtin_traits
+        return builtin_traits(tool_name)
+    except Exception:
+        return None
+
+
+def _catalog_risk_of(tool_name: str) -> str:
     """Risk class for a tool, from the command catalog, with execution split out.
 
     ``dangerous`` is resolved FIRST and deliberately outranks ``execution``.
@@ -1161,6 +1174,36 @@ def risk_of(tool_name: str) -> str:
     # answer was indistinguishable from a catalogued ``ask`` and, with nobody
     # to ask, indistinguishable from ``allow``. Say the classifier failed.
     return UNCLASSIFIED
+
+
+def risk_of(tool_name: str, *, traits=None) -> str:
+    """Keep built-in grades unless explicit host metadata changes them.
+
+    The catalog and static work tables already classify built-ins. Missing
+    trait knowledge is not a replacement classification. External advisory
+    metadata remains conservative and cannot grant a permission relaxation.
+    """
+    from sonder_runtime.domain.tools.traits import TriState
+
+    name = str(tool_name or "").strip().lstrip("/")
+    base = _catalog_risk_of(name)
+    if traits is None:
+        traits = _host_traits_for(name)
+    if traits is None:
+        return base
+    if base in {"dangerous", UNCLASSIFIED}:
+        return base
+    if getattr(traits, "host_declared", False) is True:
+        if getattr(traits, "destructive", None) is TriState.TRUE:
+            return "dangerous"
+        # Retain the existing host read contract, without lowering execution
+        # or mutation grades. The catalog golden guards this closed set.
+        if getattr(traits, "is_read_only", False) and base == "ask":
+            return "safe"
+        return base
+    # Advisory read-only/non-destructive hints cannot lower the conservative
+    # external-tool grade. Only a host-owned declaration establishes authority.
+    return "dangerous"
 
 
 def _default_rule_lookup(tool_name: str) -> dict | None:
@@ -1348,7 +1391,7 @@ def _rule_action_for(tool_name: str, rule_lookup) -> tuple[str | None, str]:
 def decide_for_caller(tool_name: str, *, interactive: bool,
                       gate_control_exempt: bool, surface: str = "",
                       record: bool = True, mode: str | None = None,
-                      rule_lookup=None, arguments=None, fence=None):
+                      rule_lookup=None, arguments=None, fence=None, traits=None):
     """``decide()`` plus the one exemption, for callers that share both.
 
     Returns ``None`` when the tool is exempt and there is therefore nothing to
@@ -1382,14 +1425,14 @@ def decide_for_caller(tool_name: str, *, interactive: bool,
         return None
     return decide(tool_name, interactive=interactive, mode=mode,
                   rule_lookup=rule_lookup, surface=surface, record=record,
-                  arguments=arguments, fence=fence)
+                  arguments=arguments, fence=fence, traits=traits)
 
 
 def decide(tool_name: str, *, interactive: bool = True,
            mode: str | None = None, rule_lookup=None,
            requires_elevation: bool = False,
            surface: str = "", record: bool = True,
-           arguments=None, fence=None, approval_ledger=None) -> Decision:
+           arguments=None, fence=None, approval_ledger=None, traits=None) -> Decision:
     """Whether ``tool_name`` may run right now.
 
     ``interactive=False`` means nobody is present to answer a prompt (a direct
@@ -1440,6 +1483,7 @@ def decide(tool_name: str, *, interactive: bool = True,
         tool_name, interactive=interactive, mode=mode, rule_lookup=rule_lookup,
         requires_elevation=requires_elevation, arguments=arguments, fence=fence,
         approval_ledger=approval_ledger, surface=surface, live=record,
+        traits=traits,
     )
     if record and not interactive and _worth_a_receipt(decision):
         _observe(decision, surface)
@@ -1503,13 +1547,19 @@ def _ledger_for(approval_ledger):
 
 def _decide(tool_name: str, *, interactive: bool, mode: str | None,
             rule_lookup, requires_elevation: bool, arguments=None, fence=None,
-            approval_ledger=None, surface: str = "", live: bool = True) -> Decision:
+            approval_ledger=None, surface: str = "", live: bool = True,
+            traits=None) -> Decision:
     active = mode or current_mode()
     if active not in _MATRIX:
         # Report the mode actually applied. Echoing an unknown name back in the
         # Decision put a mode that was never in effect into the audit trail.
         active = DEFAULT_MODE
-    risk = risk_of(tool_name)
+    # Keep the historical one-argument call shape for host-default decisions.
+    # Permission gate integrations and plugins have long monkeypatched
+    # ``risk_of(name)``; passing an explicit ``traits=None`` keyword would
+    # break those callables even though it carries no additional information.
+    risk = (risk_of(tool_name) if traits is None
+            else risk_of(tool_name, traits=traits))
     name = str(tool_name or "").lstrip("/")
     digest = call_digest(name, arguments)
     call = call_id(digest)
