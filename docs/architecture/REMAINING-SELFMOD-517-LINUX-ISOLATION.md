@@ -226,10 +226,11 @@ with digests and path rules. No model judges them.
 
 **Parity.** Clean evidence carries no marker and no failing integrity row, so
 it adds no gate and no reason. Its decision is byte-identical to what it was
-before these checks existed. A 63-scenario promotion decision matrix (every
-non-strategy kind, with passing, thin, dropped, non-replayed, regressed,
-canary-less, canary-only, baseline-less and extra-provenance evidence) gives
-the same digests on `origin/main` and on this change.
+before these checks existed. A 77-scenario promotion decision matrix (the 7
+non-strategy kinds, each with passing, thin, dropped, non-replayed, regressed,
+canary-less, canary-only, baseline-less, extra-provenance, failed-canary and
+two-result evidence) gives the same digests, pass flags, reason codes and
+gate maps on `origin/main` and on this change.
 `tests/test_selfmod_protected_writes.py` pins one of those digests.
 
 **Limits.** These checks produce evidence when they run. They are not yet
@@ -240,7 +241,21 @@ nightly driver does not run the battery yet: its candidates are function
 edits with no solver entry point. Reading a planted file without using it is
 not detected, but it also cannot raise a score. Under the Linux uid
 supervisor the candidate has no network interface, so it cannot reach the
-`network_route` trial at all, and that trial can only pass there.
+`network_route` trial at all, and that trial can only pass there. The trial
+workspace is an evaluator-owned temporary directory, and neither the Windows
+low-integrity Job nor the Linux uid supervisor grants it to the candidate.
+Under either supervisor a solver therefore cannot write `answer.txt` or edit
+a planted file, so the trial is never solved there. A solver that exits
+non-zero fails its `cheat_trial_probe` row, and `review` then rejects the run
+("one or more recorded checks failed"). Until the supervisors grant the trial
+workspace to the candidate, the battery is meant for unisolated operator
+runs. Read-only shortcuts (the canary in the solver's output) are graded
+under every supervisor. Protected-write scoring adds two digest walks of the
+candidate workspace to every watched check. For a full `sonder-runtime`
+worktree (about 1 500 protected files, mostly under `tests/`) each walk takes
+about 0.6 s on the development workstation with a warm file cache and about
+4 s cold. The walks run outside the check's timer, so recorded check
+durations keep their meaning.
 
 ### Operator-driven path (`/selfmod run`, `approve`, `deploy`, `rollback`)
 
