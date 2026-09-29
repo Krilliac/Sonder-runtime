@@ -256,7 +256,13 @@ def _perform_ref(action, ref, *, text, keys, scroll, label, surface) -> dict:
         # The control's own name is screen text: like the vision reading, it
         # can add a confirmation and never remove one.
         labels = [act.label] + ([name] if name and name != act.label else [])
-        if act.action in {"click", "double_click"} and not name and cfg.verify_clicks:
+        # A trusted, named control needs no vision reading: its UIA name is the
+        # label. An unnamed one, or one inside page content (whose accessible
+        # name the page chooses and can make differ from what it shows), still
+        # gets the vision reading exactly as an x/y click does.
+        entry = session.control_refs.get(ref)
+        untrusted = bool(getattr(entry, "untrusted", False))
+        if act.action in {"click", "double_click"} and (not name or untrusted) and cfg.verify_clicks:
             shot = desktop.capture(session.hwnd)
             session.last_capture = shot
             labels.append(_verified_label(shot, act.x, act.y))
@@ -275,9 +281,6 @@ def _perform_ref(action, ref, *, text, keys, scroll, label, surface) -> dict:
                 return {"ok": False, "confirmation_required": True, "reason": reason,
                         "detail": refusal, "labels_seen": labels, "ref": ref}
         session = ctl.require_live(cfg.allowed_apps)
-        spent = session.budget.admit()
-        if spent:
-            raise rules.ActionRefused(spent)
         desktop.focus(session.hwnd)
         # Everything is proved again after the gate and the focus change: the
         # control may have changed, moved, or been covered meanwhile.
@@ -286,10 +289,18 @@ def _perform_ref(action, ref, *, text, keys, scroll, label, surface) -> dict:
             raw, window = _resolve_ref(tree, session, info, ref)
             px, py = ui_controls.client_point(raw, window)
             if not ui_controls.topmost(raw.runtime_id, tree.hit_chain(info.left + px, info.top + py)):
-                raise desktop.TargetMoved("another window or control covers %s %r at its point; %s"
-                                          % (raw.role, name, ui_controls.REOBSERVE))
+                raise desktop.TargetMoved("another window or control covers the %s at its point; %s"
+                                          % (raw.role, ui_controls.REOBSERVE))
             method = ui_controls.choose_method(act.action, raw, act.text)
             synthetic = method not in ui_controls.PATTERN_METHODS
+            # Reading the tree can take seconds. The session premise (kill
+            # hotkey, Stop, a person's input) and the window being in front are
+            # proved again here, immediately before input, as on the x/y path.
+            session = ctl.require_live(cfg.allowed_apps)
+            spent = session.budget.admit()
+            if spent:
+                raise rules.ActionRefused(spent)
+            desktop.focus(session.hwnd)
             try:
                 _act_on_control(tree, session, act, raw, method, px, py)
             finally:

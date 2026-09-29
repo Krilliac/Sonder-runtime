@@ -143,16 +143,22 @@ on the 0–1000 grid.
 - **Acting by ref.** `ui_action(action=..., ref=...)` passes every layer above
   (configuration, the tool gate, the live-session re-proof, the budget, the
   irreversible gate). The control's own name joins the labels the irreversible
-  check reads, so it can add a confirmation. Before input, after the gate and
-  the focus change, the ref is resolved again and refused, with a request to
-  re-observe, unless the control still exists with the same role and name, is
-  enabled and visible, and is topmost at its point (`ElementFromPoint` hits the
-  control or one of its descendants).
+  check reads, so it can add a confirmation. With `verify_clicks`, a click on
+  an unnamed control, or on one inside untrusted content (a page chooses its
+  controls' accessible names), still gets the vision reading of an x/y click.
+  Before input, after the gate and the focus change, the ref is resolved again
+  and refused, with a request to re-observe, unless the control still exists
+  with the same role and name, is enabled and visible, and is topmost at its
+  point (`ElementFromPoint` hits the control or one of its descendants). The
+  live session is then proved again and the window brought to the front
+  immediately before input, as on the x/y path.
 - **Patterns first.** A click uses Invoke, Toggle or SelectionItem when the
-  control has one; `type` into an edit, combo box or spinner uses the Value
-  pattern (it sets the field's text); `type` elsewhere and `key` focus the
-  control and then send keys. Other actions are a synthetic pointer action at
-  the control's centre, with the usual physical check.
+  control has one; `type` into an *empty* edit, combo box or spinner uses the
+  Value pattern. `type` into a field that already holds text, `type`
+  elsewhere, and `key` focus the control and then send keys, so typing by ref
+  inserts like typing by x/y and never replaces what the field held. Other
+  actions are a synthetic pointer action at the control's centre, with the
+  usual physical check.
 - **Verify.** After acting, Sonder reads the control again and reports what
   changed and whether the expected change happened (`verify.expected_met`:
   true, false, or null when the action has no observable state), plus a fresh

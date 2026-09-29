@@ -97,6 +97,8 @@ class RefEntry:
     runtime_id: tuple[int, ...]
     role: str
     name: str
+    # Inside (or is) a document, web view or edit pane: its name is page text.
+    untrusted: bool = False
 
     @property
     def fingerprint(self) -> tuple[str, str]:
@@ -215,7 +217,7 @@ def build_table(raws, *, window, max_rows: int = MAX_ROWS) -> ControlTable:
         if hidden_text:
             row["untrusted"] = True
         rows.append(row)
-        refs[ref] = RefEntry(tuple(raw.runtime_id), raw.role, name)
+        refs[ref] = RefEntry(tuple(raw.runtime_id), raw.role, name, bool(hidden_text))
     return ControlTable(tuple(rows), refs, visible, visible > len(rows))
 
 
@@ -251,8 +253,9 @@ def check_target(entry: RefEntry, raw: RawControl | None, window) -> str:
     if raw is None:
         return "the control is gone (stale ref); " + REOBSERVE
     if fingerprint(raw) != entry.fingerprint:
-        return ("the control changed since it was read (was %s %r, now %s %r); %s"
-                % (entry.role, entry.name, raw.role, clean_text(raw.name), REOBSERVE))
+        # Names are untrusted screen text: say what changed, never echo the text.
+        what = "role" if raw.role != entry.role else "name"
+        return "the control changed since it was read (its %s differs); %s" % (what, REOBSERVE)
     if not raw.enabled:
         return "the control is disabled"
     if raw.offscreen or client_point(raw, window) is None:
@@ -283,7 +286,10 @@ def choose_method(action: str, raw: RawControl, text: str = "") -> str:
             return "select"
         return "pointer"
     if action == "type":
-        if ("value" in patterns and raw.value_read_only is False
+        # SetValue replaces a field's text; typing inserts at the caret. They
+        # agree only on an empty field, so SetValue is used only there and a
+        # typed ref never erases what a field (or a classic Notepad buffer) held.
+        if ("value" in patterns and raw.value_read_only is False and raw.value == ""
                 and raw.role in _SET_VALUE_ROLES and "\n" not in text and "\t" not in text):
             return "set_value"
         return "focus_type"
