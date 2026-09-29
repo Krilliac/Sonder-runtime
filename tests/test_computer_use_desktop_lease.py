@@ -124,3 +124,25 @@ def test_an_unavailable_lease_store_fails_closed_with_its_own_reason(tmp_path):
     with pytest.raises(SessionRefused, match="could not be taken: disk full"):
         _start(ctl)
     assert helpers == [] and ctl.active is None
+
+
+def test_the_lease_records_the_owner_fingerprint_against_pid_reuse(tmp_path):
+    from sonder_runtime.adapters.process_liveness import process_identity
+
+    db = tmp_path / "l.sqlite3"
+    helpers = []
+    launch = _launcher(helpers)
+
+    def launch_with_pid(*args):
+        helper = launch(*args)
+        helper.pid = os.getpid()  # any live process stands in for the indicator
+        return helper
+
+    ctl = SessionController(tmp_path / "a", desktop=FakeDesktop(), launcher=launch_with_pid,
+                            leases=_registry(db))
+    _start(ctl)
+    held = _registry(db).holder(KIND_DESKTOP_SESSION, DESKTOP_LEASE_KEY)
+    mine = process_identity(os.getpid())
+    assert mine  # this process can always fingerprint itself
+    assert held.owner_identity == mine
+    assert held.metadata["pid"] == os.getpid() and held.metadata["pid_identity"] == mine

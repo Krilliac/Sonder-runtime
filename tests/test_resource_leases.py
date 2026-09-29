@@ -261,3 +261,78 @@ def test_bind_test_sees_a_wildcard_listener():
         assert port_is_free(listener.getsockname()[1]) is False
     finally:
         listener.close()
+
+
+def test_port_keys_are_normalised_so_one_port_has_one_lease(rig):
+    reg = rig.registry()
+    reg.acquire(KIND_PORT, "047001", "worker-a", ttl_seconds=60)
+    assert reg.holder(KIND_PORT, "47001").owner_id == "worker-a"
+    with pytest.raises(Conflict):
+        reg.acquire(KIND_PORT, "47001", "worker-b", ttl_seconds=60)
+    assert reg.acquire_port("worker-b", ttl_seconds=60).key == "47000"
+    assert reg.acquire_port("worker-c", ttl_seconds=60).key == "47002"  # 47001 is taken
+    reg.heartbeat(KIND_PORT, "0047001", "worker-a")
+    assert reg.release(KIND_PORT, "47001", "worker-a") is True
+    with pytest.raises(InvalidInput):  # non-ASCII digits are not a port number
+        reg.acquire(KIND_PORT, "\u0664\u0667\u0660\u0660\u0660", "worker-a", ttl_seconds=60)
+
+
+def test_the_store_is_not_touched_until_a_lease_is_used(rig):
+    reg = rig.registry()
+    assert not rig.db.exists()
+    assert reg.holder(KIND_DEV_SERVER, "web") is None
+    assert rig.db.exists()
+
+
+def test_desktop_session_without_an_indicator_is_released_by_owner_death_only(rig):
+    reg = rig.registry()
+    reg.acquire(KIND_DESKTOP_SESSION, "console", "worker-a", ttl_seconds=10, owner_pid=5)
+    rig.now += 100  # TTL expired, but the owner is alive and may still be driving
+    with pytest.raises(Conflict, match="nothing proves"):
+        reg.acquire(KIND_DESKTOP_SESSION, "console", "worker-b", ttl_seconds=10)
+    rig.states[5] = PROCESS_UNKNOWN  # undecidable is not dead
+    with pytest.raises(Conflict):
+        reg.acquire(KIND_DESKTOP_SESSION, "console", "worker-b", ttl_seconds=10)
+    rig.states[5] = PROCESS_DEAD
+    assert reg.acquire(KIND_DESKTOP_SESSION, "console", "worker-b",
+                       ttl_seconds=10).owner_id == "worker-b"
+
+
+def test_a_recycled_indicator_pid_is_not_mistaken_for_the_indicator(rig):
+    def probe(pid, identity=None):
+        if pid == 5:
+            return PROCESS_DEAD, None
+        # pid 6 is alive again, but as a different process than the indicator
+        return (PROCESS_DEAD, "new") if identity == "old" else (PROCESS_ALIVE, "new")
+
+    reg = SqliteResourceLeaseRegistry(rig.db, clock=lambda: rig.now, probe=probe)
+    reg.acquire(KIND_DESKTOP_SESSION, "console", "a", ttl_seconds=600, owner_pid=5,
+                metadata={"pid": 6, "pid_identity": "old"})
+    assert reg.acquire(KIND_DESKTOP_SESSION, "console", "b", ttl_seconds=60).owner_id == "b"
+
+
+_RACER = """
+import sys
+from sonder_runtime.adapters.resource_leases import SqliteResourceLeaseRegistry
+from sonder_runtime.domain.common.errors import SonderError
+reg = SqliteResourceLeaseRegistry(sys.argv[1])
+try:
+    reg.acquire("dev_server", "web", "worker-" + sys.argv[2], ttl_seconds=60)
+    print("won")
+except SonderError as exc:
+    print(getattr(exc, "code", "?"))
+"""
+
+
+def test_racing_processes_get_exactly_one_lease(tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = str(Path(__file__).resolve().parents[1])
+    racers = [subprocess.Popen([sys.executable, "-c", _RACER, str(tmp_path / "l.sqlite3"), str(i)],
+                               cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+              for i in range(6)]
+    results = [racer.communicate(timeout=120) for racer in racers]
+    outcomes = sorted(out.strip() for out, _err in results)
+    assert outcomes == ["RESOURCE_LEASE_BUSY"] * 5 + ["won"], results

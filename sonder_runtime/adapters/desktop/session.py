@@ -27,6 +27,7 @@ from pathlib import Path
 from ...domain.common.errors import SonderError
 from ...domain.computer_use.rules import ActionBudget, app_allowed
 from ...domain.resource_leases import KIND_DESKTOP_SESSION, RESOURCE_LEASE_BUSY
+from ..process_liveness import process_identity
 from .windows import idle_ticks, window
 
 logger = logging.getLogger(__name__)
@@ -158,11 +159,17 @@ class SessionController:
         meta = {"session": sid}
         if isinstance(indicator_pid, int) and not isinstance(indicator_pid, bool):
             meta["pid"] = indicator_pid
+            # With the creation-time fingerprint, a recycled pid is not mistaken
+            # for the indicator (which would keep a crashed holder's lease forever).
+            indicator_identity = process_identity(indicator_pid)
+            if indicator_identity:
+                meta["pid_identity"] = indicator_identity
         try:
             self._leases.acquire(
                 KIND_DESKTOP_SESSION, DESKTOP_LEASE_KEY, owner,
                 ttl_seconds=max(1, int(ttl_seconds)) + _LEASE_GRACE_SECONDS,
-                owner_pid=os.getpid(), metadata=meta)
+                owner_pid=os.getpid(), owner_identity=process_identity(os.getpid()),
+                metadata=meta)
         except SonderError as exc:
             if indicator_pid is not None:
                 self._release_desktop(owner)
