@@ -54,6 +54,7 @@ import sonder_runtime.application.tasks.use_cases as task_use_cases
 import sonder_runtime.adapters.eval_history_reader as eval_history_adapter
 import sonder_runtime.application.evaluation_history.use_cases as eval_history_use_cases
 import sonder_runtime.adapters.memory_store as memory_store
+import sonder_runtime.application.session.transcript_export as session_transcript_export
 import orchestrator
 import retriever
 from sonder_runtime.domain.memory import rules as reward_rules
@@ -16830,17 +16831,7 @@ def session_export(session: str = "", limit: int = 50) -> str:
         turns = memory_store.session_turns(conn, session_id)[-limit:]
     finally:
         conn.close()
-    lines = [
-        "session: %s" % session_id,
-        "title: %s" % (sess.get("title") or "(untitled)"),
-        "project: %s" % (sess.get("project") or "(none)"),
-        "",
-    ]
-    for turn in turns:
-        lines.append("USER: %s" % (turn.get("task") or ""))
-        lines.append("ASSISTANT: %s" % (turn.get("response") or ""))
-        lines.append("")
-    return "\n".join(lines).rstrip()
+    return session_transcript_export.format_session_transcript(session_id, sess, turns)
 
 
 @mcp.tool()
