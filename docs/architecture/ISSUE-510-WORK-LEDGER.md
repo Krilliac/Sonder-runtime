@@ -13,6 +13,15 @@ authorities. A local passing test, an observation adapter, or an entry below doe
 not make a complete requirement verified. No unchecked master item is checked by
 this ledger. Existing implementations are extended instead of being duplicated.
 
+## Resume workspace freshness
+
+The [resume reality barrier](RESUME-REALITY-BARRIER.md) adds bounded Git
+observations to durable children, interactive lanes and Autopilot recovery.
+Changed or unknown repository inputs invalidate verifier evidence and require
+inspection/re-planning before mutation; checkpoint identity and effect-journal
+settlement retain their separate authority. Unscoped strategy observations and
+non-Git workspaces preserve their existing behavior.
+
 ## Defect audit
 
 | Item | Implementation and meaningful verification | Qualification |

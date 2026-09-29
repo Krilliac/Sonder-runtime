@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 372,
+      "file_count": 374,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -69,6 +69,7 @@
         "sonder_runtime/adapters/artifact_fetch.py",
         "sonder_runtime/adapters/artifact_grounding.py",
         "sonder_runtime/adapters/artifact_risk.py",
+        "sonder_runtime/adapters/autopilot_reality.py",
         "sonder_runtime/adapters/backup.py",
         "sonder_runtime/adapters/backup_gateway.py",
         "sonder_runtime/adapters/bounded_cloud_generation.py",
@@ -417,11 +418,12 @@
         "sonder_runtime/adapters/web_provider.py",
         "sonder_runtime/adapters/web_search.py",
         "sonder_runtime/adapters/workflow_loop_runner.py",
-        "sonder_runtime/adapters/workflow_repository.py"
+        "sonder_runtime/adapters/workflow_repository.py",
+        "sonder_runtime/adapters/workspace_reality.py"
       ]
     },
     {
-      "file_count": 385,
+      "file_count": 387,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -533,6 +535,7 @@
         "sonder_runtime/application/execution/facade.py",
         "sonder_runtime/application/execution/gateway_calls.py",
         "sonder_runtime/application/execution/process_jobs.py",
+        "sonder_runtime/application/execution/resume_reality.py",
         "sonder_runtime/application/execution/tool_service.py",
         "sonder_runtime/application/execution/worker_bindings.py",
         "sonder_runtime/application/execution/world_control.py",
@@ -675,6 +678,7 @@
         "sonder_runtime/application/ports/web.py",
         "sonder_runtime/application/ports/worker_registry.py",
         "sonder_runtime/application/ports/workflows.py",
+        "sonder_runtime/application/ports/workspace_reality.py",
         "sonder_runtime/application/preferences/__init__.py",
         "sonder_runtime/application/preferences/use_cases.py",
         "sonder_runtime/application/preflight/__init__.py",

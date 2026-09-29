@@ -1419,6 +1419,7 @@ def build_application(
             strategy_memory = try_compose_strategy_memory(
                 strategy_trace, lambda: memory_unit_of_work,
             )
+            from ..adapters.workspace_reality import GitWorkspaceReality
             interactive_lanes = AgentLaneService(
                 lane_store, sessions, gateway, lane_tools,
                 authorize_grant=authorize_lane_grant,
@@ -1433,6 +1434,7 @@ def build_application(
                     strategy_trace, strategy_memory, strategy_rollout, lane_store,
                 ),
                 prompts=prompt_store.render,
+                workspace_reality=GitWorkspaceReality(),
             )
         return interactive_lanes
 
@@ -1472,11 +1474,13 @@ def build_application(
                         worker_owner_epoch,
                     )
 
+                from ..adapters.workspace_reality import GitWorkspaceReality
                 continuation_service = DurableContinuationService(
                     continuation_repository,
                     checkpoint_provenance=JournalProvenanceStamp(
                         provenance_journal, child_provenance_binding,
                     ),
+                    workspace_reality=GitWorkspaceReality(),
                 )
                 from ..application.worker_registry.continuation import (
                     ContinuationWorkerRegistry,
