@@ -54,8 +54,8 @@ desktop observations and other host data from hosted models.
 | `window_list` | ask | Open windows of allowlisted apps. Other windows are only counted, never named. |
 | `computer_use_start` | **dangerous** | Starts a driving session on one allowlisted window. A person approves it at the console. |
 | `computer_use_stop` | ask | Ends the session. The kill hotkey and the Stop button end it too, outside the gate. |
-| `screen_capture` | ask | Captures the session window to a PNG. With `question`, it also asks the vision model about the capture. |
-| `ui_action` | execution | One action: `click`, `double_click`, `right_click`, `move`, `type`, `key` or `scroll`. |
+| `screen_capture` | ask | Captures the session window to a PNG. With `question`, it also asks the vision model about the capture. With `controls=true`, it also reads the window's control table (see [Semantic perception](#semantic-perception-ui-automation)). |
+| `ui_action` | execution | One action: `click`, `double_click`, `right_click`, `move`, `type`, `key` or `scroll`, at x/y or on a control `ref`. |
 | `computer_task` | execution | The vision model drives toward a goal, one gated step at a time. |
 
 ## Layers
@@ -123,6 +123,43 @@ Screen text is used in exactly one decision, and only to *add* friction. With
 that name, or the caller's `target_label`, looks irreversible, the click needs
 confirmation. If the model cannot name the control, the click is treated as a
 submit.
+
+## Semantic perception (UI Automation)
+
+Before vision, Sonder reads the session window's UI Automation tree
+(`adapters/desktop/uia.py`, plain ctypes COM against the system's
+`UIAutomationCore`; no extra dependency). `screen_capture(controls=true)` and
+every `computer_task` step turn it into a compact control table
+(`domain/computer_use/controls.py`): one line per visible, on-screen control,
+at most 200 rows, with a stable `ref` (derived from the control's runtime id),
+its role, name, value, enabled/checked/selected/expanded state and its centre
+on the 0–1000 grid.
+
+- **Untrusted panes.** Documents, web views (and everything inside them) and
+  edit fields are marked `content-untrusted`: their text is withheld
+  (`value=withheld`) and names inside them are clipped, so page text never
+  reaches a planner. Password values are never shown. The whole table is
+  returned inside the untrusted-observation envelope.
+- **Acting by ref.** `ui_action(action=..., ref=...)` passes every layer above
+  (configuration, the tool gate, the live-session re-proof, the budget, the
+  irreversible gate). The control's own name joins the labels the irreversible
+  check reads, so it can add a confirmation. Before input, after the gate and
+  the focus change, the ref is resolved again and refused, with a request to
+  re-observe, unless the control still exists with the same role and name, is
+  enabled and visible, and is topmost at its point (`ElementFromPoint` hits the
+  control or one of its descendants).
+- **Patterns first.** A click uses Invoke, Toggle or SelectionItem when the
+  control has one; `type` into an edit, combo box or spinner uses the Value
+  pattern (it sets the field's text); `type` elsewhere and `key` focus the
+  control and then send keys. Other actions are a synthetic pointer action at
+  the control's centre, with the usual physical check.
+- **Verify.** After acting, Sonder reads the control again and reports what
+  changed and whether the expected change happened (`verify.expected_met`:
+  true, false, or null when the action has no observable state), plus a fresh
+  control table. Values are compared, never echoed.
+- **Vision fallback.** When nothing is readable (no UI Automation, a
+  custom-drawn surface, an error), the table is empty and `computer_task`
+  uses exactly the vision-only prompt; x/y actions are unchanged.
 
 ## Coordinates
 
