@@ -9,6 +9,7 @@ containment, and result evidence cannot be bypassed by the workflow.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
@@ -69,6 +70,8 @@ class AgentWorkflowState:
     active_delegation_id: str | None
     revision: int = 0
     results: tuple[WorkflowStepResult, ...] = ()
+    task_prompt: str = ""
+    review_diff: str = ""
 
     def __post_init__(self) -> None:
         for name in ("workflow_id", "root_id", "operation_id"):
@@ -152,6 +155,7 @@ class AgentWorkflowService:
             workflow_id, root_id, context.correlation_id, self._roles,
             AgentWorkflowStatus.RUNNING, self._roles[0],
             f"{workflow_id}:delegation:1",
+            task_prompt=prompt,
         )
         return self._dispatch(state, parent_id=parent_id, prompt=prompt, workspace=workspace, context=context)
 
@@ -192,6 +196,7 @@ class AgentWorkflowService:
             terminal = AgentWorkflowState(
                 state.workflow_id, state.root_id, state.operation_id, state.roles,
                 AgentWorkflowStatus.FAILED, None, None, state.revision + 1, results,
+                state.task_prompt, state.review_diff,
             )
             return WorkflowAdvance(terminal, completed)
 
@@ -202,16 +207,25 @@ class AgentWorkflowService:
             terminal = AgentWorkflowState(
                 state.workflow_id, state.root_id, state.operation_id, state.roles,
                 AgentWorkflowStatus.SUCCEEDED, None, None, state.revision + 1, results,
+                state.task_prompt, state.review_diff,
             )
             return WorkflowAdvance(terminal, completed)
 
+        review_diff = self._diff(completed.result.output) or state.review_diff
         next_state = AgentWorkflowState(
             state.workflow_id, state.root_id, state.operation_id, state.roles,
             AgentWorkflowStatus.RUNNING, next_role,
             f"{state.workflow_id}:delegation:{len(results) + 1}",
-            state.revision + 1, results,
+            state.revision + 1, results, state.task_prompt, review_diff,
         )
-        next_prompt = self._next_prompt(next_role, completed.result.output)
+        next_prompt = self._next_prompt(
+            next_role,
+            completed.result.output,
+            task_spec=state.task_prompt,
+            artifacts=tuple(dict.fromkeys(item for step in results for item in step.evidence.artifacts)),
+            test_evidence=tuple(dict.fromkeys(item for step in results for item in step.evidence.verification)),
+            candidate_diff=review_diff,
+        )
         if len(next_prompt) > MAX_WORKFLOW_PROMPT_CHARS * 0.9:
             logger.warning(f"workflow prompt approaching size limit: workflow_id={state.workflow_id!r}, prompt_len={len(next_prompt)}/{MAX_WORKFLOW_PROMPT_CHARS}")
         logger.info(f"agent workflow advancing: workflow_id={state.workflow_id!r}, next_role={next_role.value!r}, step={len(results)+1}/{len(state.roles)}")
@@ -255,6 +269,7 @@ class AgentWorkflowService:
         active = AgentWorkflowState(
             state.workflow_id, state.root_id, state.operation_id, state.roles,
             state.status, role, delegation_id, state.revision, state.results,
+            state.task_prompt, state.review_diff,
         )
         return WorkflowDispatch(active, request, handle)
 
@@ -271,7 +286,35 @@ class AgentWorkflowService:
         return value
 
     @staticmethod
-    def _next_prompt(role: AgentRole, previous_output: str) -> str:
+    def _diff(output: str) -> str:
+        return "\n\n".join(re.findall(
+            r"```diff\s*\n(.*?)```", output, flags=re.IGNORECASE | re.DOTALL,
+        )).strip()
+
+    @staticmethod
+    def _next_prompt(
+        role: AgentRole,
+        previous_output: str,
+        *,
+        task_spec: str = "",
+        artifacts: Iterable[str] = (),
+        test_evidence: Iterable[str] = (),
+        candidate_diff: str = "",
+    ) -> str:
+        if role.value in {"verifier", "reviewer", "critic"}:
+            # The scoped roles receive only the task/spec, candidate
+            # diff/artifact material, and independently recorded test facts.
+            # Implementer rationale is intentionally not a prompt field.
+            diff = candidate_diff or AgentWorkflowService._diff(previous_output)
+            candidate = diff or "(no structured diff supplied; review artifact references only)"
+            artifact_lines = "\n".join(str(item) for item in artifacts)
+            prompt = (
+                f"Continue the agent workflow as the {role.value} role.\n"
+                f"Task/spec:\n{task_spec}\n\n"
+                f"Diff/artifacts:\n{candidate}\n{artifact_lines}\n\n"
+                f"Test evidence:\n{chr(10).join(str(item) for item in test_evidence)}"
+            )
+            return AgentWorkflowService._prompt(prompt)
         prefix = f"Continue the agent workflow as the {role.value} role. Previous role result:\n"
         return AgentWorkflowService._prompt(prefix + previous_output)
 

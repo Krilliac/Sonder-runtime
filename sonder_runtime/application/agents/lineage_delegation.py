@@ -6,7 +6,7 @@ persist the immutable records returned here through their own adapter.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 import hashlib
 import json
@@ -15,7 +15,10 @@ from pathlib import Path
 
 from sonder_runtime.application.agents.presets import AgentPreset, builtin_presets
 from sonder_runtime.domain.agents.roles import AgentRole, role_budget
-from sonder_runtime.application.ports.worker_registry import WorkerExecutionContract
+from sonder_runtime.application.ports.worker_registry import (
+    WorkerExecutionContract,
+    default_scoped_contract,
+)
 from sonder_runtime.application.ports.subagents import SubagentBudget
 
 
@@ -154,6 +157,7 @@ class DelegationRequest:
     resource_budget: SubagentBudget | None = None
     hypothesis_digest: str = ""
     speculative_lane_id: str = ""
+    context_policy_defaulted: bool = field(default=False, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "delegation_id", _required(self.delegation_id, "delegation_id"))
@@ -169,6 +173,18 @@ class DelegationRequest:
         object.__setattr__(self, "evidence_tags", tags)
         if not isinstance(self.execution_contract, WorkerExecutionContract):
             raise IntegrationError("execution_contract must be WorkerExecutionContract")
+        was_empty = self.execution_contract == WorkerExecutionContract()
+        if self.execution_contract.context_policy.value == "unspecified":
+            default_contract = default_scoped_contract(
+                self.preset.role.value, self.prompt, self.evidence_tags,
+            )
+            if default_contract is not None:
+                object.__setattr__(self, "execution_contract", replace(
+                    self.execution_contract,
+                    context_policy=default_contract.context_policy,
+                    context_inputs=default_contract.context_inputs,
+                ))
+                object.__setattr__(self, "context_policy_defaulted", was_empty)
         if self.resource_budget is not None and not isinstance(self.resource_budget, SubagentBudget):
             raise IntegrationError("resource_budget must be a SubagentBudget")
         if self.execution_contract.speculative_lane:
