@@ -6,9 +6,7 @@ turn are refused even if some layer swallowed the interrupt), unwinds the
 blocking call, and returns to the prompt.  An interrupt at the idle prompt
 still ends the session.
 """
-import os
 import signal
-import time
 
 import pytest
 
@@ -47,8 +45,9 @@ def test_sigint_during_a_chat_turn_cancels_the_turn_and_returns_to_the_prompt(
         calls.append(line)
         if line == "long question":
             try:
-                os.kill(os.getpid(), signal.SIGINT)
-                time.sleep(5)
+                # Exercise the installed handler in this process. On Windows,
+                # os.kill(pid, SIGINT) is TerminateProcess: it killed pytest itself.
+                signal.raise_signal(signal.SIGINT)
             except KeyboardInterrupt:
                 seen["scope_cancelled"] = foreground_turns.cancel_requested()
                 seen["reason"] = foreground_turns.current().reason
