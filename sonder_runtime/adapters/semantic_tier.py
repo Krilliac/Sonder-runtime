@@ -7,6 +7,8 @@ import json
 import os
 from pathlib import Path
 import threading
+
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
 import time
 
 import sonder_runtime.adapters.embeddings as embeddings
@@ -194,7 +196,7 @@ def semantic_signal(prompt, *, embedder=None, model=None):
             return None
         _flight = job
         try:
-            worker = threading.Thread(target=_run_job, args=(job,),
+            worker = owned_runtime_thread(target=_run_job, args=(job,),
                                       name="sonder-semantic-flight", daemon=True)
             worker.start()
         except Exception:
