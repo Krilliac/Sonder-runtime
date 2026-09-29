@@ -54,7 +54,6 @@ _SENTENCE_BREAK = re.compile(r"[.!?]+[\"')\]]*\s+(?=[A-Z0-9\"'(\[])")
 _CLAUSE_JOIN = re.compile(
     r";|,\s*(?:and|but|so|or|yet)\s|\s(?:but also|and also|as well as|"
     r"additionally|furthermore|moreover|whereas|in addition|plus,)\s",
-    re.I,
 )
 
 # A reference at the very start has no antecedent inside the text by
@@ -64,40 +63,52 @@ _LEADING_REFERENCE = re.compile(
     r"^(?:this|that|these|those|it|its|they|them|their|he|she|his|her|"
     r"here|there|the above|the below|the former|the latter|the same|"
     r"the previous|same|said|such)\b",
-    re.I,
 )
 _SCOPE_RESOLVED = re.compile(
     r"^(?:this|the) (?:project|repo|repository|codebase|workspace|machine|"
     r"user|runtime|store)\b",
-    re.I,
 )
 # "It is safer to ..." / "It's worth ..." -- expletive "it", not a pronoun.
-_EXPLETIVE_IT = re.compile(r"^it(?:\s+is|'s)\s+(?:not\s+)?\w+\s+(?:to|that)\b", re.I)
+_EXPLETIVE_IT = re.compile(r"^it(?:\s+is|'s)\s+(?:not\s+)?\w+\s+(?:to|that)\b")
 # "There is/are ..." is existential, not a place reference.
-_EXISTENTIAL_THERE = re.compile(r"^there\s+(?:is|are|was|were|will|should|must)\b", re.I)
+_EXISTENTIAL_THERE = re.compile(r"^there\s+(?:is|are|was|were|will|should|must)\b")
 # Backward references that are unresolved wherever they appear.
 _BACK_REFERENCE = re.compile(
     r"\b(?:the above|as above|see above|mentioned above|shown above|"
     r"the aforementioned|as mentioned|as discussed|as noted earlier|"
     r"same as before|the previous (?:one|answer|step|message|file|command)|"
     r"that (?:file|one|thing|function|error|issue|command))\b",
-    re.I,
 )
 
 _TIME_WORDS = re.compile(
     r"\b(?:currently|current version|right now|at the moment|at present|"
     r"nowadays|these days|as of now|for now|now|latest|newest|most recent|"
+    # "not yet" is left out on purpose: it mostly describes program state
+    # ("keys not yet present"), not a fact about the world that expires.
     r"recently|today|this (?:week|month|quarter|year)|upcoming|soon|"
-    r"no longer|not yet)\b",
-    re.I,
+    r"no longer)\b",
 )
 _VERSION = re.compile(
     r"\bv\d+(?:\.\d+)+\b"                       # v1.2, v3.0.1
     r"|\bversion\s+v?\d+"                        # version 5
     r"|[=<>~!]=\s*\d+(?:\.\d+)+"                 # ==1.2, >=2.0
-    r"|(?<![\d.])\d+\.\d+\.\d+(?![\d.])"         # 1.2.3, not 10.0.0.1
-    r"|\b[A-Z][\w+#-]*\s+\d+\.\d+(?![\d.])",     # Python 3.12, UE 5.8
+    r"|(?<![\d.])\d+\.\d+\.\d+(?![\d.])",        # 1.2.3, not 10.0.0.1
 )
+# "Python 3.12", "UE 5.8": a capitalised name followed by a two-part number.
+# A number carrying a unit ("Timeout 2.5 seconds", "Wait 1.5 s") is a
+# quantity, and a structural or imperative lead word ("Section 3.2",
+# "Use 4.0 as ...") names no product, so neither reads as a version.
+_NAMED_VERSION = re.compile(
+    r"\b([A-Z][\w+#-]*)\s+\d+\.\d+(?![\d.])"
+    r"(?!\s*(?i:%|x\b|[kmgt]i?b\b|ms\b|s\b|secs?\b|seconds?\b|mins?\b|"
+    r"minutes?\b|h\b|hrs?\b|hours?\b|days?\b|px\b|pt\b|em\b|rem\b))"
+)
+_NOT_A_PRODUCT = frozenset((
+    "use", "set", "wait", "keep", "allow", "try", "pass", "give", "scale",
+    "timeout", "section", "chapter", "step", "figure", "fig", "table", "page",
+    "rule", "level", "phase", "stage", "item", "part", "appendix", "equation",
+    "score", "threshold", "ratio", "weight", "factor", "about", "around",
+))
 _DATED = re.compile(
     r"\b(?:19|20)\d{2}-\d{2}(?:-\d{2})?\b"      # 2026-08-17, 2026-08
     # "as of" needs a concrete anchor after it: "as of now" is not a date.
@@ -109,7 +120,6 @@ _DATED = re.compile(
     r"(?:\d{1,2},?\s+)?(?:19|20)\d{2}\b"
     r"|\bq[1-4]\s+(?:19|20)\d{2}\b"
     r"|\((?:19|20)\d{2}\)",
-    re.I,
 )
 
 
@@ -117,13 +127,47 @@ def _strip_code(text: str) -> str:
     return _CODE_SPAN.sub(" CODE ", text)
 
 
-def claim_units(text: str) -> int:
-    """Sentences plus clause-level joins, code spans ignored."""
-    body = _strip_code(text or "").strip()
+# The keyword patterns above are written in lower case and compiled WITHOUT
+# re.I: every caller matches them against text lowered once, which is ~2-3x
+# cheaper than case-insensitive matching and keeps the 10k-row report fast.
+# Only _SENTENCE_BREAK and _NAMED_VERSION are case-sensitive on purpose and
+# see the original text.
+
+
+def _claim_units(code_free: str, lowered_code_free: str) -> int:
+    body = code_free.strip()
     if not body:
         return 0
     sentences = len([s for s in _SENTENCE_BREAK.split(body) if s.strip()])
-    return sentences + len(_CLAUSE_JOIN.findall(body))
+    return sentences + len(_CLAUSE_JOIN.findall(lowered_code_free))
+
+
+def _unresolved(lowered: str, lowered_code_free: str) -> bool:
+    body = lowered.strip().lstrip("-*>#\t ").strip()
+    if not body:
+        return False
+    if _LEADING_REFERENCE.match(body) and not (
+        _SCOPE_RESOLVED.match(body)
+        or _EXPLETIVE_IT.match(body)
+        or _EXISTENTIAL_THERE.match(body)
+    ):
+        return True
+    return bool(_BACK_REFERENCE.search(lowered_code_free))
+
+
+def _time_sensitive(code_free: str, lowered_code_free: str) -> bool:
+    if _TIME_WORDS.search(lowered_code_free) or _VERSION.search(lowered_code_free):
+        return True
+    return any(
+        match.group(1).lower() not in _NOT_A_PRODUCT
+        for match in _NAMED_VERSION.finditer(code_free)
+    )
+
+
+def claim_units(text: str) -> int:
+    """Sentences plus clause-level joins, code spans ignored."""
+    code_free = _strip_code(text or "")
+    return _claim_units(code_free, code_free.lower())
 
 
 def is_multi_claim(text: str) -> bool:
@@ -131,26 +175,17 @@ def is_multi_claim(text: str) -> bool:
 
 
 def has_unresolved_reference(text: str) -> bool:
-    body = (text or "").strip().lstrip("-*>#\t ").strip()
-    if not body:
-        return False
-    if _LEADING_REFERENCE.match(body):
-        if not (
-            _SCOPE_RESOLVED.match(body)
-            or _EXPLETIVE_IT.match(body)
-            or _EXISTENTIAL_THERE.match(body)
-        ):
-            return True
-    return bool(_BACK_REFERENCE.search(_strip_code(body)))
+    text = text or ""
+    return _unresolved(text.lower(), _strip_code(text).lower())
 
 
 def is_time_sensitive(text: str) -> bool:
-    body = _strip_code(text or "")
-    return bool(_TIME_WORDS.search(body) or _VERSION.search(body))
+    code_free = _strip_code(text or "")
+    return _time_sensitive(code_free, code_free.lower())
 
 
 def is_dated(text: str) -> bool:
-    return bool(_DATED.search(text or ""))
+    return bool(_DATED.search((text or "").lower()))
 
 
 def is_undated_time_sensitive(text: str) -> bool:
@@ -166,16 +201,21 @@ def classify(text: str) -> list[str]:
     """Reasons ``text`` is badly written for memory, in ``CHECKS`` order.
 
     Empty text yields no reasons: an empty row is a storage defect the rest of
-    the audit owns, not a writing-quality finding.
+    the audit owns, not a writing-quality finding. Same verdicts as the four
+    public predicates, but code spans are stripped and the text lowered once.
     """
-    if not (text or "").strip():
+    text = text or ""
+    if not text.strip():
         return []
+    lowered = text.lower()
+    code_free = _strip_code(text)
+    lowered_code_free = code_free.lower()
     reasons = []
-    if is_multi_claim(text):
+    if _claim_units(code_free, lowered_code_free) > MAX_CLAIM_UNITS:
         reasons.append(MULTI_CLAIM)
-    if has_unresolved_reference(text):
+    if _unresolved(lowered, lowered_code_free):
         reasons.append(UNRESOLVED_REFERENCE)
-    if is_undated_time_sensitive(text):
+    if _time_sensitive(code_free, lowered_code_free) and not _DATED.search(lowered):
         reasons.append(UNDATED_TIME_SENSITIVE)
     if is_length_out_of_bounds(text):
         reasons.append(LENGTH_OUT_OF_BOUNDS)

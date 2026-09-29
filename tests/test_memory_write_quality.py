@@ -66,6 +66,11 @@ def test_leading_or_backward_reference_is_unresolved(text):
     "Python 3.12 is the venv interpreter since 2025.",      # dated version
     "As of v2.4 the runtime currently defaults to WAL.",    # version-anchored
     "Reward thresholds sit at 0.71 for distillation.",      # bare decimal, not a version
+    "Error when incrementing counts for keys not yet present.",  # program state
+    "Set Timeout 2.5 seconds for slow probes.",             # quantity with a unit
+    "Wait 1.5 s before retrying the socket.",               # quantity with a unit
+    "Section 3.2 of the spec defines framing.",             # structural number
+    "Use 4.0 as the reward threshold.",                     # imperative, not a product
 ])
 def test_timeless_or_dated_text_is_not_flagged_time_sensitive(text):
     assert wq.UNDATED_TIME_SENSITIVE not in wq.classify(text)
@@ -112,6 +117,37 @@ def test_empty_text_is_not_a_writing_finding():
 
 def test_well_written_fact_passes_every_check():
     assert wq.classify("Sonder writes lesson rows through memory_store.add_lesson.") == []
+
+
+@pytest.mark.parametrize("text", [
+    "It currently works; restart it, and see above.",
+    "THIS BREAKS WITH THE LATEST RUFF.",
+    "As Of Now The Runtime Defaults To WAL.",
+    "Python 3.12 is required (2025).",
+    "Use `it; now` inside Shell snippets only.",
+    "- That file must never be edited by hand.",
+    "The venv runs Python 3.12 for lane 7 (verified 2026-08-17).",
+])
+def test_classify_matches_the_public_predicates(text):
+    # classify() shares one lowered/code-stripped copy across checks; it must
+    # give exactly the verdicts of the standalone predicates, in any case.
+    expected = [
+        name for name, hit in (
+            (wq.MULTI_CLAIM, wq.is_multi_claim(text)),
+            (wq.UNRESOLVED_REFERENCE, wq.has_unresolved_reference(text)),
+            (wq.UNDATED_TIME_SENSITIVE, wq.is_undated_time_sensitive(text)),
+            (wq.LENGTH_OUT_OF_BOUNDS, wq.is_length_out_of_bounds(text)),
+        ) if hit
+    ]
+    assert wq.classify(text) == expected
+
+
+def test_keyword_checks_ignore_letter_case():
+    assert wq.UNRESOLVED_REFERENCE in wq.classify("THIS BREAKS WITH COLD CACHES.")
+    assert wq.UNDATED_TIME_SENSITIVE in wq.classify("Install The LATEST ruff first.")
+    assert wq.UNDATED_TIME_SENSITIVE not in wq.classify(
+        "Install the latest ruff (verified SEPTEMBER 2026)."
+    )
 
 
 def test_reasons_follow_the_stable_check_order():
