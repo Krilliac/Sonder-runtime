@@ -143,7 +143,14 @@ CREATE TABLE IF NOT EXISTS facts (
     project TEXT,
     text TEXT,
     embedding BLOB,
-    ts TEXT DEFAULT CURRENT_TIMESTAMP
+    ts TEXT DEFAULT CURRENT_TIMESTAMP,
+    -- Optional half-open validity interval [valid_from, valid_to) as
+    -- fixed-width UTC text (domain.memory.fact_validity). NULL bounds are
+    -- unbounded: every legacy row stays current. superseded_by names the
+    -- explicit successor that closed this fact's interval.
+    valid_from TEXT,
+    valid_to TEXT,
+    superseded_by TEXT
 );
 CREATE TABLE IF NOT EXISTS lesson_usage (
     lesson_id TEXT,
@@ -529,6 +536,13 @@ def _migrate(conn):
             "owner_pid INTEGER NOT NULL, owner_identity TEXT NOT NULL, "
             "claimed_at REAL NOT NULL)"
         )
+    fact_cols = _column_names(conn, "facts")
+    for column in ("valid_from", "valid_to", "superseded_by"):
+        if column not in fact_cols:
+            # Additive and unbackfilled: a legacy fact's start is unknown and
+            # it was never closed, so NULL/NULL keeps it current -- exactly
+            # how recall treated it before validity intervals existed.
+            conn.execute("ALTER TABLE facts ADD COLUMN %s TEXT" % column)
     task_cols = _column_names(conn, "tasks")
     if "account_scope" not in task_cols:
         # Do not invent account ownership for durable legacy tasks.  NULL is
@@ -3607,20 +3621,119 @@ def _reject_authoritative_fact_bypass(conn, project):
         )
 
 
-def add_fact(conn, fact_id, project, text, embedding=None):
+def add_fact(conn, fact_id, project, text, embedding=None, *, validity=None, now=None):
+    """Insert one fact; with ``validity`` also record its interval.
+
+    ``validity`` is a ``domain.memory.fact_validity.FactValidity``.  When it
+    names ``supersedes``, that fact (same project, still open) has its
+    interval closed at the new fact's ``valid_from`` -- or now when none was
+    given, which then also becomes the new fact's ``valid_from`` so the two
+    intervals meet exactly.  Insert and close commit together or not at all.
+    """
     _reject_authoritative_fact_bypass(conn, project)
-    conn.execute(
-        "INSERT INTO facts(id, project, text, embedding) VALUES(?, ?, ?, ?)",
-        (fact_id, project, text, embedding),
-    )
+    if validity is None or validity.is_empty:
+        conn.execute(
+            "INSERT INTO facts(id, project, text, embedding) VALUES(?, ?, ?, ?)",
+            (fact_id, project, text, embedding),
+        )
+        conn.commit()
+        return
+    from sonder_runtime.domain.memory.fact_validity import utc_now_text
+
+    valid_from, valid_to = validity.valid_from, validity.valid_to
+    # Inside a caller's transaction take a savepoint so a failure undoes only
+    # this write pair.  Otherwise take the writer lock up front (IMMEDIATE):
+    # the supersede path reads before it writes, and a deferred transaction
+    # would fail its lock upgrade with SQLITE_BUSY instead of waiting.
+    nested = conn.in_transaction
+    conn.execute("SAVEPOINT sonder_add_fact" if nested else "BEGIN IMMEDIATE")
+    try:
+        if validity.supersedes is not None:
+            closed_at = valid_from or utc_now_text(now)
+            _close_superseded_fact(conn, validity.supersedes, project, closed_at, fact_id)
+            valid_from = closed_at
+            if valid_to is not None and valid_to <= valid_from:
+                raise ValueError("valid_until must follow the superseding instant")
+        conn.execute(
+            "INSERT INTO facts(id, project, text, embedding, valid_from, valid_to) "
+            "VALUES(?, ?, ?, ?, ?, ?)",
+            (fact_id, project, text, embedding, valid_from, valid_to),
+        )
+    except BaseException:
+        if nested:
+            conn.execute("ROLLBACK TO sonder_add_fact")
+            conn.execute("RELEASE sonder_add_fact")
+        else:
+            conn.rollback()
+        raise
+    if nested:
+        conn.execute("RELEASE sonder_add_fact")
     conn.commit()
 
 
-def facts_for_project(conn, project):
+def _close_superseded_fact(conn, old_id, project, closed_at, successor_id):
+    """Close ``old_id``'s interval at ``closed_at``; raise ValueError if unfit."""
+    row = conn.execute(
+        "SELECT valid_from, valid_to, superseded_by FROM facts WHERE id=? AND project=?",
+        (old_id, project),
+    ).fetchone()
+    if row is None:
+        raise ValueError("supersedes: no fact '%s' in project '%s'" % (old_id, project))
+    if row["superseded_by"] is not None:
+        raise ValueError(
+            "supersedes: fact '%s' was already superseded by '%s'"
+            % (old_id, row["superseded_by"])
+        )
+    if row["valid_from"] is not None and row["valid_from"] >= closed_at:
+        raise ValueError(
+            "supersedes: fact '%s' starts at or after the superseding instant" % old_id
+        )
+    # Never extend an interval: a fact that already ends earlier keeps its end.
+    valid_to = row["valid_to"] if (
+        row["valid_to"] is not None and row["valid_to"] < closed_at
+    ) else closed_at
+    # Re-check ``superseded_by IS NULL`` in the write itself so a fact can
+    # never gain two successors, whatever the caller's transaction shape.
+    cursor = conn.execute(
+        "UPDATE facts SET valid_to=?, superseded_by=? "
+        "WHERE id=? AND project=? AND superseded_by IS NULL",
+        (valid_to, successor_id, old_id, project),
+    )
+    if cursor.rowcount != 1:
+        raise ValueError("supersedes: fact '%s' was superseded concurrently" % old_id)
+
+
+def current_fact_params(now=None):
+    """SQL fragment + parameters restricting ``facts`` rows to current ones."""
+    from sonder_runtime.domain.memory.fact_validity import (
+        CURRENT_FACT_PREDICATE, utc_now_text,
+    )
+
+    instant = utc_now_text(now)
+    return CURRENT_FACT_PREDICATE, (instant, instant)
+
+
+def facts_for_project(conn, project, *, include_history=False, now=None):
+    """Facts for ``project`` in chronological order.
+
+    By default only facts whose validity interval contains ``now`` are
+    returned, with the same ``{id, project, text, embedding}`` shape as
+    always; legacy rows carry no interval and are always returned.
+    ``include_history=True`` returns every row plus its ``valid_from``,
+    ``valid_to`` and ``superseded_by``.
+    """
+    if include_history:
+        rows = conn.execute(
+            "SELECT id, project, text, embedding, valid_from, valid_to, superseded_by "
+            "FROM facts WHERE project=? ORDER BY ts ASC, rowid ASC",
+            (project,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    predicate, params = current_fact_params(now)
     rows = conn.execute(
-        "SELECT id, project, text, embedding FROM facts WHERE project=? "
-        "ORDER BY ts ASC, rowid ASC",
-        (project,),
+        "SELECT id, project, text, embedding FROM facts WHERE project=? AND "
+        + predicate + " ORDER BY ts ASC, rowid ASC",
+        (project, *params),
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -3640,9 +3753,16 @@ def delete_fact(conn, fact_id, project):
     return cursor.rowcount == 1
 
 
-def count_facts(conn, project):
+def count_facts(conn, project, *, include_history=False, now=None):
+    """Count the facts ``facts_for_project`` would return with the same flags."""
+    if include_history:
+        return conn.execute(
+            "SELECT COUNT(*) FROM facts WHERE project=?", (project,)
+        ).fetchone()[0]
+    predicate, params = current_fact_params(now)
     return conn.execute(
-        "SELECT COUNT(*) FROM facts WHERE project=?", (project,)
+        "SELECT COUNT(*) FROM facts WHERE project=? AND " + predicate,
+        (project, *params),
     ).fetchone()[0]
 
 
