@@ -1115,6 +1115,9 @@ def _export_runtime_environment(config, *, include_typed_runtime: bool = True) -
     os.environ["SONDER_ALLOW_CLOUD"] = "1" if config.features.cloud else "0"
     os.environ["SONDER_WEB_TOOLS"] = "1" if config.features.web else "0"
     os.environ["SONDER_LIVE_RELOAD"] = "1" if config.features.live_reload else "0"
+    os.environ["SONDER_SEMANTIC_TIER_ROUTING"] = (
+        "1" if config.features.semantic_tier_routing else "0"
+    )
     os.environ["SONDER_SOURCE_MODIFICATION"] = (
         "1" if config.features.source_modification else "0"
     )

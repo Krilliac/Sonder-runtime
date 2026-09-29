@@ -206,6 +206,11 @@ class ProviderStatus {
   final String? fallback;
   final int fallbackCount;
 
+  /// Tier name to the model this provider serves it with (Sonder
+  /// Inference's `tier_models`, from `SONDER_INFERENCE_TIER_MODELS` and its
+  /// default model). Empty when the runtime does not report it.
+  final Map<String, String> tierModels;
+
   const ProviderStatus({
     required this.provider,
     this.state = ProviderState.unknown,
@@ -223,6 +228,7 @@ class ProviderStatus {
     this.telemetry,
     this.fallback,
     this.fallbackCount = 0,
+    this.tierModels = const {},
   });
 
   factory ProviderStatus.fromJson(String key, Map<String, dynamic> json) {
@@ -245,6 +251,11 @@ class ProviderStatus {
       telemetry: TelemetryLinks.fromJson(json['telemetry']),
       fallback: fallback == null ? null : canonicalProvider(fallback),
       fallbackCount: _int(json['fallback_count']) ?? 0,
+      tierModels: {
+        for (final entry in (_map(json['tier_models']) ?? const {}).entries)
+          if (_string(entry.value, 200) case final model?)
+            entry.key.trim().toLowerCase(): model,
+      },
     );
   }
 }

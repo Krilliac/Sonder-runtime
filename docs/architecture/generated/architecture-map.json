@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 371,
+      "file_count": 372,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -381,6 +381,7 @@
         "sonder_runtime/adapters/security/permission_receipts.py",
         "sonder_runtime/adapters/security/recovery_evidence.py",
         "sonder_runtime/adapters/security/unsafe_lab.py",
+        "sonder_runtime/adapters/semantic_tier.py",
         "sonder_runtime/adapters/session_turn_claims.py",
         "sonder_runtime/adapters/storage.py",
         "sonder_runtime/adapters/subagents.py",
@@ -882,7 +883,7 @@
       ]
     },
     {
-      "file_count": 259,
+      "file_count": 260,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1097,6 +1098,7 @@
         "sonder_runtime/domain/routing/capability_router.py",
         "sonder_runtime/domain/routing/fleet_router.py",
         "sonder_runtime/domain/routing/route_planner.py",
+        "sonder_runtime/domain/routing/semantic_tier.py",
         "sonder_runtime/domain/runtime_identity.py",
         "sonder_runtime/domain/runtime_model_binding.py",
         "sonder_runtime/domain/runtime_model_configuration.py",
@@ -1147,7 +1149,7 @@
       ]
     },
     {
-      "file_count": 69,
+      "file_count": 70,
       "name": "interfaces",
       "python_files": [
         "sonder_runtime/interfaces/__init__.py",
@@ -1184,6 +1186,7 @@
         "sonder_runtime/interfaces/http/facades/fanout.py",
         "sonder_runtime/interfaces/http/facades/health_status.py",
         "sonder_runtime/interfaces/http/facades/host_tools.py",
+        "sonder_runtime/interfaces/http/facades/model_catalog.py",
         "sonder_runtime/interfaces/http/facades/model_request.py",
         "sonder_runtime/interfaces/http/facades/observability.py",
         "sonder_runtime/interfaces/http/facades/observability_stream.py",
