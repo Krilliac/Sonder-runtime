@@ -16813,10 +16813,12 @@ def memory_export(limit: int = 50, include_interactions: bool = False) -> str:
 def session_export(session: str = "", limit: int = 50, format: str = "") -> str:
     """Export a remembered conversation session as readable transcript text (format="atif": ATIF-v1.7 JSON)."""
     _maybe_live_reload()
-    from sonder_runtime.adapters import session_atif_export as atif_export
-    export_format = atif_export.normalize_session_export_format(format)
-    if export_format is None:
-        return "ERROR: unknown session_export format %r (use 'text' or 'atif')." % format
+    export_format = "text"
+    if str(format or "").strip():  # the default text path stays import-free
+        from sonder_runtime.adapters import session_atif_export as atif_export
+        export_format = atif_export.normalize_session_export_format(format)
+        if export_format is None:
+            return "ERROR: unknown session_export format %r (use 'text' or 'atif')." % format
     session_id = _resolve_session(session)
     if not session_id:
         return "ERROR: session='none' has no stored transcript."
