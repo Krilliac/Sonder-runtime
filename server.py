@@ -534,6 +534,7 @@ import sonder_speculation
 import consult as consult_flow
 import code_improve
 import tier_router
+from sonder_runtime.adapters.inference import production_tier_router
 import project_scaffold
 from sonder_runtime.platform import environment_probe
 import toolchain_status as toolchain_status_module
@@ -25336,7 +25337,7 @@ def consult(
 
 
 @mcp.tool()
-def route_request(prompt: str) -> str:
+def route_request(prompt: str, request_payload: dict | None = None) -> str:
     """Suggest the tier best suited to a request, and say why.
 
     The one durable model finding here: a local model is strong when the facts
@@ -25346,7 +25347,7 @@ def route_request(prompt: str) -> str:
     is legible rather than magic. It is a suggestion; the caller may override.
     """
     _maybe_live_reload()
-    decision = tier_router.route(prompt, available_tiers=set(TIERS))
+    decision = production_tier_router.route(prompt, set(TIERS), router=tier_router.route, tier_models=TIERS, request_payload=request_payload)
     return (
         "kind: %s\ntier: %s\nreason: %s"
         % (decision["kind"], decision["tier"], decision["reason"])
@@ -25387,9 +25388,11 @@ def improve_function(
     if not source.strip():
         return "ERROR: %s is empty or unreadable" % path
 
-    chosen = tier or tier_router.route(
+    chosen = tier or production_tier_router.route(
         objective or "improve the %s function" % function,
         available_tiers=set(TIERS),
+        router=tier_router.route, tier_models=TIERS,
+        request_payload={"messages": [{"content": code_improve.extract_function(source, function) or ""}]},
     )["tier"]
 
     def ask(prompt_text, model_tier):

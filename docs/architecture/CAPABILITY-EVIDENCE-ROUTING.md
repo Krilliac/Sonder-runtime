@@ -71,12 +71,14 @@ an updated model is eligible again as unverified. Missing identity is also
 unverified. Remote workers cannot inherit local measured evidence; advisory can
 still use them under their existing consent and membership rules.
 
-The request gateway does no identity observation in advisory mode unless the
+The request gateway, production tier selector and physical worker pool do no
+identity observation in advisory mode unless the
 store contains a fresh, nonsynthetic, identity-bound **failure of a requested
 capability** for the route's model. Empty stores, passes, unknowns and unrelated
 failures therefore cause **zero identity calls**, including after dispatch.
 
-When needed, the gateway caches observations (including unavailable results) for
+When needed, each layer uses the shared identity-cache implementation to cache
+observations (including unavailable results) for
 60 seconds per origin, model and requested context window. Production supplies
 the key from the same adapter configuration used by identity discovery. Cache
 entries also bind to the evidence file revision: an atomic refresh write,
@@ -190,4 +192,38 @@ tests**, with the same six server integration cases deselected, using the
 workspace-local `--noconftest` harness. This is gateway/contract verification,
 not a live-model latency benchmark or a full server integration run. The physical
 pool's separate identity policy is unchanged by this gateway fix.
+
+### PR #597 review fixes
+
+The subsequent pool fix applies the advisory failure prefilter to primary-only
+sends, candidate selection and pre-dispatch checks. Advisory never probes after
+dispatch. Strict keeps pre/post checks through the shared 60-second cache, keyed
+by evidence store/revision, worker origin, model and effective context. Refresh
+writes invalidate it; expiry during a strict dispatch permits another observation.
+
+Both production tier-routing calls now use the packaged
+`adapters/inference/production_tier_router.py` helper. The server injects the
+classifier and its current `TIERS` map after live policy reload; the helper opens
+the production evidence store and derives requirements from the payload.
+`route_request` accepts optional `request_payload` protocol metadata, and
+`improve_function` includes the extracted target function when estimating long
+input. Explicit tier overrides remain unchanged. Non-Ollama/cloud bindings cannot
+inherit a local Ollama model's evidence. No packaged module imports root `server`.
+
+Offline counting against committed HEAD `a69fea48` showed empty-store advisory
+observations falling from **2 to 0** for `request_primary`, **3 to 0** for a
+one-worker `request`, and **4 to 0** for a two-worker `request`. Passing, stale and
+unrelated evidence likewise produces zero observations for structured, tool,
+image, long-input and combined tool/schema payloads. A relevant failure costs
+one observation per considered worker/model/context per cache window; strict
+likewise observes once per considered worker on a cache miss. Off always costs zero.
+
+Verification with `D:/sonder-eco/venv-rt/Scripts/python.exe`: **362 focused and
+neighboring tests passed** through the workspace-local inherited-ACL harness with
+`--noconftest`; **72 empty-store cases matched `origin/main` tier/signal/fallback
+selection**. Tests execute the two server tool bodies with inert I/O to verify
+production wiring. Lint ratchet and architecture checks passed. The normal pytest
+run remains blocked in fixture setup by Windows temporary-directory ACLs; no full
+suite or live-model qualification is claimed. `server.py` is **26,934 lines**
+against the unchanged **26,942** cap. These review fixes remain uncommitted.
 

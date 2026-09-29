@@ -49,6 +49,7 @@ from sonder_runtime.domain.inference_membership import (
 from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.platform.logging import Redactor
 from sonder_runtime.platform.metrics import MetricsRegistry, default_registry
+from sonder_runtime.application.routing.identity_cache import IdentityObservationCache
 
 logger = logging.getLogger(__name__)
 
@@ -671,6 +672,7 @@ class OllamaWorkerPool:
         self._draining = False
         self._condition = threading.Condition(threading.RLock())
         self._probe_lock = threading.Lock()
+        self._identity_cache = IdentityObservationCache(clock=self._clock)
         self._metrics = {
             "logical_requests": 0,
             "dispatches": 0,
@@ -702,6 +704,31 @@ class OllamaWorkerPool:
         self._external_source = None
         self._active_probe_states = ()
         self._last_model_miss_refresh = None
+
+    @staticmethod
+    def _identity_cache_key(origin, model, payload):
+        try:
+            from .capability_evidence import identity_context_tokens
+            context_tokens = identity_context_tokens(payload)
+        except (AttributeError, TypeError, ValueError, OSError):
+            options = payload.get("options") if isinstance(payload, Mapping) else None
+            if not isinstance(options, Mapping):
+                options = {}
+            context_tokens = options.get(
+                "num_ctx", payload.get("num_ctx") if isinstance(payload, Mapping) else None,
+            )
+        return (origin, model, context_tokens)
+
+    def _observe_identity_cached(self, origin, model, payload):
+        """Resolve worker identity once per evidence revision and 60s window."""
+        if self._identity_for is None:
+            return None
+        key = self._identity_cache_key(origin, model, payload)
+        return self._identity_cache.observe(
+            key,
+            lambda: self._identity_for(origin, model, payload),
+            evidence=self._recent_evidence,
+        )
 
     @property
     def membership_limit(self) -> int:
@@ -1713,7 +1740,13 @@ class OllamaWorkerPool:
         def observe():
             identity = None
             try:
-                identity = self._identity_for(origin, model, payload) if self._identity_for else None
+                should_observe = self._capability_routing == "strict"
+                if self._capability_routing == "advisory":
+                    should_observe = self._recent_evidence.has_fresh_failure(
+                        "ollama", model, required,
+                    )
+                if should_observe:
+                    identity = self._observe_identity_cached(origin, model, payload)
                 allowed, reason = check_request_evidence(
                     self._recent_evidence, model, required, backend="ollama", identity=identity,
                     mode=self._capability_routing,
@@ -1734,11 +1767,10 @@ class OllamaWorkerPool:
 
         before = observe()
         result = sender(origin)
-        after = observe()
-        if after != before and (
-            self._capability_routing == "strict" or before is not None and after is not None
-        ):
-            raise WorkerCapabilityUnavailable("backend identity changed during model dispatch")
+        if self._capability_routing == "strict":
+            after = observe()
+            if after != before:
+                raise WorkerCapabilityUnavailable("backend identity changed during model dispatch")
         return result
 
     def request(
@@ -1826,8 +1858,15 @@ class OllamaWorkerPool:
                         continue
                     try:
                         identity = None
-                        identity = (self._identity_for(candidate.endpoint.origin, model, payload)
-                                    if self._identity_for is not None else None)
+                        should_observe = self._capability_routing == "strict"
+                        if self._capability_routing == "advisory":
+                            should_observe = self._recent_evidence.has_fresh_failure(
+                                "ollama", model, required,
+                            )
+                        if should_observe:
+                            identity = self._observe_identity_cached(
+                                candidate.endpoint.origin, model, payload,
+                            )
                         allowed, why = check_request_evidence(
                             self._recent_evidence, model, required,
                             backend="ollama", identity=identity,
@@ -1893,8 +1932,15 @@ class OllamaWorkerPool:
             identity = None
             if check_evidence is not None and required:
                 try:
-                    identity = (self._identity_for(state.endpoint.origin, model, payload)
-                                if self._identity_for is not None else None)
+                    should_observe = self._capability_routing == "strict"
+                    if self._capability_routing == "advisory":
+                        should_observe = self._recent_evidence.has_fresh_failure(
+                            "ollama", model, required,
+                        )
+                    if should_observe:
+                        identity = self._observe_identity_cached(
+                            state.endpoint.origin, model, payload,
+                        )
                     still_allowed, why = check_evidence(
                         self._recent_evidence, model, required,
                         backend="ollama", identity=identity,
@@ -1965,15 +2011,19 @@ class OllamaWorkerPool:
             logger.debug(f"pool.request: success from {state.endpoint.worker_id} in {latency_ms:.1f}ms")
             if check_evidence is not None and required:
                 try:
-                    identity = (self._identity_for(state.endpoint.origin, model, payload)
-                                if self._identity_for is not None else None)
                     if self._capability_routing == "strict":
+                        identity = self._observe_identity_cached(
+                            state.endpoint.origin, model, payload,
+                        )
                         still_allowed, why = check_evidence(
                             self._recent_evidence, model, required,
                             backend="ollama", identity=identity,
                             mode=self._capability_routing,
                         )
                     else:
+                        # Advisory mode intentionally has no post-dispatch identity
+                        # observation.  A failed preflight remains a conservative
+                        # routing hint; dispatch itself is already complete.
                         still_allowed, why = True, "unverified" if identity is None else ""
                     if identity != dispatch_identity and (
                         self._capability_routing == "strict"

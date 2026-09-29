@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import logging
-import threading
 import time
 from dataclasses import replace
 
 from sonder_runtime.domain.common.errors import DependencyUnavailable
 from sonder_runtime.domain.routing.model_names import tagged_ollama_model
 
+from .identity_cache import IdentityObservationCache
+from .identity_cache import IDENTITY_CACHE_TTL_SECONDS as IDENTITY_CACHE_TTL_SECONDS
 from .request_capabilities import (
     CAPABILITY_ROUTING_MODES,
     check_request_evidence,
@@ -16,8 +17,6 @@ from .request_capabilities import (
 )
 
 logger = logging.getLogger(__name__)
-IDENTITY_CACHE_TTL_SECONDS = 60.0
-_MAX_IDENTITY_CACHE_ENTRIES = 64
 
 
 class CapabilityEvidenceGateway:
@@ -39,9 +38,7 @@ class CapabilityEvidenceGateway:
         self._identity_for = identity_for
         self._mode = mode
         self._identity_key_for = identity_key_for
-        self._clock = clock
-        self._identity_cache = {}
-        self._identity_lock = threading.Lock()
+        self._identity_cache = IdentityObservationCache(clock=clock)
 
     @property
     def capabilities(self):
@@ -109,25 +106,9 @@ class CapabilityEvidenceGateway:
                 options = payload.get("options") or {}
                 key = (route.provider_id, route.model, getattr(route, "origin", None),
                        getattr(route, "cloud", False), options.get("num_ctx", payload.get("num_ctx")))
-            with self._identity_lock:
-                revision = self._evidence.revision if self._evidence is not None else None
-                now = self._clock()
-                cached = self._identity_cache.get(key)
-                if cached is not None:
-                    observed_at, saved_revision, identity = cached
-                    if saved_revision == revision and 0 <= now - observed_at < IDENTITY_CACHE_TTL_SECONDS:
-                        return identity
-                try:
-                    identity = self._identity_for(route, payload)
-                except (AttributeError, TypeError, ValueError, OSError, RuntimeError):
-                    identity = None
-                if len(self._identity_cache) >= _MAX_IDENTITY_CACHE_ENTRIES:
-                    self._identity_cache.pop(next(iter(self._identity_cache)))
-                # Cache unavailable observations too, so outages do not restore
-                # per-decision HTTP timeouts. A concurrent refresh invalidates
-                # this entry on the next lookup via the pre-observation revision.
-                self._identity_cache[key] = (self._clock(), revision, identity)
-                return identity
+            return self._identity_cache.observe(
+                key, lambda: self._identity_for(route, payload), evidence=self._evidence,
+            )
         except (AttributeError, TypeError, ValueError, OSError, RuntimeError):
             return None
 
