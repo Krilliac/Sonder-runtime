@@ -46,10 +46,12 @@ class WorkRunRef {
 final RegExp _refusedHead =
     RegExp(r'^refused(?:\s+(/?[^\s:]+))?\s*:\s*', caseSensitive: true);
 final RegExp _modeTail = RegExp(r'\s*\(mode:\s*([A-Za-z]+)\)\s*\.?\s*$');
-final RegExp _approveId = RegExp(r'/approve\s+([0-9a-f]{8,})');
-final RegExp _workRunId = RegExp(r'\b(wr-[0-9a-f]{8,64})\b');
+// The server's hand-off sentence (serve.py `_work_run_pending_text`), and
+// the app's own placeholder (api/chat.dart `workRunPlaceholder`), anchored
+// at the start of the reply. A reply that merely mentions a run is an answer.
 final RegExp _workRunHandOff =
-    RegExp(r'(work run wr-[0-9a-f]+|/v1/work-runs/wr-[0-9a-f]+)');
+    RegExp(r'^Work is still running (?:as work run|on the server \(work run) '
+        r'(wr-[0-9a-f]{8,64})\b');
 final RegExp _budget = RegExp(r'wall-clock budget (\d+)\s*s');
 
 /// Classify a stored assistant message. Pure and cheap; the transcript
@@ -74,9 +76,20 @@ RefusalInfo? refusalOf(ChatMessage message) {
   // ChatRefusal); the text patterns are the fallback for older servers.
   final structured = message.responseMetadata?.refusal;
   if (head == null && status != 'refused' && structured == null) return null;
+  if (structured != null &&
+      (structured.tool.isNotEmpty || structured.callId.isNotEmpty)) {
+    // The server's receipt is the only authority for what was refused and
+    // which ledger call "Approve once" would approve. The reply text is
+    // model-authored and may name a different tool, reason or call id.
+    return RefusalInfo(
+      subject: structured.tool,
+      reason: structured.reason,
+      mode: structured.mode,
+      callId: structured.callId,
+    );
+  }
   var body = head == null ? text : text.substring(head.end);
   var mode = '';
-  final approve = _approveId.firstMatch(text);
   final firstLine = body.split('\n').first;
   final tail = _modeTail.firstMatch(firstLine);
   if (tail != null) {
@@ -84,41 +97,39 @@ RefusalInfo? refusalOf(ChatMessage message) {
     body =
         firstLine.substring(0, tail.start) + body.substring(firstLine.length);
   }
-  final structuredId = structured?.callId ?? '';
-  final structuredTool = structured?.tool ?? '';
+  // Text-only refusals (servers without S1) are shown as notices but never
+  // offer approval: a `/approve <id>` in model text is not authority.
   return RefusalInfo(
-    subject: head?.group(1) ?? structuredTool,
+    subject: head?.group(1) ?? '',
     reason: body.trim(),
     mode: mode,
-    callId: structuredId.isNotEmpty ? structuredId : approve?.group(1) ?? '',
   );
 }
 
 /// The work run [message] hands off to, or null.
 ///
 /// Prefers lane A's `sonder_receipt.chat_work` metadata; falls back to the
-/// server's hand-off sentence ("Work is still running as work run wr-…
-/// Fetch the answer with GET /v1/work-runs/wr-…") for older servers.
+/// server's hand-off sentence ("Work is still running as work run wr-…"),
+/// which must lead the reply, for older servers.
 WorkRunRef? workRunOf(ChatMessage message) {
   if (message.role != Role.assistant || message.error || message.pending) {
     return null;
   }
-  // Lane A's `sonder_receipt.chat_work` metadata names the run directly.
+  // Lane A's `sonder_receipt.chat_work` metadata names the run directly,
+  // and is authoritative whenever it names one: a settled run is no
+  // hand-off, whatever the text says.
   final metadata = message.responseMetadata;
-  if (metadata != null && metadata.workRunning) {
+  if (metadata != null && metadata.workRunId.isNotEmpty) {
+    if (!metadata.workRunning) return null;
     final budget =
         int.tryParse(_budget.firstMatch(message.content)?.group(1) ?? '');
     return WorkRunRef(metadata.workRunId, budgetSeconds: budget);
   }
-  final text = message.content;
-  if (!text.contains('work run') && !text.contains('/v1/work-runs/')) {
-    return null;
-  }
-  if (!_workRunHandOff.hasMatch(text)) return null;
-  // The hand-off is short and leads the reply; a long answer that merely
+  final text = message.content.trimLeft();
+  // The hand-off is short and leads the reply; an answer that merely
   // mentions a run id is an answer.
   if (text.length > 1200) return null;
-  final id = _workRunId.firstMatch(text)?.group(1);
+  final id = _workRunHandOff.firstMatch(text)?.group(1);
   if (id == null) return null;
   final budget = int.tryParse(_budget.firstMatch(text)?.group(1) ?? '');
   return WorkRunRef(id, budgetSeconds: budget);

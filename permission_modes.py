@@ -293,11 +293,13 @@ reason -- so this module keeps importing on its own with no cycle.
 """
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import hashlib
 import json
 import logging
 import os
+import tempfile
 import threading
 from dataclasses import dataclass
 
@@ -388,6 +390,12 @@ NATIVE_MCP_WORK = {
     "compute_submit": "execution",
     "agent_lane": "execution",
     "compute_cancel": "mutation",
+    # Readers of an already placed job: its status, and one bounded,
+    # digest-verified artifact returned inline (nothing written, nothing
+    # launched). Graded so native MCP can put them through the same decision
+    # as submit/cancel instead of skipping it.
+    "compute_status": "safe",
+    "compute_artifact_fetch": "safe",
     # Developer tools (bootstrap/developer_tools.py). ``tool_inventory`` runs
     # only fixed read-only version switches of allowlisted host tools;
     # ``output_digest`` reads a guarded file window or the caller's own
@@ -415,6 +423,11 @@ NATIVE_MCP_WORK = {
     # own name, so an operator can deny network builds with one rule while
     # still allowing builds, and an approval of one never covers the other.
     "build_network": "execution",
+    # Not a tool: the second decision a desktop action takes when it looks
+    # irreversible (send, delete, purchase, ...; domain/computer_use/rules.py).
+    # ``dangerous`` so an allow rule or ``auto`` for ``ui_action`` never covers
+    # it; a person approves each such action once, at the console.
+    "computer_use_irreversible": "dangerous",
     # Crash and profile digests (bootstrap/debug_tools.py). ``crash_triage``
     # and ``profile_digest`` run pure readers over guarded files and launch
     # nothing; ``debug_run_result`` polls the caller's own run and cannot
@@ -449,6 +462,9 @@ CREDENTIAL_ARGUMENTS = frozenset({"token", "approval", "bypass", "developer_auth
 BULK_ARGUMENTS = frozenset({
     "content", "patch", "operations", "operations_json", "old", "new", "text",
     "prompt", "code", "stdin", "args_json", "inputs_json",
+    # Compute job inputs may carry arbitrary credentials even under innocuous
+    # environment variable names or command-line flags.
+    "environment", "arguments",
 })
 
 CALL_ID_CHARS = 16
@@ -574,6 +590,9 @@ EXECUTION_TOOLS = frozenset({
     "campaign_generate_compile_execute_record", "campaign_repo_repair",
     "self_heal_repair", "scaffold_project", "compiler_cache_status",
     "crash_digest", "profile_capture_digest",
+    # Desktop input (bootstrap/computer_use_tools.py): each call injects mouse
+    # or keyboard input into a live application window.
+    "ui_action", "computer_task",
 })
 
 # The same class, for work that no *registered tool* fronts. ``EXECUTION_TOOLS``
@@ -823,6 +842,8 @@ def _load() -> None:
                 saved = json.load(handle)
         except (OSError, ValueError):
             return
+        if not isinstance(saved, dict):
+            return
         mode = str(saved.get("mode", "")).strip()
         if mode in _MATRIX:
             _STATE["mode"] = mode
@@ -831,14 +852,88 @@ def _load() -> None:
         # resuming it days later is exactly the surprise to avoid.
 
 
-def _save() -> None:
+class ModePersistenceError(ValueError):
+    """A mode change could not be saved, so it was not (fully) made.
+
+    A ``ValueError`` on purpose: every surface that reports a refused mode
+    change -- the ``permission_mode`` tool and ``POST /v1/permission-mode``
+    both catch ``ValueError`` -- reports this one too, instead of claiming a
+    change the next start would silently undo.
+    """
+
+
+def _write_state(mode: str) -> None:
+    """Replace the saved mode atomically; raises ``OSError`` on any failure.
+
+    The temporary sibling is named ``<file>.tmp-*``, which the file-tool
+    guard's control-plane inventory protects alongside the file itself.
+    """
+    path = _state_path()
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    handle, temporary = tempfile.mkstemp(
+        prefix=os.path.basename(path) + ".tmp-", dir=directory,
+    )
     try:
-        path = _state_path()
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as handle:
-            json.dump({"mode": _STATE["mode"]}, handle)
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump({"mode": mode}, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def _discard_saved_state() -> bool:
+    """Remove the saved mode so the next start uses DEFAULT_MODE."""
+    try:
+        os.remove(_state_path())
+    except FileNotFoundError:
+        return True
     except OSError:
-        pass
+        return False
+    return True
+
+
+def _save(previous: str) -> None:
+    """Persist ``_STATE["mode"]`` (caller holds ``_LOCK``), failing closed.
+
+    A write that fails used to be ignored, so a lowered mode came back as the
+    old, higher one at the next start. Now:
+
+    * a raise that cannot be saved is rolled back and refused;
+    * a lowering stays in effect for this session (the safe direction), the
+      stale saved mode is removed so the next start falls back to
+      DEFAULT_MODE rather than the higher mode, and the caller is told.
+    """
+    mode = _STATE["mode"]
+    try:
+        _write_state(mode)
+        return
+    except OSError as exc:
+        failure = "%s: %s" % (type(exc).__name__, exc)
+    order = {name: index for index, name in enumerate(MODES)}
+    if order.get(mode, len(MODES)) > order.get(previous, -1):
+        _STATE["mode"] = previous
+        raise ModePersistenceError(
+            "permission mode not changed: saving %s failed (%s); the mode "
+            "stays %s" % (mode, failure, previous)
+        )
+    if _discard_saved_state():
+        restart = "the next start will use %s" % DEFAULT_MODE
+    else:
+        restart = (
+            "the saved mode (%s) could not be removed either, so the next "
+            "start may restore it" % previous
+        )
+    raise ModePersistenceError(
+        "permission mode is %s for this session only: saving it failed (%s); "
+        "%s" % (mode, failure, restart)
+    )
 
 
 # --- mode state -----------------------------------------------------------
@@ -932,8 +1027,9 @@ def set_mode(name: str) -> str:
     _load()
     match = resolve_mode(name)
     with _LOCK:
+        previous = _STATE["mode"]
         _STATE["mode"] = match
-    _save()
+        _save(previous)
     return match
 
 
@@ -941,10 +1037,11 @@ def cycle_mode(step: int = 1) -> str:
     """Advance to the next mode. Backs the Shift+Tab keybinding."""
     _load()
     with _LOCK:
-        index = MODES.index(_STATE["mode"])
+        previous = _STATE["mode"]
+        index = MODES.index(previous)
         _STATE["mode"] = MODES[(index + step) % len(MODES)]
         new = _STATE["mode"]
-    _save()
+        _save(previous)
     return new
 
 
@@ -1153,6 +1250,67 @@ def approval_spent_for(tool_name: str, arguments) -> bool:
 def forget_spent_approval() -> None:
     """Clear the spent-approval note once the call it was for is over."""
     _SPENT_APPROVAL.set(None)
+
+
+# Every approval spent while one protocol call runs, so a call that failed can
+# give them back (``approval_call_scope``). Separate from ``_SPENT_APPROVAL``,
+# which surfaces clear as soon as the reach decision is made.
+_CALL_SPENDS: contextvars.ContextVar = contextvars.ContextVar(
+    "sonder_call_spends", default=None,
+)
+
+
+# Tools whose failure is known to precede any effect: each validates its whole
+# request first and then applies it atomically, so an error reply means nothing
+# changed. Only these give a spent approval back. A failure is not proof of no
+# effect in general: ``git_merge`` can stop on a conflict after rewriting the
+# index and worktree, and a build fails after it ran -- so this is an allowlist,
+# never a denylist. Add a tool only after reading that its failure is pre-effect.
+RESTORABLE_ON_FAILURE = frozenset({
+    # Validates every binding (installed models, capabilities) before the
+    # single atomic policy write.
+    "runtime_policy_update",
+})
+
+
+class ApprovalCallScope:
+    """The approvals one protocol call spent, and the way to give them back."""
+
+    def __init__(self) -> None:
+        self.spends: list[tuple] = []
+
+    def restore(self) -> int:
+        """Give back what this call spent, because the call failed.
+
+        A surface calls this only when the tool *returned* a failure (a legacy
+        ``ERROR:`` reply, a native ``isError`` result) -- never on a raised
+        error, which can come after the effect (a post-call audit). Only tools
+        in ``RESTORABLE_ON_FAILURE`` are given back. The ledger keeps the
+        original expiry and never reopens a revoked or lapsed approval, and
+        each spend is given back at most once.
+        """
+        spends, self.spends = self.spends, []
+        restored = 0
+        for name, digest, nonce, ledger in spends:
+            if name not in RESTORABLE_ON_FAILURE:
+                continue
+            try:
+                restored += ledger.restore(nonce, digest) is not None
+            except Exception:
+                # Giving an approval back is a courtesy, never a new failure.
+                continue
+        return restored
+
+
+@contextlib.contextmanager
+def approval_call_scope():
+    """Collect the approvals spent while one protocol call runs."""
+    scope = ApprovalCallScope()
+    token = _CALL_SPENDS.set(scope)
+    try:
+        yield scope
+    finally:
+        _CALL_SPENDS.reset(token)
 
 
 def approval_ledger():
@@ -1465,6 +1623,9 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
                     approval = None
                 if approval is not None:
                     _SPENT_APPROVAL.set((name, digest))
+                    scope = _CALL_SPENDS.get()
+                    if scope is not None:
+                        scope.spends.append((name, digest, getattr(approval, "nonce", ""), ledger))
                     return Decision(
                         ALLOW, active, risk,
                         "one-shot approval %s by %s covers exactly this call "

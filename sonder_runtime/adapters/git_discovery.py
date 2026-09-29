@@ -100,12 +100,28 @@ def _run_bounded(argv: list[str], *, timeout_seconds: float, output_limit: int) 
         finally:
             stream.close()
 
-    threads = [
-        owned_runtime_thread(target=drain, args=("stdout", process.stdout, output_limit), daemon=True),
-        owned_runtime_thread(target=drain, args=("stderr", process.stderr, MAX_ERROR_BYTES), daemon=True),
-    ]
-    for thread in threads:
-        thread.start()
+    threads = []
+    try:
+        for name, stream, limit in (
+            ("stdout", process.stdout, output_limit),
+            ("stderr", process.stderr, MAX_ERROR_BYTES),
+        ):
+            thread = owned_runtime_thread(target=drain, args=(name, stream, limit), daemon=True)
+            thread.start()
+            threads.append(thread)
+    except BaseException:
+        # A refused drain thread means nothing will ever wait on or kill the
+        # child: reap it and close its pipes before surfacing the refusal.
+        process.kill()
+        process.wait()
+        for stream in (process.stdout, process.stderr):
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+        for thread in threads:
+            thread.join(timeout=1)
+        raise
     try:
         returncode = process.wait(timeout=max(0.05, float(timeout_seconds)))
     except subprocess.TimeoutExpired as exc:

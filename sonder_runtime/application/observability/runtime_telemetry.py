@@ -334,6 +334,38 @@ class RuntimeTelemetry:
             level="INFO" if outcome == "completed" else "WARNING")
         return True
 
+    def reject_request(
+        self,
+        *,
+        request_id: object,
+        surface: str,
+        requested_model: object,
+        http_status: object,
+        error_code: object,
+        total_ms: object = None,
+    ) -> None:
+        """Emit one ``request.failed`` for a request refused before its turn began.
+
+        There is no ``request.started``: a rejection is an error, never an
+        open request span.  ``rejected: true`` tells it apart from a failed
+        turn; ``attempts`` is 0 because nothing reached a provider.  The
+        caller decides who may produce one (never an unauthenticated caller).
+        """
+        if surface not in SURFACES:
+            raise ValueError(f"unknown telemetry surface {surface!r}")
+        rid = sanitize_correlation_id(request_id) or "turn-" + uuid.uuid4().hex
+        self._emit("request.failed", {
+            "outcome": "failed",
+            "rejected": True,
+            "surface": surface,
+            "kind": "chat",
+            "http_status": http_status if type(http_status) is int else None,
+            "error_code": bounded_label(error_code) or "rejected",
+            "requested_model": bounded_label(requested_model),
+            "attempts": 0,
+            "total_ms": max(0, total_ms) if type(total_ms) is int else 0,
+        }, request_id=rid, run_id=rid, level="WARNING")
+
     # -- dispatch_provider observer ---------------------------------------------
 
     def provider_send_started(self, provider_label, operation, model):
@@ -402,6 +434,32 @@ class RuntimeTelemetry:
             "from_provider": provider_id(from_provider),
             "to_provider": destination,
             "reason_code": bounded_label(reason_code) or "fallback",
+            "attempt": upcoming,
+        }, request_id=turn.turn_id, run_id=turn.turn_id, session_id=turn.session_id)
+
+    def route_overflow(self, fields: Mapping) -> None:
+        """Emit ``route.changed`` for a long-context overflow before its send.
+
+        The overflow is the turn's first attempt, so no previous attempt
+        exists for :meth:`provider_send_finished` to compare with; the rung
+        reports the change itself.  Only labels and counts are exported.
+        """
+        turn = _CURRENT_TURN.get()
+        if turn is None or turn.finished or not isinstance(fields, Mapping):
+            return
+        target = turn.owner if isinstance(turn.owner, RuntimeTelemetry) else self
+        with turn._lock:
+            upcoming = len(turn.attempts) + 1
+        worker = bounded_label(fields.get("to_worker_id"))
+        target._emit("route.changed", {
+            **({"to_worker_id": worker} if worker else {}),
+            "from_provider": provider_id(fields.get("from_provider")),
+            "from_model": bounded_label(fields.get("from_model")),
+            "to_provider": provider_id(fields.get("to_provider")),
+            "to_model": bounded_label(fields.get("to_model")),
+            "reason_code": bounded_label(fields.get("reason_code")) or "context_over_threshold",
+            "estimated_tokens": _non_negative_int(fields.get("estimated_tokens")),
+            "threshold": _non_negative_int(fields.get("threshold")),
             "attempt": upcoming,
         }, request_id=turn.turn_id, run_id=turn.turn_id, session_id=turn.session_id)
 

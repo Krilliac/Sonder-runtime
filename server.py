@@ -183,6 +183,7 @@ from sonder_runtime.adapters.model_inventory import inventory_rows as _inventory
 from sonder_runtime.domain.context import compaction as context_compaction
 from sonder_runtime.domain.context import overflow as context_overflow
 from sonder_runtime.application.routing import tier_escalation
+from sonder_runtime.application.routing import long_context_overflow as _overflow
 # The per-rung provider ContextVar lives in this package module, not here, so
 # a live reload of server.py cannot orphan an in-flight rung binding.
 from sonder_runtime.application.chat import provider_bridge as _provider_bridge
@@ -195,9 +196,8 @@ from sonder_runtime.application.context_health import (
 )
 from sonder_runtime.domain.common.errors import InvalidInput
 from sonder_runtime.domain.common.errors import SonderError as _SonderError
-from sonder_runtime.domain.runtime_identity import (
-    runtime_identity_block as _runtime_identity_block,
-)
+from sonder_runtime.adapters import prompt_store as _prompts
+from sonder_runtime.adapters.prompt_store import runtime_identity_block as _runtime_identity_block
 from sonder_runtime.domain.model_capabilities import (
     fanout_capabilities as _fanout_capabilities,
 )
@@ -481,7 +481,7 @@ from sonder_runtime.adapters.model_error_formatting import (
 from sonder_runtime.interfaces.http.serve_policy import (
     serve_temperature as _serve_temperature,
 )
-from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool
+from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool, prewarm_gate
 from sonder_runtime.domain import ollama_policy
 from sonder_runtime.domain.runtime_model_configuration import (
     RuntimeModelConfiguration,
@@ -514,6 +514,8 @@ from sonder_runtime.domain.runtime_update_parsing import (
 from sonder_runtime.domain.execution_route_formatting import (
     execution_route_header as _execution_route_header_impl,
 )
+from sonder_runtime.adapters.inference import served_tier_models as _served_models
+from sonder_runtime.adapters.inference import overflow_route as _overflow_route
 from sonder_runtime.domain.agent_observation_quality import (
     observation_ok as _agent_observation_ok,
 )
@@ -526,6 +528,8 @@ from sonder_runtime.domain.agent_escalation_identity import (
 from sonder_runtime.domain.agent_help_parsing import (
     help_advertised_tools as _agent_help_advertised_tools,
 )
+from sonder_runtime.bootstrap import generic_agent_dispatch as _generic_agent_dispatch
+from sonder_runtime.bootstrap.computer_use_chat import route as _computer_use_route
 import sonder_speculation
 import consult as consult_flow
 import code_improve
@@ -1447,14 +1451,6 @@ def _open_db_readonly():
         conn.close()
         raise
     return conn
-
-
-TRACE_SYSTEM = (
-    "Before giving your answer, output a section titled '## Reasoning' where you "
-    "think step by step: restate the task in your own words, note constraints and "
-    "edge cases, and explain your approach and any tradeoffs. Then output a section "
-    "titled '## Answer' with the final solution."
-)
 
 
 def _deployment_authenticates_callers() -> bool:
@@ -2489,14 +2485,15 @@ def _stable_system_context():
     if getattr(_SYSTEM_CONTEXT, "parts", None) is not None:
         yield
         return
-    _SYSTEM_CONTEXT.parts = _read_system_context()
-    try:
-        yield
-    finally:
-        _SYSTEM_CONTEXT.parts = None
+    with _prompts.turn_scope():  # editable prompts are pinned for the turn too
+        _SYSTEM_CONTEXT.parts = _read_system_context()
+        try:
+            yield
+        finally:
+            _SYSTEM_CONTEXT.parts = None
 
 
-def _build_system(system, trace, persona, model="", cloud=False):
+def _build_system(system, trace, persona, model="", cloud=False, provider=None):
     """Compose the effective system prompt from a base `system`, optional trace
     instruction, optional persona, editable profile, and emotion vectors.
 
@@ -2515,7 +2512,8 @@ def _build_system(system, trace, persona, model="", cloud=False):
     """
     effective_system = system
     if trace:
-        effective_system = "%s\n\n%s" % (system, TRACE_SYSTEM) if system else TRACE_SYSTEM
+        trace_text = _prompts.render("trace_instructions")
+        effective_system = "%s\n\n%s" % (system, trace_text) if system else trace_text
     if cloud:
         return _join_system_parts(
             _runtime_identity_block(model, cloud=True), effective_system,
@@ -2530,27 +2528,9 @@ def _build_system(system, trace, persona, model="", cloud=False):
     parts = getattr(_SYSTEM_CONTEXT, "parts", None)
     profile, emotions, goal_block = parts or _read_system_context()
     return _join_system_parts(
-        _runtime_identity_block(model, cloud), profile, emotions, goal_block,
+        _runtime_identity_block(model, cloud, provider), profile, emotions, goal_block,
         effective_system,
     )
-
-
-def _resolve_model_and_system(system, trace, strict, persona):
-    """Shared prep for the Sonder Runtime tool and HTTP serve layer.
-
-    Returns (model, effective_system); model is None if the strict alias is missing.
-
-    NOTE: this helper currently has no callers -- the surfaces it was written
-    for resolve their own target through `_serve_target` and call
-    `_build_system` directly. It is kept only because it is the documented
-    shape of that prep; it no longer sets any process-wide state, so leaving it
-    uncalled cannot desynchronise anything.
-    """
-    strict_eff = _STRICT_DEFAULT if strict is None else strict
-    model = resolve_sonder_model(strict_eff)
-    if model is None:
-        return None, None
-    return model, _build_system(system, trace, persona, model=model, cloud=False)
 
 
 def _serve_target(tier, strict):
@@ -2831,6 +2811,10 @@ def _runtime_command(arg: str) -> str:
     rest = rest.strip()
     if action == "reset":
         return runtime_policy_update(reset=True)
+    if action == "overflow":
+        result = runtime_policy.overflow_command(rest)
+        _refresh_runtime_policy(create=False)
+        return result
     if action == "set":
         local_models = {}
         routing = {}
@@ -2876,6 +2860,7 @@ def _runtime_command(arg: str) -> str:
             "  /runtime set embedding=<installed-embedding-model>\n"
             "  /runtime set chat=<tier> router=<tier> workbench=<tier> "
             "autopilot=<tier> fleet=<tier> review=<tier>\n"
+            "  /runtime overflow [status|on|off|threshold <n>|model <m>]   (long-context overflow)\n"
             "  /runtime reset\n"
             "Only installed local models are accepted. Embedding changes affect "
             "future vectors only; use /embeddings apply to refresh stored memory. "
@@ -3048,15 +3033,15 @@ def _selfmod_operator_lease(run_id):
             if not selfmod.heartbeat(run_id, owner):
                 return
 
-    heartbeat_thread = owned_runtime_thread(
-        target=heartbeat_worker, name="sonder-selfmod-heartbeat", daemon=True,
-    )
-    heartbeat_thread.start()
-    try:
+    heartbeat_thread = None
+    try:  # a refused heartbeat worker must still release the claimed lease
+        heartbeat_thread = owned_runtime_thread(target=heartbeat_worker, name="sonder-selfmod-heartbeat", daemon=True)
+        heartbeat_thread.start()
         yield owner
     finally:
         heartbeat_stop.set()
-        heartbeat_thread.join(timeout=2)
+        if heartbeat_thread is not None and heartbeat_thread.is_alive():
+            heartbeat_thread.join(timeout=2)
         with contextlib.suppress(Exception):
             selfmod.release(run_id, owner)
 
@@ -3120,13 +3105,9 @@ def _execute_selfmod_run(run_id, explicit_tests=None, *, unisolated=False, opera
                 run_id, "record_reproducer_before", {"command": reproducer},
                 lambda: selfmod.record_reproducer_before(run_id, reproducer),
             )
-            prompt = (
-                "Implement this bounded self-improvement only inside the isolated workspace.\n"
-                "Objective: %s\nEvidence: %s\nAcceptance criteria: %s\n"
-                "Authorized files (no others may change): %s\nWorkspace: %s\n"
-                "Inspect first, then use guarded file tools. Do not approve, deploy, alter tests outside scope, "
-                "change permissions, install dependencies, invoke selfmod, or touch the live repository."
-                % (run["objective"], "; ".join(run["evidence"]), "; ".join(run["criteria"]), ", ".join(run["files"]), workspace)
+            prompt = _prompts.render(
+                "selfmod_editor", objective=run["objective"], evidence="; ".join(run["evidence"]),
+                criteria="; ".join(run["criteria"]), files=", ".join(run["files"]), workspace=workspace,
             )
             # The run's lease already fences its record; this fences the editing
             # agent's effects on the same lease, so a worker that lost the run
@@ -3750,6 +3731,8 @@ def control_command(prompt: str, history=None, session="", project="",
         return sonder_stats()
     if cmd == "/context":
         return context_health()
+    if cmd == "/prompts":
+        return _prompts.command(arg)
     if cmd in ("/contextsize", "/ctxsize"):
         return set_context_size(arg.strip()) if arg.strip() else context_policy_status()
     if cmd in ("/compact", "/compaction"):
@@ -4840,7 +4823,7 @@ def _transport_error_detail(error) -> str:
 # Compatibility alias: endpoint display formatting is owned by the packaged
 # Ollama endpoint policy, while legacy server callers retain the zero-argument
 # private helper contract.
-_ollama_display = functools.partial(ollama_endpoint.safe_display, BASE)
+_ollama_display = lambda: ollama_endpoint.safe_display(BASE)  # noqa: E731 - reads BASE per call
 
 
 def _require_ollama_endpoint(*, cloud: bool = False) -> None:
@@ -5534,15 +5517,12 @@ def _post(
     if local_only or not OLLAMA_POOL.enabled:
         return send(BASE)
     model_hint = payload.get("model") if isinstance(payload, dict) else None
+    if path in {"/api/chat", "/api/generate"}:  # never fail behind our own prewarm
+        prewarm_gate.await_prewarm(model_hint, min(request_timeout, _PREWARM_LOAD_TIMEOUT))
     return OLLAMA_POOL.request(send, model=model_hint, idempotent=idempotent)
 
 
-_PREWARM_LOCK = threading.Lock()
-_PREWARM_INFLIGHT = set()
-# Bounds the background weight load so a wedged Ollama cannot hold the inflight
-# slot forever. Previously written as a globals() lookup for a name that was
-# never defined anywhere, so it always took the 60s fallback -- correct by
-# accident, and reported by ruff as an undefined name.
+# Bounds the background weight load so a wedged Ollama cannot hold the slot forever.
 _PREWARM_LOAD_TIMEOUT = 60
 
 
@@ -5551,12 +5531,10 @@ def prewarm_model(tier: str = "") -> bool:
 
     Model cold-load dominates first-token latency (tens of seconds for a 7B
     on CPU). Firing an empty keep-alive load concurrently with the host's
-    DB/recall/augmentation work overlaps that cost, like a CPU prefetching a
-    line it predicts the pipeline will need. Local tiers only, best-effort,
-    one in-flight load per model, and never fatal: a failed prewarm just
-    means the real call pays the normal cost.
+    DB/recall/augmentation work overlaps that cost. Local tiers only,
+    best-effort, one in-flight load per model, and never fatal.
     """
-    if not sonder_speculation.speculation_enabled():
+    if not sonder_speculation.prewarm_enabled():
         return False
     try:
         model, cloud, _augment, tier_label = _serve_target(tier or "sonder", None)
@@ -5571,28 +5549,26 @@ def prewarm_model(tier: str = "") -> bool:
             return False
     except ModelCallError:
         return False
-    with _PREWARM_LOCK:
-        if model in _PREWARM_INFLIGHT:
-            return False
-        _PREWARM_INFLIGHT.add(model)
+    if not prewarm_gate.begin(model):
+        return False
 
     def _load():
         try:
             # Empty prompt with keep_alive loads weights without generating.
-            _post(
-                "/api/generate",
-                {"model": model, "keep_alive": KEEP_ALIVE},
+            prewarm_gate.run_as_prewarm(lambda: _post(
+                "/api/generate", {"model": model, "keep_alive": KEEP_ALIVE},
                 timeout=_PREWARM_LOAD_TIMEOUT,
-            )
+            ))
         except Exception:
             pass
         finally:
-            with _PREWARM_LOCK:
-                _PREWARM_INFLIGHT.discard(model)
+            prewarm_gate.finish(model)
 
-    owned_runtime_thread(
-        target=_load, daemon=True, name="sonder-prewarm"
-    ).start()
+    try:  # a refused worker must not leave the model marked in flight forever
+        owned_runtime_thread(target=_load, daemon=True, name="sonder-prewarm").start()
+    except BaseException:
+        prewarm_gate.finish(model)
+        return False
     return True
 
 
@@ -6565,6 +6541,7 @@ def _route_chat_web(prompt, session, project, location_consent):
     return reply
 
 
+@_prompts.turn_scoped
 @_capture_named_provider_request
 def _sonder_impl_serialized(
     prompt: str,
@@ -6994,6 +6971,7 @@ def sonder(
     return _append_activity(result, response=response, replace=True)
 
 
+@_prompts.turn_scoped
 @_capture_named_provider_request
 def _answer_with_history_impl(
     prompt,
@@ -7066,6 +7044,8 @@ def _answer_with_history_impl(
         if _explicit_serve_selection(tier, "")
         else _default_route_plan(prompt, start_rung)
     )
+    escalation_plan, overflow = _overflow_route.plan(sys.modules[__name__], prompt, history, escalation_plan)
+    overflow_failure = ""
     temperature = _serve_temperature()
     pinned_ctx = (
         _platform_requested_context(context_size, default_value=SESSION_NUM_CTX)
@@ -7092,7 +7072,7 @@ def _answer_with_history_impl(
             following = escalation_plan.next_rung(attempt)
             detail = ""
             rung_scope.close()
-            bridged_provider = _bridge_provider_for_tier(tier_label, cloud)
+            bridged_provider = None if _overflow.is_overflow(rung) else _bridge_provider_for_tier(tier_label, cloud)
             rung_binding = rung_scope.enter_context(
                 _provider_bridge.bind_rung(bridged_provider, tier_label)
             )
@@ -7100,7 +7080,8 @@ def _answer_with_history_impl(
             # model that answered -- including a pre-routed first attempt,
             # which is not the route the request resolved to.
             _observe_target(model, tier_label, cloud)
-            effective_system = _build_system("", trace, "", model=model, cloud=cloud)
+            effective_system = _build_system("", trace, "", cloud=cloud, provider=bridged_provider, model=(
+                _legacy_chat_bridge.prompt_identity_model(model, tier_label, bridged_provider, _APP_GRAPH)))
             # Honor LEARN_TIERS here too. Serve conversation memory is client-side (the app
             # resends history each request), so a non-learning model can skip capture entirely:
             # no interaction row, no footer, nothing distilled. This lets a user exclude e.g.
@@ -7114,6 +7095,7 @@ def _answer_with_history_impl(
                 else None if bridged_provider is not None
                 else _auto_model_context(model)
             )
+            req_ctx = _overflow_route.rung_started(rung, overflow, req_ctx, pinned_ctx)
             try:
                 if learn:
                     # Augmentation policy controls what the model sees, not provenance.
@@ -7197,6 +7179,7 @@ def _answer_with_history_impl(
                             pass
                     iid, trace_ctx = None, None
             except ModelCallError as error:
+                detail = _overflow.error_detail(rung, error)
                 reason = (
                     tier_escalation.failure_reason(error=error)
                     if following is not None else None
@@ -7234,11 +7217,11 @@ def _answer_with_history_impl(
                 # The empty or unverified attempt was captured; it must not
                 # reach lessons.
                 _discard_interaction(iid)
-            _note_escalation(
-                tier_escalation.Step(attempt + 1, reason, rung, following, detail=detail),
-                "chat-api",
-            )
+            step = tier_escalation.Step(attempt + 1, reason, rung, following, detail=detail)
+            _note_escalation(step, "chat-api")
+            overflow_failure = overflow_failure or _overflow.failure_text(step)
             attempt += 1
+        _overflow_route.finished(overflow, rung, overflow_failure)
     except ModelCallError as error:
         if raise_model_errors:
             raise
@@ -7391,7 +7374,8 @@ def structured_answer_with_history(
         else None if bridged_provider is not None
         else _auto_model_context(model)
     )
-    system = _build_system("", False, "", model=model, cloud=cloud)
+    system = _build_system("", False, "", cloud=cloud, provider=bridged_provider, model=(
+        _legacy_chat_bridge.prompt_identity_model(model, tier_label, bridged_provider, _APP_GRAPH)))
     # A non-Ollama rung refuses decoder schemas with a 400 (the bridge
     # cannot carry ``format``) instead of reaching an absent Ollama.
     with _provider_bridge.bind_rung(bridged_provider, tier_label):
@@ -11373,6 +11357,7 @@ def turn_inspect(index: int = 0, full_prompt: bool = False, token: str = "") -> 
     ]
     lines += ["    " + line for line in (turn["prompt"] or "(none)").splitlines()[:20]]
     lines += ["", "  lessons retrieved: %d" % len(turn["lessons"])]
+    lines += ["  prompts: " + (", ".join("%s=%s" % i for i in turn.get("prompts", {}).items()) or "(none recorded)")]
     lines += ["    - " + text for text in turn["lessons"]]
     lines += ["", "  exact prompt sent to the model:"]
     lines += ["    " + line for line in (prompt_text or "(none)").splitlines()]
@@ -16162,21 +16147,6 @@ def _chat_location(
     return location
 
 
-# System prompt for web-routed research runs (chat_web_response): web tools
-# only, no workspace discovery, stop as soon as the results answer.
-_RESEARCH_AGENT_SYSTEM = (
-    "You are answering a live-information question with public web tools. "
-    "Use web_search to locate an authoritative source unless the user already "
-    "supplied its URL. ALWAYS call web_fetch on the best source before "
-    "answering, even if a search snippet looks sufficient. Never fill a "
-    "missing version, price, office-holder, or "
-    "date from model memory. Workspace and file tools are outside this run's "
-    "allowlist. Cite fetched URLs in the final answer. As soon as the fetched "
-    "source answers the question, return {\"final\": ...} immediately instead "
-    "of calling more tools."
-)
-
-
 def chat_web_response(
     prompt: str,
     history=None,
@@ -16301,7 +16271,7 @@ def chat_web_response(
             "web_search", "web_fetch", "weather_lookup",
             "approximate_location_lookup",
         ),
-        system=_RESEARCH_AGENT_SYSTEM,
+        system=_prompts.render("web_research_agent"),
     )
 
 
@@ -17410,6 +17380,9 @@ def _agent_tool_help(
     here at all.
     """
     help_text = REPOSITORY_AGENT_TOOL_HELP if read_only else AGENT_TOOL_HELP
+    existing = _agent_help_advertised_tools(help_text)
+    generated = _generic_agent_dispatch.generated_help_lines(mcp, existing, _AGENT_SYSTEM_OPERATOR_TOOLS)
+    help_text = help_text.rstrip() + "\n" + "\n".join(generated) + "\n" if generated else help_text
     denied = frozenset(
         name for name in _agent_help_advertised_tools(help_text)
         if _agent_run_tool_refusal(
@@ -18033,17 +18006,7 @@ def _agent_negative_claim_review(
     # trio here is what made 100% of the hosted reviewer's vocabulary dead.
     vocabulary = _agent_claim_review_vocabulary(cloud)
     system = _build_system(
-        "You are a local evidence reviewer. Return exactly one JSON object and no "
-        "prose or chain-of-thought. Decide only accept or continue. Accept a negative "
-        "existence claim only when tool evidence searched the exact shortest useful "
-        "anchor across the relevant scope. Reject a paraphrased/descriptive search "
-        "query, a clipped read that did not reach the target, or a scope mismatch. "
-        "Never rewrite the answer or invent evidence; continue must return exactly "
-        "one structured read-only evidence action using %s. No other tool is "
-        "available on this run: if none of them can settle the claim, return "
-        "continue with an empty tool and say so in the reason -- never accept a "
-        "claim you could not check."
-        % ", ".join(vocabulary),
+        _prompts.render("claim_reviewer", tools=", ".join(vocabulary)),
         False,
         "",
         model=model,
@@ -19466,8 +19429,7 @@ def _agent_dispatch(
                 root=args.get("root", "."),
                 timeout=args.get("timeout", 30),
             )
-    return "ERROR: unknown tool '%s'." % tool_name
-
+    return _generic_agent_dispatch.dispatch(tool_name, args, mcp, _AGENT_SYSTEM_OPERATOR_TOOLS, run_refusal=_agent_run_tool_refusal, read_only=read_only, project_bound=bool(repository_extra_roots), allow_web=allow_web, allow_location=allow_location, unsafe=unsafe)
 
 
 
@@ -19625,7 +19587,7 @@ def _cloud_agent_tool_policy_error(tool_name, *, unsafe=False):
     """Keep host-data denial absolute; unsafe bypasses nested models only."""
     return _cloud_agent_tool_policy_error_impl(
         tool_name, unsafe=unsafe,
-        local_only_tools=_CLOUD_AGENT_LOCAL_ONLY_TOOLS,
+        local_only_tools=_CLOUD_AGENT_LOCAL_ONLY_TOOLS | _generic_agent_dispatch.generic_only_names(mcp, _AGENT_SYSTEM_OPERATOR_TOOLS, tool_capabilities.dispatch_names(_agent_dispatch, include_generic=False)),
         nested_model_tools=_CLOUD_AGENT_NESTED_MODEL_TOOLS,
     )
 
@@ -20591,13 +20553,7 @@ def _agent_turn(
         )
         return refusal
     if cloud:
-        default_agent_system = (
-            "You are a hosted tool-using coding agent. Use only the tools listed "
-            "in the task transcript; host policy may withhold private machine or "
-            "workspace capabilities. Never invent tool results. Use web tools "
-            "for current external information and cite fetched URLs in the final "
-            "answer. Lead with the outcome and disclose failures."
-        )
+        default_agent_system = _prompts.render("agent_hosted")
     else:
         # Composing the application installs the host capability-summary hook
         # the brief below reads. It never probes the host here, and a failure
@@ -20606,21 +20562,11 @@ def _agent_turn(
             _application()
         except Exception:
             pass
-        default_agent_system = (
-            "You are a local tool-using coding agent. Inspect real workspace evidence before making claims. "
-            "For action tasks, use tools instead of merely describing commands. Prefer workspace_inventory, directory_tree, "
-            "text_search, file_read_range, and program_search for discovery; use guarded file tools for "
-            "mutations; validate every mutation with workspace_run, script_run, file_read_range, "
-            "image_inspect, artifact_verify, or another path-specific checker before returning final. "
-            "After editing a script, run that exact path "
-            "with script_run; an equivalent run_code snippet does not validate the on-disk file. "
-            "Never invent tool results. "
-            "Use web tools for current external information and cite fetched URLs in the final answer. "
-            "Your final answer must lead with the outcome, mention changed paths and checks, and disclose failures. "
-            # One deterministic line about the host, so a local model picks the
-            # right command shape instead of guessing. Never send this private
-            # machine inventory to a hosted agent.
-            + _local_agent_brief(project_scope)
+        # $host_brief: one deterministic line about the host, so a local model
+        # picks the right command shape instead of guessing. Never send this
+        # private machine inventory to a hosted agent.
+        default_agent_system = _prompts.render(
+            "agent_local", host_brief=_local_agent_brief(project_scope),
         )
     # Hosted agents receive only the explicitly supplied/default hosted
     # system text. _build_system also appends mutable local profile, emotion,
@@ -21617,10 +21563,8 @@ def _agent_turn(
             )
         else:
             ensure_not_cancelled()
-            # Retire a matching speculation: if the model committed to the
-            # exact read-only call the host already ran during generation,
-            # reuse its buffered observation instead of dispatching again.
-            _retired = _spec_engine.resolve(call_signature)
+            # Retire a matching speculation (a non-read-only commit drops them all).
+            _retired = _spec_engine.resolve(call_signature, tool_name)
             if _retired is not None:
                 tool_dispatched = True
                 observation = _retired.observation
@@ -22436,10 +22380,7 @@ def _autopilot_json_model(run: dict, role: str, prompt: str, validator) -> dict:
     if model is None or cloud or tier_label not in autopilot_controller.LOCAL_TIERS:
         raise RuntimeError("autopilot requires an available local model tier")
     system = _build_system(
-        "You are Sonder's bounded autonomous %s. Return exactly one JSON "
-        "object, with no markdown or private chain-of-thought. Make concrete "
-        "decisions from the supplied state. Never expand policy, tools, roots, "
-        "budgets, or completion rules." % role,
+        _prompts.render("autopilot_system", role=role),
         False,
         "",
         model=model,
@@ -22476,20 +22417,8 @@ def _autopilot_plan_model(run: dict) -> dict:
         if run.get("adaptive", True) else 0
     )
     initial_limit = max(3, min(6, max_tasks - reserve))
-    prompt = (
-        "Create a short executable plan for this autonomous goal.\n"
-        "Objective: {objective}\nProject: {project}\nPolicy: {policy}\n"
-        "Web: {web}\nAdaptive checkpoints: {adaptive}\n"
-        "Initial task limit: {initial_limit}\nOverall task ledger limit: {max_tasks}\n"
-        "Replan budget: {max_replans}\nAllowed tools: {tools}\n\n"
-        "Use measurable success criteria. Order inspection before mutation and "
-        "always finish with grounded validation. Under observe policy, do not "
-        "create implementation tasks. Keep the initial plan within its smaller "
-        "limit so adaptive review has room to replace stale pending work. JSON schema:\n"
-        '{{"summary":"...","success_criteria":["..."],"tasks":['
-        '{{"title":"...","kind":"inspect|research|implement|validate|report",'
-        '"instruction":"specific bounded action"}}]}}'
-    ).format(
+    prompt = _prompts.render(
+        "autopilot_planner",
         objective=run.get("objective", ""),
         project=run.get("project") or "default",
         policy=run.get("policy", "workspace"),
@@ -22543,35 +22472,13 @@ def _autopilot_review_model(run: dict, issue: str) -> dict:
                 task.get("output", ""), limit=6,
             ),
         })
-    prompt = (
-        "Review the bounded run and select the next decision.\n"
-        "Objective: %s\nHost gate/issue: %s\nFailures: %s/%s\n"
-        "Task budget: %s/%s\nAdaptive checkpoints: %s\nReplans: %s/%s\n"
-        "Ledger: %s\n\n"
-        "Use complete only when the host gate says all requirements passed. "
-        "At an adaptive checkpoint, use continue when the pending plan remains "
-        "correct, replan only when new evidence makes it stale, or pause when "
-        "operator judgment is genuinely required. Use retry only after a failure. "
-        "At every adaptive checkpoint, assess every pending task by ID. A task is "
-        "stale when completed evidence contradicts its premise or says its work is "
-        "already unnecessary. A stale task forbids continue: choose replan, omit "
-        "the contradicted work, and retain necessary validation/reporting. "
-        "The host preserves tasks marked keep and supersedes only tasks marked "
-        "stale. Every replan must include only necessary new replacement tasks; "
-        "tasks may be empty when removing stale work is sufficient and a kept "
-        "validation task remains. JSON schema:\n"
-        '{"decision":"complete|continue|retry|replan|pause","reason":"...",'
-        '"instruction":"corrected retry instruction or empty",'
-        '"pending_assessment":[{"id":"task-00","verdict":"keep|stale",'
-        '"reason":"evidence comparison"}],'
-        '"tasks":[{"title":"...","kind":"inspect|research|implement|validate|report",'
-        '"instruction":"..."}]}'
-    ) % (
-        run.get("objective", ""), issue, run.get("failures", 0),
-        run.get("max_failures", 3), len(run.get("plan") or []),
-        run.get("max_tasks", 12), run.get("checkpoints", 0),
-        run.get("replans", 0), run.get("max_replans", 0),
-        json.dumps(ledger, ensure_ascii=False),
+    prompt = _prompts.render(
+        "autopilot_reviewer",
+        objective=run.get("objective", ""), issue=issue, failures=run.get("failures", 0),
+        max_failures=run.get("max_failures", 3), task_count=len(run.get("plan") or []),
+        max_tasks=run.get("max_tasks", 12), checkpoints=run.get("checkpoints", 0),
+        replans=run.get("replans", 0), max_replans=run.get("max_replans", 0),
+        ledger=json.dumps(ledger, ensure_ascii=False),
     )
 
     is_checkpoint = str(issue or "").startswith("adaptive checkpoint")
@@ -22648,28 +22555,12 @@ def _autopilot_review_model(run: dict, issue: str) -> dict:
     )
 
 
-def _autopilot_evidence_has(output: str, tools) -> bool:
-    names = {str(name) for name in tools}
-    return any(
-        match.group(1) in names
-        for match in re.finditer(r"\btool=([A-Za-z0-9_]+)", str(output or ""))
-    )
-
-
 def _autopilot_work_model(
     run: dict, task: dict, prior: str, *, strategy_memory=None,
 ) -> autopilot_controller.HostTaskResult | str:
     allowed = _autopilot_allowed_tools(run)
-    prompt = (
-        "Autopilot objective: {objective}\n"
-        "Current bounded task: {task_id} [{kind}] {title}\n"
-        "Instruction: {instruction}\n"
-        "Success criteria:\n{criteria}\n"
-        "Prior task evidence:\n{prior}\n\n"
-        "Complete only this task using host tools. Inspect before mutation, do "
-        "not broaden scope, and validate every persistent change. If blocked, "
-        "report the exact blocker; do not claim success."
-    ).format(
+    prompt = _prompts.render(
+        "autopilot_worker",
         objective=run.get("objective", ""),
         task_id=task.get("id", ""),
         kind=task.get("kind", ""),
@@ -23157,30 +23048,14 @@ def _execution_route_model(
     if model is None or cloud or tier_label not in LOCAL_TIERS:
         raise RuntimeError("local execution router model is unavailable")
     system = _build_system(
-        "You are Sonder's execution-mode router. Return exactly one JSON "
-        "object and no prose or chain-of-thought. You may choose only workbench "
-        "or autopilot and only fast, code, or general local tiers. Workbench is a "
-        "foreground task with at most 12 tool steps. "
-        "Autopilot is a persistent multi-stage goal with planning, evidence review, "
-        "replanning, and validation. Never alter permissions, roots, tier mappings, "
-        "or tools.",
+        _prompts.render("execution_router_system"),
         False,
         "",
         model=model,
         cloud=False,
     )
-    route_prompt = (
-        "Choose the smallest reliable execution mode for this developer-authorized "
-        "work request. Prefer workbench when the task is self-contained and likely "
-        "to finish in one bounded tool loop. Prefer autopilot when it has several "
-        "dependent phases, needs durable progress, or requires discovery followed "
-        "by implementation and independent validation. Choose fast only for tiny "
-        "mechanical/read tasks, code for repository/code/tool work, and general for "
-        "prose-heavy explanation or review.\n"
-        "Project: %s\nRequest: %s\n"
-        'JSON schema: {"mode":"workbench|autopilot","tier":"fast|code|general",'
-        '"reason":"brief evidence-based reason","confidence":0.0}'
-        % (project or "default", str(prompt or "")[:12000])
+    route_prompt = _prompts.render(
+        "execution_router", project=project or "default", request=str(prompt or "")[:12000],
     )
     gen = _make_generate(model, system, 0.0, 240, 4096, cloud=False)
     correction = ""
@@ -23230,7 +23105,7 @@ def _execution_route_header(
 ) -> str:
     return _execution_route_header_impl(
         mode, source, reason, confidence, tier,
-        tiers_map=TIERS, local_tiers=runtime_policy.LOCAL_TIERS,
+        tiers_map=_served_models.served_tier_models(TIERS), local_tiers=runtime_policy.LOCAL_TIERS,
     )
 
 
@@ -23282,7 +23157,7 @@ def route_work_request(
     turn: the execution-mode router and the lane it chooses each build their
     own system prompt, and both go to a model. See _stable_system_context.
     """
-    with _stable_system_context():
+    with _stable_system_context(), _served_models.observation_scope():
         return _route_work_request(
             prompt, project=project, _classified_intent=_classified_intent,
             _admitted_decision=_admitted_decision,
@@ -23500,8 +23375,15 @@ def _route_work_request(
     )
 
 
+def _pool_member_tags(origin: str) -> dict:
+    with OLLAMA_POOL.open_url(urllib.request.Request(f"{origin}/api/tags"), timeout=15) as resp:
+        return json.loads(_read_ollama_response_bytes(resp).decode("utf-8"))
+
+
 def _runtime_installed_model_records() -> tuple[tuple[str, dict], ...]:
-    """Read one coherent local catalog snapshot for policy validation."""
+    """One catalog snapshot for policy validation: every pool member's models."""
+    if OLLAMA_POOL.enabled:
+        return _installed_catalog_records(OLLAMA_POOL.catalog_union(_pool_member_tags))
     return _installed_catalog_records(_get("/api/tags"))
 
 
@@ -24374,12 +24256,6 @@ def _fanout_plan(scope, *, profile="", include_unhealthy=False):
             "hosted/cloud tiers are disabled. Set SONDER_ALLOW_CLOUD=1 to opt in; prompts sent to cloud tiers leave this machine.",
         )
     return {"scope": scope, "selected": selected, "skipped": skipped}, None
-
-
-def _fanout_models(scope):
-    """Compatibility selector retained for callers that only need targets."""
-    plan, error = _fanout_plan(scope)
-    return plan["selected"], error
 
 
 
@@ -27041,6 +26917,14 @@ def run_mcp(*, safety_checked: bool = False) -> None:
                 OLLAMA_POOL.drain(timeout_seconds=5.0)
         finally:
             _close_server_owned_application(timeout=5)
+
+
+from sonder_runtime.bootstrap.computer_use_tools import register as _register_computer_use  # noqa: E402
+_register_computer_use(mcp, _record_direct_tool, lambda: _application())
+
+
+def route_computer_use(text):
+    return _computer_use_route(text, sys.modules[__name__])  # HTTP chat's desktop route
 
 
 if __name__ == "__main__" and not globals().get("_MCP_HOT_RELOAD_EXEC"):

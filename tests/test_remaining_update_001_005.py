@@ -33,6 +33,11 @@ NOW = datetime(2026, 8, 20, tzinfo=timezone.utc)
 FUTURE = "2026-08-21T00:00:00Z"
 
 
+class _TestLedger:
+    def accept(self, _repository, _chain, _verifier):
+        pass
+
+
 def _digest(value: bytes) -> str:
     return sha256(value).hexdigest()
 
@@ -70,7 +75,7 @@ def _target(artifact: bytes = b"bundle") -> tuple[UpdateTarget, bytes]:
 
 def test_tuf_like_chain_is_immutable_bounded_and_verifies_all_roles():
     chain = _chain()
-    chain.verify(_verify, now=NOW)
+    chain.verify(_verify, now=NOW, repository="test", ledger=_TestLedger())
     assert tuple(item.role for item in chain.entries) == ("root", "timestamp", "snapshot", "targets")
     with pytest.raises(AttributeError):
         chain.entries = ()
@@ -80,7 +85,8 @@ def test_metadata_expiry_and_link_tampering_fail_closed():
     chain = _chain()
     expired = replace(chain.entries[-1], expires_at="2026-08-19T23:59:59Z")
     with pytest.raises(MetadataChainError, match="expired"):
-        TufLikeMetadataChain((*chain.entries[:-1], expired)).verify(_verify, now=NOW)
+        TufLikeMetadataChain((*chain.entries[:-1], expired)).verify(
+            _verify, now=NOW, repository="test", ledger=_TestLedger())
     with pytest.raises(ValueError, match="link"):
         TufLikeMetadataChain((*chain.entries[:-1], replace(chain.entries[-1], previous_digest=_digest(b"wrong"))))
 
@@ -127,7 +133,7 @@ def test_bounded_update_lifecycle_requires_order_and_caps_history():
     with pytest.raises(ValueError, match="verified"):
         state.stage(ports, artifact)
     state.download(ports)
-    state.verify(_verify, now=NOW)
+    state.verify(_verify, now=NOW, repository="test", ledger=_TestLedger())
     state.stage(ports, artifact)
     state.health_gate(ports)
     state.activate(
@@ -154,7 +160,7 @@ def test_staging_rechecks_bytes_before_passing_them_to_the_stage_port():
     ports = _Ports(artifact)
     state = BoundedUpdateState(target)
     state.download(ports)
-    state.verify(_verify, now=NOW)
+    state.verify(_verify, now=NOW, repository="test", ledger=_TestLedger())
     with pytest.raises(ValueError, match="staged artifact"):
         state.stage(ports, b"changed")
     assert state.snapshot.phase is UpdatePhase.FAILED

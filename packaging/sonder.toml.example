@@ -54,10 +54,13 @@ max_batch_records = 256
 [ollama]
 url = "http://127.0.0.1:11434"
 allow_remote = false
-# workers = ["http://10.0.0.2:11434"]
-# Private-network CIDRs where HTTP (non-TLS) Ollama workers are accepted.
-# Without this, remote workers must use HTTPS.  Use only on isolated LANs.
-# trusted_origins = ["10.0.0.0/8", "192.168.0.0/16"]
+# Remote workers must use HTTPS through an authenticated TLS proxy in front
+# of the worker's Ollama; never point a worker at a raw :11434 port.  Use
+# ca_bundle for a private CA.  See docs/runbooks/multi-node-ollama.md.
+# workers = ["https://10.0.0.2:8443"]
+# ca_bundle = "/etc/sonder/ollama-ca.pem"
+# trusted_origins is legacy CIDR metadata kept for compatibility; it never
+# permits plain-HTTP workers or relaxes TLS validation.
 startup_timeout_seconds = 60
 request_timeout_seconds = 300
 

@@ -119,8 +119,12 @@ EventSink -> LocalObservabilitySink -> TeeEventSink(OperationsEventSink,
   would give two events the same `event_id`. Consumers treat a new instance
   like a restart (contract section 14).
 - `event_id` is `<instance_id>-<sequence>`; sequences are contiguous from 0.
-  `mono_ns` is `time.monotonic_ns()` (Linux `CLOCK_MONOTONIC`, shared with
-  Sonder-Inference on the same host), read under the same lock that assigns
+  `mono_ns` is the host-monotonic clock shared with Sonder-Inference on the
+  same host: `time.monotonic_ns()` (`CLOCK_MONOTONIC`) on Linux and
+  `time.perf_counter_ns()` (QueryPerformanceCounter, what MSVC
+  `steady_clock` reads) on Windows, where CPython before 3.13 backs
+  `time.monotonic_ns()` with the coarser, offset `GetTickCount64`. It is
+  read under the same lock that assigns
   `sequence`, so ordering by `(mono_ns, sequence)` (Observatory's replay
   order) agrees with ordering by `sequence`.
   `wall_time` is RFC 3339 UTC with milliseconds and `Z`. `node_id` is the
@@ -166,6 +170,15 @@ All three routes require administrator authorization exactly as
 `/v1/observability/trace` does. In local-open loopback mode that is every
 loopback caller; with an API key it is `Authorization: Bearer <key>`.
 Discovery reports `auth.required: false` only in local-open mode.
+
+`SONDER_AUTH_MODE=both` is not supported for live telemetry. That mode needs
+the API key in `Authorization` *and* an administrator account token in
+`X-Sonder-Account-Token`, while Observatory sends a single bearer and the
+telemetry CORS grant does not allow the account header. Every telemetry
+route, discovery included, therefore answers 401 in `both` mode. This is
+deliberate and fails closed: accepting either credential alone would weaken
+the two-credential rule `both` exists to enforce. Run the runtime in
+`api-key` mode (or local-open on loopback) when Observatory must connect.
 
 DNS-rebinding defence has two layers. The listener's own `Host` policy runs
 first, before any routing, and refuses a name it does not trust with 421
@@ -230,8 +243,9 @@ is replaced with `[unsafe-label]`.
 | `session.ended` | `emitted_events`, `dropped_events` | best effort when the graph closes |
 | `request.started` | `surface: "http.chat_completions" \| "a2a"`, `kind: "chat"`, `stream`, `requested_model`, `workload` | turn start, after request validation |
 | `route.selected` | `provider: "ollama" \| "openai_compatible" \| "sonder_inference"`, `operation: "chat" \| "generate"`, `model` (the provider-reported model when the reply names one), `attempt` (1-based in the turn), `status: "ok" \| "error"`, `error_code?` | once per provider send inside a turn, from the `dispatch_provider` observer, when the send completes (it carries the reply's model and usage, so a hung send shows no route until it ends) |
-| `route.changed` | `from_provider`, `to_provider`, `reason_code`, `attempt` | attempt k's provider differs from attempt k-1's, or a fallback wrapper reports a pre-send fallback |
+| `route.changed` | `from_provider`, `to_provider`, `reason_code`, `attempt`; for a long-context overflow also `from_model`, `to_model`, `estimated_tokens`, `threshold` and `to_worker_id?` (the pool's opaque worker id; the receipt notice names the worker by `host:port`) | attempt k's provider differs from attempt k-1's, a fallback wrapper reports a pre-send fallback, or the long-context overflow moves the first attempt to its model (`reason_code: "context_over_threshold"`) |
 | `request.completed` \| `request.failed` \| `request.cancelled` | `outcome`, `total_ms`, `http_status`, `provider`, `model`, `attempts`, `prompt_tokens?`, `completion_tokens?`, `error_code?` | exactly once per started turn |
+| `request.failed` (`rejected: true`) | `outcome: "failed"`, `rejected: true`, `surface`, `kind: "chat"`, `http_status`, `error_code` (the HTTP metric label, e.g. `invalid_model`), `requested_model?`, `attempts: 0`, `total_ms` | a chat request from an authenticated caller refused before `request.started` (unknown model, invalid body, multimodal content, forbidden command, rate limit, drain); no `request.started` precedes it, so it never opens a request span |
 | `telemetry.dropped` | `dropped_events` (cumulative), `emitted_events`, `queue_capacity`, `final` | producer drops |
 
 A pre-send fallback (`SONDER_INFERENCE_FALLBACK=ollama` after a refusal from
@@ -265,8 +279,12 @@ Error codes are domain codes, never Python class names:
   HTTP metric label.
 
 Provider sends outside a turn (background distillation, REPL, MCP) are not
-exported in v1. A request rejected before `request.started` (origin,
-framing, authentication, validation) has no terminal event either.
+exported in v1. A chat request refused before `request.started` is exported
+as one `request.failed` with `rejected: true` (see the vocabulary) only after
+the caller authenticated: origin, framing, authentication and
+authentication-rate-limit refusals stay off the stream, so anonymous traffic
+cannot fill the bounded ring. The event carries the bounded model label and
+the metric label, never the body, the error message or the credentials.
 
 Bridged EventSink events: only `model.escalation.decided`,
 `model.escalation.outcome` and `agent.delegation.accepted` cross into the
@@ -311,6 +329,8 @@ for the request carry `run_id = R` and `attributes.parent_request_id = R`.
 
 - `providers.status` comes from the model gateway's `provider_status()`; a
   gateway or provider without it reports `{"provider": id, "state": "unknown"}`.
+  Sonder Inference's entry includes `tier_models` (`{tier: model}`), the
+  model each tier bound to it is served with (additive).
 - URLs use the loopback listener address (`127.0.0.1` for a `0.0.0.0` bind).
 - `connect_urls` lists the Runtime base URL (when export is on) and the base
   URL of every provider whose status names telemetry URLs.

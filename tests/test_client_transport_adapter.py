@@ -14,8 +14,10 @@ class _Response:
     def __exit__(self, *_args):
         return False
 
-    def read(self):
-        return json.dumps(self._payload).encode("utf-8")
+    def read(self, size=-1):
+        # The transport reads a bounded body in chunks until EOF.
+        body, self._payload = self._payload, None
+        return b"" if body is None else json.dumps(body).encode("utf-8")
 
 
 def test_client_transport_adapter_owns_send_prompt(monkeypatch):

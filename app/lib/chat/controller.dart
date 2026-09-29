@@ -6,6 +6,7 @@ import 'package:flutter/widgets.dart' show AppLifecycleState;
 import '../api.dart';
 import '../chat_store.dart';
 import '../models.dart';
+import '../runtime/model_routing.dart';
 import 'backend.dart';
 import 'commands.dart';
 import 'connection.dart';
@@ -113,6 +114,11 @@ class ChatController extends ChangeNotifier {
   Timer? _liveTimer;
   bool _pollInFlight = false;
   bool _modeInFlight = false;
+
+  /// Bumped when the server/key/account changes. A status, mode or model
+  /// read that started under an older generation is discarded on return,
+  /// and its in-flight flag no longer blocks the new identity's reads.
+  int _backendGeneration = 0;
   bool _paused = false;
   bool _started = false;
   bool _disposed = false;
@@ -156,6 +162,13 @@ class ChatController extends ChangeNotifier {
   String get model => _model;
   List<String> _models = const ['sonder'];
   List<String> get models => _models;
+
+  /// Provider bindings for picker labels; empty when the runtime cannot say.
+  ModelRouting _routing = const ModelRouting();
+  ModelRouting get routing => _routing;
+
+  /// `/v1/models` row origins, the routing fallback for non-administrators.
+  Map<String, ModelOrigin> _origins = const {};
   CommandCatalog catalog = fallbackCatalog;
   bool catalogFromServer = false;
 
@@ -198,9 +211,14 @@ class ChatController extends ChangeNotifier {
   void updateBackend(ChatBackend next, {required bool identityChanged}) {
     _backend = next;
     if (identityChanged) {
+      _backendGeneration++;
+      _pollInFlight = false;
+      _modeInFlight = false;
       _modeReadOnly = false;
       _mode = null;
       _lastKnownMode = null;
+      _routing = const ModelRouting();
+      _origins = const {};
       connection.value = ConnectionStatus.connecting(next.serverUrl);
       status.value = null;
       _notify();
@@ -252,19 +270,24 @@ class ChatController extends ChangeNotifier {
     _pollInFlight = true;
     _pollTimer?.cancel();
     statusRequests++;
+    final generation = _backendGeneration;
+    final backend = _backend;
     try {
-      final info = await _backend.systemInfo();
-      if (_disposed) return;
+      final info = await backend.systemInfo();
+      if (_disposed || generation != _backendGeneration) return;
       status.value = info;
       _setConnection(ConnectionStatus(
-          ConnState.connected, ConnectionStatus.hostOf(_backend.serverUrl)));
+          ConnState.connected, ConnectionStatus.hostOf(backend.serverUrl)));
     } catch (e) {
-      if (_disposed) return;
+      if (_disposed || generation != _backendGeneration) return;
       status.value = null;
-      _setConnection(ConnectionStatus.fromError(e, _backend.serverUrl));
+      _setConnection(ConnectionStatus.fromError(e, backend.serverUrl));
     } finally {
-      _pollInFlight = false;
-      _schedulePoll();
+      // A stale poll neither clears the new identity's flag nor reschedules.
+      if (generation == _backendGeneration) {
+        _pollInFlight = false;
+        _schedulePoll();
+      }
     }
   }
 
@@ -290,15 +313,39 @@ class ChatController extends ChangeNotifier {
   // -- Models and commands ---------------------------------------------------
 
   Future<void> refreshModels() async {
+    final generation = _backendGeneration;
     try {
-      final models = await _backend.listModels();
-      if (_disposed || models.isEmpty) return;
+      final backend = _backend;
+      final catalog = await backend.modelCatalog();
+      if (_disposed || generation != _backendGeneration) return;
+      if (identical(backend, _backend)) _origins = catalog.origins;
+      final models = catalog.ids;
+      if (models.isEmpty) return;
       _models = models;
       _model = resolveCatalogModel(_models, _model);
       _notify();
     } catch (_) {
       // Offline / no auth: keep the fallback list.
     }
+    await refreshRouting();
+  }
+
+  /// Re-read the provider bindings. The ecosystem document is preferred;
+  /// when it cannot be read (older runtime, 403 for a non-administrator)
+  /// the `/v1/models` row origins label the picker, and with neither the
+  /// labels stay plain.
+  Future<void> refreshRouting() async {
+    final backend = _backend;
+    EcosystemStatus? status;
+    try {
+      status = (await backend.ecosystemStatus()).status;
+    } catch (_) {
+      status = null;
+    }
+    final next = ModelRouting.of(status, origins: _origins);
+    if (_disposed || !identical(backend, _backend)) return;
+    _routing = next;
+    _notify();
   }
 
   void selectModel(String m) {
@@ -314,9 +361,12 @@ class ChatController extends ChangeNotifier {
   }
 
   Future<void> refreshCommands() async {
+    final generation = _backendGeneration;
     try {
       final next = await _backend.fetchCommands();
-      if (_disposed || next.isEmpty) return;
+      if (_disposed || generation != _backendGeneration || next.isEmpty) {
+        return;
+      }
       catalog = next;
       catalogFromServer = true;
       _notify();
@@ -331,6 +381,7 @@ class ChatController extends ChangeNotifier {
     if (_modeInFlight || _disposed) return;
     _modeInFlight = true;
     _modeTimer?.cancel();
+    final generation = _backendGeneration;
     PermissionMode? next;
     try {
       final mode = await _backend.fetchPermissionMode();
@@ -338,10 +389,14 @@ class ChatController extends ChangeNotifier {
     } catch (_) {
       next = null;
     } finally {
-      _modeInFlight = false;
-      _scheduleModePoll();
+      if (generation == _backendGeneration) {
+        _modeInFlight = false;
+        _scheduleModePoll();
+      }
     }
-    if (_disposed) return;
+    // A mode read from the previous server/account is never applied: a
+    // stale high mode would make a real raise look like a lowering.
+    if (_disposed || generation != _backendGeneration) return;
     if (next != null) _lastKnownMode = next;
     if (next?.mode == _mode?.mode &&
         next?.elevated == _mode?.elevated &&
@@ -368,19 +423,29 @@ class ChatController extends ChangeNotifier {
       return (ModeChangeOutcome.readOnly, modeReadOnlyText);
     }
     if (target == current.mode) return (ModeChangeOutcome.unchanged, '');
+    final generation = _backendGeneration;
     if (isModeRaise(current.mode, target)) {
       final ok = await confirm(current.mode, target);
-      if (!ok || _disposed) return (ModeChangeOutcome.declined, '');
+      // A confirmation given for the previous server/account is not one for
+      // the new identity.
+      if (!ok || _disposed || generation != _backendGeneration) {
+        return (ModeChangeOutcome.declined, '');
+      }
     }
     _switchingMode = true;
     _notify();
     try {
       final next = await _backend.setPermissionMode(target);
-      if (_disposed) return (ModeChangeOutcome.changed, '');
+      if (_disposed || generation != _backendGeneration) {
+        return (ModeChangeOutcome.changed, '');
+      }
       _mode = next.isUsable ? next : null;
       if (_mode != null) _lastKnownMode = _mode;
       return (ModeChangeOutcome.changed, '');
     } on SonderException catch (e) {
+      if (_disposed || generation != _backendGeneration) {
+        return (ModeChangeOutcome.changed, '');
+      }
       final err = normalizeModeError(e);
       if (err.httpStatus == 403 || err.code == 'FORBIDDEN') {
         _modeReadOnly = true;
@@ -394,6 +459,9 @@ class ChatController extends ChangeNotifier {
         'Could not change mode: ${err.message}'
       );
     } catch (e) {
+      if (_disposed || generation != _backendGeneration) {
+        return (ModeChangeOutcome.changed, '');
+      }
       _mode = null;
       unawaited(refreshPermissionMode());
       return (ModeChangeOutcome.failed, 'Could not change mode.');
@@ -514,17 +582,46 @@ class ChatController extends ChangeNotifier {
     _notify();
   }
 
-  Future<void> deleteThread(ChatThread thread) async {
+  /// Delete [thread]. The result is what [restoreThread] needs to undo it.
+  Future<DeletedThread> deleteThread(ChatThread thread) async {
+    final index = _threads.indexWhere((t) => t.id == thread.id);
+    final stored = index < 0 ? thread : _threads[index];
     if (sending && _turnThreadId == thread.id) cancel();
     final remaining = _threads.where((t) => t.id != thread.id).toList();
-    final next =
-        remaining.isEmpty ? [ChatThread.fresh(project: _project)] : remaining;
-    final current = thread.id == _currentThreadId ? next.first : currentThread;
+    final placeholder =
+        remaining.isEmpty ? ChatThread.fresh(project: _project) : null;
+    final next = placeholder == null ? remaining : [placeholder];
+    final wasCurrent = thread.id == _currentThreadId;
+    final current = wasCurrent ? next.first : currentThread;
     _threads = next;
     _currentThreadId = current.id;
     _project = current.project;
     _setEntries(current.messages);
-    _sessions.remove(thread.id);
+    final session = _sessions.remove(thread.id);
+    _notify();
+    await ChatStore.save(next);
+    return DeletedThread._(stored, index < 0 ? 0 : index, wasCurrent,
+        session, placeholder?.id);
+  }
+
+  /// Put back a thread [deleteThread] removed, at its old position, and
+  /// select it again if it was selected. An untouched placeholder created
+  /// by the delete is dropped.
+  Future<void> restoreThread(DeletedThread deleted) async {
+    final thread = deleted.thread;
+    if (_threads.any((t) => t.id == thread.id)) return;
+    final next = [
+      for (final t in _threads)
+        if (t.id != deleted._placeholderId || t.messages.isNotEmpty) t,
+    ];
+    next.insert(deleted.index.clamp(0, next.length), thread);
+    _threads = next;
+    if (deleted._session case final n?) _sessions[thread.id] = n;
+    if (deleted.wasCurrent || !next.any((t) => t.id == _currentThreadId)) {
+      _currentThreadId = thread.id;
+      _project = thread.project;
+      _setEntries(thread.messages);
+    }
     _notify();
     await ChatStore.save(next);
   }
@@ -696,8 +793,22 @@ class ChatController extends ChangeNotifier {
   }
 
   /// Re-add the pending row when returning to the thread whose turn is live.
+  ///
+  /// [_setEntries] gives every row a fresh id, so the turn's user row is
+  /// found again: it is the thread's last user message, since nothing else
+  /// can be sent to this thread while its turn is live. Stop then restores
+  /// the prompt and rotates a cancelled first turn's session.
   void _restorePendingRow() {
-    if (_entries.isNotEmpty && _entries.last.message.pending) return;
+    for (final e in _entries.reversed) {
+      if (e.message.role == Role.user) {
+        _userId = e.id;
+        break;
+      }
+    }
+    if (_entries.isNotEmpty && _entries.last.message.pending) {
+      _pendingId = _entries.last.id;
+      return;
+    }
     _add(const ChatMessage(role: Role.assistant, content: '', pending: true));
     _pendingId = _entries.last.id;
   }
@@ -934,4 +1045,17 @@ extension<T> on Iterable<T> {
     final it = iterator;
     return it.moveNext() ? it.current : null;
   }
+}
+
+/// A thread removed by [ChatController.deleteThread], kept in memory so the
+/// delete can be undone.
+class DeletedThread {
+  final ChatThread thread;
+  final int index;
+  final bool wasCurrent;
+  final int? _session;
+  final String? _placeholderId;
+
+  const DeletedThread._(this.thread, this.index, this.wasCurrent,
+      this._session, this._placeholderId);
 }

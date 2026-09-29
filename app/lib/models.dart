@@ -46,6 +46,10 @@ class ChatResponseMetadata {
   /// A permission-gate refusal carried by this turn, or null.
   final ChatRefusal? refusal;
 
+  /// `sonder_receipt.overflow`: the long-context overflow decision for this
+  /// turn (switched to the overflow model, or stayed), or null.
+  final RouteOverflow? overflow;
+
   const ChatResponseMetadata({
     this.completionId = '',
     this.requestId = '',
@@ -63,6 +67,7 @@ class ChatResponseMetadata {
     this.workRunId = '',
     this.workStatus = '',
     this.refusal,
+    this.overflow,
   });
 
   /// True while the answer is still being produced by a work run.
@@ -89,6 +94,7 @@ class ChatResponseMetadata {
             ? ChatRefusal.fromJson(
                 Map<String, dynamic>.from(json['refusal'] as Map))
             : null,
+        overflow: RouteOverflow.fromJson(json['overflow']),
       );
 
   /// A copy with the work-run fields replaced (after a refresh or cancel).
@@ -110,6 +116,7 @@ class ChatResponseMetadata {
         workRunId: workRunId ?? this.workRunId,
         workStatus: workStatus ?? this.workStatus,
         refusal: refusal,
+        overflow: overflow,
       );
 
   bool get isEmpty =>
@@ -128,7 +135,8 @@ class ChatResponseMetadata {
       toolCalls == 0 &&
       workRunId.isEmpty &&
       workStatus.isEmpty &&
-      refusal == null;
+      refusal == null &&
+      overflow == null;
 
   Map<String, Object> toJson() => {
         'completion_id': completionId,
@@ -147,6 +155,7 @@ class ChatResponseMetadata {
         if (workRunId.isNotEmpty) 'work_run_id': workRunId,
         if (workStatus.isNotEmpty) 'work_status': workStatus,
         if (refusal != null) 'refusal': refusal!.toJson(),
+        if (overflow != null) 'overflow': overflow!.toJson(),
       };
 
   /// Compact, content-free evidence suitable for a collapsed diagnostics row.
@@ -178,8 +187,34 @@ class ChatResponseMetadata {
     if (refusal?.callId.isNotEmpty == true) {
       lines.add('refused call: ${refusal!.callId}');
     }
+    if (overflow != null) lines.add(overflow!.notice);
     return lines.join('\n');
   }
+}
+
+/// The long-context overflow decision the server made for one turn.
+///
+/// Read from `sonder_receipt.overflow`: [status] is `switched` (the turn ran
+/// on the overflow model) or `unavailable` (it stayed on its route), and
+/// [notice] is the server's one-line statement, rendered as sent.
+class RouteOverflow {
+  final String status;
+  final String notice;
+
+  const RouteOverflow({required this.status, required this.notice});
+
+  bool get switched => status == 'switched';
+
+  /// Null unless [value] is a receipt entry with a status and a notice.
+  static RouteOverflow? fromJson(Object? value) {
+    if (value is! Map) return null;
+    final status = _boundedMetadataText(value['status'], 32);
+    final notice = _boundedMetadataText(value['notice'], 300);
+    if (status.isEmpty || notice.isEmpty) return null;
+    return RouteOverflow(status: status, notice: notice);
+  }
+
+  Map<String, Object> toJson() => {'status': status, 'notice': notice};
 }
 
 String _workRunIdOrEmpty(Object? value) {
@@ -196,16 +231,19 @@ class ChatRefusal {
   final String callId;
   final String tool;
   final String reason;
+
+  /// The permission mode that refused the call, as the server reported it.
+  final String mode;
   final List<String> remedies;
 
   const ChatRefusal({
     this.callId = '',
     this.tool = '',
     this.reason = '',
+    this.mode = '',
     this.remedies = const [],
   });
 
-  static final RegExp _callId = RegExp(r'/approve ([0-9a-f]{8,64})\b');
   // Case-sensitive: the server's gates always write lowercase `refused`,
   // while a model answer that merely opens with "Refused connections …"
   // must not lose its rating chips.
@@ -224,27 +262,29 @@ class ChatRefusal {
       callId: RegExp(r'^[0-9a-f]{8,64}$').hasMatch(id) ? id : '',
       tool: _boundedMetadataText(json['tool'], 128),
       reason: _boundedMetadataText(json['reason'], 1024),
+      mode: _boundedMetadataText(json['mode'], 32),
       remedies: remedies,
     );
   }
 
-  /// Text fallback until server S1: the reply starts with `refused` and may
-  /// name `/approve <call id>`. Returns null for any other reply.
+  /// Text fallback for servers without S1: the reply starts with `refused`.
+  /// Returns null for any other reply.
+  ///
+  /// Reply text is model-authored, so it never carries approval authority:
+  /// a `/approve <id>` inside it is ignored and [callId] stays empty. Only
+  /// the server's structured `sonder_receipt.refusal` can offer "Approve
+  /// this call once".
   static ChatRefusal? fromText(String text) {
     if (!_refusedPrefix.hasMatch(text)) return null;
-    final id = _callId.firstMatch(text)?.group(1) ?? '';
     final firstLine = text.trim().split('\n').first;
-    return ChatRefusal(
-      callId: id,
-      reason: _boundedMetadataText(firstLine, 1024),
-      remedies: id.isEmpty ? const [] : ['/approve $id'],
-    );
+    return ChatRefusal(reason: _boundedMetadataText(firstLine, 1024));
   }
 
   Map<String, Object> toJson() => {
         if (callId.isNotEmpty) 'call_id': callId,
         if (tool.isNotEmpty) 'tool': tool,
         if (reason.isNotEmpty) 'reason': reason,
+        if (mode.isNotEmpty) 'mode': mode,
         if (remedies.isNotEmpty) 'remedies': remedies,
       };
 }

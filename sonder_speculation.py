@@ -501,8 +501,38 @@ class SpeculationEngine:
         thread.start()
         return True
 
-    def resolve(self, real_signature: str) -> SpeculativeResult | None:
+    def invalidate(self) -> None:
+        """Drop every buffered observation because the workspace may have changed.
+
+        Unlike :meth:`discard`, nothing is kept for a later retirement: each
+        in-flight worker is joined and its result thrown away, and the
+        retired-result cache is emptied.  A write, an execution tool, or any
+        other call outside the read-only allowlist can make every buffered
+        read stale while its call signature (tool name plus arguments) stays
+        identical, so retiring one afterwards would report pre-mutation state.
+        """
+        with self._lock:
+            slots = self._slots
+            self._slots = []
+            self._retired_cache.clear()
+        for slot in slots:
+            thread = slot.get("thread")
+            if thread is not None:
+                thread.join(timeout=30)
+            self._predictor.note_squash()
+        with self._lock:
+            # A worker that outlived its join cannot repopulate the cache: only
+            # _cache_result writes it, and nothing retires these slots now.
+            self._retired_cache.clear()
+
+    def resolve(
+        self, real_signature: str, tool_name: str | None = None,
+    ) -> SpeculativeResult | None:
         """Retire the buffered result whose slot matches the committed branch.
+
+        When ``tool_name`` names a committed call outside the read-only
+        speculation allowlist, the whole buffer is invalidated first (see
+        :meth:`invalidate`) and nothing is retired.
 
         Scans the buffer for a slot whose call signature equals the real one.
         On a match that slot is joined and its result returned (latency
@@ -512,6 +542,9 @@ class SpeculationEngine:
         buffer cannot grow unbounded.  With a single slot this is exactly the
         original retire-on-match / squash-on-miss behavior.
         """
+        if tool_name is not None and not self._predictor.speculatable(tool_name):
+            self.invalidate()
+            return None
         with self._lock:
             match = None
             for slot in self._slots:
@@ -697,6 +730,18 @@ def default_predictor() -> BranchPredictor:
 
 def speculation_enabled() -> bool:
     return os.environ.get("SONDER_SPECULATION", "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+
+
+def prewarm_enabled() -> bool:
+    """Model prewarm runs when speculation does, unless SONDER_PREWARM is off.
+
+    Prewarm spends an Ollama load on a prediction; operators (and the test
+    suite, whose incidental HTTP chats would otherwise reach the machine's
+    real Ollama) can switch it off without disabling agent-loop speculation.
+    """
+    return speculation_enabled() and os.environ.get("SONDER_PREWARM", "1").strip().lower() not in (
         "0", "false", "no", "off",
     )
 

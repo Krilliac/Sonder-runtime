@@ -1215,11 +1215,14 @@ def cmd_serve(args) -> int:
         config.ollama.request_timeout_seconds,
     )
     from sonder_runtime.adapters.persistence.sqlite.bridge_migration import (
-        require_epoch_2,
+        require_epoch_2, stamp_fresh_home,
     )
     from sonder_runtime.domain.common.errors import MigrationRequired
 
     try:
+        # Stamp a truly fresh home before migrations create its stores, then
+        # gate both new and existing homes before opening the listener.
+        stamp_fresh_home(runtime_paths.default_home())
         require_epoch_2(runtime_paths.default_home())
     except MigrationRequired as exc:
         print(
@@ -1259,13 +1262,14 @@ def cmd_serve(args) -> int:
         configure_legacy_capacity,
     )
     from sonder_runtime.bootstrap.app import (
-        close_default_runtime_resources, default_app,
+        close_default_runtime_resources, default_app, start_inference_membership,
     )
     from sonder_runtime.interfaces.http.handlers import RecallHandler, OutcomeHandler
     # Compose typed admission before any boundary resolves the legacy root.
     app = default_app(config=config)
     try:
         configure_legacy_application(app)
+        start_inference_membership(app)
         configure_legacy_interfaces()
         configure_legacy_capacity(
             autopilot_runs=config.capacity.autopilot_runs,
@@ -1353,6 +1357,8 @@ def cmd_repl(args) -> int:
     try:
         owned_application = default_app(config=config)
         configure_legacy_application(owned_application)
+        from sonder_runtime.bootstrap.app import start_inference_membership
+        start_inference_membership(owned_application)
         if args.json:
             sonder_repl.run_jsonl()
         else:
@@ -1401,6 +1407,8 @@ def cmd_mcp(args) -> int:
             return 1
         application = build_application(config=config)
         try:
+            from sonder_runtime.bootstrap.app import start_inference_membership
+            start_inference_membership(application)
             # run_native_mcp returns the number of frames served, not a
             # status: a session that reached EOF cleanly exits 0.
             if getattr(args, "progressive_tools", False):
@@ -1451,6 +1459,8 @@ def cmd_mcp(args) -> int:
         # its pool: that would erase the shared compatibility pool reference.
         owned_application = default_app(config=config)
         configure_legacy_application(owned_application)
+        from sonder_runtime.bootstrap.app import start_inference_membership
+        start_inference_membership(owned_application)
 
     from sonder_runtime.adapters.security import unsafe_lab
 

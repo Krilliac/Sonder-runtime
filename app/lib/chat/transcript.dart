@@ -14,6 +14,7 @@ import 'controller.dart';
 import '../ui/status_line.dart';
 import 'live_line.dart';
 import 'refusal.dart';
+import 'route_overflow_chip.dart';
 import 'work_run_card.dart';
 
 /// Counters for performance tests (P2-17). Debug-only bookkeeping.
@@ -40,8 +41,8 @@ class TranscriptActions {
   final ValueChanged<String> onFeedback;
   final ValueChanged<int> onRetry;
   final VoidCallback onChangeMode;
-  final Future<ApprovalOutcome> Function(String callId, Duration ttl)?
-      onApprove;
+  final Future<PendingCallLookup> Function(String callId)? onLookupApproval;
+  final ApproveCallback? onApprove;
   final Future<WorkRun> Function(String id) fetchWorkRun;
   final Future<WorkRun> Function(String id) cancelWorkRun;
   final Future<List<WorkRun>> Function() listWorkRuns;
@@ -52,6 +53,7 @@ class TranscriptActions {
     required this.onFeedback,
     required this.onRetry,
     required this.onChangeMode,
+    this.onLookupApproval,
     required this.onApprove,
     required this.fetchWorkRun,
     required this.cancelWorkRun,
@@ -421,6 +423,7 @@ class TranscriptTurn extends StatelessWidget {
       children: [
         RefusalNotice(
           refusal: parsed.refusal!,
+          onLookup: actions.onLookupApproval,
           onApprove: actions.onApprove,
           onChangeMode: actions.onChangeMode,
           onRetry: () => actions.onRetry(entry.id),
@@ -445,6 +448,13 @@ class TranscriptTurn extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        if (m?.overflow != null) ...[
+          Align(
+            alignment: Alignment.centerLeft,
+            child: RouteOverflowChip(overflow: m!.overflow!),
+          ),
+          const SizedBox(height: 8),
+        ],
         ConversationContent(content: parsed.answer, fullWidthCode: true),
         if (message.reasoning.trim().isNotEmpty) ...[
           const SizedBox(height: 8),

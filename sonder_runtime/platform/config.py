@@ -46,6 +46,7 @@ from sonder_runtime.platform.artifact_mobility_source_config import (
     artifact_mobility_source_errors,
 )
 from sonder_runtime.platform.app_control_config import AppControlConfig, app_control_errors
+from sonder_runtime.platform.computer_use_config import ComputerUseConfig, computer_use_errors
 from sonder_runtime.platform.control_state_rehearsal_config import (
     ControlStateRehearsalConfig,
     control_state_rehearsal_errors,
@@ -353,6 +354,12 @@ class ComputeConfig:
     worker_memory_budget_bytes: int | None = None
     worker_max_jobs: int = 1
     worker_reservation_seconds: int = 30
+    max_input_staging_bytes: int = 8 * 1024 * 1024 * 1024
+    max_input_spool_bytes: int = 32 * 1024 * 1024 * 1024
+    max_artifact_spool_bytes: int = 32 * 1024 * 1024 * 1024
+    max_artifact_spool_jobs: int = 1024
+    artifact_retention_seconds: int = 14 * 86400
+    min_disk_headroom_bytes: int = 512 * 1024 * 1024
     allow_remote: bool = False
     node_id: str = "local"
     snapshot_ttl_seconds: int = 30
@@ -624,6 +631,7 @@ class SonderConfig:
     )
     child_storage: ChildStorageConfig = field(default_factory=ChildStorageConfig)
     app_control: AppControlConfig = field(default_factory=AppControlConfig)
+    computer_use: ComputerUseConfig = field(default_factory=ComputerUseConfig)
     membership: MembershipConfig = field(default_factory=MembershipConfig)
     control_state_rehearsal: ControlStateRehearsalConfig = field(
         default_factory=ControlStateRehearsalConfig
@@ -684,6 +692,12 @@ class SonderConfig:
             "worker_memory_budget_bytes": self.compute.worker_memory_budget_bytes,
             "worker_max_jobs": self.compute.worker_max_jobs,
             "worker_reservation_seconds": self.compute.worker_reservation_seconds,
+            "max_input_staging_bytes": self.compute.max_input_staging_bytes,
+            "max_input_spool_bytes": self.compute.max_input_spool_bytes,
+            "max_artifact_spool_bytes": self.compute.max_artifact_spool_bytes,
+            "max_artifact_spool_jobs": self.compute.max_artifact_spool_jobs,
+            "artifact_retention_seconds": self.compute.artifact_retention_seconds,
+            "min_disk_headroom_bytes": self.compute.min_disk_headroom_bytes,
             "allow_remote": self.compute.allow_remote,
             "node_id": self.compute.node_id,
             "snapshot_ttl_seconds": self.compute.snapshot_ttl_seconds,
@@ -748,6 +762,10 @@ class SonderConfig:
             "max_request_bytes": self.memory_replication.max_request_bytes,
             "max_response_bytes": self.memory_replication.max_response_bytes,
             "max_batch_records": self.memory_replication.max_batch_records,
+        }
+        out['computer_use'] = {
+            item.name: getattr(self.computer_use, item.name)
+            for item in fields(self.computer_use)
         }
         out['child_storage'] = {
             item.name: ('<configured>' if self.child_storage.binding_file else '<unset>')
@@ -936,6 +954,7 @@ _SECTION_TYPES = {
     "artifact_mobility": ArtifactMobilityConfig,
     "child_storage": ChildStorageConfig,
     "app_control": AppControlConfig,
+    "computer_use": ComputerUseConfig,
     "control_state_rehearsal": ControlStateRehearsalConfig,
     "state": StateConfig,
     "context": ContextConfig,
@@ -1106,13 +1125,20 @@ def _apply_compute_section(
         "allow_remote", "node_id", "snapshot_ttl_seconds", "probe_timeout_ms",
         "nodes", "jobs", "worker_host_id", "worker_memory_budget_bytes",
         "worker_max_jobs", "worker_reservation_seconds",
+        "max_input_staging_bytes", "max_input_spool_bytes",
+        "max_artifact_spool_bytes", "max_artifact_spool_jobs",
+        "artifact_retention_seconds", "min_disk_headroom_bytes",
     }
     for key in raw:
         if key not in known:
             errors.append(f"unknown key [compute].{key}")
 
     capacity_values = {}
-    for key in ("worker_host_id", "worker_memory_budget_bytes", "worker_max_jobs", "worker_reservation_seconds"):
+    for key in ("worker_host_id", "worker_memory_budget_bytes", "worker_max_jobs",
+                "worker_reservation_seconds", "max_input_staging_bytes",
+                "max_input_spool_bytes", "max_artifact_spool_bytes",
+                "max_artifact_spool_jobs", "artifact_retention_seconds",
+                "min_disk_headroom_bytes"):
         value = raw.get(key, getattr(current, key))
         expected = str if key == "worker_host_id" else int
         if key == "worker_memory_budget_bytes" and value is None and key not in raw:
@@ -1356,6 +1382,30 @@ def apply_observability_environment(
     )
 
 
+# Process-wide CA bundle conventions that OpenSSL and requests already honour.
+# Remote Ollama HTTPS adopts the first usable one when no Ollama-specific bundle
+# is configured. It is used *instead of* the merged OS store: on Windows a stale
+# same-subject certificate in the user's CA store otherwise makes verification
+# of a private-CA or self-signed worker fail even though this bundle trusts it.
+PROCESS_CA_BUNDLE_VARIABLES = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE")
+
+
+def process_ca_bundle(env) -> str:
+    """Return the first absolute, existing process CA bundle, else ``""``.
+
+    An unusable value is ignored, as OpenSSL ignores it, so verification keeps
+    the system trust store instead of failing configuration validation.
+    """
+    for name in PROCESS_CA_BUNDLE_VARIABLES:
+        raw = str(env.get(name, "") or "").strip()
+        if not raw:
+            continue
+        path = Path(raw).expanduser()
+        if path.is_absolute() and path.is_file():
+            return str(path)
+    return ""
+
+
 def _apply_environment(
     config: SonderConfig, env: dict[str, str], errors: list[str]
 ) -> SonderConfig:
@@ -1490,6 +1540,8 @@ def _apply_environment(
         )
     if env.get("SONDER_OLLAMA_CA_BUNDLE", "").strip():
         ollama = replace(ollama, ca_bundle=env["SONDER_OLLAMA_CA_BUNDLE"].strip())
+    elif not ollama.ca_bundle:
+        ollama = replace(ollama, ca_bundle=process_ca_bundle(env))
     ollama = replace(
         ollama,
         worker_pool_max_workers=_env_int(
@@ -1718,6 +1770,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         errors.append(str(error))
     errors.extend(child_storage_errors(config))
     errors.extend(app_control_errors(config))
+    errors.extend(computer_use_errors(config))
     errors.extend(artifact_transfer_errors(config))
     errors.extend(memory_replication_errors(config))
     errors.extend(artifact_mobility_source_errors(config))
@@ -1841,9 +1894,28 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         errors.append("[state].minimum_free_disk_bytes must be >= 0")
     if config.state.sqlite_busy_timeout_ms < 0:
         errors.append("[state].sqlite_busy_timeout_ms must be >= 0")
-    for root in config.state.workspace_roots:
-        if not Path(root).expanduser().is_absolute():
+    local_workspace_mappings = {"default"}
+    effective_workspace_roots: dict[str, Path] = {}
+    for index, root in enumerate(config.state.workspace_roots):
+        raw_path = Path(root)
+        if not raw_path.is_absolute():
             errors.append(f"[state].workspace_roots entry not absolute: {root!r}")
+            continue
+        try:
+            resolved = raw_path.resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            errors.append(f"[state].workspace_roots entry cannot be resolved: {root!r}")
+            continue
+        mapping = resolved.name
+        if not mapping:
+            errors.append(f"[state].workspace_roots entry has no mapping name: {root!r}")
+            continue
+        if mapping in effective_workspace_roots or (mapping == "default" and index > 0):
+            errors.append(
+                f"[state].workspace_roots has duplicate effective workspace mapping: {mapping!r}"
+            )
+        effective_workspace_roots[mapping] = resolved
+        local_workspace_mappings.add(mapping)
 
     for cidr in config.ollama.trusted_origins:
         try:
@@ -2055,12 +2127,22 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         ("worker_memory_budget_bytes", 0, 1 << 50),
         ("worker_max_jobs", 1, 1024),
         ("worker_reservation_seconds", 1, 300),
+        ("max_input_staging_bytes", 1, 1 << 40),
+        ("max_input_spool_bytes", 1, 1 << 40),
+        ("max_artifact_spool_bytes", 1, 1 << 40),
+        ("max_artifact_spool_jobs", 1, 4096),
+        ("artifact_retention_seconds", 1, 30 * 86400),
+        ("min_disk_headroom_bytes", 1, 1 << 40),
     ):
         value = getattr(compute, key)
         if key == "worker_memory_budget_bytes" and value is None:
             continue
         if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
             errors.append(f"[compute].{key} must be within {minimum}..{maximum}")
+    if (type(compute.max_input_staging_bytes) is int
+            and type(compute.max_input_spool_bytes) is int
+            and compute.max_input_staging_bytes > compute.max_input_spool_bytes):
+        errors.append("[compute].max_input_staging_bytes exceeds max_input_spool_bytes")
     job_ids = [job.job_id for job in compute.jobs]
     if len(job_ids) != len(set(job_ids)):
         errors.append("[compute].jobs contains duplicate job identities")
@@ -2105,6 +2187,16 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             for value in job.workspace_mappings
         ):
             errors.append(f"{where}.workspace_mappings contains an invalid workspace identity")
+        # compute.jobs is the local worker's catalog even when the controller
+        # is also allowed to place work on remote nodes.
+        unknown_local_mappings = sorted(
+            set(job.workspace_mappings) - local_workspace_mappings
+        )
+        if unknown_local_mappings:
+            errors.append(
+                f"{where}.workspace_mappings is not available locally: "
+                f"{unknown_local_mappings}; configure matching [state].workspace_roots"
+            )
         if job.argument_policy not in {
             "none",
             "bounded",

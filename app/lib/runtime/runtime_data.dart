@@ -14,10 +14,12 @@ library;
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:http/http.dart' as http;
-
 import '../account_session.dart';
 import '../api.dart';
+import '../api/transport.dart' show ResponseTooLargeException, sendRequest;
+
+/// Largest runtime panel response read into memory, in bytes.
+const runtimeResponseMaxBytes = 4 * 1024 * 1024;
 
 int? _int(Object? value) => value is num ? value.toInt() : null;
 
@@ -160,6 +162,10 @@ abstract interface class RuntimeDataSource {
   /// `GET /v1/sonder/ecosystem` (admin). A 404 is an unsupported-runtime
   /// reading; 401/403 throw [SonderApi.adminRequiredMessage].
   Future<EcosystemReading> ecosystem();
+
+  /// `GET /v1/models` (any key): ids and each row's routing field, the
+  /// Models panel's fallback when [ecosystem] is refused.
+  Future<ModelCatalog> modelCatalog();
 }
 
 /// Direct HTTP reads bound to the configured server only (no fallback).
@@ -188,7 +194,9 @@ class HttpRuntimeDataSource implements RuntimeDataSource {
 
   Map<String, String> get _headers {
     final headers = <String, String>{'Accept': 'application/json'};
-    if (apiKey.trim().isNotEmpty) {
+    // Same rule as SonderEndpoint: no key in cleartext off this device
+    // unless the person allowed this host in Settings.
+    if (apiKey.trim().isNotEmpty && CleartextKeyPolicy.allows(baseUrl)) {
       headers['Authorization'] = 'Bearer ${apiKey.trim()}';
     }
     final account = accountSession;
@@ -199,17 +207,21 @@ class HttpRuntimeDataSource implements RuntimeDataSource {
   }
 
   Future<Object?> _send(String method, Uri uri, String fallback) async {
-    final client = http.Client();
     try {
-      final request = http.Request(method, uri)
-        ..followRedirects = false
-        ..headers.addAll(_headers);
-      if (method == 'POST') {
-        request.headers['Content-Type'] = 'application/json';
-        request.body = '{}';
-      }
-      final streamed = await client.send(request).timeout(timeout);
-      final response = await http.Response.fromStream(streamed);
+      // One deadline covers headers and body, redirects are not followed,
+      // and the body is capped: an endless or oversized response ends the
+      // read instead of exhausting memory or holding the panel open.
+      final response = await sendRequest(
+        method,
+        uri,
+        headers: {
+          ..._headers,
+          if (method == 'POST') 'Content-Type': 'application/json',
+        },
+        body: method == 'POST' ? '{}' : null,
+        timeout: timeout,
+        maxBodyBytes: runtimeResponseMaxBytes,
+      );
       Object? decoded;
       try {
         decoded = jsonDecode(utf8.decode(response.bodyBytes));
@@ -236,14 +248,15 @@ class HttpRuntimeDataSource implements RuntimeDataSource {
       return decoded;
     } on SonderException {
       rethrow;
+    } on ResponseTooLargeException catch (error) {
+      throw SonderException('$fallback: the response was too large.',
+          cause: error);
     } on TimeoutException catch (error) {
       throw SonderException('$fallback: the server did not answer in time.',
           cause: error);
     } catch (error) {
       throw SonderException('$fallback: cannot reach the server.',
           cause: error);
-    } finally {
-      client.close();
     }
   }
 
@@ -313,4 +326,11 @@ class HttpRuntimeDataSource implements RuntimeDataSource {
         apiKey: apiKey,
         accountSession: accountSession,
       ).ecosystemStatus();
+
+  @override
+  Future<ModelCatalog> modelCatalog() => SonderApi(
+        baseUrl: baseUrl,
+        apiKey: apiKey,
+        accountSession: accountSession,
+      ).modelCatalog();
 }

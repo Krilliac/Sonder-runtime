@@ -20,6 +20,7 @@ import pytest
 
 from sonder_runtime.adapters.inference.sonder_inference_gateway import (
     DEFAULT_BASE_URL,
+    DEFAULT_MODEL,
     STATUS_KEYS,
     SonderInferenceConfig,
     SonderInferenceGateway,
@@ -623,6 +624,8 @@ def test_provider_status_keys_and_types_when_ready():
         },
         "fallback": None,
         "fallback_count": 0,
+        "tier_models": {tier: DEFAULT_MODEL for tier in
+                        ("fast", "general", "code", "reasoning", "vision")},
     }
 
 
@@ -652,6 +655,27 @@ def test_embeddings_are_refused_with_the_fix():
 
 def test_capabilities_advertise_chat_only():
     assert _gateway(FakeInference()).capabilities == frozenset({"chat", "fixed-endpoint"})
+
+
+def test_served_tier_models_resolve_each_tier_without_io():
+    fake = FakeInference()
+    gateway = _gateway(fake, model="qwen3:14b", tier_models={"reasoning": "deepseek-r1:14b"})
+    assert gateway.served_tier_models() == {"sonder_inference": {
+        "fast": "qwen3:14b", "general": "qwen3:14b", "code": "qwen3:14b",
+        "reasoning": "deepseek-r1:14b", "vision": "qwen3:14b",
+    }}
+    assert fake.gets == [] and fake.posts == []
+
+
+def test_provider_status_reports_tier_models_even_when_down():
+    down = FakeInference()
+    down.get_error = urllib.error.URLError(ConnectionRefusedError(111, "refused"))
+    entry = _gateway(
+        down, model="qwen3:14b", tier_models={"reasoning": "deepseek-r1:14b"},
+    ).provider_status()["sonder_inference"]
+    assert entry["state"] == "unavailable"
+    assert entry["tier_models"]["reasoning"] == "deepseek-r1:14b"
+    assert entry["tier_models"]["general"] == "qwen3:14b"
 
 
 # -- real loopback HTTP through the stdlib transports ------------------------------

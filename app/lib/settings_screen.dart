@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 
 import 'api.dart';
 import 'local_manager.dart';
+import 'runtime/model_routing.dart';
 import 'runtime/status_word.dart';
 import 'settings.dart';
 import 'theme.dart';
@@ -60,21 +61,29 @@ int? _statusOf(Object error) {
 }
 
 /// A successful probe of [serverUrl].
-ConnectionDiagnosis diagnoseReachable(String serverUrl, {int modelCount = 0}) {
+///
+/// With [routing] from the runtime's provider bindings, a route bound to
+/// Sonder Inference is not counted as an Ollama model: [models] are split
+/// into routes and exact models, which always run on Ollama.
+ConnectionDiagnosis diagnoseReachable(String serverUrl,
+    {int modelCount = 0,
+    ModelRouting routing = const ModelRouting(),
+    List<String> models = const []}) {
   final uri = Uri.tryParse(serverUrl.trim());
   final host = uri?.host ?? '';
-  final models = modelCount == 1 ? '1 model' : '$modelCount models';
+  final count = modelCount == 1 ? '1 model' : '$modelCount models';
   if (uri != null && uri.scheme == 'http' && !_isLoopback(host)) {
     return ConnectionDiagnosis(
       ServerReachability.needsHttps,
-      'Reachable at $host ($models), but sign-in needs HTTPS off this device.',
-      detail: 'The API key works over this address. For accounts, serve the '
-          'PC over HTTPS (Tailscale Serve or a TLS proxy that keeps the Host '
-          'header).',
+      'Reachable at $host ($count), but sign-in needs HTTPS off this device.',
+      detail: 'The API key is withheld over plain HTTP unless you allow this '
+          'host below. For keys and accounts, serve the PC over HTTPS '
+          '(Tailscale Serve or a TLS proxy that keeps the Host header).',
     );
   }
-  return ConnectionDiagnosis(
-      ServerReachability.reachable, 'Connected to $host. $models available.');
+  final summary = routing.connectionSummary(models);
+  return ConnectionDiagnosis(ServerReachability.reachable,
+      'Connected to $host. ${summary ?? '$count available.'}');
 }
 
 /// A failed probe or sign-in, turned into what the person can do next.
@@ -149,10 +158,26 @@ class BootstrapSecretRequired implements Exception {
 class SettingsConnection {
   const SettingsConnection();
 
-  Future<List<String>> testServer(
+  /// `GET /v1/models`: ids plus each row's routing field.
+  Future<ModelCatalog> testServer(
           String serverUrl, String apiKey, AccountSession? account) =>
       SonderApi(baseUrl: serverUrl, apiKey: apiKey, accountSession: account)
-          .listModels();
+          .modelCatalog();
+
+  /// The runtime's provider bindings, or null when it cannot say (older
+  /// runtime, non-administrator key, any failure). Only wording depends on
+  /// it, so a failure never fails the connection test.
+  Future<EcosystemStatus?> routingStatus(
+      String serverUrl, String apiKey, AccountSession? account) async {
+    try {
+      final reading = await SonderApi(
+              baseUrl: serverUrl, apiKey: apiKey, accountSession: account)
+          .ecosystemStatus();
+      return reading.status;
+    } catch (_) {
+      return null;
+    }
+  }
 
   Future<String> login(
           String serverUrl, String apiKey, String username, String password) =>
@@ -226,6 +251,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late bool _allowHosted;
   late bool _keepServerRunning;
   late bool _allowApproximateLocation;
+
+  /// Plain-HTTP hosts allowed to receive the API key (see
+  /// [CleartextKeyPolicy]); edited only by the explicit per-host checkbox.
+  late Set<String> _cleartextKeyHosts;
   AccountSession? _account;
   bool _obscureKey = true;
   bool _obscureLauncherToken = true;
@@ -258,6 +287,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _allowHosted = widget.settings.allowHosted;
     _keepServerRunning = widget.settings.keepServerRunning;
     _allowApproximateLocation = widget.settings.allowApproximateLocation;
+    _cleartextKeyHosts = {...widget.settings.cleartextKeyHosts};
     _trackedControllers = [
       _server,
       _key,
@@ -380,6 +410,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         launcherToken: _launcherToken.text,
         observatoryExecutable: _observatoryExecutable.text.trim(),
         observatoryWebUrl: _observatoryWebUrl.text.trim(),
+        cleartextKeyHosts: _cleartextKeyHosts.toList()..sort(),
         model: _model.text.trim().isEmpty
             ? Settings.defaultModel
             : _model.text.trim(),
@@ -398,22 +429,74 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _status = null;
       _connection = null;
     });
+    // Testing uses this screen's unsaved per-host choice, then restores the
+    // saved policy whatever happens.
+    final savedHosts = CleartextKeyPolicy.allowedHosts;
+    CleartextKeyPolicy.allowOnly(_cleartextKeyHosts);
     try {
-      final models = await widget.connection.testServer(
-        _server.text,
-        _key.text,
-        _account?.matches(_server.text) == true ? _account : null,
-      );
+      final account = _account?.matches(_server.text) == true ? _account : null;
+      final catalog =
+          await widget.connection.testServer(_server.text, _key.text, account);
+      final routing = await widget.connection
+          .routingStatus(_server.text, _key.text, account);
       if (!mounted) return;
-      setState(() => _connection =
-          diagnoseReachable(_server.text, modelCount: models.length));
+      setState(() => _connection = diagnoseReachable(_server.text,
+          modelCount: catalog.ids.length,
+          routing: ModelRouting.of(routing, origins: catalog.origins),
+          models: catalog.ids));
     } catch (error) {
       if (!mounted) return;
       setState(
           () => _connection = diagnoseConnectionError(error, _server.text));
     } finally {
+      CleartextKeyPolicy.allowOnly(savedHosts);
       if (mounted) setState(() => _testing = false);
     }
+  }
+
+  /// Plain HTTP to another device with a key typed: the key would cross the
+  /// network unencrypted, so it is withheld unless this host is allowed.
+  bool get _cleartextKeyAtRisk =>
+      _key.text.trim().isNotEmpty &&
+      CleartextKeyPolicy.isCleartextRemote(_server.text);
+
+  Widget _cleartextKeyChoice() {
+    final hostKey = CleartextKeyPolicy.hostKeyOf(_server.text);
+    final allowed = _cleartextKeyHosts.contains(hostKey);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SizedBox(height: 10),
+        WorkspaceNotice(
+          key: const Key('settings-cleartext-key-warning'),
+          tone: NoticeTone.warning,
+          message: allowed
+              ? 'The API key is sent to $hostKey over unencrypted HTTP. '
+                  'Anyone on the network path can read and reuse it.'
+              : 'The API key is not sent to $hostKey: this address uses '
+                  'unencrypted HTTP. Use HTTPS, or allow this host below.',
+        ),
+        CheckboxListTile(
+          key: const Key('settings-cleartext-key-allow'),
+          contentPadding: EdgeInsets.zero,
+          controlAffinity: ListTileControlAffinity.leading,
+          value: allowed,
+          title: Text('Send the API key to $hostKey over unencrypted HTTP'),
+          subtitle: const Text('Only on a network you trust. Applies to this '
+              'host and port only.'),
+          onChanged: hostKey.isEmpty
+              ? null
+              : (v) => setState(() {
+                    if (v == true) {
+                      _cleartextKeyHosts.add(hostKey);
+                    } else {
+                      _cleartextKeyHosts.remove(hostKey);
+                    }
+                    _dirty = true;
+                  }),
+        ),
+      ],
+    );
   }
 
   Future<void> _copyServerSetting(String setting) async {
@@ -920,6 +1003,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           ),
                         ),
                       ),
+                      if (_cleartextKeyAtRisk) _cleartextKeyChoice(),
                       if (_keyringWarning != null) ...[
                         const SizedBox(height: 10),
                         WorkspaceNotice(

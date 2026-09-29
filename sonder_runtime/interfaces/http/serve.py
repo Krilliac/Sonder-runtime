@@ -37,6 +37,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from sonder_runtime.interfaces.http.artifact_transfer import handle_artifact_transfer, is_artifact_route
+from sonder_runtime.interfaces.http.connection_limit import BoundedConnectionsMixin
 from sonder_runtime.interfaces.http.host_policy import (
     HOST_NOT_ALLOWED_REMEDY, HOST_TRUSTED, forwarded_client_ip, host_decision,
     machine_host_names, normalize_allowed_host, parse_host_header,
@@ -102,6 +103,7 @@ from sonder_runtime.application.extensions.facade import ExtensionAuthority
 from sonder_runtime.application.ports.model_gateway import ModelRequest
 from sonder_runtime.application.context import bind_operation_context
 from sonder_runtime.application.chat import provider_bridge as _provider_bridge
+from sonder_runtime.application.routing import long_context_overflow as _overflow
 from sonder_runtime.domain import launcher_health as sonder_health
 from sonder_runtime.domain.common.errors import (
     Conflict,
@@ -127,6 +129,7 @@ from sonder_runtime.interfaces.http.facades.a2a_jsonrpc import (
 from sonder_runtime.interfaces.http.facades.control_plane import ControlPlaneFacade
 from sonder_runtime.interfaces.http.facades.approvals import refusal_receipt
 from sonder_runtime.interfaces.http.facades.extensions import dispatch_extension_route
+from sonder_runtime.interfaces.http.facades.model_catalog import annotate_model_rows
 from sonder_runtime.interfaces.http.facades.model_request import (
     ModelFacadeError,
     ModelRequestFacade,
@@ -350,6 +353,11 @@ def _capture_live_session_turn(*, session_id, prompt, history, model, content,
     try:
         from sonder_runtime.bootstrap.app import default_app
 
+        if _is_legacy_error_reply(content):
+            # A legacy "ERROR ..." answer is a failed model call: never replay
+            # it as assistant history, but close an admitted request.
+            return _fail_live_session_request(provider_capture, session_id, request_id,
+                                              "DEPENDENCY_UNAVAILABLE")
         if provider_capture is not None:
             capture, pending = provider_capture
             if pending.session_id != session_id or pending.request_id != request_id:
@@ -373,6 +381,17 @@ def _capture_live_session_turn(*, session_id, prompt, history, model, content,
         )
     except Exception as error:
         _serve_logger.error(f"live session capture failed for session_id={session_id!r}, request_id={request_id!r}", exc_info=True)
+        raise _LiveSessionCaptureFailure from error
+
+
+def _fail_live_session_request(admission, session_id, request_id, error_code):
+    """Append ``model.failed`` for this HTTP turn's own admitted request, if any."""
+    capture, pending = admission if admission else (None, None)
+    if pending is None or (pending.session_id, pending.request_id) != (session_id, request_id):
+        return None  # nothing admitted, or an enclosing surface owns it
+    try:
+        return capture.fail_request(pending, error_code=error_code)
+    except Exception as error:
         raise _LiveSessionCaptureFailure from error
 _MAX_JOB_CANCEL_REASON = 256
 _MAX_JOB_ID_LENGTH = 128
@@ -2335,6 +2354,8 @@ DANGEROUS_HTTP_SLASH_COMMANDS = frozenset({
     # reasoning through it, and an omission justified by a refusal must not
     # outlive the refusal.
     "/cot", "/chainofthought", "/thoughts",
+    # Shows operator prompt overrides and state-home paths.
+    "/prompts",
     "/filepolicy", "/files", "/find", "/read", "/write", "/append", "/edit",
     "/delete", "/master", "/pass", "/good", "/accept", "/accepted", "/used",
     "/copied", "/edited", "/fail", "/bad", "/trace", "/strict", "/run",
@@ -2555,6 +2576,24 @@ def _validate_chat_messages(messages):
             400, "messages must contain a non-empty user message",
         )
     return messages
+
+
+def _chat_facade_payload(req, operation):
+    """Apply the chat adapter's defaults before the provider-neutral facade.
+
+    Validation runs first to keep the adapter's error vocabulary.  An absent,
+    blank, or whitespace-only model is the default route (``_model_to_tier``),
+    and JSON null ``stream`` is the omitted non-streaming default.
+    """
+    payload = dict(req)
+    if operation == "chat.completions":
+        _validate_chat_messages(payload.get("messages"))
+    model = payload.get("model")
+    if "model" not in payload or (isinstance(model, str) and not model.strip()):
+        payload["model"] = "sonder"
+    if payload.get("stream", False) is None:
+        payload["stream"] = False
+    return payload
 
 
 def _last_user_message(messages):
@@ -3098,6 +3137,10 @@ def _slash_system_operation(command, argument):
     action = parts[0].lower() if parts else ""
     if command in ("/runtime", "/models") and action in ("set", "reset"):
         return "runtime_policy_change"
+    if command in ("/runtime", "/models") and action == "overflow" and (
+        parts[1:] and parts[1].split()[0].lower() not in ("status", "show", "help", "?")
+    ):
+        return "runtime_policy_change"
     if command in ("/update", "/updatesource") and action in ("", "apply", "now"):
         return "selfmod_deploy"
     if command in ("/stash", "/runtime-stash") and action in ("save", "save-untracked", "pop"):
@@ -3212,6 +3255,8 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         return server.sonder_stats()
     if cmd == "/context":
         return server.context_health()
+    if cmd == "/prompts":
+        return server.control_command(stripped, project=project)
     if cmd in ("/contextsize", "/ctxsize"):
         if arg.strip():
             return server.set_context_size(arg.strip())
@@ -4012,14 +4057,12 @@ def _openai_model_rows():
     except Exception:
         records = ()
 
-    # ``sonder`` is a runtime route ID, not weights.  Tier IDs are retained for
-    # compatibility, then exact live catalog names make valid installed models
-    # discoverable to standard OpenAI clients.  Do not nevertheless advertise
-    # a local tier that a legacy/manual policy points at an explicitly
-    # non-chat-capable catalog record: `/runtime set` now rejects that state,
-    # while this keeps pre-existing policy files honest too.  Missing or
-    # capability-less metadata remains listed rather than converting a catalog
-    # outage into a false claim that the whole runtime has no model routes.
+    # ``sonder`` is a runtime route ID, not weights. Tier IDs are kept for
+    # compatibility; exact live catalog names make installed models discoverable
+    # to OpenAI clients. A local tier a legacy policy points at a non-chat catalog
+    # record is not advertised (`/runtime set` rejects that state; this keeps old
+    # policy files honest). Missing or capability-less metadata stays listed, so
+    # a catalog outage is never a false claim that no model routes exist.
     add("sonder", "local")
     for tier_name, model in server.available_tiers().items():
         cloud = server._is_cloud_tier(tier_name, model)
@@ -4035,7 +4078,8 @@ def _openai_model_rows():
         if cloud and not server.cloud_allowed():
             continue
         add(name, "cloud" if cloud else "local")
-    return rows
+    return annotate_model_rows(rows, {"sonder", *server.available_tiers()}, serve_target=server._serve_target,  # per-row provider ids
+                               bridge_provider=server._bridge_provider_for_tier, gateway=getattr(_live_telemetry_application(), "model_gateway", None))
 
 
 def _reasoning_audience():
@@ -4074,7 +4118,7 @@ def _capture_http_provider_request(function):
     @functools.wraps(function)
     def wrapped(*args, **kwargs):
         from sonder_runtime.application.session.provider_attempts import (
-            ProviderCaptureFailure, deferred_provider_request_scope,
+            ProviderCaptureFailure, deferred_provider_request_scope, telemetry_error_code,
         )
 
         bound = signature.bind(*args, **kwargs)
@@ -4108,7 +4152,16 @@ def _capture_http_provider_request(function):
 
         try:
             with deferred_provider_request_scope(admit if enabled else None) as scope:
-                result = function(*args, **kwargs)
+                try:
+                    result = function(*args, **kwargs)
+                except ProviderCaptureFailure:
+                    raise
+                except Exception as error:  # admitted then failed: close it
+                    if enabled:
+                        _fail_live_session_request(
+                            getattr(scope, "admission", None), values["session"],
+                            values["capture_request_id"], telemetry_error_code(error))
+                    raise
                 if enabled and isinstance(result, TurnResult):
                     result = replace(result, provider_capture=scope.admission)
                 return result
@@ -4595,16 +4648,19 @@ def _commands_help_payload(topic="", context=None):
         return {"text": "Command catalog unavailable: %s" % exc}
 
 
-class ServeHTTPServer(ThreadingHTTPServer):
+class ServeHTTPServer(BoundedConnectionsMixin, ThreadingHTTPServer):
     """The served listener, with a TCP backlog sized for request bursts.
 
     ``socketserver`` listens with a backlog of 5.  A burst of concurrent
     clients then overflows the kernel accept queue and some connections are
     reset before the admission layer can queue them or answer 429, so the
-    backlog must at least cover the default admission capacity.
+    backlog must at least cover the default admission capacity.  Connection
+    threads are capped (see ``connection_limit``) so slow or idle clients
+    cannot grow them without bound.
     """
 
     request_queue_size = 128
+    max_connections = max(16, min(4096, _env_int("SONDER_HTTP_MAX_CONNECTIONS", 256)))
 
 
 # Inventory routes never read an unexpected body; a request carrying one is
@@ -5188,7 +5244,8 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _finish_chat_turn_telemetry(self):
-        observatory_routes.finish_chat_turn(self, log=_serve_logger)
+        observatory_routes.finish_chat_turn(
+            self, log=_serve_logger, application_for=_live_telemetry_application)
 
     def _handle_telemetry_get(self, path):
         observatory_routes.serve_get(
@@ -6547,11 +6604,7 @@ class Handler(BaseHTTPRequestHandler):
         # One turn scope per request: the ambient OperationContext and the
         # Observatory turn are bound inside it and always unwound, and a
         # started turn always gets exactly one terminal request.* event.
-        self._telemetry_turn = None
-        self._telemetry_result = None
-        self._telemetry_error_kind = None
-        self._telemetry_error_reply = False
-        self._last_response_status = None
+        observatory_routes.reset_chat_turn(self)
         with contextlib.ExitStack() as stack:
             self._turn_stack = stack
             try:
@@ -6928,12 +6981,14 @@ class Handler(BaseHTTPRequestHandler):
                     record_early_chat_metric("unauthenticated")
                 self._send_auth_error()
                 return
+            observatory_routes.admit_chat_caller(self, req)
             # Preserve the lifecycle admission precedence of the legacy
             # execution path: a draining runtime must answer DRAINING before
             # protocol normalization can report a client-side 400.
             lifecycle = sonder_lifecycle.get()
             if lifecycle.coordinator.draining:
                 _serve_logger.error(f"request rejected: runtime is draining for shutdown, correlation={self._correlation()!r}")
+                record_early_chat_metric("draining")
                 self._send_json_payload(
                     sonder_lifecycle.error_envelope(
                         "DRAINING",
@@ -6956,19 +7011,7 @@ class Handler(BaseHTTPRequestHandler):
                 ),
             )
             try:
-                facade_payload = dict(req)
-                if model_route.operation == "chat.completions":
-                    # Preserve the established adapter validation vocabulary
-                    # before the provider-neutral facade normalizes the same
-                    # envelope.
-                    _validate_chat_messages(facade_payload.get("messages"))
-                if "model" not in facade_payload:
-                    facade_payload["model"] = "sonder"
-                # The established chat adapter treats JSON null as the
-                # omitted non-streaming default; preserve that compatibility
-                # while the provider-neutral facade accepts strict booleans.
-                if facade_payload.get("stream", False) is None:
-                    facade_payload["stream"] = False
+                facade_payload = _chat_facade_payload(req, model_route.operation)
                 normalized = facade.normalize(path, facade_payload)
             except HTTPRequestError as error:
                 record_early_chat_metric("invalid_messages")
@@ -7433,6 +7476,11 @@ class Handler(BaseHTTPRequestHandler):
         turn_degradations = self._turn_stack.enter_context(
             _provider_bridge.degradation_scope()
         ) if getattr(self, "_turn_stack", None) is not None else []
+        # The long-context overflow decision, stated in the receipt (never
+        # in the answer text): switched to the overflow model, or stayed.
+        turn_overflow = self._turn_stack.enter_context(
+            _overflow.notice_scope()
+        ) if getattr(self, "_turn_stack", None) is not None else []
         try:
             # SPEC-2 WP4 admission: bounded concurrency slot with queue
             # depth, admission deadline, drain and maintenance awareness,
@@ -7495,7 +7543,7 @@ class Handler(BaseHTTPRequestHandler):
                             project=storage_project, require_all_tiers=True,
                         )
                     if structured_schema is None and allow_control_routes and reply is None:
-                        reply = server.chat_web_response(
+                        reply = (None if natural_model else server.route_computer_use(prompt)) or server.chat_web_response(  # desktop requests: gated computer use first
                             prompt,
                             history=history,
                             tier=model_selector or "code",
@@ -7847,6 +7895,9 @@ class Handler(BaseHTTPRequestHandler):
             receipt["degraded"] = list(turn_degradations)
         if chat_work_receipt is not None:
             receipt["chat_work"] = chat_work_receipt
+        overflow_receipt = _overflow.receipt_entry(turn_overflow)
+        if overflow_receipt is not None:
+            receipt["overflow"] = overflow_receipt
         refusal = _turn_refusal_receipt(turn_refusals)
         if refusal is not None:
             receipt["refusal"] = refusal
@@ -7875,6 +7926,7 @@ class Handler(BaseHTTPRequestHandler):
                             model_operation,
                             content,
                             response_model or model,
+                            receipt=receipt,
                         ), elapsed_ms=elapsed_ms,
                     )
                 else:

@@ -1,9 +1,12 @@
 # Backup and restore
 
 Backups are consistent snapshots of every authoritative store
-(memory.db, autopilot.db, fleet.db, operations.db, runtime_policy.json),
-taken with the SQLite online-backup API, hash-verified, and published by
-one atomic rename. A failed backup never prunes the last verified one.
+(memory.db, autopilot.db, fleet.db, operations.db, queued_actions.db,
+updates.db, jobs.db, runtime_policy.json) plus, on an adopted home, the
+epoch-2 domain databases `serve` requires (automation.db, selfmod.db,
+training.db) and `epoch2_adoption_receipt.json`. Databases are copied with
+the SQLite online-backup API, hash-verified, and published by one atomic
+rename. A failed backup never prunes the last verified one.
 
 ## Create
 
@@ -83,8 +86,15 @@ Restoration targets an **empty** directory; it never overwrites a live
 SONDER_HOME.
 
 1. Stop the service: `sudo systemctl stop sonder`
-2. Verify the chosen backup:
+2. Verify the chosen backup, then smoke-restore it into a disposable
+   directory:
    `python -m sonder_runtime restore verify <backup-dir>`
+   `python -m sonder_runtime restore smoke <backup-dir>`
+   `restore smoke` fails when the restored home would be refused by `serve`
+   (an adopted memory.db without every epoch-2 domain database, as in backups
+   taken before those databases were captured). A wholly pre-epoch2 backup
+   passes the smoke but needs `migrate --adopt-epoch2` against the restored
+   home before step 6.
 3. Restore to a staging directory:
    ```bash
    sudo -u sonder /opt/sonder/current/venv/bin/python -m sonder_runtime restore apply \

@@ -21,7 +21,7 @@ tool names, prefix/replay manifests, digests) are never rewritten.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
@@ -36,7 +36,10 @@ from ..ports.model_gateway import ModelRequest
 from ...domain.common.ids import new_id
 from ...domain.security import redaction as _redaction
 from ..ports.session_repository import SessionEvent, SessionRepository
-from .durable_replay import DurableReplayResult, crash_safe_replay
+from .durable_replay import (
+    DurableReplayResult, _domain_events, crash_safe_replay,
+    reconstruct_model_visible_request,
+)
 from .query_export import SessionExport, SessionQueryEngine
 
 
@@ -73,12 +76,17 @@ class CapturedTool:
 
 @dataclass(frozen=True, slots=True)
 class CapturedTurn:
-    """Evidence returned after a complete append/replay/export cycle."""
+    """Evidence returned after a complete append/replay/export cycle.
+
+    ``replay`` is the full crash-safe replay while the session fits the
+    replay bound.  Past it, finalization proves only the appended tail and
+    ``replay`` is ``None``; ``export`` then covers that verified tail.
+    """
 
     session_id: str
     turn_id: str
     appended: tuple[SessionEvent, ...]
-    replay: DurableReplayResult
+    replay: DurableReplayResult | None
     export: SessionExport
 
 
@@ -452,7 +460,17 @@ class SessionCaptureService:
     def _finalize_capture(
         self, session_id: str, turn_id: str, appended: tuple[SessionEvent, ...],
     ) -> CapturedTurn:
-        """Verify the committed stream using the existing replay/export bounds."""
+        """Verify what this turn committed.
+
+        While the whole session fits the replay bound this is the full
+        crash-safe replay and export.  Past the bound only the new tail is
+        verified (see ``_finalize_tail``): re-proving an ever-growing history
+        on every turn made each capture fail once the session outgrew it.
+        """
+        if not appended:
+            raise IntegrityFailure("capture appended no events")
+        if appended[-1].sequence >= self._read_limit():
+            return self._finalize_tail(session_id, turn_id, appended)
         try:
             replay = crash_safe_replay(
                 self._repository, session_id, max_events=self._replay_limit,
@@ -469,6 +487,74 @@ class SessionCaptureService:
         if exported.truncated:
             raise IntegrityFailure("captured session export did not reach its tail")
         return CapturedTurn(session_id, turn_id, tuple(appended), replay, exported)
+
+    def _read_limit(self) -> int:
+        adapter_limit = getattr(self._repository, "_max_read_limit", self._replay_limit)
+        if isinstance(adapter_limit, bool) or not isinstance(adapter_limit, int) or adapter_limit < 1:
+            adapter_limit = self._replay_limit
+        return min(self._replay_limit, adapter_limit)
+
+    def _finalize_tail(
+        self, session_id: str, turn_id: str, appended: tuple[SessionEvent, ...],
+    ) -> CapturedTurn:
+        """Prove the appended events are the intact, reachable session tail.
+
+        The stored range from the first appended event onward must: pass a
+        ranged integrity inspection (every event hash recomputes and the
+        first links to its stored predecessor's hash), contain exactly the
+        events this turn appended at their sequences, reach the tail within
+        the bound, and carry this turn's request snapshot.  Older history
+        was proven when it was appended and stays provable via ``replay``.
+        """
+        read_limit = self._read_limit()
+        start = appended[0].sequence
+        try:
+            events = self._repository.read_range(
+                session_id, start_sequence=start, limit=read_limit,
+            )
+            report = self._repository.inspect_integrity(
+                session_id, start_sequence=start, limit=read_limit,
+            )
+            beyond = (
+                self._repository.read_range(
+                    session_id, start_sequence=events[-1].sequence + 1, limit=1,
+                ) if events and len(events) == read_limit else ()
+            )
+            request = reconstruct_model_visible_request(
+                _domain_events(events), turn_id=turn_id,
+            )
+            exported = self._query.export_events(
+                session_id, start_sequence=start, max_events=read_limit,
+                include_integrity=False,
+            )
+        except Exception as exc:
+            if isinstance(exc, (InvalidInput, IntegrityFailure)):
+                raise
+            raise IntegrityFailure("captured session tail could not be verified/exported") from exc
+        if not report.valid:
+            raise IntegrityFailure("captured session tail failed integrity verification")
+        if (report.checked_events != len(events)
+                or report.first_sequence != (events[0].sequence if events else None)
+                or report.last_sequence != (events[-1].sequence if events else None)):
+            raise IntegrityFailure("session integrity report does not match the captured tail")
+        if beyond:
+            raise IntegrityFailure("captured session tail exceeds replay bound")
+        stored = {event.sequence: event for event in events}
+        for event in appended:
+            match = stored.get(event.sequence)
+            if (match is None or match.event_id != event.event_id
+                    or match.event_hash != event.event_hash):
+                raise IntegrityFailure("captured events are not the stored session tail")
+        if request is None or request.turn_id != turn_id:
+            raise IntegrityFailure("captured request is missing from the session tail")
+        if (exported.truncated
+                or tuple(record.sequence for record in exported.events)
+                != tuple(event.sequence for event in events)):
+            raise IntegrityFailure("captured session export did not reach its tail")
+        return CapturedTurn(
+            session_id, turn_id, tuple(appended), None,
+            replace(exported, integrity=report),
+        )
 
 
 __all__ = ["CapturedRequest", "CapturedTool", "CapturedTurn", "SessionCaptureService"]

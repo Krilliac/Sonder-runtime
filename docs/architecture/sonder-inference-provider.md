@@ -226,7 +226,13 @@ These never generate.
   URL, or scheme and host only when remote), `version`, `api_version`,
   `models` (ids), `synthetic` (bool or null), `identity` (the nine keys or
   null), `telemetry` (`discovery_url`, `sse_url`, `ndjson_url` as absolute
-  URLs, or null when unreachable), `fallback`, `fallback_count`.
+  URLs, or null when unreachable), `fallback`, `fallback_count`,
+  `tier_models` (`{tier: model}` for all five tiers: the
+  `SONDER_INFERENCE_TIER_MODELS` entry or the default model; from
+  configuration, so present even when unreachable). `served_tier_models()`
+  returns the same map as `{"sonder_inference": {...}}` without any I/O;
+  `PreSendFallbackGateway` forwards it and `ProviderDispatchGateway`
+  aggregates it, for the `/v1/models` row `sonder.served_model`.
   `PreSendFallbackGateway` fills in `fallback`/`fallback_count`, and
   `ProviderDispatchGateway.provider_status()` aggregates every provider,
   reporting providers without the method as `{"provider": id, "state": "unknown"}`.

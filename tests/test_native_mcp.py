@@ -285,11 +285,13 @@ def test_native_compute_mutations_obey_runtime_permission_policy(monkeypatch):
             AssertionError("denied compute must not execute")
         )
     )
-    monkeypatch.setattr(
-        permission_policy,
-        "decide_for_caller",
-        lambda *_args, **_kwargs: SimpleNamespace(action="deny"),
-    )
+    decisions = []
+    forgotten = []
+    def deny(*args, **kwargs):
+        decisions.append((args, kwargs))
+        return SimpleNamespace(action="deny", call_id="approved-call-1")
+    monkeypatch.setattr(permission_policy, "decide_for_caller", deny)
+    monkeypatch.setattr(permission_policy, "forget_spent_approval", lambda: forgotten.append(True))
     requests = [
         {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
             "protocolVersion": "2.0", "capabilities": {"tools": {}},
@@ -313,6 +315,10 @@ def test_native_compute_mutations_obey_runtime_permission_policy(monkeypatch):
     rows = [json.loads(line) for line in output.getvalue().splitlines()]
     assert rows[1]["result"]["isError"] is True
     assert rows[1]["result"]["error"] == "permission_denied"
+    assert rows[1]["result"]["evidence"]["call_id"] == "approved-call-1"
+    assert decisions[0][0] == ("compute_submit",)
+    assert decisions[0][1]["arguments"] == requests[1]["params"]["arguments"]
+    assert forgotten == [True]
 
 
 def test_native_compute_mutations_have_deliberate_unpatched_permission_classes():
@@ -859,3 +865,56 @@ def test_native_run_script_is_graded_as_the_legacy_execution_tool():
         surface="native-mcp", record=False, mode="manual", arguments={},
     )
     assert manual is not None and manual.action != permission_policy.allow_action()
+
+
+@pytest.mark.parametrize("fails", [True, False])
+def test_native_failed_call_gives_its_one_shot_approval_back(monkeypatch, tmp_path, fails):
+    """A failed native call did not use its approval; a successful one did."""
+    import permission_modes as pm
+    from sonder_runtime.adapters.security.approval_ledger import ApprovalLedger
+    from sonder_runtime.domain.common.errors import NotFound
+
+    ledger = ApprovalLedger(tmp_path / "approvals.db")
+    monkeypatch.setattr(pm, "_approval_ledger", lambda: ledger)
+    monkeypatch.setattr(pm, "_rule_lookup", lambda _tool: None)
+    monkeypatch.setitem(pm._STATE, "mode", pm.MANUAL)
+    # Restoring is an allowlist; admit compute_cancel for this surface test.
+    monkeypatch.setattr(pm, "RESTORABLE_ON_FAILURE", pm.RESTORABLE_ON_FAILURE | {"compute_cancel"})
+    arguments = {"controller_job_id": "controller-9", "reason": "operator stop"}
+    issued = ledger.issue("compute_cancel", pm.call_digest("compute_cancel", arguments),
+                          approver="console operator")
+
+    class _Compute:
+        def cancel(self, controller_job_id, *, reason):
+            if fails:
+                raise NotFound("no such job")
+            from sonder_runtime.application.compute_fabric.jobs import RemoteJobReceipt
+            from sonder_runtime.application.compute_fabric.service import ComputeSubmission
+            from sonder_runtime.domain.compute_fabric import PlacementDecision
+
+            return ComputeSubmission(
+                "linux-node",
+                PlacementDecision(controller_job_id, "linux-node", (), ("linux-node",), ()),
+                RemoteJobReceipt(
+                    worker_id="linux-node", remote_job_id="remote-9",
+                    controller_job_id=controller_job_id, idempotency_key="idem-9",
+                    request_sha256="a" * 64, state="cancelled",
+                ),
+            )
+
+    app = _app()
+    app.compute_service = lambda: _Compute()
+    requests = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2.0", "capabilities": {"tools": {}},
+        }},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+            "name": "compute_cancel", "arguments": arguments,
+        }},
+    ]
+    output = io.StringIO()
+    run_native_mcp(app, input_stream=io.StringIO("\n".join(json.dumps(r) for r in requests) + "\n"),
+                   output_stream=output)
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert rows[1]["result"]["isError"] is fails, rows[1]
+    assert ledger.get(issued.nonce).open() is fails

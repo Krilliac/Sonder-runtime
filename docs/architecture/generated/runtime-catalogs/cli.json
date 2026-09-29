@@ -355,6 +355,30 @@
       "summary": "Show active cross-subsystem composition bindings."
     },
     {
+      "category": "diagnostics",
+      "name": "/computer_task",
+      "risk": "execution",
+      "summary": "Let the local vision model drive the session window toward a goal, one gated step at a time."
+    },
+    {
+      "category": "diagnostics",
+      "name": "/computer_use_start",
+      "risk": "dangerous",
+      "summary": "Start a driving session on one allowlisted window (by hwnd, or the first window of app)."
+    },
+    {
+      "category": "runtime",
+      "name": "/computer_use_status",
+      "risk": "safe",
+      "summary": "Report whether gated computer use is enabled, the allowlist, and the running driving session."
+    },
+    {
+      "category": "diagnostics",
+      "name": "/computer_use_stop",
+      "risk": "ask",
+      "summary": "End the driving session now and close its indicator."
+    },
+    {
       "category": "chat",
       "name": "/consult",
       "risk": "ask",
@@ -1297,6 +1321,12 @@
       "summary": "Inventory guarded project manifests and evidence-backed command candidates."
     },
     {
+      "category": "persona",
+      "name": "/prompts",
+      "risk": "safe",
+      "summary": "List, show, or locate the editable system/agent prompt files; reload re-reads them."
+    },
+    {
       "category": "memory",
       "name": "/quality",
       "risk": "safe",
@@ -1456,7 +1486,7 @@
       "category": "runtime",
       "name": "/runtime",
       "risk": "dangerous",
-      "summary": "Inspect or guarded-edit shared local model mappings and execution-lane tiers; cloud remains separate."
+      "summary": "Inspect or guarded-edit shared local model mappings, execution-lane tiers and the long-context overflow; cloud remains separate."
     },
     {
       "category": "runtime",
@@ -1511,6 +1541,12 @@
       "name": "/scaffold_project",
       "risk": "execution",
       "summary": "Emit a complete, deterministic project skeleton for one language."
+    },
+    {
+      "category": "creative",
+      "name": "/screen_capture",
+      "risk": "ask",
+      "summary": "Capture the session window to a PNG; optionally ask the local vision model a question about it."
     },
     {
       "category": "execution",
@@ -1831,6 +1867,12 @@
       "summary": "Run a type checker (mypy, pyright, tsc) with auto-detection."
     },
     {
+      "category": "diagnostics",
+      "name": "/ui_action",
+      "risk": "execution",
+      "summary": "Perform one input action in the session window."
+    },
+    {
       "category": "runtime",
       "name": "/unload",
       "risk": "dangerous",
@@ -1919,6 +1961,12 @@
       "name": "/why",
       "risk": "safe",
       "summary": "explain how the previous plain-language turn (or [text]) routed"
+    },
+    {
+      "category": "diagnostics",
+      "name": "/window_list",
+      "risk": "ask",
+      "summary": "List open windows of allowlisted apps (hwnd, app, title, size); other windows are only counted."
     },
     {
       "category": "agents",

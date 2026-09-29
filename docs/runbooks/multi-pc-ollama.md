@@ -29,9 +29,19 @@ or two.
 
 For model-specific routing the pool requires fresh positive capability evidence.
 If no fresh supporting worker exists, one request may probe one unknown or stale
-worker; it does not fan out across the roster. Model-less requests and default
-status start no such probe. `ollama_pool_admin_status(refresh=true)` is the
-explicit administrator operation for one configured bounded stale refresh.
+worker; it does not fan out across the roster. When no eligible worker advertises
+the requested model at all, the request forces one bounded capability batch over
+eligible workers whose cached inventory lacks it (at most once every 30 seconds
+per pool), so a model pulled after the last probe becomes routable without an
+operator refresh. This renews inventory only; it never admits a worker that
+membership has not activated. Model-less requests and default status start no
+such probe. `ollama_pool_admin_status(refresh=true)` is the explicit
+administrator operation for one configured bounded stale refresh.
+
+When a chat request prewarms its model, the real request for that model waits
+(within its own deadline) for the prewarm to finish before it asks the pool for
+admission, so the prewarm cannot hold the worker's only slot and turn the real
+request into `timed out waiting for Ollama worker capacity`.
 Idempotent control reads may fail over; model POSTs never do. A transport timeout
 cannot prove that a remote worker did not receive a request body, so Sonder
 surfaces ambiguous failures instead of replaying the POST. Administrative status
@@ -96,10 +106,33 @@ worker_probe_timeout_ms = 2000
 
 Every remote worker must use HTTPS, have no credentials embedded in its URL,
 have no path/query/fragment in its configured origin, and have the matching
-model tag installed. Certificate and hostname verification use Python's system
-trust store; there is no insecure-skip-verify mode. If the consent gate, URL,
-or TLS requirements are wrong, startup fails closed rather than silently
-routing prompts over an insecure link.
+model tag installed. Certificate and hostname verification always apply; there
+is no insecure-skip-verify mode. The trust anchors are, in order:
+`[ollama].ca_bundle` / `SONDER_OLLAMA_CA_BUNDLE`, else the process-wide bundle in
+`SSL_CERT_FILE` or `REQUESTS_CA_BUNDLE` (the one OpenSSL and `requests` already
+use), else Python's system trust store. A configured bundle replaces the system
+store rather than merging with it: on Windows a stale certificate with the same
+subject in the user's CA store otherwise fails verification of a private-CA or
+self-signed worker (`self-signed certificate`) even though the bundle trusts it.
+Administrative status reports the source as `tls_verification`
+(`configured-ca-bundle` or `system-trust-store`). If the consent gate, URL, or
+TLS requirements are wrong, startup fails closed rather than silently routing
+prompts over an insecure link.
+
+## Membership lifecycle
+
+Configured remote workers start in `probation` and carry no traffic until the
+static membership controller has probed them. `serve`, MCP and the REPL start
+that controller at launch (first pass immediately, then every
+`min(30, worker_capability_ttl_seconds / 2)` seconds), and log each change as
+`inference membership: members=N active=N probation=N ...`; a roster with no
+active member logs it as a warning. A worker that has not yet had a controller
+pass reports `error_category: membership_pending`; a failed probe keeps it in
+`probation` with a closed category such as `tls`, `timeout` or `transport` and a
+bounded `capability probe failed` warning. The administrator cache refresh
+renews capabilities of admitted workers; it does not admit new members.
+External membership (`[membership] mode = "external"`) keeps its explicit,
+operator-started lifecycle.
 
 ## What never leaves the primary endpoint
 

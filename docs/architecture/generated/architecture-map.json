@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 359,
+      "file_count": 371,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -118,6 +118,11 @@
         "sonder_runtime/adapters/debugging/symbol_dirs.py",
         "sonder_runtime/adapters/debugging/triage.py",
         "sonder_runtime/adapters/delegated_verification.py",
+        "sonder_runtime/adapters/desktop/__init__.py",
+        "sonder_runtime/adapters/desktop/indicator.py",
+        "sonder_runtime/adapters/desktop/png.py",
+        "sonder_runtime/adapters/desktop/session.py",
+        "sonder_runtime/adapters/desktop/windows.py",
         "sonder_runtime/adapters/developer_tools_executor.py",
         "sonder_runtime/adapters/diagnostics/__init__.py",
         "sonder_runtime/adapters/diagnostics/sources.py",
@@ -169,6 +174,7 @@
         "sonder_runtime/adapters/git/__init__.py",
         "sonder_runtime/adapters/git_discovery.py",
         "sonder_runtime/adapters/git_mutation_guard.py",
+        "sonder_runtime/adapters/git_program_guard.py",
         "sonder_runtime/adapters/goal_formatting.py",
         "sonder_runtime/adapters/host_terminal_projection.py",
         "sonder_runtime/adapters/host_terminal_result.py",
@@ -195,7 +201,11 @@
         "sonder_runtime/adapters/inference/openai_compat.py",
         "sonder_runtime/adapters/inference/openai_compat_gateway.py",
         "sonder_runtime/adapters/inference/openai_protocol_probe.py",
+        "sonder_runtime/adapters/inference/overflow_availability.py",
+        "sonder_runtime/adapters/inference/overflow_route.py",
+        "sonder_runtime/adapters/inference/prewarm_gate.py",
         "sonder_runtime/adapters/inference/residency_feedback.py",
+        "sonder_runtime/adapters/inference/served_tier_models.py",
         "sonder_runtime/adapters/inference/sonder_inference_gateway.py",
         "sonder_runtime/adapters/inference/sonder_inference_probe.py",
         "sonder_runtime/adapters/inference/static_membership.py",
@@ -336,6 +346,7 @@
         "sonder_runtime/adapters/process_probe.py",
         "sonder_runtime/adapters/process_risk.py",
         "sonder_runtime/adapters/process_termination.py",
+        "sonder_runtime/adapters/prompt_store.py",
         "sonder_runtime/adapters/provider_bindings.py",
         "sonder_runtime/adapters/provider_dispatch/__init__.py",
         "sonder_runtime/adapters/provider_dispatch/fallback.py",
@@ -390,6 +401,7 @@
         "sonder_runtime/adapters/updates/activation_journal.py",
         "sonder_runtime/adapters/updates/control_plane.py",
         "sonder_runtime/adapters/updates/engine.py",
+        "sonder_runtime/adapters/updates/metadata_ledger.py",
         "sonder_runtime/adapters/updates/offline_rehearsal.py",
         "sonder_runtime/adapters/updates/service.py",
         "sonder_runtime/adapters/vision_input.py",
@@ -408,7 +420,7 @@
       ]
     },
     {
-      "file_count": 382,
+      "file_count": 385,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -475,6 +487,7 @@
         "sonder_runtime/application/compute_fabric/refresh.py",
         "sonder_runtime/application/compute_fabric/registry.py",
         "sonder_runtime/application/compute_fabric/service.py",
+        "sonder_runtime/application/compute_fabric/spool_budget.py",
         "sonder_runtime/application/compute_fabric/wire.py",
         "sonder_runtime/application/context.py",
         "sonder_runtime/application/context_health.py",
@@ -633,6 +646,7 @@
         "sonder_runtime/application/ports/preferences.py",
         "sonder_runtime/application/ports/preflight.py",
         "sonder_runtime/application/ports/process_probe.py",
+        "sonder_runtime/application/ports/prompts.py",
         "sonder_runtime/application/ports/protocol.py",
         "sonder_runtime/application/ports/recall.py",
         "sonder_runtime/application/ports/repl_notices.py",
@@ -692,6 +706,7 @@
         "sonder_runtime/application/routing/backend_conformance.py",
         "sonder_runtime/application/routing/calibration.py",
         "sonder_runtime/application/routing/capability_router.py",
+        "sonder_runtime/application/routing/long_context_overflow.py",
         "sonder_runtime/application/routing/tier_escalation.py",
         "sonder_runtime/application/runtime_policy/__init__.py",
         "sonder_runtime/application/runtime_policy/use_cases.py",
@@ -796,7 +811,7 @@
       ]
     },
     {
-      "file_count": 62,
+      "file_count": 65,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -820,6 +835,8 @@
         "sonder_runtime/bootstrap/child_migration_activation.py",
         "sonder_runtime/bootstrap/child_migration_host.py",
         "sonder_runtime/bootstrap/child_storage.py",
+        "sonder_runtime/bootstrap/computer_use_chat.py",
+        "sonder_runtime/bootstrap/computer_use_tools.py",
         "sonder_runtime/bootstrap/config_loading.py",
         "sonder_runtime/bootstrap/container.py",
         "sonder_runtime/bootstrap/control_state_rehearsal.py",
@@ -830,6 +847,7 @@
         "sonder_runtime/bootstrap/doctor_checks.py",
         "sonder_runtime/bootstrap/doctor_formatting.py",
         "sonder_runtime/bootstrap/evaluation.py",
+        "sonder_runtime/bootstrap/generic_agent_dispatch.py",
         "sonder_runtime/bootstrap/host_tools.py",
         "sonder_runtime/bootstrap/lane_tests.py",
         "sonder_runtime/bootstrap/legacy_interfaces.py",
@@ -864,7 +882,7 @@
       ]
     },
     {
-      "file_count": 255,
+      "file_count": 259,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -942,6 +960,9 @@
         "sonder_runtime/domain/common/safe_xml.py",
         "sonder_runtime/domain/compute_fabric.py",
         "sonder_runtime/domain/compute_profiles.py",
+        "sonder_runtime/domain/computer_use/__init__.py",
+        "sonder_runtime/domain/computer_use/intent.py",
+        "sonder_runtime/domain/computer_use/rules.py",
         "sonder_runtime/domain/consistent_hash.py",
         "sonder_runtime/domain/context/__init__.py",
         "sonder_runtime/domain/context/compaction.py",
@@ -1055,6 +1076,7 @@
         "sonder_runtime/domain/promotion/__init__.py",
         "sonder_runtime/domain/promotion/measured.py",
         "sonder_runtime/domain/prompt_composition.py",
+        "sonder_runtime/domain/prompt_templates.py",
         "sonder_runtime/domain/protocol/__init__.py",
         "sonder_runtime/domain/protocol/events.py",
         "sonder_runtime/domain/protocol/subsystem_protocols.py",
@@ -1125,7 +1147,7 @@
       ]
     },
     {
-      "file_count": 68,
+      "file_count": 70,
       "name": "interfaces",
       "python_files": [
         "sonder_runtime/interfaces/__init__.py",
@@ -1143,6 +1165,7 @@
         "sonder_runtime/interfaces/http/app_control.py",
         "sonder_runtime/interfaces/http/artifact_transfer.py",
         "sonder_runtime/interfaces/http/authority_contract.py",
+        "sonder_runtime/interfaces/http/connection_limit.py",
         "sonder_runtime/interfaces/http/facades/__init__.py",
         "sonder_runtime/interfaces/http/facades/a2a.py",
         "sonder_runtime/interfaces/http/facades/a2a_jsonrpc.py",
@@ -1161,6 +1184,7 @@
         "sonder_runtime/interfaces/http/facades/fanout.py",
         "sonder_runtime/interfaces/http/facades/health_status.py",
         "sonder_runtime/interfaces/http/facades/host_tools.py",
+        "sonder_runtime/interfaces/http/facades/model_catalog.py",
         "sonder_runtime/interfaces/http/facades/model_request.py",
         "sonder_runtime/interfaces/http/facades/observability.py",
         "sonder_runtime/interfaces/http/facades/observability_stream.py",
@@ -1199,7 +1223,7 @@
       ]
     },
     {
-      "file_count": 47,
+      "file_count": 48,
       "name": "platform",
       "python_files": [
         "sonder_runtime/platform/__init__.py",
@@ -1210,6 +1234,7 @@
         "sonder_runtime/platform/child_environment_policy.py",
         "sonder_runtime/platform/child_storage_config.py",
         "sonder_runtime/platform/client_fallback.py",
+        "sonder_runtime/platform/computer_use_config.py",
         "sonder_runtime/platform/config.py",
         "sonder_runtime/platform/config_environment.py",
         "sonder_runtime/platform/context_policy.py",

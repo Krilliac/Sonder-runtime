@@ -821,6 +821,30 @@ def native_tool_registry() -> InMemoryToolRegistry:
     return InMemoryToolRegistry(sorted(_NATIVE_TOOLS, key=lambda item: item.name))
 
 
+# A call interrupted part-way may have taken effect; only a finished failure
+# gives its one-shot approval back.
+_INTERRUPTED_ERRORS = frozenset({
+    "Cancelled", "DeadlineExceeded", "CANCELLED", "DEADLINE_EXCEEDED",
+})
+
+
+def _restoring_failed_approvals(execute):
+    """Wrap a native tool handler so a failed call does not use its approval."""
+    from ..adapters.security.permission_policy import permission_policy
+
+    def handler(name: str, arguments: dict) -> dict:
+        with permission_policy.approval_call_scope() as spent:
+            # A raised error (e.g. a post-call audit failure) can follow the
+            # effect, so only a returned failure gives the approval back.
+            result = execute(name, arguments)
+            if (isinstance(result, dict) and result.get("isError")
+                    and result.get("error") not in _INTERRUPTED_ERRORS):
+                spent.restore()
+            return result
+
+    return handler
+
+
 def run_native_mcp(application, *, input_stream: TextIO | None = None,
                    output_stream: TextIO | None = None,
                    task_handler=None, close_compute_on_exit: bool = False,
@@ -1230,14 +1254,19 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
                 permission_policy.forget_spent_approval()
         if canonical_name in _COMPUTE_NAMES:
             logger.debug(f"routing to compute handler: {canonical_name!r}")
-            if canonical_name in {"compute_submit", "compute_cancel"}:
-                from ..adapters.security.permission_policy import permission_policy
+            # Every compute tool, reads included: compute_status and
+            # compute_artifact_fetch return job state and private artifact
+            # bytes, so operator rules and the mode matrix must apply to them
+            # exactly as to submit/cancel.
+            from ..adapters.security.permission_policy import permission_policy
 
+            try:
                 decision = permission_policy.decide_for_caller(
                     canonical_name,
                     interactive=False,
                     gate_control_exempt=False,
                     surface="native-mcp",
+                    arguments=canonical_arguments,
                 )
                 if (
                     decision is not None
@@ -1249,9 +1278,14 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
                         "output": "compute host control denied by runtime permission policy",
                         "isError": True,
                         "error": "permission_denied",
-                        "evidence": {"tool": canonical_name},
+                        "evidence": {
+                            "tool": canonical_name,
+                            "call_id": getattr(decision, "call_id", ""),
+                        },
                     }
-            return compute_result(canonical_name, canonical_arguments)
+                return compute_result(canonical_name, canonical_arguments)
+            finally:
+                permission_policy.forget_spent_approval()
         typed_tools = getattr(application, "tools", None)
         typed_route = canonical_name in _TYPED_TOOL_NAMES and typed_tools is not None
         if not typed_route:
@@ -1407,7 +1441,7 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
             capabilities=capabilities,
         ),
         tool_catalog=discovery_tools if discovery is not None else registry,
-        tool_handler=execute,
+        tool_handler=_restoring_failed_approvals(execute),
         task_handler=task_handler,
         server_info_version=runtime_version(),
     )

@@ -30,6 +30,7 @@ import json
 import math
 import os
 import re
+import ssl
 import threading
 import time
 from typing import Callable, Mapping
@@ -82,6 +83,10 @@ _PROBE_RESPONSE_LIMIT = 1_048_576
 _PROTOCOL = "ollama-http-v1"
 _MAX_METRIC_WORKERS = 16
 _METRIC_OVERFLOW_LABEL = "overflow"
+# A model miss may force one bounded capability batch at most this often, so a
+# newly pulled model becomes routable without an operator refresh while a
+# stream of requests for an absent model cannot turn into a probe storm.
+_MODEL_MISS_REFRESH_INTERVAL_SECONDS = 30.0
 _configured_workers: tuple[str, ...] | None = None
 _configured_allow_remote: bool | None = None
 _configured_trusted_origins: tuple[str, ...] | None = None
@@ -140,7 +145,13 @@ def _safe_error(error: BaseException) -> str:
         reason = getattr(error, "reason", error)
         if isinstance(reason, TimeoutError):
             return "URLError: transport timed out"
+        if isinstance(reason, ssl.SSLCertVerificationError):
+            return "URLError: TLS certificate verification failed"
+        if isinstance(reason, ssl.SSLError):
+            return "URLError: TLS handshake failed"
         return "URLError: transport unavailable"
+    if isinstance(error, ssl.SSLCertVerificationError):
+        return "SSLCertVerificationError: TLS certificate verification failed"
     text = str(getattr(error, "reason", error) or type(error).__name__)
     text = " ".join(text.replace("\x00", "").split())
     return "%s: %s" % (type(error).__name__, text[:200])
@@ -661,6 +672,7 @@ class OllamaWorkerPool:
             "capability_probes": 0,
             "capability_probe_failures": 0,
             "reconnects": 0,
+            "model_miss_refreshes": 0,
         }
         self._metrics_observer = metrics
         # Production pools share their process registry. Lightweight injected
@@ -680,6 +692,7 @@ class OllamaWorkerPool:
         self._membership_omitted = 0
         self._external_source = None
         self._active_probe_states = ()
+        self._last_model_miss_refresh = None
 
     @property
     def membership_limit(self) -> int:
@@ -851,8 +864,27 @@ class OllamaWorkerPool:
                 and state.membership_evidence.checked_at <= wall_now < state.membership_evidence.expires_at
                 and not self._capabilities_stale(state, now) and not state.capability_probe_failed)
 
-    def refresh_membership_capabilities(self) -> None:
-        self.refresh_capabilities(_membership=True)
+    @property
+    def capability_ttl_seconds(self) -> float:
+        return self._capability_ttl
+
+    def refresh_membership_capabilities(self, *, renew_within_seconds: float = 0.0) -> None:
+        """Probe membership workers that are stale or would expire soon.
+
+        Only the controller renews membership evidence, and admission requires
+        it to be unexpired. The controller passes its refresh interval, so a
+        member whose evidence would lapse before the next pass (allowing one
+        probe timeout of slack, capped at half the TTL) is renewed now instead
+        of going dark until then.
+        """
+        renew = float(renew_within_seconds)
+        if not math.isfinite(renew) or renew < 0:
+            raise ValueError("renew_within_seconds must be a finite non-negative number")
+        # Never renew evidence younger than half its TTL: an interval at or
+        # above the TTL cannot be rescued by renewal and must not turn every
+        # pass into a full reprobe.
+        window = min(renew + self._probe_timeout, self._capability_ttl / 2) if renew else 0.0
+        self._refresh_capabilities(_membership=True, _renew_within=window)
 
     def membership_evidence(self, roster: MembershipRoster) -> tuple[CapabilityEvidence, ...]:
         if type(roster) is not MembershipRoster:
@@ -921,6 +953,12 @@ class OllamaWorkerPool:
         return (
             state.capabilities is None
             or now - state.capabilities.observed_at >= self._capability_ttl
+        )
+
+    def _capabilities_renewal_due(self, state: _WorkerState, now: float, window: float) -> bool:
+        """True once cached capabilities would expire within ``window`` seconds."""
+        return self._capabilities_stale(state, now) or (
+            window > 0 and now - state.capabilities.observed_at >= self._capability_ttl - window
         )
 
     def _normalize_capabilities(
@@ -1075,6 +1113,7 @@ class OllamaWorkerPool:
     def _refresh_capabilities(
         self, *, force: bool = False, _membership: bool = False,
         _target: _WorkerState | None = None, _lock_owned: bool = False,
+        _targets: frozenset[int] | None = None, _renew_within: float = 0.0,
     ) -> None:
         """Update cached capabilities using the configured bounded probe batch.
 
@@ -1102,6 +1141,8 @@ class OllamaWorkerPool:
                     state = self._states[index]
                     if _target is not None and state is not _target:
                         continue
+                    if _targets is not None and id(state) not in _targets:
+                        continue
                     if state.membership_state is not None and (
                         state.membership_state in ("draining", "expired")
                         or state.membership_expires_at is None
@@ -1111,7 +1152,7 @@ class OllamaWorkerPool:
                     if _membership and state.membership_state is None:
                         continue
                     if not (
-                        (force or self._capabilities_stale(state, now))
+                        (force or self._capabilities_renewal_due(state, now, _renew_within))
                         and (force or state.cooldown_until <= now)
                         and not state.half_open_inflight
                         and not state.capability_probe_inflight
@@ -1279,7 +1320,14 @@ class OllamaWorkerPool:
                           and self._capabilities_stale(state, now)
                           and state.cooldown_until <= now and not state.half_open_inflight]
             if not candidates:
-                return
+                miss = self._model_miss_candidates_locked(model, now)
+                if not miss:
+                    return
+                self._last_model_miss_refresh = now
+        if not candidates:
+            self._refresh_after_model_miss(model, miss, admission_timeout=admission_timeout)
+            return
+        with self._condition:
             candidate_ids = {id(state) for state in candidates}
             # A caller arriving during a probe joins it even if the fair cursor
             # already advanced. Identity and completion generation prevent a
@@ -1314,6 +1362,56 @@ class OllamaWorkerPool:
                         or not any(state is target for state in self._states)):
                     return
             self._refresh_capabilities(_target=target, _lock_owned=True)
+        finally:
+            self._probe_lock.release()
+
+    def _model_miss_candidates_locked(self, model: str, now: float) -> list[_WorkerState]:
+        """Select at most one probe batch whose cached inventory may predate a pull.
+
+        Only workers that are already admissible, or whose membership lease is
+        current and whose capability evidence is still valid, qualify: this
+        refresh renews inventory, it never activates or renews membership.
+        """
+        last = self._last_model_miss_refresh
+        if last is not None and now - last < _MODEL_MISS_REFRESH_INTERVAL_SECONDS:
+            return []
+        wall_now = self._membership_clock() if self._membership_clock is not None else None
+        selected = []
+        for state in self._states:
+            if state.membership_state is None:
+                if not self._membership_admissible(state, now):
+                    continue
+            elif not (state.membership_state == "active"
+                      and state.membership_expires_at is not None
+                      and wall_now < state.membership_expires_at
+                      and state.membership_evidence is not None
+                      and state.membership_evidence.checked_at <= wall_now
+                      < state.membership_evidence.expires_at):
+                continue
+            if (state.compatibility_error or state.cooldown_until > now
+                    or state.half_open_inflight or state.capability_probe_inflight
+                    or state.capabilities is None or self._supports_model(state, model)):
+                continue
+            selected.append(state)
+            if len(selected) >= self._probe_batch_size:
+                break
+        return selected
+
+    def _refresh_after_model_miss(self, model: str, targets, *, admission_timeout: float) -> None:
+        wait = max(0.0, min(admission_timeout, self._probe_timeout))
+        if not self._probe_lock.acquire(timeout=wait):
+            # Another bounded probe owns the lock; never queue a second one.
+            return
+        try:
+            logger.info(
+                "model %r is not advertised by any eligible worker; refreshing "
+                "capabilities on %d worker(s) once", model[:128], len(targets),
+            )
+            with self._condition:
+                self._metrics["model_miss_refreshes"] += 1
+            self._refresh_capabilities(
+                force=True, _targets=frozenset(id(state) for state in targets), _lock_owned=True,
+            )
         finally:
             self._probe_lock.release()
 
@@ -1360,6 +1458,43 @@ class OllamaWorkerPool:
                 )
                 results[endpoint.worker_id] = "error: %s" % _safe_error(error)
         return results
+
+    def catalog_union(self, fetch_tags: Callable[[str], object]) -> dict:
+        """One ``/api/tags``-shaped catalog holding every member's models.
+
+        A pooled request reaches whichever member the scheduler picks, so a
+        catalog read through ``request`` describes one host. Tier validation
+        needs the pool's catalog: a model counts as installed when any member
+        holds it. The first member (the primary) wins a name both hold. An
+        unreachable member is skipped; if none answers, the last error is raised.
+        Only members the scheduler could route to count -- the same
+        admissibility ``_choose`` applies (not probationary, expired or draining,
+        no compatibility error) -- so a model is never "installed" on a worker
+        that could not serve it.
+        """
+        with self._condition:
+            now = self._clock()
+            origins = [
+                state.endpoint.origin for state in self._states
+                if self._membership_admissible(state, now) and not state.compatibility_error
+            ]
+        merged: dict[str, dict] = {}
+        answered, last_error = False, None
+        for origin in origins:
+            try:
+                payload = fetch_tags(origin)
+            except Exception as error:
+                logger.warning(f"catalog read skipped a worker: {_safe_error(error)!r}")
+                last_error = error
+                continue
+            answered = True
+            for row in (payload or {}).get("models") or ():
+                name = isinstance(row, dict) and (row.get("name") or row.get("model"))
+                if name and name not in merged:
+                    merged[name] = row
+        if not answered and last_error is not None:
+            raise last_error
+        return {"models": list(merged.values())}
 
     def _capacity(self, state: _WorkerState) -> int:
         if state.capabilities is None:
@@ -1737,8 +1872,12 @@ class OllamaWorkerPool:
     @staticmethod
     def _status_error_category(snapshot: WorkerSnapshot) -> str:
         if not snapshot.last_error:
-            return "none"
+            # A membership worker awaiting its first controller pass has no
+            # failure yet, but reporting "none" hid a lifecycle never started.
+            return "membership_pending" if snapshot.state == "probation" else "none"
         error = snapshot.last_error.casefold()
+        if "tls" in error or "certificate" in error or "ssl" in error:
+            return "tls"
         if "timeout" in error:
             return "timeout"
         if snapshot.state == "incompatible" or "capability" in error:
@@ -1891,7 +2030,9 @@ class OllamaWorkerPool:
                 "tls_verification": (
                     "pinned-ca-exact-san"
                     if common["membership_mode"] == "external"
-                    else "system-trust-store"
+                    else importlib.import_module(
+                        "sonder_runtime.adapters.inference.ollama_endpoint"
+                    ).tls_trust_source()
                     if common["remote_worker_count"] else "not-applicable"
                 ),
                 "non_idempotent_failover": False,
