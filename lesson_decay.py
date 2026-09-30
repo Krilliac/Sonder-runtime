@@ -23,6 +23,44 @@ import heapq
 # relevant for weeks but a stale one steadily loses ground to fresher ones.
 DEFAULT_HALF_LIFE_DAYS = 30.0
 
+# Per-evidence-type half-lives, in days. Reference values from a coding-memory
+# study (world-model-mcp): evidence that a test passed stays relevant for about
+# half a year, evidence grounded in the source itself (it compiles, a bug was
+# fixed there) for about a year, a user's correction for two, and a bare
+# session observation for two weeks.
+EVIDENCE_TYPE_HALF_LIFE_DAYS = {
+    "test": 180.0,
+    "bug_fix": 365.0,
+    "source_code": 365.0,
+    "user_correction": 730.0,
+    "session": 14.0,
+}
+
+# Sonder's outcome-signal vocabulary (memory_rules.SIGNAL_REWARDS) mapped onto
+# the evidence types above. Only signals whose meaning names the evidence are
+# mapped:
+#
+# * ``tests_passed`` -- a test run passed           -> ``test``
+# * ``compiled``     -- the source built / verified -> ``source_code``
+#
+# Deliberately unmapped, so they keep DEFAULT_HALF_LIFE_DAYS exactly:
+#
+# * ``failed`` is written by test, build, lint and run verifiers alike and the
+#   row does not record which, so choosing ``test`` or ``source_code`` would be
+#   a guess.
+# * The caller-judged signals (``used``, ``copied``, ``edited``, ``accepted``,
+#   ``rejected``) record that *some caller* judged the work; the store keeps no
+#   evidence that caller was a human, so none of them is a ``user_correction``.
+# * ``bug_fix``, ``user_correction`` and ``session`` have no Sonder signal. They
+#   are still accepted by name, so a future writer that records them directly
+#   decays by the reference table without another mapping change.
+#
+# Lesson rows carry no confirmation flag, so confirmation does not change decay.
+SIGNAL_EVIDENCE_TYPES = {
+    "tests_passed": "test",
+    "compiled": "source_code",
+}
+
 # Weight applied to per-lesson usage evidence when forming an effective score.
 # Kept small so proven-useful lessons get a nudge above equally-scored peers
 # without letting raw usage volume swamp the base reward signal.
@@ -57,7 +95,36 @@ def _finite(value, default=0.0):
     return out
 
 
-def decayed_score(base_score, age_days, *, half_life_days=DEFAULT_HALF_LIFE_DAYS):
+def evidence_type_for(evidence):
+    """Canonical evidence type for a signal or type name, or None if unknown.
+
+    Accepts a Sonder outcome signal (``tests_passed``) or a reference evidence
+    type name (``test``). Anything else -- None, a non-string, an unmapped
+    signal -- is unknown and returns None.
+    """
+    if not isinstance(evidence, str):
+        return None
+    key = evidence.strip().lower()
+    if key in EVIDENCE_TYPE_HALF_LIFE_DAYS:
+        return key
+    return SIGNAL_EVIDENCE_TYPES.get(key)
+
+
+def half_life_for_evidence(evidence, default=DEFAULT_HALF_LIFE_DAYS):
+    """Half-life in days for ``evidence``; ``default`` itself when unknown.
+
+    Unknown or missing evidence returns the ``default`` object unchanged, so a
+    caller that never supplies an evidence type decays exactly as before.
+    """
+    kind = evidence_type_for(evidence)
+    if kind is None:
+        return default
+    return EVIDENCE_TYPE_HALF_LIFE_DAYS[kind]
+
+
+def decayed_score(
+    base_score, age_days, *, half_life_days=DEFAULT_HALF_LIFE_DAYS, evidence_type=None,
+):
     """Apply exponential age decay to ``base_score``.
 
     Returns ``base_score * 0.5 ** (age_days / half_life_days)``: at age 0 the
@@ -69,10 +136,14 @@ def decayed_score(base_score, age_days, *, half_life_days=DEFAULT_HALF_LIFE_DAYS
     Negative ages are clamped to 0 (a lesson cannot be fresher than "now").
     A non-positive ``half_life_days`` is meaningless, so decay is skipped and
     the base score is returned unchanged.
+
+    ``evidence_type`` (a Sonder signal or reference type name) selects the
+    half-life from EVIDENCE_TYPE_HALF_LIFE_DAYS; when it is missing or unknown
+    ``half_life_days`` is used exactly as before.
     """
     base = _finite(base_score)
     age = max(0.0, _finite(age_days))
-    hl = _finite(half_life_days)
+    hl = _finite(half_life_for_evidence(evidence_type, half_life_days))
     if hl <= 0.0:
         return base
     return base * (0.5 ** (age / hl))
@@ -103,15 +174,19 @@ def effective_score(
     *,
     half_life_days=DEFAULT_HALF_LIFE_DAYS,
     usage_weight=DEFAULT_USAGE_WEIGHT,
+    evidence_type=None,
 ):
     """Blend base reward, usage evidence, and age decay into one rank key.
 
-    The base reward is aged via :func:`decayed_score`, then the usage credit
-    from :func:`usage_credit` is added. Two lessons with the same base score
-    and age order by usage; two with the same base and usage order by
-    freshness. Higher is better.
+    The base reward is aged via :func:`decayed_score` (by ``evidence_type``
+    when known, else ``half_life_days``), then the usage credit from
+    :func:`usage_credit` is added. Two lessons with the same base score and age
+    order by usage; two with the same base and usage order by freshness.
+    Higher is better.
     """
-    aged = decayed_score(base_score, age_days, half_life_days=half_life_days)
+    aged = decayed_score(
+        base_score, age_days, half_life_days=half_life_days, evidence_type=evidence_type,
+    )
     return aged + usage_credit(uses, hits, usage_weight=usage_weight)
 
 
@@ -132,7 +207,9 @@ def rank_lessons(
     """Return ``lessons`` sorted by effective score, best first. Pure.
 
     Each lesson is a small dict (or attribute-bearing object) carrying
-    ``score``, ``created_days``, ``uses`` and ``hits``. Age is derived as
+    ``score``, ``created_days``, ``uses`` and ``hits``, and optionally an
+    ``evidence_type`` that selects its half-life (absent or unknown keeps
+    ``half_life_days``). Age is derived as
     ``now_days - created_days``. The input list is not mutated -- a new list of
     the same lesson objects is returned. Ties break by newer ``created_days``
     then by original position, so ordering is fully deterministic.
@@ -151,6 +228,7 @@ def rank_lessons(
             _lesson_field(lesson, "hits", 0),
             half_life_days=half_life_days,
             usage_weight=usage_weight,
+            evidence_type=_lesson_field(lesson, "evidence_type", None),
         )
         # Negate for descending effective score; newer (larger created) first
         # on ties; original index last as a stable final tie-break.

@@ -276,8 +276,10 @@ def stale_lesson_findings(
     lessons are already counted by the audit; this names the third population,
     lessons whose proof of usefulness has simply gone old. Fails closed the
     same way the contradiction audit does: no scored evidence, or an
-    unreadable evidence timestamp, and no claim is made. ``now`` is injectable
-    so callers and tests are deterministic.
+    unreadable evidence timestamp, and no claim is made. The newest outcome's
+    signal selects the half-life (``lesson_decay.SIGNAL_EVIDENCE_TYPES``);
+    ``half_life_days`` applies to every signal without a mapped type. ``now``
+    is injectable so callers and tests are deterministic.
     """
     limit = max(1, min(int(limit or 20), 100))
     current = now or datetime.now(timezone.utc)
@@ -286,10 +288,14 @@ def stale_lesson_findings(
     history = memory_store.lesson_usage_history(conn)
     stats = memory_store.lesson_usage_stats(conn, history=history)
     last_evidence = {}
+    last_signal = {}
     for row in history:
         # History is ordered by lesson then evidence time, so the last row
         # seen per lesson is its newest scored outcome.
         last_evidence[row["lesson_id"]] = row["evidence_ts"]
+        last_signal[row["lesson_id"]] = (
+            row["outcome_signal"] if "outcome_signal" in row.keys() else None
+        )
     texts = {row["id"]: row.get("text") or "" for row in _all_lessons(conn)}
     findings = []
     for lesson_id, lesson_stats in stats.items():
@@ -306,8 +312,12 @@ def stale_lesson_findings(
             continue
         wins = int(lesson_stats.get("wins") or 0)
         scored = wins + int(lesson_stats.get("losses") or 0)
+        # The newest outcome's signal is the evidence the age is measured
+        # from, so it picks the half-life; an unmapped or missing signal keeps
+        # ``half_life_days``.
         effective = lesson_decay.effective_score(
             mean, age_days, uses=scored, hits=wins, half_life_days=half_life_days,
+            evidence_type=last_signal.get(lesson_id),
         )
         if effective >= STALE_EFFECTIVE_FLOOR:
             continue
