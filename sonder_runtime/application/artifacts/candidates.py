@@ -60,6 +60,11 @@ class CandidateFanIn:
 
     def consume(self, output: CandidateOutput, index: int):
         result = output.result
+        if not result.get("ok") and output.readiness is None and not output.verifier_receipt:
+            # A failed candidate is not an artifact: the producer never sealed
+            # it and winner selection already requires ``ok``. Keep its public
+            # diagnostics byte-identical to the pre-fan-in tool output.
+            return result
         error = readiness_error(
             output.readiness, run_id=self.run_id, producer_id=str(index), content=_content(result),
             source_revision=self.source_revision, verifier_receipt=output.verifier_receipt,
