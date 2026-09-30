@@ -894,7 +894,7 @@
       ]
     },
     {
-      "file_count": 262,
+      "file_count": 263,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1055,6 +1055,7 @@
         "sonder_runtime/domain/memory/retention_gate.py",
         "sonder_runtime/domain/memory/rules.py",
         "sonder_runtime/domain/memory/wp6_typed.py",
+        "sonder_runtime/domain/memory/write_quality.py",
         "sonder_runtime/domain/mode_tool_policy.py",
         "sonder_runtime/domain/model_capabilities.py",
         "sonder_runtime/domain/model_catalog.py",
