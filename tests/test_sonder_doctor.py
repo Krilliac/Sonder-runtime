@@ -241,6 +241,7 @@ def test_default_checks_registry_is_read_only_pairs_and_stable():
         "ollama",
         "ollama_workers",
         "ollama_residency",
+        "embeddings",
         "sonder_inference",
         "sonder_inference_scope",
         "sonder_inference_gpu",

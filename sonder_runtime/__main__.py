@@ -429,7 +429,7 @@ def cmd_doctor(args) -> int:
         for name, check in checks
     ]
     if args.skip_ollama:
-        skipped_names = {"ollama", "ollama_workers", "ollama_residency"}
+        skipped_names = {"ollama", "ollama_workers", "ollama_residency", "embeddings"}
         checks = [
             (name, check) for name, check in checks if name not in skipped_names
         ]
