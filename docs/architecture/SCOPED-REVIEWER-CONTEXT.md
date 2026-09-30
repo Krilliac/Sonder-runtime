@@ -96,5 +96,10 @@ WorkerExecutionContract(
 )
 ~~~~
 
+Recursive hypothesis fan-in (`DelegationService.fan_in_hypotheses`) compares
+each persisted contract against `effective_execution_contract(...)`, the same
+defaulting `DelegationRequest` applies at dispatch, so reviewer, critic and
+verifier specialists fan in exactly like other presets.
+
 The worker adapter restores this using the canonical continuation metadata.
 No MCP schema, public role enum or committed catalog changes.

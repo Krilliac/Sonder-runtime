@@ -143,6 +143,32 @@ class LineageRecord:
             raise IntegrationError("lineage role must be an AgentRole")
 
 
+def effective_execution_contract(
+    contract: WorkerExecutionContract,
+    role: str,
+    prompt: str,
+    evidence_tags: Iterable[str] = (),
+) -> WorkerExecutionContract:
+    """Return the contract a ``DelegationRequest`` will actually carry.
+
+    An unspecified context policy on a reviewer/critic/verifier role is
+    defaulted to SCOPED; every other contract is returned unchanged.  Callers
+    that compare a persisted contract against its originating proposal must
+    compare against this value, not the raw proposal contract.
+    """
+    if contract.context_policy.value != "unspecified":
+        return contract
+    tags = tuple(sorted({str(tag) for tag in evidence_tags}))
+    default_contract = default_scoped_contract(role, prompt, tags)
+    if default_contract is None:
+        return contract
+    return replace(
+        contract,
+        context_policy=default_contract.context_policy,
+        context_inputs=default_contract.context_inputs,
+    )
+
+
 @dataclass(frozen=True)
 class DelegationRequest:
     """Validated request handed from one registered role to another."""
@@ -174,17 +200,12 @@ class DelegationRequest:
         if not isinstance(self.execution_contract, WorkerExecutionContract):
             raise IntegrationError("execution_contract must be WorkerExecutionContract")
         was_empty = self.execution_contract == WorkerExecutionContract()
-        if self.execution_contract.context_policy.value == "unspecified":
-            default_contract = default_scoped_contract(
-                self.preset.role.value, self.prompt, self.evidence_tags,
-            )
-            if default_contract is not None:
-                object.__setattr__(self, "execution_contract", replace(
-                    self.execution_contract,
-                    context_policy=default_contract.context_policy,
-                    context_inputs=default_contract.context_inputs,
-                ))
-                object.__setattr__(self, "context_policy_defaulted", was_empty)
+        effective = effective_execution_contract(
+            self.execution_contract, self.preset.role.value, self.prompt, self.evidence_tags,
+        )
+        if effective != self.execution_contract:
+            object.__setattr__(self, "execution_contract", effective)
+            object.__setattr__(self, "context_policy_defaulted", was_empty)
         if self.resource_budget is not None and not isinstance(self.resource_budget, SubagentBudget):
             raise IntegrationError("resource_budget must be a SubagentBudget")
         if self.execution_contract.speculative_lane:
