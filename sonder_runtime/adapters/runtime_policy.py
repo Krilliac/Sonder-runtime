@@ -1,7 +1,9 @@
 """Shared, hot-reloadable policy adapter for local models and execution lanes.
 
 Every Sonder Runtime surface uses the same per-user file. The policy intentionally
-cannot configure cloud models, permissions, roots, or credentials.
+cannot configure cloud models for local tiers, permissions, roots, credentials,
+or cloud consent; ``provider_models`` only picks the model an already-bound,
+already-consented hosted provider serves per tier.
 
 The pure validation/normalization rules live in
 ``sonder_runtime.domain.runtime_policy.rules`` and the atomic-write/lock
@@ -36,6 +38,7 @@ NPU_MODES = _rules.NPU_MODES
 NPU_CAPABILITIES = _rules.NPU_CAPABILITIES
 DEFAULT_NPU = _rules.DEFAULT_NPU
 DEFAULT_LONG_CONTEXT_OVERFLOW = _rules.DEFAULT_LONG_CONTEXT_OVERFLOW
+PROVIDER_MODEL_PROVIDERS = _rules.PROVIDER_MODEL_PROVIDERS
 _MODEL_RE = _rules._MODEL_RE
 _LOCK = threading.RLock()
 
@@ -201,8 +204,15 @@ def finish_transition(transition_id, token) -> bool:
 def update(
     local_models=None, embedding_model=None, routing=None, npu=None, reset=False,
     source="user update", expected_revision=None, transition_token=None,
-    long_context_overflow=None,
+    long_context_overflow=None, provider_models=None,
 ) -> dict:
+    """Apply one guarded policy change under the cross-process lock.
+
+    ``provider_models`` is ``{provider: {tier: model}}`` for a hosted
+    provider's per-tier model choice (an empty model clears that tier).  It
+    never binds a tier to the provider or enables cloud; see
+    ``domain.runtime_policy.rules``.
+    """
     path = policy_path().resolve()
     with _LOCK, _policy_file_lock(path=path):
         journal_path = transition_path(path)
@@ -246,7 +256,22 @@ def update(
             "long_context_overflow": dict(
                 base.get("long_context_overflow") or DEFAULT_LONG_CONTEXT_OVERFLOW
             ),
+            "provider_models": {
+                name: dict(tiers)
+                for name, tiers in (base.get("provider_models") or {}).items()
+            },
         }
+        if provider_models:
+            if not isinstance(provider_models, dict):
+                raise ValueError("provider_models update must be a JSON object")
+            for name, tiers in provider_models.items():
+                if not isinstance(tiers, dict):
+                    raise ValueError("provider_models.%s update must be a JSON object" % name)
+                merged = candidate["provider_models"].setdefault(str(name).strip().lower(), {})
+                merged.update(tiers)
+            candidate["provider_models"] = _rules.normalize_provider_models(
+                candidate["provider_models"],
+            )
         if embedding_model is not None:
             candidate["embedding_model"] = embedding_model
         if local_models:
@@ -343,6 +368,10 @@ def format_policy(policy=None) -> str:
         )
     )
     lines.append("  " + format_long_context_overflow(policy))
+    for provider, tiers in sorted((policy.get("provider_models") or {}).items()):
+        lines.append("  %s tier models (used only where that provider is bound): %s" % (
+            provider, ", ".join("%s=%s" % item for item in tiers.items()) or "-",
+        ))
     lines.append("  cloud tiers remain separate explicit opt-in configuration")
     return "\n".join(lines)
 

@@ -30,7 +30,15 @@ except ImportError:  # pragma: no cover - exercised on minimal installs
 # positions. Removed members retain their slots; later identities overflow.
 # Bounded ``backend`` label values for inference measurements; any other
 # backend is folded into "other" so label cardinality stays fixed.
-_INFERENCE_BACKEND_LABELS = frozenset({"ollama", "openai_compatible", "sonder_inference"})
+_INFERENCE_BACKEND_LABELS = frozenset({
+    "ollama", "openai_compatible", "sonder_inference", "openrouter",
+})
+# The upstream host a router reports (OpenRouter's ``provider``) is external
+# text: it is folded to a lowercase slug and at most this many distinct values
+# per process are kept as labels; later ones become "other".
+_UPSTREAM_LABEL = re.compile(r"[a-z0-9][a-z0-9._-]{0,39}")
+_MAX_UPSTREAM_LABELS = 32
+_USAGE_TOKEN_KINDS = ("prompt", "completion", "cached", "cache_write", "reasoning")
 _WORKER_LABELS = frozenset({*("w%d" % index for index in range(16)), "overflow"})
 _WORKER_IDENTITY = re.compile(r"[0-9a-f]{64}")
 _COMPUTE_REJECTION_REASONS = frozenset({
@@ -84,6 +92,7 @@ class MetricsRegistry:
         self.enabled = enabled and PROMETHEUS_AVAILABLE
         self._lock = threading.Lock()
         self._ollama_worker_identities: dict[str, str] = {}
+        self._upstream_labels: set[str] = set()
         if self.enabled:
             self._registry = CollectorRegistry()
             self.build_info = Gauge(
@@ -165,6 +174,16 @@ class MetricsRegistry:
                 buckets=(0, 1, 8, 32, 128, 512, 2048, 8192, 32768, 131072,
                          1_000_000, float("inf")),
                 registry=self._registry,
+            )
+            self.model_cost_usd_total = Counter(
+                "sonder_model_cost_usd_total",
+                "Provider-reported request cost in USD by backend and upstream host",
+                ["backend", "upstream"], registry=self._registry,
+            )
+            self.model_usage_tokens_total = Counter(
+                "sonder_model_usage_tokens_total",
+                "Provider-reported token usage by backend, upstream host and kind",
+                ["backend", "upstream", "kind"], registry=self._registry,
             )
             self.model_load_states_total = Counter(
                 "sonder_model_load_states_total",
@@ -251,7 +270,8 @@ class MetricsRegistry:
                 "model_calls_total", "model_call_duration_seconds",
                 "model_backend_phase_duration_seconds",
                 "model_token_throughput_per_second", "model_load_states_total",
-                "model_prompt_tokens",
+                "model_prompt_tokens", "model_cost_usd_total",
+                "model_usage_tokens_total",
                 "sqlite_lock_wait_seconds", "task_states", "autopilot_runs_total",
                 "backup_age_seconds", "backup_runs_total", "disk_free_bytes",
                 "redaction_failures_total", "auth_failures_total",
@@ -298,6 +318,39 @@ class MetricsRegistry:
         state = getattr(telemetry, "load_state", None)
         if state in ("cold", "warm"):
             self.model_load_states_total.labels(backend=backend, state=state).inc()
+
+    def upstream_label(self, upstream: object) -> str:
+        """A bounded label for a router-reported upstream host."""
+        text = str(upstream or "").strip().lower().replace(" ", "-")
+        if not text:
+            return "unknown"
+        if _UPSTREAM_LABEL.fullmatch(text) is None:
+            return "other"
+        with self._lock:
+            seen = self._upstream_labels
+            if text in seen:
+                return text
+            if len(seen) >= _MAX_UPSTREAM_LABELS:
+                return "other"
+            seen.add(text)
+            return text
+
+    def observe_provider_usage(
+        self, backend: str, *, upstream: object = None,
+        cost_usd: object = None, tokens: dict | None = None,
+    ) -> None:
+        """Record one call's provider-reported cost and token usage."""
+        backend = backend if backend in _INFERENCE_BACKEND_LABELS else "other"
+        label = self.upstream_label(upstream)
+        if (isinstance(cost_usd, (int, float)) and not isinstance(cost_usd, bool)
+                and 0 <= cost_usd <= 1_000_000):
+            self.model_cost_usd_total.labels(backend=backend, upstream=label).inc(float(cost_usd))
+        for kind in _USAGE_TOKEN_KINDS:
+            count = (tokens or {}).get(kind)
+            if isinstance(count, int) and not isinstance(count, bool) and 0 <= count <= 1_000_000_000:
+                self.model_usage_tokens_total.labels(
+                    backend=backend, upstream=label, kind=kind,
+                ).inc(count)
 
     def observe_model_call(
         self, *, cloud: bool, result: str, elapsed_seconds: float
