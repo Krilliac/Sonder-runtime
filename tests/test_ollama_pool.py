@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from urllib.error import URLError
 
 import pytest
@@ -7,15 +9,18 @@ import pytest
 from sonder_runtime.adapters.inference.ollama_pool import (
     OllamaWorkerPool,
     WorkerCapabilityUnavailable,
+    WorkerPoolBackpressure,
     _metric_label,
     _default_capability_prober,
     configure_typed_workers,
     from_environment,
+    local_agent_admission,
     parse_worker_origins,
     reset_typed_workers,
     validate_worker_origin,
 )
 from sonder_runtime.platform.logging import Redactor
+from sonder_runtime.platform.runtime_threads import Thread
 
 
 class _Metrics:
@@ -34,6 +39,154 @@ def test_worker_origin_parser_accepts_comma_and_semicolon_lists():
     assert parse_worker_origins("https://a:11434; https://b:11434, https://c:11434") == (
         "https://a:11434", "https://b:11434", "https://c:11434",
     )
+
+
+def test_local_caller_uses_bounded_queue_timeout_without_changing_interactive_default():
+    pool = OllamaWorkerPool(
+        "http://127.0.0.1:11434", max_inflight_per_worker=1,
+        queue_depth=2, admission_timeout_seconds=0.01,
+        local_admission_timeout_seconds=0.25,
+    )
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hold(_origin):
+        entered.set()
+        release.wait(2)
+        return "held"
+
+    active = Thread(target=lambda: pool.request(hold, caller="agent"))
+    active.start()
+    assert entered.wait(1)
+    started = time.monotonic()
+    with pytest.raises(WorkerPoolBackpressure) as excinfo:
+        pool.request(lambda _origin: "unexpected", caller="interactive")
+    assert time.monotonic() - started < 0.15
+    assert "timed out waiting" in str(excinfo.value)
+    release.set()
+    active.join(2)
+
+
+def test_local_caller_waits_for_capacity_and_environment_controls_default(monkeypatch):
+    pool = OllamaWorkerPool(
+        "http://127.0.0.1:11434", max_inflight_per_worker=1,
+        queue_depth=2, admission_timeout_seconds=0.01,
+        local_admission_timeout_seconds=0.3,
+    )
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hold(_origin):
+        entered.set()
+        release.wait(2)
+        return "held"
+
+    active = Thread(target=lambda: pool.request(hold, caller="autopilot"))
+    active.start()
+    assert entered.wait(1)
+    result = []
+    waiting = Thread(target=lambda: result.append(
+        pool.request(lambda origin: origin, caller="fleet")
+    ))
+    waiting.start()
+    time.sleep(0.05)
+    assert waiting.is_alive()
+    release.set()
+    active.join(2)
+    waiting.join(2)
+    assert result == ["http://127.0.0.1:11434"]
+
+    monkeypatch.setenv("SONDER_POOL_ADMISSION_TIMEOUT_SECONDS", "0.2")
+    configured = from_environment("http://127.0.0.1:11434", {
+        "SONDER_POOL_ADMISSION_TIMEOUT_SECONDS": "0.2",
+    })
+    assert configured._local_admission_timeout == 0.2
+
+
+def test_local_agent_admission_scope_uses_remaining_budget_and_public_pool_stays_fast():
+    local = OllamaWorkerPool(
+        "http://127.0.0.1:11434", max_inflight_per_worker=1,
+        queue_depth=1, admission_timeout_seconds=0.01,
+        local_admission_timeout_seconds=0.2,
+    )
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hold(_origin):
+        entered.set()
+        release.wait(2)
+
+    active = Thread(target=lambda: local.request(hold, caller="agent"))
+    active.start()
+    assert entered.wait(1)
+    def wait_locally():
+        with local_agent_admission(caller="autopilot", timeout_seconds=0.15):
+            local.request(lambda origin: origin)
+
+    waiting = Thread(target=wait_locally)
+    waiting.start()
+    time.sleep(0.03)
+    assert waiting.is_alive()
+    release.set()
+    active.join(2)
+    waiting.join(2)
+    assert not waiting.is_alive()
+
+    hosted = OllamaWorkerPool(
+        "https://worker.example:11434", allow_remote=True,
+        trusted_origins=("worker.example",), max_inflight_per_worker=1,
+        queue_depth=1, admission_timeout_seconds=0.01,
+        local_admission_timeout_seconds=0.2,
+    )
+    hosted_entered = threading.Event()
+    hosted_release = threading.Event()
+    hosted_active = Thread(target=lambda: hosted.request(
+        lambda _origin: (hosted_entered.set(), hosted_release.wait(2)),
+    ))
+    hosted_active.start()
+    assert hosted_entered.wait(1)
+    with local_agent_admission(caller="agent", timeout_seconds=0.2):
+        started = time.monotonic()
+        with pytest.raises(WorkerPoolBackpressure):
+            hosted.request(lambda _origin: "ok")
+        assert time.monotonic() - started < 0.15
+    hosted_release.set()
+    hosted_active.join(2)
+
+
+def test_agent_admission_expires_at_the_smaller_model_call_budget():
+    pool = OllamaWorkerPool(
+        "http://127.0.0.1:11434", queue_depth=1,
+        local_admission_timeout_seconds=1,
+    )
+    entered, release = threading.Event(), threading.Event()
+
+    def hold(_origin):
+        entered.set()
+        release.wait(2)
+
+    owner = Thread(target=lambda: pool.request(hold))
+    owner.start()
+    try:
+        assert entered.wait(1)
+        with local_agent_admission(timeout_seconds=0.05):
+            started = time.monotonic()
+            with pytest.raises(WorkerPoolBackpressure, match="timed out waiting for Ollama worker capacity"):
+                pool.request(lambda _origin: pytest.fail("saturated worker dispatched"))
+            elapsed = time.monotonic() - started
+        assert 0.04 <= elapsed < 0.8
+    finally:
+        release.set()
+        owner.join(2)
+    assert not owner.is_alive()
+
+
+@pytest.mark.parametrize("value", ["-1", "nan", "inf", "61", "invalid"])
+def test_agent_admission_configuration_rejects_unbounded_or_invalid_values(value):
+    with pytest.raises(ValueError, match="SONDER_POOL_ADMISSION_TIMEOUT_SECONDS"):
+        from_environment("http://127.0.0.1:11434", {
+            "SONDER_POOL_ADMISSION_TIMEOUT_SECONDS": value,
+        })
 
 
 def test_remote_worker_requires_https_and_explicit_consent():

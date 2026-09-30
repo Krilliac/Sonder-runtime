@@ -191,6 +191,7 @@ from sonder_runtime.application.routing import long_context_overflow as _overflo
 # a live reload of server.py cannot orphan an in-flight rung binding.
 from sonder_runtime.application.chat import provider_bridge as _provider_bridge
 from sonder_runtime.adapters import legacy_chat_bridge as _legacy_chat_bridge
+from sonder_runtime.adapters import tier_generation as _tier_generation
 from sonder_runtime.adapters import mcp_tool_manifest as _mcp_tool_manifest
 from sonder_runtime.application.context_health import (
     ContextHealthService,
@@ -1791,7 +1792,7 @@ def _make_generate(
     the decoder is not the same as verifying the result -- see
     `_require_schema_match`, which callers apply to the returned text.
     """
-    cloud = bool(cloud or _is_cloud_model_name(model))
+    cloud = bool(cloud or (_provider_bridge.active_rung() is None and _is_cloud_model_name(model)))
     if think is not None and not isinstance(think, bool):
         raise ValueError("think must be a boolean when supplied")
     if not isinstance(reasoning_continuation, bool):
@@ -1979,16 +1980,21 @@ def _no_retrieve(conn, task):
     return _no_retrieve_policy(conn, task)
 
 
+def _make_tier_generate(tier, *args, **kwargs):
+    return _tier_generation.make_generate(
+        _make_generate, tier, args, kwargs, graph=_APP_GRAPH,
+        consent=lambda: (_cloud_allowed_policy(os.environ), not _ollama_endpoint_is_local()),
+    )
+
+
 def _generate_text(prompt, tier="fast", system="", temperature=0.2,
                    num_predict=256, num_ctx=0, timeout=None):
     _refresh_live_cloud_tiers()
     model = TIERS.get(tier, TIERS["fast"])
-    # A helper call names its own tier; it must never inherit the enclosing
-    # chat rung's provider binding (it keeps its historical Ollama route).
-    with _provider_bridge.suspend_rung():
-        return _make_generate(
-            model, system, temperature, num_predict, num_ctx, timeout=timeout,
-        )(prompt)
+    return _make_tier_generate(
+        tier if tier in TIERS else "fast", model, system, temperature, num_predict,
+        num_ctx, timeout=timeout,
+    )(prompt)
 
 
 _APP_GRAPH = None
@@ -2307,60 +2313,12 @@ def _legacy_model_step_options(generator, *, temperature, num_predict, num_ctx):
 
 def _gateway_generate_text(prompt, tier="fast", system="", temperature=0.2,
                            num_predict=256, num_ctx=None, timeout=None):
-    """offload_fn routed through the SPEC-3 ChatService over the ModelGateway.
-
-    The port enforces the operation-context cloud-consent gate and returns
-    domain-typed errors; this edge translates them back to ModelCallError
-    (a urllib.error.URLError subclass) so existing callers that catch
-    URLError — session summarization/titling — keep their exact behavior.
-    An explicit num_ctx is forwarded through the port; when omitted the
-    gateway resolves the native session context via _make_generate.
-    """
-    from sonder_runtime.application.chat.handle_chat import ChatCommand
-    from sonder_runtime.application.context import (
-        current_operation_context,
-        local_owner_context,
-    )
-    from sonder_runtime.domain.common import errors as _errors
-
-    # An offload made inside a turn joins that turn's run (same correlation
-    # id R) so the next producer's events group with it.
-    ambient = current_operation_context()
-    context = local_owner_context(
-        correlation_id=(
-            ambient.correlation_id if ambient is not None
-            else "offload-%s" % os.urandom(4).hex()
-        ),
-        source="system",
+    from sonder_runtime.adapters.gateway_generation import gateway_generate_text
+    return gateway_generate_text(
+        _application, prompt, tier, system, temperature, num_predict, num_ctx, timeout,
         cloud_allowed=_cloud_allowed_policy(os.environ),
         remote_ollama_allowed=not _ollama_endpoint_is_local(),
-        timeout_seconds=float(timeout) if timeout else None,
     )
-    try:
-        # The offload asks for its own tier; the gateway routes it, never the
-        # enclosing chat rung's binding (the Ollama gateway re-enters
-        # _chat_request, which must take the ordinary path).
-        with _provider_bridge.suspend_rung():
-            result = _application().chat.complete(
-                ChatCommand(
-                    content=prompt, tier=tier, system=system,
-                    temperature=temperature, num_predict=num_predict,
-                    num_ctx=num_ctx,
-                ),
-                context,
-            )
-    except _errors.SonderError as exc:
-        # Translate the domain taxonomy back to the legacy transport error
-        # at the adapter edge so callers' URLError handling is unchanged.
-        kind = {
-            "DEADLINE_EXCEEDED": "timeout",
-            "CANCELLED": "cancelled",
-            "DEPENDENCY_UNAVAILABLE": "request",
-            "FORBIDDEN": "configuration",
-            "INVALID_INPUT": "configuration",
-        }.get(getattr(exc, "code", ""), "request")
-        raise ModelCallError(kind, str(exc)) from exc
-    return result.response_text
 
 
 def _internal_generate_for_route(model, cloud):
@@ -5201,16 +5159,6 @@ def _bridge_operation_context(timeout, cancel_check):
     )
 
 
-def _refuse_ollama_agent_on_bound_tier(tier, step):
-    """Fail closed (503) when an Ollama-only HTTP chat step meets a bound tier."""
-    _model, cloud, _augment, tier_label = _serve_target(tier, None)
-    if tier_label in (None, "cloud-disabled"):
-        return
-    provider = _bridge_provider_for_tier(tier_label, cloud)
-    if provider is not None:
-        raise _legacy_chat_bridge.ollama_agent_refusal(step, tier_label, provider)
-
-
 def _chat_request(
     payload: dict,
     *,
@@ -5764,7 +5712,19 @@ def _file_schema_rejection(interaction_id):
         pass
 
 
-def _offload_impl(
+def _offload_impl(prompt, tier="fast", system="", temperature=0.2, num_predict=1024,
+                  num_ctx=0, learn=True, timeout=TIMEOUT, cancel_check=None,
+                  schema=None, session=None):
+    with _tier_generation.scope(
+        tier, graph=_APP_GRAPH, timeout=_bound_request_timeout(timeout, TIMEOUT),
+        cancel_check=cancel_check,
+        consent=lambda: (_cloud_allowed_policy(os.environ), not _ollama_endpoint_is_local()),
+    ):
+        return _offload_tier_impl(prompt, tier, system, temperature, num_predict,
+                                 num_ctx, learn, timeout, cancel_check, schema, session)
+
+
+def _offload_tier_impl(
     prompt: str,
     tier: str = "fast",
     system: str = "",
@@ -5791,14 +5751,15 @@ def _offload_impl(
             "configuration",
             "unknown tier '%s'. Valid tiers: %s." % (tier, _valid_tier_names()),
         )
-    cloud = _is_cloud_tier(tier, model)
+    provider = _bridge_provider_for_tier(tier)
+    cloud = provider is None and _is_cloud_tier(tier, model)
     if cloud and not _cloud_allowed_policy(os.environ):
         raise ModelCallError(
             "configuration",
             _cloud_disabled_message().removeprefix("ERROR: "),
             cloud=True,
         )
-    if not cloud and (num_ctx is None or int(num_ctx or 0) <= 0):
+    if not cloud and provider is None and (num_ctx is None or int(num_ctx or 0) <= 0):
         num_ctx = _auto_model_context(model)
 
     if not _should_learn(tier, learn):
@@ -5861,6 +5822,8 @@ def _offload_impl(
                     cancel_check=cancel_check,
                     idempotent=True,
                 )
+            if provider is not None:
+                used_model = out.get("model") or model
             tokens_in = _model_usage_count(out.get("prompt_eval_count"))
             tokens_out = _model_usage_count(out.get("eval_count"))
             source = _model_usage_source(tokens_in, tokens_out)
@@ -5920,8 +5883,9 @@ def _offload_impl(
             )
 
     retrieve_kwargs = {}
-    if cloud:
-        gen = _make_generate(
+    if cloud or _provider_bridge.is_hosted(provider):
+        gen = _make_tier_generate(
+            tier,
             model,
             system,
             temperature,
@@ -5930,26 +5894,26 @@ def _offload_impl(
             cloud=True,
             timeout=request_timeout,
             cancel_check=cancel_check,
-            schema=schema,
+            schema=schema, queue=False,
         )
         retrieve_kwargs["retrieve_fn"] = _no_retrieve_policy
     else:
-        learning_model = resolve_sonder_model(_STRICT_DEFAULT)
+        learning_model = model if provider is not None else resolve_sonder_model(_STRICT_DEFAULT)
         if learning_model is None:
             raise ModelCallError(
                 "configuration",
                 "`sonder:latest` Ollama alias not found. Run setup_alias.py, "
                 "or call with strict=False to fall back to the base coder.",
             )
-        gen = _make_generate(
-            learning_model,
+        gen = _make_tier_generate(
+            tier, learning_model,
             system,
             temperature,
             num_predict,
             num_ctx,
             timeout=request_timeout,
             cancel_check=cancel_check,
-            schema=schema,
+            schema=schema, queue=False,
         )
     if capture_session is not None:
         gen = wrap_model_generator(
@@ -6686,15 +6650,18 @@ def _sonder_impl_serialized(
     def _generation_context(rung):
         # No pin: size from the selected model, not the process-wide session
         # default. This is what lets a 7B and a 30B use different KV windows.
+        provider = _provider_bridge.active_rung()
+        provider = provider.provider if provider is not None else None
         ctx = pinned_ctx
         if ctx is None:
-            ctx = 0 if rung.cloud else _auto_model_context(rung.model)
+            ctx = None if provider else 0 if rung.cloud else _auto_model_context(rung.model)
         return (
-            _build_system(system, trace, persona, model=rung.model, cloud=rung.cloud),
+            _build_system(system, trace, persona, model=rung.model, cloud=rung.cloud, provider=provider),
             ctx,
         )
 
     interaction_snapshot = None
+    rung_scope = contextlib.ExitStack()
     conn = _open_db()
     try:
         history = None
@@ -6715,6 +6682,9 @@ def _sonder_impl_serialized(
             tgt_model, cloud, augment, tier_label = (
                 rung.model, rung.cloud, rung.augment, rung.tier,
             )
+            rung_scope.close()
+            provider = None if model_override else _bridge_provider_for_tier(tier_label, cloud)
+            rung_scope.enter_context(_provider_bridge.bind_rung(provider, tier_label))
             effective_system, num_ctx_eff = _generation_context(rung)
             following = escalation_plan.next_rung(attempt)
             detail = ""
@@ -6785,6 +6755,7 @@ def _sonder_impl_serialized(
         return ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
                 "running? (the tray app / `ollama serve`)" % (_ollama_display(), e))
     finally:
+        rung_scope.close()
         conn.close()
 
     replacement = None
@@ -7598,7 +7569,7 @@ def parallel_generate_run(
         "Return one complete runnable Python solution in a single ```python code block. "
         "No prose outside the code block. Avoid input() and unbounded loops."
     )
-    gen = _make_generate(model, system, temperature, num_predict, num_ctx, cloud=cloud)
+    gen = _make_tier_generate(tier, model, system, temperature, num_predict, num_ctx, cloud=cloud)
     started = time.time()
     generation_results = [None] * variants
 
@@ -7715,7 +7686,7 @@ def parallel_generate_run_languages(
             "No prose outside the code block. Avoid interactive input and unbounded loops."
             % (lang, fence)
         )
-        gen = _make_generate(model, system, temperature, num_predict, num_ctx, cloud=cloud)
+        gen = _make_tier_generate(tier, model, system, temperature, num_predict, num_ctx, cloud=cloud)
         candidate_prompt = (
             "%s\n\nGenerate %s candidate %d. It must compile and terminate quickly."
             % (prompt, lang, variant)
@@ -9995,7 +9966,7 @@ def _orchestrator_worker(tier: str, learn: bool = False, timeout: int = 150):
     response_id = activity_tracker.current_response_id()
 
     def worker(prompt: str) -> str:
-        with activity_tracker.bind_response(response_id):
+        with activity_tracker.bind_response(response_id), ollama_pool.local_agent_admission(caller="fleet", timeout_seconds=timeout):
             return _offload_impl(
                 prompt=prompt,
                 tier=tier,
@@ -14202,6 +14173,8 @@ def _vision_local_target() -> str:
     endpoint is not an acceptable fallback.  The runtime policy owns the tier
     binding; callers cannot turn a free-form model string into a backend target.
     """
+    if _bridge_provider_for_tier("vision") is not None:
+        raise ModelCallError("unsupported_feature", "image analysis is only available on Ollama-bound vision tiers", status=400, attempts=0)
     if not ollama_endpoint.is_loopback(BASE):
         raise ModelCallError(
             "configuration",
@@ -16167,11 +16140,9 @@ def chat_web_response(
 ) -> str | None:
     """Handle explicit web chat intent before the plain model fallback.
 
-    ``gateway_bound`` is set by the HTTP chat route, where provider bindings
-    apply: the research agent's tool-using model steps only exist on Ollama,
-    so a research turn whose tier is bound to another provider fails closed
-    (503 naming the binding) instead of reaching an Ollama the operator did
-    not bind.  REPL and MCP keep their documented Ollama route.
+    ``gateway_bound`` is retained for HTTP adapter compatibility. All surfaces
+    use the same provider-aware agent loop, with the resolved tier bound for
+    every model decision and audit.
     """
     _maybe_live_reload()
     refusal = intents.containment_egress_refusal(prompt)
@@ -16267,8 +16238,6 @@ def chat_web_response(
     # workspace discovery, which wastes serialized local-model steps on a pure
     # web question (observed: a spurious local text_search after web results
     # already answered the prompt).
-    if gateway_bound:
-        _refuse_ollama_agent_on_bound_tier(tier or "code", "web research")
     return _agent_impl(
         task,
         tier=tier or "code",
@@ -17996,6 +17965,7 @@ def _agent_negative_claim_review(
     cancel_check=None,
     cloud_budget_state=None,
     session_id: str | None = None,
+    tier: str = "sonder",
 ) -> dict:
     """Audit negative existence claims without letting the reviewer invent facts."""
     if not _AGENT_NEGATIVE_CLAIM_RE.search(str(final or "")):
@@ -18030,8 +18000,8 @@ def _agent_negative_claim_review(
             "spent": 0,
             "total": _CLOUD_AGENT_OUTPUT_BUDGET,
         }
-    gen = _make_generate(
-        model, system, 0.0, 260, 4096, cloud=cloud,
+    gen = _make_tier_generate(
+        tier, model, system, 0.0, 260, 4096, cloud=cloud,
         cancel_check=cancel_check, compact_cloud_reasoning=True,
     )
     if session_id is not None:
@@ -20527,6 +20497,8 @@ def _agent_turn(
         return "unknown tier '%s'. Valid: sonder, %s." % (tier, _valid_tier_names())
     if model is None:
         return "`sonder:latest` Ollama alias not found."
+    provider = _bridge_provider_for_tier(tier_label)
+    cloud = cloud or _provider_bridge.is_hosted(provider)
     controller = _standalone_lanes.current()
     if controller is not None:
         controller.restrict(read_only=lane_read_only, cloud=cloud)
@@ -20588,14 +20560,14 @@ def _agent_turn(
     # the generator actually uses. Pin it for this turn rather than observing
     # one window and silently dispatching with another after metadata refresh.
     agent_num_ctx = (
-        _auto_model_context(model) if pre_model_context is not None and not cloud else 0
+        _auto_model_context(model) if pre_model_context is not None and not cloud and provider is None else 0
     )
     cloud_budget_state = (
         {"spent": 0, "total": _CLOUD_AGENT_OUTPUT_BUDGET}
         if cloud else None
     )
-    gen = _make_generate(
-        model, system, 0.1, agent_num_predict, agent_num_ctx, cloud=cloud,
+    gen = _make_tier_generate(
+        tier_label, model, system, 0.1, agent_num_predict, agent_num_ctx, cloud=cloud,
         cancel_check=cancel_check,
         accept_native_tool_calls=True,
         compact_cloud_reasoning=True,
@@ -21297,7 +21269,7 @@ def _agent_turn(
                 continue
             if not unsafe and _AGENT_NEGATIVE_CLAIM_RE.search(final):
                 claim_review = _agent_negative_claim_review(
-                    prompt, final, observations, model, cloud=cloud,
+                    prompt, final, observations, model, cloud=cloud, tier=tier_label,
                     cancel_check=cancel_check,
                     cloud_budget_state=cloud_budget_state,
                     session_id=capture_session,
@@ -21929,7 +21901,7 @@ def _agent_turn(
         if not _AGENT_NEGATIVE_CLAIM_RE.search(final):
             break
         claim_review = _agent_negative_claim_review(
-            prompt, final, observations, model, cloud=cloud,
+            prompt, final, observations, model, cloud=cloud, tier=tier_label,
             cancel_check=cancel_check,
             cloud_budget_state=cloud_budget_state,
             session_id=capture_session,
@@ -22379,7 +22351,7 @@ def _autopilot_json_model(run: dict, role: str, prompt: str, validator) -> dict:
     else:
         tier = run_tier
     model, cloud, _augment, tier_label = _serve_target(tier, False)
-    if model is None or cloud or tier_label not in autopilot_controller.LOCAL_TIERS:
+    if model is None or cloud or _provider_bridge.is_hosted(_bridge_provider_for_tier(tier_label)) or tier_label not in autopilot_controller.LOCAL_TIERS:
         raise RuntimeError("autopilot requires an available local model tier")
     system = _build_system(
         _prompts.render("autopilot_system", role=role),
@@ -22388,7 +22360,7 @@ def _autopilot_json_model(run: dict, role: str, prompt: str, validator) -> dict:
         model=model,
         cloud=False,
     )
-    gen = _make_generate(model, system, 0.05, 1800, 0, cloud=False)
+    gen = _make_tier_generate(tier_label, model, system, 0.05, 1800, 0, cloud=False, local_only=True)
     correction = ""
     last_error = "invalid JSON"
     for _attempt in range(2):
@@ -22622,7 +22594,7 @@ def _autopilot_work_model(
     # expired or was taken over mid-task stops changing anything at the next
     # tool call instead of at the next checkpoint.
     fence = effect_fence.autopilot_fence(run.get("id", ""), run.get("owner_id", ""))
-    with effect_fence.held(fence):
+    with effect_fence.held(fence), _tier_generation.local_only():
         output = _agent_impl(
             prompt,
             tier=run.get("tier", "code"),
@@ -22822,6 +22794,7 @@ def _autopilot_start(
         )
     except (OSError, RuntimeError, ValueError, autopilot_controller.AutopilotError) as exc:
         return "autopilot request failed: %s" % exc
+    run = _application().automation.get_run(run["id"], request_owner=request_owner) or run
     prefix = "autopilot plan started" if plan_only else "autopilot started"
     if not launched:
         prefix = _autopilot_not_launched(run["id"])
@@ -22853,6 +22826,7 @@ def _autopilot_resume(
         launched = _launch_autopilot(run["id"], max_cycles=max_cycles, **launch_kwargs)
     except (OSError, RuntimeError, ValueError, autopilot_controller.AutopilotError) as exc:
         return "autopilot request failed: %s" % exc
+    run = _application().automation.get_run(run["id"], request_owner=request_owner) or run
     return "%s\n%s" % (
         "autopilot resumed" if launched else _autopilot_not_launched(run["id"]),
         autopilot_controller.format_run(run, include_report=False),
@@ -23047,7 +23021,7 @@ def _execution_route_model(
         "router", _RUNTIME_POLICY or _refresh_runtime_policy(), fallback="fast",
     )
     model, cloud, _augment, tier_label = _serve_target(router_tier, False)
-    if model is None or cloud or tier_label not in LOCAL_TIERS:
+    if model is None or cloud or _provider_bridge.is_hosted(_bridge_provider_for_tier(tier_label)) or tier_label not in LOCAL_TIERS:
         raise RuntimeError("local execution router model is unavailable")
     system = _build_system(
         _prompts.render("execution_router_system"),
@@ -23059,7 +23033,7 @@ def _execution_route_model(
     route_prompt = _prompts.render(
         "execution_router", project=project or "default", request=str(prompt or "")[:12000],
     )
-    gen = _make_generate(model, system, 0.0, 240, 4096, cloud=False)
+    gen = _make_tier_generate(tier_label, model, system, 0.0, 240, 4096, cloud=False, local_only=True)
     correction = ""
     last_error = "invalid route decision"
     for _attempt in range(2):
@@ -25050,7 +25024,7 @@ def _ensemble_targets(tiers: str = ""):
         ]
     targets, seen_models, unknown = [], set(), []
     for tier in requested:
-        if _is_cloud_tier(tier):
+        if _is_cloud_tier(tier) or _provider_bridge.is_hosted(_bridge_provider_for_tier(tier)):
             # The implicit default must never silently ship the prompt
             # off-box. A cloud tier the caller NAMED, with cloud enabled, is
             # not silent -- that is consult's cloud leg and the /model
@@ -25068,7 +25042,7 @@ def _ensemble_targets(tiers: str = ""):
         if model in seen_models:
             continue
         seen_models.add(model)
-        targets.append((tier, model))
+        targets.append((label if _bridge_provider_for_tier(label) else tier, model))
     return targets[:ENSEMBLE_MAX_MODELS], unknown
 
 
@@ -25191,10 +25165,10 @@ def ensemble_answer(
         started = time.monotonic()
         try:
             target_num_ctx = poll_num_ctx or (
-                0 if _is_cloud_tier(tier, model) else _auto_model_context(model)
+                0 if _is_cloud_tier(tier, model) or _bridge_provider_for_tier(tier) else _auto_model_context(model)
             )
-            gen = _make_generate(
-                model, "", 0.2, max(64, int(num_predict)), target_num_ctx,
+            gen = _make_tier_generate(
+                tier, model, "", 0.2, max(64, int(num_predict)), target_num_ctx,
             )
             text = (gen(question) or "").strip()
         except ModelCallError as error:
@@ -25209,7 +25183,7 @@ def ensemble_answer(
             # Free the card before loading the next one. Best effort: a failed
             # unload costs VRAM, not correctness. Cloud models hold no local
             # VRAM, so there is nothing to free.
-            if not _is_cloud_tier(tier, model):
+            if not _is_cloud_tier(tier, model) and _bridge_provider_for_tier(tier) is None:
                 try:
                     _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
                 except Exception:
@@ -25260,16 +25234,17 @@ def ensemble_answer(
     if not synth_model or synth_label is None:
         synth_model = answers[-1]["model"]
         synth = answers[-1]["tier"]
+        synth_label = synth
     build_prompt = (
         _ensemble_code_synthesis_prompt if code_mode else _ensemble_synthesis_prompt
     )
     try:
         synth_num_ctx = poll_num_ctx or (
-            0 if _is_cloud_model_name(synth_model)
+            0 if _is_cloud_model_name(synth_model) or _bridge_provider_for_tier(synth_label)
             else _auto_model_context(synth_model)
         )
-        gen = _make_generate(
-            synth_model, "", 0.2, max(256, int(num_predict)),
+        gen = _make_tier_generate(
+            synth_label, synth_model, "", 0.2, max(256, int(num_predict)),
             synth_num_ctx,
         )
         merged = (gen(build_prompt(question, answers)) or "").strip()
@@ -25790,16 +25765,16 @@ def _codegen_critic_generation(prompt: str, *, tier: str, model: str,
                                timeout: int | None = None) -> str:
     """Call the host-resolved critic directly so failures remain exceptions."""
     cloud = _is_cloud_tier(tier, model)
-    gen = _make_generate(
-        model, "", 0.2, max(64, min(int(num_predict), 512)),
-        0 if cloud else num_ctx if num_ctx is not None else _auto_model_context(model),
+    gen = _make_tier_generate(
+        tier, model, "", 0.2, max(64, min(int(num_predict), 512)),
+        0 if cloud or _bridge_provider_for_tier(tier) else num_ctx if num_ctx is not None else _auto_model_context(model),
         cloud=cloud, think=False if single_send else None,
         single_send=single_send, timeout=timeout,
     )
     try:
         return gen(prompt)
     finally:
-        if not cloud:
+        if not cloud and _bridge_provider_for_tier(tier) is None:
             with contextlib.suppress(Exception):
                 _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
 
@@ -25819,15 +25794,16 @@ def _codegen_pinned_generation(prompt: str, *, model: str,
             _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
 
 
-def _codegen_observed_generation(prompt: str, *, model: str,
+def _codegen_observed_generation(prompt: str, *, model: str, tier: str,
                                  num_predict: int, num_ctx: int) -> str:
     """Keep a typed provider result when durable memory refs entered a prompt."""
-    gen = _make_generate(model, "", 0.2, max(64, num_predict), num_ctx)
+    gen = _make_tier_generate(tier, model, "", 0.2, max(64, num_predict), num_ctx)
     try:
         return gen(prompt)
     finally:
-        with contextlib.suppress(Exception):
-            _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
+        if _bridge_provider_for_tier(tier) is None:
+            with contextlib.suppress(Exception):
+                _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
 
 
 @mcp.tool()
@@ -25964,6 +25940,8 @@ def codegen_build_loop(
               for tier, model in explicit_targets[:2])
     canary_route = canary_route and type(num_predict) is int and 1 <= num_predict <= 8192
     active_operation = strategy_rollout.selected(scope_run_id) and canary_route
+    if active_operation and any(_bridge_provider_for_tier(tier) for tier, _model in explicit_targets[:2]):
+        return "codegen canary unavailable: sealed single-send canaries require Ollama-bound tiers"
     # A previous selected operation may have left uncertain project effects.
     # Read its sealed guard even after an operator changes rollout to off.
     try:
@@ -26254,7 +26232,7 @@ def codegen_build_loop(
                     repair_tiers[1] if rotated_this_attempt else
                     repair_tiers[0] if repair_tiers else explicit_targets[0][0]
                 )
-                if not _is_cloud_tier(memory_tier, memory_model):
+                if not _is_cloud_tier(memory_tier, memory_model) and _bridge_provider_for_tier(memory_tier) is None:
                     memory_window = int(_platform_local_model_options(
                         0.2, max(64, num_predict), _auto_model_context(memory_model),
                         native_context=context_policy.native, environ=os.environ,
@@ -26392,7 +26370,7 @@ def codegen_build_loop(
                 if memory_exposed:
                     try:
                         reply = _codegen_observed_generation(
-                            prompt, model=memory_model, num_predict=num_predict,
+                            prompt, model=memory_model, tier=memory_tier, num_predict=num_predict,
                             num_ctx=memory_window,
                         )
                     except ModelCallError as error:

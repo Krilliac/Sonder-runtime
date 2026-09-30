@@ -104,6 +104,9 @@ def operation_context(
     turn finish, exactly as it does for an Ollama rung.  Consent follows the
     same host policy ``_gateway_generate_text`` applies (injected by caller).
     """
+    helper = provider_bridge.active_helper_context()
+    if helper is not None:
+        return helper
     deadline = time.monotonic() + float(timeout) if timeout else None
     ambient = current_operation_context()
     if ambient is not None:
@@ -136,25 +139,6 @@ def chat_request(gateway: object, payload: dict, rung, *, context: OperationCont
             transient=failure.transient, attempts=1, cloud=False,
         ) from exc
     return out, response.text
-
-
-def ollama_agent_refusal(step: str, tier_label: object, provider: str) -> ModelCallError:
-    """The 503 for an Ollama-only HTTP chat step on a tier bound elsewhere.
-
-    The tool-using agent (web research) drives Ollama's native tool calls,
-    which the gateway cannot carry.  When the tier it would run on is bound
-    to another provider, answering from Ollama would silently ignore the
-    binding -- and with Ollama absent it would return a transport error as a
-    200 answer -- so the turn ends with a 503 that names the binding.
-    """
-    return ModelCallError(
-        "configuration",
-        "%s runs a tool-using agent that only Ollama serves, but tier %r is "
-        "bound to provider %s; bind that tier to ollama "
-        "(SONDER_%s_PROVIDER=ollama) to use it over HTTP chat"
-        % (step, tier_label, provider, str(tier_label).upper()),
-        status=503, attempts=0,
-    )
 
 
 def note_degradation(step: str, detail: str) -> None:

@@ -256,9 +256,10 @@ These never generate.
   `SONDER_INFERENCE_FALLBACK=ollama` covers; fail for an outage without a
   fallback and for anything no fallback can help (invalid `SONDER_INFERENCE_*`
   values, a remote URL without consent, rejected credentials or Host, an API
-  version mismatch from health or from the ready file, invalid bindings) and `sonder_inference_scope` (warn when bound: REPL, MCP,
-  autopilot and fleet generate through the legacy Ollama path regardless of
-  bindings). `--skip-inference` removes both.
+  version mismatch from health or from the ready file, invalid bindings).
+  `sonder_inference_scope` reports the tier-bound agent, autopilot, fleet and
+  helper surfaces; explicit Ollama pins, strict `sonder` aliases and durable
+  fanout remain outside that binding. `--skip-inference` removes both.
 - `serve`/`preflight` add a non-required `sonder_inference` check only; startup
   never blocks on Inference, and a check that fails unexpectedly is reported
   as a failed non-required check rather than raised.
@@ -267,16 +268,16 @@ These never generate.
 
 ## Which surfaces use the provider
 
-Provider bindings are honoured by ModelGateway consumers: `ChatService`
-(`POST /a2a` SendMessage) and session summarize/title offload. On this
-revision, `POST /v1/chat/completions` still runs the legacy Ollama chat path
-(`server.py` `_chat_request`); routing it through the gateway is contract
-section 4, owned by the chat-telemetry lane (its bridge module is
-`application/chat/provider_bridge.py` on that branch). REPL, MCP, autopilot
-and fleet generate through the legacy Ollama path regardless of bindings, which
-the `sonder_inference_scope` doctor check states. The `/v1/models` listing and
-the escalation rungs deduplicate by Ollama model name, which carries no
-meaning for Inference-bound tiers.
+Provider bindings are honoured by the chat and agent generation consumers:
+`ChatService` (`POST /a2a` SendMessage), session summarize/title offload,
+interactive agents, workbench turns, autopilot planner/task/review calls,
+master/fleet workers, ensembles, web research and audit/helper calls. Each
+call resolves its provider from the selected tier. Exact model pins, strict
+`sonder` aliases and durable fanout remain explicitly Ollama-bound; image and
+schema requests retain the chat refusal for non-Ollama providers, and the
+sealed single-send codegen canary refuses a bound non-Ollama provider. The
+`/v1/models` listing and escalation rungs may still deduplicate by Ollama model
+name; that identity has no meaning for an Inference-bound tier.
 
 ## Open questions (cross-repo shapes not pinned by the contract)
 
