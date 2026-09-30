@@ -56,6 +56,9 @@ class DrivingSession:
     last_input_mark: int
     actions: list = field(default_factory=list)
     last_capture: object = None
+    # ref -> RefEntry from the last UI Automation control table read in this
+    # session (domain/computer_use/controls.py); refs never outlive the session.
+    control_refs: dict = field(default_factory=dict)
 
 
 def _launch_indicator(stop_file: Path, ready_file: Path, label: str):

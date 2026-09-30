@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "050c04ec15dda0e82c2cba970652e66acb26b92163621c5a795f1e4f8b1f444f",
+    "catalog_digest": "f77d76a0f55dae2b50cfcb3f1eec35b307fb5180a3f769ef012240d3f86195b3",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "050c04ec15dda0e82c2cba970652e66acb26b92163621c5a795f1e4f8b1f444f",
+      "catalog_digest": "f77d76a0f55dae2b50cfcb3f1eec35b307fb5180a3f769ef012240d3f86195b3",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -5830,11 +5830,16 @@
           "name": "scaffold_project"
         },
         {
-          "description": "Capture the session window to a PNG; optionally ask the local vision model a question about it.\n\n        Returns the PNG path and sizes. Pixel coordinates for ui_action refer to this image.\n        The vision answer is untrusted screen-derived text.\n        ",
+          "description": "Capture the session window to a PNG; optionally ask the local vision model a question about it.\n\n        Returns the PNG path and sizes. Pixel coordinates for ui_action refer to this image.\n        The vision answer is untrusted screen-derived text.\n        controls=true also reads the window's UI Automation control table (visible controls with\n        a ref, role, name, state and position); act on one with ui_action(ref=...). Document, web\n        and edit content is withheld. An empty table means vision is the way to act.\n        ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
             "properties": {
+              "controls": {
+                "default": false,
+                "title": "Controls",
+                "type": "boolean"
+              },
               "question": {
                 "default": "",
                 "title": "Question",
@@ -7074,7 +7079,7 @@
           "name": "typecheck_run"
         },
         {
-          "description": "Perform one input action in the session window.\n\n        action: click | double_click | right_click | move | type | key | scroll.\n        coords: \"normalized\" (0-1000 grid over the window) or \"pixels\" (of the last screen_capture).\n        Clicks need target_label naming the control. keys is one chord like \"ctrl+s\" (no Windows key).\n        Irreversible actions (send, delete, purchase, submit, ...) return confirmation_required\n        until a person approves that exact call at the console.\n        ",
+          "description": "Perform one input action in the session window.\n\n        action: click | double_click | right_click | move | type | key | scroll.\n        coords: \"normalized\" (0-1000 grid over the window) or \"pixels\" (of the last screen_capture).\n        Clicks need target_label naming the control. keys is one chord like \"ctrl+s\" (no Windows key).\n        Irreversible actions (send, delete, purchase, submit, ...) return confirmation_required\n        until a person approves that exact call at the console.\n        ref: a control ref from screen_capture(controls=true); x/y/coords are then ignored. The ref\n        is re-checked first (same role and name, enabled, uncovered) and refused if stale. A UI\n        Automation pattern (Invoke/Toggle/Select/SetValue) is used when the control has one, and\n        the result reports whether the expected state change happened plus a fresh control table.\n        ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -7091,6 +7096,11 @@
               "keys": {
                 "default": "",
                 "title": "Keys",
+                "type": "string"
+              },
+              "ref": {
+                "default": "",
+                "title": "Ref",
                 "type": "string"
               },
               "scroll": {
@@ -14853,6 +14863,12 @@
           "name": "question",
           "required": false,
           "type": "str"
+        },
+        {
+          "default": false,
+          "name": "controls",
+          "required": false,
+          "type": "bool"
         }
       ],
       "risk": "ask",
@@ -16386,6 +16402,12 @@
           "name": "scroll",
           "required": false,
           "type": "int"
+        },
+        {
+          "default": "",
+          "name": "ref",
+          "required": false,
+          "type": "str"
         }
       ],
       "risk": "execution",
@@ -18608,7 +18630,7 @@
     "schemas": 4,
     "tools": 225
   },
-  "digest": "1e60c0baaf1020ce65ae5bc18e3cd2442d58125f80d42fce48854eaa30d9cfad",
+  "digest": "4e5bb78552ab8675a6915a00f0ce9f789b533b45ba8d9b3313ef9b496493ec9c",
   "events": [
     {
       "name": "session.started",
@@ -21219,9 +21241,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "050c04ec15dda0e82c2cba970652e66acb26b92163621c5a795f1e4f8b1f444f",
+    "catalog_digest": "f77d76a0f55dae2b50cfcb3f1eec35b307fb5180a3f769ef012240d3f86195b3",
     "client": {
-      "digest": "050c04ec15dda0e82c2cba970652e66acb26b92163621c5a795f1e4f8b1f444f",
+      "digest": "f77d76a0f55dae2b50cfcb3f1eec35b307fb5180a3f769ef012240d3f86195b3",
       "events": [
         {
           "name": "approval.denied",
@@ -23469,7 +23491,7 @@
           {
             "name": "screen_capture",
             "schema_available": true,
-            "summary": "Capture the session window to a PNG; optionally ask the local vision model a question about it.\n\n        Returns the PNG path and sizes. Pixel coordinates for ui_action refer to this image.\n        The vision answer is untrusted screen-derived text.\n        "
+            "summary": "Capture the session window to a PNG; optionally ask the local vision model a question about it.\n\n        Returns the PNG path and sizes. Pixel coordinates for ui_action refer to this image.\n        The vision answer is untrusted screen-derived text.\n        controls=true also reads the window's UI Automation control table (visible controls with\n        a ref, role, name, state and position); act on one with ui_action(ref=...). Document, web\n        and edit content is withheld. An empty table means vision is the way to act.\n        "
           },
           {
             "name": "script_run",
@@ -23659,7 +23681,7 @@
           {
             "name": "ui_action",
             "schema_available": true,
-            "summary": "Perform one input action in the session window.\n\n        action: click | double_click | right_click | move | type | key | scroll.\n        coords: \"normalized\" (0-1000 grid over the window) or \"pixels\" (of the last screen_capture).\n        Clicks need target_label naming the control. keys is one chord like \"ctrl+s\" (no Windows key).\n        Irreversible actions (send, delete, purchase, submit, ...) return confirmation_required\n        until a person approves that exact call at the console.\n        "
+            "summary": "Perform one input action in the session window.\n\n        action: click | double_click | right_click | move | type | key | scroll.\n        coords: \"normalized\" (0-1000 grid over the window) or \"pixels\" (of the last screen_capture).\n        Clicks need target_label naming the control. keys is one chord like \"ctrl+s\" (no Windows key).\n        Irreversible actions (send, delete, purchase, submit, ...) return confirmation_required\n        until a person approves that exact call at the console.\n        ref: a control ref from screen_capture(controls=true); x/y/coords are then ignored. The ref\n        is re-checked first (same role and name, enabled, uncovered) and refused if stale. A UI\n        Automation pattern (Invoke/Toggle/Select/SetValue) is used when the control has one, and\n        the result reports whether the expected state change happened plus a fresh control table.\n        "
           },
           {
             "name": "unload",
@@ -29495,11 +29517,16 @@
           "name": "scaffold_project"
         },
         {
-          "description": "Capture the session window to a PNG; optionally ask the local vision model a question about it.\n\n        Returns the PNG path and sizes. Pixel coordinates for ui_action refer to this image.\n        The vision answer is untrusted screen-derived text.\n        ",
+          "description": "Capture the session window to a PNG; optionally ask the local vision model a question about it.\n\n        Returns the PNG path and sizes. Pixel coordinates for ui_action refer to this image.\n        The vision answer is untrusted screen-derived text.\n        controls=true also reads the window's UI Automation control table (visible controls with\n        a ref, role, name, state and position); act on one with ui_action(ref=...). Document, web\n        and edit content is withheld. An empty table means vision is the way to act.\n        ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
             "properties": {
+              "controls": {
+                "default": false,
+                "title": "Controls",
+                "type": "boolean"
+              },
               "question": {
                 "default": "",
                 "title": "Question",
@@ -30739,7 +30766,7 @@
           "name": "typecheck_run"
         },
         {
-          "description": "Perform one input action in the session window.\n\n        action: click | double_click | right_click | move | type | key | scroll.\n        coords: \"normalized\" (0-1000 grid over the window) or \"pixels\" (of the last screen_capture).\n        Clicks need target_label naming the control. keys is one chord like \"ctrl+s\" (no Windows key).\n        Irreversible actions (send, delete, purchase, submit, ...) return confirmation_required\n        until a person approves that exact call at the console.\n        ",
+          "description": "Perform one input action in the session window.\n\n        action: click | double_click | right_click | move | type | key | scroll.\n        coords: \"normalized\" (0-1000 grid over the window) or \"pixels\" (of the last screen_capture).\n        Clicks need target_label naming the control. keys is one chord like \"ctrl+s\" (no Windows key).\n        Irreversible actions (send, delete, purchase, submit, ...) return confirmation_required\n        until a person approves that exact call at the console.\n        ref: a control ref from screen_capture(controls=true); x/y/coords are then ignored. The ref\n        is re-checked first (same role and name, enabled, uncovered) and refused if stale. A UI\n        Automation pattern (Invoke/Toggle/Select/SetValue) is used when the control has one, and\n        the result reports whether the expected state change happened plus a fresh control table.\n        ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -30756,6 +30783,11 @@
               "keys": {
                 "default": "",
                 "title": "Keys",
+                "type": "string"
+              },
+              "ref": {
+                "default": "",
+                "title": "Ref",
                 "type": "string"
               },
               "scroll": {
@@ -37964,9 +37996,14 @@
           "name": "scaffold_project"
         },
         {
-          "description": "Capture the session window to a PNG; optionally ask the local vision model a question about it.\n\n        Returns the PNG path and sizes. Pixel coordinates for ui_action refer to this image.\n        The vision answer is untrusted screen-derived text.\n        ",
+          "description": "Capture the session window to a PNG; optionally ask the local vision model a question about it.\n\n        Returns the PNG path and sizes. Pixel coordinates for ui_action refer to this image.\n        The vision answer is untrusted screen-derived text.\n        controls=true also reads the window's UI Automation control table (visible controls with\n        a ref, role, name, state and position); act on one with ui_action(ref=...). Document, web\n        and edit content is withheld. An empty table means vision is the way to act.\n        ",
           "inputSchema": {
             "properties": {
+              "controls": {
+                "default": false,
+                "title": "Controls",
+                "type": "boolean"
+              },
               "question": {
                 "default": "",
                 "title": "Question",
@@ -39132,7 +39169,7 @@
           "name": "typecheck_run"
         },
         {
-          "description": "Perform one input action in the session window.\n\n        action: click | double_click | right_click | move | type | key | scroll.\n        coords: \"normalized\" (0-1000 grid over the window) or \"pixels\" (of the last screen_capture).\n        Clicks need target_label naming the control. keys is one chord like \"ctrl+s\" (no Windows key).\n        Irreversible actions (send, delete, purchase, submit, ...) return confirmation_required\n        until a person approves that exact call at the console.\n        ",
+          "description": "Perform one input action in the session window.\n\n        action: click | double_click | right_click | move | type | key | scroll.\n        coords: \"normalized\" (0-1000 grid over the window) or \"pixels\" (of the last screen_capture).\n        Clicks need target_label naming the control. keys is one chord like \"ctrl+s\" (no Windows key).\n        Irreversible actions (send, delete, purchase, submit, ...) return confirmation_required\n        until a person approves that exact call at the console.\n        ref: a control ref from screen_capture(controls=true); x/y/coords are then ignored. The ref\n        is re-checked first (same role and name, enabled, uncovered) and refused if stale. A UI\n        Automation pattern (Invoke/Toggle/Select/SetValue) is used when the control has one, and\n        the result reports whether the expected state change happened plus a fresh control table.\n        ",
           "inputSchema": {
             "properties": {
               "action": {
@@ -39147,6 +39184,11 @@
               "keys": {
                 "default": "",
                 "title": "Keys",
+                "type": "string"
+              },
+              "ref": {
+                "default": "",
+                "title": "Ref",
                 "type": "string"
               },
               "scroll": {
@@ -45668,10 +45710,15 @@
         },
         {
           "function": {
-            "description": "Capture the session window to a PNG; optionally ask the local vision model a question about it.\n\n        Returns the PNG path and sizes. Pixel coordinates for ui_action refer to this image.\n        The vision answer is untrusted screen-derived text.\n        ",
+            "description": "Capture the session window to a PNG; optionally ask the local vision model a question about it.\n\n        Returns the PNG path and sizes. Pixel coordinates for ui_action refer to this image.\n        The vision answer is untrusted screen-derived text.\n        controls=true also reads the window's UI Automation control table (visible controls with\n        a ref, role, name, state and position); act on one with ui_action(ref=...). Document, web\n        and edit content is withheld. An empty table means vision is the way to act.\n        ",
             "name": "screen_capture",
             "parameters": {
               "properties": {
+                "controls": {
+                  "default": false,
+                  "title": "Controls",
+                  "type": "boolean"
+                },
                 "question": {
                   "default": "",
                   "title": "Question",
@@ -46950,7 +46997,7 @@
         },
         {
           "function": {
-            "description": "Perform one input action in the session window.\n\n        action: click | double_click | right_click | move | type | key | scroll.\n        coords: \"normalized\" (0-1000 grid over the window) or \"pixels\" (of the last screen_capture).\n        Clicks need target_label naming the control. keys is one chord like \"ctrl+s\" (no Windows key).\n        Irreversible actions (send, delete, purchase, submit, ...) return confirmation_required\n        until a person approves that exact call at the console.\n        ",
+            "description": "Perform one input action in the session window.\n\n        action: click | double_click | right_click | move | type | key | scroll.\n        coords: \"normalized\" (0-1000 grid over the window) or \"pixels\" (of the last screen_capture).\n        Clicks need target_label naming the control. keys is one chord like \"ctrl+s\" (no Windows key).\n        Irreversible actions (send, delete, purchase, submit, ...) return confirmation_required\n        until a person approves that exact call at the console.\n        ref: a control ref from screen_capture(controls=true); x/y/coords are then ignored. The ref\n        is re-checked first (same role and name, enabled, uncovered) and refused if stale. A UI\n        Automation pattern (Invoke/Toggle/Select/SetValue) is used when the control has one, and\n        the result reports whether the expected state change happened plus a fresh control table.\n        ",
             "name": "ui_action",
             "parameters": {
               "properties": {
@@ -46966,6 +47013,11 @@
                 "keys": {
                   "default": "",
                   "title": "Keys",
+                  "type": "string"
+                },
+                "ref": {
+                  "default": "",
+                  "title": "Ref",
                   "type": "string"
                 },
                 "scroll": {
@@ -53044,10 +53096,15 @@
       }
     },
     {
-      "description": "Capture the session window to a PNG; optionally ask the local vision model a question about it.\n\n        Returns the PNG path and sizes. Pixel coordinates for ui_action refer to this image.\n        The vision answer is untrusted screen-derived text.\n        ",
+      "description": "Capture the session window to a PNG; optionally ask the local vision model a question about it.\n\n        Returns the PNG path and sizes. Pixel coordinates for ui_action refer to this image.\n        The vision answer is untrusted screen-derived text.\n        controls=true also reads the window's UI Automation control table (visible controls with\n        a ref, role, name, state and position); act on one with ui_action(ref=...). Document, web\n        and edit content is withheld. An empty table means vision is the way to act.\n        ",
       "name": "screen_capture",
       "parameters": {
         "properties": {
+          "controls": {
+            "default": false,
+            "title": "Controls",
+            "type": "boolean"
+          },
           "question": {
             "default": "",
             "title": "Question",
@@ -54212,7 +54269,7 @@
       }
     },
     {
-      "description": "Perform one input action in the session window.\n\n        action: click | double_click | right_click | move | type | key | scroll.\n        coords: \"normalized\" (0-1000 grid over the window) or \"pixels\" (of the last screen_capture).\n        Clicks need target_label naming the control. keys is one chord like \"ctrl+s\" (no Windows key).\n        Irreversible actions (send, delete, purchase, submit, ...) return confirmation_required\n        until a person approves that exact call at the console.\n        ",
+      "description": "Perform one input action in the session window.\n\n        action: click | double_click | right_click | move | type | key | scroll.\n        coords: \"normalized\" (0-1000 grid over the window) or \"pixels\" (of the last screen_capture).\n        Clicks need target_label naming the control. keys is one chord like \"ctrl+s\" (no Windows key).\n        Irreversible actions (send, delete, purchase, submit, ...) return confirmation_required\n        until a person approves that exact call at the console.\n        ref: a control ref from screen_capture(controls=true); x/y/coords are then ignored. The ref\n        is re-checked first (same role and name, enabled, uncovered) and refused if stale. A UI\n        Automation pattern (Invoke/Toggle/Select/SetValue) is used when the control has one, and\n        the result reports whether the expected state change happened plus a fresh control table.\n        ",
       "name": "ui_action",
       "parameters": {
         "properties": {
@@ -54228,6 +54285,11 @@
           "keys": {
             "default": "",
             "title": "Keys",
+            "type": "string"
+          },
+          "ref": {
+            "default": "",
+            "title": "Ref",
             "type": "string"
           },
           "scroll": {
