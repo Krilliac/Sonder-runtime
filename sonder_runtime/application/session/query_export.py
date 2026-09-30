@@ -62,6 +62,25 @@ def _redact(value: Any, redactor: TelemetryRedactor) -> Any:
     return value
 
 
+_RETENTION_ENVELOPE_KEYS = frozenset({"privacy_class", "redacted"})
+
+
+def retention_envelope(privacy_class: str) -> dict[str, object]:
+    """The payload that replaces an event withheld by a retention marker."""
+    return {"privacy_class": privacy_class, "redacted": True}
+
+
+def is_retention_withheld(payload: Mapping[str, object]) -> bool:
+    """True only for the exact retention replacement envelope.
+
+    Generic credential redaction rewrites values but keeps the payload's own
+    keys (``content``, ``call_id`` ...), so it never matches this shape even
+    when the original payload happened to carry ``redacted: true``.
+    """
+    return (isinstance(payload, Mapping) and set(payload) == _RETENTION_ENVELOPE_KEYS
+            and payload.get("redacted") is True and isinstance(payload.get("privacy_class"), str))
+
+
 @dataclass(frozen=True, slots=True)
 class SessionEventRecord:
     """Stable export envelope retaining every field needed for replay."""
@@ -138,10 +157,15 @@ class TranscriptRecord:
     sequence: int
     turn_id: str = ""
     name: str = ""
+    # True when a retention marker withheld this turn: ``content`` is then a
+    # placeholder, never the original text, and must not be shown as prose
+    # (e.g. as a session title).
+    redacted: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return {"role": self.role, "content": self.content, "event_type": self.event_type,
-                "sequence": self.sequence, "turn_id": self.turn_id, "name": self.name}
+                "sequence": self.sequence, "turn_id": self.turn_id, "name": self.name,
+                "redacted": self.redacted}
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,7 +245,7 @@ class SessionQueryEngine:
         privacy_class = (privacy_targets or {}).get(event.sequence)
         if privacy_class is None:
             return record
-        return replace(record, payload={"privacy_class": privacy_class, "redacted": True}, redacted=True)
+        return replace(record, payload=retention_envelope(privacy_class), redacted=True)
 
     @staticmethod
     def _fingerprint(session_id: str, event_type: str | None, text: str | None,
@@ -343,13 +367,25 @@ class SessionQueryEngine:
         result = []
         for event in events:
             role = roles.get(event.event_type)
-            if role is None or not isinstance(event.payload.get("content", ""), str):
+            if role is None:
                 continue
-            result.append(TranscriptRecord(role, event.payload["content"], event.event_type,
+            if event.redacted and is_retention_withheld(event.payload):
+                # A retention marker replaced the whole payload.  Keep the turn
+                # (role, sequence, event type) so replay/trajectory consumers
+                # see the true turn order and count, but expose only the
+                # privacy class -- the original content and ids are withheld.
+                label = event.payload["privacy_class"] or "withheld"
+                result.append(TranscriptRecord(role, f"[redacted: {label}]", event.event_type,
+                                               event.sequence, redacted=True))
+                continue
+            content = event.payload.get("content")
+            if not isinstance(content, str):
+                continue
+            result.append(TranscriptRecord(role, content, event.event_type,
                                            event.sequence, str(event.payload.get("turn_id", "")),
                                            str(event.payload.get("name", ""))))
         return tuple(result)
 
 
-__all__ = ["QueryExportError", "DefaultExportRedactor", "SessionEventRecord", "TranscriptRecord", "SessionQueryPage",
+__all__ = ["is_retention_withheld", "retention_envelope", "QueryExportError", "DefaultExportRedactor", "SessionEventRecord", "TranscriptRecord", "SessionQueryPage",
            "SessionExport", "SessionQueryEngine"]

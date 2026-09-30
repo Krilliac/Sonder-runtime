@@ -24,7 +24,12 @@ def wire(monkeypatch):
         sent.append(json.loads(request.data))
         return io.BytesIO(b'{"message":{"content":"ok"}}')
 
-    monkeypatch.setattr(server, "OLLAMA_POOL", SimpleNamespace(enabled=False, open_url=open_url))
+    # Mirrors the real single-host pool with no capability evidence: the
+    # primary gate dispatches straight to the caller's origin.
+    monkeypatch.setattr(server, "OLLAMA_POOL", SimpleNamespace(
+        enabled=False, open_url=open_url,
+        request_primary=lambda send, *, origin=None, **_kwargs: send(origin),
+    ))
     return sent, recorded
 
 
