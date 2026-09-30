@@ -48,6 +48,7 @@ import os
 import re
 import socket
 import ssl
+import sys
 import threading
 import time
 import urllib.error
@@ -60,6 +61,7 @@ from types import MappingProxyType
 from typing import Sequence
 from urllib.parse import quote, urlsplit, urlunsplit
 
+from ...application.chat import stream_sink
 from ...application.context import OperationContext
 from ...application.ports.model_gateway import (
     Embedding,
@@ -91,6 +93,8 @@ from .openai_compat_gateway import (
     OpenAICompatibleConfig,
     OpenAICompatibleGateway,
 )
+from .request_tuning import tune_request
+from .sse_stream import post_streaming
 from .telemetry import from_openai_compatible
 
 logger = logging.getLogger(__name__)
@@ -360,7 +364,13 @@ def direct_get_transport(url: str, headers: dict, timeout: float) -> tuple[int, 
 def direct_post_transport(url: str, payload: dict, headers: dict, timeout) -> dict:
     """POST seam: like :func:`direct_get_transport`, but non-2xx raises
     ``HTTPError`` (carrying only the bounded error body) for the shared
-    gateway's error mapping."""
+    gateway's error mapping.  ``"stream": true`` reads the event stream
+    (:mod:`.sse_stream`) and returns the same aggregated document."""
+    if payload.get("stream") is True:
+        return post_streaming(
+            url, payload, headers, timeout, stream_sink.call_stream(),
+            exchange=sys.modules[__name__],
+        )
     data = json.dumps(payload).encode("utf-8")
     status, body, error_headers = _exchange(
         "POST", url, headers, data, timeout, RESPONSE_BODY_LIMIT,
@@ -1136,8 +1146,6 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         for name in _UNSUPPORTED_OPTIONS:
             if options.get(name) not in (None, False, "", [], {}):
                 raise InvalidInput("sonder-inference v1 does not support the %r option" % name)
-        if options.get("think") not in (None, False):
-            raise InvalidInput("sonder-inference v1 does not support thinking mode")
         payload: dict[str, object] = {}
         for option, wire in _FORWARDED_OPTIONS.items():
             if option not in options or options[option] is None:
@@ -1175,15 +1183,20 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         self._enforce_consent(cfg, context)
         timeout = self._call_timeout(settings, context)
         options = dict(request.options or {})
+        think = options.pop("think", None)  # decided after readiness (request_tuning)
         model = self.select_model(request, settings)
+        live = stream_sink.call_stream()
         payload = {
             "model": model,
             "messages": self._build_messages(request),
-            "stream": False,
+            "stream": live is not None,
             **self._payload_options(options),
         }
+        if live is not None:
+            payload["stream_options"] = {"include_usage": True}
         self._call.settings = settings
-        self._require_ready(settings, timeout)
+        snap = self._require_ready(settings, timeout)
+        tune_request(payload, think, snap.document, self._env)
         timeout = self._call_timeout(settings, context)
         started = time.monotonic()
         data = self._post("/v1/chat/completions", payload, cfg, timeout, context=context)
