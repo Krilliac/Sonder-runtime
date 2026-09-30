@@ -146,3 +146,77 @@ def test_local_only_suppresses_cloud_consent_for_explicit_local_helpers():
     )
     with local_only(), pytest.raises(ModelCallError, match="requires cloud consent"):
         generator("must stay local")
+
+
+@pytest.mark.parametrize("ambient_timeout, drained", [(0.001, False), (60, True)])
+def test_ambient_http_deadline_and_drain_token_do_not_bound_a_helper_model_step(
+    ambient_timeout, drained,
+):
+    """A helper call inherits the chat bridge's bounds: its own timeout and cancel_check.
+
+    The HTTP context carries a 30 s admission deadline and the lifecycle drain
+    token.  Neither may cut short an agent step on a bridged tier, exactly as
+    neither does on the Ollama path (see ``BridgeCancellation``).
+    """
+    import time
+
+    from sonder_runtime.adapters import legacy_chat_bridge
+    from sonder_runtime.application.context import bind_operation_context, local_owner_context
+
+    class Drain:
+        cancelled = drained
+
+        def wait(self, timeout=None):
+            return drained
+
+    seen = []
+
+    def factory(*_args, **_kwargs):
+        def raw(_prompt):
+            context = legacy_chat_bridge.operation_context(
+                30, None, cloud_allowed=False, remote_ollama_allowed=False,
+            )
+            seen.append((context.remaining_seconds, context.cancellation.cancelled))
+            return "answer"
+        return raw
+
+    ambient = local_owner_context(
+        correlation_id="http-turn", source="http", timeout_seconds=ambient_timeout,
+        cancellation=Drain(),
+    )
+    time.sleep(0.02)
+    with bind_operation_context(ambient):
+        generator = make_generate(
+            factory, "fast", ("model", "system", .1, 10, 0), {"timeout": 30},
+            graph=_graph(fast="sonder_inference"), consent=lambda: (False, False),
+        )
+        assert generator("hello") == "answer"
+    remaining, cancelled = seen[0]
+    assert remaining > 25
+    assert cancelled is False
+
+
+def test_helper_cancel_check_still_cancels_the_bridged_step():
+    from sonder_runtime.adapters import legacy_chat_bridge
+
+    seen = []
+
+    def factory(*_args, **_kwargs):
+        def raw(_prompt):
+            context = legacy_chat_bridge.operation_context(
+                30, None, cloud_allowed=False, remote_ollama_allowed=False,
+            )
+            seen.append(context.cancellation.cancelled)
+            return "answer"
+        return raw
+
+    flag = {"stop": False}
+    generator = make_generate(
+        factory, "fast", ("model", "system", .1, 10, 0),
+        {"timeout": 30, "cancel_check": lambda: flag["stop"]},
+        graph=_graph(fast="sonder_inference"), consent=lambda: (False, False),
+    )
+    generator("first")
+    flag["stop"] = True
+    generator("second")
+    assert seen == [False, True]

@@ -30,28 +30,31 @@ def local_only():
 
 
 def _context(timeout, cancel_check, cloud_allowed, remote_ollama_allowed, origin=None):
+    """The context for one bridged helper call.
+
+    Bounded exactly like ``legacy_chat_bridge.operation_context``: by the call's
+    own ``timeout`` and ``cancel_check`` only.  The ambient HTTP context's 30 s
+    admission deadline and its drain token bound neither an agent step on the
+    Ollama path nor a bridged chat turn, so they must not cut a bridged agent
+    short either.  Consent can only narrow: the caller's (and, across threads,
+    the constructing caller's) restrictions are never widened.
+    """
     ambient = current_operation_context() or origin
     if origin is not None:
         cloud_allowed = cloud_allowed and origin.cloud_allowed
         remote_ollama_allowed = remote_ollama_allowed and origin.remote_ollama_allowed
-    deadline = time.monotonic() + float(timeout) if timeout is not None else None
-    if origin is not None and origin.deadline_monotonic is not None:
-        deadline = min(deadline, origin.deadline_monotonic) if deadline is not None else origin.deadline_monotonic
+    cancellation = legacy_chat_bridge.BridgeCancellation(cancel_check)
     if ambient is None:
         return local_owner_context(
             correlation_id="tier-helper-" + uuid4().hex, source="worker",
-            timeout_seconds=timeout,
-            cancellation=legacy_chat_bridge.BridgeCancellation(cancel_check),
+            timeout_seconds=timeout, cancellation=cancellation,
             cloud_allowed=cloud_allowed and not _LOCAL_ONLY.get(),
             remote_ollama_allowed=remote_ollama_allowed,
         )
-    if ambient.deadline_monotonic is not None:
-        deadline = min(deadline, ambient.deadline_monotonic) if deadline is not None else ambient.deadline_monotonic
     return replace(
-        ambient, deadline_monotonic=deadline,
-        cancellation=legacy_chat_bridge.BridgeCancellation(
-            lambda: ambient.cancellation.cancelled or bool(origin and origin.cancellation.cancelled) or bool(cancel_check and cancel_check()),
-        ),
+        ambient,
+        deadline_monotonic=time.monotonic() + float(timeout) if timeout is not None else None,
+        cancellation=cancellation,
         cloud_allowed=cloud_allowed and ambient.cloud_allowed and not _LOCAL_ONLY.get(),
         remote_ollama_allowed=remote_ollama_allowed and ambient.remote_ollama_allowed,
     )
