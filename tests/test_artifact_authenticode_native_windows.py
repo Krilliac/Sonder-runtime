@@ -29,13 +29,16 @@ def test_signed_windows_powershell_matches_exact_microsoft_organization(monkeypa
         str(executable), expect_type="pe", expect_publisher="Microsoft Corporation",
     )
 
-    assert result["detected_type"] == "pe", result
-    assert result["signature_verified"] is True, result
-    assert result["signature"]["supported"] is True, result
-    assert result["signature"]["status"] == "Valid", result
-    assert result["signature"]["thumbprint"], result
+    # pytest truncates a large dict in the failure line; name the fields that
+    # say *why* a verdict was not "verified" so a CI failure is diagnosable.
+    detail = {key: result.get(key) for key in ("verdict", "signature", "checks")}
+    assert result["detected_type"] == "pe", detail
+    assert result["signature_verified"] is True, detail
+    assert result["signature"]["supported"] is True, detail
+    assert result["signature"]["status"] == "Valid", detail
+    assert result["signature"]["thumbprint"], detail
     assert artifact_fetch._signer_organization(result["signature"]["publisher"]) == "Microsoft Corporation"
-    assert result["ok"] and result["verdict"] == "verified", result
+    assert result["ok"] and result["verdict"] == "verified", detail
     assert {row["check"] for row in result["checks"] if row["ok"]} >= {
         "size", "block_page", "magic", "publisher",
     }

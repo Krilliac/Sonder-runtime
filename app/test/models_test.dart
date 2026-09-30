@@ -15,6 +15,17 @@ void main() {
     expect(done.pending, false);
   });
 
+  test('threads created in the same clock tick get distinct ids', () {
+    // Windows advances DateTime.now() in ticks far coarser than the
+    // microsecond id; the startup thread and an immediate New chat used to
+    // share one id there, so switching back selected the wrong transcript.
+    final ids = [for (var i = 0; i < 1000; i++) ChatThread.fresh().id];
+    expect(ids.toSet(), hasLength(ids.length));
+    for (final id in ids) {
+      expect(id, matches(RegExp(r'^chat-\d+$')));
+    }
+  });
+
   test('ChatThread derives a useful display title', () {
     final thread = ChatThread.fresh().copyWith(
       messages: const [

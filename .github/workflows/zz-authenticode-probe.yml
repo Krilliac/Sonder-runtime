@@ -1,0 +1,41 @@
+name: zz-authenticode-probe
+# TEMPORARY diagnostic for the flaky Authenticode canary; removed before merge.
+on:
+  pull_request:
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+      - name: Probe Get-AuthenticodeSignature exactly like artifact_fetch
+        shell: pwsh
+        run: |
+          Get-Service CryptSvc | Format-List Name,Status,StartType
+          $py = @'
+          import json, os, subprocess, time
+          exe = os.path.join(os.environ["SystemRoot"], "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+          keys = ("SystemRoot", "WINDIR", "ComSpec", "PATH", "PATHEXT", "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "ProgramData")
+          env = {k: os.environ[k] for k in keys if os.environ.get(k)}
+          literal = exe.replace("'", "''")
+          script = ("$ErrorActionPreference='Stop';$s = Get-AuthenticodeSignature -LiteralPath '%s';$cert = $s.SignerCertificate;"
+                    "[pscustomobject]@{Status=[string]$s.Status;StatusMessage=[string]$s.StatusMessage;"
+                    "Subject=$(if ($cert) { [string]$cert.Subject } else { '' });SignatureType=[string]$s.SignatureType} | ConvertTo-Json -Compress") % literal
+          boot = time.time()
+          for i in range(40):
+              t = time.monotonic()
+              try:
+                  c = subprocess.run([exe, "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True, text=True, timeout=60, env=env)
+                  out = (c.stdout or "").strip(); err = (c.stderr or "").strip()[:300]; rc = c.returncode
+              except subprocess.TimeoutExpired:
+                  out, err, rc = "", "TIMEOUT", None
+              print("PROBE", i, "rc=%s" % rc, "%.2fs" % (time.monotonic() - t), out[:300], err, flush=True)
+              time.sleep(3)
+          '@
+          $py | python -
