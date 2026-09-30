@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 373,
+      "file_count": 377,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -188,11 +188,14 @@
         "sonder_runtime/adapters/host_tools/snapshot_store.py",
         "sonder_runtime/adapters/host_tools/windows.py",
         "sonder_runtime/adapters/inference/__init__.py",
+        "sonder_runtime/adapters/inference/capability_evidence.py",
+        "sonder_runtime/adapters/inference/capability_refresh.py",
         "sonder_runtime/adapters/inference/external_membership.py",
         "sonder_runtime/adapters/inference/injected.py",
         "sonder_runtime/adapters/inference/membership_high_water.py",
         "sonder_runtime/adapters/inference/model_gateway_factory.py",
         "sonder_runtime/adapters/inference/ollama.py",
+        "sonder_runtime/adapters/inference/ollama_conformance.py",
         "sonder_runtime/adapters/inference/ollama_endpoint.py",
         "sonder_runtime/adapters/inference/ollama_gateway.py",
         "sonder_runtime/adapters/inference/ollama_model_root.py",
@@ -205,6 +208,7 @@
         "sonder_runtime/adapters/inference/overflow_availability.py",
         "sonder_runtime/adapters/inference/overflow_route.py",
         "sonder_runtime/adapters/inference/prewarm_gate.py",
+        "sonder_runtime/adapters/inference/production_tier_router.py",
         "sonder_runtime/adapters/inference/residency_feedback.py",
         "sonder_runtime/adapters/inference/served_tier_models.py",
         "sonder_runtime/adapters/inference/sonder_inference_gateway.py",
@@ -422,7 +426,7 @@
       ]
     },
     {
-      "file_count": 385,
+      "file_count": 388,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -708,7 +712,10 @@
         "sonder_runtime/application/routing/backend_conformance.py",
         "sonder_runtime/application/routing/calibration.py",
         "sonder_runtime/application/routing/capability_router.py",
+        "sonder_runtime/application/routing/evidence_gateway.py",
+        "sonder_runtime/application/routing/identity_cache.py",
         "sonder_runtime/application/routing/long_context_overflow.py",
+        "sonder_runtime/application/routing/request_capabilities.py",
         "sonder_runtime/application/routing/tier_escalation.py",
         "sonder_runtime/application/runtime_policy/__init__.py",
         "sonder_runtime/application/runtime_policy/use_cases.py",
@@ -886,7 +893,7 @@
       ]
     },
     {
-      "file_count": 261,
+      "file_count": 262,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1101,6 +1108,7 @@
         "sonder_runtime/domain/routing/capability_profiles.py",
         "sonder_runtime/domain/routing/capability_router.py",
         "sonder_runtime/domain/routing/fleet_router.py",
+        "sonder_runtime/domain/routing/model_names.py",
         "sonder_runtime/domain/routing/route_planner.py",
         "sonder_runtime/domain/routing/semantic_tier.py",
         "sonder_runtime/domain/runtime_identity.py",
