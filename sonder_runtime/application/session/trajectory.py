@@ -8,6 +8,7 @@ from typing import Iterable
 
 from ...domain.common.errors import IntegrityFailure, InvalidInput
 from ...domain.common.events import DomainEvent
+from .query_export import is_retention_withheld
 
 
 MAX_TRAJECTORY_STEPS = 10_000
@@ -75,6 +76,15 @@ def project_trajectory(
     ``tool.call`` starts a step and ``tool.result``/``tool.failed`` closes it.
     Raw content is represented only by hashes and byte counts, making the
     projection suitable for inspection and evidence transport.
+
+    An event withheld by a retention marker carries no ``call_id``, tool name
+    or content.  A withheld action opens a ``"withheld"`` step with none of
+    those fields; the next observation that cannot be matched by ``call_id``
+    (itself withheld, or naming a call that was withheld) closes the oldest
+    open withheld step.  A withheld observation with no withheld action open
+    closes the oldest visible action as ``"withheld"`` without a result
+    digest; if nothing is open it becomes its own ``"withheld"`` step, so
+    retention never turns into an unavailable route.
     """
     if not 1 <= max_steps <= MAX_TRAJECTORY_STEPS:
         raise InvalidInput("max_steps is out of bounds")
@@ -88,14 +98,49 @@ def project_trajectory(
     if any(event.aggregate_id != session_id for event in ordered):
         raise IntegrityFailure("trajectory contains multiple session aggregates")
     active: dict[str, TrajectoryStep] = {}
+    withheld_open: list[TrajectoryStep] = []
     completed: list[TrajectoryStep] = []
+
+    def _withheld_step(sequence: int) -> TrajectoryStep:
+        return TrajectoryStep(session_id, "", "", "", "withheld", sequence, None, "", None, None)
+
+    def _close_withheld(sequence: int) -> None:
+        if withheld_open:
+            step = withheld_open.pop(0)
+            completed.append(TrajectoryStep(
+                step.session_id, "", "", "", "withheld", step.requested_sequence, sequence,
+                "", None, None,
+            ))
+        elif active:
+            # Only the observation was withheld: close the oldest visible
+            # action, keeping its (unwithheld) call metadata but no result.
+            call_id = min(active, key=lambda key: active[key].requested_sequence)
+            step = active.pop(call_id)
+            completed.append(TrajectoryStep(
+                step.session_id, step.turn_id, step.call_id, step.tool, "withheld",
+                step.requested_sequence, sequence, step.arguments_sha256, None, None,
+            ))
+        else:
+            completed.append(TrajectoryStep(
+                session_id, "", "", "", "withheld", sequence, sequence, "", None, None,
+            ))
+
     for event in ordered:
         payload = event.payload
+        if (event.event_type in {"tool.call", "tool.result", "tool.failed"}
+                and is_retention_withheld(payload)):
+            if event.event_type == "tool.call":
+                if len(active) + len(withheld_open) + len(completed) >= max_steps:
+                    raise InvalidInput("trajectory exceeds max_steps")
+                withheld_open.append(_withheld_step(event.sequence))
+            else:
+                _close_withheld(event.sequence)
+            continue
         if event.event_type == "tool.call":
             call_id = _text(payload, "call_id")
             if call_id in active:
                 raise IntegrityFailure("trajectory contains duplicate active tool calls")
-            if len(active) + len(completed) >= max_steps:
+            if len(active) + len(withheld_open) + len(completed) >= max_steps:
                 raise InvalidInput("trajectory exceeds max_steps")
             arguments = _text(payload, "content")
             active[call_id] = TrajectoryStep(
@@ -105,6 +150,11 @@ def project_trajectory(
             )
         elif event.event_type in {"tool.result", "tool.failed"}:
             call_id = _text(payload, "call_id")
+            if call_id not in active and withheld_open:
+                # The observation's action was withheld: its call_id and tool
+                # are unknown, so close the step without re-exposing them.
+                _close_withheld(event.sequence)
+                continue
             try:
                 current = active.pop(call_id)
             except KeyError as exc:
@@ -124,6 +174,7 @@ def project_trajectory(
                 current.arguments_sha256, _digest(result), len(result.encode("utf-8")),
             ))
     completed.extend(active.values())
+    completed.extend(withheld_open)
     return TrajectoryExport(session_id, tuple(sorted(completed, key=lambda step: step.requested_sequence)))
 
 
