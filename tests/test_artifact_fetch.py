@@ -625,6 +625,17 @@ def test_authenticode_process_ignores_inherited_powershell_module_path(monkeypat
     assert captured["env"]["SystemRoot"] == environment["SystemRoot"]
     assert "PSModulePath" not in captured["env"]
     assert "PYTHONPATH" not in captured["env"]
+    # The verifier's cmdlets come from its own $PSHOME, loaded explicitly and
+    # called module-qualified: command-discovery autoload analyzes every
+    # installed module first (~18 s per call on hosted Windows images, which
+    # timed the canary out) and could resolve a same-named user module.
+    script = captured["argv"][captured["argv"].index("-Command") + 1]
+    assert "[IO.Path]::Combine($PSHOME, 'Modules', $m, $m + '.psd1')" in script
+    assert "Join-Path" not in script
+    assert "'Microsoft.PowerShell.Security','Microsoft.PowerShell.Utility'" in script
+    assert "Microsoft.PowerShell.Security\\Get-AuthenticodeSignature -LiteralPath" in script
+    assert "Microsoft.PowerShell.Utility\\ConvertTo-Json -Compress" in script
+    assert script.index("Import-Module") < script.index("Get-AuthenticodeSignature")
 
 
 # --- redirects, resume, idempotency --------------------------------------
