@@ -17,7 +17,8 @@ Verified against the code on 2026-09-26.
 | Composition | `sonder_runtime/adapters/model_gateway_factory.py`, `adapters/runtime_container.py` |
 | Status aggregation | `ProviderDispatchGateway.provider_status()` in `adapters/provider_dispatch/gateway.py` |
 | Identity reader and protocol probe | `sonder_runtime/adapters/inference/sonder_inference_probe.py`, `scripts/backend_attest.py --backend sonder-inference` |
-| Doctor and preflight | `sonder_doctor.py` (`sonder_inference`, `sonder_inference_scope`), `adapters/preflight.py` |
+| Doctor and preflight | `sonder_doctor.py` (`sonder_inference`, `sonder_inference_scope`, `sonder_inference_gpu`), `adapters/preflight.py` |
+| Streaming, thinking, sampling defaults, residency | see [request path](../integration/sonder-inference-request-path.md) |
 
 ## Selecting the provider
 
@@ -54,6 +55,9 @@ or construction.
 | `SONDER_INFERENCE_TIMEOUT_SECONDS` | `300` | Per-call ceiling, never beyond the operation deadline. |
 | `SONDER_INFERENCE_HEALTH_TTL_SECONDS` | `5` | How long a health observation is reused. |
 | `SONDER_INFERENCE_FALLBACK` | `none` | `none` or `ollama`; anything else fails composition. |
+| `SONDER_INFERENCE_THINKING` | `auto` | Forward `think` as `chat_template_kwargs.enable_thinking`: `auto` (when the health document advertises it), `on`, `off`. |
+| `SONDER_INFERENCE_SAMPLING_DEFAULTS` | `0` | `1` fills the model family's recommended sampling values for fields the caller left unset. |
+| `SONDER_INFERENCE_SAMPLING_TABLE` | unset | JSON list replacing the built-in sampling family table. |
 
 Base URL resolution order: `SONDER_INFERENCE_BASE_URL`, then the ready file,
 then the default. Invalid values (unknown tier keys, non-numeric timeouts,
@@ -96,13 +100,18 @@ mapping, but injects its own GET and POST transports:
 ## Wire format
 
 `POST /v1/chat/completions` with the OpenAI subset: `model`, `messages`
-(system, history, user), `stream: false`, and only the sampling options the
-caller set. Ollama option names map as `num_predict`→`max_tokens`; `temperature`,
+(system, history, user), `stream: false` (`true` with
+`stream_options.include_usage` for the first bridged generation of a streamed
+HTTP turn; see [request path](../integration/sonder-inference-request-path.md)),
+and only the sampling options the caller set (plus family defaults when
+`SONDER_INFERENCE_SAMPLING_DEFAULTS=1`). Ollama option names map as `num_predict`→`max_tokens`; `temperature`,
 `top_p`, `top_k`, `min_p`, `typical_p`, `seed`, `stop` (string or up to four),
 `presence_penalty`, `frequency_penalty`, `repeat_penalty`, `repeat_last_n` and
 `num_ctx` pass through by name (the last four as Sonder extensions). `format`,
-`tools`, `tool_choice`, `functions`, `response_format` and `think=True` are
-refused locally with `InvalidInput`; Inference v1 would reject them anyway.
+`tools`, `tool_choice`, `functions` and `response_format` are refused locally
+with `InvalidInput`; Inference v1 would reject them anyway. `think` is
+forwarded as `chat_template_kwargs.enable_thinking` when the server advertises
+support; otherwise `think=True` is refused and `think=False` dropped.
 
 Model selection: an explicit `ModelRequest.options["model"]`, else
 `SONDER_INFERENCE_TIER_MODELS[tier]`, else `SONDER_INFERENCE_MODEL`. The

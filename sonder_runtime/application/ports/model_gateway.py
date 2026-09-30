@@ -99,6 +99,11 @@ class InferenceTelemetry:
     prompt_tokens_per_second: float | None = None
     output_tokens_per_second: float | None = None
     load_state: str | None = None
+    # Backend-measured time to the first generated token, and speculative
+    # decoding counts (drafted / accepted), when the backend reported them.
+    ttft_ms: float | None = None
+    draft_tokens: int | None = None
+    draft_accepted_tokens: int | None = None
 
 
 @dataclass(frozen=True)
