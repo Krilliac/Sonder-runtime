@@ -2350,7 +2350,7 @@ def lesson_usage_history(conn):
     # named ineligible source is removed.
     return conn.execute(
         "SELECT lesson_id, interaction_id, task, reward, "
-        "COALESCE(outcome_ts, ts) AS evidence_ts "
+        "COALESCE(outcome_ts, ts) AS evidence_ts, outcome_signal "
         "FROM lesson_usage WHERE reward IS NOT NULL "
         "AND (outcome_source IS NULL OR outcome_source NOT IN (%s)) "
         "ORDER BY lesson_id, datetime(evidence_ts), rowid" % placeholders,
