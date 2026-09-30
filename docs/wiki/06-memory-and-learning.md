@@ -1,7 +1,9 @@
 # Memory & Learning
 
 Sonder's differentiator: it learns *your* context from grounded outcomes.
-All memory is local SQLite in `memory.db`, owned by `memory_store.py`.
+Facts, lessons and interactions use local SQLite in `memory.db`, owned by
+`memory_store.py`. [Playbooks](22-playbooks.md) add owner-editable topic notes
+under `<SONDER_HOME>/playbooks/` with explicit approval and a stable trigger index.
 
 ## What is stored
 
@@ -12,6 +14,7 @@ All memory is local SQLite in `memory.db`, owned by `memory_store.py`.
 | Lessons | Short, reusable takeaways distilled from *successful* interactions. |
 | Interactions | Captured task→response rows with embeddings and token accounting. |
 | Outcomes | Grounded signals (compiled, tests_passed, used, rejected, failed). |
+| Playbooks | Curated Markdown topic documents, including failures, procedures, measurements and owner preferences; proposed until approved. |
 
 ## The learning loop
 

@@ -36,6 +36,7 @@ backups, and a signed update path. It is not a foundation model.
 | 20 | [Terminal UI Conventions](20-terminal-ui-conventions.md) | REPL presentation rules, the scripted-output contract, NDJSON turns, error hints, replay |
 | 20 | [Test-Suite Performance](20-test-suite-performance.md) | Running the suite fast: timing capture, slow-test ranking, hang visibility, bounded parallelism |
 | 21 | [App Design System](21-app-design-system.md) | The Flutter app's tokens, bundled faces, transcript grammar and theme preference |
+| 22 | [Playbooks](22-playbooks.md) | Curated owner notes, approval, stable triggers, bounded loading and maintenance |
 
 ## Operational tools
 

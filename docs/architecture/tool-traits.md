@@ -72,7 +72,8 @@ child-runner call ordinal. Unclassified empty-effect calls remain unknown.
 ## Measured compatibility with origin/main
 
 Baseline: `45a3e093aa423c3a23f9e356419972d2332015e5`, read using `git show`.
-`tests/fixtures/builtin_risk_golden.json` pins all 339 canonical catalog names.
+`tests/fixtures/builtin_risk_golden.json` pins all 339 baseline catalog names
+plus `playbooks` (added later, `dangerous`).
 `tests/fixtures/builtin_behavior_golden.json` pins the 16 speculation names,
 31 typed gateway names, existing retry call sites and origin retry decisions.
 `tests/test_builtin_behavior_golden.py` exercises the real catalog classifier,

@@ -54,6 +54,8 @@ import sonder_runtime.application.tasks.use_cases as task_use_cases
 import sonder_runtime.adapters.eval_history_reader as eval_history_adapter
 import sonder_runtime.application.evaluation_history.use_cases as eval_history_use_cases
 import sonder_runtime.adapters.memory_store as memory_store
+from sonder_runtime.bootstrap import playbook_context
+from sonder_runtime.bootstrap.playbooks import register_tools as _register_playbook_tools
 import sonder_runtime.application.session.transcript_export as session_transcript_export
 import orchestrator
 import retriever
@@ -2231,7 +2233,7 @@ def _capture_named_provider_request(function):
             )
             return capture, pending
 
-        with deferred_provider_request_scope(admit if session_id is not None else None):
+        with playbook_context.session_scope(session_id), deferred_provider_request_scope(admit if session_id is not None else None):
             return function(*args, **kwargs)
 
     return wrapped
@@ -2404,30 +2406,17 @@ def _resolve_project(project):
 
 # The mutable, disk-backed parts of the system prompt, pinned for one turn.
 #
-# One turn can build the system prompt more than once, and each build re-read
-# system_profile.md, the emotion vectors and the goal store from disk.
-# Measured: a workbench-agent turn builds it twice (the agent loop, then the
-# negative-claim reviewer at finalization) and a routed work request builds it
-# three times (execution-mode router, then the agent, then that reviewer).
-# Every one of those prompts is sent to a model -- none is discarded -- so this
-# cannot be fixed by dropping a build. With an edit landing between two reads,
-# one turn told the router "never use the network" and, in the same turn, told
-# the agent "always use the network".
-#
-# Per-REQUEST freshness is deliberate: system_profile.py exists so an operator
-# can edit standing instructions while the server runs. Per-TURN consistency is
-# what was missing, so the parts are read once per turn and reused, not cached
-# for the life of the process.
-#
-# _runtime_identity_block() is deliberately NOT pinned. It names the model
-# answering THIS call, and the two consumers in a routed turn can run on
-# different tiers; pinning it would make the second prompt state the first
-# one's model, which is the exact failure that block exists to prevent.
+# One turn builds the system prompt two or three times (router, agent, claim
+# reviewer), all sent, so an edit landing between builds must not give them
+# contradictory instructions: profile, emotions and goal are read once per turn
+# and the playbook index once per session. Runtime identity is NOT pinned (it
+# names the model answering THIS call). Full rationale and measurements:
+# sonder_runtime/domain/prompt_composition.py.
 _SYSTEM_CONTEXT = threading.local()
 
 
 def _read_system_context():
-    """Read the disk-backed system-prompt parts: (profile, emotions, goal)."""
+    """Read profile/emotions/goal plus the session-stable playbook index."""
     profile = system_profile.system_prompt()
     emotions = emotion_vectors.system_prompt()
     # An active goal is re-stated every turn so a long objective cannot erode
@@ -2438,7 +2427,7 @@ def _read_system_context():
         goal_block = goal_store.context_block()
     except Exception:
         goal_block = ""
-    return profile, emotions, goal_block
+    return profile, emotions, goal_block, playbook_context.stable_index()
 
 
 @contextlib.contextmanager
@@ -2494,9 +2483,12 @@ def _build_system(system, trace, persona, model="", cloud=False, provider=None):
     # Outside a pinned turn this is an ordinary fresh read, so a single-build
     # caller behaves exactly as before.
     parts = getattr(_SYSTEM_CONTEXT, "parts", None)
-    profile, emotions, goal_block = parts or _read_system_context()
+    values = parts or _read_system_context()
+    profile, emotions, goal_block = values[:3]
+    playbook_index = values[3] if len(values) > 3 else ""
     return _join_system_parts(
-        _runtime_identity_block(model, cloud, provider), profile, emotions, goal_block,
+        _runtime_identity_block(model, cloud, provider), profile, emotions,
+        playbook_context.frame_owner_notes(playbook_index), goal_block,
         effective_system,
     )
 
@@ -4126,6 +4118,9 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
                  answers clean), but the turn is still captured (with its task
                  embedding) so record_outcome can ground and distill it.
     """
+    effective_system, playbook_selection = playbook_context.augment(
+        effective_system, prompt, cloud=cloud or _is_cloud_model_name(model) or _provider_bridge.hosted_rung_active() or not augment,
+    )
     gen = _make_generate(
         model, effective_system, temperature, num_predict, num_ctx,
         cloud=cloud, allow_cloud_fallback=allow_cloud_fallback,
@@ -4187,6 +4182,7 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
             task_embedding_revision=embedding_provenance.get("revision"),
             task_embedding_dim=embedding_provenance.get("dimension"),
         )
+        playbook_context.record_usage(conn, playbook_selection, iid)
         _capture_preferences(
             conn, prompt, source_interaction=iid,
             scope="project:%s" % project if project else "global",
@@ -4202,6 +4198,7 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
         task_embedding_revision=embedding_provenance.get("revision"),
         task_embedding_dim=embedding_provenance.get("dimension"),
     )
+    playbook_context.record_usage(conn, playbook_selection, iid)
     _capture_preferences(
         conn, prompt, source_interaction=iid,
         scope="project:%s" % project if project else "global",
@@ -4749,6 +4746,7 @@ else:
         "sonder-runtime", version=_runtime_version(),
     )
 _PERSISTENT_MCP = mcp
+playbook_note, playbook_read = _register_playbook_tools(mcp, config_getter=lambda: getattr(_APP_GRAPH, "config", None))
 
 
 def _bounded_timeout(value) -> int:
@@ -20763,6 +20761,7 @@ def _agent_turn(
         )
         pre_model_context_rendered = bool(context_text)
         transcript += context_text
+    transcript, _ = playbook_context.augment(transcript, prompt, cloud=cloud or _provider_bridge.hosted_rung_active())
 
     def ensure_not_cancelled():
         if (

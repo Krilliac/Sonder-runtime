@@ -37,6 +37,10 @@ from sonder_runtime.platform import paths as runtime_paths
 from sonder_runtime.platform import version as sonder_version
 from sonder_runtime.application.command_surface import McpCommand
 from sonder_runtime.bootstrap.legacy_mcp import build_legacy_server_mcp_runtime
+from sonder_runtime.interfaces.cli.playbooks import (
+    add_parser as add_playbooks_parser,
+    configure_store_factory as configure_playbook_surface,
+)
 
 
 def _cli_overrides(args) -> dict:
@@ -1360,6 +1364,16 @@ def cmd_repl(args) -> int:
         _erase_startup_notice(notice)
         print(str(exc), file=sys.stderr)
         return 2
+    from sonder_runtime.bootstrap.playbooks import get_store, note_context
+    from sonder_runtime.adapters.playbook_review import approve_pending, reconcile
+    runtime_config = config
+    def repl_playbook_store(*, config=None, home=None):
+        return get_store(config=config or runtime_config, home=home)
+    from sonder_runtime.bootstrap import playbook_context as bootstrap_playbook_context
+    configure_playbook_surface(
+        repl_playbook_store,
+        note_context, approve_pending, bootstrap_playbook_context.reload_index, reconcile,
+    )
     _configure_typed_home(config)
     _configure_repl_logging(config, machine_output=bool(args.json))
     _export_runtime_environment(config)
@@ -1873,6 +1887,8 @@ def build_parser() -> argparse.ArgumentParser:
     common(p)
     p.set_defaults(func=cmd_config)
 
+    add_playbooks_parser(sub)
+
     p = sub.add_parser("migrate", help="apply pending schema migrations")
     common(p)
     p.add_argument("--store", choices=STORE_NAMES)
@@ -2105,6 +2121,19 @@ def main(argv: list[str] | None = None) -> int:
     else:
         args = build_parser().parse_args(raw_argv)
     try:
+        if getattr(args, "command", "") == "playbooks":
+            config = _load_config(args)
+            _configure_typed_home(config)
+            from sonder_runtime.bootstrap.playbooks import get_store, note_context
+            from sonder_runtime.adapters.playbook_review import approve_pending, reconcile
+            from sonder_runtime.bootstrap import playbook_context as bootstrap_playbook_context
+            runtime_config = config
+            def cli_playbook_store(*, config=None, home=None):
+                return get_store(config=config or runtime_config, home=home)
+            configure_playbook_surface(
+                cli_playbook_store, note_context, approve_pending,
+                bootstrap_playbook_context.reload_index, reconcile,
+            )
         return args.func(args)
     except sonder_config.ConfigError as exc:
         print(str(exc), file=sys.stderr)
