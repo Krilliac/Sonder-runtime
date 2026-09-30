@@ -434,7 +434,7 @@ def cmd_doctor(args) -> int:
             (name, check) for name, check in checks if name not in skipped_names
         ]
     if args.skip_inference:
-        skipped_names = {"sonder_inference", "sonder_inference_scope"}
+        skipped_names = {"sonder_inference", "sonder_inference_scope", "sonder_inference_gpu"}
         checks = [
             (name, check) for name, check in checks if name not in skipped_names
         ]

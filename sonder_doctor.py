@@ -733,11 +733,48 @@ def _check_sonder_inference_scope(*, env=None) -> dict:
     }
 
 
+def _check_sonder_inference_gpu(*, env=None) -> dict:
+    """Warn when another local model would share the GPU with Inference.
+
+    Configuration only (no I/O): a tier bound to a loopback Sonder Inference
+    plus a tier bound to local Ollama, or an Ollama embedder not kept on the
+    CPU, means two runtimes load onto one card and the Inference server's
+    weights or KV spill into shared memory (decode 2-15x slower, no error).
+    Also warns when ``SONDER_KEEP_PRIMARY_RESIDENT=1`` pins a model while
+    other local Ollama models can load.  Nothing is changed.
+    """
+    import os
+
+    from sonder_runtime.adapters.inference import gpu_residency
+
+    bindings, failure = _inference_binding(env)
+    if failure is not None:
+        return failure
+    source = os.environ if env is None else env
+    local = False
+    if "sonder_inference" in bindings.tier_providers.values():
+        try:
+            from sonder_runtime.adapters.inference.sonder_inference_gateway import (
+                config_from_env,
+            )
+
+            local = config_from_env(source).loopback
+        except Exception:  # noqa: BLE001 - the sonder_inference check reports config errors
+            local = False
+    elif not gpu_residency.keep_primary_resident(source):
+        return _skip("no tier is bound to sonder_inference")
+    findings = gpu_residency.gpu_sharing_findings(source, bindings, inference_local=local)
+    if findings:
+        return {"status": STATUS_WARN, "detail": "; ".join(findings)}
+    return {"status": STATUS_OK, "detail": "no other local model is configured to share the GPU"}
+
+
 def sonder_inference_checks(env=None) -> list[tuple[str, CheckCallable]]:
     """Bind the Sonder Inference checks to one environment snapshot."""
     return [
         ("sonder_inference", lambda: _check_sonder_inference(env=env)),
         ("sonder_inference_scope", lambda: _check_sonder_inference_scope(env=env)),
+        ("sonder_inference_gpu", lambda: _check_sonder_inference_gpu(env=env)),
     ]
 
 
@@ -875,6 +912,7 @@ def default_checks() -> list[tuple[str, CheckCallable]]:
         ("ollama_residency", _check_ollama_residency),
         ("sonder_inference", _check_sonder_inference),
         ("sonder_inference_scope", _check_sonder_inference_scope),
+        ("sonder_inference_gpu", _check_sonder_inference_gpu),
     ]
 
 

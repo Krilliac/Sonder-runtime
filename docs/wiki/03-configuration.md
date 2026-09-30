@@ -293,6 +293,11 @@ on the CPU (`num_gpu: 0`). Use it when the chat model nearly fills VRAM:
   25 ms per embedding.
 
 It pairs with Ollama's `OLLAMA_MAX_LOADED_MODELS` of 2 or more.
+`SONDER_KEEP_PRIMARY_RESIDENT=1` (opt-in) sends `keep_alive: -1` for the
+primary chat model only, so it is not unloaded between turns; use it when that
+model is the only local model on the GPU (doctor `sonder_inference_gpu` warns
+otherwise). Streaming, thinking and sampling switches for Sonder Inference:
+[request path](../integration/sonder-inference-request-path.md).
 `SONDER_MODEL_ESCALATION` (default on; `0`/`off` disables) lets the default
 route step up to the next distinct bound local model when its first model
 fails or answers nothing, at most twice per turn; explicit tiers and model

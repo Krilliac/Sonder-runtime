@@ -107,11 +107,11 @@ def test_scope_warning_names_the_surfaces_bindings_do_not_reach():
 
 
 def test_default_and_bound_registries_include_the_checks():
-    assert [name for name, _ in sonder_doctor.default_checks()][-2:] == [
-        "sonder_inference", "sonder_inference_scope",
+    assert [name for name, _ in sonder_doctor.default_checks()][-3:] == [
+        "sonder_inference", "sonder_inference_scope", "sonder_inference_gpu",
     ]
     assert [name for name, _ in sonder_doctor.sonder_inference_checks({})] == [
-        "sonder_inference", "sonder_inference_scope",
+        "sonder_inference", "sonder_inference_scope", "sonder_inference_gpu",
     ]
 
 
