@@ -293,6 +293,26 @@ on the CPU (`num_gpu: 0`). Use it when the chat model nearly fills VRAM:
   25 ms per embedding.
 
 It pairs with Ollama's `OLLAMA_MAX_LOADED_MODELS` of 2 or more.
+
+`SONDER_EMBED_BASE_URL` sends embeddings to a dedicated Ollama origin, for
+example a LAN node, while chat stays on the primary. This keeps the embedder
+off the chat model's GPU entirely. The origin passes the same policy as
+`OLLAMA_HOST`: a remote host needs `https://` and `SONDER_ALLOW_REMOTE_OLLAMA=1`.
+If the host is unreachable, or a fronting proxy answers 502-504, embeddings
+stop for `SONDER_EMBED_COOLDOWN_SECONDS` (default 30). During that time
+callers use their lexical fallback. `SONDER_EMBED_FALLBACK=local` instead
+retries on a loopback primary with the model forced onto the CPU, and
+`fallback_reason` records it. The model must also be installed there. With
+`OLLAMA_MAX_LOADED_MODELS=1` that fallback still evicts the chat model.
+`SONDER_EMBED_KEEP_ALIVE` (for example `24h`, or `-1` for no expiry) sets
+Ollama's `keep_alive` on embedding requests. Use it so a busy remote host does
+not unload the embedder when it is idle.
+Loopback-only features (semantic tier routing, `memory_embedding_backfill`,
+the learning-health revision refresh) stay off while the embedder is remote.
+`sonder doctor` reports whether the embedding model is installed where
+embeddings are sent. See
+[Multi-PC Ollama](../runbooks/multi-pc-ollama.md#dedicated-embedding-host).
+
 `SONDER_KEEP_PRIMARY_RESIDENT=1` (opt-in) sends `keep_alive: -1` for the
 primary chat model only, so it is not unloaded between turns; use it when that
 model is the only local model on the GPU (doctor `sonder_inference_gpu` warns

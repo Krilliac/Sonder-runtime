@@ -5,25 +5,123 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import stat
 import threading
+import time
 import urllib.error
 import urllib.request
 import urllib.parse
 import sonder_runtime.adapters.embedding_cache as embed_cache
 from sonder_runtime.adapters.inference import ollama_endpoint
 
-BASE = ollama_endpoint.normalize()
+# A dedicated embedding endpoint lets the embedder live on another Ollama host
+# (for example a LAN node) while chat stays on the local primary. Without it,
+# every embedding goes to the primary; with OLLAMA_MAX_LOADED_MODELS=1 each one
+# evicts the resident chat model, and with more slots it competes for its VRAM.
+# The origin passes the same policy as OLLAMA_HOST (remote needs https and
+# SONDER_ALLOW_REMOTE_OLLAMA=1). See docs/runbooks/multi-pc-ollama.md.
+EMBED_BASE_ENV = "SONDER_EMBED_BASE_URL"
+# "none" (default): while the dedicated endpoint is down, embed() returns None
+# and callers take their existing lexical fallback. "local": retry once on the
+# loopback primary with num_gpu=0 (the model must be installed there too).
+EMBED_FALLBACK_ENV = "SONDER_EMBED_FALLBACK"
+EMBED_COOLDOWN_ENV = "SONDER_EMBED_COOLDOWN_SECONDS"
+_DEFAULT_COOLDOWN_SECONDS = 30.0
+_FALLBACK_MODES = {"none", "local"}
+# Caddy/nginx answer 502-504 when the Ollama behind them is down: that is an
+# unreachable embedder, unlike a 4xx (for example a model that is not installed).
+_UNAVAILABLE_HTTP_CODES = frozenset({502, 503, 504})
+_circuit_lock = threading.Lock()
+_circuit = {"open_until": 0.0, "failures": 0}
+
+
+def dedicated_origin() -> str | None:
+    """The normalized SONDER_EMBED_BASE_URL origin, or None when unset."""
+    raw = os.environ.get(EMBED_BASE_ENV, "").strip()
+    return ollama_endpoint.normalize(raw) if raw else None
+
+
+def _primary_origin(url: str | None = None) -> str:
+    return ollama_endpoint.normalize(url) if url is not None else ollama_endpoint.normalize()
+
+
+def fallback_mode() -> str:
+    """Validated SONDER_EMBED_FALLBACK value; unknown values fail closed to none."""
+    value = os.environ.get(EMBED_FALLBACK_ENV, "").strip().lower() or "none"
+    return value if value in _FALLBACK_MODES else "none"
+
+
+def embedding_route(primary: str | None = None) -> dict:
+    """Where default embeddings go: ``origin``, ``dedicated``, ``fallback``.
+
+    ``fallback`` is the loopback primary only when a dedicated endpoint is set,
+    SONDER_EMBED_FALLBACK=local, and the primary really is loopback (a fallback
+    never sends embeddings to a second remote host).
+    """
+    dedicated = dedicated_origin()
+    primary_origin = _primary_origin(primary)
+    fallback = None
+    if (
+        dedicated
+        and fallback_mode() == "local"
+        and primary_origin != dedicated
+        and ollama_endpoint.is_loopback(primary_origin)
+    ):
+        fallback = primary_origin
+    return {
+        "origin": dedicated or primary_origin,
+        "dedicated": bool(dedicated),
+        "fallback": fallback,
+        "model": canonical_model_name(EMBED_MODEL),
+    }
+
+
+def _cooldown_seconds() -> float:
+    try:
+        value = float(os.environ.get(EMBED_COOLDOWN_ENV, "") or _DEFAULT_COOLDOWN_SECONDS)
+    except ValueError:
+        return _DEFAULT_COOLDOWN_SECONDS
+    return min(max(value, 0.0), 3600.0)
+
+
+def _circuit_open() -> bool:
+    with _circuit_lock:
+        return time.monotonic() < _circuit["open_until"]
+
+
+def _trip_circuit() -> None:
+    with _circuit_lock:
+        _circuit["failures"] += 1
+        _circuit["open_until"] = time.monotonic() + _cooldown_seconds()
+
+
+def _close_circuit() -> None:
+    with _circuit_lock:
+        _circuit["failures"] = 0
+        _circuit["open_until"] = 0.0
+
+
+def circuit_status() -> dict:
+    """Read-only view of the dedicated-endpoint circuit for status surfaces."""
+    with _circuit_lock:
+        remaining = max(0.0, _circuit["open_until"] - time.monotonic())
+        return {"open": remaining > 0, "retry_in_seconds": round(remaining, 1),
+                "consecutive_failures": _circuit["failures"]}
+
+
+BASE = dedicated_origin() or _primary_origin()
 OLLAMA_HOST = urllib.parse.urlparse(BASE).netloc
 
 
 def configure_typed_endpoint(url: str | None) -> None:
-    """Update the frozen BASE to match the typed Ollama endpoint."""
+    """Update the frozen BASE to match the typed Ollama endpoint.
+
+    A SONDER_EMBED_BASE_URL override is embedding-specific and wins over the
+    general Ollama endpoint.
+    """
     global BASE, OLLAMA_HOST
-    if url is not None:
-        BASE = ollama_endpoint.normalize(url)
-    else:
-        BASE = ollama_endpoint.normalize()
+    BASE = dedicated_origin() or _primary_origin(url)
     OLLAMA_HOST = urllib.parse.urlparse(BASE).netloc
 # 0.0.0.0 is a bind-all address (used so `ollama serve` is reachable from a phone
 # on the LAN), not connectable on Windows — dial loopback instead.
@@ -372,6 +470,26 @@ def _record_npu_fallback_handler(handled):
         pass
 
 
+_KEEP_ALIVE_PATTERN = re.compile(r"^-?\d+(?:\.\d+)?(?:ms|s|m|h)?$")
+
+
+def _keep_alive():
+    """SONDER_EMBED_KEEP_ALIVE as an Ollama keep_alive value, or None.
+
+    Ollama unloads an idle model after its default five minutes. A remote
+    embedding host that is also busy with other work can then take tens of
+    seconds to reload it (measured 2026-09-30: 31 s for a 0.5 GB model on a
+    loaded Node1), longer than recall callers wait. ``24h`` or ``-1`` keeps
+    the small embedder resident. Invalid values are ignored.
+    """
+    raw = os.environ.get("SONDER_EMBED_KEEP_ALIVE", "").strip()
+    if not raw or not _KEEP_ALIVE_PATTERN.match(raw):
+        return None
+    if raw.lstrip("-").replace(".", "", 1).isdigit():
+        return int(float(raw))
+    return raw
+
+
 def _embed_on_cpu() -> bool:
     """Whether SONDER_EMBED_ON_CPU asks Ollama to keep the embedder off the GPU.
 
@@ -384,6 +502,37 @@ def _embed_on_cpu() -> bool:
 
 
 def embed(text, timeout=30, base=None, model=None):
+    """Embed *text*; soft-fails to None.
+
+    An explicit ``base`` is honoured as-is. The default route uses
+    SONDER_EMBED_BASE_URL when set: a transport failure there (connection
+    error, timeout, or 502-504 from a fronting proxy) opens a short circuit so
+    later calls do not each wait out the timeout, and SONDER_EMBED_FALLBACK=local
+    retries on the loopback primary with the model forced onto CPU. The
+    fallback is reported through ``fallback_reason``, never silently.
+    """
+    route = embedding_route() if base is None else None
+    if route is None or not route["dedicated"]:
+        return _embed_at(text, timeout, base, model)
+    if not _circuit_open():
+        vector = _embed_at(text, timeout, None, model)
+        if vector is not None:
+            _close_circuit()
+            return vector
+        if not getattr(_EMBED_STATE, "transport_failed", False):
+            return None
+        _trip_circuit()
+    if route["fallback"] is None:
+        _EMBED_STATE.fallback_reason = "embed_endpoint_unavailable"
+        return None
+    vector = _embed_at(text, timeout, route["fallback"], model, force_cpu=True)
+    if vector is not None:
+        _EMBED_STATE.fallback_reason = "embed_endpoint_unavailable_local_cpu"
+    return vector
+
+
+def _embed_at(text, timeout=30, base=None, model=None, force_cpu=False):
+    _EMBED_STATE.transport_failed = False
     _EMBED_STATE.vector = None
     _EMBED_STATE.revision = None
     _EMBED_STATE.model = None
@@ -486,8 +635,11 @@ def embed(text, timeout=30, base=None, model=None):
                 _EMBED_STATE.fallback_reason = "npu_unavailable"
                 npu_fallback_pending = True
         body = {"model": selected_model, "prompt": prompt}
-        if _embed_on_cpu():
+        if force_cpu or _embed_on_cpu():
             body["options"] = {"num_gpu": 0}
+        keep_alive = _keep_alive()
+        if keep_alive is not None:
+            body["keep_alive"] = keep_alive
         payload = json.dumps(body).encode("utf-8")
         req = urllib.request.Request(
             "%s/api/embeddings" % selected_base,
@@ -523,7 +675,13 @@ def embed(text, timeout=30, base=None, model=None):
                 if npu_fallback_pending:
                     _record_npu_fallback_handler(True)
                 return vector
-        except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+        except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc:
+            code = getattr(exc, "code", None)
+            _EMBED_STATE.transport_failed = (
+                code in _UNAVAILABLE_HTTP_CODES
+                if isinstance(exc, urllib.error.HTTPError)
+                else not isinstance(exc, ValueError)
+            )
             if npu_fallback_pending:
                 _record_npu_fallback_handler(False)
             return None
