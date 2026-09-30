@@ -517,6 +517,7 @@ from sonder_runtime.domain.execution_route_formatting import (
 )
 from sonder_runtime.adapters.inference import served_tier_models as _served_models
 from sonder_runtime.adapters.inference import overflow_route as _overflow_route
+from sonder_runtime.adapters.inference import gpu_residency as _gpu_residency
 from sonder_runtime.domain.agent_observation_quality import (
     observation_ok as _agent_observation_ok,
 )
@@ -592,6 +593,13 @@ def _ollama_endpoint_is_local(base: str | None = None) -> bool:
 # destination for this client without mutating the server process environment.
 # How long a model stays in VRAM after its last call. Short = frees GPU quickly.
 KEEP_ALIVE = os.environ.get("SONDER_KEEP_ALIVE", "2m")
+
+
+def _keep_alive_for(model):
+    """KEEP_ALIVE, or -1 for the primary chat model under SONDER_KEEP_PRIMARY_RESIDENT=1."""
+    return _gpu_residency.keep_alive_for(model, KEEP_ALIVE, primary=lambda: _serve_target(None, None)[0])
+
+
 TIMEOUT = int(os.environ.get("SONDER_TIMEOUT", "300"))
 _RUNTIME_MODEL_CONFIGURATION = RuntimeModelConfiguration.from_environment(os.environ)
 SONDER_STABLE_ALIAS = _RUNTIME_MODEL_CONFIGURATION.stable_alias
@@ -1851,7 +1859,7 @@ def _make_generate(
                 payload, model, compact=compact_cloud_reasoning,
             )
         else:
-            payload["keep_alive"] = KEEP_ALIVE
+            payload["keep_alive"] = _keep_alive_for(model)
         ok = False
         content = ""
         used_model = model
@@ -5559,7 +5567,7 @@ def prewarm_model(tier: str = "") -> bool:
         try:
             # Empty prompt with keep_alive loads weights without generating.
             prewarm_gate.run_as_prewarm(lambda: _post(
-                "/api/generate", {"model": model, "keep_alive": KEEP_ALIVE},
+                "/api/generate", {"model": model, "keep_alive": _keep_alive_for(model)},
                 timeout=_PREWARM_LOAD_TIMEOUT,
             ))
         except Exception:
@@ -5821,7 +5829,7 @@ def _offload_impl(
         if cloud:
             _apply_cloud_thinking_policy(payload, model)
         else:
-            payload["keep_alive"] = KEEP_ALIVE
+            payload["keep_alive"] = _keep_alive_for(model)
         started = time.time()
         ok = False
         usage = {}
@@ -9290,7 +9298,7 @@ def memory_quality_report(sample_limit: int = 5) -> str:
     sample_limit = _safe_limit_policy(sample_limit, 5, 20)
     conn = _open_db()
     try:
-        report = memory_quality.audit(conn)
+        report = memory_quality.audit_with_write_quality(conn)
     finally:
         conn.close()
     return memory_quality.format_audit(report, sample_limit=sample_limit)
@@ -14360,7 +14368,7 @@ def _vision_analyze_impl(
             native_context=context_policy.native,
             environ=os.environ,
         ),
-        "keep_alive": KEEP_ALIVE,
+        "keep_alive": _keep_alive_for(model),
     }
     _out, content = _chat_request(
         payload, model=model, cloud=False, timeout=timeout, idempotent=True,
@@ -24506,7 +24514,7 @@ def _fanout_synthesis_generate(model, source_bundle):
             native_context=context_policy.native,
             environ=os.environ,
         ),
-        "keep_alive": KEEP_ALIVE,
+        "keep_alive": _keep_alive_for(model),
     }
     out, _attempts = _post_model(
         "/api/chat", payload, model=model, cloud=False,

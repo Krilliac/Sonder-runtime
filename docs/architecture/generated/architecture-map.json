@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 377,
+      "file_count": 380,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -191,6 +191,7 @@
         "sonder_runtime/adapters/inference/capability_evidence.py",
         "sonder_runtime/adapters/inference/capability_refresh.py",
         "sonder_runtime/adapters/inference/external_membership.py",
+        "sonder_runtime/adapters/inference/gpu_residency.py",
         "sonder_runtime/adapters/inference/injected.py",
         "sonder_runtime/adapters/inference/membership_high_water.py",
         "sonder_runtime/adapters/inference/model_gateway_factory.py",
@@ -209,10 +210,12 @@
         "sonder_runtime/adapters/inference/overflow_route.py",
         "sonder_runtime/adapters/inference/prewarm_gate.py",
         "sonder_runtime/adapters/inference/production_tier_router.py",
+        "sonder_runtime/adapters/inference/request_tuning.py",
         "sonder_runtime/adapters/inference/residency_feedback.py",
         "sonder_runtime/adapters/inference/served_tier_models.py",
         "sonder_runtime/adapters/inference/sonder_inference_gateway.py",
         "sonder_runtime/adapters/inference/sonder_inference_probe.py",
+        "sonder_runtime/adapters/inference/sse_stream.py",
         "sonder_runtime/adapters/inference/static_membership.py",
         "sonder_runtime/adapters/inference/telemetry.py",
         "sonder_runtime/adapters/inference/vision.py",
@@ -426,7 +429,7 @@
       ]
     },
     {
-      "file_count": 389,
+      "file_count": 390,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -474,6 +477,7 @@
         "sonder_runtime/application/chat/handoff_receipts.py",
         "sonder_runtime/application/chat/lanes.py",
         "sonder_runtime/application/chat/provider_bridge.py",
+        "sonder_runtime/application/chat/stream_sink.py",
         "sonder_runtime/application/command_surface/__init__.py",
         "sonder_runtime/application/command_surface/mcp.py",
         "sonder_runtime/application/compaction.py",
@@ -894,7 +898,7 @@
       ]
     },
     {
-      "file_count": 262,
+      "file_count": 263,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1055,6 +1059,7 @@
         "sonder_runtime/domain/memory/retention_gate.py",
         "sonder_runtime/domain/memory/rules.py",
         "sonder_runtime/domain/memory/wp6_typed.py",
+        "sonder_runtime/domain/memory/write_quality.py",
         "sonder_runtime/domain/mode_tool_policy.py",
         "sonder_runtime/domain/model_capabilities.py",
         "sonder_runtime/domain/model_catalog.py",
@@ -1162,7 +1167,7 @@
       ]
     },
     {
-      "file_count": 70,
+      "file_count": 71,
       "name": "interfaces",
       "python_files": [
         "sonder_runtime/interfaces/__init__.py",
@@ -1210,6 +1215,7 @@
         "sonder_runtime/interfaces/http/facades/work_runs.py",
         "sonder_runtime/interfaces/http/handlers.py",
         "sonder_runtime/interfaces/http/host_policy.py",
+        "sonder_runtime/interfaces/http/live_stream.py",
         "sonder_runtime/interfaces/http/memory_replication.py",
         "sonder_runtime/interfaces/http/serve.py",
         "sonder_runtime/interfaces/http/serve_policy.py",

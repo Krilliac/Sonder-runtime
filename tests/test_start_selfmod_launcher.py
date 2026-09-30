@@ -42,20 +42,40 @@ def _env(state_root: Path) -> dict[str, str]:
     return result
 
 
+# A cold Windows PowerShell start plus the launcher's mutex, git and
+# Start-Process work routinely takes several seconds on a loaded hosted
+# runner. The wait below returns as soon as the state file appears (or every
+# launcher has exited), so this bound only matters when something is wrong.
+STATE_TIMEOUT = 90.0
+
+
+def _wait_for_state(state_path: Path, children: list[subprocess.Popen[str]]) -> bool:
+    deadline = time.monotonic() + STATE_TIMEOUT
+    while time.monotonic() < deadline:
+        if state_path.exists():
+            return True
+        if all(child.poll() is not None for child in children):
+            # Every launcher exited; a final check covers a publish that
+            # landed just before the last one returned.
+            return state_path.exists()
+        time.sleep(0.1)
+    return state_path.exists()
+
+
 def _start_async(launcher: Path, repo: Path, env: dict[str, str]) -> tuple[subprocess.Popen[str], Path]:
     state_path = Path(env["SONDER_SELFMOD_STATE_ROOT"]) / "sonder" / "selfmod-continuous.json"
     child = subprocess.Popen(
         ["powershell", "-NoProfile", "-File", str(launcher), "-Python", sys.executable],
         cwd=repo, env=env, text=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
     )
-    for _ in range(60):
-        if state_path.exists():
-            return child, state_path
-        if child.poll() is not None:
-            break
-        time.sleep(0.1)
+    if _wait_for_state(state_path, [child]):
+        return child, state_path
+    exit_code = child.poll()
     child.kill()
-    raise AssertionError(f"launcher did not publish state: {child.stderr.read() if child.stderr else ''}")
+    raise AssertionError(
+        f"launcher did not publish state within {STATE_TIMEOUT:.0f}s "
+        f"(launcher exit code {exit_code}): {child.stderr.read() if child.stderr else ''}"
+    )
 
 
 @pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell is required")
@@ -135,11 +155,7 @@ def test_parallel_start_has_one_owner(tmp_path):
                                  stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
                 for command in commands]
     state_path = state_root / "sonder" / "selfmod-continuous.json"
-    for _ in range(60):
-        if state_path.exists():
-            break
-        time.sleep(0.1)
-    assert state_path.exists()
+    assert _wait_for_state(state_path, children)
     _powershell(launcher, "-Stop", env=env)
     for child in children:
         if child.poll() is None:

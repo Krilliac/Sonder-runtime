@@ -312,6 +312,12 @@ the learning-health revision refresh) stay off while the embedder is remote.
 `sonder doctor` reports whether the embedding model is installed where
 embeddings are sent. See
 [Multi-PC Ollama](../runbooks/multi-pc-ollama.md#dedicated-embedding-host).
+
+`SONDER_KEEP_PRIMARY_RESIDENT=1` (opt-in) sends `keep_alive: -1` for the
+primary chat model only, so it is not unloaded between turns; use it when that
+model is the only local model on the GPU (doctor `sonder_inference_gpu` warns
+otherwise). Streaming, thinking and sampling switches for Sonder Inference:
+[request path](../integration/sonder-inference-request-path.md).
 `SONDER_MODEL_ESCALATION` (default on; `0`/`off` disables) lets the default
 route step up to the next distinct bound local model when its first model
 fails or answers nothing, at most twice per turn; explicit tiers and model

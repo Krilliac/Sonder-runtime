@@ -244,6 +244,7 @@ def test_default_checks_registry_is_read_only_pairs_and_stable():
         "embeddings",
         "sonder_inference",
         "sonder_inference_scope",
+        "sonder_inference_gpu",
     ]
     assert all(callable(fn) for _, fn in first)
     first.append(("extra", lambda: "ok"))
