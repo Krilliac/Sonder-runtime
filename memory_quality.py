@@ -8,6 +8,7 @@ import lesson_decay
 import lesson_pruner
 import sonder_runtime.adapters.memory_store as memory_store
 from sonder_runtime.domain.memory import rules as memory_rules
+from sonder_runtime.domain.memory import write_quality
 
 LONG_LESSON_CHARS = 220
 
@@ -275,8 +276,10 @@ def stale_lesson_findings(
     lessons are already counted by the audit; this names the third population,
     lessons whose proof of usefulness has simply gone old. Fails closed the
     same way the contradiction audit does: no scored evidence, or an
-    unreadable evidence timestamp, and no claim is made. ``now`` is injectable
-    so callers and tests are deterministic.
+    unreadable evidence timestamp, and no claim is made. The newest outcome's
+    signal selects the half-life (``lesson_decay.SIGNAL_EVIDENCE_TYPES``);
+    ``half_life_days`` applies to every signal without a mapped type. ``now``
+    is injectable so callers and tests are deterministic.
     """
     limit = max(1, min(int(limit or 20), 100))
     current = now or datetime.now(timezone.utc)
@@ -285,10 +288,14 @@ def stale_lesson_findings(
     history = memory_store.lesson_usage_history(conn)
     stats = memory_store.lesson_usage_stats(conn, history=history)
     last_evidence = {}
+    last_signal = {}
     for row in history:
         # History is ordered by lesson then evidence time, so the last row
         # seen per lesson is its newest scored outcome.
         last_evidence[row["lesson_id"]] = row["evidence_ts"]
+        last_signal[row["lesson_id"]] = (
+            row["outcome_signal"] if "outcome_signal" in row.keys() else None
+        )
     texts = {row["id"]: row.get("text") or "" for row in _all_lessons(conn)}
     findings = []
     for lesson_id, lesson_stats in stats.items():
@@ -305,8 +312,12 @@ def stale_lesson_findings(
             continue
         wins = int(lesson_stats.get("wins") or 0)
         scored = wins + int(lesson_stats.get("losses") or 0)
+        # The newest outcome's signal is the evidence the age is measured
+        # from, so it picks the half-life; an unmapped or missing signal keeps
+        # ``half_life_days``.
         effective = lesson_decay.effective_score(
             mean, age_days, uses=scored, hits=wins, half_life_days=half_life_days,
+            evidence_type=last_signal.get(lesson_id),
         )
         if effective >= STALE_EFFECTIVE_FLOOR:
             continue
@@ -470,6 +481,66 @@ def audit(conn):
     }
 
 
+WRITE_QUALITY_SAMPLE_CAP = 20
+
+
+def write_quality_findings(conn, sample_cap=WRITE_QUALITY_SAMPLE_CAP):
+    """Write-time quality of every stored fact and lesson. Read-only.
+
+    Deterministic and local: ``write_quality.classify`` is a lexical check, no
+    model is called. Report-only by contract -- no repair path reads this, so
+    ``memory_quality_repair`` can never delete or rewrite an entry because a
+    heuristic disliked its wording. Facts come first (they are injected into
+    every project-scoped prompt), each table in its stored order.
+    """
+    def entries():
+        for row in conn.execute(
+            "SELECT id, text FROM facts ORDER BY ts ASC, rowid ASC"
+        ):
+            yield "fact", row[0], row[1] or ""
+        for row in conn.execute(
+            "SELECT id, text FROM lessons ORDER BY ts ASC, rowid ASC"
+        ):
+            yield "lesson", row[0], row[1] or ""
+
+    return write_quality.summarize(entries(), sample_cap=sample_cap)
+
+
+def audit_with_write_quality(conn):
+    """``audit`` plus the report-only ``write_quality`` section.
+
+    Kept separate from ``audit`` so the doctor, learning-health and status
+    callers of ``audit`` see exactly the dict (and pay exactly the cost) they
+    always did; only the memory quality report asks for the extra section.
+    """
+    report = audit(conn)
+    report["write_quality"] = write_quality_findings(conn)
+    return report
+
+
+def _format_write_quality(section, sample_limit):
+    by_check = section.get("by_check", {})
+    lines = [
+        "  write quality (report-only, never repaired): %s of %s fact(s), "
+        "%s of %s lesson(s) flagged"
+        % (
+            section.get("flagged_facts", 0), section.get("checked_facts", 0),
+            section.get("flagged_lessons", 0), section.get("checked_lessons", 0),
+        ),
+        "    multi-claim: %s | unresolved reference: %s | "
+        "undated time-sensitive: %s | length out of bounds: %s"
+        % tuple(by_check.get(name, 0) for name in write_quality.CHECKS),
+    ]
+    rows = section.get("samples", [])[:sample_limit]
+    if rows:
+        lines.append("  write quality samples (ids only):")
+        for row in rows:
+            lines.append("    %s %s [%s]" % (
+                row["kind"], row["id"], ",".join(row["reasons"]),
+            ))
+    return lines
+
+
 def _truncate(text, n=90):
     text = text or ""
     return text if len(text) <= n else text[: n - 3] + "..."
@@ -540,6 +611,8 @@ def format_audit(report, sample_limit=5):
                 row.get("privacy_preview") or "<empty>",
             ))
         lines.append("  use memory_privacy_repair with explicit lesson IDs; dry-run first.")
+    if "write_quality" in report:
+        lines.extend(_format_write_quality(report["write_quality"], sample_limit))
     return "\n".join(lines)
 
 
