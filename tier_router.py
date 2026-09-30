@@ -135,7 +135,11 @@ def _semantic_signal(prompt, classifier, embedder):
 
 
 def route(prompt: str, available_tiers=None, *, semantic_enabled=None,
-          semantic_classifier=None, embedder=None) -> dict:
+          semantic_classifier=None, embedder=None, recent_evidence=None,
+          identity_for=None, tier_models=None, tools=False,
+          structured_output=False, has_image=False, approx_tokens=0,
+          long_context=False, required_capabilities=None,
+          request_payload=None, capability_routing=None) -> dict:
     """Suggest a tier for `prompt`.
 
     Returns {"kind", "tier", "reason", "fallback_used", "signal"}. If the preferred tier
@@ -148,9 +152,75 @@ def route(prompt: str, available_tiers=None, *, semantic_enabled=None,
     kind = classify(prompt)
     tier, reason = _PREFERENCE[kind]
     signal = "lexical"
+    from sonder_runtime.adapters.inference.capability_evidence import (
+        capability_routing_mode,
+    )
+    mode = capability_routing_mode(
+        None if capability_routing is None else {"SONDER_CAPABILITY_ROUTING": capability_routing}
+    )
+    evidence_notes = []
+    evidence_fallback = False
+    evidence_required = frozenset(required_capabilities or ())
+    requirements_error = False
+    if recent_evidence is not None:
+        try:
+            from sonder_runtime.application.routing.request_capabilities import (
+                request_requirements,
+            )
+            evidence_required |= request_requirements(
+                request_payload, prompt=prompt, tools=tools,
+                structured_output=structured_output, has_image=has_image,
+                approx_tokens=approx_tokens, long_context=long_context,
+            )
+        except (ImportError, TypeError, ValueError):
+            requirements_error = bool(
+                evidence_required or tools or structured_output or has_image
+                or long_context or approx_tokens or request_payload is not None
+            )
     if available_tiers is not None:
         # Keep the caller's order: the last-resort fallback takes the first entry.
-        available_tiers = [tier_name for tier_name in available_tiers if tier_name != "vision"]
+        available_tiers = [tier_name for tier_name in available_tiers
+                           if tier_name != "vision" or "vision" in evidence_required]
+    if requirements_error and mode == "strict":
+        return {"kind": kind, "tier": None, "reason": "request capability requirements are invalid",
+                "fallback_used": True, "signal": signal}
+    if recent_evidence is not None and mode != "off" and (evidence_required or requirements_error):
+        tier_models = tier_models or {}
+        eligible_tiers = []
+        refusals = []
+        for candidate in available_tiers if available_tiers is not None else tuple(tier_models):
+            model = tier_models.get(candidate)
+            try:
+                from sonder_runtime.application.routing.request_capabilities import (
+                    check_request_evidence,
+                )
+                identity = identity_for(model) if identity_for is not None and model else None
+                allowed, evidence_reason = check_request_evidence(
+                    recent_evidence, model, evidence_required,
+                    backend="ollama", identity=identity, mode=mode,
+                )
+            except (AttributeError, ImportError, TypeError, ValueError, OSError, RuntimeError):
+                allowed = mode == "advisory"
+                evidence_reason = "unverified: recent capability evidence unavailable"
+            if allowed:
+                eligible_tiers.append(candidate)
+                evidence_notes.append(f"{candidate}: {evidence_reason}")
+            else:
+                refusals.append(f"{candidate}: {evidence_reason}")
+        if not eligible_tiers and mode == "strict":
+            return {"kind": kind, "tier": None,
+                    "reason": "no eligible tier for required capabilities (%s)" %
+                    ("; ".join(refusals) or "recent capability evidence unavailable"),
+                    "fallback_used": True, "signal": signal}
+        if eligible_tiers:
+            available_tiers = eligible_tiers
+        elif refusals:
+            evidence_fallback = True
+            evidence_notes.append("capability fallback_used: all candidates failed; retaining configured routing")
+        else:
+            evidence_notes.append("unverified: model identity unavailable")
+        if refusals:
+            evidence_notes.append("capability evidence refused: " + "; ".join(refusals))
     enabled = (env_bool(os.environ.get("SONDER_SEMANTIC_TIER_ROUTING", "0"))
                if semantic_enabled is None else semantic_enabled is True)
     if kind == "general" and enabled:
@@ -160,7 +230,7 @@ def route(prompt: str, available_tiers=None, *, semantic_enabled=None,
             reason = (f"semantic tier={tier}; margin={semantic['margin']:.3f}; "
                       f"embedding model={semantic['model']}")
             signal = "semantic"
-    fallback_used = False
+    fallback_used = evidence_fallback
     if available_tiers is not None and tier not in available_tiers:
         fallback_used = True
         for candidate in ("code", "general", "reasoning"):
@@ -170,5 +240,7 @@ def route(prompt: str, available_tiers=None, *, semantic_enabled=None,
         else:
             tier = next(iter(available_tiers), "code")
         reason += " (preferred tier unavailable; using %s)" % tier
+    if evidence_notes:
+        reason += " (" + "; ".join(evidence_notes) + ")"
     return {"kind": kind, "tier": tier, "reason": reason,
             "fallback_used": fallback_used, "signal": signal}
