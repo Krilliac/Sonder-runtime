@@ -172,6 +172,31 @@ def test_parallel_generate_valid_output_exact_parity(monkeypatch, multi_language
     assert actual == expected
 
 
+@pytest.mark.parametrize("multi_language", [False, True])
+def test_parallel_generate_failed_candidate_output_exact_parity(monkeypatch, multi_language):
+    # Failed candidates are never sealed and never become winners, so the
+    # fan-in must pass their public diagnostics through byte-for-byte.
+    monkeypatch.setattr(server, "_refresh_live_cloud_tiers", lambda: None)
+    replies = iter(["no code here", "```python\nraise SystemExit(1)\n```"])
+    monkeypatch.setattr(server, "_make_generate", lambda *a, **k: lambda _prompt: next(replies))
+    monkeypatch.setattr(server.grounding, "run_code", lambda *a, **k: (False, "exit 1"))
+    monkeypatch.setattr(server.grounding, "run_language_code", lambda *a, **k: (False, "exit 1"))
+    monkeypatch.setattr(server.time, "time", lambda: 100.0)
+    if multi_language:
+        actual = server.parallel_generate_run_languages(
+            "print one", languages="python", variants_per_language=2, max_workers=1,
+        )
+        expected = ("parallel multi-language generate/run: 0/2 passed in 0.000s (tier=code, workers=1)\n"
+                    "[FAIL] python-1 [python]\nno python code block returned\n"
+                    "[FAIL] python-2 [python]\nexit 1")
+    else:
+        actual = server.parallel_generate_run("print one", variants=2, max_workers=1)
+        expected = ("parallel generate/run: 0/2 passed in 0.000s (tier=code, workers=1)\n"
+                    "[FAIL] candidate-1\nno Python code block returned\n"
+                    "[FAIL] candidate-2\nexit 1")
+    assert actual == expected
+
+
 def test_truncated_generated_candidate_never_reaches_verifier_or_winner(monkeypatch):
     def gen(_prompt):
         return "```python\nprint(1)\n```"
@@ -180,7 +205,8 @@ def test_truncated_generated_candidate_never_reaches_verifier_or_winner(monkeypa
     monkeypatch.setattr(server, "_make_generate", lambda *a, **k: gen)
     monkeypatch.setattr(server.grounding, "run_code", lambda *a, **k: pytest.fail("truncated generation reached verifier"))
     result = server.parallel_generate_run("print one", variants=1)
-    assert "NOT READY" in result and "truncated" in result and "winner code" not in result
+    assert "[FAIL] candidate-1\nERROR: provider output is truncated" in result
+    assert "0/1 passed" in result and "winner code" not in result
 
 
 def test_configured_verifier_cannot_be_disabled_by_removing_its_receipt():
