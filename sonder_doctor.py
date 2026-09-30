@@ -631,6 +631,80 @@ def _check_ollama_residency(*, timeout: float = 5.0, config=None) -> dict:
     }
 
 
+def _check_embeddings(*, timeout: float = 5.0, config=None) -> dict:
+    """Verify the embedding model is installed where embeddings are sent.
+
+    Embeddings soft-fail to None and every caller degrades to lexical recall,
+    so an embedder that is missing (a model pulled on another host, a typo in
+    SONDER_EMBED_MODEL) or a dedicated SONDER_EMBED_BASE_URL that is down is
+    otherwise invisible: memory recall quietly stops being semantic. Warn, not
+    fail -- the runtime still works without vectors.
+    """
+    config = config if config is not None else _load_config_or_none()
+    if config is None:
+        return _skip("config unavailable for the embedding endpoint")
+    if getattr(getattr(config, "membership", None), "mode", "static") == "external":
+        return _skip("deferred: external membership requires explicit typed pool refresh")
+    try:
+        import json
+        import urllib.error
+        import urllib.request
+        from urllib.parse import urlsplit
+        from sonder_runtime.adapters import embeddings
+        from sonder_runtime.adapters.inference import ollama_endpoint
+    except Exception as exc:  # pragma: no cover - import guard
+        return _skip("embedding transport unavailable (%s)" % exc)
+    primary = getattr(getattr(config, "ollama", None), "url", None)
+    try:
+        route = embeddings.embedding_route(primary)
+    except ValueError as exc:
+        return {"status": STATUS_FAIL, "detail": "embedding endpoint invalid: %s" % exc}
+    model = route["model"]
+
+    def installed(origin: str) -> tuple[bool | None, str]:
+        host = urlsplit(origin).hostname or origin
+        try:
+            request = urllib.request.Request(origin.rstrip("/") + "/api/tags", method="GET")
+            with ollama_endpoint.open_url(request, timeout=timeout) as response:
+                payload = json.loads(response.read(1_048_576).decode("utf-8"))
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            return None, "%s unreachable (%s)" % (host, exc)
+        names = {
+            embeddings.canonical_model_name(item.get("name") or item.get("model"))
+            for item in payload.get("models") or [] if isinstance(item, dict)
+        }
+        if model in names:
+            return True, host
+        return False, "%s lacks %s" % (host, model)
+
+    where = "dedicated" if route["dedicated"] else "primary"
+    ok, detail = installed(route["origin"])
+    if not ok:
+        return {
+            "status": STATUS_WARN,
+            "detail": "embeddings (%s): %s; memory recall degrades to lexical" % (where, detail),
+        }
+    if route["fallback"]:
+        fb_ok, fb_detail = installed(route["fallback"])
+        if not fb_ok:
+            return {
+                "status": STATUS_WARN,
+                "detail": "embeddings -> %s (%s): %s present, but the local-CPU fallback %s" % (
+                    detail, where, model, fb_detail,
+                ),
+            }
+        return {
+            "status": STATUS_OK,
+            "detail": "embeddings -> %s (%s): %s present; local-CPU fallback ready" % (
+                detail, where, model,
+            ),
+        }
+    return {
+        "status": STATUS_OK,
+        "detail": "embeddings -> %s (%s): %s present" % (detail, where, model),
+    }
+
+
 def _inference_binding(env=None):
     """Return ``(bindings, None)`` or ``(None, fail entry)``; never raises."""
     from sonder_runtime.adapters.provider_bindings import provider_bindings_from_env
@@ -851,6 +925,7 @@ def ollama_checks(config) -> list[tuple[str, CheckCallable]]:
         ("ollama", lambda: _check_ollama(config=config)),
         ("ollama_workers", lambda: _check_ollama_workers(config=config)),
         ("ollama_residency", lambda: _check_ollama_residency(config=config)),
+        ("embeddings", lambda: _check_embeddings(config=config)),
     ]
 
 
@@ -873,6 +948,7 @@ def default_checks() -> list[tuple[str, CheckCallable]]:
         ("ollama", _check_ollama),
         ("ollama_workers", _check_ollama_workers),
         ("ollama_residency", _check_ollama_residency),
+        ("embeddings", _check_embeddings),
         ("sonder_inference", _check_sonder_inference),
         ("sonder_inference_scope", _check_sonder_inference_scope),
     ]
