@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 380,
+      "file_count": 381,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -122,6 +122,7 @@
         "sonder_runtime/adapters/desktop/indicator.py",
         "sonder_runtime/adapters/desktop/png.py",
         "sonder_runtime/adapters/desktop/session.py",
+        "sonder_runtime/adapters/desktop/uia.py",
         "sonder_runtime/adapters/desktop/windows.py",
         "sonder_runtime/adapters/developer_tools_executor.py",
         "sonder_runtime/adapters/diagnostics/__init__.py",
@@ -899,7 +900,7 @@
       ]
     },
     {
-      "file_count": 265,
+      "file_count": 266,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -978,6 +979,7 @@
         "sonder_runtime/domain/compute_fabric.py",
         "sonder_runtime/domain/compute_profiles.py",
         "sonder_runtime/domain/computer_use/__init__.py",
+        "sonder_runtime/domain/computer_use/controls.py",
         "sonder_runtime/domain/computer_use/intent.py",
         "sonder_runtime/domain/computer_use/rules.py",
         "sonder_runtime/domain/consistent_hash.py",
