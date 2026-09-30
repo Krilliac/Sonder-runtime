@@ -47,6 +47,7 @@ from sonder_runtime.interfaces.http.memory_replication import (
     is_memory_replication_route,
 )
 from sonder_runtime.interfaces.http.sse import KEEPALIVE_FRAME, SSEKeepAlive
+from sonder_runtime.interfaces.http import live_stream as _live_stream
 
 _APP_CONTROL_BINDING = None
 _APP_CONTROL_CONFIG = None
@@ -7690,7 +7691,7 @@ class Handler(BaseHTTPRequestHandler):
                             if stream:
                                 # Commit to SSE now and keep the connection
                                 # alive while the turn generates.
-                                self._begin_early_stream()
+                                self._begin_early_stream(model)
                             try:
                                 turn = self._run_streamable_prompt(
                                 prompt,
@@ -8035,22 +8036,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def _write_stream_body(self, iid, model, content, elapsed_ms, receipt, usage,
                            activity, lock=None):
-        with lock if lock is not None else contextlib.nullcontext():
-            self.wfile.write(_chunk(iid, model, {"role": "assistant", "content": content}).encode("utf-8"))
-            self.wfile.write(_chunk(
-                iid, model, {}, finish_reason="stop", elapsed_ms=elapsed_ms,
-                receipt=receipt, activity=activity,
-            ).encode("utf-8"))
-            if usage is not None:
-                self.wfile.write(_chunk(iid, model, {}, usage=usage).encode("utf-8"))
-            self.wfile.write(b"data: [DONE]\n\n")
-        return True
+        # Live deltas already sent (early SSE) are reconciled with the answer.
+        return _live_stream.write_stream_body(
+            self, _chunk, iid, model, content, elapsed_ms, receipt, usage, activity, lock=lock,
+        )
 
     def _run_streamable_prompt(self, *args, **kwargs):
-        """The plain model turn; a seam kept separate from stream framing."""
-        return _run_prompt(*args, **kwargs)
+        """The plain model turn; a streaming provider forwards live deltas."""
+        with _live_stream.armed_for(self, _chunk, hold_code=server._code_gate_enabled()):
+            return _run_prompt(*args, **kwargs)
 
-    def _begin_early_stream(self):
+    def _begin_early_stream(self, model="sonder"):
         """Send SSE headers before generation and start keep-alive frames.
 
         Model errors after this point can no longer change the HTTP status;
@@ -8073,7 +8069,7 @@ class Handler(BaseHTTPRequestHandler):
         keepalive = SSEKeepAlive(
             write, STREAM_HEARTBEAT_SECONDS, thread_factory=owned_runtime_thread,
         )
-        self._early_stream = keepalive
+        self._early_stream, self._stream_model = keepalive, model
         self.close_connection = True
         try:
             self.send_response(200)

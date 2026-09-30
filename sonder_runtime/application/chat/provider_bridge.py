@@ -8,8 +8,12 @@ payload to this module instead of posting it to Ollama.  This module:
 * holds the per-rung provider in a ContextVar (here, not in ``server.py``, so a
   live reload of ``server.py`` cannot orphan an in-flight binding);
 * converts the Ollama payload into a provider-neutral ``ModelRequest`` and
-  refuses what the gateway cannot carry (decoder schemas, thinking, native
-  tools, images);
+  refuses what the gateway cannot carry (decoder schemas, native tools,
+  images, and thinking except on ``THINKING_PROVIDERS``, whose gateway
+  decides from what the server advertises);
+* claims the turn's live token stream (``stream_sink``) for the call when
+  the provider can stream (``STREAMING_PROVIDERS``), so a streamed HTTP turn
+  shows tokens as they are generated;
 * calls ``model_gateway.generate`` with the rung binding cleared, so the Ollama
   gateway (itself built on ``_chat_request``) and gateway offloads made during
   the call are never intercepted again;
@@ -38,6 +42,7 @@ from ...domain.common.errors import (
     SonderError,
 )
 from ..context import OperationContext
+from . import stream_sink
 from ..ports.model_gateway import ModelRequest, ModelResponse
 
 LEGACY_PROVIDER = "ollama"
@@ -48,6 +53,11 @@ PROVIDER_UNAVAILABLE_KIND = "provider_unavailable"
 # stronger rung would only hide it, so it is terminal as well.
 UNSUPPORTED_FEATURE_KIND = "unsupported_feature"
 _FORWARDED_OPTIONS = ("temperature", "num_predict", "num_ctx")
+# Providers whose gateway forwards ``think`` itself (as chat_template_kwargs
+# when the server advertises support, refusing True otherwise).
+THINKING_PROVIDERS = frozenset({"sonder_inference"})
+# Providers whose gateway can forward content deltas to a live turn stream.
+STREAMING_PROVIDERS = frozenset({"sonder_inference"})
 _ROLES = frozenset({"system", "user", "assistant", "tool"})
 
 _RUNG: ContextVar["RungBinding | None"] = ContextVar(
@@ -174,16 +184,22 @@ def _text(value: object, where: str) -> str:
 
 
 def model_request_from_ollama_payload(
-    payload: Mapping[str, object], *, tier: str,
+    payload: Mapping[str, object], *, tier: str, provider: str | None = None,
 ) -> ModelRequest:
-    """Convert one Ollama ``/api/chat`` payload into a provider-neutral request."""
+    """Convert one Ollama ``/api/chat`` payload into a provider-neutral request.
+
+    ``provider`` in ``THINKING_PROVIDERS`` carries a boolean ``think`` as the
+    ``think`` option instead of refusing ``True`` and dropping ``False``.
+    """
     if not isinstance(payload, Mapping):
         raise InvalidInput("chat payload must be an object")
     if payload.get("format") is not None:
         raise UnsupportedProviderFeature(
             "response_format/schema decoding is only available on Ollama tiers"
         )
-    if payload.get("think") is True:
+    think = payload.get("think")
+    carry_think = provider in THINKING_PROVIDERS and isinstance(think, bool)
+    if think is True and not carry_think:
         raise UnsupportedProviderFeature(
             "model thinking is only available on Ollama tiers"
         )
@@ -225,6 +241,8 @@ def model_request_from_ollama_payload(
             if key != "temperature" and int(value) <= 0:
                 continue
             options[key] = int(value) if key != "temperature" else float(value)
+    if carry_think:
+        options["think"] = think
     return ModelRequest(
         prompt=prompt,
         tier=str(tier or "sonder"),
@@ -248,6 +266,12 @@ def ollama_shape(response: ModelResponse) -> dict[str, object]:
         shaped["prompt_eval_count"] = response.tokens_in
     if response.tokens_out is not None:
         shaped["eval_count"] = response.tokens_out
+    # Provider-reported prompt-cache reuse, in the field Ollama uses for it
+    # (a subset of prompt_eval_count).  Absent stays absent: never a fake 0.
+    cached = getattr(response.telemetry, "prompt_cached_tokens", None)
+    if (response.tokens_in is not None and type(cached) is int
+            and 0 <= cached <= response.tokens_in):
+        shaped["prompt_eval_cached_count"] = cached
     return shaped
 
 
@@ -302,10 +326,16 @@ def generate_via_gateway(
     gateway and any offload it triggers re-enter ``_chat_request`` and must
     take the ordinary Ollama path, not this bridge again.
     """
-    request = model_request_from_ollama_payload(payload, tier=tier)
     binding = active_rung()
+    provider = binding.provider if binding is not None else None
+    request = model_request_from_ollama_payload(payload, tier=tier, provider=provider)
     with suspend_rung():
-        response = gateway.generate(request, context)
+        if provider in STREAMING_PROVIDERS:
+            # Only the turn's first bridged generation streams (see stream_sink).
+            with stream_sink.claimed_for_call():
+                response = gateway.generate(request, context)
+        else:
+            response = gateway.generate(request, context)
     if not isinstance(response, ModelResponse):
         raise DependencyUnavailable("model gateway returned an invalid response")
     if binding is not None and isinstance(response.model, str) and response.model:
@@ -317,6 +347,8 @@ __all__ = [
     "BridgeFailure",
     "LEGACY_PROVIDER",
     "PROVIDER_UNAVAILABLE_KIND",
+    "STREAMING_PROVIDERS",
+    "THINKING_PROVIDERS",
     "UNSUPPORTED_FEATURE_KIND",
     "UnsupportedProviderFeature",
     "RungBinding",

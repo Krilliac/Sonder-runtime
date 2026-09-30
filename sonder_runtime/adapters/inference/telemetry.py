@@ -97,14 +97,66 @@ def from_ollama(payload: dict) -> InferenceTelemetry | None:
     return telemetry if any(value is not None for value in telemetry.__dict__.values()) else None
 
 
-def from_openai_compatible(payload: dict) -> InferenceTelemetry | None:
-    """Normalize the bounded ``timings`` extension used by llama.cpp peers."""
+def _prompt_cache_counts(usage: dict, timings: dict) -> tuple[int | None, int | None, int | None]:
+    """``(prompt, cached, uncached)`` prompt tokens, each ``None`` when unknown.
+
+    The total is ``usage.prompt_tokens`` only: ``timings.prompt_n`` means the
+    whole prompt on Sonder Inference but only the uncached part on
+    llama.cpp's own server, so it is never read as a total.  The cached
+    subset is ``usage.prompt_tokens_details.cached_tokens``, else
+    ``timings.cache_n``.  A missing or inconsistent value stays unknown; it
+    never becomes a fabricated 0.
+    """
+    prompt = _count(usage.get("prompt_tokens"))
+    details = usage.get("prompt_tokens_details")
+    cached = _count(details.get("cached_tokens")) if isinstance(details, dict) else None
+    if cached is None:
+        cached = _count(timings.get("cache_n"))
+    if cached is not None and prompt is not None and cached > prompt:
+        cached = None
+    uncached = prompt - cached if prompt is not None and cached is not None else None
+    return prompt, cached, uncached
+
+
+def _draft_counts(timings: dict) -> tuple[int | None, int | None]:
+    drafted = _count(timings.get("draft_n"))
+    accepted = _count(timings.get("draft_n_accepted"))
+    if drafted is not None and accepted is not None and accepted > drafted:
+        return None, None
+    return drafted, accepted
+
+
+def from_openai_compatible(payload: dict, *, with_usage: bool = False) -> InferenceTelemetry | None:
+    """Normalize the bounded ``timings`` extension used by llama.cpp peers.
+
+    Also reads ``timings.ttft_ms``, ``timings.cache_n`` and
+    ``timings.draft_n``/``draft_n_accepted``.  ``with_usage`` (Sonder
+    Inference) additionally reads the prompt total, cached prompt tokens and
+    completion count from ``usage`` (see :func:`_prompt_cache_counts`);
+    generic peers keep their historical timings-only telemetry.  Every absent
+    field stays ``None`` (unknown).
+    """
     timings = payload.get("timings")
     if not isinstance(timings, dict):
         timings = {}
+    usage = payload.get("usage") if with_usage else None
+    if not isinstance(usage, dict):
+        usage = {}
     prompt_ms = _milliseconds(timings.get("prompt_ms"))
     eval_ms = _milliseconds(timings.get("predicted_ms"))
+    prompt_tokens, cached_tokens, uncached_tokens = _prompt_cache_counts(usage, timings)
+    drafted, accepted = _draft_counts(timings)
+    output_tokens = _count(usage.get("completion_tokens"))
+    if output_tokens is None and with_usage:
+        output_tokens = _count(timings.get("predicted_n"))
     telemetry = InferenceTelemetry(
+        prompt_tokens=prompt_tokens,
+        prompt_cached_tokens=cached_tokens,
+        prompt_uncached_tokens=uncached_tokens,
+        output_tokens=output_tokens,
+        ttft_ms=_milliseconds(timings.get("ttft_ms")),
+        draft_tokens=drafted,
+        draft_accepted_tokens=accepted,
         backend_total_ms=_milliseconds(timings.get("total_ms")),
         load_ms=_milliseconds(timings.get("load_ms")),
         prompt_eval_ms=prompt_ms,
