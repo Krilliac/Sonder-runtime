@@ -8,6 +8,7 @@ import lesson_decay
 import lesson_pruner
 import sonder_runtime.adapters.memory_store as memory_store
 from sonder_runtime.domain.memory import rules as memory_rules
+from sonder_runtime.domain.memory import write_quality
 
 LONG_LESSON_CHARS = 220
 
@@ -480,6 +481,66 @@ def audit(conn):
     }
 
 
+WRITE_QUALITY_SAMPLE_CAP = 20
+
+
+def write_quality_findings(conn, sample_cap=WRITE_QUALITY_SAMPLE_CAP):
+    """Write-time quality of every stored fact and lesson. Read-only.
+
+    Deterministic and local: ``write_quality.classify`` is a lexical check, no
+    model is called. Report-only by contract -- no repair path reads this, so
+    ``memory_quality_repair`` can never delete or rewrite an entry because a
+    heuristic disliked its wording. Facts come first (they are injected into
+    every project-scoped prompt), each table in its stored order.
+    """
+    def entries():
+        for row in conn.execute(
+            "SELECT id, text FROM facts ORDER BY ts ASC, rowid ASC"
+        ):
+            yield "fact", row[0], row[1] or ""
+        for row in conn.execute(
+            "SELECT id, text FROM lessons ORDER BY ts ASC, rowid ASC"
+        ):
+            yield "lesson", row[0], row[1] or ""
+
+    return write_quality.summarize(entries(), sample_cap=sample_cap)
+
+
+def audit_with_write_quality(conn):
+    """``audit`` plus the report-only ``write_quality`` section.
+
+    Kept separate from ``audit`` so the doctor, learning-health and status
+    callers of ``audit`` see exactly the dict (and pay exactly the cost) they
+    always did; only the memory quality report asks for the extra section.
+    """
+    report = audit(conn)
+    report["write_quality"] = write_quality_findings(conn)
+    return report
+
+
+def _format_write_quality(section, sample_limit):
+    by_check = section.get("by_check", {})
+    lines = [
+        "  write quality (report-only, never repaired): %s of %s fact(s), "
+        "%s of %s lesson(s) flagged"
+        % (
+            section.get("flagged_facts", 0), section.get("checked_facts", 0),
+            section.get("flagged_lessons", 0), section.get("checked_lessons", 0),
+        ),
+        "    multi-claim: %s | unresolved reference: %s | "
+        "undated time-sensitive: %s | length out of bounds: %s"
+        % tuple(by_check.get(name, 0) for name in write_quality.CHECKS),
+    ]
+    rows = section.get("samples", [])[:sample_limit]
+    if rows:
+        lines.append("  write quality samples (ids only):")
+        for row in rows:
+            lines.append("    %s %s [%s]" % (
+                row["kind"], row["id"], ",".join(row["reasons"]),
+            ))
+    return lines
+
+
 def _truncate(text, n=90):
     text = text or ""
     return text if len(text) <= n else text[: n - 3] + "..."
@@ -550,6 +611,8 @@ def format_audit(report, sample_limit=5):
                 row.get("privacy_preview") or "<empty>",
             ))
         lines.append("  use memory_privacy_repair with explicit lesson IDs; dry-run first.")
+    if "write_quality" in report:
+        lines.extend(_format_write_quality(report["write_quality"], sample_limit))
     return "\n".join(lines)
 
 
