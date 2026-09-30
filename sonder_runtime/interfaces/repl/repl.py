@@ -1783,6 +1783,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /fact <text>       remember a durable fact for the active project
   /fact forget <id> confirm  remove one listed active-project fact
   /facts             list facts and IDs for the active project
+  /playbooks [action]  review agent-written playbook notes: list, show, approve, reject, edit, rm, reload, correction
   /exit, /quit, /q   leave
 """
 

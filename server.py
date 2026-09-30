@@ -2448,12 +2448,12 @@ def _resolve_project(project):
 
 # The mutable, disk-backed parts of the system prompt, pinned for one turn.
 #
-# Pin editable context within a turn: the agent/reviewer and router may build
-# two or three prompts, all actually sent. An intervening disk edit must not
-# give those calls contradictory instructions. Profile, emotions and goal
-# refresh per turn; playbook index refreshes per session or explicit reload.
-# Runtime identity remains per call because different rungs use different
-# models. Pinning identity would misidentify the second model.
+# One turn builds the system prompt two or three times (router, agent, claim
+# reviewer), all sent, so an edit landing between builds must not give them
+# contradictory instructions: profile, emotions and goal are read once per turn
+# and the playbook index once per session. Runtime identity is NOT pinned (it
+# names the model answering THIS call). Full rationale and measurements:
+# sonder_runtime/domain/prompt_composition.py.
 _SYSTEM_CONTEXT = threading.local()
 
 
