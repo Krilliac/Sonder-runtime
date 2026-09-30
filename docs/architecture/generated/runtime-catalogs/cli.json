@@ -1276,7 +1276,7 @@
       "category": "memory",
       "name": "/playbooks",
       "risk": "dangerous",
-      "summary": ""
+      "summary": "review agent-written playbook notes: list, show, approve, reject, edit, rm, reload, correction"
     },
     {
       "category": "diagnostics",

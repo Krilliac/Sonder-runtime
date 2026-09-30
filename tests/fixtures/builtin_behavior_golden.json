@@ -1,0 +1,164 @@
+{
+  "origin_sha": "45a3e093aa423c3a23f9e356419972d2332015e5",
+  "provenance": {
+    "speculation": "sonder_runtime/domain/speculation_policy.py:SPECULATABLE_TOOLS",
+    "typed_gateway": "sonder_runtime/bootstrap/typed_tools.py:TYPED_TOOLS; origin ToolGateway.execute has no concurrency gate",
+    "retry": "No production per-built-in tool retry dispatcher; existing generic policy caller and keyed effect declarations pinned below."
+  },
+  "speculatable": [
+    "activity_status",
+    "command_registry_list",
+    "context_health",
+    "data_inspect",
+    "directory_tree",
+    "file_find",
+    "file_read",
+    "file_read_range",
+    "image_inspect",
+    "memory_search",
+    "permission_policy",
+    "program_search",
+    "script_search",
+    "status",
+    "text_search",
+    "workspace_inventory"
+  ],
+  "retry": {
+    "eligible": [],
+    "calls": {
+      "sonder_runtime/application/loop/durable_control.py": [
+        "retry_decision(failure_code, status=status, attempt=attempt, max_attempts=max_attempts, outcome_known=outcome_known, effect=effect, idempotency_key=idempotency_key, retry_after_seconds=retry_after_seconds, deadline_seconds=deadline_seconds)"
+      ],
+      "sonder_runtime/adapters/execution/process_jobs.py": [
+        "journaled_effect(self._effect_binding, operation_id=f'process-start:{request.identity.job_id}', idempotency_key=request.identity.idempotency_key, request=request, invoke=lambda: self._start_unjournaled(request), receipt_key=lambda result: f'{request.identity.job_id}:{result.process_id}', reconciliation='idempotent')"
+      ],
+      "sonder_runtime/application/compute_fabric/jobs.py": [
+        "journaled_effect(self._effect_binding, operation_id=f'compute-submit:{self.worker_id}:{envelope.idempotency_key}', idempotency_key=envelope.idempotency_key, request=envelope, invoke=lambda: self._submit_unjournaled(envelope), receipt_key=lambda result: result.remote_job_id, reconciliation='idempotent')",
+        "journaled_effect(self._effect_binding, operation_id=operation_id, idempotency_key=idempotency_key, request=request, invoke=lambda: self._cancel_bound(remote_job_id, reason, idempotency_key, _effect_request_digest(request)), receipt_key=lambda result: f'{result.remote_job_id}:{result.state}', reconciliation='idempotent')"
+      ]
+    },
+    "effect_decisions": [
+      {
+        "kwargs": {
+          "effect": "none",
+          "outcome_known": true,
+          "idempotency_key": "stable"
+        },
+        "action": "retry"
+      },
+      {
+        "kwargs": {
+          "effect": "none",
+          "outcome_known": false,
+          "idempotency_key": "stable"
+        },
+        "action": "retry"
+      },
+      {
+        "kwargs": {
+          "effect": "idempotent",
+          "outcome_known": true,
+          "idempotency_key": "stable"
+        },
+        "action": "retry"
+      },
+      {
+        "kwargs": {
+          "effect": "idempotent",
+          "outcome_known": false,
+          "idempotency_key": "stable"
+        },
+        "action": "reconcile_then_retry"
+      },
+      {
+        "kwargs": {
+          "effect": "non_idempotent",
+          "outcome_known": true,
+          "idempotency_key": "stable"
+        },
+        "action": "retry"
+      },
+      {
+        "kwargs": {
+          "effect": "non_idempotent",
+          "outcome_known": false,
+          "idempotency_key": "stable"
+        },
+        "action": "reconcile_then_retry"
+      }
+    ],
+    "entrypoint_callers": [
+      "sonder_runtime/application/loop/durable_control.py:DurableLoopControl.retry:retry_decision",
+      "sonder_runtime/application/loop/facade.py:LoopSessionLifecycleFacade.transport_executor:TransportRetryExecutor",
+      "sonder_runtime/application/loop/transport_retry.py:TransportRetryExecutor._decision:retry_decision"
+    ]
+  },
+  "concurrency": {
+    "speculation": [
+      "activity_status",
+      "command_registry_list",
+      "context_health",
+      "data_inspect",
+      "directory_tree",
+      "file_find",
+      "file_read",
+      "file_read_range",
+      "image_inspect",
+      "memory_search",
+      "permission_policy",
+      "program_search",
+      "script_search",
+      "status",
+      "text_search",
+      "workspace_inventory"
+    ],
+    "typed_gateway": [
+      "build_fix",
+      "build_fix_restore",
+      "build_fix_result",
+      "build_job",
+      "build_job_result",
+      "build_model",
+      "crash_digest",
+      "crash_triage",
+      "debug_run_result",
+      "directory_tree",
+      "edit_file",
+      "file_batch_write",
+      "file_copy",
+      "file_delete",
+      "file_find",
+      "file_move",
+      "file_read_range",
+      "json_patch",
+      "make_directory",
+      "output_digest",
+      "profile_capture_digest",
+      "profile_digest",
+      "program_search",
+      "read_file",
+      "script_search",
+      "test_run",
+      "test_run_result",
+      "text_patch",
+      "text_search",
+      "tool_inventory",
+      "write_file"
+    ]
+  },
+  "intentional_concurrency_changes": {
+    "speculation": [
+      "activity_status",
+      "command_registry_list",
+      "context_health",
+      "data_inspect",
+      "memory_search",
+      "permission_policy",
+      "program_search",
+      "script_search",
+      "status",
+      "workspace_inventory"
+    ],
+    "typed_gateway": []
+  }
+}

@@ -22,6 +22,7 @@ from typing import Any, Awaitable, Callable, Mapping, Protocol
 
 from ..application.context import OperationContext
 from ..application.ports.event_sink import EventSink
+from ..domain.tools.traits import TriState, ToolTraits
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ _MAX_TIMEOUT_SECONDS = 60.0
 _MAX_RESULT_BYTES = 1_048_576
 _MAX_ARGUMENT_BYTES = 65_536
 _NUMERIC_HOST_PART = re.compile(r"^(?:0[xX][0-9A-Fa-f]+|0[0-7]*|[0-9]+)$")
+_UNSET = object()
 
 
 class ExternalMcpError(RuntimeError):
@@ -49,14 +51,23 @@ class ExternalMcpError(RuntimeError):
 @dataclass(frozen=True)
 class ExternalMcpToolPolicy:
     name: str
-    read_only: bool = True
+    read_only: bool | object = _UNSET
     capabilities: tuple[str, ...] = ("read",)
+    # Annotations are learned from tools/list and remain advisory unless the
+    # containing server explicitly trusts them.  ``traits`` is host authority
+    # and is therefore always present even when discovery has not run.
+    traits: ToolTraits | None = None
+    host_read_only_declared: bool = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not _SAFE_NAME.fullmatch(self.name):
             raise ValueError("external MCP tool names must be non-empty and canonical")
+        declared = self.read_only is not _UNSET
+        if self.read_only is _UNSET:
+            object.__setattr__(self, "read_only", True)
         if type(self.read_only) is not bool:
             raise ValueError("read_only must be a Boolean")
+        object.__setattr__(self, "host_read_only_declared", declared)
         capabilities = frozenset(self.capabilities)
         if len(capabilities) != len(self.capabilities):
             raise ValueError("external MCP tool capabilities must be unique")
@@ -66,6 +77,10 @@ class ExternalMcpToolPolicy:
             raise ValueError("read-only external MCP tools cannot request mutate")
         if not self.read_only and "mutate" not in capabilities:
             raise ValueError("writable external MCP tools must explicitly request mutate")
+        if self.traits is not None and (
+            not isinstance(self.traits, ToolTraits) or not self.traits.host_declared
+        ):
+            raise ValueError("external MCP tool traits must be ToolTraits")
 
 
 @dataclass(frozen=True)
@@ -78,6 +93,7 @@ class ExternalMcpServerPolicy:
     timeout_seconds: float = 15.0
     max_result_bytes: int = 131_072
     transport: str = "streamable_http"
+    trust_annotations: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not _SAFE_NAME.fullmatch(self.name):
@@ -86,6 +102,8 @@ class ExternalMcpServerPolicy:
             raise ValueError("only the non-executable streamable_http transport is supported")
         if type(self.allow_remote) is not bool:
             raise ValueError("allow_remote must be a Boolean")
+        if type(self.trust_annotations) is not bool:
+            raise ValueError("trust_annotations must be a Boolean")
         if not self.tools:
             raise ValueError("external MCP servers require an explicit tool allowlist")
         names = [tool.name for tool in self.tools]
@@ -153,6 +171,7 @@ class ExternalMcpReceipt:
 class ExternalMcpCallResult:
     value: Any
     receipt: ExternalMcpReceipt
+    traits: ToolTraits | None = None
 
 
 SecretResolver = Callable[[str], str | None]
@@ -179,6 +198,9 @@ class ExternalMcpBridge:
         self._events = events
         self._secret_resolver = secret_resolver
         self._enabled_capabilities = enabled_capabilities
+        self._discovered_traits: dict[tuple[str, str], ToolTraits] = {}
+        self._discovered_advisory: dict[tuple[str, str], ToolTraits] = {}
+        self._invoke_lock = asyncio.Lock()
         logger.debug(
             f"ExternalMcpBridge initialized servers={sorted(self._servers)} "
             f"capabilities={sorted(self._enabled_capabilities)}"
@@ -209,6 +231,61 @@ class ExternalMcpBridge:
                 for server in self._servers.values()
             ],
         }
+
+    def tool_traits(self, server_name: str, tool_name: str) -> ToolTraits | None:
+        """Return host/advisory traits for an allowlisted external tool.
+
+        This is the descriptor seam used by permission, retry, and scheduler
+        consumers.  Unknown tools never receive metadata merely because a
+        remote server advertised them.
+        """
+        server = self._servers.get(server_name)
+        if server is None:
+            return None
+        policy = next((item for item in server.tools if item.name == tool_name), None)
+        if policy is None:
+            return None
+        return self._discovered_traits.get((server_name, tool_name), _host_traits(policy))
+
+    def tool_annotation_traits(self, server_name: str, tool_name: str) -> ToolTraits | None:
+        """Return raw annotation traits for audit/UI, before host merging."""
+        return self._discovered_advisory.get((server_name, tool_name))
+
+    def ingest_tool_list(self, server_name: str, response: Any) -> int:
+        """Ingest ``tools/list`` metadata for configured tools only.
+
+        The response is metadata, never a call result.  MCP annotations are
+        advisory by default; a trusted server may explicitly opt in through
+        ``trust_annotations``.  Malformed or omitted hints become UNKNOWN.
+        """
+        server = self._servers.get(server_name)
+        if server is None:
+            raise ExternalMcpError("SERVER_NOT_ALLOWED", "external MCP server is not allowed")
+        rows = _field(response, "tools", ())
+        if rows is None or isinstance(rows, (str, bytes, Mapping)):
+            raise ExternalMcpError("INVALID_METADATA", "external MCP tool metadata is invalid")
+        try:
+            rows = iter(rows)
+        except TypeError as exc:
+            raise ExternalMcpError("INVALID_METADATA", "external MCP tool metadata is invalid") from exc
+        configured = {tool.name: tool for tool in server.tools}
+        count = 0
+        for row in rows:
+            name = _field(row, "name", None)
+            if not isinstance(name, str) or name not in configured:
+                continue
+            annotations = _field(row, "annotations", None)
+            traits = traits_from_mcp_annotations(
+                annotations,
+                trusted=server.trust_annotations,
+                max_result_bytes=server.max_result_bytes,
+            )
+            self._discovered_advisory[(server_name, name)] = traits
+            self._discovered_traits[(server_name, name)] = _merge_host_authority(
+                _host_traits(configured[name]), traits, trusted=server.trust_annotations,
+            )
+            count += 1
+        return count
 
     async def call(
         self,
@@ -328,10 +405,8 @@ class ExternalMcpBridge:
                 credential=credential,
             )
             try:
-                raw_result = await _await_stage(
-                    self._transport.invoke(request),
-                    context=context,
-                    deadline=deadline,
+                raw_result = await self._invoke_transport(
+                    request, context=context, deadline=deadline,
                 )
             except ExternalMcpError:
                 raise
@@ -375,7 +450,10 @@ class ExternalMcpBridge:
                 receipt_id, audit_server, policy, True, started, result_bytes, structured, None,
                 context,
             )
-            return ExternalMcpCallResult(value=value, receipt=receipt)
+            return ExternalMcpCallResult(
+                value=value, receipt=receipt,
+                traits=self.tool_traits(server_name, tool_name),
+            )
         except ExternalMcpError as exc:
             logger.error(
                 f"external MCP call failed server={server_name!r} tool={tool_name!r} "
@@ -394,6 +472,21 @@ class ExternalMcpBridge:
                 exc.code, context,
             )
             raise
+
+    async def _invoke_transport(
+        self, request: McpCallRequest, *, context: OperationContext,
+        deadline: float,
+    ) -> Any:
+        """Serialize calls unless host authority proves parallel safety."""
+        # MCP ToolAnnotations do not declare concurrency safety. Keep one
+        # admission gate for every call so a safe-looking call can never race
+        # an unknown/unsafe call. Future host-declared concurrency metadata
+        # can opt into a more permissive scheduler above this seam.
+        async def guarded_invoke() -> Any:
+            async with self._invoke_lock:
+                return await self._transport.invoke(request)
+
+        return await _await_stage(guarded_invoke(), context=context, deadline=deadline)
 
     def _receipt(
         self,
@@ -463,7 +556,7 @@ def policies_from_mapping(raw: Mapping[str, Any]) -> tuple[ExternalMcpServerPoli
     servers = []
     server_keys = {
         "name", "endpoint", "tools", "credential_env", "allow_remote",
-        "timeout_seconds", "max_result_bytes", "transport",
+        "timeout_seconds", "max_result_bytes", "transport", "trust_annotations",
     }
     tool_keys = {"name", "read_only", "capabilities"}
     for item in raw["servers"]:
@@ -486,6 +579,97 @@ def policies_from_mapping(raw: Mapping[str, Any]) -> tuple[ExternalMcpServerPoli
         values["tools"] = tuple(tools)
         servers.append(ExternalMcpServerPolicy(**values))
     return tuple(servers)
+
+
+def _host_traits(policy: ExternalMcpToolPolicy) -> ToolTraits:
+    """Translate the explicit host allowlist into authoritative traits."""
+    return policy.traits or ToolTraits(
+        read_only=(TriState.TRUE if policy.read_only else TriState.FALSE)
+        if policy.host_read_only_declared else TriState.UNKNOWN,
+        # A host read-only declaration is sufficient to establish no mutation.
+        destructive=TriState.FALSE if policy.host_read_only_declared and policy.read_only else TriState.UNKNOWN,
+        max_result_bytes=None,
+        host_declared=True,
+    )
+
+
+def _merge_host_authority(
+    host: ToolTraits, advisory: ToolTraits, *, trusted: bool,
+) -> ToolTraits:
+    # Trusted annotations may fill unknown host traits, but cannot erase an
+    # explicit host restriction. Untrusted hints are allowed only to increase
+    # conservatism.
+    values = {}
+    for name in ("read_only", "destructive", "idempotent", "concurrency_safe", "open_world"):
+        hv = getattr(host, name)
+        av = getattr(advisory, name)
+        if hv is not TriState.UNKNOWN:
+            values[name] = hv
+            if name in {"read_only", "idempotent", "concurrency_safe"} and av is TriState.FALSE:
+                values[name] = TriState.FALSE if hv is not TriState.TRUE else TriState.UNKNOWN
+            elif name in {"destructive", "open_world"} and av is TriState.TRUE:
+                values[name] = TriState.TRUE
+        elif trusted:
+            values[name] = av
+        elif name in {"destructive", "open_world"} and av is TriState.TRUE:
+            values[name] = TriState.TRUE
+        else:
+            values[name] = TriState.UNKNOWN
+    if host.is_read_only and values["read_only"] is not TriState.TRUE:
+        # A no-destruction claim inferred from read-only is no longer proof
+        # after that very read-only declaration has been contradicted.
+        if values["destructive"] is TriState.FALSE:
+            values["destructive"] = TriState.UNKNOWN
+    return ToolTraits(**values, max_result_bytes=advisory.max_result_bytes, host_declared=True)
+
+
+def traits_from_mcp_annotations(
+    annotations: Any,
+    *,
+    trusted: bool = False,
+    max_result_bytes: int | None = None,
+) -> ToolTraits:
+    """Map MCP ToolAnnotations to tri-state traits.
+
+    Presence is significant: omitted/defaulted SDK fields are UNKNOWN rather
+    than the MCP schema's suggested defaults.  Values with a non-Boolean type
+    are also UNKNOWN and cannot accidentally grant authority.
+    """
+    if type(trusted) is not bool:
+        raise ValueError("trusted must be a Boolean")
+    return ToolTraits(
+        read_only=_annotation_state(annotations, "readOnlyHint", "read_only_hint"),
+        destructive=_annotation_state(annotations, "destructiveHint", "destructive_hint"),
+        idempotent=_annotation_state(annotations, "idempotentHint", "idempotent_hint"),
+        # MCP has no concurrency annotation; it must remain conservative.
+        concurrency_safe=TriState.UNKNOWN,
+        open_world=_annotation_state(annotations, "openWorldHint", "open_world_hint"),
+        max_result_bytes=max_result_bytes,
+        host_declared=bool(trusted),
+    )
+
+
+def _annotation_state(value: Any, *names: str) -> TriState:
+    if value is None:
+        return TriState.UNKNOWN
+    fields_set = getattr(value, "model_fields_set", None)
+    if fields_set is None:
+        fields_set = getattr(value, "__fields_set__", None)
+    for name in names:
+        if isinstance(value, Mapping):
+            if name not in value:
+                continue
+            raw = value[name]
+        else:
+            if fields_set is not None and name not in fields_set:
+                continue
+            if not hasattr(value, name):
+                continue
+            raw = getattr(value, name)
+        if type(raw) is bool:
+            return TriState.TRUE if raw else TriState.FALSE
+        return TriState.UNKNOWN
+    return TriState.UNKNOWN
 
 
 async def _await_stage(

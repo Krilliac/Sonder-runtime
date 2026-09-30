@@ -16,6 +16,7 @@ from typing import Generic, Protocol, TypeVar
 
 from ...domain.cancellation_tree import CancellationNode
 from ...domain.loop_retry_policy import ReplayAction, SideEffectClass
+from ...domain.tools.traits import ToolTraits
 from .durable_control import (
     IdempotencyReceipt,
     IdempotencyStore,
@@ -126,8 +127,10 @@ class TransportRetryExecutor(Generic[RequestT, ResponseT]):
         idempotency_key: str,
         max_attempts: int = 3,
         effect: SideEffectClass = SideEffectClass.IDEMPOTENT,
+        traits: ToolTraits | None = None,
     ) -> RetryExecutionResult[ResponseT]:
-        self._validate(operation_id, fingerprint, idempotency_key, max_attempts, effect)
+        self._validate(operation_id, fingerprint, idempotency_key, max_attempts, effect, traits)
+        effect = SideEffectClass(effect)
         existing = self._idempotency.begin(idempotency_key, fingerprint)
         if existing.status in {"completed", "reconciled"}:
             return RetryExecutionResult(existing.result, 0, True, ())
@@ -140,7 +143,9 @@ class TransportRetryExecutor(Generic[RequestT, ResponseT]):
                     request, idempotency_key=idempotency_key, attempt=attempt
                 )
             except TransportFailure as failure:
-                decision = self._decision(failure, attempt, max_attempts, effect, idempotency_key)
+                decision = self._decision(
+                    failure, attempt, max_attempts, effect, idempotency_key, traits
+                )
                 record = self._evidence.record(
                     operation_id, decision, attempt=attempt, failure_code=failure.code
                 )
@@ -161,6 +166,12 @@ class TransportRetryExecutor(Generic[RequestT, ResponseT]):
                     if reconciliation.state is not ReconciliationState.RETRY_SAFE:
                         raise RetryExecutionError(
                             "transport outcome is not proven safe to replay"
+                        ) from failure
+                    replay_safe = (effect is not SideEffectClass.NON_IDEMPOTENT and
+                                   (traits is None or traits.replay_safe))
+                    if not replay_safe:
+                        raise RetryExecutionError(
+                            "tool traits do not prove replay safety"
                         ) from failure
                 elif decision.action is ReplayAction.DO_NOT_RETRY:
                     raise RetryExecutionError(
@@ -201,17 +212,18 @@ class TransportRetryExecutor(Generic[RequestT, ResponseT]):
         self._check_cancelled()
 
     @staticmethod
-    def _decision(failure, attempt, max_attempts, effect, key):
+    def _decision(failure, attempt, max_attempts, effect, key, traits=None):
         from ...domain.loop_retry_policy import retry_decision
 
-        return retry_decision(
+        decision = retry_decision(
             failure.code, status=failure.status, attempt=attempt,
             max_attempts=max_attempts, outcome_known=failure.outcome_known,
-            effect=effect, idempotency_key=key,
+            effect=effect, idempotency_key=key, traits=traits,
         )
+        return decision
 
     @staticmethod
-    def _validate(operation_id, fingerprint, key, max_attempts, effect) -> None:
+    def _validate(operation_id, fingerprint, key, max_attempts, effect, traits=None) -> None:
         if not str(operation_id).strip() or not str(fingerprint).strip() or not str(key).strip():
             raise ValueError("operation_id, fingerprint, and idempotency_key are required")
         if isinstance(max_attempts, bool) or not isinstance(max_attempts, int) or max_attempts < 1:
@@ -220,6 +232,8 @@ class TransportRetryExecutor(Generic[RequestT, ResponseT]):
             SideEffectClass(effect)
         except (TypeError, ValueError) as exc:
             raise ValueError("effect must be a known side-effect class") from exc
+        if traits is not None and not isinstance(traits, ToolTraits):
+            raise TypeError("traits must be ToolTraits or None")
 
 
 __all__ = [
