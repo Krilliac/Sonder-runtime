@@ -27,17 +27,20 @@ jobs:
           script = ("$ErrorActionPreference='Stop';$s = Get-AuthenticodeSignature -LiteralPath '%s';$cert = $s.SignerCertificate;"
                     "[pscustomobject]@{Status=[string]$s.Status;StatusMessage=[string]$s.StatusMessage;"
                     "Subject=$(if ($cert) { [string]$cert.Subject } else { '' });SignatureType=[string]$s.SignatureType} | ConvertTo-Json -Compress") % literal
-          inner = ("$sw=[Diagnostics.Stopwatch]::StartNew();Import-Module Microsoft.PowerShell.Security;$a=$sw.Elapsed.TotalSeconds;"
-                   "$s = Get-AuthenticodeSignature -LiteralPath '%s';$b=$sw.Elapsed.TotalSeconds;"
-                   "$s2 = Get-AuthenticodeSignature -LiteralPath '%s';$c=$sw.Elapsed.TotalSeconds;"
-                   "'IMPORT={0:N2} FIRST={1:N2} SECOND={2:N2} STATUS={3} {4}' -f $a,($b-$a),($c-$b),$s.Status,$s2.Status") % (literal, literal)
-          for i in range(6):
-              for label, e in (("scrubbed", env), ("fullenv", None)):
+          lit = literal
+          variants = {
+              "original": script,
+              "sw_original": ("$sw=[Diagnostics.Stopwatch]::StartNew();$ErrorActionPreference='Stop';$s = Get-AuthenticodeSignature -LiteralPath '%s';$a=$sw.Elapsed.TotalSeconds;$cert = $s.SignerCertificate;"
+                              "$o=[pscustomobject]@{Status=[string]$s.Status;StatusMessage=[string]$s.StatusMessage;Subject=$(if ($cert) { [string]$cert.Subject } else { '' })};$b=$sw.Elapsed.TotalSeconds;"
+                              "$j=$o | ConvertTo-Json -Compress;$c=$sw.Elapsed.TotalSeconds;'SIG={0:N2} OBJ={1:N2} JSON={2:N2} {3}' -f $a,($b-$a),($c-$b),$j") % lit,
+              "no_json": ("$s = Get-AuthenticodeSignature -LiteralPath '%s';[string]$s.Status + '|' + [string]$s.SignerCertificate.Subject") % lit,
+              "json_only": "[pscustomobject]@{A='b'} | ConvertTo-Json -Compress",
+          }
+          for i in range(4):
+              for label, body in variants.items():
                   t = time.monotonic()
-                  c = subprocess.run([exe, "-NoProfile", "-NonInteractive", "-Command", "exit 0"], capture_output=True, text=True, timeout=120, env=e)
-                  t1 = time.monotonic() - t
-                  t = time.monotonic()
-                  c = subprocess.run([exe, "-NoProfile", "-NonInteractive", "-Command", inner], capture_output=True, text=True, timeout=180, env=e)
-                  print("PROBE2", i, label, "bare_start=%.2fs" % t1, "total=%.2fs" % (time.monotonic() - t), (c.stdout or "").strip()[:200], (c.stderr or "").strip()[:200], flush=True)
+                  c = subprocess.run([exe, "-NoProfile", "-NonInteractive", "-Command", body], capture_output=True, text=True, timeout=180, env=env)
+                  print("PROBE3", i, label, "wall=%.2fs" % (time.monotonic() - t), (c.stdout or "").strip()[:220], (c.stderr or "").strip()[:200], flush=True)
+                  time.sleep(2)
           '@
           $py | python -
