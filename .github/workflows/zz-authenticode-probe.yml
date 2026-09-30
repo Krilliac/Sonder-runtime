@@ -7,40 +7,32 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6]
+        shard: [1, 2, 3]
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
-      - name: Probe Get-AuthenticodeSignature exactly like artifact_fetch
+      - name: Time the fixed verifier against the previous autoloading script
         shell: pwsh
         run: |
-          Get-Service CryptSvc | Format-List Name,Status,StartType
           $py = @'
-          import json, os, subprocess, time
+          import os, subprocess, sys, time
+          sys.path.insert(0, os.getcwd())
+          from sonder_runtime.adapters import artifact_fetch
           exe = os.path.join(os.environ["SystemRoot"], "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
-          keys = ("SystemRoot", "WINDIR", "ComSpec", "PATH", "PATHEXT", "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "ProgramData")
-          env = {k: os.environ[k] for k in keys if os.environ.get(k)}
+          env = artifact_fetch._powershell_environment()
           literal = exe.replace("'", "''")
-          script = ("$ErrorActionPreference='Stop';$s = Get-AuthenticodeSignature -LiteralPath '%s';$cert = $s.SignerCertificate;"
-                    "[pscustomobject]@{Status=[string]$s.Status;StatusMessage=[string]$s.StatusMessage;"
-                    "Subject=$(if ($cert) { [string]$cert.Subject } else { '' });SignatureType=[string]$s.SignatureType} | ConvertTo-Json -Compress") % literal
-          lit = literal
-          variants = {
-              "original": script,
-              "sw_original": ("$sw=[Diagnostics.Stopwatch]::StartNew();$ErrorActionPreference='Stop';$s = Get-AuthenticodeSignature -LiteralPath '%s';$a=$sw.Elapsed.TotalSeconds;$cert = $s.SignerCertificate;"
-                              "$o=[pscustomobject]@{Status=[string]$s.Status;StatusMessage=[string]$s.StatusMessage;Subject=$(if ($cert) { [string]$cert.Subject } else { '' })};$b=$sw.Elapsed.TotalSeconds;"
-                              "$j=$o | ConvertTo-Json -Compress;$c=$sw.Elapsed.TotalSeconds;'SIG={0:N2} OBJ={1:N2} JSON={2:N2} {3}' -f $a,($b-$a),($c-$b),$j") % lit,
-              "no_json": ("$s = Get-AuthenticodeSignature -LiteralPath '%s';[string]$s.Status + '|' + [string]$s.SignerCertificate.Subject") % lit,
-              "json_only": "[pscustomobject]@{A='b'} | ConvertTo-Json -Compress",
-          }
-          for i in range(4):
-              for label, body in variants.items():
-                  t = time.monotonic()
-                  c = subprocess.run([exe, "-NoProfile", "-NonInteractive", "-Command", body], capture_output=True, text=True, timeout=180, env=env)
-                  print("PROBE3", i, label, "wall=%.2fs" % (time.monotonic() - t), (c.stdout or "").strip()[:220], (c.stderr or "").strip()[:200], flush=True)
-                  time.sleep(2)
+          old = ("$ErrorActionPreference='Stop';$s = Get-AuthenticodeSignature -LiteralPath '%s';$cert = $s.SignerCertificate;"
+                 "[pscustomobject]@{Status=[string]$s.Status;Subject=$(if ($cert) { [string]$cert.Subject } else { '' })} | ConvertTo-Json -Compress") % literal
+          for i in range(5):
+              t = time.monotonic()
+              r = artifact_fetch._authenticode_signature(exe)
+              print("PROBE4", i, "fixed", "wall=%.2fs" % (time.monotonic() - t), r["status"], r["publisher"][:60], flush=True)
+              t = time.monotonic()
+              c = subprocess.run([exe, "-NoProfile", "-NonInteractive", "-Command", old], capture_output=True, text=True, timeout=180, env=env)
+              print("PROBE4", i, "previous", "wall=%.2fs" % (time.monotonic() - t), (c.stdout or "").strip()[:120], flush=True)
           '@
           $py | python -
