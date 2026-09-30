@@ -11,6 +11,7 @@ from typing import Any, Mapping
 
 from ...domain.common.errors import Forbidden
 from ...domain.security import redaction as _redaction
+from ...domain.tools.traits import ToolTraits
 from ..ports.tool_execution import ToolExecutionResult, ToolExecutor
 from ..ports.tool_registry import ToolRegistry, ToolSchemaSelection
 from .gateway_contract import (
@@ -58,7 +59,15 @@ class ResourcePolicyEvaluator:
         # A multi-effect tool must be admitted for every declared effect.  A
         # single arbitrary set iteration previously allowed a read rule to
         # authorize a tool that also wrote files or used the network.
-        effects = tuple(sorted(requested_effects)) or ("",)
+        # An empty legacy effect set never proves purity. Keep policy rules
+        # for pure/read-only calls from admitting an undeclared mutation.
+        traits = (descriptor.traits if self.registry is not None else permission.traits) or ToolTraits()
+        effective_effects = set(requested_effects)
+        if not traits.is_read_only and not requested_effects - {"read", "read_files", "network"}:
+            effective_effects.add("unknown")
+        if traits.is_open_world:
+            effective_effects.add("network")
+        effects = tuple(sorted(effective_effects)) or ("",)
         matched = []
         for effect in effects:
             result = self.policy.evaluate(ResourceRequest(

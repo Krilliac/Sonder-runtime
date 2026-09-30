@@ -20,7 +20,7 @@ class PermissionPolicyProvider:
     def decide_for_caller(self, tool_name: str, *, interactive: bool,
                           gate_control_exempt: bool, surface: str = "",
                           record: bool = True, mode: str | None = None,
-                          rule_lookup=None, arguments=None, fence=None):
+                          rule_lookup=None, arguments=None, fence=None, traits=None):
         return _engine().decide_for_caller(
             tool_name,
             interactive=interactive,
@@ -31,6 +31,7 @@ class PermissionPolicyProvider:
             rule_lookup=rule_lookup,
             arguments=arguments,
             fence=fence,
+            traits=traits,
         )
 
     def call_digest(self, tool_name: str, arguments) -> str:

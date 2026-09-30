@@ -131,6 +131,7 @@ def typed_tool_registry() -> InMemoryToolRegistry:
         descriptors.append(ToolDescriptor(
             name, base.description, schema,
             effects=base.effects, execution_class=base.execution_class,
+            traits=base.traits,
         ))
     logger.info(f"typed tool registry built, tool_count={len(descriptors)}")
     logger.debug(f"typed tool registry built with {len(descriptors)} descriptors")

@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from enum import Enum
 import math
 
+from .tools.traits import ToolTraits
+
 
 class RetryClass(str, Enum):
     TRANSIENT = "transient"
@@ -136,10 +138,13 @@ def retry_decision(
     idempotency_key: str | None = None,
     retry_after_seconds: float | None = None,
     deadline_seconds: float | None = None,
+    traits: ToolTraits | None = None,
 ) -> RetryDecision:
     """Build bounded replay metadata for one failed loop attempt."""
     if attempt < 1 or max_attempts < 1:
         raise ValueError("attempt and max_attempts must be positive")
+    if traits is not None and not isinstance(traits, ToolTraits):
+        raise TypeError("traits must be ToolTraits or None")
     classification = classify_retry(failure_code, status=status, outcome_known=outcome_known)
     side_effect = side_effect_requirement(
         effect, outcome_known=outcome_known, idempotency_key=idempotency_key,
@@ -160,12 +165,24 @@ def retry_decision(
         action = ReplayAction.DO_NOT_RETRY
     if attempt >= max_attempts and action is ReplayAction.RETRY:
         action = ReplayAction.DO_NOT_RETRY
+    replay_safe = (side_effect.effect is not SideEffectClass.NON_IDEMPOTENT and
+                   (traits is None or traits.replay_safe))
+    if not replay_safe:
+        # An unknown post-dispatch outcome may still be reconciled to a
+        # committed receipt, but a retry-safe reconciliation must never turn
+        # a non-idempotent operation into a second physical invocation.
+        if action is ReplayAction.RETRY:
+            action = ReplayAction.DO_NOT_RETRY
     backoff = BackoffMetadata(
         retry_after_seconds=retry_after_seconds, deadline_seconds=deadline_seconds,
     )
     return RetryDecision(
         classification, action, max_attempts, backoff, side_effect,
-        f"{classification.value}; attempt {attempt} of {max_attempts}",
+        (
+            "operation is not replay-safe"
+            if not replay_safe
+            else f"{classification.value}; attempt {attempt} of {max_attempts}"
+        ),
     )
 
 

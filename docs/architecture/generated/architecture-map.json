@@ -429,7 +429,7 @@
       ]
     },
     {
-      "file_count": 390,
+      "file_count": 391,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -795,6 +795,7 @@
         "sonder_runtime/application/tools/gateway_contract.py",
         "sonder_runtime/application/tools/generated_catalogs.py",
         "sonder_runtime/application/tools/resource_policy.py",
+        "sonder_runtime/application/tools/scheduling.py",
         "sonder_runtime/application/tools/typed_gateway.py",
         "sonder_runtime/application/training/__init__.py",
         "sonder_runtime/application/training/adapter_catalog.py",
@@ -898,7 +899,7 @@
       ]
     },
     {
-      "file_count": 263,
+      "file_count": 265,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1150,9 +1151,11 @@
         "sonder_runtime/domain/tier_names.py",
         "sonder_runtime/domain/token_bucket.py",
         "sonder_runtime/domain/tools/__init__.py",
+        "sonder_runtime/domain/tools/builtin_traits.py",
         "sonder_runtime/domain/tools/descriptors.py",
         "sonder_runtime/domain/tools/governance.py",
         "sonder_runtime/domain/tools/policy.py",
+        "sonder_runtime/domain/tools/traits.py",
         "sonder_runtime/domain/training/__init__.py",
         "sonder_runtime/domain/training/models.py",
         "sonder_runtime/domain/training/reproducible.py",

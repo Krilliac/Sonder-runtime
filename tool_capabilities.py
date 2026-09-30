@@ -15,6 +15,8 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Callable, Iterable, Mapping
 
+from sonder_runtime.domain.tools.traits import ToolTraits, TriState
+
 
 class Effect(str, Enum):
     READ_ONLY = "read-only"
@@ -87,6 +89,20 @@ class ToolCapability:
     resources: frozenset[ResourceClass]
     deduplicated_inspection: bool = False
     counts_as_inspection: bool = False
+    traits: ToolTraits | None = None
+
+    def __post_init__(self) -> None:
+        if self.traits is None:
+            read_only = self.effect is Effect.READ_ONLY
+            object.__setattr__(self, "traits", ToolTraits(
+                read_only=TriState.TRUE if read_only else TriState.FALSE,
+                destructive=TriState.FALSE if read_only else TriState.UNKNOWN,
+                idempotent=TriState.TRUE if read_only else TriState.UNKNOWN,
+                open_world=(TriState.FALSE if self.network is NetworkRequirement.NONE
+                            else TriState.TRUE),
+            ))
+        elif not isinstance(self.traits, ToolTraits):
+            raise TypeError("traits must be ToolTraits")
 
 
 @dataclass(frozen=True, slots=True)

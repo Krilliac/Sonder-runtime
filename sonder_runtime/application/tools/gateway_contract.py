@@ -20,13 +20,17 @@ import hashlib
 import json
 import logging
 import time
-from dataclasses import dataclass, field
+from contextlib import nullcontext
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Mapping, Protocol
 
 from ...domain.common.errors import Cancelled, DeadlineExceeded, Forbidden, InvalidInput
+from ...domain.tools.builtin_traits import builtin_traits
+from ...domain.tools.traits import ToolTraits
 from ..execution import effect_journal, gateway_calls
 from ..ports.tool_registry import ToolSchemaSelection
+from .scheduling import ToolConcurrencyGate
 
 _LOG = logging.getLogger(__name__)
 
@@ -96,8 +100,11 @@ class ToolPermission:
     effects: frozenset[str] = frozenset()
     approval: ApprovalMode = ApprovalMode.NOT_REQUIRED
     reconciliation: str = "manual"
+    traits: ToolTraits | None = None
 
     def __post_init__(self) -> None:
+        if self.traits is not None and not isinstance(self.traits, ToolTraits):
+            raise InvalidInput("tool permission traits must be ToolTraits")
         if any(not effect.strip() for effect in self.effects):
             raise InvalidInput("tool permission effects must be non-empty")
         if self.reconciliation not in {"manual", "idempotent", "query"}:
@@ -267,8 +274,20 @@ class ToolGateway:
         redactor: OutputRedactor,
         receipts: ReceiptSink,
         audit: ToolAuditRepository | None = None,
+        registry: Any = None,
+        concurrency_gate: ToolConcurrencyGate | None = None,
     ) -> None:
         self._schema = schema
+        self._registry = registry
+        # Admission by concurrency trait is opt-in. A gateway instance is
+        # shared by every surface of a process (agents, native MCP, HTTP,
+        # lanes), so a default process-wide exclusive gate would hold every
+        # unrelated call behind any long UNKNOWN-concurrency call (test_run
+        # and build_job wait up to 60 s by default). A scheduler that wants
+        # trait-driven overlap control composes its own gate.
+        if concurrency_gate is not None and not isinstance(concurrency_gate, ToolConcurrencyGate):
+            raise TypeError("concurrency_gate must be a ToolConcurrencyGate or None")
+        self._concurrency = concurrency_gate
         self._permissions = permissions
         self._approvals = approvals
         self._invoker = invoker
@@ -289,6 +308,7 @@ class ToolGateway:
         *,
         audit: ToolAuditRepository | None = None,
         context_factory: Any = None,
+        concurrency_gate: ToolConcurrencyGate | None = None,
     ) -> "ToolGateway":
         """Compose the gateway over the typed registry/execution ports.
 
@@ -309,9 +329,24 @@ class ToolGateway:
             redactor,
             receipts,
             audit=audit,
+            registry=registry,
+            concurrency_gate=concurrency_gate,
         )
 
     def execute(self, request: ToolGatewayRequest) -> ToolReceipt:
+        # A typed registry is host authority; request metadata can never
+        # replace it. Legacy callers retain their effects compatibility map.
+        descriptor = self._registry.get(request.tool_name) if self._registry is not None else None
+        # A typed registry is the authority for composed gateways.  The
+        # legacy gateway has no descriptor, so retain the host's existing
+        # built-in read declarations (for example ``read_file``) while still
+        # leaving unclassified empty-effect tools conservative/unknown.
+        traits = (descriptor.traits if descriptor is not None else
+                  builtin_traits(request.tool_name, request.permission.effects))
+        request = replace(request, permission=replace(request.permission, traits=traits))
+        return self._execute_admitted(request)
+
+    def _execute_admitted(self, request: ToolGatewayRequest) -> ToolReceipt:
         started = time.monotonic()
         policy_match = ""
         journal_binding = effect_journal.current()
@@ -333,24 +368,32 @@ class ToolGateway:
                     % ", ".join(sorted(unscoped_effects))
                 )
             policy_match = _match_text(_authorize(self._permissions, request))
+            if request.permission.reconciliation == "idempotent" and not request.permission.traits.replay_safe:
+                raise Forbidden("tool replay requires host-declared idempotent=TRUE")
             if request.permission.approval is ApprovalMode.REQUIRED:
                 if not request.approval_token or not self._approvals.approve(request):
                     raise Forbidden("tool approval is required")
             self._check_control(request)
-            if journal_binding is not None and request.permission.effects:
-                journal_intent = self._begin_journaled(journal_binding, request)
-            try:
-                result = self._invoker.invoke(request)
-            except BaseException as exc:
-                if journal_binding is not None and journal_intent is not None:
-                    try:
-                        journal_binding.mark_uncertain(
-                            journal_intent, detail=f"invoker raised {type(exc).__name__}"
-                        )
-                    except BaseException as uncertainty_error:  # noqa: BLE001 - preserve original interrupt
-                        _LOG.error("tool effect uncertainty publication failed: %s",
-                                   type(uncertainty_error).__name__)
-                raise
+            admission = (nullcontext() if self._concurrency is None else self._concurrency.admit(
+                request.permission.traits.can_parallelize, lambda: self._check_control(request)
+            ))
+            with admission:
+                if journal_binding is not None and (
+                    request.permission.effects or not request.permission.traits.is_read_only
+                ):
+                    journal_intent = self._begin_journaled(journal_binding, request)
+                try:
+                    result = self._invoker.invoke(request)
+                except BaseException as exc:
+                    if journal_binding is not None and journal_intent is not None:
+                        try:
+                            journal_binding.mark_uncertain(
+                                journal_intent, detail=f"invoker raised {type(exc).__name__}"
+                            )
+                        except BaseException as uncertainty_error:  # noqa: BLE001 - preserve original interrupt
+                            _LOG.error("tool effect uncertainty publication failed: %s",
+                                       type(uncertainty_error).__name__)
+                    raise
             # The executor returned the terminal outcome of an already admitted
             # effect. Preserve that truth even if cancellation/deadline arrived
             # in flight; the next invocation still fails its admission checks.
@@ -456,7 +499,7 @@ class ToolGateway:
             )
         return calls.admit(
             journal_binding, tool_name=request.tool_name,
-            arguments=request.arguments, effects=request.permission.effects,
+            arguments=request.arguments, effects=request.permission.effects or frozenset({"unknown"}),
             reconciliation=request.permission.reconciliation,
         )
 

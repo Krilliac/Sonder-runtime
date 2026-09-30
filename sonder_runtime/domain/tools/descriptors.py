@@ -7,6 +7,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum, auto
 
+from .traits import ToolTraits, TriState as TriState, traits_from_effects
+
 
 class ToolEffect(Enum):
     READ_FILES = auto()
@@ -31,6 +33,13 @@ class ToolDescriptor:
     input_schema: dict = field(default_factory=dict)
     effects: frozenset[ToolEffect] = field(default_factory=frozenset)
     execution_class: ExecutionClass = ExecutionClass.PURE
+    traits: ToolTraits | None = None
+
+    def __post_init__(self) -> None:
+        if self.traits is None:
+            object.__setattr__(self, "traits", traits_from_effects(self.effects))
+        elif not isinstance(self.traits, ToolTraits):
+            raise TypeError("traits must be ToolTraits")
 
 
 @dataclass(frozen=True)

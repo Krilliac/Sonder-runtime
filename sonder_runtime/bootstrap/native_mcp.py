@@ -818,7 +818,13 @@ _GRADED_NAMES["run_script"] = "script_run"
 def native_tool_registry() -> InMemoryToolRegistry:
     """Return the immutable-at-composition catalog for native MCP tools."""
     logger.debug(f"building native tool registry, tool_count={len(_NATIVE_TOOLS)}")
-    return InMemoryToolRegistry(sorted(_NATIVE_TOOLS, key=lambda item: item.name))
+    from dataclasses import replace
+    from ..domain.tools.builtin_traits import builtin_traits
+
+    return InMemoryToolRegistry(
+        replace(item, traits=builtin_traits(item.name, item.effects))
+        for item in sorted(_NATIVE_TOOLS, key=lambda item: item.name)
+    )
 
 
 # A call interrupted part-way may have taken effect; only a finished failure

@@ -9,6 +9,7 @@ from sonder_runtime.domain.loop_retry_policy import (
     retry_decision,
     side_effect_requirement,
 )
+from sonder_runtime.domain.tools.traits import ToolTraits, TriState
 
 
 @pytest.mark.parametrize(
@@ -66,3 +67,20 @@ def test_non_idempotent_unknown_outcome_must_reconcile_before_replay():
     assert retry_decision("timeout", effect=SideEffectClass.NON_IDEMPOTENT).action is ReplayAction.DO_NOT_RETRY
     with pytest.raises(ValueError):
         BackoffMetadata(base_seconds=3, maximum_seconds=2)
+
+
+def test_unknown_or_false_trait_never_allows_physical_retry():
+    for trait in (TriState.UNKNOWN, TriState.FALSE):
+        decision = retry_decision(
+            "timeout", outcome_known=True, effect=SideEffectClass.IDEMPOTENT,
+            idempotency_key="stable", traits=ToolTraits(idempotent=trait),
+        )
+        assert decision.action is ReplayAction.DO_NOT_RETRY
+
+
+def test_non_idempotent_legacy_effect_reconciles_but_does_not_retry():
+    decision = retry_decision(
+        "timeout", outcome_known=False,
+        effect=SideEffectClass.NON_IDEMPOTENT, idempotency_key="stable",
+    )
+    assert decision.action is ReplayAction.RECONCILE_THEN_RETRY

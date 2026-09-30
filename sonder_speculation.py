@@ -34,6 +34,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from sonder_runtime.domain import speculation_policy
+from sonder_runtime.domain.tools.builtin_traits import builtin_traits
+from sonder_runtime.domain.tools.traits import ToolTraits
 from sonder_runtime.platform import speculation as speculation_config
 
 # Compatibility alias for callers that imported the historical allowlist.
@@ -259,8 +261,10 @@ class BranchPredictor:
             return None
         return tool, confidence
 
-    def speculatable(self, tool_name: str) -> bool:
-        return speculation_policy.is_speculatable(tool_name)
+    def speculatable(self, tool_name: str, traits: ToolTraits | None = None) -> bool:
+        return speculation_policy.is_speculatable(
+            tool_name, traits if traits is not None else builtin_traits(tool_name)
+        )
 
     # -- accounting --------------------------------------------------------
 
@@ -432,9 +436,14 @@ class SpeculationEngine:
             self._max_slots = speculation_slots()
         else:
             self._max_slots = max(1, min(_MAX_SLOTS, int(slots)))
-        # Each slot is a dict {tool_name, call_signature, result, thread}.
+        # Each slot is a dict {tool_name, call_signature, result, thread, traits}.
         # A list preserves issue order so a mispredict squashes the stalest.
         self._slots: list[dict] = []
+        # Slots can be removed from the reorder buffer before their worker
+        # joins (the join has a bounded timeout). Keep a reservation until
+        # the worker's finally block runs so a timed-out unknown operation
+        # cannot be overlapped by a new speculation.
+        self._active_workers: dict[int, ToolTraits] = {}
         # A small read-through cache keeps a completed, squashed *read-only*
         # result available when a model takes the same branch one turn later.
         # Listing order and model read order need not agree; without this a
@@ -452,45 +461,64 @@ class SpeculationEngine:
             while len(self._retired_cache) > self._max_slots:
                 self._retired_cache.pop(next(iter(self._retired_cache)))
 
-    def begin(self, tool_name: str, call_signature: str, args: dict) -> bool:
+    def begin(
+        self, tool_name: str, call_signature: str, args: dict,
+        *, traits: ToolTraits | None = None,
+    ) -> bool:
         """Launch a speculative read-only call. Returns True if issued.
 
         Issues while a free slot exists; refuses (returns False) when the
         buffer is full, when the engine is disabled, or when the tool is not
         on the read-only allowlist (mutating tools are never speculated).
         """
-        if not self._enabled or not self._predictor.speculatable(tool_name):
+        effective_traits = traits if traits is not None else builtin_traits(tool_name)
+        if not self._enabled or not self._predictor.speculatable(tool_name, effective_traits):
             return False
         with self._lock:
             # The result is already available for retirement.  Do not issue a
             # duplicate read while the model decides whether to use it.
             if call_signature in self._retired_cache:
                 return False
-            if len(self._slots) >= self._max_slots:
+            if len(self._slots) >= self._max_slots or len(self._active_workers) >= self._max_slots:
                 return False  # buffer full; back-pressure like a full ROB
+            # An unknown concurrency contract is safe for one speculative
+            # request, but never justifies overlapping requests.
+            if self._active_workers:
+                if not effective_traits.can_parallelize:
+                    return False
+                if any(
+                    not worker_traits.can_parallelize
+                    for worker_traits in self._active_workers.values()
+                ):
+                    return False
             slot: dict = {
                 "tool_name": tool_name,
                 "call_signature": call_signature,
                 "result": None,
                 "thread": None,
+                "traits": effective_traits,
             }
+            self._active_workers[id(slot)] = effective_traits
 
             def _work(slot=slot):
                 started = time.monotonic()
+                observation, ok = "", False
                 try:
                     observation, ok = self._dispatch(tool_name, args)
                 except Exception as exc:  # a bad speculation must never raise
                     observation, ok = ("speculation error: %s" % exc), False
-                finished = time.monotonic()
-                with self._lock:
-                    slot["result"] = SpeculativeResult(
-                        tool_name=tool_name,
-                        call_signature=call_signature,
-                        observation=str(observation),
-                        ok=bool(ok),
-                        started=started,
-                        finished=finished,
-                    )
+                finally:
+                    finished = time.monotonic()
+                    with self._lock:
+                        slot["result"] = SpeculativeResult(
+                            tool_name=tool_name,
+                            call_signature=call_signature,
+                            observation=str(observation),
+                            ok=bool(ok),
+                            started=started,
+                            finished=finished,
+                        )
+                        self._active_workers.pop(id(slot), None)
 
             thread = threading.Thread(
                 target=_work, daemon=True, name="sonder-speculation"
@@ -527,6 +555,7 @@ class SpeculationEngine:
 
     def resolve(
         self, real_signature: str, tool_name: str | None = None,
+        *, traits: ToolTraits | None = None,
     ) -> SpeculativeResult | None:
         """Retire the buffered result whose slot matches the committed branch.
 
@@ -542,9 +571,11 @@ class SpeculationEngine:
         buffer cannot grow unbounded.  With a single slot this is exactly the
         original retire-on-match / squash-on-miss behavior.
         """
-        if tool_name is not None and not self._predictor.speculatable(tool_name):
-            self.invalidate()
-            return None
+        if tool_name is not None:
+            effective_traits = traits if traits is not None else builtin_traits(tool_name)
+            if not self._predictor.speculatable(tool_name, effective_traits):
+                self.invalidate()
+                return None
         with self._lock:
             match = None
             for slot in self._slots:
