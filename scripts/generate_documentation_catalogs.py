@@ -225,15 +225,18 @@ def _runtime_reference() -> dict[str, Any]:
 
 def _architecture_map() -> dict[str, Any]:
     layers = []
-    for directory in sorted(path for path in PACKAGE.iterdir() if path.is_dir()):
+    # A bytecode cache is not a layer, and whether one exists at generation
+    # time must not decide what the generated map says (the --check gate
+    # compares bytes, so a checkout with or without it has to agree).
+    for directory in sorted(
+        path for path in PACKAGE.iterdir() if path.is_dir() and path.name != "__pycache__"
+    ):
         files = sorted(path.relative_to(ROOT).as_posix() for path in directory.rglob("*.py"))
         layers.append({"name": directory.name, "python_files": files, "file_count": len(files)})
     ownership_module = importlib.import_module(
         "sonder_runtime.application.architecture.ownership_catalog"
     )
-    ownership = ownership_module.default_layer_ownership_catalog(
-        row["name"] for row in layers if row["name"] != "__pycache__"
-    )
+    ownership = ownership_module.default_layer_ownership_catalog(row["name"] for row in layers)
     return {
         "schema": "sonder-architecture-map-v1",
         "authority": "docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md",
