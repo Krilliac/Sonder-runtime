@@ -189,11 +189,12 @@ def test_extractors_cannot_go_vacuous():
     # server.py is size-capped, so newer tool families register themselves
     # from their own module with the same ``@mcp.tool()`` decorator (inside a
     # ``register(mcp, ...)`` function). Their source is part of the AST view.
-    from sonder_runtime.bootstrap import computer_use_tools
+    from sonder_runtime.bootstrap import computer_use_tools, openrouter_tools
 
     module = ast.parse(inspect.getsource(server))
-    registrar = ast.parse(inspect.getsource(computer_use_tools))
-    nested = [node for node in ast.walk(registrar)
+    nested = [node
+              for registrar_module in (computer_use_tools, openrouter_tools)
+              for node in ast.walk(ast.parse(inspect.getsource(registrar_module)))
               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
     decorated = set()
     for node in list(module.body) + nested:

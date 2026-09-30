@@ -22,6 +22,7 @@ from sonder_runtime.adapters.inference.openai_compat_gateway import (
 from sonder_runtime.adapters.inference.openai_protocol_probe import (
     OpenAICompatibleProtocolProbe,
 )
+from sonder_runtime.adapters.inference.openrouter_gateway import protocol_probe_gateway
 from sonder_runtime.adapters.inference.sonder_inference_gateway import (
     SonderInferenceConfig,
     SonderInferenceGateway,
@@ -43,7 +44,7 @@ from sonder_runtime.domain.routing.backend_conformance import (
 )
 from sonder_runtime.platform.paths import state_path
 
-BACKENDS = ("openai-compatible", "sonder-inference")
+BACKENDS = ("openai-compatible", "sonder-inference", "openrouter")
 
 
 def attest(
@@ -173,6 +174,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.backend == "sonder-inference":
         return _main_sonder_inference(parser, args)
+    openrouter = args.backend == "openrouter"
+    if openrouter:
+        # OpenRouter is an OpenAI-compatible route: the same probes run
+        # through a concrete OpenAICompatibleGateway at https://openrouter.ai/api
+        # with OPENROUTER_API_KEY. It is a paid API, so --allow-cloud stays
+        # mandatory and nothing ever runs this automatically.
+        if args.base_url is None:
+            args.base_url = "https://openrouter.ai/api"
+        if args.model is None:
+            parser.error("--backend openrouter requires --model vendor/model")
     args.base_url = (args.base_url if args.base_url is not None
                      else os.environ.get("SONDER_OPENAI_BASE_URL", "").strip())
     args.model = (args.model if args.model is not None
@@ -211,8 +222,17 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"invalid backend identity: {exc}")
         if identity.backend != "openai-compatible" or identity.model != args.model:
             parser.error("backend identity must match the configured route")
+    gateway = OpenAICompatibleGateway(config)
+    if openrouter and not args.dry_run:
+        try:
+            gateway = protocol_probe_gateway(args.model, env={
+                **os.environ, "SONDER_ALLOW_CLOUD": "1",
+                "SONDER_OPENROUTER_BASE_URL": args.base_url.rstrip("/") + "/v1",
+            })
+        except SonderError as exc:
+            parser.error(f"invalid OpenRouter configuration: {exc}")
     result = attest(
-        OpenAICompatibleGateway(config),
+        gateway,
         backend="openai-compatible",
         model=args.model,
         evidence_path=args.evidence,

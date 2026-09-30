@@ -215,6 +215,45 @@ def _sonder_inference_result() -> CheckResult | None:
     return CheckResult("sonder_inference", ready, False, detail)
 
 
+def _check_openrouter() -> CheckResult | None:
+    """Configuration-only note for a bound OpenRouter provider.
+
+    Never contacts OpenRouter (a paid API is never probed automatically) and
+    never names the key's value: it reports opt-in, key presence and whether
+    every bound tier resolves to a model.
+    """
+    try:
+        from sonder_runtime.adapters.provider_bindings import provider_bindings_from_env
+
+        bindings = provider_bindings_from_env()
+        if "openrouter" not in bindings.bound_providers:
+            return None
+        from sonder_runtime.adapters.inference.openrouter_gateway import (
+            check_endpoint_policy,
+            config_from_env,
+        )
+
+        settings = config_from_env()
+        check_endpoint_policy(settings)
+        tiers = sorted(
+            tier for tier, provider in bindings.tier_providers.items()
+            if provider == "openrouter"
+        )
+        missing = [tier for tier in tiers if not settings.model_for_tier(tier)]
+        if missing:
+            return CheckResult(
+                "openrouter", False, False,
+                "no OpenRouter model for tier(s) %s; run `python -m sonder_runtime "
+                "openrouter use <tier> <vendor/model>`" % ", ".join(missing),
+            )
+        return CheckResult(
+            "openrouter", True, False,
+            "hosted provider configured for %s (not probed)" % (", ".join(tiers) or "default"),
+        )
+    except Exception as exc:  # noqa: BLE001 - preflight never blocks on a hosted provider
+        return CheckResult("openrouter", False, False, str(exc)[:240])
+
+
 def run_preflight(
     config: SonderConfig,
     *,
@@ -232,4 +271,7 @@ def run_preflight(
     inference = _check_sonder_inference()
     if inference is not None:
         checks.append(inference)
+    router = _check_openrouter()
+    if router is not None:
+        checks.append(router)
     return PreflightReport(checks=tuple(checks))

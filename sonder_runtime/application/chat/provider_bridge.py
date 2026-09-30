@@ -127,6 +127,23 @@ def active_rung() -> RungBinding | None:
     return _RUNG.get()
 
 
+# Bridged providers that run off this machine on a third party's service.  A
+# rung bound to one gets the same hosted-data boundary as a ``cloud-*`` tier:
+# only request-scoped instructions, never the disk-backed local profile,
+# emotion vectors, goal, or recalled memory/lessons.
+HOSTED_PROVIDERS = frozenset({"openrouter"})
+
+
+def is_hosted(provider: object) -> bool:
+    return provider in HOSTED_PROVIDERS
+
+
+def hosted_rung_active() -> bool:
+    """Whether the rung bound on this thread sends prompts to a hosted provider."""
+    binding = _RUNG.get()
+    return binding is not None and is_hosted(binding.provider)
+
+
 @contextmanager
 def degradation_scope() -> Iterator[list[str]]:
     """Collect Ollama-only steps a non-Ollama turn had to run without."""
