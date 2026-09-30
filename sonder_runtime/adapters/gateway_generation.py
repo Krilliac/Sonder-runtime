@@ -62,4 +62,3 @@ def gateway_generate_text(application, prompt, tier="fast", system="", temperatu
         }.get(getattr(exc, "code", ""), "request")
         raise ModelCallError(kind, str(exc)) from exc
     return result.response_text
-
