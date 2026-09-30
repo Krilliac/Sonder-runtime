@@ -63,6 +63,9 @@ _ROLES = frozenset({"system", "user", "assistant", "tool"})
 _RUNG: ContextVar["RungBinding | None"] = ContextVar(
     "sonder_chat_rung_binding", default=None,
 )
+_HELPER_CONTEXT: ContextVar[OperationContext | None] = ContextVar(
+    "sonder_tier_helper_context", default=None,
+)
 _DEGRADATIONS: ContextVar[list[str] | None] = ContextVar(
     "sonder_chat_turn_degradations", default=None,
 )
@@ -135,6 +138,19 @@ def suspend_rung() -> Iterator[None]:
 def active_rung() -> RungBinding | None:
     """The non-Ollama rung bound on this thread, or None for the legacy path."""
     return _RUNG.get()
+
+
+def active_helper_context() -> OperationContext | None:
+    return _HELPER_CONTEXT.get()
+
+
+@contextmanager
+def bind_helper_context(context: OperationContext) -> Iterator[None]:
+    token = _HELPER_CONTEXT.set(context)
+    try:
+        yield
+    finally:
+        _HELPER_CONTEXT.reset(token)
 
 
 # Bridged providers that run off this machine on a third party's service.  A

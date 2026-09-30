@@ -149,7 +149,7 @@ def test_warnings_cover_embedding_origins_and_legacy_surfaces():
     warnings = " | ".join(document["observatory"]["warnings"])
     assert "SONDER_EMBEDDING_PROVIDER=ollama" in warnings
     assert "SONDER_OBSERVATORY_ORIGINS" in warnings
-    assert "REPL, MCP" in warnings
+    assert "agents, autopilot, fleet" in warnings
 
 
 def test_disabled_export_without_a_status_surface_is_not_found():
@@ -188,7 +188,8 @@ def test_a_global_origin_does_not_hide_the_missing_observatory_origin():
     assert configured == []
 
 
-def test_bound_provider_warning_names_the_ollama_only_http_dispatchers():
+def test_bound_provider_warning_names_remaining_ollama_contracts():
     warnings = " | ".join(_build(_bindings(), SimpleNamespace())["observatory"]["warnings"])
-    for surface in ("work intents", "ensemble", "fanout", "web research"):
+    for surface in ("exact model pins", "strict sonder alias", "fanout", "image/schema", "single-send canaries"):
         assert surface in warnings
+    assert "still use Ollama" not in warnings

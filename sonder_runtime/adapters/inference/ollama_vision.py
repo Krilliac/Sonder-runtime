@@ -10,6 +10,7 @@ from ...application.context import OperationContext
 from ...application.ports.model_target import ModelTargetResolver
 from ...application.ports.vision_gateway import VisionRequest, VisionResponse, require_vision_text
 from ...domain.common.errors import Cancelled, DeadlineExceeded, DependencyUnavailable, Forbidden
+from ..provider_bindings import provider_bindings_from_env
 from . import ollama_endpoint
 
 logger = logging.getLogger(__name__)
@@ -42,11 +43,12 @@ def configure_typed_request_timeout(seconds: int | None) -> None:
 class OllamaVisionGateway:
     """Send one image-bearing request to a loopback Ollama endpoint."""
 
-    def __init__(self, *, target_resolver: ModelTargetResolver, transport=None):
+    def __init__(self, *, target_resolver: ModelTargetResolver, transport=None, provider_bindings=None):
         if not callable(target_resolver):
             raise ValueError("vision target resolver must be callable")
         self._target_resolver = target_resolver
         self._transport = transport
+        self._provider_bindings = provider_bindings if provider_bindings is not None else provider_bindings_from_env()
         logger.info("OllamaVisionGateway initialized")
 
     @staticmethod
@@ -61,6 +63,8 @@ class OllamaVisionGateway:
 
     def analyze(self, request: VisionRequest, context: OperationContext) -> VisionResponse:
         timeout = self._check_context(context)
+        if self._provider_bindings.tier_providers.get(request.tier, "ollama") != "ollama":
+            raise Forbidden("image analysis is only available on Ollama-bound vision tiers")
         endpoint = ollama_endpoint.normalize()
         logger.debug(f"OllamaVisionGateway.analyze: endpoint={endpoint!r}, tier={request.tier!r}")
         if not ollama_endpoint.is_loopback(endpoint):

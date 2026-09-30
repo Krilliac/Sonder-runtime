@@ -64,7 +64,7 @@ python -m sonder_runtime doctor
 | `sonder_inference warn ... connection limit` | server up but at `--max-connections`; requests fail with `CapacityExceeded` until load drops |
 | `sonder_inference fail ... start sonder-infer serve` | down with no fallback |
 | `sonder_inference fail ... the fallback does not apply` | invalid `SONDER_INFERENCE_*` value, remote URL without consent, rejected key or Host, API version mismatch (health or ready file); fix the cause, a fallback cannot help |
-| `sonder_inference_scope warn` | always shown when bound: REPL, MCP, autopilot and fleet still generate through Ollama |
+| `sonder_inference_scope ok` | tier-bound agents, autopilot, fleet and helper calls resolve through Sonder Inference; explicit Ollama pins, strict `sonder` aliases and durable fanout remain Ollama-bound |
 
 `--skip-inference` omits both lines. `python -m sonder_runtime preflight`
 reports `sonder_inference` as a non-required check; `serve` never refuses to
