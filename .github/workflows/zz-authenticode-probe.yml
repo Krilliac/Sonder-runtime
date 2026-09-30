@@ -7,7 +7,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2]
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -15,7 +15,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
-      - name: Time the fixed verifier against the previous autoloading script
+      - name: Time each verifier step inside one Windows PowerShell process
         shell: pwsh
         run: |
           $py = @'
@@ -25,14 +25,29 @@ jobs:
           exe = os.path.join(os.environ["SystemRoot"], "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
           env = artifact_fetch._powershell_environment()
           literal = exe.replace("'", "''")
-          old = ("$ErrorActionPreference='Stop';$s = Get-AuthenticodeSignature -LiteralPath '%s';$cert = $s.SignerCertificate;"
-                 "[pscustomobject]@{Status=[string]$s.Status;Subject=$(if ($cert) { [string]$cert.Subject } else { '' })} | ConvertTo-Json -Compress") % literal
-          for i in range(5):
+          steps = [
+              ("sec", "Import-Module -Name (Join-Path (Join-Path (Join-Path $PSHOME 'Modules') 'Microsoft.PowerShell.Security') 'Microsoft.PowerShell.Security.psd1')"),
+              ("util", "Import-Module -Name (Join-Path (Join-Path (Join-Path $PSHOME 'Modules') 'Microsoft.PowerShell.Utility') 'Microsoft.PowerShell.Utility.psd1')"),
+              ("sig", "$s = Microsoft.PowerShell.Security\\Get-AuthenticodeSignature -LiteralPath '%s'" % literal),
+              ("cert", "$cert = $s.SignerCertificate; $o = [pscustomobject]@{Status=[string]$s.Status; Subject=[string]$cert.Subject}"),
+              ("json", "$j = $o | Microsoft.PowerShell.Utility\\ConvertTo-Json -Compress"),
+          ]
+          byname = ("secname", "Import-Module Microsoft.PowerShell.Security")
+          orders = {"sec_first": steps, "util_first": [steps[1], steps[0]] + steps[2:],
+                    "probe2_shape": [byname, steps[2], steps[3]]}
+          for i in range(3):
+              for name, order in orders.items():
+                  body = "$sw=[Diagnostics.Stopwatch]::StartNew();$t=@();" + "".join(
+                      "%s;$t+=('%s='+$sw.Elapsed.TotalSeconds.ToString('N2'));" % (code, label) for label, code in order
+                  ) + "[Console]::WriteLine(($t -join ' ') + ' ' + $j)"
+                  t = time.monotonic()
+                  c = subprocess.run([exe, "-NoProfile", "-NonInteractive", "-Command", body], capture_output=True, text=True, timeout=180, env=env)
+                  print("PROBE5", i, name, "wall=%.2fs" % (time.monotonic() - t), (c.stdout or "").strip()[:260], (c.stderr or "").strip()[:200], flush=True)
               t = time.monotonic()
-              r = artifact_fetch._authenticode_signature(exe)
-              print("PROBE4", i, "fixed", "wall=%.2fs" % (time.monotonic() - t), r["status"], r["publisher"][:60], flush=True)
+              c = subprocess.run([exe, "-NoProfile", "-NonInteractive", "-Command", "[Console]::WriteLine('x')"], capture_output=True, text=True, timeout=180, env=env)
+              print("PROBE5", i, "console_only", "wall=%.2fs" % (time.monotonic() - t), flush=True)
               t = time.monotonic()
-              c = subprocess.run([exe, "-NoProfile", "-NonInteractive", "-Command", old], capture_output=True, text=True, timeout=180, env=env)
-              print("PROBE4", i, "previous", "wall=%.2fs" % (time.monotonic() - t), (c.stdout or "").strip()[:120], flush=True)
+              c = subprocess.run([exe, "-NoProfile", "-NonInteractive", "-Command", "'x'"], capture_output=True, text=True, timeout=180, env=env)
+              print("PROBE5", i, "pipeline_output", "wall=%.2fs" % (time.monotonic() - t), flush=True)
           '@
           $py | python -
