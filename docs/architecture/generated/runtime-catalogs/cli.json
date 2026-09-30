@@ -1177,6 +1177,18 @@
       "summary": "Read an administrator-only cached worker page; optionally refresh one bounded stale batch."
     },
     {
+      "category": "web",
+      "name": "/openrouter_account",
+      "risk": "safe",
+      "summary": "Show OpenRouter credits remaining, this key's limit and usage."
+    },
+    {
+      "category": "web",
+      "name": "/openrouter_models",
+      "risk": "safe",
+      "summary": "List OpenRouter models this key may use: id, context, USD per 1M prompt/completion tokens, tool and structured-output support."
+    },
+    {
       "category": "dev",
       "name": "/output_digest",
       "risk": "safe",

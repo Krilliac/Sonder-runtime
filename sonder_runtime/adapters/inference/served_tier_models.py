@@ -50,6 +50,14 @@ def served_prompt_model(
     for the tier label ``bind_rung`` gives the gateway; anything else, and any
     error reading the config, keeps ``model`` so the prompt never gets worse.
     """
+    if provider == "openrouter":
+        try:
+            from .openrouter_gateway import config_from_env as openrouter_config
+
+            served = openrouter_config(env).model_for_tier(str(tier or ""))
+        except Exception:
+            return model
+        return str(served or "").strip() or model
     if provider != "sonder_inference":
         return model
     try:
@@ -78,6 +86,18 @@ def served_tier_models(tiers: Mapping[str, str], env: Mapping[str, str] | None =
             for name in inference_tiers:
                 model = settings.tier_models.get(name, settings.model)
                 served[name] = "%s (sonder_inference)" % model
+        router_tiers = [
+            name for name, provider in bindings.tier_providers.items()
+            if provider == "openrouter"
+        ]
+        if router_tiers:
+            from .openrouter_gateway import config_from_env as openrouter_config
+
+            router = openrouter_config(env)
+            for name in router_tiers:
+                routed = router.model_for_tier(name)
+                if routed:
+                    served[name] = "%s (openrouter)" % routed
     except Exception:
         served = dict(tiers)
     observed = _OBSERVED.get()

@@ -155,6 +155,12 @@ redacted configuration. Annotated examples are in
 [`packaging/sonder.env.example`](packaging/sonder.env.example); the full
 reference is [configuration](docs/wiki/03-configuration.md).
 
+Tiers can optionally be routed to hosted models through
+[OpenRouter](docs/integration/openrouter.md): off by default, it needs
+`OPENROUTER_API_KEY`, the explicit `SONDER_ALLOW_CLOUD=1` opt-in and a tier
+binding, and sends privacy-first routing preferences (no prompt logging,
+zero data retention) unless overridden.
+
 ## Security model
 
 Sonder can execute code and modify files on the host, so access to a Sonder

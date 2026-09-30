@@ -30,6 +30,13 @@ _LIVE_PROVIDER_VARIABLES = (
     "SONDER_INFERENCE_MODEL",
     "SONDER_INFERENCE_API_KEY",
     "SONDER_TEST_INFERENCE_URL",
+    "OPENROUTER_API_KEY",
+    "SONDER_OPENROUTER_BASE_URL",
+    "SONDER_OPENROUTER_MODEL",
+    "SONDER_OPENROUTER_TIER_MODELS",
+    "SONDER_OPENROUTER_PROVIDER",
+    "SONDER_OPENROUTER_PROVIDER_ORDER",
+    "SONDER_OPENROUTER_TIER_PROVIDER",
 )
 _CAPTURED_LIVE_PROVIDER_ENV = {
     name: os.environ[name]
@@ -48,6 +55,9 @@ def _clear_ambient_deployment_variables() -> None:
         if (_ambient_variable.upper().startswith(("SONDER_", "OLLAMA_"))
                 and _ambient_variable.upper() not in _HARNESS_VARIABLES):
             os.environ.pop(_ambient_variable, None)
+    # A hosted-provider key outside the SONDER_ namespace: tests must never
+    # see (or send) an operator's real key.
+    os.environ.pop("OPENROUTER_API_KEY", None)
 
 
 _clear_ambient_deployment_variables()
