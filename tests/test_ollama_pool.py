@@ -279,7 +279,7 @@ def test_server_posts_through_the_pool_selected_origin(monkeypatch):
         origins = ("http://127.0.0.1:11434", "https://worker.example:11434")
         model_hints = []
 
-        def request(self, sender, *, model=None, idempotent=False):
+        def request(self, sender, *, model=None, idempotent=False, payload=None):
             self.model_hints.append(model)
             return sender("https://worker.example:11434")
 
@@ -645,6 +645,9 @@ def test_local_only_never_reaches_the_pool_even_with_remote_workers(monkeypatch)
 
         def request(self, _sender):
             pytest.fail("local_only requests must bypass the worker pool entirely")
+
+        def request_primary(self, sender, **_kwargs):
+            return sender(server.BASE)
 
     class Response:
         def __enter__(self):

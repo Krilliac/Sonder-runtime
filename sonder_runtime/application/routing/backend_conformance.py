@@ -189,6 +189,7 @@ PROTOCOL_CASES = (
     BackendCapability.STRUCTURED,
     BackendCapability.CANCELLATION,
     BackendCapability.TOOL_NATIVE,
+    BackendCapability.TOOLS_WITH_SCHEMA,
     BackendCapability.TOOL_FALLBACK,
     BackendCapability.TOOL_SEQUENTIAL,
     BackendCapability.TOOL_PARALLEL,
@@ -208,7 +209,7 @@ def _protocol_passed(capability: BackendCapability, value: Mapping[str, object],
         return value.get("schema_valid") is True and value.get("response_kind") == "object"
     if capability is BackendCapability.CANCELLATION:
         return value.get("cancelled") is True and value.get("effect_stopped") is True
-    if capability is BackendCapability.TOOL_NATIVE:
+    if capability in (BackendCapability.TOOL_NATIVE, BackendCapability.TOOLS_WITH_SCHEMA):
         return value.get("tool_calls") == ["echo"] and value.get("schema_valid") is True
     if capability is BackendCapability.TOOL_FALLBACK:
         return value.get("fallback_calls") == ["echo"] and value.get("allowlisted") is True
@@ -333,6 +334,30 @@ class RecentCapabilityEvidence:
             return BackendConformanceRecord.from_dict(value) if isinstance(value, dict) else None
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return None
+
+    @property
+    def revision(self):
+        """Observe atomic replacement, including a refresh in another process."""
+        try:
+            stat = self.path.stat()
+        except OSError:
+            return None
+        return (stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
+
+    def has_fresh_failure(self, backend: str, model: str, required, *, now=None) -> bool:
+        """Whether observing identity could exclude an advisory candidate.
+
+        This is only a cheap prefilter; assess() still verifies the live identity
+        before a saved failure can affect routing.
+        """
+        record = self.load(backend, model)
+        current = time.time() if now is None else float(now)
+        return bool(
+            record is not None and not record.synthetic and record.identity is not None
+            and math.isfinite(current)
+            and 0 <= current - record.checked_at <= self.max_age_seconds
+            and record.failed.intersection(required)
+        )
 
     def check(self, model: str, required: frozenset[Capability], *, backend: str = "local",
               now: float | None = None, identity: BackendIdentity | None = None):

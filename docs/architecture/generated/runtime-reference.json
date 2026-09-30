@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "40ec5cd42dcecb6e84bdf80c5672b13c841bff0db6f65cb648e947eed1e4209e",
+    "catalog_digest": "b6fa46fe22c722de61b666798619886bab4888ebe43da37dc880f8dab4ad7a5f",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "40ec5cd42dcecb6e84bdf80c5672b13c841bff0db6f65cb648e947eed1e4209e",
+      "catalog_digest": "b6fa46fe22c722de61b666798619886bab4888ebe43da37dc880f8dab4ad7a5f",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -5555,6 +5555,19 @@
               "prompt": {
                 "title": "Prompt",
                 "type": "string"
+              },
+              "request_payload": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Request Payload"
               }
             },
             "required": [
@@ -14459,6 +14472,12 @@
           "name": "prompt",
           "required": true,
           "type": "str"
+        },
+        {
+          "default": null,
+          "name": "request_payload",
+          "required": false,
+          "type": "str"
         }
       ],
       "risk": "ask",
@@ -18534,7 +18553,7 @@
     "schemas": 4,
     "tools": 223
   },
-  "digest": "7a81c9e02cf6c51d26799cf897c9f504146d0237cf2e5239fc5d027cba33cb90",
+  "digest": "71306af9c7070eaed55a60964a0d4f611c131b15aa54b727b3812fa7490e33f3",
   "events": [
     {
       "name": "session.started",
@@ -21145,9 +21164,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "40ec5cd42dcecb6e84bdf80c5672b13c841bff0db6f65cb648e947eed1e4209e",
+    "catalog_digest": "b6fa46fe22c722de61b666798619886bab4888ebe43da37dc880f8dab4ad7a5f",
     "client": {
-      "digest": "40ec5cd42dcecb6e84bdf80c5672b13c841bff0db6f65cb648e947eed1e4209e",
+      "digest": "b6fa46fe22c722de61b666798619886bab4888ebe43da37dc880f8dab4ad7a5f",
       "events": [
         {
           "name": "approval.denied",
@@ -29134,6 +29153,19 @@
               "prompt": {
                 "title": "Prompt",
                 "type": "string"
+              },
+              "request_payload": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Request Payload"
               }
             },
             "required": [
@@ -37584,6 +37616,19 @@
               "prompt": {
                 "title": "Prompt",
                 "type": "string"
+              },
+              "request_payload": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Request Payload"
               }
             },
             "required": [
@@ -45216,6 +45261,19 @@
                 "prompt": {
                   "title": "Prompt",
                   "type": "string"
+                },
+                "request_payload": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Request Payload"
                 }
               },
               "required": [
@@ -47418,7 +47476,7 @@
   },
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "6be05f104304b0db7c2d8556d4eb74bd89badb64f64fdabeaa18f8bc4e1a6ee4",
+    "server.py": "a13f4db89b8125505d137a4aec1bca085e5a3d178744f37b5484bb573b516f9e",
     "sonder_runtime/application/tools/generated_catalogs.py": "0cb58ae27e9f0e56102282b7e2a5b7b8a9d955a4322055e87d18d3970fe644d8",
     "sonder_runtime/bootstrap/native_mcp.py": "70ff163345c30e4b379a77af0eaddbe8a51d3d93e001b68d538f09f5c6c4ee9f",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
@@ -52585,6 +52643,19 @@
           "prompt": {
             "title": "Prompt",
             "type": "string"
+          },
+          "request_payload": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Request Payload"
           }
         },
         "required": [

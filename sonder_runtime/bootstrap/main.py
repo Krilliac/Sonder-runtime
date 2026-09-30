@@ -11,6 +11,7 @@ from ..adapters import runtime_capabilities as caps
 from ..adapters.cli_options import parse_args
 from ..adapters.runtime_configuration import build_config_from_env
 from ..adapters.runtime_capabilities import RuntimeCapabilities
+from ..adapters.inference.capability_evidence import load_production_evidence
 from .container import build_runtime
 
 logger = logging.getLogger(__name__)
@@ -41,7 +42,11 @@ def main(argv: list[str] | None = None) -> int:
     logger.debug(f"building config from env, profile={args.profile!r}")
     config = build_config_from_env(args.profile)
     logger.debug("building runtime container")
-    _runtime = build_runtime(config, runtime_caps)
+    _runtime = build_runtime(
+        config, runtime_caps,
+        route_evidence=load_production_evidence(config.sonder_home),
+        production_route_policy=True,
+    )
     logger.info("runtime container built successfully")
     logger.debug("runtime container built successfully")
     return 0
