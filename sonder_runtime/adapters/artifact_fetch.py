@@ -498,16 +498,19 @@ def _authenticode_signature(path, *, timeout=60.0):
         }
     literal = str(path).replace("'", "''")
     # Load the two cmdlets' modules explicitly from the verifier's own
-    # $PSHOME and call them module-qualified. Left to command-discovery
-    # autoload, PowerShell first analyzes every module on the default module
-    # path; on a host with many installed modules (hosted CI images) that
-    # costs ~18 s per verifier process and pushed loaded runs past the
-    # timeout below. Importing by $PSHOME path also means a same-named module
-    # earlier on the user's module path cannot stand in for the verifier.
+    # $PSHOME and call them module-qualified. Any cmdlet left to
+    # command-discovery autoload (Get-AuthenticodeSignature, ConvertTo-Json,
+    # even Join-Path) makes PowerShell analyze every module on the default
+    # module path first; on a host with many installed modules (hosted CI
+    # images) that cost ~18-30 s per verifier process and pushed loaded runs
+    # past the timeout below. Import-Module is a core cmdlet and the path is
+    # built with a .NET call, so nothing here triggers discovery. Importing
+    # by $PSHOME path also means a same-named module earlier on the user's
+    # module path cannot stand in for the verifier.
     script = (
         "$ErrorActionPreference='Stop';"
         "foreach ($m in 'Microsoft.PowerShell.Security','Microsoft.PowerShell.Utility') {"
-        " Import-Module -Name (Join-Path (Join-Path (Join-Path $PSHOME 'Modules') $m) ($m + '.psd1')) };"
+        " Import-Module -Name ([IO.Path]::Combine($PSHOME, 'Modules', $m, $m + '.psd1')) };"
         "$s = Microsoft.PowerShell.Security\\Get-AuthenticodeSignature -LiteralPath '%s';"
         "$cert = $s.SignerCertificate;"
         "[pscustomobject]@{"
