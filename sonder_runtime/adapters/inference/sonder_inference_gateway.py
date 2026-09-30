@@ -1220,7 +1220,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         if not isinstance(usage, dict):
             raise DependencyUnavailable("sonder-inference returned an invalid usage object")
         timings = data.get("timings") if isinstance(data.get("timings"), dict) else {}
-        telemetry = from_openai_compatible(data)
+        telemetry = from_openai_compatible(data, with_usage=True)
         prompt_count = usage.get("prompt_tokens")
         if prompt_count is None:
             prompt_count = timings.get("prompt_n")

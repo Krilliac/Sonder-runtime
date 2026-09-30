@@ -126,17 +126,20 @@ def _draft_counts(timings: dict) -> tuple[int | None, int | None]:
     return drafted, accepted
 
 
-def from_openai_compatible(payload: dict) -> InferenceTelemetry | None:
+def from_openai_compatible(payload: dict, *, with_usage: bool = False) -> InferenceTelemetry | None:
     """Normalize the bounded ``timings`` extension used by llama.cpp peers.
 
-    Also reads ``timings.ttft_ms``, the prompt-cache counts (see
-    :func:`_prompt_cache_counts`), ``timings.draft_n``/``draft_n_accepted``
-    and the completion count.  Every absent field stays ``None`` (unknown).
+    Also reads ``timings.ttft_ms``, ``timings.cache_n`` and
+    ``timings.draft_n``/``draft_n_accepted``.  ``with_usage`` (Sonder
+    Inference) additionally reads the prompt total, cached prompt tokens and
+    completion count from ``usage`` (see :func:`_prompt_cache_counts`);
+    generic peers keep their historical timings-only telemetry.  Every absent
+    field stays ``None`` (unknown).
     """
     timings = payload.get("timings")
     if not isinstance(timings, dict):
         timings = {}
-    usage = payload.get("usage")
+    usage = payload.get("usage") if with_usage else None
     if not isinstance(usage, dict):
         usage = {}
     prompt_ms = _milliseconds(timings.get("prompt_ms"))
@@ -144,7 +147,7 @@ def from_openai_compatible(payload: dict) -> InferenceTelemetry | None:
     prompt_tokens, cached_tokens, uncached_tokens = _prompt_cache_counts(usage, timings)
     drafted, accepted = _draft_counts(timings)
     output_tokens = _count(usage.get("completion_tokens"))
-    if output_tokens is None:
+    if output_tokens is None and with_usage:
         output_tokens = _count(timings.get("predicted_n"))
     telemetry = InferenceTelemetry(
         prompt_tokens=prompt_tokens,

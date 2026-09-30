@@ -170,7 +170,7 @@ def test_table_override_and_validation():
 
 
 def test_openai_compatible_telemetry_reads_cache_ttft_and_draft_counts():
-    telemetry = from_openai_compatible({
+    telemetry = from_openai_compatible(with_usage=True, payload={
         "usage": {"prompt_tokens": 100, "completion_tokens": 20,
                   "prompt_tokens_details": {"cached_tokens": 90}},
         "timings": {"ttft_ms": 12.5, "cache_n": 1, "draft_n": 10, "draft_n_accepted": 7},
@@ -183,17 +183,19 @@ def test_openai_compatible_telemetry_reads_cache_ttft_and_draft_counts():
 
 
 def test_cache_n_is_the_fallback_and_absence_stays_unknown():
-    telemetry = from_openai_compatible({"usage": {"prompt_tokens": 50}, "timings": {"cache_n": 0}})
+    telemetry = from_openai_compatible({"usage": {"prompt_tokens": 50}, "timings": {"cache_n": 0}}, with_usage=True)
     assert (telemetry.prompt_cached_tokens, telemetry.prompt_uncached_tokens) == (0, 50)
-    unknown = from_openai_compatible({"usage": {"prompt_tokens": 50}, "timings": {"prompt_n": 50}})
+    unknown = from_openai_compatible({"usage": {"prompt_tokens": 50}, "timings": {"prompt_n": 50}}, with_usage=True)
     assert unknown.prompt_cached_tokens is None and unknown.prompt_uncached_tokens is None
     assert unknown.ttft_ms is None and unknown.draft_tokens is None
     # timings.prompt_n is never read as the prompt total (llama.cpp: uncached only).
-    assert from_openai_compatible({"timings": {"prompt_n": 50}}) is None
+    assert from_openai_compatible({"timings": {"prompt_n": 50}}, with_usage=True) is None
+    # Generic OpenAI-compatible peers keep timings-only telemetry.
+    assert from_openai_compatible({"usage": {"prompt_tokens": 50, "completion_tokens": 3}}) is None
 
 
 def test_inconsistent_counts_are_dropped_not_clamped():
-    telemetry = from_openai_compatible({
+    telemetry = from_openai_compatible(with_usage=True, payload={
         "usage": {"prompt_tokens": 5, "prompt_tokens_details": {"cached_tokens": 9}},
         "timings": {"draft_n": 2, "draft_n_accepted": 3},
     })
