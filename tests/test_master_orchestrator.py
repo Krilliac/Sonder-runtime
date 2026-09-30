@@ -306,7 +306,8 @@ def test_delegated_fanin_with_no_validated_child_refuses_synthesis(monkeypatch):
     assert result["output"].startswith("ERROR: artifact readiness barrier rejected fan-in")
 
 
-def test_delegated_missing_worker_slot_remains_visible_to_synthesis(monkeypatch):
+def test_delegated_failed_worker_is_omitted_from_synthesis_as_before(monkeypatch):
+    """A failed child publishes no output; the audit prompt matches pre-barrier behaviour."""
     original = master_orchestrator._run_worker
     prompts = []
     calls = []
@@ -325,8 +326,9 @@ def test_delegated_missing_worker_slot_remains_visible_to_synthesis(monkeypatch)
     )
     assert result["output"] == "merged"
     assert "complete worker output" in prompts[0]
-    assert "--- %s ---" % calls[1] in prompts[0]
-    assert prompts[0].count("ARTIFACT REJECTED") == 1
+    assert "--- %s ---" % calls[0] in prompts[0]
+    assert "--- %s ---" % calls[1] not in prompts[0]
+    assert "ARTIFACT REJECTED" not in prompts[0]
 
 
 def test_master_fanin_rejects_tampered_receipt_against_trusted_host_value():
@@ -492,6 +494,33 @@ def test_repository_fleet_propagates_exact_project_and_scopes_aggregation(
     assert "This is repository work, not greenfield design" in audit_prompts[0]
     assert result["output"].startswith("=== HOST AGGREGATION SCOPE ===")
     assert "project=%s" % expected in result["output"]
+
+
+def test_repository_aggregation_header_lists_only_accepted_children(monkeypatch, tmp_path):
+    monkeypatch.setattr(master_orchestrator, "parallel_worker_slots", lambda count: 1)
+    calls = []
+    monkeypatch.setattr(
+        master_orchestrator, "_run_worker",
+        _partial_readiness_worker(master_orchestrator._run_worker, calls),
+    )
+
+    def worker(_prompt, project):
+        return master_orchestrator.repository_worker_result(
+            _repository_receipt(project), project,
+        )
+
+    result = master_orchestrator.run_delegated(
+        "Audit current source files.",
+        worker_fn=worker,
+        audit_fn=lambda prompt: "scoped merge",
+        agents=2,
+        project=str(tmp_path),
+    )
+
+    header = result["output"].split("\n\n", 1)[0]
+    assert header.startswith("=== HOST AGGREGATION SCOPE ===")
+    assert "children=%s" % calls[1] in header.splitlines()
+    assert calls[0] not in header
 
 
 def test_repository_fleet_rejects_scope_receipt_from_another_project(tmp_path):

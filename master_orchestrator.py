@@ -2532,18 +2532,9 @@ def run_delegated(
             "Decisions made and Open risks, not an Evidence gaps questionnaire.",
             "",
         ])
-    for agent_id in child_ids:
-        if agent_id in rendered_outputs:
-            continue
-        readiness_errors.setdefault(
-            agent_id, "producer did not publish a completed artifact"
-        )
-        audit_prompt.extend([
-            "--- %s ---" % agent_id,
-            "[ARTIFACT REJECTED: %s; output withheld from synthesis]"
-            % readiness_errors[agent_id],
-            "",
-        ])
+    # Children that failed or aborted produced no output and, as before the
+    # readiness barrier, are not mentioned to the audit model.  Only a child
+    # that produced output rejected by the barrier gets a withheld marker.
     for agent_id, output in outputs:
         if agent_id in readiness_errors:
             audit_prompt.extend([
@@ -2576,7 +2567,9 @@ def run_delegated(
     if repository_task:
         merged = (
             "=== HOST AGGREGATION SCOPE ===\nproject=%s\nchildren=%s\n\n%s"
-            % (project_scope, ",".join(agent_id for agent_id, _ in outputs), merged)
+            % (project_scope, ",".join(
+                agent_id for agent_id, _ in outputs if agent_id not in readiness_errors
+            ), merged)
         )
     if objectives:
         aggregate_metrics = fleet_provenance.validate_aggregate_output(

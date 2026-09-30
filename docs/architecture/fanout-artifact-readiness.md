@@ -14,8 +14,11 @@ Consumers never create evidence from whatever bytes they find.
 
 Fleet and master share one synthesis boundary; `run_inline` has no worker
 fan-in. Master already sealed outputs on this base revision. The change reports
-rejected/missing slots to synthesis instead of aborting the whole join or
-omitting failed siblings. There is no extra Fleet readiness table or database read.
+readiness-rejected slots to synthesis instead of aborting the whole join.
+Children that failed or aborted without output stay omitted from the audit
+prompt exactly as before, and the repository `HOST AGGREGATION SCOPE`
+`children=` line lists only accepted children. There is no extra Fleet
+readiness table or database read.
 
 Valid slots retain the previous synthesis bytes exactly. Rejected slots
 contribute only identity/status, never output. Model fanout emits a `not_ready`
