@@ -154,37 +154,54 @@ def _strip_code(text: str) -> str:
 
 
 def _clause_joins(lowered_code_free: str) -> int:
+    # Joins are visited left to right, so the list boundaries (found once per
+    # text) are consumed with a forward-only cursor: the whole count stays
+    # linear in the text length. Stored text has no length cap -- MAX_CHARS
+    # only flags -- so a per-join rescan of the prefix would be quadratic.
+    boundaries = None
+    cursor = 0
+    start = 0
     joins = 0
     for match in _CLAUSE_JOIN.finditer(lowered_code_free):
         # Only ", and"/", or" can close a serial list; ", but"/", so"/", yet"
         # always join two clauses, however short the segment before them.
-        if match.group(1) in _LIST_CLOSERS and _closes_a_list(
-            lowered_code_free, match.start(),
-        ):
-            continue
+        if match.group(1) in _LIST_CLOSERS:
+            comma_at = match.start()
+            if boundaries is None:
+                boundaries = [
+                    b.end() for b in _LIST_BOUNDARY.finditer(lowered_code_free)
+                ]
+            while cursor < len(boundaries) and boundaries[cursor] <= comma_at:
+                start = boundaries[cursor]
+                cursor += 1
+            if _closes_a_list(lowered_code_free, start, comma_at):
+                continue
         joins += 1
     return joins
 
 
-def _closes_a_list(lowered: str, comma_at: int) -> bool:
+def _closes_a_list(lowered: str, start: int, comma_at: int) -> bool:
     """True when the ", and"/", or" at ``comma_at`` ends a serial list.
 
     "Run tests, lint, and docs checks" has an Oxford comma, not a second
     clause: an earlier comma in the same sentence and a short item (at most
-    ``_LIST_ITEM_WORDS`` words) right before the join. Semicolons and
-    sentence ends (".", "!", "?") bound the search, so "Use X; prefer Y, and
-    run Z" still counts as a join. ``lowered`` has abbreviation dots removed,
-    so "e.g." does not end the sentence here either.
+    ``_LIST_ITEM_WORDS`` words) right before the join. ``start`` is the end of
+    the last semicolon or sentence end (".", "!", "?") before the join, so
+    "Use X; prefer Y, and run Z" still counts as a join. ``lowered`` has
+    abbreviation dots removed, so "e.g." does not end the sentence here either.
+
+    Known undercount: a short introductory clause reads as a list item, so
+    "If CI is slow, rerun, and file a bug." scores one join fewer than it
+    has. Undercounting is the safe direction for a report-only flag.
     """
-    head = lowered[:comma_at]
-    start = 0
-    for boundary in _LIST_BOUNDARY.finditer(head):
-        start = boundary.end()
-    head = head[start:]
-    previous_comma = head.rfind(",")
+    # rfind stops at the nearest comma; every ", and"/", or" join is itself a
+    # comma, so successive calls scan disjoint spans (linear overall).
+    previous_comma = lowered.rfind(",", start, comma_at)
     if previous_comma < 0:
         return False
-    return len(head[previous_comma + 1:].split()) <= _LIST_ITEM_WORDS
+    return (
+        len(lowered[previous_comma + 1:comma_at].split()) <= _LIST_ITEM_WORDS
+    )
 
 
 def _claim_units(code_free: str, lowered_code_free: str) -> int:

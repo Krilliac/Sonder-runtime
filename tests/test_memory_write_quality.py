@@ -273,3 +273,25 @@ def test_report_is_fast_on_ten_thousand_facts():
 
     assert "of 10000 fact(s)" in text
     assert elapsed < 2.0, "write-quality report took %.2fs on 10k facts" % elapsed
+
+
+
+_LONG_TEXTS = {
+    # Stored text has no length cap (MAX_CHARS only flags), so one huge fact
+    # must not stall the report: the serial-list check has to stay linear.
+    "prose": "The build uses cmake, ninja, and clang for the engine targets, "
+    "or msvc when needed. " * 2_500,                    # ~210 KB of prose
+    "joins": "a, b" + ", and c" * 30_000,                # ~210 KB of joins
+}
+
+
+@pytest.mark.parametrize("name", sorted(_LONG_TEXTS))
+def test_classify_is_linear_on_one_very_long_text(name):
+    text = _LONG_TEXTS[name]
+    assert len(text) > 200_000
+    started = time.perf_counter()
+    reasons = wq.classify(text)
+    elapsed = time.perf_counter() - started
+
+    assert wq.LENGTH_OUT_OF_BOUNDS in reasons
+    assert elapsed < 1.0, "classify took %.2fs on %d chars" % (elapsed, len(text))
