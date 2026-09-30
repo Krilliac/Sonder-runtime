@@ -55,6 +55,15 @@ _CLAUSE_JOIN = re.compile(
     r";|,\s*(?:and|but|so|or|yet)\s|\s(?:but also|and also|as well as|"
     r"additionally|furthermore|moreover|whereas|in addition|plus,)\s",
 )
+# A serial list's last item ("tests, lint, and docs") is this short; a
+# longer segment before ", and" reads as a clause.
+_LIST_ITEM_WORDS = 3
+# Abbreviation dots are not sentence ends: "e.g. Ninja" or "Clang vs. MSVC"
+# must not split one claim in two. "etc." at a real sentence end then merges
+# two sentences -- an undercount, the safe direction for a report-only flag.
+_ABBREVIATION = re.compile(
+    r"\b(?:e\.g|i\.e|vs|etc|cf|approx|incl|esp|viz|resp)\.", re.IGNORECASE,
+)
 
 # A reference at the very start has no antecedent inside the text by
 # construction. "This project/repo" is exempt: facts are stored per project,
@@ -140,12 +149,39 @@ def _strip_code(text: str) -> str:
 # see the original text.
 
 
+def _clause_joins(lowered_code_free: str) -> int:
+    joins = 0
+    for match in _CLAUSE_JOIN.finditer(lowered_code_free):
+        if match.group(0).startswith(",") and _closes_a_list(
+            lowered_code_free, match.start(),
+        ):
+            continue
+        joins += 1
+    return joins
+
+
+def _closes_a_list(lowered: str, comma_at: int) -> bool:
+    """True when the ", and"/", or" at ``comma_at`` ends a serial list.
+
+    "Run tests, lint, and docs checks" has an Oxford comma, not a second
+    clause: an earlier comma in the same sentence and a short item (at most
+    ``_LIST_ITEM_WORDS`` words) right before the join. Semicolons bound the
+    search, so "Use X; prefer Y, and run Z" still counts as a join.
+    """
+    head = lowered[:comma_at]
+    head = head[max(head.rfind(";"), head.rfind(". ")) + 1:]
+    previous_comma = head.rfind(",")
+    if previous_comma < 0:
+        return False
+    return len(head[previous_comma + 1:].split()) <= _LIST_ITEM_WORDS
+
+
 def _claim_units(code_free: str, lowered_code_free: str) -> int:
-    body = code_free.strip()
+    body = _ABBREVIATION.sub(lambda m: m.group(0)[:-1], code_free).strip()
     if not body:
         return 0
     sentences = len([s for s in _SENTENCE_BREAK.split(body) if s.strip()])
-    return sentences + len(_CLAUSE_JOIN.findall(lowered_code_free))
+    return sentences + _clause_joins(lowered_code_free)
 
 
 def _unresolved(lowered: str, lowered_code_free: str) -> bool:

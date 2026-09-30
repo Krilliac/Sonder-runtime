@@ -16,6 +16,11 @@ from sonder_runtime.domain.memory import write_quality as wq
     "Prefer `a; b; c` style only inside shell snippets.",
     "Build and test with build.ps1 before pushing.",  # list "and", not a clause
     "The repo uses ruff, mypy and pytest in CI.",
+    # Abbreviation dots are not sentence breaks.
+    "Prefer a build system, e.g. Ninja. It is faster than MSBuild.",
+    "Compare Clang vs. MSVC warnings. MSVC is stricter here.",
+    # An Oxford-comma list is one claim, not a clause join.
+    "Run tests, lint, and docs checks before pushing. CI enforces it.",
 ])
 def test_atomic_text_is_not_multi_claim(text):
     assert wq.MULTI_CLAIM not in wq.classify(text)
@@ -25,6 +30,8 @@ def test_atomic_text_is_not_multi_claim(text):
     "Use pathlib for paths; prefer f-strings, and always run black before commit.",
     "The server listens on 11435. Logs go to runtime/logs. Backups run nightly.",
     "Tests live in tests/, but fixtures live in conftest.py; additionally the CI uses -n 6.",
+    # A long segment before ", and" is a clause, even after an earlier comma.
+    "Use uv, prefer ruff over flake8 for every new module, and pin mypy. CI checks it.",
 ])
 def test_conjunction_heavy_text_is_multi_claim(text):
     assert wq.MULTI_CLAIM in wq.classify(text)
