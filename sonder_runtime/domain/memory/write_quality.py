@@ -52,12 +52,13 @@ _SENTENCE_BREAK = re.compile(r"[.!?]+[\"')\]]*\s+(?=[A-Z0-9\"'(\[])")
 # is a list, not a second claim, so only the comma/semicolon-marked forms and
 # discourse connectives count.
 _CLAUSE_JOIN = re.compile(
-    r";|,\s*(?:and|but|so|or|yet)\s|\s(?:but also|and also|as well as|"
+    r";|,\s*(and|but|so|or|yet)\s|\s(?:but also|and also|as well as|"
     r"additionally|furthermore|moreover|whereas|in addition|plus,)\s",
 )
 # A serial list's last item ("tests, lint, and docs") is this short; a
 # longer segment before ", and" reads as a clause.
 _LIST_ITEM_WORDS = 3
+_LIST_CLOSERS = frozenset({"and", "or"})
 # Abbreviation dots are not sentence ends: "e.g. Ninja" or "Clang vs. MSVC"
 # must not split one claim in two. "etc." at a real sentence end then merges
 # two sentences -- an undercount, the safe direction for a report-only flag.
@@ -155,7 +156,9 @@ def _strip_code(text: str) -> str:
 def _clause_joins(lowered_code_free: str) -> int:
     joins = 0
     for match in _CLAUSE_JOIN.finditer(lowered_code_free):
-        if match.group(0).startswith(",") and _closes_a_list(
+        # Only ", and"/", or" can close a serial list; ", but"/", so"/", yet"
+        # always join two clauses, however short the segment before them.
+        if match.group(1) in _LIST_CLOSERS and _closes_a_list(
             lowered_code_free, match.start(),
         ):
             continue

@@ -36,6 +36,11 @@ def test_atomic_text_is_not_multi_claim(text):
     # item of a list that runs on into the next sentence.
     "If slow, retry! Use ruff, and pin mypy.",
     "If slow, retry? Use ruff, and pin mypy.",
+    # Only ", and"/", or" can close a serial list; ", but"/", so"/", yet"
+    # after a short segment still join two clauses.
+    "If CI fails, rerun, but check the logs first. Then file a bug.",
+    "Prefer ruff, not flake8, so CI stays fast. Pin it.",
+    "When slow, retry, yet cap the retries. Log each one.",
 ])
 def test_conjunction_heavy_text_is_multi_claim(text):
     assert wq.MULTI_CLAIM in wq.classify(text)
