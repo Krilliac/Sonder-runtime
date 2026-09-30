@@ -39,6 +39,10 @@ def test_conjunction_heavy_text_is_multi_claim(text):
     "There are two gates: lint ratchet and architecture.",  # existential "there"
     "Sonder stores facts per project in memory.db.",
     "Iterate over dict.items() when both key and value are needed.",
+    # Mid-sentence "that" is a complementizer, not a demonstrative.
+    "Ensure that file paths are absolute.",
+    "Check that one worker stays idle before merging.",
+    "Make sure that error messages include the path.",
 ])
 def test_self_contained_text_has_no_unresolved_reference(text):
     assert wq.UNRESOLVED_REFERENCE not in wq.classify(text)
@@ -71,6 +75,8 @@ def test_leading_or_backward_reference_is_unresolved(text):
     "Wait 1.5 s before retrying the socket.",               # quantity with a unit
     "Section 3.2 of the spec defines framing.",             # structural number
     "Use 4.0 as the reward threshold.",                     # imperative, not a product
+    "Returns 0.5 when the score is missing.",               # quantity lead word
+    "Default 0.7 temperature suits code tasks.",            # quantity lead word
 ])
 def test_timeless_or_dated_text_is_not_flagged_time_sensitive(text):
     assert wq.UNDATED_TIME_SENSITIVE not in wq.classify(text)

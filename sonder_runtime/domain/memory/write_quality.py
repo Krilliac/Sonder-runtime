@@ -72,12 +72,14 @@ _SCOPE_RESOLVED = re.compile(
 _EXPLETIVE_IT = re.compile(r"^it(?:\s+is|'s)\s+(?:not\s+)?\w+\s+(?:to|that)\b")
 # "There is/are ..." is existential, not a place reference.
 _EXISTENTIAL_THERE = re.compile(r"^there\s+(?:is|are|was|were|will|should|must)\b")
-# Backward references that are unresolved wherever they appear.
+# Backward references that are unresolved wherever they appear. "that file"
+# is deliberately NOT here: mid-sentence "that" is usually a complementizer
+# ("Ensure that file paths are absolute"); a leading "That file ..." is still
+# caught by _LEADING_REFERENCE.
 _BACK_REFERENCE = re.compile(
     r"\b(?:the above|as above|see above|mentioned above|shown above|"
     r"the aforementioned|as mentioned|as discussed|as noted earlier|"
-    r"same as before|the previous (?:one|answer|step|message|file|command)|"
-    r"that (?:file|one|thing|function|error|issue|command))\b",
+    r"same as before|the previous (?:one|answer|step|message|file|command))\b",
 )
 
 _TIME_WORDS = re.compile(
@@ -108,6 +110,10 @@ _NOT_A_PRODUCT = frozenset((
     "timeout", "section", "chapter", "step", "figure", "fig", "table", "page",
     "rule", "level", "phase", "stage", "item", "part", "appendix", "equation",
     "score", "threshold", "ratio", "weight", "factor", "about", "around",
+    # Sentence-initial words that lead a quantity, not a product name.
+    "default", "defaults", "return", "returns", "max", "min", "limit",
+    "retry", "multiply", "divide", "round", "temperature", "top", "cap",
+    "floor", "ceiling", "margin", "budget", "alpha", "decay", "gain",
 ))
 _DATED = re.compile(
     r"\b(?:19|20)\d{2}-\d{2}(?:-\d{2})?\b"      # 2026-08-17, 2026-08
