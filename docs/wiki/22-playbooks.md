@@ -137,6 +137,12 @@ SQLite operations only, and refuse unsafe paths and link-based redirection.
 Manually pasted secrets should be removed by the owner; the runtime never
 silently rewrites unrelated owner text to sanitize it.
 
+`<SONDER_HOME>/playbooks/` is runtime-owned control state, like the approvals
+database: the agent's file tools can neither read nor write it, so a model
+cannot forge a `status: approved` entry on disk. It proposes through
+`playbook_note` and reads through `playbook_read`; only the runtime, the
+`playbooks` command and the owner's own editor change the files.
+
 `memory_quality_report` adds a report-only playbook section when playbooks
 exist. It reports status counts, approved index bytes, exact duplicate merge
 plans, stale environment/measurement entries, and conflict candidates using

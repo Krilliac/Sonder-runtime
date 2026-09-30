@@ -64,3 +64,10 @@ def test_the_store_itself_still_writes_its_own_tree(home):
                        triggers=["build"])
     assert entry["status"] == "proposed"
     assert (home / "playbooks" / "builds.md").is_file()
+
+
+def test_file_tools_cannot_read_the_tree_either(home):
+    PlaybookStore(home).note("builds", "procedure", "Wrapper", "Always build through the wrapper script.",
+                             triggers=["build"])
+    with pytest.raises(PermissionError):
+        file_ops.read_file(str(home / "playbooks" / "builds.md"))
