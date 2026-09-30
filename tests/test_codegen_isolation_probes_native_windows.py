@@ -352,6 +352,42 @@ def _staged_restricted_runtime(root: Path, sid) -> Path:
     return python
 
 
+# NTSTATUS values a process exits with when Windows cannot initialize it at
+# all (loader or DLL initialization), before any Python code runs.
+_PROCESS_INIT_FAILURES = {
+    0xC0000022: "STATUS_ACCESS_DENIED",
+    0xC0000142: "STATUS_DLL_INIT_FAILED",
+}
+
+
+def _require_restricted_sid_process_start(selfmod_low_integrity, stage: Path) -> None:
+    """Skip only when this host cannot start ANY process under the token.
+
+    A restricting SID list holding only a fresh SID must also pass every
+    access check the loader makes (System32 DLLs, the window station and
+    desktop). Standard Windows hosts grant that SID nothing outside the
+    stage, so process initialization fails with an NTSTATUS before the
+    interpreter runs and no probe can observe anything. That is a host
+    capability, not an isolation verdict: detect it with a no-op child
+    through the very same supervisor and token, and keep every probe
+    assertion wherever the child can start.
+    """
+    result = selfmod_low_integrity.run_isolated(
+        [sys.executable, "-I", "-c", f"print({_MARKER + 'started'!r})"],
+        cwd=stage, timeout=20,
+    )
+    code = int(result.get("exit_code") or 0) & 0xFFFFFFFF
+    if (not result.get("passed") and not str(result.get("output") or "").strip()
+            and code in _PROCESS_INIT_FAILURES):
+        pytest.skip(
+            "host cannot initialize a process under a token whose only restricting "
+            f"SID is a fresh unique SID (no-op child exited {_PROCESS_INIT_FAILURES[code]} "
+            f"0x{code:08X} with no output); restricted-SID probes need a host "
+            "that grants that SID process-start access"
+        )
+    assert result["passed"] and _MARKER + "started" in str(result["output"]), result
+
+
 def test_unique_restricting_sid_profile_requires_proven_launch_and_deny_checks(
     request, monkeypatch, tmp_path,
 ):
@@ -408,6 +444,7 @@ def test_unique_restricting_sid_profile_requires_proven_launch_and_deny_checks(
             local.setattr(selfmod_low_integrity, "__file__", str(stage / "supervisor.py"))
             local.setattr(selfmod_low_integrity, "_low_token", restricted_low_token)
             local.setenv("SONDER_SELFMOD_SCRATCH_ROOT", str(stage))
+            _require_restricted_sid_process_start(selfmod_low_integrity, stage)
             try:
                 reads = _run_probe(
                     _READ_PROBE, [json.dumps({name: str(path) for name, path in paths.items()})],

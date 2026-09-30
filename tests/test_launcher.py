@@ -15,6 +15,12 @@ import pytest
 
 import sonder_launcher
 
+# Synchronization points wait for a real event, so a generous bound costs
+# nothing when the host is fast and only matters when a loaded CI runner
+# (sqlite fsync, thread start) is slow. Never a sleep: every wait returns
+# as soon as its condition holds.
+SYNC_TIMEOUT = 30.0
+
 
 def test_linux_group_liveness_ignores_zombie_only_groups(monkeypatch, tmp_path):
     monkeypatch.setattr(sonder_launcher.sys, "platform", "linux")
@@ -874,12 +880,12 @@ def test_idempotent_replay_and_single_active_operation(monkeypatch, tmp_path):
 
     def blocked(action, context_size, timeout=None):
         entered.set()
-        assert release.wait(2)
+        assert release.wait(SYNC_TIMEOUT)
         return _successful_result(action)
 
     monkeypatch.setattr(controller, "action", blocked)
     first, created = controller.submit("start", "8k", "mobile-request-0002")
-    assert created is True and entered.wait(1)
+    assert created is True and entered.wait(SYNC_TIMEOUT)
 
     replay, created = controller.submit("start", "8k", "mobile-request-0002")
     assert created is False and replay["id"] == first["id"]
@@ -889,7 +895,7 @@ def test_idempotent_replay_and_single_active_operation(monkeypatch, tmp_path):
         controller.submit("stop", "8k")
 
     release.set()
-    assert controller.wait_operation(first["id"], 2)["phase"] == "succeeded"
+    assert controller.wait_operation(first["id"], SYNC_TIMEOUT)["phase"] == "succeeded"
 
 
 def test_cross_controller_lock_does_not_steal_from_live_local_owner(
@@ -902,12 +908,12 @@ def test_cross_controller_lock_does_not_steal_from_live_local_owner(
 
     def blocked(action, context_size, timeout=None):
         entered.set()
-        assert release.wait(2)
+        assert release.wait(SYNC_TIMEOUT)
         return _successful_result(action)
 
     monkeypatch.setattr(controller, "action", blocked)
     operation, _ = controller.submit("start")
-    assert entered.wait(1)
+    assert entered.wait(SYNC_TIMEOUT)
     with sqlite3.connect(controller.db_path) as connection:
         connection.execute(
             "UPDATE sonder_launcher_operation_lock SET lease_until=0 WHERE id=1"
@@ -919,7 +925,7 @@ def test_cross_controller_lock_does_not_steal_from_live_local_owner(
         second.submit("stop")
 
     release.set()
-    assert controller.wait_operation(operation["id"], 5)["phase"] == "succeeded"
+    assert controller.wait_operation(operation["id"], SYNC_TIMEOUT)["phase"] == "succeeded"
 
 
 def test_dead_owner_is_interrupted_and_stale_worker_cannot_overwrite(
@@ -932,12 +938,12 @@ def test_dead_owner_is_interrupted_and_stale_worker_cannot_overwrite(
 
     def blocked(action, context_size, timeout=None):
         entered.set()
-        assert release.wait(2)
+        assert release.wait(SYNC_TIMEOUT)
         return _successful_result(action)
 
     monkeypatch.setattr(controller, "action", blocked)
     operation, _ = controller.submit("start")
-    assert entered.wait(1)
+    assert entered.wait(SYNC_TIMEOUT)
     with controller._threads_lock:
         worker = controller._threads[operation["id"]]
     with sqlite3.connect(controller.db_path) as connection:
@@ -952,7 +958,10 @@ def test_dead_owner_is_interrupted_and_stale_worker_cannot_overwrite(
     assert recovered.operation(operation["id"])["phase"] == "interrupted"
     assert recovered.status()["active_operation"] is None
     release.set()
-    worker.join(timeout=2)
+    worker.join(timeout=SYNC_TIMEOUT)
+    # The stale worker must have finished its overwrite attempt; otherwise the
+    # assertion below would pass only because the worker had not tried yet.
+    assert not worker.is_alive()
     assert recovered.operation(operation["id"])["phase"] == "interrupted"
 
 
@@ -972,7 +981,7 @@ def test_operation_output_and_history_are_bounded(monkeypatch, tmp_path):
             "start", idempotency_key="retention-key-%04d" % index
         )
         ids.append(operation["id"])
-        finished = controller.wait_operation(operation["id"], 2)
+        finished = controller.wait_operation(operation["id"], SYNC_TIMEOUT)
         assert len(finished["message"]) == sonder_launcher.MAX_OPERATION_OUTPUT
         assert finished["message"].startswith("[output truncated]\n")
 
@@ -1520,12 +1529,12 @@ def test_expired_hard_deadline_recovers_even_with_live_worker(monkeypatch, tmp_p
 
     def blocked(action, context_size, timeout=None):
         entered.set()
-        assert release.wait(2)
+        assert release.wait(SYNC_TIMEOUT)
         return _successful_result(action)
 
     monkeypatch.setattr(controller, "action", blocked)
     operation, _ = controller.submit("start")
-    assert entered.wait(1)
+    assert entered.wait(SYNC_TIMEOUT)
     with sqlite3.connect(controller.db_path) as connection:
         connection.execute(
             "UPDATE sonder_launcher_operations SET hard_deadline=0.5 WHERE id=?",
@@ -1535,7 +1544,7 @@ def test_expired_hard_deadline_recovers_even_with_live_worker(monkeypatch, tmp_p
     controller.recover_interrupted()
     assert controller.operation(operation["id"])["phase"] == "interrupted"
     release.set()
-    assert controller.wait_operation(operation["id"], 2)["phase"] == "interrupted"
+    assert controller.wait_operation(operation["id"], SYNC_TIMEOUT)["phase"] == "interrupted"
 
 
 def test_forced_normal_finalization_failure_uses_emergency_transaction(
@@ -1556,7 +1565,7 @@ def test_forced_normal_finalization_failure_uses_emergency_transaction(
 
     monkeypatch.setattr(controller, "_finish_operation", fail_finalize)
     operation, _ = controller.submit("start")
-    finished = controller.wait_operation(operation["id"], 2)
+    finished = controller.wait_operation(operation["id"], SYNC_TIMEOUT)
 
     assert len(calls) == len(sonder_launcher.FINALIZE_RETRY_DELAYS)
     assert finished["phase"] == "succeeded"
@@ -1589,7 +1598,7 @@ def test_total_finalization_failure_is_recovered_after_worker_exits(
     )
 
     operation, _ = controller.submit("start")
-    finished = controller.wait_operation(operation["id"], 2)
+    finished = controller.wait_operation(operation["id"], SYNC_TIMEOUT)
 
     assert finished["phase"] == "interrupted"
     assert controller.status()["active_operation"] is None

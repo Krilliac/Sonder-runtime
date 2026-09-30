@@ -393,10 +393,26 @@ class ChatThread {
     required this.messages,
   });
 
+  /// The last timestamp [ChatThread.fresh] issued as an id.
+  static int _lastIssuedMicros = 0;
+
+  /// A `chat-<microseconds>` id that is unique within this process.
+  ///
+  /// The wall clock's resolution is far coarser than a microsecond on some
+  /// platforms (Windows advances it in ticks of a millisecond or more), so
+  /// two threads created in the same tick -- the startup thread and an
+  /// immediate New chat -- would otherwise share one id and one transcript.
+  static String _uniqueId(DateTime now) {
+    var micros = now.microsecondsSinceEpoch;
+    if (micros <= _lastIssuedMicros) micros = _lastIssuedMicros + 1;
+    _lastIssuedMicros = micros;
+    return 'chat-$micros';
+  }
+
   factory ChatThread.fresh({String project = 'default'}) {
     final now = DateTime.now();
     return ChatThread(
-      id: 'chat-${now.microsecondsSinceEpoch}',
+      id: _uniqueId(now),
       title: 'New chat',
       project: project.trim().isEmpty ? 'default' : project.trim(),
       createdAt: now,

@@ -4005,7 +4005,10 @@ def main(*, machine_output=False):
         previous_stdout, sys.stdout = sys.stdout, ndjson_writer
 
     last_status = None
+    # Monotonic time the idle-prompt quit window opened, plus whether the
+    # next prompt must reopen it (see the KeyboardInterrupt handler below).
     last_interrupt = [0.0]
+    reopen_quit_window = [False]
 
     while True:
         # ``/workspace`` may select/create a directory in response to a prior
@@ -4045,6 +4048,14 @@ def main(*, machine_output=False):
                         print(status)
                     last_status = status
                     prompt = _readline_prompt(_prompt_glyph())
+            if reopen_quit_window[0]:
+                # The 2 s window is for the person at the keyboard. Redrawing
+                # the status line above may be slow (it reads runtime state),
+                # so the window restarts once the prompt is actually ready
+                # instead of being spent before it is shown. A Ctrl-C that
+                # lands during the redraw still counts from the first press.
+                reopen_quit_window[0] = False
+                last_interrupt[0] = time.monotonic()
             line = _read_input(
                 prompt,
                 history=input_history,
@@ -4074,6 +4085,7 @@ def main(*, machine_output=False):
                     print()
                 break
             last_interrupt[0] = now
+            reopen_quit_window[0] = True
             print()
             print(_paint("(Ctrl-C again or /exit to quit)", "muted"))
             continue
