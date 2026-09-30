@@ -19,6 +19,7 @@ from ...domain.routing.backend_conformance import (
 from ..context import OperationContext
 from ..ports.model_gateway import Embedding, ModelGateway, ModelRequest, ModelResponse
 from ..routing.capability_router import CapabilityRouter, RouteDecision, RoutingRequest
+from ..routing.request_capabilities import request_requirements
 from .health_and_roles import (
     GatewayRoute,
     LogicalRole,
@@ -144,6 +145,17 @@ class ModelGatewayFacade:
         if (request.tier != route.model
                 or request.options.get("model", route.model) != route.model):
             raise DependencyUnavailable("requested model differs from evidenced role route")
+        required = request_requirements({
+            **request.options, "system": request.system,
+            "messages": [*request.history, {"role": "user", "content": request.prompt}],
+        })
+        if required:
+            options = {} if self._evidence_clock is None else {"now": self._evidence_clock()}
+            verdict = self._recent_evidence.assess(
+                route.model, required, backend=route.provider_id, identity=identity, **options,
+            )
+            if verdict.state is not EvidenceState.PASSED:
+                raise DependencyUnavailable(f"request capability route refused: {verdict.reason_code}")
         return route, identity
 
     def generate(self, request: ModelRequest, context: OperationContext) -> ModelResponse:

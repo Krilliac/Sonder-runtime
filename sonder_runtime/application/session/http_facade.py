@@ -145,7 +145,8 @@ class HttpSessionFacade:
         except (IntegrityFailure, InvalidInput, QueryExportError, ValueError):
             return ""
         for item in transcript:
-            if item.role == "user" and isinstance(item.content, str) and item.content.strip():
+            if (item.role == "user" and not item.redacted
+                    and isinstance(item.content, str) and item.content.strip()):
                 text = " ".join(item.content.split())
                 if len(text) > self.TITLE_CHARS:
                     text = text[: self.TITLE_CHARS - 1].rstrip() + "\u2026"
