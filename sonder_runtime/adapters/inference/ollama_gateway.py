@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ipaddress
 import importlib
+from contextlib import nullcontext
 import logging
 import math
 import os
@@ -386,7 +387,12 @@ class OllamaGateway:
         )
         started = time.monotonic()
         try:
-            text = gen(request.prompt, list(request.history) or None)
+            admission = (
+                ollama_pool.local_agent_admission(timeout_seconds=context.remaining_seconds)
+                if context.source == "worker" and not cloud else nullcontext()
+            )
+            with admission:
+                text = gen(request.prompt, list(request.history) or None)
         except ModelCallError as exc:
             logger.debug(f"OllamaGateway.generate: ModelCallError kind={getattr(exc, 'kind', 'unknown')!r}")
             if getattr(exc, "transient", False):
