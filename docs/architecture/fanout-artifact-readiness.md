@@ -20,7 +20,10 @@ omitting failed siblings. There is no extra Fleet readiness table or database re
 Valid slots retain the previous synthesis bytes exactly. Rejected slots
 contribute only identity/status, never output. Model fanout emits a `not_ready`
 source; master emits an `ARTIFACT REJECTED` marker; parallel generation emits
-`NOT READY` and cannot select that code. When there is no usable output, the
+`NOT READY` for a candidate that claimed success without valid evidence and
+cannot select that code. Candidates that already failed are not artifacts: they
+are never sealed, never selected, and keep their pre-fan-in diagnostics
+byte-for-byte. When there is no usable output, the
 no-result/refusal behavior remains explicit. Active model fanout runs still
 cannot be synthesized.
 

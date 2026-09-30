@@ -61,7 +61,8 @@ behaviour before commit.
 Added or expanded tests exercise complete-valid parity, stored-byte tampering,
 storage/provider truncation, still-writing/missing slots, stale/cross-run
 evidence, configured-verifier receipt requirements and independent receipt
-matching. Candidate tests prove rejected code cannot become a winner and that
+matching. Candidate tests prove rejected code cannot become a winner, that
+already-failed candidates render byte-identically to the base revision, and that
 two concurrent generator calls cannot exchange completion metadata.
 
 Role tests cover all six built-in defaults, the critic adapter, explicit CLEAN
