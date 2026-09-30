@@ -137,8 +137,10 @@ on the 0–1000 grid.
 
 - **Untrusted panes.** Documents, web views (and everything inside them) and
   edit fields are marked `content-untrusted`: their text is withheld
-  (`value=withheld`) and names inside them are clipped, so page text never
-  reaches a planner. Password values are never shown. The whole table is
+  (`value=withheld`), static text inside them is not listed, and only the
+  actionable controls inside them (links, buttons, fields) are listed, with
+  clipped names. Page text reaches a planner only as the short accessible
+  name of something it could act on. Password values are never shown. The whole table is
   returned inside the untrusted-observation envelope.
 - **Acting by ref.** `ui_action(action=..., ref=...)` passes every layer above
   (configuration, the tool gate, the live-session re-proof, the budget, the

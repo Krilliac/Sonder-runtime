@@ -9,8 +9,11 @@ the state change an action caused.
 
 Control names and values come from the screen, so they are untrusted data.
 The table is always handed to callers inside the untrusted-observation
-envelope, and the content of documents, web views and edit fields is withheld
-from it entirely (role and name only), so page text never reaches a planner.
+envelope. The content of documents, web views and edit fields is withheld:
+their values are never shown, static text inside them is not listed, and the
+actionable controls inside them (links, buttons, fields) are listed with
+clipped names marked untrusted, so page text reaches a planner only as the
+short accessible name of something it could act on.
 Like the vision reading, a control's name can only *add* a confirmation.
 """
 from __future__ import annotations
@@ -166,8 +169,18 @@ def _state(raw: RawControl) -> list[str]:
     return state
 
 
-def _worth_a_row(raw: RawControl) -> bool:
-    return bool(raw.patterns & PATTERNS) or raw.role in _INTERACTIVE or bool(clean_text(raw.name))
+def _actionable(raw: RawControl) -> bool:
+    return bool(raw.patterns & PATTERNS) or raw.role in _INTERACTIVE
+
+
+def _worth_a_row(raw: RawControl, in_content: bool) -> bool:
+    if in_content and raw.role not in _CONTENT_ROLES:
+        # Inside a document, web view or edit pane a named control that cannot
+        # be acted on is page text (every text run is a Text control whose name
+        # is the text): it is not listed. Actionable controls (links, buttons,
+        # fields) are, with their names clipped and marked untrusted.
+        return _actionable(raw)
+    return _actionable(raw) or bool(clean_text(raw.name))
 
 
 def build_table(raws, *, window, max_rows: int = MAX_ROWS) -> ControlTable:
@@ -188,7 +201,7 @@ def build_table(raws, *, window, max_rows: int = MAX_ROWS) -> ControlTable:
         if raw.parent < 0 or raw.offscreen or not raw.runtime_id:
             continue
         clipped = _clip(raw.rect, window)
-        if clipped is None or not _worth_a_row(raw):
+        if clipped is None or not _worth_a_row(raw, hidden_text):
             continue
         visible += 1
         if len(rows) >= max_rows:
