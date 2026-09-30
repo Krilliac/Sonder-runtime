@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 380,
+      "file_count": 385,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -346,6 +346,11 @@
         "sonder_runtime/adapters/persistence/terminal_output.py",
         "sonder_runtime/adapters/persistence/tool_audit.py",
         "sonder_runtime/adapters/persistence/worker_effect_hosts.py",
+        "sonder_runtime/adapters/playbook_maintenance.py",
+        "sonder_runtime/adapters/playbook_review.py",
+        "sonder_runtime/adapters/playbook_search.py",
+        "sonder_runtime/adapters/playbook_store.py",
+        "sonder_runtime/adapters/playbook_telemetry.py",
         "sonder_runtime/adapters/preference_adapters.py",
         "sonder_runtime/adapters/preference_codec.py",
         "sonder_runtime/adapters/preflight.py",
@@ -429,7 +434,7 @@
       ]
     },
     {
-      "file_count": 390,
+      "file_count": 391,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -582,6 +587,7 @@
         "sonder_runtime/application/memory/learning_ladder.py",
         "sonder_runtime/application/memory/memory_policy.py",
         "sonder_runtime/application/memory/outcome_service.py",
+        "sonder_runtime/application/memory/playbook_context.py",
         "sonder_runtime/application/memory/procedural_learning.py",
         "sonder_runtime/application/memory/recall_service.py",
         "sonder_runtime/application/memory/receipt_observation.py",
@@ -825,7 +831,7 @@
       ]
     },
     {
-      "file_count": 67,
+      "file_count": 69,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -884,6 +890,8 @@
         "sonder_runtime/bootstrap/openrouter_cli.py",
         "sonder_runtime/bootstrap/openrouter_tools.py",
         "sonder_runtime/bootstrap/owned_http_runtime.py",
+        "sonder_runtime/bootstrap/playbook_context.py",
+        "sonder_runtime/bootstrap/playbooks.py",
         "sonder_runtime/bootstrap/prepared_workbench.py",
         "sonder_runtime/bootstrap/provider_bindings.py",
         "sonder_runtime/bootstrap/repl_host_selection.py",
@@ -898,7 +906,7 @@
       ]
     },
     {
-      "file_count": 263,
+      "file_count": 264,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1055,6 +1063,7 @@
         "sonder_runtime/domain/memory/__init__.py",
         "sonder_runtime/domain/memory/authoritative_fact_metadata.py",
         "sonder_runtime/domain/memory/governance.py",
+        "sonder_runtime/domain/memory/playbooks.py",
         "sonder_runtime/domain/memory/replication.py",
         "sonder_runtime/domain/memory/retention_gate.py",
         "sonder_runtime/domain/memory/rules.py",
@@ -1167,7 +1176,7 @@
       ]
     },
     {
-      "file_count": 71,
+      "file_count": 72,
       "name": "interfaces",
       "python_files": [
         "sonder_runtime/interfaces/__init__.py",
@@ -1179,6 +1188,7 @@
         "sonder_runtime/interfaces/cli/commands.py",
         "sonder_runtime/interfaces/cli/extensions.py",
         "sonder_runtime/interfaces/cli/headless.py",
+        "sonder_runtime/interfaces/cli/playbooks.py",
         "sonder_runtime/interfaces/editor/__init__.py",
         "sonder_runtime/interfaces/editor/transport.py",
         "sonder_runtime/interfaces/http/__init__.py",
@@ -1244,7 +1254,7 @@
       ]
     },
     {
-      "file_count": 48,
+      "file_count": 49,
       "name": "platform",
       "python_files": [
         "sonder_runtime/platform/__init__.py",
@@ -1277,6 +1287,7 @@
         "sonder_runtime/platform/netns_probe.py",
         "sonder_runtime/platform/npu_policy.py",
         "sonder_runtime/platform/paths.py",
+        "sonder_runtime/platform/playbooks_config.py",
         "sonder_runtime/platform/private_cot_policy.py",
         "sonder_runtime/platform/private_files.py",
         "sonder_runtime/platform/process.py",

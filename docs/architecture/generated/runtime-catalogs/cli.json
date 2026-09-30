@@ -1261,6 +1261,24 @@
       "summary": "show/set active persona (coder/explainer/reviewer/teacher)"
     },
     {
+      "category": "memory",
+      "name": "/playbook_note",
+      "risk": "ask",
+      "summary": "Record a non-obvious discovery that saves time or prevents mistakes; include evidence, commands and dates, one idea per entry, in an existing topic."
+    },
+    {
+      "category": "memory",
+      "name": "/playbook_read",
+      "risk": "safe",
+      "summary": "Read bounded approved owner notes for one relevant topic."
+    },
+    {
+      "category": "memory",
+      "name": "/playbooks",
+      "risk": "dangerous",
+      "summary": ""
+    },
+    {
       "category": "diagnostics",
       "name": "/policy_explain",
       "risk": "safe",

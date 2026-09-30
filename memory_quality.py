@@ -515,6 +515,12 @@ def audit_with_write_quality(conn):
     """
     report = audit(conn)
     report["write_quality"] = write_quality_findings(conn)
+    from sonder_runtime.bootstrap.playbooks import quality_report
+    playbooks = quality_report(conn, detect_conflicts=lesson_decay.detect_contradictions)
+    if playbooks is not None:
+        from sonder_runtime.bootstrap.playbook_context import metrics
+        playbooks["session_loads"] = metrics()
+        report["playbooks"] = playbooks
     return report
 
 
@@ -613,6 +619,9 @@ def format_audit(report, sample_limit=5):
         lines.append("  use memory_privacy_repair with explicit lesson IDs; dry-run first.")
     if "write_quality" in report:
         lines.extend(_format_write_quality(report["write_quality"], sample_limit))
+    if "playbooks" in report:
+        from sonder_runtime.adapters.playbook_maintenance import format_report
+        lines.extend(format_report(report["playbooks"]))
     return "\n".join(lines)
 
 

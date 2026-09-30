@@ -1604,6 +1604,8 @@ _ACCOUNT_GLOBAL_MEMORY_TOOLS = frozenset((
     "sonder_remember_fact",
     "sonder_sessions",
     "sonder_stats",
+    "playbook_note",
+    "playbook_read",
 ))
 
 
