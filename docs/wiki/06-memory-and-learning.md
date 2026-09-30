@@ -105,7 +105,8 @@ instruction.
   old whose age-decayed effective score fell below a floor — experimental,
   diagnostics only), and **duplicate facts** (per-project only; removal stays
   with `sonder_forget_fact`). A trailing **write quality** section counts
-  facts and lessons that are not atomic (several chained claims), not
+  facts and lessons that are not atomic (several chained claims; a serial
+  "a, b, and c" list or an abbreviation such as "e.g." is not one), not
   self-contained (open with an unresolved "this"/"it"/"the above"), mention
   something time-sensitive ("currently", "latest", a version) without a date,
   or fall outside the length bounds. It is lexical, local and report-only:

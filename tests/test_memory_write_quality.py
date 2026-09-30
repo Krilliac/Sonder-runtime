@@ -16,6 +16,11 @@ from sonder_runtime.domain.memory import write_quality as wq
     "Prefer `a; b; c` style only inside shell snippets.",
     "Build and test with build.ps1 before pushing.",  # list "and", not a clause
     "The repo uses ruff, mypy and pytest in CI.",
+    # Abbreviation dots are not sentence breaks.
+    "Prefer a build system, e.g. Ninja. It is faster than MSBuild.",
+    "Compare Clang vs. MSVC warnings. MSVC is stricter here.",
+    # An Oxford-comma list is one claim, not a clause join.
+    "Run tests, lint, and docs checks before pushing. CI enforces it.",
 ])
 def test_atomic_text_is_not_multi_claim(text):
     assert wq.MULTI_CLAIM not in wq.classify(text)
@@ -25,6 +30,17 @@ def test_atomic_text_is_not_multi_claim(text):
     "Use pathlib for paths; prefer f-strings, and always run black before commit.",
     "The server listens on 11435. Logs go to runtime/logs. Backups run nightly.",
     "Tests live in tests/, but fixtures live in conftest.py; additionally the CI uses -n 6.",
+    # A long segment before ", and" is a clause, even after an earlier comma.
+    "Use uv, prefer ruff over flake8 for every new module, and pin mypy. CI checks it.",
+    # "!" and "?" end a sentence for the list check too: "retry" is not an
+    # item of a list that runs on into the next sentence.
+    "If slow, retry! Use ruff, and pin mypy.",
+    "If slow, retry? Use ruff, and pin mypy.",
+    # Only ", and"/", or" can close a serial list; ", but"/", so"/", yet"
+    # after a short segment still join two clauses.
+    "If CI fails, rerun, but check the logs first. Then file a bug.",
+    "Prefer ruff, not flake8, so CI stays fast. Pin it.",
+    "When slow, retry, yet cap the retries. Log each one.",
 ])
 def test_conjunction_heavy_text_is_multi_claim(text):
     assert wq.MULTI_CLAIM in wq.classify(text)
@@ -257,3 +273,25 @@ def test_report_is_fast_on_ten_thousand_facts():
 
     assert "of 10000 fact(s)" in text
     assert elapsed < 2.0, "write-quality report took %.2fs on 10k facts" % elapsed
+
+
+
+_LONG_TEXTS = {
+    # Stored text has no length cap (MAX_CHARS only flags), so one huge fact
+    # must not stall the report: the serial-list check has to stay linear.
+    "prose": "The build uses cmake, ninja, and clang for the engine targets, "
+    "or msvc when needed. " * 2_500,                    # ~210 KB of prose
+    "joins": "a, b" + ", and c" * 30_000,                # ~210 KB of joins
+}
+
+
+@pytest.mark.parametrize("name", sorted(_LONG_TEXTS))
+def test_classify_is_linear_on_one_very_long_text(name):
+    text = _LONG_TEXTS[name]
+    assert len(text) > 200_000
+    started = time.perf_counter()
+    reasons = wq.classify(text)
+    elapsed = time.perf_counter() - started
+
+    assert wq.LENGTH_OUT_OF_BOUNDS in reasons
+    assert elapsed < 1.0, "classify took %.2fs on %d chars" % (elapsed, len(text))

@@ -152,6 +152,41 @@ eligibility) also treat any configured remote worker as non-local, not just a
 non-loopback primary — a loopback primary with a remote worker in
 `SONDER_OLLAMA_WORKERS` is reported and cached as remote.
 
+## Dedicated embedding host
+
+Embeddings do not use the pool: they go to one origin. By default that origin
+is the primary. On a machine whose GPU holds one large chat model, every
+embedding there competes with that model. With `OLLAMA_MAX_LOADED_MODELS=1`,
+Ollama unloads the chat model for it. To move only the embedder to a worker:
+
+```text
+SONDER_EMBED_BASE_URL=https://10.77.0.2:8443   # worker behind a TLS proxy
+SONDER_ALLOW_REMOTE_OLLAMA=1
+SONDER_OLLAMA_CA_BUNDLE=C:\path\to\worker-ca.pem
+SONDER_EMBED_MODEL=nomic-embed-text:latest     # must be installed on the worker
+SONDER_EMBED_FALLBACK=none                     # or: local (CPU on the primary)
+SONDER_EMBED_KEEP_ALIVE=24h                    # keep the embedder resident there
+```
+
+- Without `SONDER_EMBED_KEEP_ALIVE`, Ollama unloads an idle embedder after
+  five minutes. A worker that is busy with other work can take tens of seconds
+  to reload it, which is longer than recall callers wait.
+
+- A worker that is down costs one timed-out call, then a
+  `SONDER_EMBED_COOLDOWN_SECONDS` circuit (default 30 s). A 4xx, such as a
+  missing model, is a configuration error. It never triggers the fallback.
+- `SONDER_EMBED_FALLBACK=local` never sends embeddings to a second remote
+  host. It only uses a loopback primary, with `num_gpu: 0`.
+- Stored vectors carry model and revision provenance. Using the same model tag
+  on both hosts keeps them comparable. A different model needs the usual
+  explicit backfill.
+- `memory_embedding_backfill`, semantic tier routing, and the learning-health
+  revision refresh are loopback-only by design, so they stay off while the
+  embedder is remote. For a backfill, unset `SONDER_EMBED_BASE_URL` for that
+  run.
+- `sonder doctor` reports the `embeddings` check: whether the model is
+  installed where embeddings go, and whether the fallback is ready.
+
 ## Verify
 
 The normal status surface is a cached summary: eligible/total workers, available

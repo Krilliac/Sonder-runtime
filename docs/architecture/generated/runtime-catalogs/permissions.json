@@ -1,5 +1,5 @@
 {
-  "note": "execution_class and effects are what each tool descriptor declares. A descriptor that declares neither reads as execution_class 'pure' with no effects, so an entry of that shape is not evidence that the tool is side-effect free (process-launching and network tools can appear that way). This projection is published for inspection and is not the enforcement point.",
+  "note": "execution_class and effects are what each tool descriptor declares. A descriptor that declares neither reads as execution_class 'pure' with no effects, so an entry of that shape is not evidence that the tool is side-effect free (process-launching and network tools can appear that way). This projection is published for inspection and is not the enforcement point. Internal tri-state traits distinguish unknown effects from host-declared read-only behavior; they are not part of this public version-1 projection, and unknown traits are conservative.",
   "schema": "sonder-tool-permissions-v1",
   "tools": [
     {

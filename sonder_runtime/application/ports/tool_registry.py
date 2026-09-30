@@ -12,6 +12,7 @@ from typing import Any, Iterable, Protocol
 
 from ...domain.common.errors import Conflict, Forbidden, InvalidInput, NotFound
 from ...domain.tools.descriptors import ExecutionClass, ToolEffect
+from ...domain.tools.traits import ToolTraits, traits_from_effects
 
 
 @dataclass(frozen=True)
@@ -28,8 +29,13 @@ class ToolDescriptor:
     input_schema: dict[str, Any] = field(default_factory=dict)
     effects: frozenset[ToolEffect] = field(default_factory=frozenset)
     execution_class: ExecutionClass = ExecutionClass.PURE
+    traits: ToolTraits | None = None
 
     def __post_init__(self) -> None:
+        if self.traits is None:
+            object.__setattr__(self, "traits", traits_from_effects(self.effects))
+        elif not isinstance(self.traits, ToolTraits):
+            raise InvalidInput("tool traits must be ToolTraits")
         if not self.name or self.name.strip() != self.name:
             raise InvalidInput("tool name must be a non-empty trimmed string")
         if not isinstance(self.input_schema, dict):
@@ -101,6 +107,7 @@ class ExecutableToolInventory:
                     input_schema=deepcopy(item.input_schema),
                     effects=frozenset(item.effects),
                     execution_class=item.execution_class,
+                    traits=item.traits,
                 )
                 for item in self.descriptors
             ),

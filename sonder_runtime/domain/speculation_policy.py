@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from .tools.builtin_traits import builtin_traits
+from .tools.traits import ToolTraits
+
 
 # A speculative call must be read-only, local, and unable to spend a cloud
 # budget. Keep this allowlist closed: new tools are non-speculatable until
@@ -26,9 +29,19 @@ SPECULATABLE_TOOLS = frozenset({
 })
 
 
-def is_speculatable(tool_name: str) -> bool:
-    """Return whether a tool is safe to issue before branch resolution."""
-    return tool_name in SPECULATABLE_TOOLS
+def is_speculatable(tool_name: str, traits: ToolTraits | None = None) -> bool:
+    """Return whether a tool is safe to issue before branch resolution.
+
+    The closed host allowlist remains the legacy gate.  When metadata is
+    supplied, it is an additional gate: only a host-declared read-only trait
+    can authorize speculation.  Advisory metadata from an external server
+    therefore cannot grant this optimization.
+    """
+    if tool_name not in SPECULATABLE_TOOLS:
+        return False
+    if traits is None:
+        traits = builtin_traits(tool_name)
+    return isinstance(traits, ToolTraits) and traits.is_read_only
 
 
 __all__ = ["SPECULATABLE_TOOLS", "is_speculatable"]
