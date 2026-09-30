@@ -243,6 +243,27 @@ def test_table_is_bounded():
     assert table.truncated and table.seen == 300
 
 
+def test_colliding_short_refs_do_not_depend_on_walk_order():
+    # rid(6648) and rid(7811) share the 6-hex short ref; both must get the long
+    # form, so a ref read in one walk order names the same control in the next.
+    first, second = rid(6648), rid(7811)
+    assert controls.make_ref(first) == controls.make_ref(second)
+    root = RawControl(ROOT, 50032, "w", rect=(0, 0, 100, 100), parent=-1)
+
+    def button(runtime_id, name):
+        return RawControl(runtime_id, 50000, name, rect=(0, 0, 10, 10),
+                          patterns=frozenset({"invoke"}), parent=0)
+
+    a = controls.build_table([root, button(first, "Keep"), button(second, "Delete")],
+                             window=(0, 0, 100, 100))
+    b = controls.build_table([root, button(second, "Delete"), button(first, "Keep")],
+                             window=(0, 0, 100, 100))
+    refs_a = {r["name"]: r["ref"] for r in a.rows}
+    refs_b = {r["name"]: r["ref"] for r in b.rows}
+    assert refs_a == refs_b
+    assert refs_a["Keep"] == controls.make_ref(first, 12) != refs_a["Delete"]
+
+
 def test_screen_capture_returns_the_table_inside_the_untrusted_envelope(rig):
     out = _observe(rig)
     assert out["control_rows"] == 8

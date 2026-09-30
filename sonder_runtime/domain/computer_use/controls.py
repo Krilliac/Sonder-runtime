@@ -194,20 +194,26 @@ def build_table(raws, *, window, max_rows: int = MAX_ROWS) -> ControlTable:
     raws = list(raws)
     untrusted = _untrusted_flags(raws)
     wl, wt, ww, wh = (int(v) for v in window)
-    rows: list[dict] = []
-    refs: dict[str, RefEntry] = {}
-    visible = 0
+    candidates = []
     for raw, hidden_text in zip(raws, untrusted, strict=True):
         if raw.parent < 0 or raw.offscreen or not raw.runtime_id:
             continue
         clipped = _clip(raw.rect, window)
-        if clipped is None or not _worth_a_row(raw, hidden_text):
-            continue
-        visible += 1
+        if clipped is not None and _worth_a_row(raw, hidden_text):
+            candidates.append((raw, hidden_text, clipped))
+    # Every control whose short ref collides with another's gets the long
+    # form, so a ref never depends on which of the two the walk met first.
+    owners: dict[str, set] = {}
+    for raw, _, _ in candidates:
+        owners.setdefault(make_ref(raw.runtime_id), set()).add(tuple(raw.runtime_id))
+    rows: list[dict] = []
+    refs: dict[str, RefEntry] = {}
+    visible = len(candidates)
+    for raw, hidden_text, clipped in candidates:
         if len(rows) >= max_rows:
-            continue
+            break
         ref = make_ref(raw.runtime_id)
-        if ref in refs and refs[ref].runtime_id != tuple(raw.runtime_id):
+        if len(owners[ref]) > 1:
             ref = make_ref(raw.runtime_id, 12)
         if ref in refs:
             continue
