@@ -1,5 +1,6 @@
 import asyncio
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,8 +11,10 @@ from sonder_runtime.adapters.external_mcp import (
     ExternalMcpServerPolicy,
     ExternalMcpToolPolicy,
     policies_from_mapping,
+    traits_from_mcp_annotations,
 )
 import sonder_runtime.adapters.external_mcp as external_mcp
+from sonder_runtime.domain.tools.traits import TriState
 
 
 class RecordingEvents:
@@ -243,6 +246,16 @@ def test_host_config_builds_only_the_explicit_allowlist():
     assert policies[0].credential_env == "SONDER_DOCS_MCP_TOKEN"
 
 
+def test_host_config_null_read_only_is_not_treated_as_omission():
+    with pytest.raises(ValueError, match="read_only must be a Boolean"):
+        policies_from_mapping({
+            "servers": [{
+                "name": "docs", "endpoint": "http://127.0.0.1:8765/mcp",
+                "tools": [{"name": "lookup", "read_only": None}],
+            }]
+        })
+
+
 @pytest.mark.parametrize("value", ["false", "true", 0, 1, None])
 def test_remote_consent_requires_an_actual_boolean(value):
     with pytest.raises(ValueError, match="allow_remote must be a Boolean"):
@@ -357,3 +370,161 @@ def test_observability_failure_does_not_change_completed_call_semantics():
 def test_host_config_requires_an_object():
     with pytest.raises(ValueError, match="must be an object"):
         policies_from_mapping([])
+
+
+def test_mcp_annotations_omit_hints_as_unknown_and_reject_malformed_values():
+    omitted = traits_from_mcp_annotations({})
+    assert omitted.read_only is TriState.UNKNOWN
+    assert omitted.destructive is TriState.UNKNOWN
+    assert omitted.idempotent is TriState.UNKNOWN
+    assert omitted.open_world is TriState.UNKNOWN
+
+    malformed = traits_from_mcp_annotations({"readOnlyHint": "true", "idempotentHint": 1})
+    assert malformed.read_only is TriState.UNKNOWN
+    assert malformed.idempotent is TriState.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    "hint, expected",
+    [(True, TriState.TRUE), (False, TriState.FALSE), (None, TriState.UNKNOWN)],
+)
+def test_each_mcp_hint_is_strictly_tri_state(hint, expected):
+    for name in ("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"):
+        annotations = {} if hint is None else {name: hint}
+        traits = traits_from_mcp_annotations(annotations)
+        assert getattr(traits, {
+            "readOnlyHint": "read_only", "destructiveHint": "destructive",
+            "idempotentHint": "idempotent", "openWorldHint": "open_world",
+        }[name]) is expected
+
+
+def test_sdk_defaulted_annotations_are_unknown_when_not_set():
+    annotations = SimpleNamespace(
+        readOnlyHint=False, destructiveHint=True,
+        idempotentHint=False, openWorldHint=True,
+        model_fields_set=set(),
+    )
+    traits = traits_from_mcp_annotations(annotations)
+    assert traits.read_only is TriState.UNKNOWN
+    assert traits.destructive is TriState.UNKNOWN
+    assert traits.idempotent is TriState.UNKNOWN
+    assert traits.open_world is TriState.UNKNOWN
+
+
+def test_external_annotations_are_advisory_and_do_not_grant_read_only_authority():
+    writable = ExternalMcpToolPolicy("lookup", read_only=False, capabilities=("read", "mutate"))
+    server = _server(tools=(writable,))
+    bridge = _bridge(RecordingTransport([]), RecordingEvents(), server=server)
+    assert bridge.ingest_tool_list("docs", {
+        "tools": [{"name": "lookup", "annotations": {
+            "readOnlyHint": True, "idempotentHint": True,
+        }}]
+    }) == 1
+    traits = bridge.tool_traits("docs", "lookup")
+    assert traits is not None
+    # The host allowlist remains the authority and the external hint cannot
+    # make an otherwise writable tool eligible for speculation.
+    assert traits.host_declared is True
+    assert traits.read_only is TriState.FALSE
+    assert traits.idempotent is TriState.UNKNOWN
+
+
+def test_external_negative_annotation_can_only_make_host_read_only_more_conservative():
+    bridge = _bridge(RecordingTransport([]), RecordingEvents(), server=_server(
+        tools=(ExternalMcpToolPolicy("lookup", read_only=True),),
+    ))
+    bridge.ingest_tool_list("docs", {
+        "tools": [{"name": "lookup", "annotations": {"readOnlyHint": False}}]
+    })
+    traits = bridge.tool_traits("docs", "lookup")
+    assert traits is not None
+    assert traits.read_only is TriState.UNKNOWN
+    assert traits.may_be_destructive
+
+
+def test_omitted_host_read_only_is_unknown_until_explicitly_declared():
+    bridge = _bridge(RecordingTransport([]), RecordingEvents(), server=_server())
+    traits = bridge.tool_traits("docs", "lookup")
+    assert traits is not None
+    assert traits.read_only is TriState.UNKNOWN
+
+    explicit = _bridge(
+        RecordingTransport([]), RecordingEvents(),
+        server=_server(tools=(ExternalMcpToolPolicy("lookup", read_only=True),)),
+    )
+    explicit_traits = explicit.tool_traits("docs", "lookup")
+    assert explicit_traits is not None
+    assert explicit_traits.read_only is TriState.TRUE
+
+
+def test_server_annotation_trust_is_explicit_and_strict():
+    with pytest.raises(ValueError, match="trust_annotations must be a Boolean"):
+        _server(trust_annotations="true")
+    trusted = _server(trust_annotations=True)
+    bridge = _bridge(RecordingTransport([]), RecordingEvents(), server=trusted)
+    bridge.ingest_tool_list("docs", {
+        "tools": [{"name": "lookup", "annotations": {
+            "readOnlyHint": True, "destructiveHint": False,
+        }}]
+    })
+    traits = bridge.tool_traits("docs", "lookup")
+    assert traits is not None and traits.host_declared is True
+    assert traits.read_only is TriState.TRUE
+    with pytest.raises(ValueError, match="trusted must be a Boolean"):
+        traits_from_mcp_annotations({}, trusted="yes")
+
+
+@pytest.mark.parametrize(
+    "hint, expected",
+    [("destructiveHint", TriState.TRUE), ("openWorldHint", TriState.TRUE)],
+)
+def test_advisory_risk_hints_can_only_tighten_unknown_or_safe_host_traits(hint, expected):
+    server = _server(tools=(ExternalMcpToolPolicy("lookup", read_only=True),))
+    bridge = _bridge(RecordingTransport([]), RecordingEvents(), server=server)
+    bridge.ingest_tool_list("docs", {"tools": [{"name": "lookup", "annotations": {hint: True}}]})
+    traits = bridge.tool_traits("docs", "lookup")
+    assert traits is not None
+    assert getattr(traits, {"destructiveHint": "destructive", "openWorldHint": "open_world"}[hint]) is expected
+
+
+def test_trusted_hints_tighten_known_host_safety_but_cannot_override_mutation():
+    safe = _server(
+        trust_annotations=True,
+        tools=(ExternalMcpToolPolicy("lookup", read_only=True),),
+    )
+    bridge = _bridge(RecordingTransport([]), RecordingEvents(), server=safe)
+    bridge.ingest_tool_list("docs", {"tools": [{"name": "lookup", "annotations": {"readOnlyHint": False}}]})
+    traits = bridge.tool_traits("docs", "lookup")
+    assert traits is not None and traits.read_only is TriState.UNKNOWN
+
+    unsafe_tool = ExternalMcpToolPolicy("lookup", read_only=False, capabilities=("read", "mutate"))
+    unsafe = _bridge(
+        RecordingTransport([]), RecordingEvents(),
+        server=_server(tools=(unsafe_tool,), trust_annotations=True),
+    )
+    unsafe.ingest_tool_list("docs", {"tools": [{"name": "lookup", "annotations": {"readOnlyHint": True}}]})
+    unsafe_traits = unsafe.tool_traits("docs", "lookup")
+    assert unsafe_traits is not None and unsafe_traits.read_only is TriState.FALSE
+
+
+def test_bridge_serializes_concurrent_external_calls_by_default():
+    state = {"active": 0, "peak": 0}
+
+    class OverlapDetectingTransport:
+        async def invoke(self, request):
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+            await asyncio.sleep(0.01)
+            state["active"] -= 1
+            return {"structuredContent": {"ok": True}}
+
+    bridge = _bridge(OverlapDetectingTransport(), RecordingEvents())
+
+    async def exercise():
+        await asyncio.gather(
+            bridge.call("docs", "lookup", {}, context=_context()),
+            bridge.call("docs", "lookup", {}, context=_context()),
+        )
+
+    asyncio.run(exercise())
+    assert state["peak"] == 1

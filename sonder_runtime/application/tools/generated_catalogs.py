@@ -27,7 +27,9 @@ PERMISSIONS_NOTE = (
     "effects, so an entry of that shape is not evidence that the tool is "
     "side-effect free (process-launching and network tools can appear that "
     "way). This projection is published for inspection and is not the "
-    "enforcement point."
+    "enforcement point. Internal tri-state traits distinguish unknown effects "
+    "from host-declared read-only behavior; they are not part of this public "
+    "version-1 projection, and unknown traits are conservative."
 )
 
 
@@ -125,6 +127,7 @@ def _descriptor(tool: Any) -> ToolDescriptor:
             input_schema=dict(getattr(tool, "input_schema", {}) or {}),
             effects=frozenset(getattr(tool, "effects", frozenset())),
             execution_class=getattr(tool, "execution_class", ExecutionClass.PURE),
+            traits=getattr(tool, "traits", None),
         )
     return tool
 
@@ -185,6 +188,8 @@ class GeneratedCatalogs:
             tool for tool in tools
             if selection is None or selection.allows(tool.name)
         )
+        # Version-1 consumers validate this public shape strictly. Traits stay
+        # on internal descriptors and must not leak into SDK capabilities.
         tool_contracts = tuple({
             "description": tool.description,
             "effects": sorted(_effect_name(effect) for effect in tool.effects),
