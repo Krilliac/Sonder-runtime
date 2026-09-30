@@ -198,7 +198,7 @@ def test_model_selection_prefers_option_then_tier_map_then_default():
 
 
 @pytest.mark.parametrize("options", [
-    {"format": "json"}, {"tools": [{"type": "function"}]}, {"think": True},
+    {"format": "json"}, {"tools": [{"type": "function"}]},
     {"response_format": {"type": "json_object"}}, {"temperature": "hot"},
     {"stop": ["a", "b", "c", "d", "e"]}, {"num_predict": 1.5}, {"top_k": True},
 ])
@@ -207,6 +207,15 @@ def test_unsupported_or_invalid_options_are_refused_before_any_send(options):
     with pytest.raises(InvalidInput):
         _gateway(fake).generate(ModelRequest(prompt="x", tier="fast", options=options), _ctx())
     assert fake.posts == [] and fake.gets == []
+
+
+def test_thinking_is_refused_before_any_prompt_when_the_server_does_not_advertise_it():
+    # Support is read from the (cached) health document, so the refusal now
+    # follows one health GET; the prompt is still never sent.
+    fake = FakeInference()
+    with pytest.raises(InvalidInput, match="thinking"):
+        _gateway(fake).generate(ModelRequest(prompt="x", tier="fast", options={"think": True}), _ctx())
+    assert fake.posts == []
 
 
 def test_correlation_workload_and_auth_headers():
