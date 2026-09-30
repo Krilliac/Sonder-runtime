@@ -58,20 +58,24 @@ class PermissionModesEvaluator:
         self._policy_names = dict(policy_names or {})
 
     def authorize(self, tool_name: str, scope: ToolScope, permission: ToolPermission) -> str:
-        del permission  # effects are the resource policy's business
-        return self._decide(tool_name, scope, arguments=None)
+        return self._decide(tool_name, scope, arguments=None,
+                            traits=getattr(permission, "traits", None))
 
     def authorize_request(self, request: ToolGatewayRequest) -> str:
         if getattr(request.scope, "gate", "gateway") == "surface":
             return SURFACE_DECIDED
-        return self._decide(request.tool_name, request.scope, arguments=dict(request.arguments))
+        return self._decide(
+            request.tool_name, request.scope, arguments=dict(request.arguments),
+            traits=getattr(request.permission, "traits", None),
+        )
 
-    def _decide(self, tool_name: str, scope: ToolScope, *, arguments) -> str:
+    def _decide(self, tool_name: str, scope: ToolScope, *, arguments, traits=None) -> str:
         name = self._policy_names.get(tool_name, tool_name)
         surface, exempt = SURFACES.get(getattr(scope, "source", "repl"), ("system", False))
         decision = self._policy.decide_for_caller(
             name, interactive=False, gate_control_exempt=exempt, surface=surface,
             arguments=arguments, fence=effect_fence.current(),
+            traits=traits,
         )
         if decision is None:
             return "permission:exempt"

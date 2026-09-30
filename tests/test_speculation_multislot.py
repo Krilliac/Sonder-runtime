@@ -61,21 +61,21 @@ def test_multislot_runs_two_speculations_concurrently(predictor):
     gate = _Gate()
     engine = SpeculationEngine(predictor, gate, slots=2)
 
-    assert engine.begin("workspace_inventory", "sig-1", {}) is True
+    assert engine.begin("file_read", "sig-1", {}) is True
     assert engine.begin("directory_tree", "sig-2", {}) is True
     # Both workers must be inside dispatch at the same time.
     assert gate.wait_entered(2) is True
-    assert sorted(gate.seen) == ["directory_tree", "workspace_inventory"]
+    assert sorted(gate.seen) == ["directory_tree", "file_read"]
     assert engine.inflight == 2
     assert engine.busy is True
 
     # A third begin is refused: the buffer is full at its two-slot capacity.
-    assert engine.begin("status", "sig-3", {}) is False
+    assert engine.begin("text_search", "sig-3", {}) is False
 
     gate.release()
     r1 = engine.resolve("sig-1")
     r2 = engine.resolve("sig-2")
-    assert r1 is not None and r1.tool_name == "workspace_inventory"
+    assert r1 is not None and r1.tool_name == "file_read"
     assert r2 is not None and r2.tool_name == "directory_tree"
     assert engine.busy is False
 
@@ -85,15 +85,15 @@ def test_slots_one_preserves_single_in_flight(predictor):
     engine = SpeculationEngine(predictor, gate, slots=1)
     assert engine.max_slots == 1
 
-    assert engine.begin("status", "s1", {}) is True
+    assert engine.begin("text_search", "s1", {}) is True
     # With a single slot the second begin is refused while one is in flight,
     # exactly as the original engine behaved.
-    assert engine.begin("status", "s2", {}) is False
+    assert engine.begin("text_search", "s2", {}) is False
     assert engine.inflight == 1
 
     gate.release()
     result = engine.resolve("s1")
-    assert result is not None and result.tool_name == "status"
+    assert result is not None and result.tool_name == "text_search"
     assert engine.busy is False
 
 
@@ -105,8 +105,8 @@ def test_engine_reads_env_slot_count_when_unset(predictor, monkeypatch):
 
     engine = SpeculationEngine(predictor, dispatch)  # slots default -> env
     assert engine.max_slots == 3
-    assert engine.begin("status", "a", {}) is True
-    assert engine.begin("workspace_inventory", "b", {}) is True
+    assert engine.begin("text_search", "a", {}) is True
+    assert engine.begin("file_read", "b", {}) is True
     assert engine.begin("directory_tree", "c", {}) is True
     # Fourth is refused: env said three slots.
     assert engine.begin("file_read", "d", {"path": "x"}) is False
@@ -119,12 +119,12 @@ def test_resolve_retires_matching_slot_and_leaves_others_in_flight(predictor):
         return ("out:%s" % tool), True
 
     engine = SpeculationEngine(predictor, dispatch, slots=3)
-    engine.begin("status", "s1", {})
-    engine.begin("workspace_inventory", "s2", {})
+    engine.begin("text_search", "s1", {})
+    engine.begin("file_read", "s2", {})
     engine.begin("directory_tree", "s3", {})
 
     retired = engine.resolve("s2")  # commit the middle branch
-    assert retired is not None and retired.tool_name == "workspace_inventory"
+    assert retired is not None and retired.tool_name == "file_read"
     # A retirement squashes nothing: the other two stay in the buffer.
     assert predictor.stats()["squashes"] == 0
     assert engine.inflight == 2
@@ -136,8 +136,8 @@ def test_resolve_miss_squashes_only_the_stalest_slot(predictor):
         return "ok", True
 
     engine = SpeculationEngine(predictor, dispatch, slots=3)
-    engine.begin("status", "s1", {})       # stalest
-    engine.begin("workspace_inventory", "s2", {})
+    engine.begin("text_search", "s1", {})       # stalest
+    engine.begin("file_read", "s2", {})
 
     # Committed branch matches no buffered slot: squash exactly one (the
     # stalest), not the whole buffer.
@@ -147,7 +147,7 @@ def test_resolve_miss_squashes_only_the_stalest_slot(predictor):
 
     # The surviving slot (s2) can still be retired on its own signature.
     retired = engine.resolve("s2")
-    assert retired is not None and retired.tool_name == "workspace_inventory"
+    assert retired is not None and retired.tool_name == "file_read"
     assert predictor.stats()["squashes"] == 1
 
 
@@ -156,8 +156,8 @@ def test_discard_squashes_all_remaining_slots(predictor):
         return "ok", True
 
     engine = SpeculationEngine(predictor, dispatch, slots=4)
-    engine.begin("status", "s1", {})
-    engine.begin("workspace_inventory", "s2", {})
+    engine.begin("text_search", "s1", {})
+    engine.begin("file_read", "s2", {})
     engine.begin("directory_tree", "s3", {})
 
     engine.discard()
@@ -182,8 +182,8 @@ def test_worker_exception_becomes_failed_result_multislot(predictor):
         raise RuntimeError("kaboom")
 
     engine = SpeculationEngine(predictor, dispatch, slots=2)
-    engine.begin("status", "s1", {})
-    engine.begin("workspace_inventory", "s2", {})
+    engine.begin("text_search", "s1", {})
+    engine.begin("file_read", "s2", {})
     # Both retire as failed results; neither begin/resolve ever raised.
     r1 = engine.resolve("s1")
     r2 = engine.resolve("s2")

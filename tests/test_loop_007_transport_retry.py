@@ -1,3 +1,5 @@
+import pytest
+
 from sonder_runtime.adapters.persistence.sqlite.loop_state import (
     SQLiteLoopStateRepository,
     SQLiteRetryEvidenceLedger,
@@ -13,6 +15,7 @@ from sonder_runtime.application.loop.transport_retry import (
     TransportRetryExecutor,
 )
 from sonder_runtime.domain.loop_retry_policy import SideEffectClass
+from sonder_runtime.domain.tools.traits import ToolTraits, TriState
 
 
 class ScriptedTransport:
@@ -66,22 +69,20 @@ def test_typed_transport_retries_with_one_key_and_durable_evidence(tmp_path):
     assert result.evidence[0].classification == "transient"
 
 
-def test_unknown_outcome_reconciles_before_effectful_replay(tmp_path):
+def test_unknown_outcome_reconciles_without_non_idempotent_replay(tmp_path):
     transport = ScriptedTransport(
         TransportFailure("timeout"),
         {"ok": "replayed"},
     )
     executor = make_executor(tmp_path, transport)
 
-    result = executor.execute(
-        "op", "request", fingerprint="fp", idempotency_key="stable",
-        max_attempts=2, effect=SideEffectClass.NON_IDEMPOTENT,
-    )
-
-    assert result.result == {"ok": "replayed"}
+    with pytest.raises(RetryExecutionError, match="replay safety"):
+        executor.execute(
+            "op", "request", fingerprint="fp", idempotency_key="stable",
+            max_attempts=2, effect=SideEffectClass.NON_IDEMPOTENT,
+        )
     assert transport.reconciliations == [("request", "stable")]
-    assert len(result.evidence) == 1
-    assert result.evidence[0].action.value == "reconcile_then_retry"
+    assert len(transport.calls) == 1
 
 
 def test_committed_reconciliation_returns_without_replay(tmp_path):
@@ -150,3 +151,37 @@ def test_completed_idempotent_operation_is_replayed_from_durable_state(tmp_path)
     assert first.result == second.result == {"ok": True}
     assert second.replayed is True
     assert second_transport.calls == []
+
+
+def test_unknown_tool_traits_refuse_transport_replay(tmp_path):
+    transport = ScriptedTransport(
+        TransportFailure("timeout", outcome_known=True),
+        {"must-not-run": True},
+    )
+    executor = make_executor(tmp_path, transport)
+    with pytest.raises(RetryExecutionError, match="not retryable"):
+        executor.execute(
+            "op", "request", fingerprint="fp", idempotency_key="stable",
+            max_attempts=2,
+            traits=ToolTraits(idempotent=TriState.UNKNOWN),
+        )
+    assert len(transport.calls) == 1
+
+
+def test_external_advisory_idempotent_hint_cannot_enable_replay(tmp_path):
+    transport = ScriptedTransport(
+        TransportFailure("timeout", outcome_known=True),
+        {"must-not-run": True},
+    )
+    executor = make_executor(tmp_path, transport)
+    with pytest.raises(RetryExecutionError, match="not retryable"):
+        executor.execute(
+            "op", "request", fingerprint="fp", idempotency_key="stable",
+            max_attempts=2,
+            traits=ToolTraits(
+                idempotent=TriState.TRUE,
+                read_only=TriState.TRUE,
+                host_declared=False,
+            ),
+        )
+    assert len(transport.calls) == 1

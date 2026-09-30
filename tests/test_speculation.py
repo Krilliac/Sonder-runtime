@@ -8,6 +8,7 @@ import pytest
 
 import sonder_speculation
 from sonder_speculation import BranchPredictor, SpeculationEngine
+from sonder_runtime.domain.tools.traits import ToolTraits, TriState
 
 
 @pytest.fixture()
@@ -81,6 +82,73 @@ def test_speculatable_allowlist_excludes_mutations(predictor):
     assert not predictor.speculatable("file_write")
     assert not predictor.speculatable("run_code")
     assert not predictor.speculatable("web_fetch")
+
+
+def test_external_read_only_advisory_does_not_enable_speculation(predictor):
+    advisory = ToolTraits(
+        read_only=TriState.TRUE,
+        host_declared=False,
+    )
+    assert not predictor.speculatable("file_read", advisory)
+
+
+def test_unknown_concurrency_serializes_typed_speculation(predictor):
+    release = threading.Event()
+    def dispatch(tool, args):
+        assert release.wait(3)
+        return "ok", True
+    engine = SpeculationEngine(predictor, dispatch, slots=2)
+    traits = ToolTraits(read_only=TriState.TRUE)
+    try:
+        assert engine.begin("file_read", "sig-a", {}, traits=traits)
+        assert not engine.begin("file_read", "sig-b", {}, traits=traits)
+    finally:
+        release.set()
+        engine.discard()
+
+
+def test_host_read_only_concurrency_safe_allows_typed_speculation(predictor):
+    engine = SpeculationEngine(predictor, lambda tool, args: ("ok", True), slots=2)
+    traits = ToolTraits(
+        read_only=TriState.TRUE,
+        concurrency_safe=TriState.TRUE,
+    )
+    assert engine.begin("file_read", "sig-a", {}, traits=traits)
+    assert engine.begin("file_read", "sig-b", {}, traits=traits)
+    engine.discard()
+
+
+def test_unknown_worker_reservation_survives_slot_removal_until_release(predictor):
+    started = threading.Event()
+    release = threading.Event()
+
+    def dispatch(tool, args):
+        started.set()
+        release.wait(timeout=5)
+        return "ok", True
+
+    engine = SpeculationEngine(predictor, dispatch, slots=2)
+    traits = ToolTraits(read_only=TriState.TRUE)
+    assert engine.begin("file_read", "sig-a", {}, traits=traits)
+    assert started.wait(timeout=2)
+    invalidator = threading.Thread(target=engine.invalidate)
+    invalidator.start()
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and engine.inflight:
+        time.sleep(0.01)
+    # The worker remains reserved while invalidate's bounded join is waiting.
+    assert not engine.begin("file_read", "sig-b", {}, traits=traits)
+    release.set()
+    invalidator.join(timeout=2)
+    assert not invalidator.is_alive()
+    # Once released, the reservation disappears and a fresh call is allowed.
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and not engine.begin(
+        "file_read", "sig-c", {}, traits=traits
+    ):
+        time.sleep(0.01)
+    assert engine.inflight == 1
+    engine.discard()
 
 
 # -- speculation engine ------------------------------------------------------
