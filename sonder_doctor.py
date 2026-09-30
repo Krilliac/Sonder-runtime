@@ -785,24 +785,19 @@ def _check_sonder_inference(*, env=None, gateway=None) -> dict:
 
 
 def _check_sonder_inference_scope(*, env=None) -> dict:
-    """Say plainly which surfaces a sonder_inference binding does not reach.
-
-    Provider bindings are honoured by ModelGateway consumers only.  The REPL,
-    MCP, autopilot and fleet still generate through the legacy Ollama path, so
-    an operator who bound every tier to Sonder Inference must not assume
-    those surfaces stopped using Ollama.
-    """
+    """Report the tier-bound generation surfaces using Sonder Inference."""
     bindings, failure = _inference_binding(env)
     if failure is not None:
         return failure
     if "sonder_inference" not in bindings.bound_providers:
         return _skip("not configured (no provider binding uses sonder_inference)")
     return {
-        "status": STATUS_WARN,
+        "status": STATUS_OK,
         "detail": (
-            "REPL, MCP, autopilot and fleet generate through the legacy "
-            "Ollama path regardless of provider bindings; only ModelGateway "
-            "consumers use sonder_inference"
+            "tier-bound REPL, MCP, agents, workbench, autopilot, fleet, "
+            "ensembles, web research and helper calls use sonder_inference; "
+            "explicit Ollama pins, strict sonder aliases and durable fanout "
+            "remain Ollama-bound"
         ),
     }
 

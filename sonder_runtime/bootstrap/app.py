@@ -694,7 +694,7 @@ def build_application(
     logger.debug("composing vision service and context planning facade")
     vision = VisionService(
         FileVisionInputProvider(),
-        OllamaVisionGateway(target_resolver=target_resolver),
+        OllamaVisionGateway(target_resolver=target_resolver, provider_bindings=provider_bindings),
     )
     # Provider-neutral context planning is part of the live application graph;
     # hardware measurements remain an explicit adapter input at call time.
