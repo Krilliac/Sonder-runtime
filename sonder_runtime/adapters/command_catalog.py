@@ -204,6 +204,8 @@ _CATEGORY_BY_TOOL = {
     "image_inspect": "creative",
     "ground_artifact": "creative",
     "weather_lookup": "web",
+    "openrouter_models": "web",
+    "openrouter_account": "web",
     "approximate_location_lookup": "web",
     "local_service_probe": "system",
     "computer_use_status": "system",
@@ -418,6 +420,11 @@ _READ_ONLY = frozenset({
     "runtime_source_update_status",
     "runtime_source_stash_status",
     "permission_approvals",
+    # Network reads of OpenRouter's catalog and key/credit endpoints
+    # (bootstrap/openrouter_tools.py): no prompt, no spend, no write, graded
+    # like web_fetch/weather_lookup; the cloud consent gate still refuses
+    # them unless SONDER_ALLOW_CLOUD is on.
+    "openrouter_models", "openrouter_account",
 })
 
 # Branches whose real work is done by module-level functions that front no
