@@ -32,6 +32,10 @@ def test_atomic_text_is_not_multi_claim(text):
     "Tests live in tests/, but fixtures live in conftest.py; additionally the CI uses -n 6.",
     # A long segment before ", and" is a clause, even after an earlier comma.
     "Use uv, prefer ruff over flake8 for every new module, and pin mypy. CI checks it.",
+    # "!" and "?" end a sentence for the list check too: "retry" is not an
+    # item of a list that runs on into the next sentence.
+    "If slow, retry! Use ruff, and pin mypy.",
+    "If slow, retry? Use ruff, and pin mypy.",
 ])
 def test_conjunction_heavy_text_is_multi_claim(text):
     assert wq.MULTI_CLAIM in wq.classify(text)

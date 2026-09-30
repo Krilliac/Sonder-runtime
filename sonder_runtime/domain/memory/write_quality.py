@@ -64,6 +64,9 @@ _LIST_ITEM_WORDS = 3
 _ABBREVIATION = re.compile(
     r"\b(?:e\.g|i\.e|vs|etc|cf|approx|incl|esp|viz|resp)\.", re.IGNORECASE,
 )
+# Where the backward search for a serial list stops: a semicolon or a
+# sentence end.
+_LIST_BOUNDARY = re.compile(r";|[.!?]\s")
 
 # A reference at the very start has no antecedent inside the text by
 # construction. "This project/repo" is exempt: facts are stored per project,
@@ -165,11 +168,16 @@ def _closes_a_list(lowered: str, comma_at: int) -> bool:
 
     "Run tests, lint, and docs checks" has an Oxford comma, not a second
     clause: an earlier comma in the same sentence and a short item (at most
-    ``_LIST_ITEM_WORDS`` words) right before the join. Semicolons bound the
-    search, so "Use X; prefer Y, and run Z" still counts as a join.
+    ``_LIST_ITEM_WORDS`` words) right before the join. Semicolons and
+    sentence ends (".", "!", "?") bound the search, so "Use X; prefer Y, and
+    run Z" still counts as a join. ``lowered`` has abbreviation dots removed,
+    so "e.g." does not end the sentence here either.
     """
     head = lowered[:comma_at]
-    head = head[max(head.rfind(";"), head.rfind(". ")) + 1:]
+    start = 0
+    for boundary in _LIST_BOUNDARY.finditer(head):
+        start = boundary.end()
+    head = head[start:]
     previous_comma = head.rfind(",")
     if previous_comma < 0:
         return False
@@ -177,11 +185,17 @@ def _closes_a_list(lowered: str, comma_at: int) -> bool:
 
 
 def _claim_units(code_free: str, lowered_code_free: str) -> int:
-    body = _ABBREVIATION.sub(lambda m: m.group(0)[:-1], code_free).strip()
+    body = _ABBREVIATION.sub(_drop_final_dot, code_free).strip()
     if not body:
         return 0
     sentences = len([s for s in _SENTENCE_BREAK.split(body) if s.strip()])
-    return sentences + _clause_joins(lowered_code_free)
+    return sentences + _clause_joins(
+        _ABBREVIATION.sub(_drop_final_dot, lowered_code_free),
+    )
+
+
+def _drop_final_dot(match: re.Match) -> str:
+    return match.group(0)[:-1]
 
 
 def _unresolved(lowered: str, lowered_code_free: str) -> bool:
