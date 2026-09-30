@@ -27,15 +27,17 @@ jobs:
           script = ("$ErrorActionPreference='Stop';$s = Get-AuthenticodeSignature -LiteralPath '%s';$cert = $s.SignerCertificate;"
                     "[pscustomobject]@{Status=[string]$s.Status;StatusMessage=[string]$s.StatusMessage;"
                     "Subject=$(if ($cert) { [string]$cert.Subject } else { '' });SignatureType=[string]$s.SignatureType} | ConvertTo-Json -Compress") % literal
-          boot = time.time()
-          for i in range(40):
-              t = time.monotonic()
-              try:
-                  c = subprocess.run([exe, "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True, text=True, timeout=60, env=env)
-                  out = (c.stdout or "").strip(); err = (c.stderr or "").strip()[:300]; rc = c.returncode
-              except subprocess.TimeoutExpired:
-                  out, err, rc = "", "TIMEOUT", None
-              print("PROBE", i, "rc=%s" % rc, "%.2fs" % (time.monotonic() - t), out[:300], err, flush=True)
-              time.sleep(3)
+          inner = ("$sw=[Diagnostics.Stopwatch]::StartNew();Import-Module Microsoft.PowerShell.Security;$a=$sw.Elapsed.TotalSeconds;"
+                   "$s = Get-AuthenticodeSignature -LiteralPath '%s';$b=$sw.Elapsed.TotalSeconds;"
+                   "$s2 = Get-AuthenticodeSignature -LiteralPath '%s';$c=$sw.Elapsed.TotalSeconds;"
+                   "'IMPORT={0:N2} FIRST={1:N2} SECOND={2:N2} STATUS={3} {4}' -f $a,($b-$a),($c-$b),$s.Status,$s2.Status") % (literal, literal)
+          for i in range(6):
+              for label, e in (("scrubbed", env), ("fullenv", None)):
+                  t = time.monotonic()
+                  c = subprocess.run([exe, "-NoProfile", "-NonInteractive", "-Command", "exit 0"], capture_output=True, text=True, timeout=120, env=e)
+                  t1 = time.monotonic() - t
+                  t = time.monotonic()
+                  c = subprocess.run([exe, "-NoProfile", "-NonInteractive", "-Command", inner], capture_output=True, text=True, timeout=180, env=e)
+                  print("PROBE2", i, label, "bare_start=%.2fs" % t1, "total=%.2fs" % (time.monotonic() - t), (c.stdout or "").strip()[:200], (c.stderr or "").strip()[:200], flush=True)
           '@
           $py | python -
