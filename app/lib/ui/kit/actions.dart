@@ -33,6 +33,11 @@ class AsyncActionButton extends StatefulWidget {
   /// Key for the underlying Material button.
   final Key? buttonKey;
 
+  /// Asked before the action runs, e.g. a confirmation dialog for a
+  /// destructive action. Resolving false leaves the button idle: no busy
+  /// spinner behind the dialog, no "done", nothing reported.
+  final Future<bool> Function()? confirm;
+
   const AsyncActionButton({
     super.key,
     required this.label,
@@ -44,6 +49,7 @@ class AsyncActionButton extends StatefulWidget {
     this.tooltip,
     this.onError,
     this.buttonKey,
+    this.confirm,
   });
 
   @override
@@ -55,6 +61,7 @@ enum _Phase { idle, busy, done, failed }
 class _AsyncActionButtonState extends State<AsyncActionButton> {
   _Phase _phase = _Phase.idle;
   bool _spinnerShown = false;
+  bool _confirming = false;
   Timer? _spinnerDelay;
   Timer? _settle;
 
@@ -71,7 +78,18 @@ class _AsyncActionButtonState extends State<AsyncActionButton> {
 
   Future<void> _run() async {
     final action = widget.onPressed;
-    if (action == null || _phase == _Phase.busy) return;
+    if (action == null || _phase == _Phase.busy || _confirming) return;
+    final confirm = widget.confirm;
+    if (confirm != null) {
+      _confirming = true;
+      final bool go;
+      try {
+        go = await confirm();
+      } finally {
+        _confirming = false;
+      }
+      if (!go || !mounted) return;
+    }
     _settle?.cancel();
     setState(() {
       _phase = _Phase.busy;
@@ -163,9 +181,9 @@ class _AsyncActionButtonState extends State<AsyncActionButton> {
       curve: SonderMotion.standard,
       child: Row(mainAxisSize: MainAxisSize.min, children: [
         if (leading != null) ...[leading, const SizedBox(width: SonderSpace.sm)],
-        // Flexible, as in Material's own icon buttons: under large text in
-        // a narrow column the label wraps instead of overflowing.
-        Flexible(child: Text(label)),
+        // Flexible, so a long label wraps at large text sizes instead of
+        // overflowing a narrow column.
+        Flexible(child: Text(label, textAlign: TextAlign.center)),
       ]),
     );
     final Widget button = switch (widget.style) {

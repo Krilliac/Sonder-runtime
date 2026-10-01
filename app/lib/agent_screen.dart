@@ -1,16 +1,32 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import 'agent_lanes.dart';
-import 'background_work.dart';
 import 'agent_command_id.dart';
+import 'agent_lanes.dart';
+import 'agents/agent_status.dart';
+import 'agents/background_detail.dart';
+import 'agents/composer.dart';
+import 'agents/list_pane.dart';
+import 'agents/shortcuts.dart';
+import 'agents/transcript_model.dart';
+import 'agents/transcript_view.dart';
 import 'api.dart';
+import 'background_work.dart';
 import 'theme.dart';
+import 'ui/kit.dart';
 import 'workspace_ui.dart';
 
+/// Asks whether the person may leave Agents: resolves false when they chose
+/// to keep their unsent drafts or unconfirmed requests.
+typedef AgentLeaveGuard = Future<bool> Function();
+
+/// Agent conversations (lanes) and background work (fleets, autopilot).
+///
+/// The server owns every status, message and report; this screen polls,
+/// shows and sends commands, and keeps per-conversation drafts and scroll
+/// positions for its lifetime (UX-CONTRACT.md).
 class AgentScreen extends StatefulWidget {
   final SonderApi api;
   final String? initialLaneId;
@@ -18,30 +34,26 @@ class AgentScreen extends StatefulWidget {
   /// Project selected in Chat, retained for cancellation command context.
   final String initialProject;
   final ValueChanged<WorkspaceDestination>? onNavigate;
-  const AgentScreen({super.key, required this.api,
+
+  /// Lets the app shell run this screen's leave guard before it switches
+  /// destinations (sidebar, drawer, shortcuts). Called with the guard when
+  /// the screen mounts and with null when it unmounts; store it without a
+  /// rebuild. With a [ShellScope] and this hook, in-page links (Open
+  /// Runtime, Go to Chat) leave through `ShellScope.navigate` and rely on
+  /// the shell to ask; without the hook the screen asks first itself.
+  final void Function(AgentLeaveGuard? guard)? registerLeaveGuard;
+
+  const AgentScreen({
+    super.key,
+    required this.api,
     this.initialLaneId,
-    this.initialProject = '', this.onNavigate});
+    this.initialProject = '',
+    this.onNavigate,
+    this.registerLeaveGuard,
+  });
+
   @override
   State<AgentScreen> createState() => _AgentScreenState();
-}
-
-class _ShortcutRow extends StatelessWidget {
-  final String keys;
-  final String action;
-
-  const _ShortcutRow({required this.keys, required this.action});
-
-  @override
-  Widget build(BuildContext context) => Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SizedBox(
-            width: 178,
-            child: Text(keys, style: SonderTokens.of(context).mono(12)),
-          ),
-          Expanded(child: Text(action)),
-        ],
-      );
 }
 
 class _PendingCommand {
@@ -52,21 +64,37 @@ class _PendingCommand {
   _PendingCommand(this.action, this.content) : id = newAgentCommandId();
 }
 
-enum _AgentFilter { all, working, attention, unread, finished }
+/// A control command the server did not confirm; its notice explains.
+class _NotConfirmed implements Exception {
+  const _NotConfirmed();
+}
+
+typedef _BackgroundRef = ({String kind, String id});
+
+/// Width of the list pane beside the transcript: room for the five status
+/// filters on one line where the page allows it.
+double _listWidth(double pageWidth) => pageWidth >= 1100 ? 360 : 344;
+
+/// Below this width the list and the transcript are separate pages.
+const _splitBreakpoint = 850.0;
 
 class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
   final _lanes = <String, AgentLane>{};
   final _drafts = <String, TextEditingController>{};
   final _scrolls = <String, ScrollController>{};
-  final _acknowledging = <String>{};
+  final _scrollOffsets = <String, double>{};
   final _snapshots = <String, AgentSnapshot>{};
   final _events = <String, Map<int, AgentEvent>>{};
   final _pending = <String, _PendingCommand>{};
-  final _commandErrors = <String, String>{};
+  final _commandErrors = <String, ({String action, String message})>{};
+  final _openTools = <String, Set<String>>{};
+  final _openDetails = <String>{};
+  final _reportOpen = <String, bool>{};
   BackgroundWork _background = const BackgroundWork();
   final _createdOrder = <String, int>{};
   String? _backgroundError;
   bool _backgroundPaused = false, _backgroundRefreshing = false;
+  final _backgroundActionErrors = <String, String>{};
   final _reports = <String, AgentReport>{};
   final _reportParents = <String, String>{};
   final _reportCursors = <String, int>{};
@@ -74,20 +102,29 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
   final _reportErrors = <String, String>{};
   final _reportLoading = <String>{};
   String? _selected, _listError, _detailError;
+  _BackgroundRef? _selectedBackground;
   RequestFailure? _listFailure, _detailFailure;
-  bool _listPaused = false, _appActive = true;
+  bool _listPaused = false, _appActive = true, _visible = true;
   final _search = TextEditingController();
   final _searchFocus = FocusNode();
-  final _composerFocus = FocusNode();
-  _AgentFilter _filter = _AgentFilter.all;
+
+  /// One per conversation: two composers briefly coexist while the
+  /// transcript pane cross-fades, and a focus node has one owner.
+  final _composerFocus = <String, FocusNode>{};
+  final _awayFromEnd = ValueNotifier<bool>(false);
+  AgentFilter _filter = AgentFilter.all;
   bool _groupByParent = true;
   bool _loading = true, _refreshing = false, _hasMore = false;
+  bool _manualRefreshing = false, _loadingMore = false;
   bool _initialConsumed = false;
+  bool _wide = true;
   int _listCursor = 0, _generation = 0;
   int _loadedPages = 1;
   Timer? _timer;
   Timer? _watchTimer;
   Completer<void>? _watchDelay;
+
+  bool get _active => _appActive && _visible;
 
   void _stopWatch() {
     _generation++;
@@ -110,6 +147,7 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    widget.registerLeaveGuard?.call(_confirmLeave);
     _loadLanes();
     _loadBackground();
     _timer = Timer.periodic(const Duration(seconds: 10), (_) {
@@ -119,17 +157,36 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // A page kept alive offstage (covered by an opaque route, or a shell
+    // that disables its tickers) stops inspecting, like a backgrounded app.
+    final visible = TickerMode.valuesOf(context).enabled;
+    if (visible == _visible) return;
+    _visible = visible;
+    if (!visible) {
+      _stopWatch();
+    } else {
+      _resume();
+    }
+  }
+
+  @override
   void dispose() {
+    widget.registerLeaveGuard?.call(null);
     WidgetsBinding.instance.removeObserver(this);
     _stopWatch();
     _timer?.cancel();
     _search.dispose();
     _searchFocus.dispose();
-    _composerFocus.dispose();
+    for (final node in _composerFocus.values) {
+      node.dispose();
+    }
+    _awayFromEnd.dispose();
     for (final controller in _drafts.values) {
       controller.dispose();
     }
-    for (final controller in _scrolls.values) {
+    for (final controller in [..._scrolls.values, ..._retiredScrolls]) {
       controller.dispose();
     }
     super.dispose();
@@ -141,14 +198,23 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
     if (!_appActive) {
       _stopWatch();
     } else {
-      unawaited(_loadLanes(manual: true));
-      unawaited(_loadBackground(manual: true));
-      if (_selected != null) _select(_selected!);
+      _resume();
     }
   }
 
+  void _resume() {
+    if (!_active) return;
+    unawaited(_loadLanes(manual: true));
+    unawaited(_loadBackground(manual: true));
+    if (_selected != null) _select(_selected!);
+  }
+
+  // -------------------------------------------------------------------------
+  // Loading
+  // -------------------------------------------------------------------------
+
   Future<void> _loadLanes({bool more = false, bool manual = false}) async {
-    if (_refreshing || !_appActive || (_listPaused && !manual)) return;
+    if (_refreshing || !_active || (_listPaused && !manual)) return;
     if (manual) _listPaused = false;
     _refreshing = true;
     try {
@@ -171,7 +237,7 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
         _listError = null;
         _listFailure = null;
       });
-    final initial = widget.initialLaneId;
+      final initial = widget.initialLaneId;
       if (!more && !_initialConsumed && initial != null) {
         if (_lanes.containsKey(initial)) {
           _initialConsumed = true;
@@ -187,7 +253,8 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
           } catch (error) {
             if (mounted) {
               setState(() {
-                _listFailure = RequestFailure.read(error, resource: 'agent conversation');
+                _listFailure =
+                    RequestFailure.read(error, resource: 'agent conversation');
                 _listError = _listFailure!.message;
                 _listPaused = true;
               });
@@ -211,7 +278,7 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _loadBackground({bool manual = false}) async {
-    if (!_appActive || _backgroundRefreshing || (_backgroundPaused && !manual)) {
+    if (!_active || _backgroundRefreshing || (_backgroundPaused && !manual)) {
       return;
     }
     _backgroundRefreshing = true;
@@ -243,6 +310,27 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
     }
   }
 
+  Future<void> _refreshAll() async {
+    setState(() => _manualRefreshing = true);
+    try {
+      await Future.wait([
+        _loadLanes(manual: true),
+        _loadBackground(manual: true),
+      ]);
+    } finally {
+      if (mounted) setState(() => _manualRefreshing = false);
+    }
+  }
+
+  Future<void> _loadMore() async {
+    setState(() => _loadingMore = true);
+    try {
+      await _loadLanes(more: true, manual: true);
+    } finally {
+      if (mounted) setState(() => _loadingMore = false);
+    }
+  }
+
   void _mergeLane(AgentLane lane) {
     if (lane.createdOrder > 0) _createdOrder[lane.id] = lane.createdOrder;
     if ((_lanes[lane.id]?.revision ?? -1) <= lane.revision) {
@@ -250,16 +338,79 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // Selection and inspection
+  // -------------------------------------------------------------------------
+
+  /// Remembers where the open transcript was scrolled, so returning to it
+  /// lands in the same place.
+  void _rememberScroll() {
+    final id = _selected;
+    final scroll = id == null ? null : _scrolls[id];
+    if (id != null && scroll != null && scroll.hasClients) {
+      _scrollOffsets[id] = scroll.offset;
+    }
+  }
+
+  ScrollController _scrollFor(String id) => _scrolls.putIfAbsent(
+      id,
+      () => ScrollController(
+          initialScrollOffset: _scrollOffsets[id] ?? 0,
+          keepScrollOffset: false));
+
+  /// Controllers replaced while a fading view may still hold them. Each is
+  /// disposed once nothing is attached, never while a view still scrolls.
+  final _retiredScrolls = <ScrollController>[];
+
+  void _retireScroll(String id) {
+    final controller = _scrolls.remove(id);
+    if (controller != null) _retiredScrolls.add(controller);
+    _retiredScrolls.removeWhere((controller) {
+      if (controller.hasClients) return false;
+      controller.dispose();
+      return true;
+    });
+  }
+
   void _select(String id) {
+    if (_selected != id) {
+      _rememberScroll();
+      // A new view gets a new controller that starts at the remembered
+      // offset; the outgoing view may still be fading out with the old one.
+      _retireScroll(id);
+      _awayFromEnd.value = false;
+    }
     _stopWatch();
     setState(() {
       _selected = id;
+      _selectedBackground = null;
       _detailError = null;
       _detailFailure = null;
     });
     final generation = ++_generation;
     unawaited(_watch(id, generation));
     unawaited(_loadReports(id));
+  }
+
+  void _selectBackground(String kind, String id) {
+    _rememberScroll();
+    _stopWatch();
+    setState(() {
+      _selected = null;
+      _selectedBackground = (kind: kind, id: id);
+    });
+  }
+
+  /// Narrow layouts: back from a transcript or detail to the list.
+  void _closeDetail() {
+    _rememberScroll();
+    final id = _selected;
+    if (id != null) _retireScroll(id);
+    setState(() {
+      _selected = null;
+      _selectedBackground = null;
+    });
+    _stopWatch();
   }
 
   Future<void> _loadReports(String id, {bool more = false}) async {
@@ -299,7 +450,7 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
 
   Future<void> _watch(String id, int generation) async {
     var failures = 0;
-    while (mounted && _appActive && generation == _generation) {
+    while (mounted && _active && generation == _generation) {
       try {
         final previous = _snapshots[id];
         final snapshot = await widget.api.agentInspect(
@@ -310,6 +461,8 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
           wait: false,
         );
         if (!mounted || generation != _generation) return;
+        final grew = snapshot.events.isNotEmpty || previous == null;
+        if (grew && previous != null) _followIfAtEnd(id);
         setState(() {
           _mergeLane(snapshot.lane);
           _snapshots[id] = snapshot;
@@ -343,35 +496,92 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
     }
   }
 
+  /// Keeps a reader who is at the end of a transcript at the end as new
+  /// events arrive; a reader scrolled up stays where they are.
+  void _followIfAtEnd(String id) {
+    final scroll = _scrolls[id];
+    if (scroll == null || !scroll.hasClients) return;
+    final position = scroll.position;
+    if (position.maxScrollExtent - position.pixels > 96) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !scroll.hasClients) return;
+      scroll.animateTo(scroll.position.maxScrollExtent,
+          duration: SonderMotion.of(context, SonderMotion.medium),
+          curve: SonderMotion.standard);
+    });
+  }
+
+  void _goLatest(String id) {
+    final scroll = _scrolls[id];
+    if (scroll == null || !scroll.hasClients) return;
+    scroll.animateTo(scroll.position.maxScrollExtent,
+        duration: SonderMotion.of(context, SonderMotion.slow),
+        curve: SonderMotion.standard);
+  }
+
+  // -------------------------------------------------------------------------
+  // Leaving and navigation
+  // -------------------------------------------------------------------------
+
+  bool get _hasUnsentWork =>
+      _pending.isNotEmpty ||
+      _drafts.values.any((controller) => controller.text.trim().isNotEmpty);
+
+  Future<bool> _confirmLeave() async {
+    if (!_hasUnsentWork) return true;
+    if (!mounted) return false;
+    final leave = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+              title: const Text('Leave agent conversations?'),
+              content: Text(_pending.isNotEmpty
+                  ? 'A request has not been confirmed. Leaving closes its retry controls; the agent may still receive it. Unsent drafts will also be discarded.'
+                  : 'Your unsent drafts will be discarded. Messages already sent remain in their conversations.'),
+              actions: [
+                TextButton(
+                    autofocus: true,
+                    onPressed: () => Navigator.pop(context, false),
+                    child: const Text('Keep editing')),
+                TextButton(
+                    onPressed: () => Navigator.pop(context, true),
+                    child: const Text('Leave conversations'))
+              ],
+            ));
+    return leave == true;
+  }
+
+  bool get _canNavigate =>
+      ShellScope.maybeOf(context) != null || widget.onNavigate != null;
+
+  /// System back on a pushed Agents route: ask about drafts, then pop.
+  /// `Navigator.pop` does not consult [PopScope], so it cannot ask twice.
+  Future<void> _leaveRoute() async {
+    if (!await _confirmLeave() || !mounted) return;
+    final navigator = Navigator.of(context);
+    if (navigator.canPop()) navigator.pop();
+  }
+
   Future<void> _navigate(WorkspaceDestination destination) async {
-    final hasDraft =
-        _drafts.values.any((controller) => controller.text.trim().isNotEmpty);
-    if (hasDraft || _pending.isNotEmpty) {
-      final leave = await showDialog<bool>(
-          context: context,
-          builder: (context) => AlertDialog(
-                title: const Text('Leave agent conversations?'),
-                content: Text(_pending.isNotEmpty
-                    ? 'A request has not been confirmed. Leaving closes its retry controls; the agent may still receive it. Unsent drafts will also be discarded.'
-                    : 'Your unsent drafts will be discarded. Messages already sent remain in their conversations.'),
-                actions: [
-                  TextButton(
-                      autofocus: true,
-                      onPressed: () => Navigator.pop(context, false),
-                      child: const Text('Keep editing')),
-                  TextButton(
-                      onPressed: () => Navigator.pop(context, true),
-                      child: const Text('Leave conversations'))
-                ],
-              ));
-      if (leave != true || !mounted) return;
+    final shell = ShellScope.maybeOf(context);
+    if (shell != null) {
+      // A registered guard is run by the shell; asking here too would ask
+      // twice.
+      if (widget.registerLeaveGuard == null && !await _confirmLeave()) return;
+      if (mounted) shell.navigate(destination);
+      return;
     }
+    if (!await _confirmLeave() || !mounted) return;
     if (widget.onNavigate != null) {
       widget.onNavigate!(destination);
-    } else if (destination == WorkspaceDestination.chat && mounted) {
-      Navigator.of(context).maybePop();
+    } else if (destination == WorkspaceDestination.chat &&
+        Navigator.of(context).canPop()) {
+      Navigator.of(context).pop();
     }
   }
+
+  // -------------------------------------------------------------------------
+  // Commands
+  // -------------------------------------------------------------------------
 
   void _sendSelected() {
     final lane = _lanes[_selected];
@@ -389,12 +599,14 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
     unawaited(_command(lane.id, 'messages', content: controller.text.trim()));
   }
 
-  Future<void> _command(String id, String action, {String? content}) async {
+  /// Sends (or retries, with the same command ID) a lane command. Returns
+  /// whether the server confirmed it.
+  Future<bool> _command(String id, String action, {String? content}) async {
     final pending = _pending.putIfAbsent(
       id,
       () => _PendingCommand(action, content),
     );
-    if (pending.sending) return;
+    if (pending.sending) return false;
     setState(() {
       pending.sending = true;
       pending.error = null;
@@ -407,7 +619,7 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
         commandId: pending.id,
         content: pending.content,
       );
-      if (!mounted) return;
+      if (!mounted) return true;
       setState(() {
         if (receipt.lane != null) _mergeLane(receipt.lane!);
         if (pending.action == 'messages' &&
@@ -417,6 +629,7 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
         _pending.remove(id);
       });
       if (_selected == id) _select(id);
+      return true;
     } catch (error) {
       if (mounted) {
         setState(() {
@@ -426,7 +639,8 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
               error.httpStatus! < 500 &&
               !error.retryable) {
             _pending.remove(id);
-            _commandErrors[id] = error.message;
+            _commandErrors[id] =
+                (action: pending.action, message: error.message);
           } else {
             pending.error =
                 'The server did not confirm this request. Retry checks the same request safely.';
@@ -434,10 +648,15 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
           }
         });
       }
+      return false;
     }
   }
 
-  Future<void> _cancel(AgentLane lane) async {
+  Future<void> _control(String id, String action) async {
+    if (!await _command(id, action)) throw const _NotConfirmed();
+  }
+
+  Future<bool> _confirmCancel(AgentLane lane) async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -458,8 +677,75 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
         ],
       ),
     );
-    if (confirmed == true && mounted) await _command(lane.id, 'cancel');
+    return confirmed == true && mounted;
   }
+
+  Future<void> _ackReport(AgentReport report, String laneId) async {
+    try {
+      await widget.api.agentAcknowledge(
+        report.id,
+        commandId: 'read-${report.id}',
+      );
+    } catch (_) {
+      if (mounted) {
+        setState(
+          () => _reportErrors[laneId] =
+              'Could not confirm the report was marked read. Retry reports to check its current state.',
+        );
+      }
+      rethrow;
+    }
+    await _loadReports(laneId);
+    await _loadLanes(manual: true);
+  }
+
+  Future<bool> _confirmBackgroundCancel(String what, String title) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Cancel this $what?'),
+        content: Text('Requests cancellation of “$title”. Its status updates '
+            'here once the server confirms it.'),
+        actions: [
+          TextButton(
+            autofocus: true,
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Keep running'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text('Cancel $what'),
+          ),
+        ],
+      ),
+    );
+    return confirmed == true && mounted;
+  }
+
+  Future<void> _cancelBackground(String kind, String id, String title) async {
+    if (!mounted) return;
+    setState(() => _backgroundActionErrors.remove(id));
+    try {
+      await widget.api.cancelBackground(
+        kind,
+        id,
+        project: widget.initialProject.trim(),
+      );
+    } catch (error) {
+      if (mounted) {
+        setState(() => _backgroundActionErrors[id] =
+            RequestFailure.read(error, resource: 'cancellation').message);
+      }
+      rethrow;
+    }
+    if (!mounted) return;
+    showSonderToast(context, 'Cancellation requested for “$title”');
+    await _loadBackground(manual: true);
+  }
+
+  // -------------------------------------------------------------------------
+  // List data
+  // -------------------------------------------------------------------------
 
   List<AgentLane> _orderedLanes() {
     final ordered = _lanes.values.toList()
@@ -488,41 +774,45 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
     return result;
   }
 
-  static const _filterLabels = {
-    _AgentFilter.all: 'All statuses',
-    _AgentFilter.working: 'Working',
-    _AgentFilter.attention: 'Needs attention',
-    _AgentFilter.unread: 'Unread reports',
-    _AgentFilter.finished: 'Finished',
-  };
+  bool _matchesQuery(List<String> values) {
+    final query = _search.text.trim().toLowerCase();
+    return query.isEmpty ||
+        values.any((value) => value.toLowerCase().contains(query));
+  }
 
   bool _matches(AgentLane lane) {
-    final query = _search.text.trim().toLowerCase();
     final parent = _lanes[lane.parentLaneId];
-    if (query.isNotEmpty &&
-        ![
+    return _matchesQuery([
           lane.displayTitle,
           lane.task,
           lane.workspaceRoot,
-          parent?.displayTitle ?? ''
-        ].any((value) => value.toLowerCase().contains(query))) {
-      return false;
-    }
-    return switch (_filter) {
-      _AgentFilter.all => true,
-      _AgentFilter.working => const {
-          'queued',
-          'running',
-          'interrupt_requested',
-          'cancel_requested'
-        }.contains(lane.status),
-      _AgentFilter.attention =>
-        const {'awaiting_input', 'failed', 'interrupted'}.contains(lane.status),
-      _AgentFilter.unread => lane.unreadReports > 0,
-      _AgentFilter.finished =>
-        const {'completed', 'cancelled'}.contains(lane.status),
-    };
+          parent?.displayTitle ?? '',
+        ]) &&
+        lane.matches(_filter);
   }
+
+  bool _fleetMatches(BackgroundFleet fleet) =>
+      backgroundMatches(fleet.status, _filter) &&
+      _matchesQuery([
+        fleet.task,
+        fleet.id,
+        for (final child in fleet.children) child.task,
+      ]);
+
+  bool _autopilotMatches(BackgroundAutopilot run) =>
+      backgroundMatches(run.status, _filter) &&
+      _matchesQuery([run.objective, run.id, run.currentTask]);
+
+  Map<AgentFilter, int> _filterCounts() => {
+        for (final filter in AgentFilter.values)
+          filter: _lanes.values.where((lane) => lane.matches(filter)).length +
+              _background.fleets
+                  .where((f) => backgroundMatches(f.status, filter))
+                  .length +
+              _background.autopilot
+                  .where((r) => backgroundMatches(r.status, filter))
+                  .length,
+      };
 
   String _rootParentId(AgentLane lane) {
     final seen = <String>{};
@@ -530,6 +820,46 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
       lane = _lanes[lane.parentLaneId]!;
     }
     return lane.parentSessionId;
+  }
+
+  /// Tree positions for rows shown together: depth counts only visible
+  /// ancestors, so a filtered child never points at a missing parent.
+  Map<String, TreePosition> _tree(List<AgentLane> rows) {
+    final ids = {for (final lane in rows) lane.id};
+    final parentOf = <String, String?>{};
+    final children = <String, List<String>>{};
+    for (final lane in rows) {
+      final parent = lane.parentLaneId;
+      final visible =
+          parent != null && parent != lane.id && ids.contains(parent)
+              ? parent
+              : null;
+      parentOf[lane.id] = visible;
+      if (visible != null) children.putIfAbsent(visible, () => []).add(lane.id);
+    }
+    bool last(String id) {
+      final parent = parentOf[id];
+      return parent == null || children[parent]!.last == id;
+    }
+
+    final result = <String, TreePosition>{};
+    for (final lane in rows) {
+      final path = <String>[];
+      final seen = <String>{lane.id};
+      var parent = parentOf[lane.id];
+      while (parent != null && seen.add(parent)) {
+        path.insert(0, parent);
+        parent = parentOf[parent];
+      }
+      final depth = path.length;
+      result[lane.id] = TreePosition(
+        depth: depth,
+        rails: [for (var k = 0; k < depth - 1; k++) !last(path[k + 1])],
+        last: last(lane.id),
+        hasChildren: children[lane.id]?.isNotEmpty ?? false,
+      );
+    }
+    return result;
   }
 
   String _shortId(String id) => id.length <= 12
@@ -540,21 +870,21 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
       context: context,
       builder: (context) => AlertDialog(
             title: const Text('Parent conversation'),
-            content: SelectableText(id),
+            content:
+                SelectableText(id, style: SonderTokens.of(context).mono(13)),
             actions: [
               TextButton.icon(
                   onPressed: () async {
                     try {
                       await Clipboard.setData(ClipboardData(text: id));
                       if (context.mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('Parent ID copied')));
+                        showSonderToast(context, 'Parent ID copied');
                       }
                     } catch (_) {
                       if (context.mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                            content: Text(
-                                'Could not copy. Select the ID above to copy it manually.')));
+                        showSonderToast(context,
+                            'Could not copy. Select the ID above to copy it manually.',
+                            kind: StatusKind.fail);
                       }
                     }
                   },
@@ -569,7 +899,7 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
   void _clearFilters() {
     setState(() {
       _search.clear();
-      _filter = _AgentFilter.all;
+      _filter = AgentFilter.all;
     });
     _searchFocus.requestFocus();
   }
@@ -579,15 +909,17 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
       setState(() => _search.clear());
       return;
     }
-    if (MediaQuery.sizeOf(context).width < 850 && _selected != null) {
-      setState(() => _selected = null);
-      _stopWatch();
+    if (!_wide && (_selected != null || _selectedBackground != null)) {
+      _closeDetail();
     }
   }
 
   void _moveSelection(int delta) {
     // Do not steal the normal word/cursor movement from a text field.
-    if (_searchFocus.hasFocus || _composerFocus.hasFocus) return;
+    if (_searchFocus.hasFocus ||
+        _composerFocus.values.any((node) => node.hasFocus)) {
+      return;
+    }
     final lanes = _orderedLanes().where(_matches).toList();
     if (lanes.isEmpty) return;
     final current = _selected == null
@@ -597,454 +929,365 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
     _select(lanes[next].id);
   }
 
-  Future<void> _showKeyboardHelp() async {
-    await showDialog<void>(
-        context: context,
-        builder: (context) => AlertDialog(
-              title: const Text('Agent conversation shortcuts'),
-              content: const Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _ShortcutRow(
-                    keys: 'Ctrl+Enter / ⌘+Enter',
-                    action: 'Send the follow-up in the composer',
-                  ),
-                  SizedBox(height: 12),
-                  _ShortcutRow(
-                    keys: 'Ctrl+Shift+F / ⌘+Shift+F',
-                    action: 'Focus conversation search',
-                  ),
-                  SizedBox(height: 12),
-                  _ShortcutRow(
-                    keys: 'Alt+↑ / Alt+↓',
-                    action: 'Move to the previous or next loaded conversation',
-                  ),
-                  SizedBox(height: 12),
-                  _ShortcutRow(
-                    keys: 'Escape',
-                    action:
-                        'Clear focused search, or return to the list on narrow screens',
-                  ),
-                  SizedBox(height: 16),
-                  Text(
-                    'Enter adds a new line. A request is sent only after the server confirms the same command.',
-                  ),
-                ],
-              ),
-              actions: [
-                TextButton(
-                    autofocus: true,
-                    onPressed: () => Navigator.pop(context),
-                    child: const Text('Close')),
-              ],
-            ));
-  }
+  // -------------------------------------------------------------------------
+  // List pane
+  // -------------------------------------------------------------------------
 
-  Widget _laneList() {
-    final ordered = _orderedLanes().where(_matches).toList();
-    final groups = <String, List<AgentLane>>{};
-    for (final lane in ordered) {
-      groups
-          .putIfAbsent(_groupByParent ? _rootParentId(lane) : '', () => [])
-          .add(lane);
-    }
+  Widget _searchAndFilters() {
     final tokens = SonderTokens.of(context);
-    return Column(children: [
-      ListTile(
-          title: const Text('Conversations'),
-          trailing: IconButton(
-              tooltip: 'Refresh conversations',
-              onPressed: _refreshing ? null : () => _loadLanes(manual: true),
-              icon: const Icon(Icons.refresh))),
-      if (_lanes.isNotEmpty)
-        Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            child: Column(children: [
-              TextField(
-                  key: const Key('agent-search'),
-                  controller: _search,
-                  focusNode: _searchFocus,
-                  decoration: InputDecoration(
-                      labelText: _hasMore
-                          ? 'Search loaded conversations'
-                          : 'Search conversations',
-                      prefixIcon: const Icon(Icons.search, size: 18),
-                      suffixIcon: _search.text.isEmpty
-                          ? null
-                          : IconButton(
-                              tooltip: 'Clear search',
-                              icon: const Icon(Icons.close, size: 18),
-                              onPressed: () {
-                                setState(() => _search.clear());
-                                _searchFocus.requestFocus();
-                              })),
-                  onChanged: (_) => setState(() {})),
-              const SizedBox(height: 8),
-              Row(children: [
-                Expanded(
-                    child: PopupMenuButton<_AgentFilter>(
-                        tooltip: 'Filter agent status',
-                        onSelected: (value) => setState(() => _filter = value),
-                        itemBuilder: (_) => [
-                              for (final entry in _filterLabels.entries)
-                                PopupMenuItem(
-                                    value: entry.key, child: Text(entry.value))
-                            ],
-                        child: ConstrainedBox(
-                            // ≥48 dp hit area; the row looks unchanged.
-                            constraints: const BoxConstraints(minHeight: 48),
-                            child: Row(children: [
-                              const Icon(Icons.filter_list, size: 18),
-                              const SizedBox(width: 8),
-                              Flexible(
-                                  child: Text(_filterLabels[_filter]!,
-                                      overflow: TextOverflow.ellipsis)),
-                              const Icon(Icons.arrow_drop_down, size: 18)
-                            ])))),
-                IconButton(
-                    tooltip:
-                        _groupByParent ? 'Show a flat list' : 'Group by parent',
-                    isSelected: _groupByParent,
-                    onPressed: () =>
-                        setState(() => _groupByParent = !_groupByParent),
-                    icon: const Icon(Icons.account_tree_outlined, size: 18)),
-              ]),
-              Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text(
-                      '${ordered.length} of ${_lanes.length} loaded${_hasMore ? ' · more available' : ''}',
-                      style: Theme.of(context).textTheme.labelSmall)),
-              const SizedBox(height: 8),
-            ])),
-      if (_listError != null)
-        Padding(
-            padding: const EdgeInsets.all(12),
-            child: WorkspaceNotice(
-                message: _listError!,
-                tone: NoticeTone.warning,
-                action: TextButton(
-                    onPressed: _listFailure?.settingsRequired == true &&
-                            widget.onNavigate != null
-                        ? () => _navigate(WorkspaceDestination.settings)
-                        : () => _loadLanes(manual: true),
-                    child: Text(_listFailure?.settingsRequired == true &&
-                            widget.onNavigate != null
-                        ? 'Open Settings'
-                        : 'Retry')))),
-      Expanded(
-          child: _loading
-              ? const Center(child: CircularProgressIndicator())
-              : (_lanes.isEmpty
-                  &&
-                      _background.fleets.isEmpty &&
-                      _background.autopilot.isEmpty &&
-                      _backgroundError == null)
-                  ? _emptyState()
-                  : ListView(children: [
-                      if (_backgroundError != null)
-                          Padding(
-                            padding: const EdgeInsets.all(12),
-                            child: WorkspaceNotice(
-                              message: _backgroundError!,
-                              tone: NoticeTone.warning,
-                              action: TextButton(
-                                onPressed: _backgroundRefreshing
-                                    ? null
-                                    : () => _loadBackground(manual: true),
-                                child: const Text('Retry background work'),
-                              ),
-                            ),
-                          ),
-                        if (_background.fleets.isNotEmpty) _backgroundSection(),
-                        if (_background.autopilot.isNotEmpty)
-                          _autopilotSection(),
-                        if (_background.truncated)
-                          const Padding(
-                            padding: EdgeInsets.all(12),
-                            child: Text('Some older runs or children are not loaded in this background snapshot.'),
-                          ),
-                        if (ordered.isEmpty&& _lanes.isNotEmpty)
-                        Padding(
-                            padding: const EdgeInsets.all(20),
-                            child: Column(children: [
-                              const Text(
-                                  'No loaded conversations match these filters.'),
-                              TextButton(
-                                  onPressed: _clearFilters,
-                                  child: const Text('Clear filters')),
-                            ]),
-                          ),
-                        if (ordered.isNotEmpty)
-                          const Padding(
-                            key: Key('agent-lanes-group'),
-                            padding: EdgeInsets.fromLTRB(12, 12, 12, 4),
-                            child: Text('Agent lanes'),
-                          ),
-                      for (final group in groups.entries) ...[
-                        if (group.key.isNotEmpty)
-                          Padding(
-                              padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-                              child: Semantics(
-                                  label: 'Parent conversation ${group.key}',
-                                  child: TextButton.icon(
-                                      onPressed: () => _showParent(group.key),
-                                      icon: const Icon(Icons.call_split,
-                                          size: 14),
-                                      label: Text(
-                                          'Parent · ${_shortId(group.key)}',
-                                          style: Theme.of(context)
-                                              .textTheme
-                                              .labelSmall)))),
-                        for (final lane in group.value)
-                          ListTile(
-                              selected: lane.id == _selected,
-                              contentPadding: EdgeInsets.only(
-                                  left: _lanes.containsKey(lane.parentLaneId) && _groupByParent
-                                      ? 28
-                                      : 12,
-                                  right: 12),
-                              leading:
-                                  Icon(_lanes.containsKey(lane.parentLaneId) ? Icons.subdirectory_arrow_right : Icons.chat_bubble_outline,
-                                      size: 18),
-                              title: Text(lane.displayTitle,
-                                  maxLines: 2, overflow: TextOverflow.ellipsis),
-                              subtitle: Text(lane.statusLabel,
-                                  style: TextStyle(
-                                      color: const {'failed', 'awaiting_input'}
-                                              .contains(lane.status)
-                                          ? tokens.danger
-                                          : tokens.text2)),
-                              trailing: lane.unreadReports > 0
-                                  ? Semantics(
-                                      label: '${lane.unreadReports} unread reports',
-                                      child: Badge(label: Text('${lane.unreadReports}'), child: const Icon(Icons.mark_chat_unread_outlined, size: 18)))
-                                  : null,
-                              onTap: () => _select(lane.id)),
-                      ],
-                      if (_hasMore)
-                        TextButton(
-                            onPressed: _refreshing
-                                ? null
-                                : () => _loadLanes(more: true, manual: true),
-                            child: const Text('Load more conversations')),
-                    ]),
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+          SonderSpace.sm, SonderSpace.md, SonderSpace.sm, 0),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        TextField(
+          key: const Key('agent-search'),
+          controller: _search,
+          focusNode: _searchFocus,
+          style: Theme.of(context).textTheme.bodyMedium,
+          decoration: InputDecoration(
+            labelText: _hasMore
+                ? 'Search loaded conversations'
+                : 'Search conversations',
+            floatingLabelBehavior: FloatingLabelBehavior.never,
+            isDense: true,
+            prefixIcon: Icon(Icons.search, size: 18, color: tokens.muted),
+            prefixIconConstraints:
+                const BoxConstraints(minWidth: 40, minHeight: 40),
+            contentPadding: const EdgeInsets.symmetric(
+                horizontal: SonderSpace.sm, vertical: 13),
+            suffixIcon: _search.text.isEmpty
+                ? null
+                : IconButton(
+                    tooltip: 'Clear search',
+                    iconSize: 16,
+                    icon: const Icon(Icons.close),
+                    onPressed: () {
+                      setState(() => _search.clear());
+                      _searchFocus.requestFocus();
+                    }),
+          ),
+          onChanged: (_) => setState(() {}),
         ),
-      ],
+        const SizedBox(height: SonderSpace.xs),
+        AgentFilterBar(
+          value: _filter,
+          counts: _filterCounts(),
+          onChanged: (value) => setState(() => _filter = value),
+        ),
+      ]),
     );
   }
 
-  Widget _backgroundSection() => ExpansionTile(
-        key: const Key('fleet-group'),
-        title: Text('Fleets (${_background.fleets.length})'),
-        children: [
-          for (final fleet in _background.fleets)
-            ExpansionTile(
-              key: ValueKey<String>('fleet-${fleet.id}'),
-              title: Text(
-                fleet.task.isEmpty ? fleet.id : fleet.task,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-              ),
-              subtitle: Text(
-                '${fleet.status} · ${fleet.requestedAgents} agents · ${fleet.countSummary} · ${fleet.workerSlots} worker slots · ${fleet.elapsedLabel}',
-              ),
-              trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-                IconButton(
-                  tooltip: 'Open fleet details',
-                  icon: const Icon(Icons.open_in_new, size: 18),
-                  onPressed: () => _showBackgroundDetail(
-                    title: fleet.task.isEmpty ? fleet.id : fleet.task,
-                    status: '${fleet.status} · ${fleet.requestedAgents} agents · ${fleet.workerSlots} worker slots · ${fleet.countSummary}',
-                    preview: fleet.preview),
-                ),
-                if (fleet.cancelable) IconButton(
-                      tooltip: 'Cancel fleet',
-                      icon: const Icon(Icons.stop_circle_outlined),
-                      onPressed: () => _cancelBackground('fleet', fleet.id),
-                    ),
-    ]),
-              children: [
-                for (final child in fleet.children)
-                  ListTile(
-                    key: ValueKey<String>('fleet-child-${child.id}'),
-                    title: Text(
-                      child.task.isEmpty ? child.id : child.task,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    subtitle: Text(
-                      '${child.status} · ${child.elapsedLabel}${child.preview.isEmpty ? '' : ' · ${child.preview}'}',
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    trailing: child.cancelable ? IconButton(
-                      tooltip: 'Cancel child agent',
-                      icon: const Icon(Icons.stop_circle_outlined),
-                      onPressed: () => _cancelBackground('fleet', child.id),
-                    ) : null,
-                    onTap: child.id.isEmpty
-                        ? () => _showBackgroundDetail(
-                              title: child.task.isEmpty ? child.id : child.task,
-                              status: child.status,
-                              preview: child.preview,
-                            )
-                        : () => _lanes.containsKey(child.id)
-                            ? _select(child.id)
-                            : _showBackgroundDetail(
-                                title:
-                                    child.task.isEmpty ? child.id : child.task,
-                                status: child.status,
-                                preview: child.preview,
-                              ),
-                  ),
-              ],
-            ),
-        ],
+  Widget _refreshButton() => IconButton(
+        tooltip: 'Refresh conversations',
+        onPressed: _manualRefreshing ? null : _refreshAll,
+        icon: _manualRefreshing
+            ? const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : const Icon(Icons.refresh, size: 18),
       );
 
-  Widget _autopilotSection() => ExpansionTile(
-        key: const Key('autopilot-group'),
-        title: Text('Autopilot (${_background.autopilot.length})'),
-        children: [
-          for (final run in _background.autopilot)
-            ListTile(
-              title: Text(
-                run.objective.isEmpty ? run.id : run.objective,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-              ),
-              subtitle: Text(
-                '${run.status}${run.phase.isEmpty ? '' : ' · ${run.phase}'}${run.currentTask.isEmpty ? '' : ' · ${run.currentTask}'} · ${run.taskCountSummary} · ${run.elapsedLabel}',
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-              ),
-              trailing: Wrap(
-                spacing: 2,
-                children: [
-                  IconButton(
-                    tooltip: 'Open autopilot details',
-                    icon: const Icon(Icons.open_in_new, size: 18),
-                    onPressed: () => _showBackgroundDetail(
-                      title: run.objective.isEmpty ? run.id : run.objective,
-                      status:
-                          '${run.status}${run.phase.isEmpty ? '' : ' · ${run.phase}'}',
-                      preview: run.preview,
-                    ),
-                  ),
-                  if (run.cancelable)
-                    IconButton(
-                      tooltip: 'Cancel autopilot',
-                      icon: const Icon(Icons.stop_circle_outlined),
-                      onPressed: () => _cancelBackground('autopilot', run.id),
-                    ),
-                ],
-              ),
-            ),
-        ],
+  Widget _notice(String title, {List<Widget> actions = const []}) => Padding(
+        padding: const EdgeInsets.fromLTRB(
+            SonderSpace.sm, SonderSpace.xs, SonderSpace.sm, SonderSpace.sm),
+        child: WorkspaceNotice(
+            kind: StatusKind.warn, title: title, actions: actions),
       );
 
-  Future<void> _cancelBackground(String kind, String id) async {
-    if (!mounted) return;
-    try {
-      await widget.api.cancelBackground(
-        kind,
-        id,
-        project: widget.initialProject.trim(),
-      );
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Cancellation requested for $id. Refreshing status…'),
-        ),
-      );
-      await _loadBackground(manual: true);
-  }
-
-  catch (error) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(RequestFailure.read(error, resource: 'cancellation').message)),
-      );
-    }
-  }
-
-  Future<void> _showBackgroundDetail({
-    required String title,
-    required String status,
-    required String preview,
-  }) =>
-      showDialog<void>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: Text(title),
-          content: SelectableText(
-            preview.isEmpty ? 'Status: $status' : 'Status: $status\n\n$preview',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Close'),
-            ),
-          ],
-        ),
-      );
-
-  /// No agents yet: say where they come from, at the top, with a way there
-  /// (plan P2-15).
-  Widget _emptyState() {
-    final tokens = SonderTokens.of(context);
-    return ListView(
+  Widget _emptyState() => Center(
         key: const Key('agents-empty'),
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-        children: [
-          Text('Agents start from Chat with /delegate',
-              style: Theme.of(context).textTheme.titleSmall),
-          const SizedBox(height: 6),
-          Text(
-              'Ask Sonder to delegate a task, or type /delegate <task> in Chat. '
-              'Each agent gets its own conversation here, and it stays '
-              'available after the work finishes.',
-              style: Theme.of(context)
-                  .textTheme
-                  .bodyMedium
-                  ?.copyWith(color: tokens.text2)),
-          const SizedBox(height: 12),
-          Align(
-              alignment: Alignment.centerLeft,
-              child: FilledButton.tonalIcon(
-                  onPressed: () {
-                    if (widget.onNavigate != null) {
-                      _navigate(WorkspaceDestination.chat);
-                    } else {
-                      Navigator.of(context).maybePop();
-                    }
-                  },
-                  icon: const Icon(Icons.chat_bubble_outline, size: 18),
-                  label: const Text('Go to Chat'))),
-        ]);
+        child: ConstrainedBox(
+          // A comfortable measure for the sentence under the title.
+          constraints: const BoxConstraints(maxWidth: 480),
+          child: EmptyState(
+            icon: Icons.account_tree_outlined,
+            title: 'Agents start from Chat with /delegate',
+            message: 'Ask Sonder to delegate a task, or type /delegate <task> '
+                'in Chat. Each agent gets its own conversation here, and it '
+                'stays available after the work finishes.',
+            action: _canNavigate || Navigator.of(context).canPop()
+                ? FilledButton.tonalIcon(
+                    onPressed: () => _navigate(WorkspaceDestination.chat),
+                    icon: const Icon(Icons.chat_bubble_outline, size: 18),
+                    label: const Text('Go to Chat'))
+                : null,
+          ),
+        ),
+      );
+
+  String _fleetSummary(BackgroundFleet fleet) {
+    final p = fleetProgress(fleet);
+    final s = backgroundStatus(fleet.status).kind;
+    final when = s == StatusKind.running || s == StatusKind.note
+        ? elapsedText(fleet.elapsedSeconds)
+        : updatedAgo(fleet.updatedTs, _background.capturedAt) ??
+            elapsedText(fleet.elapsedSeconds);
+    return [
+      '${p.done} of ${p.total} done',
+      if (p.failed > 0) '${p.failed} failed',
+      if (when != null) when,
+    ].join(' · ');
   }
 
-  Widget _readable(Widget child) => Align(
-      alignment: Alignment.topCenter,
-      child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: conversationWidth),
-          child: child));
-
-  void _goLatest(String id) {
-    final scroll = _scrolls[id];
-    if (scroll == null || !scroll.hasClients) return;
-    scroll.animateTo(scroll.position.maxScrollExtent,
-        duration: MediaQuery.disableAnimationsOf(context)
-            ? Duration.zero
-            : const Duration(milliseconds: 180),
-        curve: Curves.easeOut);
+  String _autopilotSummary(BackgroundAutopilot run) {
+    final total = run.taskCounts['total'] ?? 0;
+    final s = backgroundStatus(run.status).kind;
+    final when = s == StatusKind.running || s == StatusKind.note
+        ? elapsedText(run.elapsedSeconds)
+        : updatedAgo(run.updatedTs, _background.capturedAt) ??
+            elapsedText(run.elapsedSeconds);
+    return [
+      if (total > 0) '${run.taskCounts['done'] ?? 0} of $total tasks',
+      if (when != null) when,
+    ].join(' · ');
   }
+
+  List<Widget> _backgroundRows() {
+    final fleets = _background.fleets.where(_fleetMatches).toList();
+    final runs = _background.autopilot.where(_autopilotMatches).toList();
+    if (fleets.isEmpty && runs.isEmpty && _backgroundError == null) {
+      return const [];
+    }
+    final selected = _selectedBackground;
+    return [
+      AgentSectionHeader(
+        key: const Key('background-group'),
+        title: 'Background work',
+        count: fleets.length + runs.length,
+      ),
+      if (_backgroundError != null)
+        _notice(_backgroundError!, actions: [
+          TextButton(
+            onPressed: _backgroundRefreshing
+                ? null
+                : () => _loadBackground(manual: true),
+            child: const Text('Retry background work'),
+          ),
+        ]),
+      if (fleets.isNotEmpty)
+        KeyedSubtree(
+          key: const Key('fleet-group'),
+          child: Column(children: [
+            for (final fleet in fleets)
+              BackgroundRow(
+                key: ValueKey<String>('fleet-${fleet.id}'),
+                kindLabel: 'Fleet',
+                title: fleet.displayTask,
+                status: fleet.status,
+                detail: _fleetSummary(fleet),
+                progress: fleetBar(context, fleet),
+                selected: selected?.kind == 'fleet' && selected?.id == fleet.id,
+                onTap: () => _selectBackground('fleet', fleet.id),
+              ),
+          ]),
+        ),
+      if (runs.isNotEmpty)
+        KeyedSubtree(
+          key: const Key('autopilot-group'),
+          child: Column(children: [
+            for (final run in runs)
+              BackgroundRow(
+                key: ValueKey<String>('autopilot-${run.id}'),
+                kindLabel: 'Autopilot',
+                title: run.displayObjective,
+                status: run.status,
+                detail: _autopilotSummary(run),
+                progress: autopilotBar(context, run),
+                selected:
+                    selected?.kind == 'autopilot' && selected?.id == run.id,
+                onTap: () => _selectBackground('autopilot', run.id),
+              ),
+          ]),
+        ),
+      if (_background.truncated)
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+              SonderSpace.xl, SonderSpace.xs, SonderSpace.md, 0),
+          child: Text(
+              'Some older runs or children are not loaded in this background snapshot.',
+              style: Theme.of(context).textTheme.bodySmall),
+        ),
+      const SizedBox(height: SonderSpace.md),
+    ];
+  }
+
+  List<Widget> _laneRows(List<AgentLane> ordered) {
+    final tokens = SonderTokens.of(context);
+    final text = Theme.of(context).textTheme;
+    final empty = !_loading &&
+        _lanes.isEmpty &&
+        _background.isEmpty &&
+        _backgroundError == null;
+    final filtered = _filter != AgentFilter.all || _search.text.isNotEmpty;
+    final rows = <Widget>[
+      AgentSectionHeader(
+        key: const Key('agent-lanes-group'),
+        title: 'Conversations',
+        count:
+            _lanes.isEmpty ? null : (filtered ? ordered.length : _lanes.length),
+        countSemantics: '${ordered.length} of ${_lanes.length} loaded'
+            '${_hasMore ? ', more available' : ''}',
+        actions: [
+          if (_lanes.isNotEmpty)
+            IconButton(
+                tooltip:
+                    _groupByParent ? 'Show a flat list' : 'Group by parent',
+                isSelected: _groupByParent,
+                onPressed: () =>
+                    setState(() => _groupByParent = !_groupByParent),
+                icon: const Icon(Icons.account_tree_outlined, size: 18)),
+          _refreshButton(),
+        ],
+      ),
+      if (_listError != null)
+        _notice(_listError!, actions: [
+          TextButton(
+              onPressed: _listFailure?.settingsRequired == true && _canNavigate
+                  ? () => _navigate(WorkspaceDestination.settings)
+                  : () => _loadLanes(manual: true),
+              child: Text(_listFailure?.settingsRequired == true && _canNavigate
+                  ? 'Open Settings'
+                  : 'Retry')),
+        ]),
+    ];
+    if (empty) {
+      rows.add(_emptyState());
+      return rows;
+    }
+    if (_lanes.isEmpty) {
+      if (!_loading) {
+        rows.add(Padding(
+          padding: const EdgeInsets.fromLTRB(
+              SonderSpace.xl, SonderSpace.xs, SonderSpace.md, SonderSpace.md),
+          child: Text(
+              'No agent conversations yet. Start one from Chat with /delegate.',
+              style: text.bodySmall?.copyWith(color: tokens.muted)),
+        ));
+      }
+      return rows;
+    }
+    if (ordered.isEmpty) {
+      rows.add(Padding(
+        padding: const EdgeInsets.symmetric(
+            horizontal: SonderSpace.xl, vertical: SonderSpace.lg),
+        child: Column(children: [
+          Text('No loaded conversations match these filters.',
+              textAlign: TextAlign.center,
+              style: text.bodySmall?.copyWith(color: tokens.text2)),
+          const SizedBox(height: SonderSpace.xs),
+          TextButton(
+              onPressed: _clearFilters, child: const Text('Clear filters')),
+        ]),
+      ));
+    } else {
+      final groups = <String, List<AgentLane>>{};
+      for (final lane in ordered) {
+        groups
+            .putIfAbsent(_groupByParent ? _rootParentId(lane) : '', () => [])
+            .add(lane);
+      }
+      for (final group in groups.entries) {
+        final tree = _groupByParent ? _tree(group.value) : null;
+        if (group.key.isNotEmpty) {
+          rows.add(ParentGroupLabel(
+            id: group.key,
+            label: 'Parent · ${_shortId(group.key)}',
+            onTap: () => _showParent(group.key),
+          ));
+        }
+        for (final lane in group.value) {
+          rows.add(LaneRow(
+            key: ValueKey<String>('lane-${lane.id}'),
+            lane: lane,
+            selected: lane.id == _selected,
+            tree: tree?[lane.id] ?? TreePosition.root,
+            age: lane.updatedAt == null
+                ? null
+                : '${compactSpan(DateTime.now().toUtc().difference(lane.updatedAt!).abs())} ago',
+            onTap: () => _select(lane.id),
+          ));
+        }
+      }
+    }
+    if (_hasMore) {
+      rows.add(Padding(
+        padding: const EdgeInsets.fromLTRB(
+            SonderSpace.md, SonderSpace.md, SonderSpace.md, 0),
+        child: Column(children: [
+          Text('${_lanes.length} loaded · more on the server',
+              style: text.bodySmall?.copyWith(color: tokens.muted)),
+          const SizedBox(height: SonderSpace.xs),
+          OutlinedButton(
+            onPressed: _loadingMore || _refreshing ? null : _loadMore,
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              if (_loadingMore) ...[
+                const SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2)),
+                const SizedBox(width: SonderSpace.sm),
+              ],
+              const Flexible(
+                child: Text('Load more conversations',
+                    textAlign: TextAlign.center),
+              ),
+            ]),
+          ),
+        ]),
+      ));
+    }
+    return rows;
+  }
+
+  Widget _listPane({required bool wide}) {
+    final tokens = SonderTokens.of(context);
+    final ordered = _orderedLanes().where(_matches).toList();
+    final hasItems = _lanes.isNotEmpty || !_background.isEmpty;
+    return Container(
+      color: wide ? tokens.panel : null,
+      child: Column(children: [
+        if (hasItems) _searchAndFilters(),
+        Expanded(
+          child: _loading
+              ? const Padding(
+                  padding: EdgeInsets.only(top: SonderSpace.sm),
+                  child: SkeletonRows(
+                      rows: 6, semanticLabel: 'Loading agent conversations'),
+                )
+              : FocusTraversalGroup(
+                  child: ListView(
+                    key: const Key('agent-list'),
+                    padding: const EdgeInsets.fromLTRB(SonderSpace.sm,
+                        SonderSpace.xs, SonderSpace.sm, SonderSpace.xxl),
+                    children: [
+                      ..._backgroundRows(),
+                      ..._laneRows(ordered),
+                    ],
+                  ),
+                ),
+        ),
+      ]),
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Transcript pane
+  // -------------------------------------------------------------------------
 
   Widget _parentContext(AgentLane lane) {
+    final tokens = SonderTokens.of(context);
+    // Standard density: a compact button would shrink its 48 dp target.
+    final style = TextButton.styleFrom(
+      foregroundColor: tokens.text2,
+      padding: const EdgeInsets.symmetric(horizontal: SonderSpace.sm),
+    );
     final parent = _lanes[lane.parentLaneId];
     if (lane.parentLaneId != null) {
       return TextButton.icon(
+          style: style,
           onPressed: () => _select(lane.parentLaneId!),
           icon: const Icon(Icons.arrow_upward, size: 14),
           label: Text(parent?.displayTitle ?? 'Parent conversation',
@@ -1052,555 +1295,775 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
     }
     if (lane.parentSessionId.isEmpty) return const SizedBox.shrink();
     return TextButton.icon(
+        style: style,
         onPressed: () => _showParent(lane.parentSessionId),
         icon: const Icon(Icons.call_split, size: 14),
         label: Text('Parent conversation · ${_shortId(lane.parentSessionId)}',
             overflow: TextOverflow.ellipsis));
   }
 
-  Widget _transcript(AgentLane lane) {
-    final snapshot = _snapshots[lane.id];
-    final pending = _pending[lane.id];
-    final controller = _drafts.putIfAbsent(lane.id, TextEditingController.new);
-    final scroll = _scrolls.putIfAbsent(lane.id, ScrollController.new);
-    final needsResume =
-        const {'failed', 'interrupted', 'awaiting_input'}.contains(lane.status);
-    final messages = <int, AgentMessage>{};
-    final history = (_events[lane.id]?.values.toList() ?? <AgentEvent>[])
-      ..sort((a, b) => a.sequence.compareTo(b.sequence));
-    for (final event in history) {
-      if (event.type == 'lane.message') {
-        messages[event.sequence] = AgentMessage.fromJson(
-            {...event.payload, 'sequence': event.sequence});
-      }
+  Widget _laneActions(AgentLane lane, _PendingCommand? pending) {
+    final idle = pending == null;
+    void quiet(Object error, StackTrace stack) {
+      // The command notice beside the header explains the failure.
     }
-    for (final message in snapshot?.messages ?? <AgentMessage>[]) {
-      messages[message.sequence] = message;
-    }
-    final entries = <({int sequence, Widget widget})>[];
-    for (final message in messages.values) {
-      entries.add((
-        sequence: message.sequence,
-        widget: _entry(message.authorLabel, message.content,
-            detail: message.deliveryState == 'queued'
-                ? (needsResume
-                    ? 'Queued · choose Resume to continue'
-                    : 'Queued for the next turn')
-                : message.deliveryState == 'accepted'
-                    ? 'Received by agent'
-                    : null)
-      ));
-    }
-    final tools = <String, ({AgentEvent first, AgentEvent? result})>{};
-    for (final event in history) {
-      if (event.type == 'model.response') {
-        entries.add((
-          sequence: event.sequence,
-          widget: _entry('Agent', event.payload['content']?.toString() ?? '')
-        ));
-      }
-      if (event.type.startsWith('tool.')) {
-        final id = event.payload['call_id']?.toString() ?? event.id;
-        final key = id.isEmpty ? '${event.sequence}' : id;
-        tools[key] = (
-          first: tools[key]?.first ?? event,
-          result: event.type == 'tool.result' ? event : tools[key]?.result
+
+    return Wrap(
+      spacing: SonderSpace.sm,
+      runSpacing: SonderSpace.sm,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        if (lane.canResume)
+          AsyncActionButton(
+            key: const Key('lane-resume'),
+            label: 'Resume',
+            icon: Icons.play_arrow,
+            style: lane.needsAttention
+                ? ActionButtonStyle.filled
+                : ActionButtonStyle.outlined,
+            doneLabel: null,
+            onError: quiet,
+            onPressed: idle ? () => _control(lane.id, 'resume') : null,
+          ),
+        if (lane.canInterrupt)
+          AsyncActionButton(
+            key: const Key('lane-interrupt'),
+            label: 'Interrupt',
+            icon: Icons.pause,
+            doneLabel: null,
+            onError: quiet,
+            onPressed: idle ? () => _control(lane.id, 'interrupt') : null,
+          ),
+        if (lane.canCancel)
+          AsyncActionButton(
+            key: const Key('lane-cancel'),
+            label: 'Cancel work',
+            icon: Icons.stop_circle_outlined,
+            style: ActionButtonStyle.text,
+            doneLabel: null,
+            onError: quiet,
+            confirm: () => _confirmCancel(lane),
+            onPressed: idle ? () => _control(lane.id, 'cancel') : null,
+          ),
+      ],
+    );
+  }
+
+  Widget _laneHeader(AgentLane lane, _PendingCommand? pending, bool wide) {
+    final tokens = SonderTokens.of(context);
+    final text = Theme.of(context).textTheme;
+    final pad = wide ? SonderSpace.xxl : SonderSpace.lg;
+    final commandError = _commandErrors[lane.id];
+    final controlPending = pending != null && pending.action != 'messages';
+    final stopped =
+        lane.needsAttention && lane.error.isNotEmpty ? lane.error : null;
+    final facts = [
+      lane.tier.isEmpty ? 'tier unavailable' : 'tier ${lane.tier}',
+      'revision ${lane.revision}',
+    ];
+    final status = Semantics(
+      container: true,
+      label: 'Server execution status: ${lane.executionSummary}',
+      liveRegion: true,
+      excludeSemantics: true,
+      child: SonderSwitcher(
+        child: StatusPill(lane.statusKind,
+            key: ValueKey(lane.status), word: lane.statusLabel),
+      ),
+    );
+    final factsRow = Wrap(
+      spacing: SonderSpace.sm,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        for (var i = 0; i < facts.length; i++) ...[
+          if (i > 0)
+            Text('·', style: tokens.mono(12, color: tokens.hairlineStrong)),
+          Text(facts[i], style: tokens.mono(12, color: tokens.muted)),
+        ],
+      ],
+    );
+    final actions = _laneActions(lane, pending);
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+          pad, wide ? SonderSpace.lg : SonderSpace.md, pad, SonderSpace.md),
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: conversationWidth),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // The link's icon lines up with the title's first letter.
+              Transform.translate(
+                offset: const Offset(-SonderSpace.sm, 0),
+                child: _parentContext(lane),
+              ),
+              Tooltip(
+                message: lane.displayTitle,
+                child: Text(lane.displayTitle,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: wide
+                        ? text.titleLarge
+                        : text.titleMedium
+                            ?.copyWith(fontWeight: FontWeight.w600)),
+              ),
+              const SizedBox(height: SonderSpace.sm),
+              LayoutBuilder(builder: (context, constraints) {
+                final identity = Wrap(
+                  spacing: SonderSpace.md,
+                  runSpacing: SonderSpace.xs,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [status, factsRow],
+                );
+                if (constraints.maxWidth < 560) {
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      identity,
+                      const SizedBox(height: SonderSpace.md),
+                      actions,
+                    ],
+                  );
+                }
+                return Row(children: [
+                  Expanded(child: identity),
+                  const SizedBox(width: SonderSpace.md),
+                  actions,
+                ]);
+              }),
+              SonderReveal(
+                visible: stopped != null,
+                child: stopped == null
+                    ? const SizedBox.shrink()
+                    : Padding(
+                        padding: const EdgeInsets.only(top: SonderSpace.md),
+                        child: WorkspaceNotice(
+                          kind: lane.status == 'failed'
+                              ? StatusKind.fail
+                              : StatusKind.warn,
+                          word: lane.status == 'failed' ? null : 'needs you',
+                          title: laneErrorSummary(stopped),
+                          hint: laneErrorSummary(stopped) == stopped
+                              ? null
+                              : 'server code $stopped',
+                          liveRegion: false,
+                        ),
+                      ),
+              ),
+              SonderReveal(
+                visible: _detailError != null,
+                child: _detailError == null
+                    ? const SizedBox.shrink()
+                    : Padding(
+                        padding: const EdgeInsets.only(top: SonderSpace.md),
+                        child: WorkspaceNotice(
+                          kind: StatusKind.warn,
+                          title: _detailError!,
+                          actions: [
+                            TextButton(
+                                onPressed: _detailFailure?.settingsRequired ==
+                                            true &&
+                                        _canNavigate
+                                    ? () =>
+                                        _navigate(WorkspaceDestination.settings)
+                                    : () => _select(lane.id),
+                                child: Text(
+                                    _detailFailure?.settingsRequired == true &&
+                                            _canNavigate
+                                        ? 'Open Settings'
+                                        : 'Retry')),
+                          ],
+                        ),
+                      ),
+              ),
+              SonderReveal(
+                visible: controlPending ||
+                    (commandError != null && commandError.action != 'messages'),
+                child: Padding(
+                  padding: const EdgeInsets.only(top: SonderSpace.md),
+                  child: controlPending
+                      ? _pendingNotice(lane, pending)
+                      : commandError != null &&
+                              commandError.action != 'messages'
+                          ? WorkspaceNotice(
+                              kind: StatusKind.fail,
+                              title: commandError.message)
+                          : const SizedBox.shrink(),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _pendingNotice(AgentLane lane, _PendingCommand pending) =>
+      WorkspaceNotice(
+        kind: pending.error == null ? StatusKind.running : StatusKind.warn,
+        word: pending.error == null ? 'sending' : null,
+        title: pending.error ??
+            switch (pending.action) {
+              'interrupt' => 'Sending the interrupt request…',
+              'resume' => 'Sending the resume request…',
+              'cancel' => 'Sending the cancel request…',
+              _ => 'Sending your message…',
+            },
+        actions: [
+          if (pending.error != null)
+            TextButton(
+                onPressed: () => _command(lane.id, pending.action),
+                child: const Text('Retry request')),
+        ],
+      );
+
+  Widget _transcriptItem(AgentLane lane, TranscriptItem item, bool needsResume,
+      {int? explainedFailure}) {
+    switch (item) {
+      case MessageItem():
+        return AgentTurnView(
+            key: ValueKey(item.key), item: item, needsResume: needsResume);
+      case ToolItem():
+        final open = _openTools[lane.id]?.contains(item.callKey) ?? false;
+        return ToolCallCard(
+          key: ValueKey('tool-${lane.id}-${item.callKey}'),
+          item: item,
+          expanded: open,
+          onToggle: () => setState(() {
+            final set = _openTools.putIfAbsent(lane.id, () => {});
+            if (!set.remove(item.callKey)) set.add(item.callKey);
+          }),
         );
-      }
+      case LifecycleItem():
+        return LifecycleLine(
+            key: ValueKey(item.key),
+            item: item,
+            showReason: item.sequence != explainedFailure);
     }
-    for (final tool in tools.entries) {
-      final first = tool.value.first;
-      final result = tool.value.result;
-      final args = first.payload['arguments'];
-      final output = result?.payload['output']?.toString() ?? '';
-      final status = result == null
-          ? 'Requested'
-          : result.payload['success'] == false
-              ? 'Failed'
-              : result.payload['success'] == true
-                  ? 'Completed'
-                  : 'Result received';
-      entries.add((
-        sequence: first.sequence,
-        widget: Padding(
-            padding: const EdgeInsets.only(bottom: 12),
-            child: Card(
-                child: ExpansionTile(
-              key: PageStorageKey('tool-${lane.id}-${tool.key}'),
-              leading: const Icon(Icons.terminal, size: 18),
-              title: Text(first.payload['name']?.toString() ?? 'Tool activity'),
-              subtitle: Text(status),
-              childrenPadding: const EdgeInsets.all(16),
-              expandedCrossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (args != null) ...[
-                  const Text('Request'),
-                  const SizedBox(height: 6),
-                  SelectableText(
-                      const JsonEncoder.withIndent('  ').convert(args),
-                      style: SonderTokens.of(context).mono(12)),
-                  const SizedBox(height: 12)
-                ],
-                if (output.isNotEmpty)
-                  SelectableText(output,
-                      style: SonderTokens.of(context).mono(12))
-                else
-                  Text(result == null
-                      ? 'No result received yet.'
-                      : 'No text output.')
-              ],
-            )))
-      ));
-    }
-    entries.sort((a, b) => a.sequence.compareTo(b.sequence));
+  }
+
+  List<Widget> _reportSection(AgentLane lane) {
+    final text = Theme.of(context).textTheme;
     final reports = _reports.values
         .where((report) => _reportParents[report.id] == lane.id)
         .toList();
+    if (reports.isEmpty && _reportErrors[lane.id] == null) return const [];
+    final unread = reports.where((r) => !r.acknowledged).length;
+    return [
+      const SizedBox(height: SonderSpace.xxl),
+      Row(children: [
+        Expanded(
+          child: Semantics(
+            header: true,
+            child: Text('Reports to parent',
+                style: text.titleSmall?.copyWith(fontWeight: FontWeight.w600)),
+          ),
+        ),
+        if (unread > 0)
+          CountBadge(unread,
+              semantic: '$unread unread report${unread == 1 ? '' : 's'}'),
+      ]),
+      const SizedBox(height: SonderSpace.xs),
+      Text('Marking a report read does not approve or integrate its changes.',
+          style: text.bodySmall),
+      const SizedBox(height: SonderSpace.md),
+      if (_reportErrors[lane.id] != null)
+        Padding(
+          padding: const EdgeInsets.only(bottom: SonderSpace.md),
+          child: WorkspaceNotice(
+              kind: StatusKind.warn,
+              title: _reportErrors[lane.id]!,
+              actions: [
+                TextButton(
+                    onPressed: () => _loadReports(lane.id),
+                    child: const Text('Retry reports')),
+              ]),
+        ),
+      for (final report in reports)
+        Padding(
+          padding: const EdgeInsets.only(bottom: SonderSpace.md),
+          child: ReportCard(
+            key: ValueKey('report-${report.id}'),
+            report: report,
+            expanded: _reportOpen[report.id] ?? !report.acknowledged,
+            onToggle: () => setState(() => _reportOpen[report.id] =
+                !(_reportOpen[report.id] ?? !report.acknowledged)),
+            onMarkRead:
+                report.acknowledged ? null : () => _ackReport(report, lane.id),
+            onMarkReadError: (_, __) {},
+          ),
+        ),
+      if (_reportHasMore[lane.id] == true)
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton(
+              onPressed: () => _loadReports(lane.id, more: true),
+              child: const Text('Load more reports')),
+        ),
+    ];
+  }
+
+  Widget _transcript(AgentLane lane, {required bool wide}) {
+    final tokens = SonderTokens.of(context);
+    final text = Theme.of(context).textTheme;
+    final snapshot = _snapshots[lane.id];
+    final pending = _pending[lane.id];
+    final controller = _drafts.putIfAbsent(lane.id, TextEditingController.new);
+    final scroll = _scrollFor(lane.id);
+    final needsResume = lane.needsAttention;
+    final pad = wide ? SonderSpace.xxl : SonderSpace.lg;
     final canSend = pending == null &&
         lane.status != 'cancelled' &&
         _detailFailure?.settingsRequired != true &&
         controller.text.trim().isNotEmpty;
+    final commandError = _commandErrors[lane.id];
+
+    Widget body;
+    if (snapshot == null) {
+      body = ListView(
+        padding: EdgeInsets.fromLTRB(pad, SonderSpace.lg, pad, SonderSpace.lg),
+        children: [
+          Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: conversationWidth),
+              child: _detailError == null
+                  ? const TranscriptSkeleton()
+                  : Padding(
+                      padding:
+                          const EdgeInsets.symmetric(vertical: SonderSpace.xl),
+                      child: Text('Conversation not loaded.',
+                          style:
+                              text.bodyMedium?.copyWith(color: tokens.text2)),
+                    ),
+            ),
+          ),
+        ],
+      );
+    } else {
+      final items = buildTranscript(
+        _events[lane.id]?.values ?? const <AgentEvent>[],
+        snapshot.messages,
+        active: lane.isWorking,
+      );
+      // The header notice explains the current failure; its marker in the
+      // timeline then shows only what happened, not the reason again.
+      int? explainedFailure;
+      if (lane.needsAttention && lane.error.isNotEmpty) {
+        for (final item in items.reversed) {
+          if (item is LifecycleItem &&
+              (item.kind == LifecycleKind.failed ||
+                  item.kind == LifecycleKind.stalled)) {
+            explainedFailure = item.sequence;
+            break;
+          }
+        }
+      }
+      final hasDetails = lane.task.isNotEmpty ||
+          lane.workspaceRoot.isNotEmpty ||
+          lane.tier.isNotEmpty;
+      final head = <Widget>[
+        if (hasDetails)
+          RunDetails(
+            key: ValueKey('task-${lane.id}'),
+            lane: lane,
+            expanded: _openDetails.contains(lane.id),
+            onToggle: () => setState(() {
+              if (!_openDetails.remove(lane.id)) _openDetails.add(lane.id);
+            }),
+            onOpenRuntime: _canNavigate
+                ? () => _navigate(WorkspaceDestination.runtime)
+                : null,
+          ),
+        if (snapshot.hasMore)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: SonderSpace.md),
+            child: Text('Loading conversation history…',
+                style: text.bodySmall?.copyWith(color: tokens.muted)),
+          ),
+        if (items.isEmpty)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: SonderSpace.xl),
+            child: Text('This conversation has no messages yet.',
+                style: text.bodyMedium?.copyWith(color: tokens.text2)),
+          ),
+      ];
+      final tail = _reportSection(lane);
+      final count = head.length + items.length + tail.length;
+      // Every item spans the reading column, so short text starts at its
+      // left edge instead of being centred.
+      Widget readable(Widget child) => Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: conversationWidth),
+              child: SizedBox(width: double.infinity, child: child),
+            ),
+          );
+      final list = ListView.builder(
+        key: const Key('agent-transcript'),
+        // The controller is retained per lane in _scrolls; per-item state
+        // (open tool cards, reports, details) lives in this screen, so items
+        // can be rebuilt lazily without losing it.
+        controller: scroll,
+        padding: EdgeInsets.fromLTRB(pad, SonderSpace.md, pad, SonderSpace.xxl),
+        itemCount: count,
+        itemBuilder: (context, index) {
+          if (index < head.length) return readable(head[index]);
+          index -= head.length;
+          if (index < items.length) {
+            return readable(_transcriptItem(lane, items[index], needsResume,
+                explainedFailure: explainedFailure));
+          }
+          return readable(tail[index - items.length]);
+        },
+      );
+      bool track(ScrollMetrics metrics, int depth) {
+        if (depth != 0) return false;
+        final away = metrics.maxScrollExtent - metrics.pixels > 240;
+        if (_awayFromEnd.value != away) _awayFromEnd.value = away;
+        return false;
+      }
+
+      body = Stack(children: [
+        NotificationListener<ScrollMetricsNotification>(
+          onNotification: (n) => track(n.metrics, n.depth),
+          child: NotificationListener<ScrollUpdateNotification>(
+            onNotification: (n) => track(n.metrics, n.depth),
+            child: list,
+          ),
+        ),
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: SonderSpace.md,
+          child: Center(
+            child: ValueListenableBuilder<bool>(
+              valueListenable: _awayFromEnd,
+              builder: (context, away, _) => SonderSwitcher(
+                alignment: Alignment.bottomCenter,
+                child: away
+                    ? _LatestButton(
+                        key: const ValueKey('latest'),
+                        onTap: () => _goLatest(lane.id))
+                    : const SizedBox.shrink(key: ValueKey('none')),
+              ),
+            ),
+          ),
+        ),
+      ]);
+    }
+
+    final messagePending = pending != null && pending.action == 'messages';
+    final messageError =
+        commandError != null && commandError.action == 'messages'
+            ? commandError.message
+            : null;
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-      _readable(Padding(
-          padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
-          child:
-              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            _parentContext(lane),
-            Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Expanded(
-                  child: Tooltip(
-                      message: lane.displayTitle,
-                      child: Text(lane.displayTitle,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.titleLarge))),
-              const SizedBox(width: 12),
-              Semantics(
-                  label: 'Server execution status: ${lane.executionSummary}',
-                  liveRegion: true,
-                  child: Chip(label: Text(lane.statusLabel))),
-            ]),
-            Wrap(
-                spacing: 8,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  Chip(
-                      avatar: const Icon(Icons.memory_outlined, size: 16),
-                      label: Text(lane.tier.isEmpty
-                          ? 'Tier unavailable'
-                          : 'Tier ${lane.tier}')),
-                  Chip(
-                      avatar: const Icon(Icons.sync_outlined, size: 16),
-                      label: Text('Revision ${lane.revision}')),
-                  if (lane.canInterrupt)
-                    TextButton.icon(
-                        onPressed: pending == null
-                            ? () => _command(lane.id, 'interrupt')
-                            : null,
-                        icon: const Icon(Icons.pause, size: 18),
-                        label: const Text('Interrupt')),
-                  if (lane.canResume)
-                    TextButton.icon(
-                        onPressed: pending == null
-                            ? () => _command(lane.id, 'resume')
-                            : null,
-                        icon: const Icon(Icons.play_arrow, size: 18),
-                        label: const Text('Resume')),
-                  if (lane.canCancel)
-                    TextButton(
-                        onPressed: pending == null ? () => _cancel(lane) : null,
-                        child: const Text('Cancel work')),
-                  IconButton(
-                      tooltip: 'Go to latest activity',
-                      onPressed: () => _goLatest(lane.id),
-                      icon: const Icon(Icons.vertical_align_bottom, size: 18)),
-                ]),
-            if (_detailError != null)
-              WorkspaceNotice(
-                  message: _detailError!,
-                  tone: NoticeTone.warning,
-                  action: TextButton(
-                      onPressed: _detailFailure?.settingsRequired == true &&
-                              widget.onNavigate != null
-                          ? () => _navigate(WorkspaceDestination.settings)
-                          : () => _select(lane.id),
-                      child: Text(_detailFailure?.settingsRequired == true &&
-                              widget.onNavigate != null
-                          ? 'Open Settings'
-                          : 'Retry'))),
-          ]))),
-      const Divider(height: 1),
-      Expanded(
-          child: snapshot == null
-              ? Center(
-                  child: _detailError == null
-                      ? const CircularProgressIndicator()
-                      : const Text('Conversation not loaded.'))
-              : ListView(
-                  // The controller is retained per lane in _scrolls. A
-                  // PageStorageKey here would collide with ExpansionTile's
-                  // boolean state and nested selectable markdown scrolls.
-                  controller: scroll,
-                  padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
-                  children: [
-                      _readable(Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            if (lane.task.isNotEmpty ||
-                                lane.workspaceRoot.isNotEmpty ||
-                                lane.tier.isNotEmpty)
-                              ExpansionTile(
-                                // Keep the tile identity local. A PageStorageKey
-                                // here would share its boolean expansion state
-                                // with nested selectable text scroll positions.
-                                key: ValueKey('task-${lane.id}'),
-                                title: const Text(
-                                    'Task, workspace and run details'),
-                                tilePadding: EdgeInsets.zero,
-                                expandedCrossAxisAlignment:
-                                    CrossAxisAlignment.start,
-                                children: [
-                                  if (lane.task.isNotEmpty)
-                                    ConversationContent(content: lane.task),
-                                  if (lane.workspaceRoot.isNotEmpty) ...[
-                                    const SizedBox(height: 12),
-                                    Text('Assigned workspace',
-                                        style: Theme.of(context)
-                                            .textTheme
-                                            .labelLarge),
-                                    SelectableText(lane.workspaceRoot,
-                                        style:
-                                            SonderTokens.of(context).mono(12))
-                                  ],
-                                  if (lane.tier.isNotEmpty) ...[
-                                    const SizedBox(height: 12),
-                                    Text('Execution',
-                                        style: Theme.of(context)
-                                            .textTheme
-                                            .labelLarge),
-                                    SelectableText(lane.executionSummary,
-                                        style:
-                                            SonderTokens.of(context).mono(12)),
-                                    const SizedBox(height: 8),
-                                    const Text(
-                                        'Per-lane capacity counters are not reported by this server. Use Runtime for cluster-level capacity and resource health.'),
-                                    if (widget.onNavigate != null)
-                                      Align(
-                                          alignment: Alignment.centerLeft,
-                                          child: TextButton.icon(
-                                              onPressed: () => _navigate(
-                                                  WorkspaceDestination.runtime),
-                                              icon: const Icon(
-                                                  Icons
-                                                      .dashboard_customize_outlined,
-                                                  size: 16),
-                                              label:
-                                                  const Text('Open Runtime'))),
-                                  ],
-                                  const SizedBox(height: 16)
-                                ],
-                              ),
-                            if (snapshot.hasMore)
-                              const Padding(
-                                  padding: EdgeInsets.symmetric(vertical: 12),
-                                  child: Text('Loading conversation history…')),
-                            if (lane.error.isNotEmpty)
-                              Padding(
-                                  padding: const EdgeInsets.only(bottom: 16),
-                                  child: WorkspaceNotice(
-                                      message: lane.error,
-                                      tone: NoticeTone.warning)),
-                            if (entries.isEmpty)
-                              const Padding(
-                                  padding: EdgeInsets.symmetric(vertical: 20),
-                                  child: Text(
-                                      'This conversation has no messages yet.')),
-                            ...entries.map((entry) => entry.widget),
-                            if (reports.isNotEmpty ||
-                                _reportErrors[lane.id] != null) ...[
-                              const Divider(),
-                              Text('Reports to parent',
-                                  style:
-                                      Theme.of(context).textTheme.titleMedium),
-                              const SizedBox(height: 6),
-                              const Text(
-                                  'Marking a report read does not approve or integrate its changes.'),
-                              const SizedBox(height: 12),
-                            ],
-                            if (_reportErrors[lane.id] != null)
-                              WorkspaceNotice(
-                                  message: _reportErrors[lane.id]!,
-                                  tone: NoticeTone.warning,
-                                  action: TextButton(
-                                      onPressed: () => _loadReports(lane.id),
-                                      child: const Text('Retry reports'))),
-                            for (final report in reports)
-                              Padding(
-                                  padding: const EdgeInsets.only(bottom: 12),
-                                  child: Card(
-                                      child: ExpansionTile(
-                                    key: PageStorageKey('report-${report.id}'),
-                                    initiallyExpanded: !report.acknowledged,
-                                    leading: Icon(
-                                        report.acknowledged
-                                            ? Icons.mark_chat_read_outlined
-                                            : Icons.mark_chat_unread_outlined,
-                                        size: 18),
-                                    title: const Text('Report to parent'),
-                                    subtitle: Text(report.acknowledged
-                                        ? 'Read'
-                                        : 'Unread'),
-                                    childrenPadding: const EdgeInsets.fromLTRB(
-                                        16, 0, 16, 16),
-                                    expandedCrossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      ConversationContent(
-                                          content: report.summary),
-                                      if (report.artifacts.isNotEmpty) ...[
-                                        const SizedBox(height: 12),
-                                        Text('Artifacts',
-                                            style: Theme.of(context)
-                                                .textTheme
-                                                .labelLarge),
-                                        for (final artifact in report.artifacts)
-                                          Padding(
-                                              padding:
-                                                  const EdgeInsets.symmetric(
-                                                      vertical: 6),
-                                              child: SelectableText(artifact,
-                                                  style:
-                                                      SonderTokens.of(context)
-                                                          .mono(12)))
-                                      ],
-                                      if (!report.acknowledged)
-                                        TextButton(
-                                            onPressed: _acknowledging
-                                                    .contains(report.id)
-                                                ? null
-                                                : () =>
-                                                    _ackReport(report, lane.id),
-                                            child: const Text('Mark read'))
-                                    ],
-                                  ))),
-                            if (_reportHasMore[lane.id] == true)
-                              TextButton(
-                                  onPressed: () =>
-                                      _loadReports(lane.id, more: true),
-                                  child: const Text('Load more reports')),
-                          ])),
-                    ])),
-      _readable(
-          Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-        if (_commandErrors[lane.id] != null)
-          _notice(_commandErrors[lane.id]!, warning: true),
-        if (pending != null)
-          _notice(pending.error ?? 'Sending request…',
-              warning: pending.error != null,
-              action: pending.error == null
-                  ? null
-                  : TextButton(
-                      onPressed: () => _command(lane.id, pending.action),
-                      child: const Text('Retry request'))),
-        SafeArea(
-            top: false,
-            child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      if (needsResume)
-                        Padding(
-                            padding: const EdgeInsets.only(bottom: 8),
-                            child: Text(
-                                'Messages wait here until you choose Resume.',
-                                style: Theme.of(context).textTheme.labelSmall)),
-                      if (lane.status == 'cancelled')
-                        const Padding(
-                            padding: EdgeInsets.only(bottom: 8),
-                            child: Text(
-                                'This conversation was cancelled. Its messages remain available.')),
-                      Row(
-                          crossAxisAlignment: CrossAxisAlignment.end,
-                          children: [
-                            Expanded(
-                                child: CallbackShortcuts(
-                                    bindings: {
-                                  const SingleActivator(
-                                      LogicalKeyboardKey.enter,
-                                      control: true): _sendSelected,
-                                  const SingleActivator(
-                                      LogicalKeyboardKey.enter,
-                                      meta: true): _sendSelected,
-                                },
-                                    child: TextField(
-                                        key: ValueKey('composer-${lane.id}'),
-                                        controller: controller,
-                                        focusNode: _composerFocus,
-                                        enabled: pending == null &&
-                                            lane.status != 'cancelled' &&
-                                            _detailFailure?.settingsRequired !=
-                                                true,
-                                        minLines: 1,
-                                        maxLines: 6,
-                                        decoration: const InputDecoration(
-                                            labelText: 'Message this agent',
-                                            hintText:
-                                                'Send a correction or follow-up'),
-                                        onChanged: (_) => setState(() {})))),
-                            const SizedBox(width: 8),
-                            IconButton.filled(
-                                tooltip: 'Send to agent',
-                                onPressed: canSend ? _sendSelected : null,
-                                icon: const Icon(Icons.arrow_upward)),
-                          ]),
-                      const SizedBox(height: 6),
-                      Text(
-                          'Ctrl+Enter or ⌘+Enter to send · Enter for a new line',
-                          style: Theme.of(context).textTheme.labelSmall),
-                    ]))),
-      ])),
+      _laneHeader(lane, pending, wide),
+      Divider(height: 1, color: tokens.hairline),
+      Expanded(child: body),
+      SonderReveal(
+        visible: messagePending || messageError != null,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(
+              SonderSpace.md, SonderSpace.sm, SonderSpace.md, 0),
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: conversationWidth),
+              child: messagePending
+                  ? _pendingNotice(lane, pending)
+                  : messageError != null
+                      ? WorkspaceNotice(
+                          kind: StatusKind.fail, title: messageError)
+                      : const SizedBox.shrink(),
+            ),
+          ),
+        ),
+      ),
+      AgentComposer(
+        controller: controller,
+        focusNode: _composerFocus.putIfAbsent(lane.id, FocusNode.new),
+        fieldKey: ValueKey('composer-${lane.id}'),
+        enabled: pending == null &&
+            lane.status != 'cancelled' &&
+            _detailFailure?.settingsRequired != true,
+        canSend: canSend,
+        onSend: _sendSelected,
+        onChanged: (_) => setState(() {}),
+        note: lane.status == 'cancelled'
+            ? 'This conversation was cancelled. Its messages remain available.'
+            : needsResume
+                ? 'Messages wait here until you choose Resume.'
+                : null,
+        noteKind: needsResume ? StatusKind.warn : StatusKind.note,
+        showHint: MediaQuery.sizeOf(context).width >= 600,
+      ),
     ]);
   }
 
-  Future<void> _ackReport(AgentReport report, String laneId) async {
-    if (!_acknowledging.add(report.id)) return;
-    setState(() {});
-    try {
-      await widget.api.agentAcknowledge(
-        report.id,
-        commandId: 'read-${report.id}',
-      );
-      await _loadReports(laneId);
-      await _loadLanes(manual: true);
-    } catch (_) {
-      if (mounted) {
-        setState(
-          () => _reportErrors[laneId] =
-              'Could not confirm the report was marked read. Retry reports to check its current state.',
-        );
-      }
-    } finally {
-      _acknowledging.remove(report.id);
-      if (mounted) setState(() {});
-    }
+  /// Identity of what the detail pane shows, for its cross-fade.
+  String get _detailKey {
+    final background = _selectedBackground;
+    if (_selected != null) return 'lane-$_selected';
+    if (background != null) return '${background.kind}-${background.id}';
+    return 'none';
   }
 
-  Widget _entry(String author, String content, {String? detail}) => Padding(
-        padding: const EdgeInsets.only(bottom: 24),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(author, style: Theme.of(context).textTheme.labelLarge),
-            const SizedBox(height: 6),
-            ConversationContent(content: content),
-            if (detail != null)
-              Text(detail, style: Theme.of(context).textTheme.labelSmall),
-          ],
-        ),
+  /// Whether the selected fleet or autopilot run is still in the snapshot.
+  bool get _backgroundSelectionExists {
+    final ref = _selectedBackground;
+    if (ref == null) return false;
+    return ref.kind == 'fleet'
+        ? _background.fleets.any((f) => f.id == ref.id)
+        : _background.autopilot.any((r) => r.id == ref.id);
+  }
+
+  Widget? _backgroundDetail({required bool wide}) {
+    final ref = _selectedBackground;
+    if (ref == null) return null;
+    if (ref.kind == 'fleet') {
+      final fleet = _background.fleets.where((f) => f.id == ref.id).firstOrNull;
+      if (fleet == null) return null;
+      return FleetDetailView(
+        fleet: fleet,
+        capturedAt: _background.capturedAt,
+        narrow: !wide,
+        error: _backgroundActionErrors[fleet.id],
+        confirmCancel: () =>
+            _confirmBackgroundCancel('fleet', fleet.displayTask),
+        onCancel: () => _cancelBackground('fleet', fleet.id, fleet.displayTask),
+        onCancelError: (_, __) {},
+        onCancelChild: (child) async {
+          if (!await _confirmBackgroundCancel('agent', child.displayTask)) {
+            return;
+          }
+          try {
+            await _cancelBackground('fleet', child.id, child.displayTask);
+          } catch (_) {
+            if (mounted) {
+              showSonderToast(
+                  context,
+                  _backgroundActionErrors[child.id] ??
+                      'Could not request cancellation.',
+                  kind: StatusKind.fail);
+            }
+          }
+        },
+        hasLane: _lanes.containsKey,
+        onOpenLane: _select,
       );
-  Widget _notice(String text, {Widget? action, bool warning = false}) =>
-      Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-          child: WorkspaceNotice(
-              message: text,
-              tone: warning ? NoticeTone.warning : NoticeTone.info,
-              action: action));
+    }
+    final run = _background.autopilot.where((r) => r.id == ref.id).firstOrNull;
+    if (run == null) return null;
+    return AutopilotDetailView(
+      run: run,
+      capturedAt: _background.capturedAt,
+      narrow: !wide,
+      error: _backgroundActionErrors[run.id],
+      confirmCancel: () =>
+          _confirmBackgroundCancel('autopilot run', run.displayObjective),
+      onCancel: () =>
+          _cancelBackground('autopilot', run.id, run.displayObjective),
+      onCancelError: (_, __) {},
+    );
+  }
+
+  Widget _detailPane({required bool wide}) {
+    final lane = _lanes[_selected];
+    if (lane != null) {
+      return KeyedSubtree(
+          key: ValueKey('lane-pane-${lane.id}'),
+          child: _transcript(lane, wide: wide));
+    }
+    final background = _backgroundDetail(wide: wide);
+    if (background != null) return background;
+    if (_loading) return const SizedBox.shrink();
+    return const Align(
+      alignment: Alignment(0, -0.2),
+      child: EmptyState(
+        icon: Icons.forum_outlined,
+        title: 'Select an agent conversation',
+        message: 'Its transcript, tool calls and reports open here.',
+      ),
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Page
+  // -------------------------------------------------------------------------
 
   @override
-  Widget build(BuildContext context) => LayoutBuilder(
-        builder: (context, constraints) {
-          final wide = constraints.maxWidth >= 850;
-          final lane = _lanes[_selected];
-          void focusSearch() {
-            if (!wide && _selected != null) {
-              setState(() => _selected = null);
-              _stopWatch();
-            }
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (mounted) _searchFocus.requestFocus();
-            });
-          }
+  Widget build(BuildContext context) {
+    final shell = ShellScope.maybeOf(context);
+    final tokens = SonderTokens.of(context);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final wide = constraints.maxWidth >= _splitBreakpoint;
+        _wide = wide;
+        final hasDetail =
+            _lanes[_selected] != null || _backgroundSelectionExists;
+        final narrowDetail = !wide && hasDetail;
+        final empty = !_loading &&
+            _lanes.isEmpty &&
+            _background.isEmpty &&
+            _backgroundError == null;
+        void focusSearch() {
+          if (narrowDetail) _closeDetail();
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) _searchFocus.requestFocus();
+          });
+        }
 
-          return CallbackShortcuts(
-              bindings: {
-                const SingleActivator(LogicalKeyboardKey.keyF,
-                    control: true, shift: true): focusSearch,
-                const SingleActivator(LogicalKeyboardKey.keyF,
-                    meta: true, shift: true): focusSearch,
-                const SingleActivator(LogicalKeyboardKey.arrowUp, alt: true):
-                    () => _moveSelection(-1),
-                const SingleActivator(LogicalKeyboardKey.arrowDown, alt: true):
-                    () => _moveSelection(1),
-                const SingleActivator(LogicalKeyboardKey.escape): _handleEscape,
-              },
-              child: Focus(
-                  autofocus: true,
-                  child: Scaffold(
-                    appBar: AppBar(
-                      title: const Text('Agents'),
-                      actions: [
-                        // Wide layouts already show the list's search field;
-                        // one search control per screen.
-                        if (!wide && _lanes.isNotEmpty)
-                          IconButton(
-                              tooltip: 'Find conversation (Ctrl+Shift+F)',
-                              onPressed: focusSearch,
-                              icon: const Icon(Icons.search)),
-                        IconButton(
-                            tooltip: 'Agent conversation shortcuts',
-                            onPressed: _showKeyboardHelp,
-                            icon: const Icon(Icons.help_outline)),
-                        if (widget.onNavigate != null) ...[
-                          WorkspaceMenu(
-                              current: WorkspaceDestination.agents,
-                              onSelected: _navigate),
-                          TextButton.icon(
-                              onPressed: () =>
-                                  _navigate(WorkspaceDestination.chat),
-                              icon: const Icon(Icons.chat_bubble_outline,
-                                  size: 18),
-                              label: const Text('Chat')),
-                        ],
-                      ],
-                      leading: !wide && _selected != null
-                          ? IconButton(
-                              tooltip: 'All agent conversations',
-                              icon: const Icon(Icons.arrow_back),
-                              onPressed: () {
-                                setState(() => _selected = null);
-                                _stopWatch();
-                              },
-                            )
-                          : Navigator.of(context).canPop()
-                              ? IconButton(
-                                  tooltip: 'Back to chat',
-                                  icon: const Icon(Icons.arrow_back),
-                                  onPressed: () =>
-                                      _navigate(WorkspaceDestination.chat))
-                              : null,
-                    ),
-                    body: wide && !_loading && _lanes.isEmpty
-                        ? _readable(_laneList())
-                        : wide
-                            ? Row(
-                                children: [
-                                  SizedBox(width: 272, child: _laneList()),
-                                  const VerticalDivider(width: 1),
-                                  Expanded(
-                                    child: lane == null
-                                        ? const Center(
-                                            child: Text(
-                                                'Select an agent conversation'),
-                                          )
-                                        : _transcript(lane),
-                                  ),
-                                ],
-                              )
-                            : lane == null
-                                ? _laneList()
-                                : _transcript(lane),
-                  )));
-        },
-      );
+        final Widget? leading = narrowDetail
+            ? IconButton(
+                tooltip: 'All agent conversations',
+                icon: const Icon(Icons.arrow_back),
+                onPressed: _closeDetail,
+              )
+            : shell != null
+                ? (shell.sidebarVisible
+                    ? null
+                    : IconButton(
+                        tooltip: 'Open navigation',
+                        icon: const Icon(Icons.menu),
+                        onPressed: shell.openNavigation,
+                      ))
+                : Navigator.of(context).canPop()
+                    ? IconButton(
+                        tooltip: 'Back to chat',
+                        icon: const Icon(Icons.arrow_back),
+                        onPressed: () => _navigate(WorkspaceDestination.chat))
+                    : null;
+
+        final Widget body;
+        if (wide && empty) {
+          body = Align(
+            alignment: Alignment.topCenter,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: conversationWidth),
+              child: _listPane(wide: false),
+            ),
+          );
+        } else if (wide) {
+          body = Row(children: [
+            SizedBox(
+                width: _listWidth(constraints.maxWidth),
+                child: _listPane(wide: true)),
+            VerticalDivider(width: 1, thickness: 1, color: tokens.hairline),
+            Expanded(
+              child: FocusTraversalGroup(
+                child: SonderSwitcher(
+                  child: KeyedSubtree(
+                    key: ValueKey(_detailKey),
+                    child: _detailPane(wide: true),
+                  ),
+                ),
+              ),
+            ),
+          ]);
+        } else {
+          body = SonderSwitcher(
+            child: KeyedSubtree(
+              key: ValueKey(narrowDetail ? _detailKey : 'list'),
+              child: narrowDetail
+                  ? _detailPane(wide: false)
+                  : _listPane(wide: false),
+            ),
+          );
+        }
+
+        return PopScope(
+          canPop: !narrowDetail && (shell != null || !_hasUnsentWork),
+          onPopInvokedWithResult: (didPop, _) async {
+            if (didPop) return;
+            if (narrowDetail) {
+              _closeDetail();
+              return;
+            }
+            await _leaveRoute();
+          },
+          child: CallbackShortcuts(
+            bindings: {
+              const SingleActivator(LogicalKeyboardKey.keyF,
+                  control: true, shift: true): focusSearch,
+              const SingleActivator(LogicalKeyboardKey.keyF,
+                  meta: true, shift: true): focusSearch,
+              const SingleActivator(LogicalKeyboardKey.arrowUp, alt: true):
+                  () => _moveSelection(-1),
+              const SingleActivator(LogicalKeyboardKey.arrowDown, alt: true):
+                  () => _moveSelection(1),
+              const SingleActivator(LogicalKeyboardKey.escape): _handleEscape,
+            },
+            child: Focus(
+              autofocus: true,
+              child: Scaffold(
+                appBar: AppBar(
+                  automaticallyImplyLeading: false,
+                  leading: leading,
+                  title: const Text('Agents'),
+                  actions: [
+                    // Wide layouts already show the list's search field;
+                    // one search control per screen.
+                    if (!wide && (_lanes.isNotEmpty || !_background.isEmpty))
+                      IconButton(
+                          tooltip: 'Find conversation (Ctrl+Shift+F)',
+                          onPressed: focusSearch,
+                          icon: const Icon(Icons.search)),
+                    IconButton(
+                        tooltip: 'Agent conversation shortcuts',
+                        onPressed: () => showAgentShortcuts(context),
+                        icon: const Icon(Icons.help_outline)),
+                    if (shell == null && widget.onNavigate != null) ...[
+                      WorkspaceMenu(
+                          current: WorkspaceDestination.agents,
+                          onSelected: _navigate),
+                      TextButton.icon(
+                          onPressed: () => _navigate(WorkspaceDestination.chat),
+                          icon: const Icon(Icons.chat_bubble_outline, size: 18),
+                          label: const Text('Chat')),
+                    ],
+                    const SizedBox(width: SonderSpace.xs),
+                  ],
+                ),
+                body: body,
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// "Latest": appears when the reader has scrolled away from the end.
+class _LatestButton extends StatelessWidget {
+  final VoidCallback onTap;
+  const _LatestButton({super.key, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = SonderTokens.of(context);
+    final text = Theme.of(context).textTheme;
+    return Tooltip(
+      message: 'Go to latest activity',
+      child: Material(
+        color: tokens.raised,
+        shape: StadiumBorder(side: BorderSide(color: tokens.hairlineStrong)),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 48),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: SonderSpace.lg),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(Icons.arrow_downward, size: 16, color: tokens.text2),
+                const SizedBox(width: SonderSpace.sm),
+                Text('Latest',
+                    style: text.labelLarge?.copyWith(color: tokens.text)),
+              ]),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }

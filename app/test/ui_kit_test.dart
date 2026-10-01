@@ -77,8 +77,7 @@ void main() {
       expect(selected, ['models']);
     });
 
-    testWidgets('search filters the rail by label and keyword',
-        (tester) async {
+    testWidgets('search filters the rail by label and keyword', (tester) async {
       _surface(tester, const Size(1280, 800));
       await tester.pumpWidget(_app(CategoryScaffold(
         title: 'Settings',
@@ -207,6 +206,34 @@ void main() {
       expect(find.text('Test host control'), findsOneWidget);
     });
 
+    testWidgets('a declined confirmation runs nothing and never looks busy',
+        (tester) async {
+      var answer = false;
+      var runs = 0;
+      await tester.pumpWidget(_app(Scaffold(
+        body: Center(
+          child: AsyncActionButton(
+            label: 'Cancel work',
+            doneLabel: 'Requested',
+            confirm: () async => answer,
+            onPressed: () async => runs++,
+          ),
+        ),
+      )));
+      await tester.tap(find.text('Cancel work'));
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(runs, 0);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      expect(find.text('Cancel work'), findsOneWidget);
+      answer = true;
+      await tester.tap(find.text('Cancel work'));
+      await tester.pump();
+      await tester.pump();
+      expect(runs, 1);
+      expect(find.text('Requested'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 2));
+    });
+
     testWidgets('a failure shows failed and reaches onError', (tester) async {
       Object? seen;
       await tester.pumpWidget(_app(Scaffold(
@@ -261,8 +288,7 @@ void main() {
               child: const SettingRow(
                 label: 'Context size',
                 description: 'Requested conversation capacity.',
-                trailing: SizedBox(
-                    key: Key('control'), width: 120, height: 36),
+                trailing: SizedBox(key: Key('control'), width: 120, height: 36),
               ),
             ),
           ),
@@ -283,8 +309,7 @@ void main() {
       expect(find.bySemanticsLabel('Context: 4.1k of 8.2k'), findsOneWidget);
     });
 
-    testWidgets('StatusPill and CountBadge always carry words',
-        (tester) async {
+    testWidgets('StatusPill and CountBadge always carry words', (tester) async {
       await tester.pumpWidget(_app(const Scaffold(
         body: Row(children: [
           StatusPill(StatusKind.warn, word: 'needs you'),
@@ -346,7 +371,8 @@ void main() {
       expect(asked, 2);
     });
 
-    testWidgets('a guard uses its latest callback, and is inert without a shell',
+    testWidgets(
+        'a guard uses its latest callback, and is inert without a shell',
         (tester) async {
       final guards = ShellLeaveGuards();
       await tester.pumpWidget(_app(scope(
@@ -469,6 +495,43 @@ void main() {
           findsOneWidget);
     });
 
+    testWidgets('StructuredFields reads as fields, clips, and keeps raw JSON',
+        (tester) async {
+      final value = {
+        'path': 'src/render/pso_cache.cpp',
+        'old_text': List.generate(6, (i) => 'line $i').join('\n'),
+        'limit': 50,
+        'dry_run': false,
+        'note': null,
+      };
+      await tester.pumpWidget(_app(Scaffold(
+        body: SingleChildScrollView(
+          child: SizedBox(
+            width: 640,
+            child: StructuredFields(value, label: 'Arguments'),
+          ),
+        ),
+      )));
+      // One row per key; no JSON punctuation in the readable view.
+      expect(find.text('path'), findsOneWidget);
+      expect(find.text('src/render/pso_cache.cpp'), findsOneWidget);
+      expect(find.text('50'), findsOneWidget);
+      expect(find.text('false'), findsOneWidget);
+      expect(find.textContaining('"path"'), findsNothing);
+      // Long values are clipped behind an explicit control.
+      expect(find.textContaining('line 5'), findsNothing);
+      await tester.tap(find.text('Show all 6 lines'));
+      await tester.pump();
+      expect(find.textContaining('line 5'), findsOneWidget);
+      expect(find.text('Show less'), findsOneWidget);
+      // The exact value stays one tap away.
+      await tester.tap(find.text('Raw JSON'));
+      await tester.pump();
+      expect(find.textContaining('"path": "src/render/pso_cache.cpp"'),
+          findsOneWidget);
+      expect(find.byTooltip('Copy arguments'), findsOneWidget);
+    });
+
     testWidgets('RawOutput collapses long output behind Show all',
         (tester) async {
       final long = List.generate(30, (i) => 'line $i').join('\n');
@@ -483,7 +546,8 @@ void main() {
   });
 
   group('QuietAction', () {
-    testWidgets('a compact pill inside a full 48 dp target, named and '
+    testWidgets(
+        'a compact pill inside a full 48 dp target, named and '
         'announced as selected', (tester) async {
       var taps = 0;
       await tester.pumpWidget(_app(Scaffold(
@@ -514,8 +578,7 @@ void main() {
       expect(taps, 1);
       expect(tester.getSize(find.byType(QuietAction).first).height, 48);
       // The icon-only action is still a full target.
-      expect(
-          tester.getSize(find.byType(QuietAction).last), const Size(48, 48));
+      expect(tester.getSize(find.byType(QuietAction).last), const Size(48, 48));
       final handle = tester.ensureSemantics();
       expect(
           tester.getSemantics(find.bySemanticsLabel('Marked useful')),
@@ -565,8 +628,7 @@ void main() {
               semanticLabel: 'Context: 2,100 of 8,192 tokens used (26%)'),
         ),
       )));
-      expect(
-          find.bySemanticsLabel('Context: 2,100 of 8,192 tokens used (26%)'),
+      expect(find.bySemanticsLabel('Context: 2,100 of 8,192 tokens used (26%)'),
           findsOneWidget);
       expect(tester.getSize(find.byType(RingMeter)), const Size(18, 18));
     });
