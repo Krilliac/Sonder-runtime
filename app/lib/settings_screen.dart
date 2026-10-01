@@ -161,7 +161,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   late final _StagedKeyPolicy _keyPolicy =
       _StagedKeyPolicy(() => _cleartextKeyHosts);
-  late final String? _initialCategory;
+  late String? _initialCategory;
+
+  /// The shell's last section request this screen applied, and a counter
+  /// that rebuilds the category scaffold at that section.
+  ShellSection? _appliedSection;
+  int _sectionEpoch = 0;
   bool _leaving = false;
 
   @override
@@ -203,6 +208,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _initialCategory = widget.initialCategory ??
         (_firstRun ? SettingsCategory.connection : null);
     widget.registerLeaveGuard?.call(_leaveGuard);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // The shell asks for a section (the connection footer, a /login
+    // intercept) with a new ShellSection each time; apply each one once.
+    final section = ShellScope.maybeOf(context)?.section;
+    if (section == null || identical(section, _appliedSection)) return;
+    _appliedSection = section;
+    _initialCategory = section.id;
+    _sectionEpoch++;
+    final username = section.params['username'];
+    if (username != null && username.isNotEmpty && _username.text.isEmpty) {
+      _username.text = username;
+    }
   }
 
   @override
@@ -272,7 +293,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// here are kept.
   void _rebase(Settings next) {
     final before = _saved;
-    void follow(TextEditingController controller, String Function(Settings) of) {
+    void follow(
+        TextEditingController controller, String Function(Settings) of) {
       final was = of(before);
       final now = of(next);
       if (was != now && controller.text.trim() == was.trim()) {
@@ -309,8 +331,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return model.isEmpty ? Settings.defaultModel : model;
   }
 
-  int? get _contextTokens => parseContextTokens(
-      _contextSize.text.trim().isEmpty ? contextSizeDefault : _contextSize.text);
+  int? get _contextTokens => parseContextTokens(_contextSize.text.trim().isEmpty
+      ? contextSizeDefault
+      : _contextSize.text);
 
   bool _textChanged(TextEditingController controller, String saved) =>
       controller.text.trim() != saved.trim();
@@ -327,7 +350,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return staged != saved;
   }
 
-  bool get _launcherUrlChanged => _textChanged(_launcherUrl, _saved.launcherUrl);
+  bool get _launcherUrlChanged =>
+      _textChanged(_launcherUrl, _saved.launcherUrl);
   bool get _launcherTokenChanged =>
       _textChanged(_launcherToken, _saved.launcherToken);
   bool get _hostsChanged =>
@@ -552,7 +576,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   // -- Network actions -------------------------------------------------------
 
-  void _rememberModels(String server, ModelCatalog catalog, ModelRouting routing) {
+  void _rememberModels(
+      String server, ModelCatalog catalog, ModelRouting routing) {
     _models = ModelChoices(catalog.ids, routing);
     _modelsServer = server.trim();
   }
@@ -609,18 +634,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final settings = _current();
     final error = settings.launcherConfigurationError;
     if (!settings.hasHostLauncher || error != null) {
-      setState(() => _launcherOutcome = ActionOutcome(StatusKind.warn,
-          error ?? 'Enter the host launcher URL first.'));
+      setState(() => _launcherOutcome = ActionOutcome(
+          StatusKind.warn, error ?? 'Enter the host launcher URL first.'));
       return;
     }
     setState(() => _launcherOutcome = null);
     ActionOutcome outcome;
     try {
-      final status = await widget.connection
-          .launcherStatus(settings.effectiveLauncherUrl, settings.launcherToken);
+      final status = await widget.connection.launcherStatus(
+          settings.effectiveLauncherUrl, settings.launcherToken);
       if (status.serverState == 'foreign_listener') {
         outcome = const ActionOutcome(
-            StatusKind.warn, 'The launcher answered, but another service holds '
+            StatusKind.warn,
+            'The launcher answered, but another service holds '
             'the main server port.');
       } else if (status.ok) {
         outcome = ActionOutcome.ok('The launcher is ready; the main server is '
@@ -643,7 +669,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _accountAction({required bool register}) async {
     if (_account != null) {
-      setState(() => _accountOutcome = const ActionOutcome(StatusKind.warn,
+      setState(() => _accountOutcome = const ActionOutcome(
+          StatusKind.warn,
           'Sign out or explicitly forget the current session before '
           'switching accounts.'));
       return;
@@ -722,8 +749,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           'Sign-in needs an https:// server URL off this device.'));
     } catch (_) {
       if (!mounted) return;
-      setState(() => _accountOutcome =
-          const ActionOutcome.failed('Account request could not be completed.'));
+      setState(() => _accountOutcome = const ActionOutcome.failed(
+          'Account request could not be completed.'));
     } finally {
       if (mounted) setState(() => _signInBusy = false);
     }
@@ -802,10 +829,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       widget.onChanged(_saved.copyWith());
     } catch (_) {
       if (!mounted) return;
-      setState(() => _accountOutcome = const ActionOutcome.failed(
-          'Revocation not confirmed.',
-          detail: 'Retry Sign out, or explicitly Forget local session. The '
-              'session is kept for the retry.'));
+      setState(() => _accountOutcome =
+          const ActionOutcome.failed('Revocation not confirmed.',
+              detail: 'Retry Sign out, or explicitly Forget local session. The '
+                  'session is kept for the retry.'));
     } finally {
       if (mounted) setState(() => _sessionBusy = false);
     }
@@ -1089,30 +1116,33 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ];
     }
     final dirty = _dirty;
-    return CategoryScaffold(
-      title: 'Settings',
-      categories: _categories(),
-      initialId: _initialCategory,
-      leading: leading,
-      leadingWidth: leadingWidth,
-      actions: actions,
-      searchHint: 'Search settings',
-      contentMaxWidth: _contentWidth,
-      navigationKey: const Key('settings-categories'),
-      bottomBar: Builder(
-        builder: (context) {
-          final pages = CategoryNavigator.maybeOf(context);
-          return UnsavedChangesBar(
-            visible: dirty,
-            where: _changedPages,
-            error: _saveError,
-            contentMaxWidth: _contentWidth,
-            onDiscard: _discard,
-            onSave: () => _save(pages),
-          );
-        },
-      ),
-    );
+    return ShellLeaveGuard(
+        canLeave: _leaveGuard,
+        child: CategoryScaffold(
+          key: ValueKey('settings-sections-$_sectionEpoch'),
+          title: 'Settings',
+          categories: _categories(),
+          initialId: _initialCategory,
+          leading: leading,
+          leadingWidth: leadingWidth,
+          actions: actions,
+          searchHint: 'Search settings',
+          contentMaxWidth: _contentWidth,
+          navigationKey: const Key('settings-categories'),
+          bottomBar: Builder(
+            builder: (context) {
+              final pages = CategoryNavigator.maybeOf(context);
+              return UnsavedChangesBar(
+                visible: dirty,
+                where: _changedPages,
+                error: _saveError,
+                contentMaxWidth: _contentWidth,
+                onDiscard: _discard,
+                onSave: () => _save(pages),
+              );
+            },
+          ),
+        ));
   }
 }
 

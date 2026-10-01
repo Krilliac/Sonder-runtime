@@ -33,8 +33,8 @@ class ShellScope extends InheritedWidget {
   /// on Settings and Runtime (`connection`, `account`, `approvals`…), a lane
   /// id on Agents. Leave guards run first, as for [navigate]. Null in a
   /// shell without deep links.
-  final void Function(WorkspaceDestination destination, String section)?
-      openSection;
+  final void Function(WorkspaceDestination destination, String section,
+      {Map<String, String> params})? openSection;
 
   /// The section this page was asked to show, or null. Each request is a new
   /// [ShellSection], so asking for the same section twice is two requests:
@@ -74,8 +74,12 @@ class ShellSection {
   /// id, depending on the destination.
   final String id;
 
+  /// Extra values for the section, e.g. `username` for Settings > Account
+  /// opened by a `/login` intercept. Never credentials.
+  final Map<String, String> params;
+
   /// Not const on purpose: every request must be a distinct object.
-  ShellSection(this.id);
+  ShellSection(this.id, {this.params = const {}});
 
   @override
   String toString() => 'ShellSection($id)';

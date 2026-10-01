@@ -293,7 +293,7 @@ class _ChatScreenState extends State<ChatScreen>
 
   Future<void> _handleIntercept(ComposerIntercept intercept) async {
     switch (intercept) {
-      case AccountIntercept(:final command):
+      case AccountIntercept(:final command, :final username):
         final messenger = ScaffoldMessenger.of(context);
         messenger.showSnackBar(SnackBar(
           content: Text(command == '/register'
@@ -302,7 +302,9 @@ class _ChatScreenState extends State<ChatScreen>
               : 'Sign in from Settings > Account. Passwords never go into '
                   'the chat.'),
         ));
-        _go(WorkspaceDestination.settings, section: 'account');
+        _go(WorkspaceDestination.settings,
+            section: 'account',
+            params: {if (username.isNotEmpty) 'username': username});
       case ModeIntercept(:final target):
         if (target == null) {
           await _openPermissionModePicker();
@@ -427,12 +429,13 @@ class _ChatScreenState extends State<ChatScreen>
   /// Settings category, an agent lane). Inside the app shell the shell does
   /// it and runs its leave guards; pumped alone, this page pushes the
   /// destination as a route.
-  void _go(WorkspaceDestination destination, {String? section}) {
+  void _go(WorkspaceDestination destination,
+      {String? section, Map<String, String> params = const {}}) {
     final shell = context.getInheritedWidgetOfExactType<ShellScope>();
     if (shell != null) {
       final open = shell.openSection;
       if (section != null && open != null) {
-        open(destination, section);
+        open(destination, section, params: params);
       } else {
         shell.navigate(destination);
       }
@@ -446,7 +449,8 @@ class _ChatScreenState extends State<ChatScreen>
       case WorkspaceDestination.runtime:
         unawaited(_pushRuntime());
       case WorkspaceDestination.settings:
-        unawaited(_pushSettings());
+        unawaited(
+            _pushSettings(category: section, username: params['username']));
     }
   }
 
@@ -461,11 +465,13 @@ class _ChatScreenState extends State<ChatScreen>
 
   // Pushed routes, for this page outside the shell (tests pump it alone).
 
-  Future<void> _pushSettings() async {
+  Future<void> _pushSettings({String? category, String? username}) async {
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => SettingsScreen(
           settings: widget.settings,
+          initialCategory: category,
+          initialUsername: username,
           onChanged: (next) {
             _session.settingsSaved(next);
             widget.onSettingsChanged(next);
@@ -529,8 +535,7 @@ class _ChatScreenState extends State<ChatScreen>
         listWorkRuns: () => _chat.backend.listWorkRuns(),
         onWorkRunResolved: (entryId, run) =>
             unawaited(_chat.resolveWorkRun(entryId, run)),
-        onOpenAgentLane: (id) =>
-            _go(WorkspaceDestination.agents, section: id),
+        onOpenAgentLane: (id) => _go(WorkspaceDestination.agents, section: id),
         onSendCommand: _submit,
       );
 
@@ -731,7 +736,10 @@ class _ModelPill extends StatelessWidget {
     if (!routing.bypassesBinding) {
       return [for (final m in models) item(m, routing.pickerLabel(m))];
     }
-    final exact = [for (final m in models) if (!routing.isRoute(m)) m];
+    final exact = [
+      for (final m in models)
+        if (!routing.isRoute(m)) m
+    ];
     return [
       for (final m in models)
         if (routing.isRoute(m)) item(m, routing.pickerLabel(m)),
