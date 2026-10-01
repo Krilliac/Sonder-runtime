@@ -915,6 +915,45 @@ void main() {
     expect(guard, isNull, reason: 'unregistered when the screen goes');
   });
 
+  testWidgets('inside the shell, unsent drafts stop a sidebar switch once',
+      (tester) async {
+    tester.view.physicalSize = const Size(1100, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final guards = ShellLeaveGuards();
+    await tester.pumpWidget(MaterialApp(
+        theme: SonderTheme.dark,
+        home: ShellScope(
+          current: WorkspaceDestination.agents,
+          sidebarVisible: true,
+          navigate: (_) {},
+          openNavigation: () {},
+          leaveGuards: guards,
+          child: AgentScreen(api: FakeAgents()),
+        )));
+    await tester.pumpAndSettle();
+    expect(guards.isEmpty, isFalse, reason: 'the page registers with the shell');
+    expect(await guards.canLeave(), isTrue, reason: 'nothing unsent');
+    await tester.tap(find.text('Parser agent'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+        find.byWidgetPredicate((widget) =>
+            widget is TextField &&
+            widget.decoration?.labelText == 'Message this agent'),
+        'Unsent correction');
+    final leaving = guards.canLeave();
+    await tester.pumpAndSettle();
+    expect(find.text('Leave agent conversations?'), findsOneWidget);
+    await tester.tap(find.text('Keep editing'));
+    await tester.pumpAndSettle();
+    expect(await leaving, isFalse);
+    expect(find.text('Leave agent conversations?'), findsNothing);
+    expect(find.text('Unsent correction'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    expect(guards.isEmpty, isTrue, reason: 'unregistered when the page goes');
+  });
+
   testWidgets('tool calls are cards with readable arguments, not JSON prose',
       (tester) async {
     await open(tester, ToolAgents());

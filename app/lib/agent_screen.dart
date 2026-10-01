@@ -564,9 +564,11 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
   Future<void> _navigate(WorkspaceDestination destination) async {
     final shell = ShellScope.maybeOf(context);
     if (shell != null) {
-      // A registered guard is run by the shell; asking here too would ask
-      // twice.
-      if (widget.registerLeaveGuard == null && !await _confirmLeave()) return;
+      // The shell runs this page's ShellLeaveGuard (or a registered guard)
+      // before it switches; asking here too would ask twice.
+      final shellAsks =
+          shell.leaveGuards != null || widget.registerLeaveGuard != null;
+      if (!shellAsks && !await _confirmLeave()) return;
       if (mounted) shell.navigate(destination);
       return;
     }
@@ -1894,142 +1896,152 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     final shell = ShellScope.maybeOf(context);
     final tokens = SonderTokens.of(context);
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final wide = constraints.maxWidth >= _splitBreakpoint;
-        _wide = wide;
-        final hasDetail =
-            _lanes[_selected] != null || _backgroundSelectionExists;
-        final narrowDetail = !wide && hasDetail;
-        final empty = !_loading &&
-            _lanes.isEmpty &&
-            _background.isEmpty &&
-            _backgroundError == null;
-        void focusSearch() {
-          if (narrowDetail) _closeDetail();
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted) _searchFocus.requestFocus();
-          });
-        }
+    // Unsent drafts and uncertain commands stop the shell's sidebar, drawer,
+    // shortcuts and system back, as they stop in-page navigation.
+    return ShellLeaveGuard(
+        canLeave: _confirmLeave,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final wide = constraints.maxWidth >= _splitBreakpoint;
+            _wide = wide;
+            final hasDetail =
+                _lanes[_selected] != null || _backgroundSelectionExists;
+            final narrowDetail = !wide && hasDetail;
+            final empty = !_loading &&
+                _lanes.isEmpty &&
+                _background.isEmpty &&
+                _backgroundError == null;
+            void focusSearch() {
+              if (narrowDetail) _closeDetail();
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (mounted) _searchFocus.requestFocus();
+              });
+            }
 
-        final Widget? leading = narrowDetail
-            ? IconButton(
-                tooltip: 'All agent conversations',
-                icon: const Icon(Icons.arrow_back),
-                onPressed: _closeDetail,
-              )
-            : shell != null
-                ? (shell.sidebarVisible
-                    ? null
-                    : IconButton(
-                        tooltip: 'Open navigation',
-                        icon: const Icon(Icons.menu),
-                        onPressed: shell.openNavigation,
-                      ))
-                : Navigator.of(context).canPop()
-                    ? IconButton(
-                        tooltip: 'Back to chat',
-                        icon: const Icon(Icons.arrow_back),
-                        onPressed: () => _navigate(WorkspaceDestination.chat))
-                    : null;
+            final Widget? leading = narrowDetail
+                ? IconButton(
+                    tooltip: 'All agent conversations',
+                    icon: const Icon(Icons.arrow_back),
+                    onPressed: _closeDetail,
+                  )
+                : shell != null
+                    ? (shell.sidebarVisible
+                        ? null
+                        : IconButton(
+                            tooltip: 'Open navigation',
+                            icon: const Icon(Icons.menu),
+                            onPressed: shell.openNavigation,
+                          ))
+                    : Navigator.of(context).canPop()
+                        ? IconButton(
+                            tooltip: 'Back to chat',
+                            icon: const Icon(Icons.arrow_back),
+                            onPressed: () =>
+                                _navigate(WorkspaceDestination.chat))
+                        : null;
 
-        final Widget body;
-        if (wide && empty) {
-          body = Align(
-            alignment: Alignment.topCenter,
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: conversationWidth),
-              child: _listPane(wide: false),
-            ),
-          );
-        } else if (wide) {
-          body = Row(children: [
-            SizedBox(
-                width: _listWidth(constraints.maxWidth),
-                child: _listPane(wide: true)),
-            VerticalDivider(width: 1, thickness: 1, color: tokens.hairline),
-            Expanded(
-              child: FocusTraversalGroup(
-                child: SonderSwitcher(
-                  child: KeyedSubtree(
-                    key: ValueKey(_detailKey),
-                    child: _detailPane(wide: true),
+            final Widget body;
+            if (wide && empty) {
+              body = Align(
+                alignment: Alignment.topCenter,
+                child: ConstrainedBox(
+                  constraints:
+                      const BoxConstraints(maxWidth: conversationWidth),
+                  child: _listPane(wide: false),
+                ),
+              );
+            } else if (wide) {
+              body = Row(children: [
+                SizedBox(
+                    width: _listWidth(constraints.maxWidth),
+                    child: _listPane(wide: true)),
+                VerticalDivider(width: 1, thickness: 1, color: tokens.hairline),
+                Expanded(
+                  child: FocusTraversalGroup(
+                    child: SonderSwitcher(
+                      child: KeyedSubtree(
+                        key: ValueKey(_detailKey),
+                        child: _detailPane(wide: true),
+                      ),
+                    ),
+                  ),
+                ),
+              ]);
+            } else {
+              body = SonderSwitcher(
+                child: KeyedSubtree(
+                  key: ValueKey(narrowDetail ? _detailKey : 'list'),
+                  child: narrowDetail
+                      ? _detailPane(wide: false)
+                      : _listPane(wide: false),
+                ),
+              );
+            }
+
+            return PopScope(
+              canPop: !narrowDetail && (shell != null || !_hasUnsentWork),
+              onPopInvokedWithResult: (didPop, _) async {
+                if (didPop) return;
+                if (narrowDetail) {
+                  _closeDetail();
+                  return;
+                }
+                await _leaveRoute();
+              },
+              child: CallbackShortcuts(
+                bindings: {
+                  const SingleActivator(LogicalKeyboardKey.keyF,
+                      control: true, shift: true): focusSearch,
+                  const SingleActivator(LogicalKeyboardKey.keyF,
+                      meta: true, shift: true): focusSearch,
+                  const SingleActivator(LogicalKeyboardKey.arrowUp, alt: true):
+                      () => _moveSelection(-1),
+                  const SingleActivator(LogicalKeyboardKey.arrowDown,
+                      alt: true): () => _moveSelection(1),
+                  const SingleActivator(LogicalKeyboardKey.escape):
+                      _handleEscape,
+                },
+                child: Focus(
+                  autofocus: true,
+                  child: Scaffold(
+                    appBar: AppBar(
+                      automaticallyImplyLeading: false,
+                      leading: leading,
+                      title: const Text('Agents'),
+                      actions: [
+                        // Wide layouts already show the list's search field;
+                        // one search control per screen.
+                        if (!wide &&
+                            (_lanes.isNotEmpty || !_background.isEmpty))
+                          IconButton(
+                              tooltip: 'Find conversation (Ctrl+Shift+F)',
+                              onPressed: focusSearch,
+                              icon: const Icon(Icons.search)),
+                        IconButton(
+                            tooltip: 'Agent conversation shortcuts',
+                            onPressed: () => showAgentShortcuts(context),
+                            icon: const Icon(Icons.help_outline)),
+                        if (shell == null && widget.onNavigate != null) ...[
+                          WorkspaceMenu(
+                              current: WorkspaceDestination.agents,
+                              onSelected: _navigate),
+                          TextButton.icon(
+                              onPressed: () =>
+                                  _navigate(WorkspaceDestination.chat),
+                              icon: const Icon(Icons.chat_bubble_outline,
+                                  size: 18),
+                              label: const Text('Chat')),
+                        ],
+                        const SizedBox(width: SonderSpace.xs),
+                      ],
+                    ),
+                    body: body,
                   ),
                 ),
               ),
-            ),
-          ]);
-        } else {
-          body = SonderSwitcher(
-            child: KeyedSubtree(
-              key: ValueKey(narrowDetail ? _detailKey : 'list'),
-              child: narrowDetail
-                  ? _detailPane(wide: false)
-                  : _listPane(wide: false),
-            ),
-          );
-        }
-
-        return PopScope(
-          canPop: !narrowDetail && (shell != null || !_hasUnsentWork),
-          onPopInvokedWithResult: (didPop, _) async {
-            if (didPop) return;
-            if (narrowDetail) {
-              _closeDetail();
-              return;
-            }
-            await _leaveRoute();
+            );
           },
-          child: CallbackShortcuts(
-            bindings: {
-              const SingleActivator(LogicalKeyboardKey.keyF,
-                  control: true, shift: true): focusSearch,
-              const SingleActivator(LogicalKeyboardKey.keyF,
-                  meta: true, shift: true): focusSearch,
-              const SingleActivator(LogicalKeyboardKey.arrowUp, alt: true):
-                  () => _moveSelection(-1),
-              const SingleActivator(LogicalKeyboardKey.arrowDown, alt: true):
-                  () => _moveSelection(1),
-              const SingleActivator(LogicalKeyboardKey.escape): _handleEscape,
-            },
-            child: Focus(
-              autofocus: true,
-              child: Scaffold(
-                appBar: AppBar(
-                  automaticallyImplyLeading: false,
-                  leading: leading,
-                  title: const Text('Agents'),
-                  actions: [
-                    // Wide layouts already show the list's search field;
-                    // one search control per screen.
-                    if (!wide && (_lanes.isNotEmpty || !_background.isEmpty))
-                      IconButton(
-                          tooltip: 'Find conversation (Ctrl+Shift+F)',
-                          onPressed: focusSearch,
-                          icon: const Icon(Icons.search)),
-                    IconButton(
-                        tooltip: 'Agent conversation shortcuts',
-                        onPressed: () => showAgentShortcuts(context),
-                        icon: const Icon(Icons.help_outline)),
-                    if (shell == null && widget.onNavigate != null) ...[
-                      WorkspaceMenu(
-                          current: WorkspaceDestination.agents,
-                          onSelected: _navigate),
-                      TextButton.icon(
-                          onPressed: () => _navigate(WorkspaceDestination.chat),
-                          icon: const Icon(Icons.chat_bubble_outline, size: 18),
-                          label: const Text('Chat')),
-                    ],
-                    const SizedBox(width: SonderSpace.xs),
-                  ],
-                ),
-                body: body,
-              ),
-            ),
-          ),
-        );
-      },
-    );
+        ));
   }
 }
 
