@@ -33,6 +33,15 @@ class AsyncActionButton extends StatefulWidget {
   /// Key for the underlying Material button.
   final Key? buttonKey;
 
+  /// Shows the busy state even when this button did not start the run: an
+  /// action its owner tracks can outlive the page that started it, and the
+  /// button drawn when the page comes back must still read as running.
+  final bool busy;
+
+  /// Asked before the action runs (a confirmation dialog). Progress shows
+  /// only once it answers true; false or null leaves the button as it was.
+  final Future<bool?> Function()? confirm;
+
   const AsyncActionButton({
     super.key,
     required this.label,
@@ -44,6 +53,8 @@ class AsyncActionButton extends StatefulWidget {
     this.tooltip,
     this.onError,
     this.buttonKey,
+    this.busy = false,
+    this.confirm,
   });
 
   @override
@@ -69,9 +80,24 @@ class _AsyncActionButtonState extends State<AsyncActionButton> {
     super.dispose();
   }
 
+  bool _confirming = false;
+
   Future<void> _run() async {
     final action = widget.onPressed;
-    if (action == null || _phase == _Phase.busy) return;
+    if (action == null || _phase == _Phase.busy || widget.busy || _confirming) {
+      return;
+    }
+    final confirm = widget.confirm;
+    if (confirm != null) {
+      _confirming = true;
+      final bool? go;
+      try {
+        go = await confirm();
+      } finally {
+        _confirming = false;
+      }
+      if (go != true || !mounted || widget.busy) return;
+    }
     _settle?.cancel();
     setState(() {
       _phase = _Phase.busy;
@@ -119,13 +145,17 @@ class _AsyncActionButtonState extends State<AsyncActionButton> {
   @override
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
-    final busy = _phase == _Phase.busy;
+    // A run its owner reports ([AsyncActionButton.busy]) has been going for
+    // a while already, so its spinner shows at once.
+    final external = widget.busy && _phase != _Phase.busy;
+    final phase = external ? _Phase.busy : _phase;
+    final busy = phase == _Phase.busy;
     final String label;
     Widget? leading;
-    switch (_phase) {
+    switch (phase) {
       case _Phase.busy:
         label = widget.busyLabel ?? widget.label;
-        leading = _spinnerShown
+        leading = _spinnerShown || external
             ? SizedBox(
                 width: 14,
                 height: 14,
@@ -163,7 +193,11 @@ class _AsyncActionButtonState extends State<AsyncActionButton> {
       curve: SonderMotion.standard,
       child: Row(mainAxisSize: MainAxisSize.min, children: [
         if (leading != null) ...[leading, const SizedBox(width: SonderSpace.sm)],
-        Text(label),
+        // A button in a tight cell (a grid, large text) ellipsizes its label
+        // instead of overflowing.
+        Flexible(
+          child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
+        ),
       ]),
     );
     final Widget button = switch (widget.style) {
@@ -175,7 +209,7 @@ class _AsyncActionButtonState extends State<AsyncActionButton> {
         TextButton(key: widget.buttonKey, onPressed: onPressed, child: child),
     };
     final semantic = Semantics(
-      liveRegion: _phase != _Phase.idle,
+      liveRegion: phase != _Phase.idle,
       child: button,
     );
     if (widget.tooltip == null) return semantic;

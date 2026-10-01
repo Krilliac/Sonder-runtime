@@ -126,11 +126,21 @@ class Meter extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           mainAxisSize: MainAxisSize.min,
           children: [
-            Row(children: [
-              Expanded(child: Text(label, style: text.bodySmall)),
-              Text(valueLabel,
-                  style: tokens.mono(11.5, color: tokens.text2)),
-            ]),
+            // Label left, value right; a value too long for the line (or
+            // large text) moves under the label instead of overflowing.
+            SizedBox(
+              width: double.infinity,
+              child: Wrap(
+                alignment: WrapAlignment.spaceBetween,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                spacing: SonderSpace.sm,
+                children: [
+                  Text(label, style: text.bodySmall),
+                  Text(valueLabel,
+                      style: tokens.mono(11.5, color: tokens.text2)),
+                ],
+              ),
+            ),
             const SizedBox(height: SonderSpace.xs + 2),
             ClipRRect(
               borderRadius: BorderRadius.circular(SonderRadius.pill),
