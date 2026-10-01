@@ -272,7 +272,7 @@ def _terminate_process_tree(proc):
                 _close_windows_job(job)
                 proc._sonder_job_handle = None
                 return
-            except (AttributeError, OSError):
+            except (AttributeError, OSError, TypeError, ctypes.ArgumentError):
                 pass
         try:
             _terminate_windows_descendants(proc.pid)
@@ -447,7 +447,10 @@ def _close_windows_job(job):
     if job and os.name == "nt":
         try:
             ctypes.windll.kernel32.CloseHandle(job)
-        except (AttributeError, OSError):
+        except (AttributeError, OSError, TypeError, ctypes.ArgumentError):
+            # ArgumentError: a handle ctypes cannot marshal (it is not an
+            # OSError). Closing is best effort; never raise out of teardown,
+            # which runs on the lifetime timer thread.
             pass
 
 
@@ -693,7 +696,17 @@ class _WindowRegistry:
             except Exception:  # noqa: BLE001 - teardown is best effort; the job still closes
                 logging.getLogger(__name__).warning(
                     "runwindow lifetime teardown failed", exc_info=True)
-            self._release_locked(key)
+            try:
+                self._release_locked(key)
+            except Exception:  # noqa: BLE001 - never kill the timer thread
+                logging.getLogger(__name__).warning(
+                    "runwindow lifetime release failed", exc_info=True)
+
+    def shutdown(self):
+        """Cancel every lifetime timer and release every owned console."""
+        with self._lock:
+            for key in list(self._windows):
+                self._release_locked(key)
 
 
 _WINDOWS = _WindowRegistry()
