@@ -580,6 +580,7 @@ _MATRIX = {
 # so this module stays importable on its own; a drift test cross-checks it
 # against server's own execution sets.
 EXECUTION_TOOLS = frozenset({
+    "file_check",
     "agent_lane",
     "workspace_run", "script_run", "run_code", "run_project", "isolated_run",
     "build_run", "build_clean", "test_run", "lint_run", "format_code",

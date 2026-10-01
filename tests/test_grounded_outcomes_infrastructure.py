@@ -32,7 +32,7 @@ The direct MCP path has the result dict. The agent path does not: ``_agent_
 dispatch`` returns rendered text and ``_feed_grounded_outcome`` receives only
 that, so a text reader is required for the path that actually runs the agent
 and autopilot lanes. It reads exactly the header block ``_format_run_result``
-emits and stops at the first ``stdout:``/``stderr:`` line, so a failing test's
+emits and stops at the first ``digest:``/``stdout:``/``stderr:`` line, so a failing test's
 own output can never be mistaken for an infrastructure report --
 ``test_a_failure_whose_output_mentions_errors_is_still_a_verdict`` pins that,
 because losing a real negative is worse than keeping a wrong one in a store
@@ -177,16 +177,22 @@ def test_the_two_predicates_agree(result, is_infra):
     assert bool(go.rendered_infrastructure_error(rendered)) is is_infra, rendered
 
 
-def test_a_failure_whose_output_mentions_errors_is_still_a_verdict():
+@pytest.mark.parametrize("digest", [False, True])
+def test_a_failure_whose_output_mentions_errors_is_still_a_verdict(digest):
     """A failing suite prints whatever it likes, including lines that look
     exactly like an infrastructure report. The reader stops at the first
-    ``stdout:``/``stderr:`` header for precisely this reason."""
+    ``stdout:``/``stderr:`` header for precisely this reason -- and at the
+    ``digest:`` block, which lifts ERROR and file:line lines out of that
+    output and renders them ahead of it."""
     rendered = server._format_run_result("test run (pytest)", {
         "ok": False, "returncode": 1, "timed_out": False,
-        "stdout": "  error: assertion failed\n  timed_out: true\n  returncode: -1",
+        "stdout": "  error: assertion failed\n  timed_out: true\n  returncode: -1\n"
+                  "ERROR:root:fixture setup logged this\nsee error:5",
         "stderr": "E   error: nope",
-    })
+    }, digest=digest)
+    assert ("\ndigest:\n" in rendered) is digest
     assert go.rendered_infrastructure_error(rendered) == ""
+    assert go.rendered_verdict(rendered) is False
 
 
 def test_a_tool_that_raised_reads_as_infrastructure():
