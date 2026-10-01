@@ -86,6 +86,11 @@ class HostTaskResult:
     # contained the selected pre-model context. Transport failures do not
     # establish that the model saw or used a selected strategy reference.
     pre_model_context_response_observed: bool = False
+    # Append additive fields to preserve positional construction of old receipts.
+    # Deferred verification records a write, never objective completion.
+    validation_evidence: tuple[dict, ...] = ()
+    verification_deferred: bool = False
+    verification_required: str = ""
 
     def receipt(self) -> dict:
         receipt = {
@@ -106,6 +111,12 @@ class HostTaskResult:
             }
         if self.pre_model_context_response_observed:
             receipt["pre_model_context_response_observed"] = True
+        if self.validation_evidence:
+            receipt["validation_evidence"] = [dict(item) for item in self.validation_evidence]
+        if self.verification_deferred:
+            receipt["verification_deferred"] = True
+        if self.verification_required:
+            receipt["verification_required"] = self.verification_required
         return receipt
 
 
@@ -310,9 +321,30 @@ def _completion_gate(run: dict) -> tuple[bool, str]:
 
 def _next_pending(plan: list[dict]) -> tuple[int, dict] | tuple[None, None]:
     for index, task in enumerate(plan):
-        if task.get("status") == "pending":
+        if (
+            task.get("status") == "pending"
+            and not task.get("verification_deferred")
+        ):
             return index, task
     return None, None
+
+
+def _clear_deferred_verification(plan: list[dict]) -> bool:
+    """Make deferred validation tasks runnable on an explicit resume.
+
+    The task remains pending after a refused verifier so the completion gate
+    cannot mistake it for success.  The marker is only a same-invocation
+    scheduling fence; a later execute_run call is an explicit retry boundary.
+    """
+    changed = False
+    for task in plan:
+        if task.get("status") != "pending" or not task.get("verification_deferred"):
+            continue
+        task.pop("verification_deferred", None)
+        task.pop("verification_required", None)
+        task["error"] = ""
+        changed = True
+    return changed
 
 
 def _mark_interrupted_tasks_uncertain(plan: list[dict]) -> int:
@@ -420,6 +452,7 @@ def format_report(run: dict, review_reason: str = "", error: str = "") -> str:
         "autopilot end report",
         "  run: %s" % run.get("id", ""),
         "  objective: %s" % run.get("objective", ""),
+        "  working in: %s" % run.get("project", ""),
         "  policy/tier: %s / %s" % (run.get("policy", ""), run.get("tier", "")),
         "  cycles/failures: %s/%s" % (run.get("cycles", 0), run.get("failures", 0)),
         "  adaptive/checkpoints/replans: %s / %s / %s/%s" % (
@@ -440,6 +473,11 @@ def format_report(run: dict, review_reason: str = "", error: str = "") -> str:
                 lines.append("        action: %s" % action)
         if task.get("error"):
             lines.append("        error: %s" % _first_line(task["error"]))
+        for evidence in (task.get("host_receipt") or {}).get("validation_evidence", []):
+            lines.append("        static evidence (not executed): %s | %s + %s | %s" % (
+                evidence.get("path", ""), evidence.get("readback_tool", "no read-back"),
+                evidence.get("checker", "no static checker"), evidence.get("status", "unknown"),
+            ))
     if review_reason:
         lines.append("  reviewer: %s" % review_reason)
     if error:
@@ -453,12 +491,16 @@ def format_run(run: dict | None, include_report: bool = True) -> str:
         return "(no autopilot run)"
     plan = run.get("plan") or []
     passed = sum(1 for task in plan if task.get("status") == "passed")
+    unverified = sum(
+        1 for task in plan if task.get("status") == "passed_unverified"
+    )
     pending = sum(1 for task in plan if task.get("status") == "pending")
     lines = [
         "sonder autopilot",
         "  id: %s" % run.get("id", ""),
         "  status/phase: %s / %s" % (run.get("status", ""), run.get("phase", "")),
         "  objective: %s" % run.get("objective", ""),
+        "  working in: %s" % run.get("project", ""),
         "  policy/tier/web: %s / %s / %s" % (
             run.get("policy", ""), run.get("tier", ""),
             "on" if run.get("allow_web") else "off",
@@ -472,6 +514,8 @@ def format_run(run: dict | None, include_report: bool = True) -> str:
             run.get("max_replans", 0),
         ),
     ]
+    if unverified:
+        lines.append("  written-not-executed: %d (needs approved verification)" % unverified)
     if run.get("summary"):
         lines.append("  summary: %s" % run["summary"])
     if run.get("last_error"):
@@ -657,6 +701,12 @@ def execute_run(
                 last_error="interrupted task outcome uncertain",
                 final_report=report,
             ) or run
+        if _clear_deferred_verification(plan):
+            run = autopilot_store.save_progress(
+                run["id"], owner_id, plan=plan, status="running", phase="execute",
+                event_kind="verification_retry",
+                event_message="deferred validation tasks are retryable after explicit resume",
+            ) or run
         if not plan:
             proposed = normalize_plan(
                 plan_fn(run), run["objective"], run.get("max_tasks") or 12,
@@ -724,6 +774,14 @@ def execute_run(
             plan = [dict(task) for task in (run.get("plan") or [])]
             task_index, task = _next_pending(plan)
             if task is None:
+                if any(item.get("status") == "passed_unverified" or (
+                    item.get("status") == "pending" and item.get("verification_deferred")
+                ) for item in plan):
+                    return autopilot_store.finish_run(
+                        run["id"], owner_id, "paused",
+                        summary="written work reported; execution verification needs approval",
+                        final_report=format_report(run),
+                    ) or run
                 gate_ok, gate_reason = _completion_gate(run)
                 # There is no next worker task to carry a late steering note.
                 # Deliver it as fenced, untrusted review context before a run
@@ -833,6 +891,38 @@ def execute_run(
                 result.output if isinstance(result, HostTaskResult) else result or ""
             )[:MAX_TASK_OUTPUT]
             passed, error = _task_passed(result, task)
+            deferred = (
+                isinstance(result, HostTaskResult)
+                and result.verification_deferred
+            )
+            verification_required = (
+                str(result.verification_required or "").strip()
+                if isinstance(result, HostTaskResult) else ""
+            )
+            deferred_reason = (
+                "written, not executed: needs %s to verify"
+                % (verification_required or "approved verification")
+            )
+            deferred_nonfailure = deferred and (
+                passed or task.get("kind") == "validate"
+            )
+            task_status = "passed" if passed else "failed"
+            failures_delta = 0 if passed else 1
+            if deferred and task.get("kind") == "implement" and passed:
+                # A mutation is durable host evidence that the write happened,
+                # but refusal to execute its verifier must remain visible and
+                # must not satisfy the final completion gate.
+                task_status = "passed_unverified"
+                error = deferred_reason
+            elif deferred and task.get("kind") == "validate":
+                # Keep validation pending and fence it for the remainder of
+                # this invocation.  An explicit resume clears the fence and
+                # retries the real validator under the then-current policy.
+                task_status = "pending"
+                error = "needs approval to run %s" % (
+                    verification_required or "the required verifier"
+                )
+                failures_delta = 0
             flags = autopilot_store.control_flags(run["id"], owner_id)
             if flags.get("lost"):
                 raise AutopilotError("autopilot ownership was lost during task execution")
@@ -841,9 +931,13 @@ def execute_run(
                     run["id"], owner_id, "cancelled",
                     summary="cancelled; active task result discarded",
                 ) or run
-            task["status"] = "passed" if passed else "failed"
+            task["status"] = task_status
             task["output"] = output
             task["error"] = error
+            if deferred and task.get("kind") == "validate":
+                task["verification_deferred"] = True
+                if verification_required:
+                    task["verification_required"] = verification_required
             task["host_receipt"] = (
                 result.receipt() if isinstance(result, HostTaskResult) else {}
             )
@@ -852,11 +946,15 @@ def execute_run(
                 run["id"], owner_id,
                 plan=plan,
                 cycles_delta=1,
-                failures_delta=0 if passed else 1,
+                failures_delta=failures_delta,
                 current_task=-1,
-                event_kind="task_pass" if passed else "task_fail",
+                event_kind=(
+                    "task_deferred" if deferred_nonfailure
+                    else "task_pass" if passed else "task_fail"
+                ),
                 event_message=(
-                    "%s passed" % task["id"] if passed
+                    "%s deferred: %s" % (task["id"], error) if deferred_nonfailure
+                    else "%s passed" % task["id"] if passed
                     else "%s failed: %s" % (task["id"], error)
                 ),
             )
@@ -864,6 +962,11 @@ def execute_run(
             if saved is not None:
                 observe(task)
             invoked_cycles += 1
+            if deferred and (passed or task.get("kind") == "validate"):
+                # Deferred validation is a policy/permission boundary, not a
+                # task failure.  Continue with any runnable work so the run
+                # can produce an honest report instead of consuming retries.
+                continue
             if passed:
                 pending_index, _pending_task = _next_pending(run.get("plan") or [])
                 should_checkpoint = (

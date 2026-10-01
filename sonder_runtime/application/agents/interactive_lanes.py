@@ -72,6 +72,60 @@ _INSTRUCTION_FILE_NAMES = frozenset({"agents.md", "zero.md"})
 _INSTRUCTION_DIRECTORIES = frozenset({".zero"})
 
 
+def _prefix_timing_stats(response):
+    """Return backend supplied prefix counts, without estimating them."""
+    timings = getattr(response, "timings", None)
+    if timings is None:
+        return {}
+    result = {}
+    for name in ("cache_n", "prompt_n"):
+        value = (
+            timings.get(name)
+            if isinstance(timings, Mapping)
+            else getattr(timings, name, None)
+        )
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            result[name] = value
+    return result
+
+
+def _record_prefix_activity(observer, step, stats, *, turn_id, request_id):
+    """Best-effort host activity projection; durable evidence is emitted by the caller."""
+    if not stats or not callable(observer):
+        return
+    try:
+        observer(
+            "inference.decode",
+            step=step,
+            turn_id=turn_id,
+            request_id=request_id,
+            summary="step %s cache_n=%s prompt_n=%s" % (
+                step, stats.get("cache_n"), stats.get("prompt_n"),
+            ),
+            **stats,
+        )
+    except Exception:  # noqa: BLE001 - telemetry cannot affect lane state
+        return
+
+
+def _retain_history_with_hysteresis(timeline, protected_count, cursor=None):
+    """Keep protected entries and move the ordinary head in four-entry blocks."""
+    ordinary = [entry for entry in timeline if not entry[3]]
+    slots = _LANE_HISTORY_MESSAGES - protected_count
+    if len(timeline) <= _LANE_HISTORY_MESSAGES:
+        return ordinary, None
+    # A sixteen-entry hysteresis quantum is four eviction blocks.  The
+    # resulting head stays byte-stable for at least sixteen one-entry turns;
+    # the formula is derived solely from the ordered replay, so restarts match.
+    excess = max(0, len(ordinary) - max(0, slots))
+    drop = ((excess + 15) // 16) * 16
+    if slots > 0:
+        # A nearly all-protected history cannot supply a full hysteresis
+        # quantum. Keep its newest tool evidence whenever even one slot fits.
+        drop = max(excess, min(drop, max(0, (len(ordinary) - 1) // 4) * 4))
+    return ordinary[drop:], None
+
+
 def _instruction_path(path, root):
     """Whether *path* (resolved, inside *root*) is a project instruction file."""
     try:
@@ -288,6 +342,7 @@ class AgentLaneService:
         effect_journal=None,
         compaction_service: SessionCompactionService | None = None,
         strategy_observer=None,
+        activity_observer=None,
         prompts: PromptRenderer | None = None,
     ):
         self.store, self.sessions, self.gateway, self.tools = (
@@ -348,6 +403,7 @@ class AgentLaneService:
         self._context_planning = context_planning
         self._live_context = live_context
         self._strategy_observer = strategy_observer
+        self._activity_observer = activity_observer
         self._prompts = prompts
 
     def _observe_strategy(self, lane):
@@ -413,7 +469,9 @@ class AgentLaneService:
         )
         return facade, turn_id, step_id
 
-    def _loop_model_completed(self, lane, request_id, step, response):
+    def _loop_model_completed(
+        self, lane, request_id, step, response, *, prefix_stats=None,
+    ):
         if step is None:
             return
         facade, turn_id, step_id = step
@@ -425,6 +483,8 @@ class AgentLaneService:
         tokens = getattr(response, "tokens_out", None)
         if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens >= 0:
             payload["output_tokens"] = tokens
+        if prefix_stats:
+            payload.update(prefix_stats)
         self._loop_fact(facade, lane["session_id"], "model.completed", payload)
 
     def _loop_model_failed(self, lane, step, error):
@@ -1638,11 +1698,12 @@ class AgentLaneService:
                 "resume after operator-led compaction"
             )
         if len(timeline) > _LANE_HISTORY_MESSAGES:
-            # Keep every protected fact, then the newest ordinary context. The
-            # final sort restores source order, including archive pointers.
-            slots = _LANE_HISTORY_MESSAGES - len(protected)
-            ordinary = [entry for entry in timeline if not entry[3]]
-            selected_ordinary = ordinary[-max(0, slots):]
+            # Keep every protected fact, then evict ordinary entries in blocks
+            # of four. This leaves headroom for several turns before the next
+            # head mutation, instead of shifting the window every turn.
+            selected_ordinary, _ = _retain_history_with_hysteresis(
+                timeline, len(protected),
+            )
             selected = [entry for entry in timeline if entry[3]] + selected_ordinary
             timeline = sorted(selected, key=lambda entry: (entry[0], entry[1]))
         else:
@@ -1772,7 +1833,14 @@ class AgentLaneService:
                 "\nVisible tool schemas (only these tools may be requested): "
                 + rendered
             )
-            dynamic_suffix = "\nTool schema selection id: " + selection.selection_id
+            # Keep this per-turn identity in the final user message.  The
+            # selected schemas remain in the stable system prefix, while the
+            # manifest still binds the exact attempt/turn to tool calls.
+            dynamic_suffix = (
+                "\n\n[tool schema selection id: "
+                + selection.selection_id
+                + "]"
+            )
         route = route if isinstance(route, ResolvedModelRoute) else None
         route_identity = (
             route if route is not None
@@ -1850,7 +1918,7 @@ class AgentLaneService:
                         )
                 except (TypeError, ValueError) as exc:
                     system += "\nLive stable context unavailable: " + type(exc).__name__
-        system += dynamic_suffix
+        prompt += dynamic_suffix
         request_options = {
             "num_predict": max(1, lane["max_output_tokens"] - lane["used_tokens"])
         }
@@ -2095,6 +2163,7 @@ class AgentLaneService:
                     text = require_model_text(response.text)
                     if len(text.encode("utf-8")) > 65536:
                         raise ValueError("provider output exceeds lane payload ceiling")
+                    prefix_stats = _prefix_timing_stats(response)
                     measured = response.tokens_out
                     # Unknown provider usage receives a conservative character ceiling.
                     charged = (
@@ -2115,8 +2184,29 @@ class AgentLaneService:
                         sequence = tx.emit(
                             lane,
                             "model.response",
-                            {"content": text, "turn_id": turn_id, "request_id": request_id},
+                            {
+                                "content": text,
+                                "turn_id": turn_id,
+                                "request_id": request_id,
+                                **prefix_stats,
+                            },
                         )
+                        if prefix_stats:
+                            tx.emit(
+                                lane,
+                                "inference.decode",
+                                {
+                                    "step": lane["used_steps"],
+                                    "turn_id": turn_id,
+                                    "request_id": request_id,
+                                    "summary": "step %s cache_n=%s prompt_n=%s" % (
+                                        lane["used_steps"],
+                                        prefix_stats.get("cache_n"),
+                                        prefix_stats.get("prompt_n"),
+                                    ),
+                                    **prefix_stats,
+                                },
+                            )
                         lane["pending_response"] = dict(
                             text=text,
                             source_sequence=sequence,
@@ -2125,7 +2215,14 @@ class AgentLaneService:
                         tx.handled(lane, [m["id"] for m in messages])
                         tx.save(lane)
                     self._done()
-                    self._loop_model_completed(lane, request_id, loop_step, response)
+                    _record_prefix_activity(
+                        self._activity_observer, lane["used_steps"], prefix_stats,
+                        turn_id=turn_id, request_id=request_id,
+                    )
+                    self._loop_model_completed(
+                        lane, request_id, loop_step, response,
+                        prefix_stats=prefix_stats,
+                    )
                 except Exception:
                     # The provider already returned. A malformed response or
                     # failed durable projection is left unresolved rather than

@@ -785,24 +785,19 @@ def _check_sonder_inference(*, env=None, gateway=None) -> dict:
 
 
 def _check_sonder_inference_scope(*, env=None) -> dict:
-    """Say plainly which surfaces a sonder_inference binding does not reach.
-
-    Provider bindings are honoured by ModelGateway consumers only.  The REPL,
-    MCP, autopilot and fleet still generate through the legacy Ollama path, so
-    an operator who bound every tier to Sonder Inference must not assume
-    those surfaces stopped using Ollama.
-    """
+    """Report the tier-bound generation surfaces using Sonder Inference."""
     bindings, failure = _inference_binding(env)
     if failure is not None:
         return failure
     if "sonder_inference" not in bindings.bound_providers:
         return _skip("not configured (no provider binding uses sonder_inference)")
     return {
-        "status": STATUS_WARN,
+        "status": STATUS_OK,
         "detail": (
-            "REPL, MCP, autopilot and fleet generate through the legacy "
-            "Ollama path regardless of provider bindings; only ModelGateway "
-            "consumers use sonder_inference"
+            "tier-bound REPL, MCP, agents, workbench, autopilot, fleet, "
+            "ensembles, web research and helper calls use sonder_inference; "
+            "explicit Ollama pins, strict sonder aliases and durable fanout "
+            "remain Ollama-bound"
         ),
     }
 
@@ -815,7 +810,11 @@ def _check_sonder_inference_gpu(*, env=None) -> dict:
     CPU, means two runtimes load onto one card and the Inference server's
     weights or KV spill into shared memory (decode 2-15x slower, no error).
     Also warns when ``SONDER_KEEP_PRIMARY_RESIDENT=1`` pins a model while
-    other local Ollama models can load.  Nothing is changed.
+    other local Ollama models can load.  An embedder sent to another host
+    (``SONDER_EMBED_BASE_URL``) never loads here, and with
+    ``OLLAMA_LLM_LIBRARY=cpu`` the local daemon finds no GPU at all, so the
+    check reports ok and names what it would otherwise have flagged.
+    Nothing is changed.
     """
     import os
 
@@ -837,9 +836,11 @@ def _check_sonder_inference_gpu(*, env=None) -> dict:
             local = False
     elif not gpu_residency.keep_primary_resident(source):
         return _skip("no tier is bound to sonder_inference")
-    findings = gpu_residency.gpu_sharing_findings(source, bindings, inference_local=local)
-    if findings:
-        return {"status": STATUS_WARN, "detail": "; ".join(findings)}
+    report = gpu_residency.gpu_sharing_report(source, bindings, inference_local=local)
+    if report["findings"]:
+        return {"status": STATUS_WARN, "detail": "; ".join(report["findings"])}
+    if report["note"]:
+        return {"status": STATUS_OK, "detail": report["note"]}
     return {"status": STATUS_OK, "detail": "no other local model is configured to share the GPU"}
 
 

@@ -27,10 +27,11 @@ lives in an adapter, so the hook in ``server.py`` builds it from
 """
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Iterator, Mapping
+from types import MappingProxyType
 
 from ...domain.common.errors import (
     Cancelled,
@@ -42,8 +43,8 @@ from ...domain.common.errors import (
     SonderError,
 )
 from ..context import OperationContext
-from . import stream_sink
 from ..ports.model_gateway import ModelRequest, ModelResponse
+from . import stream_sink
 
 LEGACY_PROVIDER = "ollama"
 # The ModelCallError kind for a provider that is down.  It is terminal: the
@@ -52,7 +53,10 @@ PROVIDER_UNAVAILABLE_KIND = "provider_unavailable"
 # A feature the bound provider cannot carry is the caller's error (400); a
 # stronger rung would only hide it, so it is terminal as well.
 UNSUPPORTED_FEATURE_KIND = "unsupported_feature"
-_FORWARDED_OPTIONS = ("temperature", "num_predict", "num_ctx")
+_FORWARDED_OPTIONS = (
+    "temperature", "num_predict", "num_ctx", "top_p", "top_k", "min_p",
+    "repeat_penalty", "seed", "stop",
+)
 # Providers whose gateway forwards ``think`` itself (as chat_template_kwargs
 # when the server advertises support, refusing True otherwise).
 THINKING_PROVIDERS = frozenset({"sonder_inference"})
@@ -62,6 +66,9 @@ _ROLES = frozenset({"system", "user", "assistant", "tool"})
 
 _RUNG: ContextVar["RungBinding | None"] = ContextVar(
     "sonder_chat_rung_binding", default=None,
+)
+_HELPER_CONTEXT: ContextVar[OperationContext | None] = ContextVar(
+    "sonder_tier_helper_context", default=None,
 )
 _DEGRADATIONS: ContextVar[list[str] | None] = ContextVar(
     "sonder_chat_turn_degradations", default=None,
@@ -109,12 +116,21 @@ class RungBinding:
     provider: str
     tier: str
     served_model: str | None = None
+    options: Mapping[str, object] | None = None
 
 
 @contextmanager
-def bind_rung(provider: str | None, tier: str) -> Iterator[RungBinding | None]:
+def bind_rung(
+    provider: str | None, tier: str, *, options: Mapping[str, object] | None = None,
+) -> Iterator[RungBinding | None]:
     """Bind the rung's provider for the enclosed block; Ollama binds nothing."""
-    binding = RungBinding(provider, str(tier or "sonder")) if is_bridged(provider) else None
+    binding = (
+        RungBinding(
+            provider, str(tier or "sonder"),
+            options=MappingProxyType(dict(options)) if options is not None else None,
+        )
+        if is_bridged(provider) else None
+    )
     token = _RUNG.set(binding)
     try:
         yield binding
@@ -135,6 +151,19 @@ def suspend_rung() -> Iterator[None]:
 def active_rung() -> RungBinding | None:
     """The non-Ollama rung bound on this thread, or None for the legacy path."""
     return _RUNG.get()
+
+
+def active_helper_context() -> OperationContext | None:
+    return _HELPER_CONTEXT.get()
+
+
+@contextmanager
+def bind_helper_context(context: OperationContext) -> Iterator[None]:
+    token = _HELPER_CONTEXT.set(context)
+    try:
+        yield
+    finally:
+        _HELPER_CONTEXT.reset(token)
 
 
 # Bridged providers that run off this machine on a third party's service.  A
@@ -198,6 +227,17 @@ def model_request_from_ollama_payload(
             "response_format/schema decoding is only available on Ollama tiers"
         )
     think = payload.get("think")
+    binding = active_rung()
+    bound_options = (
+        binding.options
+        if binding is not None and binding.provider == provider
+        and provider in THINKING_PROVIDERS else None
+    )
+    # Explicit request fields win over frozen generator defaults.
+    if bound_options and think is None and isinstance(bound_options.get("think"), bool):
+        think = bound_options["think"]
+    payload_options = payload.get("options")
+    payload_options = payload_options if isinstance(payload_options, Mapping) else {}
     carry_think = provider in THINKING_PROVIDERS and isinstance(think, bool)
     if think is True and not carry_think:
         raise UnsupportedProviderFeature(
@@ -236,11 +276,42 @@ def model_request_from_ollama_payload(
     if isinstance(raw_options, Mapping):
         for key in _FORWARDED_OPTIONS:
             value = raw_options.get(key)
+            if key == "stop":
+                if isinstance(value, str) and value:
+                    options[key] = value
+                elif (isinstance(value, (list, tuple))
+                      and all(isinstance(item, str) and item for item in value)):
+                    options[key] = list(value)
+                continue
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 continue
-            if key != "temperature" and int(value) <= 0:
+            if key in {"num_predict", "num_ctx"} and int(value) <= 0:
                 continue
-            options[key] = int(value) if key != "temperature" else float(value)
+            if key == "temperature":
+                options[key] = float(value)
+            elif key == "top_k" or key in {"num_predict", "num_ctx", "seed"}:
+                options[key] = int(value)
+            else:
+                options[key] = float(value)
+    if bound_options:
+        for key, value in bound_options.items():
+            if key == "think" or key in options:
+                continue
+            if key in {"reasoning_budget_tokens", "reasoning_budget_message"}:
+                if value is not None:
+                    options[key] = value
+            elif key in _FORWARDED_OPTIONS or key == "sampling_profile":
+                options[key] = value
+    # The bridge accepts reasoning controls in the legacy options object too;
+    # the inference gateway maps them onto its request contract.
+    if provider in THINKING_PROVIDERS:
+        for key in ("reasoning_budget_tokens", "reasoning_budget_message"):
+            value = payload.get(key, payload_options.get(key))
+            if value is not None:
+                options[key] = value
+        profile = payload.get("sampling_profile", payload_options.get("sampling_profile"))
+        if profile is not None:
+            options["sampling_profile"] = profile
     if carry_think:
         options["think"] = think
     return ModelRequest(
@@ -252,16 +323,19 @@ def model_request_from_ollama_payload(
     )
 
 
-def ollama_shape(response: ModelResponse) -> dict[str, object]:
+def ollama_shape(response: ModelResponse, *, finish_reason=None) -> dict[str, object]:
     """Shape a ModelResponse as the Ollama reply legacy callers consume."""
-    # No ``done_reason``: the gateway does not report why the provider
-    # stopped, and claiming "stop" would hide a truncation from legacy
-    # consumers that look for "length".  Every consumer treats it as optional.
+    finish_reason = getattr(response, "finish_reason", None) or finish_reason
+    if finish_reason is None:
+        telemetry = getattr(response, "telemetry", None)
+        finish_reason = getattr(telemetry, "finish_reason", None)
     shaped: dict[str, object] = {
         "model": response.model,
         "message": {"role": "assistant", "content": response.text},
         "done": True,
     }
+    if finish_reason in {"length", "stop"}:
+        shaped["done_reason"] = finish_reason
     if response.tokens_in is not None:
         shaped["prompt_eval_count"] = response.tokens_in
     if response.tokens_out is not None:
@@ -340,7 +414,9 @@ def generate_via_gateway(
         raise DependencyUnavailable("model gateway returned an invalid response")
     if binding is not None and isinstance(response.model, str) and response.model:
         binding.served_model = response.model
-    return ollama_shape(response), response
+    metadata = getattr(gateway, "last_response_meta", None)
+    finish_reason = metadata.get("finish_reason") if isinstance(metadata, Mapping) else None
+    return ollama_shape(response, finish_reason=finish_reason), response
 
 
 __all__ = [
