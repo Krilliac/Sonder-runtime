@@ -82,7 +82,10 @@ writer's own output, while the damage lands on a *reader* who never sees it:
 column, so ``calibration_status`` reports one unmarked number, and
 ``calibration.should_verify`` gates runtime behaviour off that same population
 -- meaning the instrument moves the control loop it is measuring. A convention
-imposed on a stranger is not a control.
+imposed on a stranger is not a control. (Written before ``outcomes.source``,
+#62. Recorded provenance now keeps these rows out of the caller-judged
+population, but no source names a benchmark, so the refusal stands: see
+``PROVENANCE_AVAILABLE``.)
 
 So ``--record`` now **refuses** while ``PROVENANCE_AVAILABLE`` is False. What
 remains true and load-bearing: ``--live`` without ``--record`` is unaffected and
@@ -149,24 +152,25 @@ FOOTER_PREFIX = "\n\n[interaction_id: "
 
 _ACCEPTED, _REJECTED_SIGNAL = "accepted", "rejected"
 
-#: Whether an outcome row can carry where it came from. It cannot: the store
-#: has no provenance column and ``calibration.measure`` aggregates by signal
-#: name alone, so a benchmark-authored row is indistinguishable from a row a
-#: human filed after reviewing real delegated work. Until that changes,
+#: Whether a benchmark-authored outcome row can be told apart from the
+#: runtime's own. Not yet. ``outcomes.source`` (#62) keeps such a row out of
+#: the caller-judged population that ``calibration.should_verify`` reads, but
+#: no source names a benchmark: ``_live_recorder`` would file it as the
+#: runtime's own ``attributed`` verdict, counted in the autograded figures and
+#: indistinguishable there from real work. Until a source can mark it,
 #: ``--record`` refuses.
 PROVENANCE_AVAILABLE = False
 
 _PROVENANCE_REFUSAL = (
-    "recording is disabled: an outcome row cannot yet carry its provenance. "
-    "calibration.measure aggregates by signal name alone, so rows this "
-    "benchmark writes are indistinguishable from a caller's verdict on real "
-    "delegated work -- and calibration.should_verify gates runtime behaviour "
-    "off that same population, so recording here moves the control loop this "
-    "harness is supposed to be measuring. A disclosure in the writer's own "
-    "output does not reach the stranger who later quotes the number. Run "
-    "--live without --record, or add a provenance column and set "
-    "PROVENANCE_AVAILABLE once a benchmark-authored row can be excluded on "
-    "request."
+    "recording is disabled: a benchmark-authored outcome row cannot yet carry "
+    "provenance of its own. outcomes.source keeps it out of the caller-judged "
+    "population calibration.should_verify reads, but no source names a "
+    "benchmark, so a recorded row would be filed as the runtime's own "
+    "attributed verdict and counted as real work in the autograded figures. "
+    "A disclosure in the writer's own output does not reach the stranger who "
+    "later quotes the number. Run --live without --record, or add a benchmark "
+    "outcome source and set PROVENANCE_AVAILABLE once a benchmark-authored "
+    "row can be excluded on request."
 )
 
 # Curly quotes, dashes and non-breaking spaces: the characters a model
