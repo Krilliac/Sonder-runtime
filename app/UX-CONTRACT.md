@@ -2,6 +2,14 @@
 
 Canonical appearance: DESIGN.md and lib/theme.dart. Shared workspace navigation, notices, read-error classification and Markdown live in lib/workspace_ui.dart. Screens own domain state and routing callbacks, not duplicate versions of these primitives.
 
+Routed work shows the host acknowledgement as the first assistant reply, then a
+compact live progress block within the existing work-run card. The card polls
+the existing owner-scoped work-run endpoint, including when its parent has
+returned but `progress_complete` is false. Final summary and result replace that
+block in the same conversation turn. Progress is server-authored evidence;
+neither the app nor a returned model answer invents validation. Older servers
+without narration fields keep the existing placeholder and completion behavior.
+
 - Chat owns the four peer routes: Chat, Agents, Runtime (System screen), Settings. Runtime controls retain their existing authorization and confirmation behavior. Settings retains its existing unsaved-edit guard.
 - Runtime inference status shows cached aggregate counts. Worker origins and model previews appear only after **Inspect worker page**; **Refresh worker cache** explicitly requests one configured bounded batch. Details are never loaded by polling, are cleared on an access failure or credential/host change, and use an explicit next-page action. Server administrator authorization remains authoritative.
 - Agent search is local to loaded conversations. Until pagination completes it says “Search loaded conversations”; loading more remains available while filtering. Status filters and parent groups use actual returned data. Parent titles are used only when loaded; otherwise the short parent ID opens its full selectable value.

@@ -335,6 +335,8 @@ def create_run(
         row = conn.execute(
             "SELECT * FROM autopilot_runs WHERE id=?", (run_id,)
         ).fetchone()
+    from sonder_runtime.application.ports.work_narration import link
+    link("autopilot", run_id)
     return _row_dict(row)
 
 
@@ -987,15 +989,40 @@ def snapshot(include_finished: bool = True, limit: int = 20, request_owner: str 
         total = conn.execute("SELECT COUNT(*) FROM autopilot_runs WHERE 1=1%s" % owner_sql, owner_args).fetchone()[0]
     finally:
         conn.close()
-    latest = rows[0] if rows else None
+    # Events are durable run history and are included in this additive
+    # snapshot projection so narrators never need a parallel state store.
+    events_by_run = {}
+    event_limit = 100
+    conn = _connect()
+    try:
+        for run in rows:
+            run_id = str(run.get("id") or "")
+            if not run_id:
+                continue
+            event_rows = conn.execute(
+                "SELECT event_id, run_id, ts, kind, message FROM autopilot_events "
+                "WHERE run_id=? ORDER BY event_id DESC LIMIT ?",
+                (run_id, event_limit),
+            ).fetchall()
+            events_by_run[run_id] = [dict(row) for row in reversed(event_rows)]
+    finally:
+        conn.close()
+    narrated_runs = []
+    for run in rows:
+        copy = dict(run)
+        copy["events"] = events_by_run.get(str(run.get("id") or ""), [])
+        narrated_runs.append(copy)
+    latest = narrated_runs[0] if narrated_runs else None
+    from sonder_runtime.domain.work_narration import progress
     return {
         "active_runs": int(active),
         "resumable_runs": int(resumable),
         "total_runs": int(total),
         "total_listed": len(rows),
-        "runs": rows,
+        "runs": narrated_runs,
         "latest": latest,
         "database": database_path(),
+        "progress": progress(autopilot={"runs": narrated_runs}),
     }
 
 

@@ -142,8 +142,107 @@ void main() {
     expect(find.byKey(const Key('work-run-card')), findsNothing);
     expect(find.text('The PSO cache now warms at load.'), findsOneWidget);
     expect(
-        await storedChatText(), contains('The PSO cache now warms at load.'));
+      await storedChatText(),
+      contains('The PSO cache now warms at load.'),
+    );
     expect(await storedChatText(), isNot(contains('GET /v1/work-runs')));
+    await unmountChat(tester);
+  });
+
+  testWidgets('renders live progress and waits for the final summary', (
+    tester,
+  ) async {
+    final backend = FakeChatBackend();
+    await pumpChat(tester, backend);
+    await _sendLongTurn(tester, backend);
+    backend.workRun = (id) => WorkRun(
+          id: id,
+          status: 'returned',
+          progressComplete: false,
+          progress: const [
+            WorkRunProgress(
+              id: 'p1',
+              runId: _runId,
+              text: 'Agent 1 finished the scan.',
+              kind: 'task_finished',
+              at: 1,
+              finalLine: false,
+            ),
+          ],
+          finalSummary: 'Validation is still running.',
+        );
+    await tester.tap(find.byKey(const Key('work-run-refresh')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.byKey(const Key('work-run-progress')), findsOneWidget);
+    expect(find.text('Agent 1 finished the scan.'), findsOneWidget);
+    expect(find.byKey(const Key('work-run-card')), findsOneWidget);
+
+    backend.workRun = (id) => WorkRun(
+          id: id,
+          status: 'returned',
+          progressComplete: true,
+          output: 'The result is ready.',
+          finalSummary: 'Validation passed.',
+        );
+    await tester.tap(find.byKey(const Key('work-run-refresh')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.byKey(const Key('work-run-card')), findsNothing);
+    expect(
+      find.textContaining('Validation passed.', findRichText: true),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining('The result is ready.', findRichText: true),
+      findsOneWidget,
+    );
+    await unmountChat(tester);
+  });
+
+  testWidgets('keeps progress readable at narrow width with large text', (
+    tester,
+  ) async {
+    tester.binding.platformDispatcher.textScaleFactorTestValue = 1.8;
+    addTearDown(
+      tester.binding.platformDispatcher.clearTextScaleFactorTestValue,
+    );
+    final backend = FakeChatBackend();
+    await pumpChat(tester, backend, size: const Size(390, 900));
+    await _sendLongTurn(tester, backend);
+    backend.workRun = (id) => WorkRun(
+          id: id,
+          status: 'running',
+          progress: const [
+            WorkRunProgress(
+              id: 'narrow-1',
+              runId: _runId,
+              text: 'Validating the generated files on the local host.',
+              kind: 'validation',
+              at: 2,
+              finalLine: false,
+            ),
+          ],
+          progressComplete: false,
+        );
+    // Large text can make the notice taller than the transcript viewport.
+    // Finish its entry scroll, then reach the control as a reader would.
+    await tester.pumpAndSettle();
+    final refresh = find.byKey(const Key('work-run-refresh'));
+    await tester.ensureVisible(refresh);
+    await tester.pumpAndSettle();
+    expect(refresh.hitTestable(), findsOneWidget);
+    await tester.tap(refresh);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.byKey(const Key('work-run-progress')), findsOneWidget);
+    final progress =
+        find.text('Validating the generated files on the local host.');
+    expect(progress, findsOneWidget);
+    await tester.ensureVisible(progress);
+    await tester.pumpAndSettle();
+    expect(progress.hitTestable(), findsOneWidget);
+    expect(tester.takeException(), isNull);
     await unmountChat(tester);
   });
 

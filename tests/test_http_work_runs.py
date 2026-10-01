@@ -73,12 +73,14 @@ def test_slow_lane_answers_with_run_id_and_persists_the_answer(work_env, monkeyp
     assert record["output"] == "lane finished after the client stopped waiting"
 
 
-def test_fast_lane_returns_inline_with_run_id(work_env, monkeypatch):
+def test_fast_lane_returns_ack_immediately_then_persists_answer(work_env, monkeypatch):
     monkeypatch.setattr(server, "route_work_request", lambda prompt, **_k: "done")
     result = _work()
-    assert (result.status, result.text) == ("returned", "done")
+    assert result.status == "running"
+    assert result.acknowledgement in result.text
+    assert result.work_run_id in result.text
     record = _wait_finished(result.work_run_id)
-    assert record["output"] == "done"
+    assert (record["status"], record["output"]) == ("returned", "done")
 
 
 def test_cancel_stops_effects_and_is_recorded(work_env, monkeypatch):
@@ -120,6 +122,7 @@ def test_wall_budget_expiry_fences_effects(work_env, monkeypatch):
 
     monkeypatch.setattr(server, "route_work_request", lane)
     result = _work()
+    _wait_finished(result.work_run_id)
     assert "wall-clock budget" in observed["lost"]
     assert _wait_finished(result.work_run_id)["status"] == "budget_exceeded"
 
@@ -164,6 +167,7 @@ def test_thread_start_failure_frees_the_slot_and_terminalizes_the_run(work_env):
 def test_runs_are_owner_scoped(work_env, monkeypatch):
     monkeypatch.setattr(server, "route_work_request", lambda prompt, **_k: "alice's answer")
     result = _work(context=ALICE)
+    assert result.status == "running"
     _wait_finished(result.work_run_id, ALICE)
     bob = serve._state_principal(BOB)
     assert serve._WORK_RUNNER.get(result.work_run_id, bob) is None
