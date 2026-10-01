@@ -21049,11 +21049,8 @@ def _agent_turn(
         nonlocal claim_review_policy_refused, claim_review_verified
         tool_name = str(review.get("tool") or "")
         tool_args = review.get("args") or {}
-        # Validate the same host-scoped arguments that dispatch will use.  A
-        # repository model commonly echoes the absolute PROJECT ROOT from its
-        # prompt; checking the raw model arguments first incorrectly rejected
-        # that path even though the host had already authorized and confined
-        # the run to ``project_scope``.
+        # Callback policy checks model intent; repository guards and dispatch
+        # use host-scoped paths so injected authority is not a model bypass.
         policy_tool_args = _project_scope_args(
             tool_name, tool_args, project_scope,
         )
@@ -21066,7 +21063,7 @@ def _agent_turn(
                 % tool_name
             )
         if not policy_error and tool_policy is not None:
-            policy_error = str(tool_policy(tool_name, policy_tool_args) or "")
+            policy_error = str(tool_policy(tool_name, tool_args) or "")
         if not policy_error and cloud:
             policy_error = _cloud_agent_tool_policy_error(tool_name)
         if not policy_error:
@@ -21084,7 +21081,7 @@ def _agent_turn(
             ensure_not_cancelled()
             observation_text = str(_agent_dispatch_observed(
                 tool_name,
-                tool_args,
+                policy_tool_args,
                 allow_web=False,
                 read_only=True,
                 project=project_scope,
@@ -21349,8 +21346,8 @@ def _agent_turn(
                 _predictor.note_miss()
         _predictor.record_transition(_spec_state, tool_name)
         _last_tool_name = tool_name
-        # Keep policy and dispatch on one canonical, host-confined view of a
-        # repository tool call.  Previously the early read-only check saw raw
+        # Keep repository guards and dispatch on one host-confined view of a
+        # tool call; callback policy sees model args. The read-only check saw raw
         # model paths while dispatch later rebased them under ``project_scope``.
         # Absolute in-project paths were therefore rejected before dispatch,
         # causing fleet workers to exhaust max_steps without any file evidence.
@@ -21377,6 +21374,9 @@ def _agent_turn(
             and call_signature in successful_inspection_results
         )
         prior_identical_failures = failed_call_counts.get(call_signature, 0)
+        from sonder_runtime.domain.agents.policy_refusal_guard import repeated_policy_refusal
+        if refusal := repeated_policy_refusal(observations):
+            return _early_exit("ERROR: host policy refused 3 consecutive calls: " + refusal)
         if prior_identical_failures >= 3:
             if auto_checklist:
                 _agent_checklist_fail(
@@ -21399,7 +21399,7 @@ def _agent_turn(
                 % tool_name
             )
         if not policy_error and tool_policy is not None:
-            policy_error = str(tool_policy(tool_name, policy_tool_args) or "")
+            policy_error = str(tool_policy(tool_name, tool_args) or "")
         if not policy_error and cloud:
             policy_error = _cloud_agent_tool_policy_error(
                 tool_name, unsafe=unsafe,
@@ -22288,6 +22288,7 @@ def _autopilot_tool_policy(run: dict):
                 "ERROR: HOST POLICY: autonomous runs cannot set "
                 "include_ignored=true."
             )
+        # Preserve the trusted host sentinel for direct, already-scoped callers.
         host_scoped_text_patch = (
             tool_name == "text_patch"
             and bool(project_scope)
@@ -22296,7 +22297,7 @@ def _autopilot_tool_policy(run: dict):
             and args.get("extra_roots") == project_scope
         )
         if (
-            any(args.get(name) for name in ("token", "approval", "extra_roots"))
+            any(name in args for name in ("token", "approval", "extra_roots"))
             and not host_scoped_text_patch
         ):
             return "ERROR: HOST POLICY: autonomous runs cannot use bypass credentials or extra roots."
