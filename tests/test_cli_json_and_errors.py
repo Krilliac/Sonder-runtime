@@ -38,6 +38,7 @@ def _backup(home, capsys):
     return json.loads(capsys.readouterr().out)["path"]
 
 
+@pytest.mark.usefixtures("isolated_default_runtime")
 def test_restore_apply_json_is_a_single_document(home, tmp_path, capsys):
     backup = _backup(home, capsys)
     dest = tmp_path / "restored"
@@ -50,6 +51,7 @@ def test_restore_apply_json_is_a_single_document(home, tmp_path, capsys):
     assert "SONDER_HOME" in out.err  # the operator hint is still shown
 
 
+@pytest.mark.usefixtures("isolated_default_runtime")
 def test_restore_apply_text_keeps_the_hint_on_stdout(home, tmp_path, capsys):
     backup = _backup(home, capsys)
     rc = main(["restore", "apply", backup, str(tmp_path / "r"),
@@ -58,6 +60,7 @@ def test_restore_apply_text_keeps_the_hint_on_stdout(home, tmp_path, capsys):
     assert "State restored" in capsys.readouterr().out
 
 
+@pytest.mark.usefixtures("isolated_default_runtime")
 def test_restore_apply_into_non_empty_destination_is_a_clean_error(
     home, tmp_path, capsys
 ):
@@ -84,6 +87,7 @@ def test_restore_apply_of_missing_backup_is_a_clean_error(
     assert not (tmp_path / "dest").exists()
 
 
+@pytest.mark.usefixtures("isolated_default_runtime")
 def test_backup_create_onto_a_file_is_a_clean_error(home, tmp_path, capsys):
     target = tmp_path / "a-file"
     target.write_text("x", encoding="utf-8")
@@ -93,6 +97,7 @@ def test_backup_create_onto_a_file_is_a_clean_error(home, tmp_path, capsys):
     assert "Traceback" not in err and "backup failed" in err
 
 
+@pytest.mark.usefixtures("isolated_default_runtime")
 @pytest.mark.parametrize("keep", ["0", "-1"])
 def test_backup_prune_keep_below_one_is_a_clean_error(home, capsys, keep):
     _backup(home, capsys)
@@ -110,6 +115,7 @@ def _gateway_records(caplog):
     ]
 
 
+@pytest.mark.usefixtures("isolated_default_runtime")
 def test_expected_backup_faults_are_logged_without_a_traceback(
     home, tmp_path, capsys, caplog
 ):
@@ -151,6 +157,7 @@ def test_restore_io_failure_is_not_logged_as_a_refusal(
     assert "No space left" in message
 
 
+@pytest.mark.usefixtures("isolated_default_runtime")
 def test_unexpected_backup_faults_keep_their_traceback(
     home, tmp_path, monkeypatch, caplog
 ):
@@ -167,6 +174,7 @@ def test_unexpected_backup_faults_keep_their_traceback(
     assert records and records[0].exc_info is not None
 
 
+@pytest.mark.usefixtures("isolated_default_runtime")
 def test_concurrent_backup_lock_is_a_clean_error(home, monkeypatch, capsys):
     import sonder_runtime.adapters.backup as backup_impl
     from sonder_runtime.adapters.persistence.operations_store import (

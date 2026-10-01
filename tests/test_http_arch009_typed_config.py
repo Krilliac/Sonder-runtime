@@ -55,6 +55,7 @@ def test_typed_http_values_are_not_replaced_by_environment(monkeypatch):
     assert serve.CORS_ORIGINS == {"https://typed.example"}
 
 
+@pytest.mark.usefixtures("isolated_default_runtime")
 def test_typed_main_uses_configured_port_when_environment_is_poisoned(monkeypatch):
     monkeypatch.setenv("SONDER_PORT", "19999")
     config = _config(port=12345)

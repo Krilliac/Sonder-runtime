@@ -39,6 +39,9 @@ def _load(path: Path):
 def _catalog_server_stub():
     """Provide only the registry seam while retaining real catalog derivation."""
     source_paths = [ROOT.parent / "server.py", ROOT.parent / "sonder_runtime" / "bootstrap" / "computer_use_tools.py"]
+    from sonder_runtime.bootstrap.agent_help_tools import discover_agent_tool_registrars
+    source_paths.extend(ROOT.parent / "sonder_runtime" / "bootstrap" / (name + ".py")
+                        for name, _register in discover_agent_tool_registrars())
     tree = ast.parse("\n".join(path.read_text(encoding="utf-8") for path in source_paths))
     names = []
     for node in ast.walk(tree):

@@ -22,7 +22,7 @@
   },
   "autopilot_worker": {
    "source": "server.py:22666",
-   "text": "Autopilot objective: Fix the parser a $dollar {brace} %s 100% \\ back\nCurrent bounded task: task-01 [implement] Edit $x\nInstruction: Change {y} 50%\nSuccess criteria:\n- tests pass\n- no {regressions}\nPrior task evidence:\nprior evidence a $dollar {brace} %s 100% \\ back\n\nComplete only this task using host tools. Inspect before mutation, do not broaden scope, and validate every persistent change. If blocked, report the exact blocker; do not claim success."
+   "text": "Autopilot objective: Fix the parser a $dollar {brace} %s 100% \\ back\nCurrent bounded task: task-01 [implement] Edit $x\nInstruction: Change {y} 50%\nSuccess criteria:\n- tests pass\n- no {regressions}\nPrior task evidence:\nprior evidence a $dollar {brace} %s 100% \\ back\n\nComplete only this task using host tools. Inspect before mutation, do not broaden scope, and validate every persistent change. If blocked, report the exact blocker; do not claim success.\nWorkflow: find the relevant file or symbol, read it, edit it, run focused tests, check the result, and give the final answer. Use tool_help {\"name\": \"...\"} when an advertised tool's arguments are unclear."
   },
   "child_lane": {
    "source": "sonder_runtime/application/agents/interactive_lanes.py:1692",
