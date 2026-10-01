@@ -173,6 +173,8 @@ from sonder_runtime.adapters.security.permission_policy import (
 import reloadable_mcp
 import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
 import autopilot_controller
+from sonder_runtime.adapters.agent_artifact_gate import AgentArtifactGate, validation_deferral
+from sonder_runtime.adapters.creation_workspace import prepare_loop_project, prepare_writing_project
 from sonder_runtime.adapters.persistence import fanout_store
 import fanout_prompt_vault
 from sonder_runtime.adapters.model_transport import ModelCallError
@@ -2001,11 +2003,12 @@ def _generate_text(prompt, tier="fast", system="", temperature=0.2,
 _APP_GRAPH = None
 _APP_GRAPH_LOCK = threading.Lock()
 _APP_GRAPH_OWNED_BY_SERVER = False
+_APP_GRAPH_BUILT_BY_SERVER = None  # the exact graph _application() constructed
 
 
 def _application():
     """Lazily build the SPEC-3 composition-root graph (no import-time cost)."""
-    global _APP_GRAPH, _APP_GRAPH_OWNED_BY_SERVER
+    global _APP_GRAPH, _APP_GRAPH_OWNED_BY_SERVER, _APP_GRAPH_BUILT_BY_SERVER
     with _APP_GRAPH_LOCK:
         if _APP_GRAPH is None:
             from sonder_runtime.bootstrap import app as _bootstrap_app
@@ -2014,6 +2017,7 @@ def _application():
                 preference_module_provider=lambda: preference_learning,
             )
             _APP_GRAPH_OWNED_BY_SERVER = True
+            _APP_GRAPH_BUILT_BY_SERVER = _APP_GRAPH
         # Every graph this runtime serves feeds the ledger, whether it built
         # the graph itself or an entrypoint handed one over (the handoff also
         # installs it; adding the same observer again is a no-op).
@@ -2035,12 +2039,14 @@ def _install_typed_build_feed(application) -> None:
 
 def _close_server_owned_application(*, timeout=5) -> None:
     """Retire only a graph that this legacy module constructed itself."""
-    global _APP_GRAPH, _APP_GRAPH_OWNED_BY_SERVER
+    global _APP_GRAPH, _APP_GRAPH_OWNED_BY_SERVER, _APP_GRAPH_BUILT_BY_SERVER
     with _APP_GRAPH_LOCK:
-        if not _APP_GRAPH_OWNED_BY_SERVER or _APP_GRAPH is None:
-            return
         application = _APP_GRAPH
-        _APP_GRAPH = None
+        # Ownership is identity, not the flag alone: anything bound over the graph
+        # built here (an impostor the binding just refused) never gets a cleanup call.
+        if not _APP_GRAPH_OWNED_BY_SERVER or application is None or application is not _APP_GRAPH_BUILT_BY_SERVER:
+            return
+        _APP_GRAPH = _APP_GRAPH_BUILT_BY_SERVER = None
         _APP_GRAPH_OWNED_BY_SERVER = False
     # Never hold the legacy graph lock while a provider close can block or
     # invoke a compatibility hook.  Externally configured graphs are left to
@@ -12945,12 +12951,10 @@ def file_read_range(
             {"path": path, "start_line": start_line, "end_line": end_line},
             token=token, approval=approval, extra_roots=extra_roots,
         )
+        output = _format_file_result("file range", data)
     except Exception as exc:
         _record_direct_tool("file_read_range", args, ok=False, started=started, summary=str(exc))
         return "ERROR: %s" % exc
-    lines = ["file range: %s lines %s-%s" % (data["path"], data["start_line"], data["end_line"])]
-    lines.extend("%6d  %s" % (row["line"], row["text"]) for row in data["lines"])
-    output = "\n".join(lines)
     _record_direct_tool(
         "file_read_range", args, ok=True, started=started,
         summary="%d lines" % len(data["lines"]), output=output,
@@ -17092,7 +17096,7 @@ AGENT_TOOL_HELP = """Available tools:
 - directory_create: {"path": "output/reports", "parents": true}
 - file_find: {"query": "*.py", "root": ".", "max_results": 50}
 - repository_symbol_index: {"path": ".", "glob": "*", "language": "auto|python|javascript|typescript|c|cpp|csharp|rust|go", "max_files": 200, "max_total_bytes": 2000000, "max_file_bytes": 256000, "max_symbols": 2000}
-- file_read: {"path": "README.md"}
+- file_read: {"path": "README.md", "offset": 1, "limit": 120}
 - file_digest: {"path": "artifact.bin", "max_bytes": 32000000}
 - directory_digest: {"path": ".", "max_depth": 12, "max_files": 2000, "max_total_bytes": 32000000, "max_file_bytes": 32000000, "max_results": 2500}
 - file_read_range: {"path": "server.py", "start_line": 1, "end_line": 200}
@@ -17112,7 +17116,7 @@ AGENT_TOOL_HELP = """Available tools:
 - file_batch_write: {"operations_json": [{"path": "a.txt", "content": "...", "mode": "create|overwrite"}]}
 - json_patch: {"path": "config.json", "operations_json": [{"op": "test", "path": "/version", "value": 1}, {"op": "replace", "path": "/version", "value": 2}], "mode": "preview|apply"}
 - text_patch: {"root": ".", "patch": "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n", "apply": false}
-- file_edit: {"path": "notes.txt", "old": "before", "new": "after", "count": 1}
+- file_edit: {"path": "notes.txt", "old": "before", "new": "after", "count": 1} -- must match exactly once; whitespace and CRLF tolerant; result echoes the region with line numbers
 - file_copy: {"source": "assets/input.bin", "destination": "build/input.bin", "overwrite": false}
 - file_move: {"source": "build/draft.bin", "destination": "dist/final.bin", "overwrite": false}
 - file_delete: {"path": "notes.txt", "dry_run": true}
@@ -18251,6 +18255,8 @@ def _agent_dispatch(
     args = args or {}
     if not isinstance(args, dict):
         return "ERROR: tool args must be a JSON object"
+    if tool_name == "file_read":
+        args = {**args, "path": args.get("path") or args.get("file") or args.get("filename") or args.get("file_path") or ""}
     # A model never holds a credential. A string ``token`` or ``approval`` in
     # a proposal is dropped before anything reads it, on every agent path and
     # not only the autonomous ones; the in-process objects the host injects
@@ -18781,12 +18787,10 @@ def _agent_dispatch(
             extra_roots=args.get("extra_roots", ""),
         )
     if tool_name == "file_read":
-        return file_read(
-            path=args.get("path", ""),
-            max_bytes=args.get("max_bytes", 256000),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
+        from sonder_runtime.adapters.inspection_executor import render_agent_file_page
+        return render_agent_file_page(
+            args, read=_typed_tool, record=_record_direct_tool,
+            activity=activity_tracker, reload=_maybe_live_reload,
         )
     if tool_name == "file_digest":
         return file_digest(
@@ -19578,6 +19582,8 @@ def _project_scope_args(tool_name, args, project):
     ):
         return args
     scoped = dict(args)
+    if tool_name == "file_read":
+        scoped["path"] = scoped.get("path") or scoped.get("file") or scoped.get("filename") or scoped.get("file_path") or ""
     # Never compose a model-supplied root with the trusted host root.  This is
     # the host-resolved path boundary; child processes remain user-level code,
     # not an operating-system sandbox.
@@ -20251,7 +20257,7 @@ def _agent_batch_guard_telemetry(event):
 
 _LOCAL_AGENT_NUM_PREDICT = 1200
 _CLOUD_AGENT_WRITE_CHUNK_HINT = 24000
-
+from sonder_runtime.adapters import agent_generation_budget as _agent_generation_budget
 
 
 def _local_agent_brief(project_scope: str = "") -> str:
@@ -20390,15 +20396,7 @@ def _take_agent_model_failure():
 
 
 def _agent_impl(*args, **kwargs) -> str:
-    """One agent turn, with the disk-backed system-prompt parts pinned.
-
-    The agent builds its system prompt at the top of the turn and the
-    negative-claim reviewer builds another at finalization (measured: two
-    builds, two reads of system_profile.md, in one turn). Both are sent to a
-    model, so they must not disagree about the operator's standing
-    instructions. See _stable_system_context; a nested call under an already
-    pinned turn reuses the outer reading.
-    """
+    """Pin system-prompt parts across a turn and its negative-claim review."""
     with _managed_agent_admission_scope(), _stable_system_context(), _standalone_lanes.model_loop_scope():
         controller = _standalone_lanes.current()
         if controller is not None:
@@ -20498,7 +20496,9 @@ def _agent_turn(
     controller = _standalone_lanes.current()
     if controller is not None:
         controller.restrict(read_only=lane_read_only, cloud=cloud)
-    project_scope, project_error = _agent_project_scope(project)
+    project, project_error = prepare_loop_project(project, writing=not (read_only or cloud))
+    project_scope, scope_error = _agent_project_scope(project)
+    project_error = project_error or scope_error
     if project_error:
         if return_host_receipt:
             return autopilot_controller.HostTaskResult(
@@ -20550,8 +20550,9 @@ def _agent_turn(
             system or default_agent_system, False, "", model=model, cloud=False)
     )
     agent_num_predict = (
-        _CLOUD_AGENT_NUM_PREDICT if cloud else _LOCAL_AGENT_NUM_PREDICT
+        _CLOUD_AGENT_NUM_PREDICT if cloud else _agent_generation_budget.decision_num_predict(provider, cloud, True)
     )
+    agent_temperature = _tier_generation.decision_temperature(provider)
     # A host-owned pre-model context producer needs the same resolved window
     # the generator actually uses. Pin it for this turn rather than observing
     # one window and silently dispatching with another after metadata refresh.
@@ -20563,10 +20564,10 @@ def _agent_turn(
         if cloud else None
     )
     gen = _make_tier_generate(
-        tier_label, model, system, 0.1, agent_num_predict, agent_num_ctx, cloud=cloud,
+        tier_label, model, system, agent_temperature, agent_num_predict, agent_num_ctx, cloud=cloud,
         cancel_check=cancel_check,
         accept_native_tool_calls=True,
-        compact_cloud_reasoning=True,
+        compact_cloud_reasoning=True, generation_kind="decision",
     )
     if capture_session is not None:
         gen = wrap_model_generator(
@@ -20576,12 +20577,12 @@ def _agent_turn(
             tier=tier_label or tier,
             system=system,
             options={
-                "temperature": 0.1,
+                "temperature": agent_temperature,
                 "num_predict": agent_num_predict,
                 "num_ctx": 0,
             },
             options_factory=lambda _prompt, _history, raw: _legacy_model_step_options(
-                raw, temperature=0.1, num_predict=agent_num_predict, num_ctx=0,
+                raw, temperature=agent_temperature, num_predict=agent_num_predict, num_ctx=0,
             ),
             first_user_message=prompt,
             failure_code=_legacy_model_failure_code,
@@ -20627,6 +20628,7 @@ def _agent_turn(
             _canonical_agent_tool_name(name) for name in tool_allowlist if name
         )
     )
+    artifact_gate = AgentArtifactGate(project_scope, prompt, allowed_tools, enabled=auto_checklist and not (read_only or cloud or unsafe))
     used_tool_names = set()
     successful_web_calls = set()
     successful_inspection_results = {}
@@ -20712,10 +20714,7 @@ def _agent_turn(
         _start_agent_checklist(prompt, project, read_only)
         if auto_checklist else ("", {})
     )
-    # Filesystem scope: a real directory roots file and execution tools there.
-    # A clear bare namespace label such as "default" remains checklist-only;
-    # path-like typos were rejected above rather than failing open to Sonder's
-    # own workspace.
+    # Entry-point and named-default writing runs have a real root; see prepare_loop_project.
     transcript = "Task:\n%s\n\n%s" % (
         prompt,
         # Every gate this run will actually apply, not just the three that
@@ -20800,21 +20799,7 @@ def _agent_turn(
     delegated_verdict = None
 
     def _work_validated():
-        """Was the change actually checked, by either grounded route?
-
-        ``validation_ok`` and ``verification_ok`` answer the same question over
-        disjoint tool sets. Until the developer-workflow tools became
-        dispatchable, the only way to validate a mutation was to shell out
-        through ``workspace_run``; counting a passing, root-covering
-        test_run/build_run/lint_run/typecheck_run as anything less than a
-        validation would fail a run precisely *for reaching for the
-        purpose-built tool*, while the same run's end report called the
-        verification satisfied. This is the one place that contradiction is
-        resolved, so the report, the checklist and the receipt cannot disagree.
-
-        Not a relaxation: the added satisfying condition is a host-observed
-        passing verifier whose root covers every mutated path.
-        """
+        """Current, covering host evidence; delegated work retains its certificate gate."""
         nonlocal delegated_verdict
         controller = _standalone_lanes.current()
         if controller is not None and controller.delegated_work:
@@ -20824,7 +20809,7 @@ def _agent_turn(
             )
             return (delegated_verdict.valid is True
                     and (not parent_effect_dirty or validation_ok or verification_ok))
-        return validation_ok or verification_ok
+        return validation_ok or verification_ok or artifact_gate.assess()["passed"]
 
     def finish_final(final, *, failed=False):
         nonlocal validation_attempted, mutated, parent_effect_dirty, validation_ok, verification_ok
@@ -20885,6 +20870,9 @@ def _agent_turn(
                 final = "EVIDENCE_REQUIRED: original host observations could not be preserved.\n\n" + final
                 failed = True
         validated = False if failed else _work_validated()
+        artifact_assessment = artifact_gate.assess()
+        deferred = not (failed or delegated or validated) and artifact_assessment["deferred"]
+        validation_attempted |= artifact_assessment["attempted"]
         if delegated and delegated_verdict is not None:
             validation_attempted = True
         if auto_checklist:
@@ -20899,7 +20887,7 @@ def _agent_turn(
             _agent_checklist_mark(
                 checklist_id, checklist_states, 3, validation_status,
                 "grounded validation passed" if validated else (
-                    "no mutation required" if not mutated else "validation did not pass"
+                    "no mutation required" if not mutated else "needs approval for execution" if deferred else "validation did not pass"
                 ),
             )
             _agent_checklist_mark(
@@ -20909,12 +20897,12 @@ def _agent_turn(
         # so the activity feed keeps naming the work rather than the standing.
         model_summary = final.splitlines()[0] if final else "agent completed"
 
-        validation_failed = bool(auto_checklist and (mutated or delegated) and not validated)
+        validation_failed = bool(auto_checklist and (mutated or delegated) and not (validated or deferred))
         standing = ""
         # Only where a verifier was actually callable. Elsewhere the sentence
         # names tools the lane is forbidden from using and has no OFF state --
         # see _agent_verifier_reachable.
-        if not validated and not verification_ok and _agent_verifier_reachable(
+        if not deferred and not validated and not verification_ok and _agent_verifier_reachable(
             read_only, allowed_tools,
         ):
             demanded, reason = _agent_verification_standing()
@@ -20958,6 +20946,11 @@ def _agent_turn(
         activity_tracker.set_result_summary(
             _AGENT_VALIDATION_FAILED_LINE if validation_failed else model_summary
         )
+        if deferred:
+            final = "written, not executed: needs %s to verify\n\n%s" % (artifact_assessment["required"], final)
+            activity_tracker.set_response_status("unverified", "written; execution needs approval")
+        elif validated and artifact_assessment["passed"]:
+            final = "Static checks passed; artifact not executed.\n\n" + final
         certificate_fields = {}
         if delegated:
             if delegated_verdict is not None:
@@ -20976,7 +20969,7 @@ def _agent_turn(
             controller.terminal_projected = True
         if controller is not None:
             from sonder_runtime.application.ports.host_final import HostFinalFacts
-            final_class = 'ERROR' if failed else 'NORMAL'
+            final_class = 'ERROR' if failed else 'UNVERIFIED' if deferred else 'NORMAL'
             for marker in (*autopilot_controller.FAILURE_PREFIXES, _AGENT_UNVERIFIED_PREFIX):
                 if final.lstrip().startswith(marker):
                     final_class = marker.rstrip(':')
@@ -21002,6 +20995,7 @@ def _agent_turn(
                 validation_passed=validated,
                 project_scope=project_scope,
                 pre_model_context_response_observed=pre_model_context_response_observed,
+                **artifact_gate.receipt_fields(artifact_assessment) if not (failed or delegated) else {},
                 **certificate_fields,
             )
         return final
@@ -21045,11 +21039,8 @@ def _agent_turn(
         nonlocal claim_review_policy_refused, claim_review_verified
         tool_name = str(review.get("tool") or "")
         tool_args = review.get("args") or {}
-        # Validate the same host-scoped arguments that dispatch will use.  A
-        # repository model commonly echoes the absolute PROJECT ROOT from its
-        # prompt; checking the raw model arguments first incorrectly rejected
-        # that path even though the host had already authorized and confined
-        # the run to ``project_scope``.
+        # Callback policy checks model intent; repository guards and dispatch
+        # use host-scoped paths so injected authority is not a model bypass.
         policy_tool_args = _project_scope_args(
             tool_name, tool_args, project_scope,
         )
@@ -21062,7 +21053,7 @@ def _agent_turn(
                 % tool_name
             )
         if not policy_error and tool_policy is not None:
-            policy_error = str(tool_policy(tool_name, policy_tool_args) or "")
+            policy_error = str(tool_policy(tool_name, tool_args) or "")
         if not policy_error and cloud:
             policy_error = _cloud_agent_tool_policy_error(tool_name)
         if not policy_error:
@@ -21080,7 +21071,7 @@ def _agent_turn(
             ensure_not_cancelled()
             observation_text = str(_agent_dispatch_observed(
                 tool_name,
-                tool_args,
+                policy_tool_args,
                 allow_web=False,
                 read_only=True,
                 project=project_scope,
@@ -21251,7 +21242,7 @@ def _agent_turn(
                     "HOST REQUIREMENT: use at least one relevant inspection or execution tool before final."
                 )
                 continue
-            if auto_checklist and mutated and not validation_ok and step < max_steps:
+            if auto_checklist and mutated and not _work_validated() and not artifact_gate.assess()["deferred"] and step < max_steps:
                 _agent_checklist_mark(
                     checklist_id, checklist_states, 2, "done", "mutations completed",
                 )
@@ -21260,7 +21251,7 @@ def _agent_turn(
                 )
                 observations.append(
                     "HOST REQUIREMENT: files changed but no grounded validation has passed. "
-                    "Run or retry an exact validator now."
+                    + artifact_gate.guidance()
                 )
                 continue
             if not unsafe and _AGENT_NEGATIVE_CLAIM_RE.search(final):
@@ -21345,8 +21336,8 @@ def _agent_turn(
                 _predictor.note_miss()
         _predictor.record_transition(_spec_state, tool_name)
         _last_tool_name = tool_name
-        # Keep policy and dispatch on one canonical, host-confined view of a
-        # repository tool call.  Previously the early read-only check saw raw
+        # Keep repository guards and dispatch on one host-confined view of a
+        # tool call; callback policy sees model args. The read-only check saw raw
         # model paths while dispatch later rebased them under ``project_scope``.
         # Absolute in-project paths were therefore rejected before dispatch,
         # causing fleet workers to exhaust max_steps without any file evidence.
@@ -21373,6 +21364,9 @@ def _agent_turn(
             and call_signature in successful_inspection_results
         )
         prior_identical_failures = failed_call_counts.get(call_signature, 0)
+        from sonder_runtime.domain.agents.policy_refusal_guard import repeated_policy_refusal
+        if refusal := repeated_policy_refusal(observations):
+            return _early_exit("ERROR: host policy refused 3 consecutive calls: " + refusal)
         if prior_identical_failures >= 3:
             if auto_checklist:
                 _agent_checklist_fail(
@@ -21395,7 +21389,7 @@ def _agent_turn(
                 % tool_name
             )
         if not policy_error and tool_policy is not None:
-            policy_error = str(tool_policy(tool_name, policy_tool_args) or "")
+            policy_error = str(tool_policy(tool_name, tool_args) or "")
         if not policy_error and cloud:
             policy_error = _cloud_agent_tool_policy_error(
                 tool_name, unsafe=unsafe,
@@ -21687,6 +21681,8 @@ def _agent_turn(
             tool_dispatched
             and tool_name in _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS
         )
+        if tool_dispatched:
+            artifact_gate.observe(tool_name, policy_tool_args, observation_text, success=tool_ok, mutation=mutation_attempt_may_have_changed, execution=execution_may_have_changed)
         batch_advisory = None
         if tool_dispatched and not (
             mutation_attempt_may_have_changed or execution_may_have_changed
@@ -21981,6 +21977,9 @@ def agent(
     refusal = intents.containment_egress_refusal(prompt)
     if refusal:
         return refusal
+    project, project_error = prepare_writing_project(project)
+    if project_error:
+        return project_error
     nested = activity_tracker.current() is not None
     with activity_tracker.response_span(
         "agent:%s" % (tier or "code"),
@@ -22042,6 +22041,9 @@ def _workbench_agent_escalating(
     prompt, tier, *, max_steps, allow_web, project, allow_location,
     prepared_plan=None, session=None,
 ):
+    project, project_error = prepare_writing_project(project)
+    if project_error:
+        return project_error, tier
     project_scope, _error = _agent_project_scope(project)
     with _standalone_lanes.managed_escalation_scope(
         _application, project=project_scope, max_rungs=tier_escalation.MAX_ESCALATIONS + 1,
@@ -22284,6 +22286,7 @@ def _autopilot_tool_policy(run: dict):
                 "ERROR: HOST POLICY: autonomous runs cannot set "
                 "include_ignored=true."
             )
+        # Preserve the trusted host sentinel for direct, already-scoped callers.
         host_scoped_text_patch = (
             tool_name == "text_patch"
             and bool(project_scope)
@@ -22292,7 +22295,7 @@ def _autopilot_tool_policy(run: dict):
             and args.get("extra_roots") == project_scope
         )
         if (
-            any(args.get(name) for name in ("token", "approval", "extra_roots"))
+            any(name in args for name in ("token", "approval", "extra_roots"))
             and not host_scoped_text_patch
         ):
             return "ERROR: HOST POLICY: autonomous runs cannot use bypass credentials or extra roots."
@@ -22356,7 +22359,7 @@ def _autopilot_json_model(run: dict, role: str, prompt: str, validator) -> dict:
         model=model,
         cloud=False,
     )
-    gen = _make_tier_generate(tier_label, model, system, 0.05, 1800, 0, cloud=False, local_only=True)
+    gen = _make_tier_generate(tier_label, model, system, 0.05, _agent_generation_budget.json_num_predict(_bridge_provider_for_tier(tier_label)), 0, cloud=False, local_only=True, generation_kind="json")
     correction = ""
     last_error = "invalid JSON"
     for _attempt in range(2):
@@ -22529,6 +22532,9 @@ def _autopilot_work_model(
     run: dict, task: dict, prior: str, *, strategy_memory=None,
 ) -> autopilot_controller.HostTaskResult | str:
     allowed = _autopilot_allowed_tools(run)
+    deferred = validation_deferral(allowed, task, run.get("project", "")) if task.get("kind") == "validate" else None
+    if deferred:
+        return autopilot_controller.HostTaskResult(**deferred, project_scope=run.get("project", ""))
     prompt = _prompts.render(
         "autopilot_worker",
         objective=run.get("objective", ""),

@@ -177,11 +177,13 @@ def test_plan_mode_refuses_a_mutating_dispatch_and_never_calls_the_tool(monkeypa
     assert "file_write" in observation
 
 
-def test_plan_mode_still_lets_reads_through(monkeypatch):
-    monkeypatch.setattr(server, "file_read", lambda **_kwargs: "contents")
+def test_plan_mode_still_lets_reads_through(monkeypatch, tmp_path):
+    target = tmp_path / "x"
+    target.write_text("contents", encoding="utf-8")
+    monkeypatch.setattr(server, "_typed_tool", lambda tool, args, **_kw: {"path": str(target)})
     pm.set_mode(pm.PLAN)
 
-    assert server._agent_dispatch("file_read", {"path": "x"}) == "contents"
+    assert "contents" in server._agent_dispatch("file_read", {"path": "x"})
 
 
 def test_auto_mode_runs_the_dispatch_plan_refused(monkeypatch):
