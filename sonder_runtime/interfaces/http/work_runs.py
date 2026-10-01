@@ -152,6 +152,9 @@ class WorkRunner:
     def run(self, principal: str, call: Callable[[], object], *,
             classify: Callable[[object], tuple[str, str]],
             thread_wrapper: Callable[[Callable[[], None]], Callable[[], None]] | None = None,
+            wait_seconds: int | float | None = None,
+            on_admitted: Callable[[str], None] | None = None,
+            defer_start: Callable[[Callable[[], None]], bool] | None = None,
             ) -> WorkOutcome:
         """Start ``call`` under a fence and wait up to the wait budget.
 
@@ -181,6 +184,16 @@ class WorkRunner:
             with self._lock:
                 self._runs.pop(run_id, None)
             raise
+        if on_admitted is not None:
+            try:
+                on_admitted(run_id)
+            except BaseException:
+                try:
+                    self._store.finish(run_id, "failed", "Acknowledgement could not be recorded; work did not start.")
+                finally:
+                    with self._lock:
+                        self._runs.pop(run_id, None)
+                raise
         fence = self._fence(run)
         waiter = {"attached": True}
 
@@ -215,24 +228,48 @@ class WorkRunner:
 
         target = thread_wrapper(body) if thread_wrapper is not None else body
         context = contextvars.copy_context()
-        try:
-            worker = self._thread_factory(
-                target=context.run, args=(target,), name="sonder-http-work-" + run_id[-8:],
-                daemon=True,
-            )
-            worker.start()
-        except BaseException:
-            # body() never ran, so its cleanup did not either: free the slot
-            # and terminalize the durable row instead of leaving it running.
+
+        def start_worker():
             try:
-                self._store.finish(run_id, "failed", "")
-            except Exception:
-                _LOG.error("HTTP work run %s could not be marked failed", run_id, exc_info=True)
-            with self._lock:
-                self._runs.pop(run_id, None)
-            run.done.set()
+                worker = self._thread_factory(
+                    target=context.run, args=(target,), name="sonder-http-work-" + run_id[-8:],
+                    daemon=True,
+                )
+                worker.start()
+            except BaseException:
+                # body() never ran, so its cleanup did not either: free the slot
+                # and terminalize the durable row instead of leaving it running.
+                try:
+                    self._store.finish(run_id, "failed", "")
+                except Exception:
+                    _LOG.error("HTTP work run %s could not be marked failed", run_id, exc_info=True)
+                with self._lock:
+                    self._runs.pop(run_id, None)
+                run.done.set()
+                raise
+
+        try:
+            deferred = bool(defer_start(start_worker)) if defer_start is not None else False
+        except BaseException:
+            try:
+                self._store.finish(run_id, "failed", "Work could not be queued.")
+            finally:
+                with self._lock:
+                    self._runs.pop(run_id, None)
             raise
-        if not run.done.wait(self.wait_seconds):
+        if not deferred:
+            start_worker()
+        wait_for = self.wait_seconds if wait_seconds is None else max(0.0, min(
+            float(self.budget_seconds), float(wait_seconds),
+        ))
+        # A zero wait is the explicit fire-and-status mode used by narrated
+        # HTTP admissions.  Always return the receipt, even if a tiny worker
+        # completed during thread startup; its terminal record is available
+        # through the status route.
+        if wait_for == 0:
+            waiter["attached"] = False
+            return WorkOutcome(run_id, False)
+        if not run.done.wait(wait_for):
             waiter["attached"] = False
             # Close the race with a run that finished just after the wait.
             if not run.done.is_set():

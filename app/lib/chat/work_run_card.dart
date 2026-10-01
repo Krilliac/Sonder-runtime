@@ -4,7 +4,8 @@ import 'package:flutter/material.dart';
 
 import '../api.dart';
 import '../theme.dart';
-import '../workspace_ui.dart' show StatusKind, WorkspaceNotice;
+import '../workspace_ui.dart'
+    show ConversationContent, StatusKind, WorkspaceNotice;
 import 'classify.dart';
 import '../ui/status_line.dart';
 
@@ -26,6 +27,7 @@ class WorkRunCard extends StatefulWidget {
   final Future<WorkRun> Function(String id) fetch;
   final Future<WorkRun> Function(String id) cancel;
   final ValueChanged<WorkRun> onResolved;
+  final String acknowledgement;
 
   /// Poll delays, in order; the last one repeats.
   final List<Duration> backoff;
@@ -36,6 +38,7 @@ class WorkRunCard extends StatefulWidget {
     required this.fetch,
     required this.cancel,
     required this.onResolved,
+    this.acknowledgement = '',
     this.backoff = const [
       Duration(seconds: 2),
       Duration(seconds: 5),
@@ -61,6 +64,7 @@ class _WorkRunCardState extends State<WorkRunCard> with WidgetsBindingObserver {
   Timer? _poll;
   Timer? _tick;
   bool _resolved = false;
+  int _requestGeneration = 0;
 
   /// False while the app is backgrounded or a route covers the chat
   /// (TickerMode off): the card then issues no requests and no rebuilds.
@@ -85,6 +89,23 @@ class _WorkRunCardState extends State<WorkRunCard> with WidgetsBindingObserver {
     if (on == _tickersOn) return;
     _tickersOn = on;
     _visible ? _resume(refreshNow: true) : _pause();
+  }
+
+  @override
+  void didUpdateWidget(covariant WorkRunCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.run.id == widget.run.id) return;
+    _requestGeneration++;
+    _poll?.cancel();
+    _info = null;
+    _error = '';
+    _forbidden = false;
+    _stopping = false;
+    _stopRequested = false;
+    _inFlight = false;
+    _step = 0;
+    _resolved = false;
+    if (_visible) _resume(refreshNow: true);
   }
 
   @override
@@ -134,19 +155,25 @@ class _WorkRunCardState extends State<WorkRunCard> with WidgetsBindingObserver {
 
   Future<void> _refresh({bool manual = false}) async {
     if (_inFlight) return;
+    final requestGeneration = _requestGeneration;
+    final requestedRunId = widget.run.id;
     _inFlight = true;
     if (manual) {
       _step = 0;
       _poll?.cancel();
     }
     try {
-      final info = await widget.fetch(widget.run.id);
-      if (!mounted) return;
+      final info = await widget.fetch(requestedRunId);
+      if (!mounted ||
+          requestGeneration != _requestGeneration ||
+          requestedRunId != widget.run.id) {
+        return;
+      }
       setState(() {
         _info = info;
         _error = '';
       });
-      if (!info.isRunning) {
+      if (!info.isRunning && info.narrationComplete) {
         _resolved = true;
         _poll?.cancel();
         _tick?.cancel();
@@ -154,7 +181,11 @@ class _WorkRunCardState extends State<WorkRunCard> with WidgetsBindingObserver {
         return;
       }
     } on SonderException catch (e) {
-      if (!mounted) return;
+      if (!mounted ||
+          requestGeneration != _requestGeneration ||
+          requestedRunId != widget.run.id) {
+        return;
+      }
       setState(() {
         _forbidden = e.httpStatus == 403;
         _error = e.message;
@@ -165,7 +196,11 @@ class _WorkRunCardState extends State<WorkRunCard> with WidgetsBindingObserver {
     } finally {
       _inFlight = false;
     }
-    if (mounted) _schedule();
+    if (mounted &&
+        requestGeneration == _requestGeneration &&
+        requestedRunId == widget.run.id) {
+      _schedule();
+    }
   }
 
   Future<void> _stop() async {
@@ -202,7 +237,7 @@ class _WorkRunCardState extends State<WorkRunCard> with WidgetsBindingObserver {
         _stopRequested = true;
         _error = '';
       });
-      if (!info.isRunning) {
+      if (!info.isRunning && info.narrationComplete) {
         _resolved = true;
         _poll?.cancel();
         _tick?.cancel();
@@ -249,27 +284,64 @@ class _WorkRunCardState extends State<WorkRunCard> with WidgetsBindingObserver {
       key: const Key('work-run-card'),
       container: true,
       label: 'working: $title',
-      child: WorkspaceNotice(
-        framed: false,
-        liveRegion: false,
-        kind: StatusKind.running,
-        title: title,
-        detail: _stopRequested
-            ? 'Stop requested. Waiting for the run to finish its current step.'
-            : 'Still running on the PC. The answer will appear here.',
-        hint: _error.isEmpty ? '' : "couldn't refresh: $_error",
-        actions: [
-          OutlinedButton(
-            key: const Key('work-run-refresh'),
-            onPressed: _inFlight ? null : () => _refresh(manual: true),
-            child: const Text('Refresh'),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (widget.acknowledgement.isNotEmpty &&
+              !widget.acknowledgement.startsWith('Work is still running'))
+            ConversationContent(
+              key: const Key('work-run-acknowledgement'),
+              content: widget.acknowledgement,
+              fullWidthCode: true,
+            ),
+          WorkspaceNotice(
+            framed: false,
+            liveRegion: false,
+            kind: StatusKind.running,
+            title: title,
+            detail: _stopRequested
+                ? 'Stop requested. Waiting for the run to finish its current step.'
+                : 'Still running on the PC. The answer will appear here.',
+            hint: _error.isEmpty ? '' : "couldn't refresh: $_error",
+            actions: [
+              OutlinedButton(
+                key: const Key('work-run-refresh'),
+                onPressed: _inFlight ? null : () => _refresh(manual: true),
+                child: const Text('Refresh'),
+              ),
+              OutlinedButton(
+                key: const Key('work-run-stop'),
+                style: OutlinedButton.styleFrom(foregroundColor: tokens.danger),
+                onPressed: _stopping || _stopRequested ? null : _stop,
+                child: Text(_stopRequested ? 'Stopping…' : 'Stop run…'),
+              ),
+            ],
           ),
-          OutlinedButton(
-            key: const Key('work-run-stop'),
-            style: OutlinedButton.styleFrom(foregroundColor: tokens.danger),
-            onPressed: _stopping || _stopRequested ? null : _stop,
-            child: Text(_stopRequested ? 'Stopping…' : 'Stop run…'),
-          ),
+          if (info?.progress.isNotEmpty == true) ...[
+            const SizedBox(height: 6),
+            Semantics(
+              liveRegion: true,
+              label: 'Work progress',
+              child: Container(
+                key: const Key('work-run-progress'),
+                padding: const EdgeInsets.only(left: 12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    for (final line in info!.progress)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 2),
+                        child: Text(
+                          line.text,
+                          key: Key('work-progress-${line.id}'),
+                          style: tokens.mono(12, color: tokens.muted),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );

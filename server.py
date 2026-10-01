@@ -157,6 +157,8 @@ import assetgen
 import sonder_runtime.adapters.artifact_grounding as artifact_grounding
 import game_forge
 import sonder_runtime.adapters.filesystem.workbench as workbench
+from sonder_runtime.bootstrap.work_narration import narrated as _narrated_work
+from sonder_runtime.application.ports.work_narration import route_reason as _narration_reason
 import creative_router
 import intents
 import sonder_runtime.adapters.runtime_policy as runtime_policy
@@ -10092,6 +10094,7 @@ def _master_grounded_build(
 
 
 @mcp.tool()
+@_narrated_work("fleet", lambda: globals())
 def master_orchestrate(
     task: str,
     mode: str = "ask",
@@ -21961,6 +21964,7 @@ def _agent_turn(
 
 
 @mcp.tool()
+@_narrated_work("agent", lambda: globals())
 def agent(
     prompt: str,
     tier: str = "code",
@@ -22040,6 +22044,7 @@ def _work_expects_effects(prompt):
     return bool(verbs - _READ_ONLY_WORK_VERBS)
 
 
+@_narrated_work("workbench", lambda: globals())
 def _workbench_agent_escalating(
     prompt, tier, *, max_steps, allow_web, project, allow_location,
     prepared_plan=None, session=None,
@@ -22149,6 +22154,7 @@ def _workbench_agent_escalating_owned(
 
 
 @mcp.tool()
+@_narrated_work("workbench", lambda: globals())
 def workbench_agent(
     prompt: str,
     tier: str = "auto",
@@ -22743,6 +22749,7 @@ def _autopilot_not_launched(run_id: str) -> str:
     )
 
 
+@_narrated_work("autopilot", lambda: globals())
 def _autopilot_start(
     objective: str,
     project: str = "",
@@ -23294,6 +23301,7 @@ def _route_work_request(
 
     resolved_project = _resolve_project(handoff.project) or ""
     if mode == "fleet":
+        _narration_reason(reason)
         master_kwargs = {
             "task": handoff.objective, "mode": "fleet", "tier": selected_tier,
             "learn": False,
@@ -23305,6 +23313,7 @@ def _route_work_request(
             master_kwargs["project"] = resolved_project
         output = master_orchestrate(**master_kwargs)
     elif mode == "workbench":
+        _narration_reason(reason)
         output, selected_tier = _workbench_agent_escalating(
             handoff.objective, selected_tier, max_steps=12, allow_web=True,
             project=resolved_project, allow_location=False,
@@ -23333,6 +23342,7 @@ def _route_work_request(
                 current.get("objective", ""),
                 current.get("id", ""),
             )
+        _narration_reason(reason)
         output = autopilot_start(
             objective=handoff.objective,
             project=resolved_project,
@@ -24733,6 +24743,7 @@ def _execute_fanout_run(run_id):
     return receipt
 
 
+@_narrated_work("fanout", lambda: globals())
 def _model_fanout_authorized(prompt: str, scope: str = "", num_predict: int = 512,
                              timeout: int = 45, max_cloud_workers: int = 2,
                              request_owner: str = "", request_role: str = "",

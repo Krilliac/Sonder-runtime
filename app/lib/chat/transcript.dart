@@ -322,6 +322,7 @@ class TranscriptTurn extends StatelessWidget {
         ReplyKind.refused => _refusalContent(context, parsed!),
         ReplyKind.workRun => WorkRunCard(
             run: parsed!.workRun!,
+            acknowledgement: message.content,
             fetch: actions.fetchWorkRun,
             cancel: actions.cancelWorkRun,
             onResolved: (run) => actions.onWorkRunResolved(entry.id, run),

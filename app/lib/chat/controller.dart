@@ -975,13 +975,20 @@ class ChatController extends ChangeNotifier {
     switch (run.status) {
       case 'returned':
       case 'refused':
+        final acknowledgement = old.responseMetadata?.acknowledgement ?? '';
+        final parts = <String>[
+          if (acknowledgement.isNotEmpty) acknowledgement,
+          if (run.finalSummary.isNotEmpty) run.finalSummary,
+          if (run.output.isNotEmpty) run.output,
+        ];
         next = ChatMessage(
           role: Role.assistant,
-          content: run.output.isEmpty ? '(empty response)' : run.output,
+          content: parts.isEmpty ? '(empty response)' : parts.join('\n\n'),
           // The run is settled: keep the receipt, but it no longer marks a
           // running work run (workRunOf reads it first).
-          responseMetadata:
-              old.responseMetadata?.withWork(workStatus: run.status),
+          responseMetadata: old.responseMetadata?.withWork(
+            workStatus: run.status,
+          ),
         );
       default:
         final label = switch (run.status) {
@@ -991,10 +998,16 @@ class ChatController extends ChangeNotifier {
           'failed' => 'failed',
           _ => 'ended with an unknown outcome',
         };
+        final acknowledgement = old.responseMetadata?.acknowledgement ?? '';
+        final details = <String>[
+          if (acknowledgement.isNotEmpty) acknowledgement,
+          if (run.finalSummary.isNotEmpty) run.finalSummary,
+          if (run.output.isNotEmpty) run.output,
+        ];
         next = ChatMessage(
           role: Role.assistant,
           content: 'Work run ${run.id} $label.'
-              '${run.output.isEmpty ? '' : '\n\n${run.output}'}',
+              '${details.isEmpty ? '' : '\n\n${details.join('\n\n')}'}',
           error: true,
           diagnostic: 'work run: ${run.id}\nstatus: ${run.status}',
         );

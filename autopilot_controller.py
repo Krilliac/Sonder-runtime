@@ -663,6 +663,12 @@ def snapshot(include_finished: bool = True, limit: int = 20, request_owner: str 
             )
     else:
         data["events"] = []
+    # New repository implementations already project the additive narration
+    # field. Preserve the published legacy port shape for older adapters (and
+    # the stale-adapter fallback above), which may intentionally omit it.
+    if "progress" in data:
+        from sonder_runtime.domain.work_narration import progress
+        data["progress"] = progress(autopilot=data)
     return data
 
 
