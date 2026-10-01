@@ -76,6 +76,9 @@ def test_every_control_command_branch_has_a_repl_branch():
     "/mission status",
     "/vision photo.png | what is this",
     "/analyzeimage photo.png | what is this",
+    "/master fleet 0 make me something cool",
+    "/master_orchestrate delegate 2 write primes.py",
+    "/delegate write primes.py",
 ])
 def test_catalogued_control_commands_are_forwarded(monkeypatch, capsys, line):
     seen = []

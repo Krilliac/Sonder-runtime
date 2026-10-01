@@ -3,7 +3,7 @@ class AgentLane {
   final String id, sessionId, parentSessionId, title, task, status, attemptId;
   final String? parentLaneId;
   final String workspaceRoot, tier, error;
-  final int revision, unreadReports;
+  final int revision, unreadReports, createdOrder;
   AgentLane.fromJson(Map<String, dynamic> j)
       : id = j['id']?.toString() ?? '',
         sessionId = j['session_id']?.toString() ?? '',
@@ -17,6 +17,7 @@ class AgentLane {
         tier = j['tier']?.toString() ?? '',
         error = j['error']?.toString() ?? '',
         revision = (j['revision'] as num?)?.toInt() ?? 0,
+        createdOrder = (j['created_order'] as num?)?.toInt() ?? 0,
         unreadReports = (j['unread_reports'] as num?)?.toInt() ?? 0;
   String get displayTitle =>
       title.isEmpty ? (task.isEmpty ? 'Agent conversation' : task) : title;
