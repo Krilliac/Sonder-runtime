@@ -48,6 +48,14 @@ def format_runtime_model_call_error(
     error, *, endpoint_loopback: bool, display: str,
 ) -> str:
     """Render a runtime model error after classifying its endpoint target."""
+    provider = getattr(error, "provider", None)
+    if isinstance(provider, str) and provider and provider != "ollama":
+        # Only bridge-created errors carry this metadata. Ordinary Ollama
+        # failures keep the historical formatting and retry hints below.
+        return "ERROR contacting %s at %s after %d attempt(s): %s" % (
+            provider, getattr(error, "provider_display_url", "(endpoint unavailable)"),
+            error.attempts, error.detail,
+        )
     target = (
         "hosted Ollama" if error.cloud else
         "remote Ollama" if not endpoint_loopback else
