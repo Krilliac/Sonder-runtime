@@ -48,6 +48,7 @@ def test_private_ollama_certificate_requires_supplied_ca_bundle(monkeypatch):
         pytest.skip("private Ollama worker is unavailable")
     with raw:
         context = ssl.create_default_context()
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         try:
             with context.wrap_socket(raw, server_hostname="10.77.0.2"):
                 pytest.skip("private worker certificate is already trusted by this host")
@@ -60,6 +61,7 @@ def test_private_ollama_certificate_requires_supplied_ca_bundle(monkeypatch):
     if not ca or not Path(ca).is_file():
         pytest.skip("private worker CA fixture is unavailable")
     context = ssl.create_default_context(cafile=ca)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     try:
         with socket.create_connection(("10.77.0.2", 8443), timeout=3) as raw:
             with context.wrap_socket(raw, server_hostname="10.77.0.2") as client:
