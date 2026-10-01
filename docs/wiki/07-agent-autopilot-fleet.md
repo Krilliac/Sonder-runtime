@@ -73,7 +73,10 @@ Writing runs without an explicit project (`default`, empty, or an unresolved
 project name) use `<state-home>/creations/<run-id>/`. Autopilot persists this
 folder in its project field, shown by the app and by `working in:` in start,
 status, and report text. Standalone writing agents also allocate a creations
-folder before opening their lanes. Existing project directories keep their
+folder before opening their lanes. Inside the agent loop only a named project
+that resolves to no directory is upgraded; an omitted project stays unbound for
+host-owned callers that keep their own root (the selfmod editor's candidate
+workspace, the web research agent, unsafe lab). Existing project directories keep their
 selected scope; read-only observe runs keep their existing behavior. A default
 state home inside a Sonder Git checkout is refused instead of writing artifacts
 into the Runtime source. Configured workspace grants still apply to delegation.
