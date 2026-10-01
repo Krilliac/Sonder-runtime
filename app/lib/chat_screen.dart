@@ -484,10 +484,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _openAgents() => Navigator.of(context).push<void>(
+  Future<void> _openAgents({String? initialLaneId}) => Navigator.of(context).push<void>(
         MaterialPageRoute(
             builder: (_) =>
-                AgentScreen(api: _api, onNavigate: _navigateWorkspace)),
+                AgentScreen(api: _api,
+            initialLaneId: initialLaneId,
+            initialProject: _chat.project, onNavigate: _navigateWorkspace)),
       );
 
   Future<void> _openAppControl() => Navigator.of(context).push<void>(
@@ -564,6 +566,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         listWorkRuns: () => _chat.backend.listWorkRuns(),
         onWorkRunResolved: (entryId, run) =>
             unawaited(_chat.resolveWorkRun(entryId, run)),
+        onOpenAgentLane: (id) => unawaited(_openAgents(initialLaneId: id)),
+        onSendCommand: _submit,
       );
 
   Widget? _modeChip() {

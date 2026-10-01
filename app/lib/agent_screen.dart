@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'agent_lanes.dart';
+import 'background_work.dart';
 import 'agent_command_id.dart';
 import 'api.dart';
 import 'theme.dart';
@@ -12,8 +13,14 @@ import 'workspace_ui.dart';
 
 class AgentScreen extends StatefulWidget {
   final SonderApi api;
+  final String? initialLaneId;
+
+  /// Project selected in Chat, retained for cancellation command context.
+  final String initialProject;
   final ValueChanged<WorkspaceDestination>? onNavigate;
-  const AgentScreen({super.key, required this.api, this.onNavigate});
+  const AgentScreen({super.key, required this.api,
+    this.initialLaneId,
+    this.initialProject = '', this.onNavigate});
   @override
   State<AgentScreen> createState() => _AgentScreenState();
 }
@@ -56,6 +63,10 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
   final _events = <String, Map<int, AgentEvent>>{};
   final _pending = <String, _PendingCommand>{};
   final _commandErrors = <String, String>{};
+  BackgroundWork _background = const BackgroundWork();
+  final _createdOrder = <String, int>{};
+  String? _backgroundError;
+  bool _backgroundPaused = false, _backgroundRefreshing = false;
   final _reports = <String, AgentReport>{};
   final _reportParents = <String, String>{};
   final _reportCursors = <String, int>{};
@@ -71,6 +82,7 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
   _AgentFilter _filter = _AgentFilter.all;
   bool _groupByParent = true;
   bool _loading = true, _refreshing = false, _hasMore = false;
+  bool _initialConsumed = false;
   int _listCursor = 0, _generation = 0;
   int _loadedPages = 1;
   Timer? _timer;
@@ -99,7 +111,11 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _loadLanes();
-    _timer = Timer.periodic(const Duration(seconds: 10), (_) => _loadLanes());
+    _loadBackground();
+    _timer = Timer.periodic(const Duration(seconds: 10), (_) {
+      _loadLanes();
+      _loadBackground();
+    });
   }
 
   @override
@@ -126,6 +142,7 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
       _stopWatch();
     } else {
       unawaited(_loadLanes(manual: true));
+      unawaited(_loadBackground(manual: true));
       if (_selected != null) _select(_selected!);
     }
   }
@@ -154,6 +171,30 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
         _listError = null;
         _listFailure = null;
       });
+    final initial = widget.initialLaneId;
+      if (!more && !_initialConsumed && initial != null) {
+        if (_lanes.containsKey(initial)) {
+          _initialConsumed = true;
+          _select(initial);
+        } else {
+          try {
+            final snapshot = await widget.api.agentInspect(initial);
+            if (mounted && !_initialConsumed) {
+              _mergeLane(snapshot.lane);
+              _initialConsumed = true;
+              _select(initial);
+            }
+          } catch (error) {
+            if (mounted) {
+              setState(() {
+                _listFailure = RequestFailure.read(error, resource: 'agent conversation');
+                _listError = _listFailure!.message;
+                _listPaused = true;
+              });
+            }
+          }
+        }
+      }
     } catch (error) {
       if (mounted) {
         setState(() {
@@ -169,7 +210,41 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
     }
   }
 
+  Future<void> _loadBackground({bool manual = false}) async {
+    if (!_appActive || _backgroundRefreshing || (_backgroundPaused && !manual)) {
+      return;
+    }
+    _backgroundRefreshing = true;
+    if (manual) _backgroundPaused = false;
+    try {
+      // Agents is a host-wide activity view: a selected Chat project scopes
+      // new delegation/cancellation commands, but must not hide other work.
+      final value = await widget.api.backgroundWork();
+      if (mounted) {
+        setState(() {
+          _background = value;
+          _backgroundError = null;
+        });
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          final failure = RequestFailure.read(
+            error,
+            resource: 'background work',
+          );
+          _backgroundError = failure.message;
+          if (failure.settingsRequired) _background = const BackgroundWork();
+          _backgroundPaused = true;
+        });
+      }
+    } finally {
+      _backgroundRefreshing = false;
+    }
+  }
+
   void _mergeLane(AgentLane lane) {
+    if (lane.createdOrder > 0) _createdOrder[lane.id] = lane.createdOrder;
     if ((_lanes[lane.id]?.revision ?? -1) <= lane.revision) {
       _lanes[lane.id] = lane;
     }
@@ -387,24 +462,27 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
   }
 
   List<AgentLane> _orderedLanes() {
+    final ordered = _lanes.values.toList()
+      ..sort((a, b) =>
+          (_createdOrder[b.id] ?? 0).compareTo(_createdOrder[a.id] ?? 0));
     final result = <AgentLane>[];
     final seen = <String>{};
     void add(AgentLane lane) {
       if (!seen.add(lane.id)) return;
       result.add(lane);
-      for (final child in _lanes.values.where(
+      for (final child in ordered.where(
         (e) => e.parentLaneId == lane.id,
       )) {
         add(child);
       }
     }
 
-    for (final lane in _lanes.values.where(
+    for (final lane in ordered.where(
       (e) => !_lanes.containsKey(e.parentLaneId),
     )) {
       add(lane);
     }
-    for (final lane in _lanes.values) {
+    for (final lane in ordered) {
       add(lane);
     }
     return result;
@@ -657,10 +735,36 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
       Expanded(
           child: _loading
               ? const Center(child: CircularProgressIndicator())
-              : _lanes.isEmpty
+              : (_lanes.isEmpty
+                  &&
+                      _background.fleets.isEmpty &&
+                      _background.autopilot.isEmpty &&
+                      _backgroundError == null)
                   ? _emptyState()
                   : ListView(children: [
-                      if (ordered.isEmpty)
+                      if (_backgroundError != null)
+                          Padding(
+                            padding: const EdgeInsets.all(12),
+                            child: WorkspaceNotice(
+                              message: _backgroundError!,
+                              tone: NoticeTone.warning,
+                              action: TextButton(
+                                onPressed: _backgroundRefreshing
+                                    ? null
+                                    : () => _loadBackground(manual: true),
+                                child: const Text('Retry background work'),
+                              ),
+                            ),
+                          ),
+                        if (_background.fleets.isNotEmpty) _backgroundSection(),
+                        if (_background.autopilot.isNotEmpty)
+                          _autopilotSection(),
+                        if (_background.truncated)
+                          const Padding(
+                            padding: EdgeInsets.all(12),
+                            child: Text('Some older runs or children are not loaded in this background snapshot.'),
+                          ),
+                        if (ordered.isEmpty&& _lanes.isNotEmpty)
                         Padding(
                             padding: const EdgeInsets.all(20),
                             child: Column(children: [
@@ -669,7 +773,14 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
                               TextButton(
                                   onPressed: _clearFilters,
                                   child: const Text('Clear filters')),
-                            ])),
+                            ]),
+                          ),
+                        if (ordered.isNotEmpty)
+                          const Padding(
+                            key: Key('agent-lanes-group'),
+                            padding: EdgeInsets.fromLTRB(12, 12, 12, 4),
+                            child: Text('Agent lanes'),
+                          ),
                       for (final group in groups.entries) ...[
                         if (group.key.isNotEmpty)
                           Padding(
@@ -717,9 +828,167 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
                                 ? null
                                 : () => _loadLanes(more: true, manual: true),
                             child: const Text('Load more conversations')),
-                    ])),
-    ]);
+                    ]),
+        ),
+      ],
+    );
   }
+
+  Widget _backgroundSection() => ExpansionTile(
+        key: const Key('fleet-group'),
+        title: Text('Fleets (${_background.fleets.length})'),
+        children: [
+          for (final fleet in _background.fleets)
+            ExpansionTile(
+              key: ValueKey<String>('fleet-${fleet.id}'),
+              title: Text(
+                fleet.task.isEmpty ? fleet.id : fleet.task,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+              subtitle: Text(
+                '${fleet.status} · ${fleet.requestedAgents} agents · ${fleet.countSummary} · ${fleet.workerSlots} worker slots · ${fleet.elapsedLabel}',
+              ),
+              trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                IconButton(
+                  tooltip: 'Open fleet details',
+                  icon: const Icon(Icons.open_in_new, size: 18),
+                  onPressed: () => _showBackgroundDetail(
+                    title: fleet.task.isEmpty ? fleet.id : fleet.task,
+                    status: '${fleet.status} · ${fleet.requestedAgents} agents · ${fleet.workerSlots} worker slots · ${fleet.countSummary}',
+                    preview: fleet.preview),
+                ),
+                if (fleet.cancelable) IconButton(
+                      tooltip: 'Cancel fleet',
+                      icon: const Icon(Icons.stop_circle_outlined),
+                      onPressed: () => _cancelBackground('fleet', fleet.id),
+                    ),
+    ]),
+              children: [
+                for (final child in fleet.children)
+                  ListTile(
+                    key: ValueKey<String>('fleet-child-${child.id}'),
+                    title: Text(
+                      child.task.isEmpty ? child.id : child.task,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    subtitle: Text(
+                      '${child.status} · ${child.elapsedLabel}${child.preview.isEmpty ? '' : ' · ${child.preview}'}',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    trailing: child.cancelable ? IconButton(
+                      tooltip: 'Cancel child agent',
+                      icon: const Icon(Icons.stop_circle_outlined),
+                      onPressed: () => _cancelBackground('fleet', child.id),
+                    ) : null,
+                    onTap: child.id.isEmpty
+                        ? () => _showBackgroundDetail(
+                              title: child.task.isEmpty ? child.id : child.task,
+                              status: child.status,
+                              preview: child.preview,
+                            )
+                        : () => _lanes.containsKey(child.id)
+                            ? _select(child.id)
+                            : _showBackgroundDetail(
+                                title:
+                                    child.task.isEmpty ? child.id : child.task,
+                                status: child.status,
+                                preview: child.preview,
+                              ),
+                  ),
+              ],
+            ),
+        ],
+      );
+
+  Widget _autopilotSection() => ExpansionTile(
+        key: const Key('autopilot-group'),
+        title: Text('Autopilot (${_background.autopilot.length})'),
+        children: [
+          for (final run in _background.autopilot)
+            ListTile(
+              title: Text(
+                run.objective.isEmpty ? run.id : run.objective,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+              subtitle: Text(
+                '${run.status}${run.phase.isEmpty ? '' : ' · ${run.phase}'}${run.currentTask.isEmpty ? '' : ' · ${run.currentTask}'} · ${run.taskCountSummary} · ${run.elapsedLabel}',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+              trailing: Wrap(
+                spacing: 2,
+                children: [
+                  IconButton(
+                    tooltip: 'Open autopilot details',
+                    icon: const Icon(Icons.open_in_new, size: 18),
+                    onPressed: () => _showBackgroundDetail(
+                      title: run.objective.isEmpty ? run.id : run.objective,
+                      status:
+                          '${run.status}${run.phase.isEmpty ? '' : ' · ${run.phase}'}',
+                      preview: run.preview,
+                    ),
+                  ),
+                  if (run.cancelable)
+                    IconButton(
+                      tooltip: 'Cancel autopilot',
+                      icon: const Icon(Icons.stop_circle_outlined),
+                      onPressed: () => _cancelBackground('autopilot', run.id),
+                    ),
+                ],
+              ),
+            ),
+        ],
+      );
+
+  Future<void> _cancelBackground(String kind, String id) async {
+    if (!mounted) return;
+    try {
+      await widget.api.cancelBackground(
+        kind,
+        id,
+        project: widget.initialProject.trim(),
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Cancellation requested for $id. Refreshing status…'),
+        ),
+      );
+      await _loadBackground(manual: true);
+  }
+
+  catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(RequestFailure.read(error, resource: 'cancellation').message)),
+      );
+    }
+  }
+
+  Future<void> _showBackgroundDetail({
+    required String title,
+    required String status,
+    required String preview,
+  }) =>
+      showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text(title),
+          content: SelectableText(
+            preview.isEmpty ? 'Status: $status' : 'Status: $status\n\n$preview',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Close'),
+            ),
+          ],
+        ),
+      );
 
   /// No agents yet: say where they come from, at the top, with a way there
   /// (plan P2-15).

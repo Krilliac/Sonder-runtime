@@ -2360,7 +2360,7 @@ DANGEROUS_HTTP_SLASH_COMMANDS = frozenset({
     # Shows operator prompt overrides and state-home paths.
     "/prompts",
     "/filepolicy", "/files", "/find", "/read", "/write", "/append", "/edit",
-    "/delete", "/master", "/pass", "/good", "/accept", "/accepted", "/used",
+    "/delete", "/master", "/master_orchestrate", "/delegate", "/pass", "/good", "/accept", "/accepted", "/used",
     "/copied", "/edited", "/fail", "/bad", "/trace", "/strict", "/run",
     "/runwindow", "/runnew", "/runconsole", "/runproject", "/train", "/learn",
     "/asset", "/assets", "/assetgen", "/artifact", "/forge", "/gamesuite",
@@ -3219,7 +3219,7 @@ def _developer_chat_reply(cmd, arg, context):
 
 
 def _handle_slash(content, messages=None, state=None, project="", context=None,
-                  idempotency_key=""):
+                  idempotency_key="", workspace_project=None, lane_session=""):
     """Return response text if `content` is a recognized slash command, else None."""
     state = _state_or_legacy(state)
 
@@ -3506,30 +3506,25 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         return server.file_delete(
             path=arg.strip(), dry_run=True, token=state.token
         )
-    if cmd == "/master":
-        task_boundary_error = _account_task_boundary_refusal(
-            "master_orchestrate", {}, context,
+    if cmd == "/delegate":
+        from sonder_runtime.bootstrap.app import default_app
+        from sonder_runtime.interfaces.http.agent_work_routes import delegate_chat
+        return delegate_chat(
+            arg, application=default_app(), context=_http_debug_context(context or {}, "delegate-chat"),
+            project=project if workspace_project is None else workspace_project,
+            policy=permission_policy, parent_session_id=lane_session, command_id=idempotency_key,
+            allow_creation=_admin_authorized(context or {}),
+            state_home_of=lambda app: getattr(getattr(getattr(app, "config", None), "state", None), "home", "") or runtime_paths.default_home(),
         )
+    if cmd in ("/master", "/master_orchestrate"):
+        task_boundary_error = _account_task_boundary_refusal("master_orchestrate", {}, context)
         if task_boundary_error:
             return task_boundary_error
-        text = arg.strip()
-        mode = "ask"
-        task = text
-        if text:
-            parts = text.split(None, 1)
-            mode_alias = {
-                "delagte": "delegate", "delegte": "delegate",
-                "paralell": "parallel", "inlne": "inline",
-                "workflow": "fleet",
-            }
-            requested_mode = mode_alias.get(parts[0].lower(), parts[0].lower())
-            if requested_mode in (
-                "ask", "inline", "master", "delegate", "delegated", "agents",
-                "parallel", "fleet", "swarm", "fanout",
-            ):
-                mode = requested_mode
-                task = parts[1] if len(parts) > 1 else ""
-        return server.master_orchestrate(task=task, mode=mode)
+        from sonder_runtime.interfaces.orchestration_commands import execute_master_command, uses_tool_arguments
+        if not uses_tool_arguments(arg):
+            return execute_master_command(arg, orchestrate=server.master_orchestrate,
+                                          capacity=server.master_orchestrator.capacity,
+                                          project=project if workspace_project is None else workspace_project)
     if cmd in ("/pass", "/good"):
         if state.last_iid:
             msg = server.record_outcome(state.last_iid, "tests_passed")
@@ -5397,100 +5392,24 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _handle_agent_lane_request(self, method, path, payload=None):
-        """Bind lane commands to authenticated identity and configured scope."""
-        if path != "/v1/agent-lanes" and not path.startswith("/v1/agent-lanes/"):
+        if path != "/v1/background-work" and path != "/v1/agent-lanes" and not path.startswith("/v1/agent-lanes/"):
             return False
-        auth = self._request_auth_context()
-        if not auth.get("authorized"):
-            self._send_auth_error()
-            return True
-        from dataclasses import replace
         from sonder_runtime.bootstrap.app import default_app
-        from sonder_runtime.domain.common.errors import SonderError
-        from sonder_runtime.adapters.security.permission_policy import permission_policy as lane_policy
-
-        try:
-            application = default_app()
-            factory = getattr(application, "agent_lanes", None)
-            if not callable(factory):
-                raise DependencyUnavailable("agent conversations are unavailable")
-            query_values = urllib.parse.parse_qs(
-                urllib.parse.urlsplit(self.path).query,
-                keep_blank_values=True, max_num_fields=16,
-            )
-            if any(len(values) != 1 for values in query_values.values()):
-                raise InvalidInput("query fields must occur only once")
-            query = {key: values[0] for key, values in query_values.items()}
-            context = sonder_lifecycle.get().operation_context(self._correlation(), auth)
-            account = auth.get("account")
-            if account is not None:
-                identity = _account_identity(account)
-                if not identity:
-                    raise PermissionError("authenticated account identity is unavailable")
-                principal = "account:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
-            else:
-                # Local-open and the sole deployment API key address the same
-                # operator conversations as native MCP. Accounts never alias it.
-                principal = "owner"
-            state = getattr(getattr(application, "config", None), "state", None)
-            roots = tuple(Path(root).resolve() for root in getattr(state, "workspace_roots", ())) \
-                if _admin_authorized(auth) else ()
-            context = replace(context, principal_id=principal, workspace_roots=roots)
-            from sonder_runtime.interfaces.agent_lane_entrypoint import http_parent_scope
-            if payload is not None and not isinstance(payload, dict):
-                raise InvalidInput("request must be an object")
-            payload = dict(payload or {})
-            for fields in (payload, query):
-                if "parent_session_id" in fields:
-                    fields["parent_session_id"] = http_parent_scope(fields["parent_session_id"], principal)
-            if method != "GET":
-                # The approval ledger is process-wide. Bind HTTP approvals to
-                # authenticated identity and effective roots as well as the
-                # exact request; another account cannot spend this approval.
-                arguments = {
-                    "method": method, "path": path, "payload": payload or {},
-                    "query": query, "principal_id": principal,
-                    "workspace_roots": [str(root) for root in roots],
-                }
-                decision = lane_policy.decide_for_caller(
-                    "agent_lane", interactive=False, gate_control_exempt=False,
-                    surface="http", arguments=arguments,
-                )
-                if decision is not None and decision.action != lane_policy.allow_action():
-                    raise PermissionError(decision.reason)
-            from sonder_runtime.interfaces.http.facades.agent_lanes import dispatch_agent_lane_route
-            result = dispatch_agent_lane_route(
-                factory(), method, path, payload or {}, query, context,
-            )
-            if result is None:
-                self._send_not_found()
-            else:
-                self._send_json_payload(result.body, status=result.status_code)
-        except (SonderError, ValueError, TypeError, PermissionError) as error:
-            code = getattr(error, "code", "INVALID_INPUT")
-            if isinstance(error, PermissionError):
-                code = "FORBIDDEN"
-            status = {
-                "UNAUTHENTICATED": 401, "FORBIDDEN": 403, "NOT_FOUND": 404,
-                "CONFLICT": 409, "CONCURRENCY_CONFLICT": 409,
-                "CAPACITY_EXCEEDED": 429, "DEPENDENCY_UNAVAILABLE": 503,
-                "INTEGRITY_FAILURE": 503, "INTERNAL_FAILURE": 503,
-                "DEADLINE_EXCEEDED": 408, "CANCELLED": 409,
-            }.get(code, 400)
-            self._send_json_payload(
-                {"error": {"code": code, "message": str(error), "type": "agent_lane_error"}},
-                status=status,
-            )
-        except Exception:
-            _serve_logger.exception("agent lane request failed, correlation=%r", self._correlation())
-            self._send_json_payload(
-                {"error": {"code": "DEPENDENCY_UNAVAILABLE",
-                           "message": "agent conversations are unavailable", "type": "server_error"}},
-                status=503,
-            )
-        finally:
-            lane_policy.forget_spent_approval()
-        return True
+        from sonder_runtime.interfaces.http.agent_work_routes import handle_agent_work_request
+        from sonder_runtime.interfaces.http.background_work import runtime_background_work
+        from sonder_runtime.adapters.persistence.background_work import fleet_snapshot, autopilot_snapshot
+        return handle_agent_work_request(
+            self, method, path, payload, application_of=default_app,
+            context_of=_http_debug_context, policy=permission_policy, logger=_serve_logger,
+            allow_creation_of=_admin_authorized,
+            query_of=lambda handler: urllib.parse.parse_qs(
+                urllib.parse.urlsplit(handler.path).query, keep_blank_values=True, max_num_fields=16),
+            state_home_of=lambda application: getattr(
+                getattr(getattr(application, "config", None), "state", None), "home", "") or runtime_paths.default_home(),
+            background_of=lambda application, auth: runtime_background_work(
+                application, auth, fleet_snapshot=fleet_snapshot, autopilot_snapshot=autopilot_snapshot,
+                admin_authorized=_admin_authorized, request_owner=_task_account_scope),
+        )
 
     def do_PUT(self):
         self._correlation_id = ""
@@ -7517,6 +7436,7 @@ class Handler(BaseHTTPRequestHandler):
                             prompt, messages=messages, state=state,
                             project=storage_project, context=context,
                             idempotency_key=self.headers.get("Idempotency-Key", ""),
+                            workspace_project=project, lane_session=session,
                         )
                     if (structured_schema is None and allow_control_routes and reply is None
                             and not context.get("account")
@@ -7898,6 +7818,8 @@ class Handler(BaseHTTPRequestHandler):
             receipt["degraded"] = list(turn_degradations)
         if chat_work_receipt is not None:
             receipt["chat_work"] = chat_work_receipt
+        from sonder_runtime.interfaces.orchestration_commands import reply_receipt_fields
+        receipt.update(reply_receipt_fields(reply))
         overflow_receipt = _overflow.receipt_entry(turn_overflow)
         if overflow_receipt is not None:
             receipt["overflow"] = overflow_receipt
@@ -8283,6 +8205,20 @@ def main(
             _WORK_RUNNER.reconcile()
         except Exception:
             _serve_logger.error("HTTP work run reconciliation failed at startup", exc_info=True)
+
+        def _warm_command_catalog():
+            # Without this the first slash command builds the catalog (an AST
+            # walk of the legacy dispatch chains, ~2-4 s) inside its request.
+            # A failed build caches nothing, so the request path still raises.
+            try:
+                command_catalog.http_slash_tools()
+                command_catalog.catalog()
+            except Exception:
+                _serve_logger.warning("command catalog warm-up failed", exc_info=True)
+
+        owned_runtime_thread(
+            target=_warm_command_catalog, daemon=True, name="sonder-catalog-warmup"
+        ).start()
         BOUND_PORT = port
         url = "http://%s:%d" % (HOST, port)
         _serve_logger.info(f"Server listening on {url}, auth_mode={_effective_auth_mode()!r}")
