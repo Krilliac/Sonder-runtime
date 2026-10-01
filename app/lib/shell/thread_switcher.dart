@@ -125,7 +125,12 @@ class _ThreadSwitcherState extends State<ThreadSwitcher> {
         rows.add(Padding(
           padding: const EdgeInsets.fromLTRB(
               SonderSpace.xl, SonderSpace.md, SonderSpace.xl, SonderSpace.xs),
-          child: Text(age.label.toUpperCase(), style: text.labelSmall),
+          // The same group labels as the sidebar's list.
+          child: Semantics(
+            header: true,
+            child: Text(age.label,
+                style: text.labelMedium?.copyWith(color: tokens.muted)),
+          ),
         ));
         rows.addAll(threads.map(row));
       }

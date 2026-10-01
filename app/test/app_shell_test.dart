@@ -400,6 +400,30 @@ void main() {
       await unmountChat(tester);
     });
 
+    testWidgets('reduced motion: switches and collapse happen at once',
+        (tester) async {
+      tester.platformDispatcher.accessibilityFeaturesTestValue =
+          const FakeAccessibilityFeatures(disableAnimations: true);
+      addTearDown(
+          tester.platformDispatcher.clearAccessibilityFeaturesTestValue);
+      await pumpShell(tester, FakeChatBackend(),
+          size: _desk, prefs: _seed(), clock: _clock, pageBuilder: _standIns());
+      await _settle(tester);
+
+      await tester.tap(_destination(WorkspaceDestination.agents));
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('Agents page'), findsOneWidget);
+      // Chat is already offstage: no fade frames in between.
+      expect(find.byType(ChatScreen), findsNothing);
+
+      await tester.tap(find.byKey(const Key('shell-collapse')));
+      await tester.pump();
+      await tester.pump();
+      expect(tester.getSize(find.byKey(const Key('shell-sidebar'))).width, 64);
+      await unmountChat(tester);
+    });
+
     testWidgets('starts collapsed when that was remembered', (tester) async {
       await pumpShell(tester, FakeChatBackend(),
           size: _desk, prefs: _seed(), clock: _clock, collapsed: true);
