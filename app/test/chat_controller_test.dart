@@ -23,6 +23,25 @@ Future<ChatController> _start(
 }
 
 void main() {
+  testWidgets('control commands use runtime model despite concrete selection', (
+    tester,
+  ) async {
+    final backend = FakeChatBackend();
+    final c = ChatController(backend, model: 'qwen:27b');
+    final control = c.send('/delegate make a file');
+    await tester.pump();
+    expect(backend.lastTurn.request.model, 'sonder');
+    backend.lastTurn.done('started');
+    await control;
+
+    final ordinary = c.send('explain this code');
+    await tester.pump();
+    expect(backend.lastTurn.request.model, 'qwen:27b');
+    backend.lastTurn.done('answer');
+    await ordinary;
+    c.dispose();
+  });
+
   testWidgets('status poll never overlaps and idles at 5 s', (tester) async {
     final backend = FakeChatBackend()..statusDelay = const Duration(seconds: 3);
     final c = await _start(tester, backend);

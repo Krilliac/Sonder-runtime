@@ -48,6 +48,9 @@ class TranscriptActions {
   final Future<List<WorkRun>> Function() listWorkRuns;
   final void Function(int entryId, WorkRun run) onWorkRunResolved;
 
+  final ValueChanged<String>? onOpenAgentLane;
+  final ValueChanged<String>? onSendCommand;
+
   const TranscriptActions({
     required this.onStop,
     required this.onFeedback,
@@ -59,6 +62,8 @@ class TranscriptActions {
     required this.cancelWorkRun,
     required this.listWorkRuns,
     required this.onWorkRunResolved,
+    this.onOpenAgentLane,
+    this.onSendCommand,
   });
 }
 
@@ -455,6 +460,21 @@ class TranscriptTurn extends StatelessWidget {
           ),
           const SizedBox(height: 8),
         ],
+        if (m?.agentLane != null) ...[
+          const SizedBox(height: 10),
+          _AgentLaneAck(
+            receipt: m!.agentLane!,
+            onOpen: actions.onOpenAgentLane,
+          ),
+        ],
+        if (m?.orchestration != null &&
+            m!.orchestration!.choices.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          _OrchestrationChoices(
+            receipt: m.orchestration!,
+            onSend: actions.onSendCommand,
+          ),
+        ],
         ConversationContent(content: parsed.answer, fullWidthCode: true),
         if (message.reasoning.trim().isNotEmpty) ...[
           const SizedBox(height: 8),
@@ -530,6 +550,76 @@ class TranscriptTurn extends StatelessWidget {
       ],
     );
   }
+}
+
+class _AgentLaneAck extends StatelessWidget {
+  final AgentLaneReceipt receipt;
+  final ValueChanged<String>? onOpen;
+  const _AgentLaneAck({required this.receipt, this.onOpen});
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = SonderTokens.of(context);
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: tokens.panel,
+        border: Border(left: BorderSide(color: tokens.accent, width: 2)),
+      ),
+      child: Wrap(
+        spacing: 10,
+        runSpacing: 4,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          Text(
+            'Agent lane ${receipt.laneId} started',
+            style: tokens.mono(12, color: tokens.text2),
+          ),
+          if (receipt.folder.isNotEmpty)
+            Text(
+              receipt.folder,
+              style: tokens.mono(11, color: tokens.muted),
+              overflow: TextOverflow.ellipsis,
+            ),
+          if (onOpen != null)
+            TextButton.icon(
+              key: const Key('open-agent-lane'),
+              onPressed: () => onOpen!(receipt.laneId),
+              icon: const Icon(Icons.open_in_new, size: 16),
+              label: const Text('Open in Agents'),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _OrchestrationChoices extends StatelessWidget {
+  final OrchestrationReceipt receipt;
+  final ValueChanged<String>? onSend;
+  const _OrchestrationChoices({required this.receipt, this.onSend});
+
+  @override
+  Widget build(BuildContext context) => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('How should I run this?'),
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 8,
+            runSpacing: 6,
+            children: [
+              for (final choice in receipt.choices)
+                ActionChip(
+                  key: ValueKey<String>('orchestration-${choice.command}'),
+                  label: Text(choice.label),
+                  onPressed:
+                      onSend == null ? null : () => onSend!(choice.command),
+                ),
+            ],
+          ),
+        ],
+      );
 }
 
 /// A feedback control with a full-size touch target and an explicit label.

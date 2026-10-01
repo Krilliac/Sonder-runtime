@@ -3856,6 +3856,16 @@ def control_command(prompt: str, history=None, session="", project="",
         return preference_command(arg)
     if cmd in ("/improve", "/improvements"):
         return system_improvement_report()
+    if cmd == "/delegate":
+        from sonder_runtime.interfaces.http.agent_work_routes import native_delegate_reply
+        return native_delegate_reply(arg, context_of=_agent_lane_context, policy=permission_modes,
+                                     project=project, parent_session_id=session,
+                                     state_home_of=lambda app: app.config.state.home or sonder_paths.default_home())
+    if cmd in ("/master", "/master_orchestrate"):
+        from sonder_runtime.interfaces.orchestration_commands import execute_master_command, uses_tool_arguments
+        if not uses_tool_arguments(arg):
+            return execute_master_command(arg, orchestrate=master_orchestrate,
+                                          capacity=master_orchestrator.capacity, project=project)
     if cmd in ("/agents", "/masterstatus"):
         return master_status()
     if cmd in ("/capacity", "/agentcapacity"):
@@ -10161,31 +10171,14 @@ def master_orchestrate(
         else:
             delegate_count = master_orchestrator.clamp_agent_count(agents, default=3)
             fleet_count = master_orchestrator.clamp_agent_count(
-                agents, default=master_orchestrator.max_agents(),
+                agents, default=max(1, int(master_orchestrator.capacity()["worker_slots"])),
             )
         if worker_cap:
-            delegate_capacity = master_orchestrator.capacity(delegate_count, worker_cap=worker_cap)
             fleet_capacity = master_orchestrator.capacity(fleet_count, worker_cap=worker_cap)
         else:
-            delegate_capacity = master_orchestrator.capacity(delegate_count)
             fleet_capacity = master_orchestrator.capacity(fleet_count)
-        return (
-            "Master orchestrator ready.\n"
-            "Choose execution mode:\n"
-            "  inline   - master handles the task directly.\n"
-            "  delegate - queue %d agent(s) across %d safe worker slot(s), audit, then merge.\n"
-            "  fleet    - queue %d agent(s) across %d safe worker slot(s), return immediately, then monitor it.\n"
-            "              Omit agents (or pass 0) to use the hardware ceiling.\n"
-            "              Set worker_cap (or say 'use N workers') for a bounded per-run override.\n"
-            "Keywords fleet, swarm, spawn as many agents, parallel agents, and\n"
-            "parallel workflow select fleet automatically without replacing an explicit agent count.\n"
-            "Call master_orchestrate(task, mode='inline'|'delegate'|'fleet') or chat `/master inline ...`."
-        ) % (
-            delegate_count,
-            delegate_capacity["worker_slots"],
-            fleet_count,
-            fleet_capacity["worker_slots"],
-        )
+        from sonder_runtime.interfaces.orchestration_commands import master_choice
+        return master_choice(task, delegate_count, fleet_count, fleet_capacity["worker_slots"])
     if not task:
         return "ERROR: empty task."
     tier = _runtime_lane_tier("fleet", tier)
