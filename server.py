@@ -7068,10 +7068,9 @@ def _answer_with_history_impl(
             _observe_target(model, tier_label, cloud)
             effective_system = _build_system("", trace, "", cloud=cloud, provider=bridged_provider, model=(
                 _legacy_chat_bridge.prompt_identity_model(model, tier_label, bridged_provider, _APP_GRAPH)))
-            # Honor LEARN_TIERS here too. Serve conversation memory is client-side (the app
-            # resends history each request), so a non-learning model can skip capture entirely:
-            # no interaction row, no footer, nothing distilled. This lets a user exclude e.g.
-            # cloud from learning and have the app respect it. The local route is gated via 'code'.
+            if not cloud and not _explicit_serve_selection(tier, ""):
+                from sonder_runtime.application.chat.honesty import no_tools_system
+                effective_system = no_tools_system(effective_system, prompt)
             learn = _should_learn(_canonical_learn_tier(tier_label), True)
             req_ctx = (
                 pinned_ctx if pinned_ctx is not None
@@ -23133,7 +23132,7 @@ def _capability_refined_tier(
 
 def route_work_request(
     prompt: str, project: str = "", *, _classified_intent=None,
-    _admitted_decision=None,
+    _admitted_decision=None, _tool_tier="",
 ) -> str | None:
     """Transparently route eligible natural work to a bounded execution lane.
 
@@ -23144,13 +23143,13 @@ def route_work_request(
     with _stable_system_context(), _served_models.observation_scope():
         return _route_work_request(
             prompt, project=project, _classified_intent=_classified_intent,
-            _admitted_decision=_admitted_decision,
+            _admitted_decision=_admitted_decision, _tool_tier=_tool_tier,
         )
 
 
 def _route_work_request(
     prompt: str, project: str = "", *, _classified_intent=None,
-    _admitted_decision=None,
+    _admitted_decision=None, _tool_tier="",
 ) -> str | None:
     _maybe_live_reload()
     refusal = intents.containment_egress_refusal(prompt)
@@ -23169,9 +23168,7 @@ def _route_work_request(
         }
         if explicit_worker_cap else None
     )
-    # The classifier may identify work, but only this typed boundary packages
-    # it for a pre-existing execution lane.  A plain conversation yields no
-    # handoff and therefore cannot start tools or background work.
+    # Classification grants no authority; dispatch retains every lane gate.
     from sonder_runtime.application.chat.lanes import (
         ChatHandoffProvenance, ChatLaneDecision, ChatLaneService,
     )
@@ -23302,7 +23299,14 @@ def _route_work_request(
     selected_tier, reason = _capability_refined_tier(prompt, selected_tier, reason)
 
     resolved_project = _resolve_project(handoff.project) or ""
-    if mode == "fleet":
+    if mode == "inspection" or (mode == handoff.requested_mode == "workbench"
+                                and intents.classify_file_intent(prompt)):
+        from sonder_runtime.adapters.chat_file_routing import route_file_request
+        output, selected_tier = route_file_request(
+            sys.modules[__name__], handoff.objective, mode, handoff.project,
+            _tool_tier or selected_tier, pinned=bool(_tool_tier),
+        )
+    elif mode == "fleet":
         master_kwargs = {
             "task": handoff.objective, "mode": "fleet", "tier": selected_tier,
             "learn": False,
