@@ -55,6 +55,9 @@ from sonder_runtime.interfaces.http.app_control import handle_app_control, is_ap
 from sonder_runtime.interfaces.http.work_runs import (
     WorkCapacityExhausted, WorkRunner, current_run_id as current_work_run_id,
 )
+from sonder_runtime.bootstrap.http_work_narration import deferred_post as _deferred_post, enrich_work_record as _enrich_work_record, run_scoped as _run_work_scoped, work_ack as _work_ack, start_work as _start_narrated_work, admission_result as _work_admission_result
+from sonder_runtime.bootstrap.work_narration import enrich_status as _narrated_status, cancel_linked_work as _cancel_linked_work
+from sonder_runtime.bootstrap.http_command_narration import dispatch as _dispatch_narrated_command
 
 _ARTIFACT_TRANSFER_BINDING = None
 _ARTIFACT_TRANSFER_CONFIG = None
@@ -1508,7 +1511,8 @@ def _idempotent_http_action(context, supplied_key, action, factory):
                 served_action_receipts.finish(cache_key, uncertain=True)
             raise
         try:
-            served_action_receipts.finish(cache_key)
+            # A detached admission is not evidence that the action finished.
+            served_action_receipts.finish(cache_key, uncertain=isinstance(result, ChatWorkResult) and result.status == "running")
         except (OSError, sqlite3.Error):
             # The side effect returned but its terminal record did not commit.
             # Leaving `started` is intentionally conservative on retry.
@@ -3218,6 +3222,12 @@ def _developer_chat_reply(cmd, arg, context):
     )
 
 
+def _narrate_http_command(name, arguments, call, context):
+    return _dispatch_narrated_command(server, name, arguments, call, runner=_WORK_RUNNER,
+        principal=_state_principal(context), store=http_work_runs, tracker=activity_tracker,
+        thread_wrapper=_bind_current_activity())
+
+
 def _handle_slash(content, messages=None, state=None, project="", context=None,
                   idempotency_key=""):
     """Return response text if `content` is a recognized slash command, else None."""
@@ -3352,11 +3362,11 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         # creating a sibling run.
         return _idempotent_http_action(
             context, idempotency_key, "autopilot\0%s\0%s" % (project, stripped),
-            lambda: server.control_command(
+            lambda: _narrate_http_command("autopilot", {"action": arg.partition(" ")[0], "objective": arg.partition(" ")[2], "project": project}, lambda: server.control_command(
                 stripped,
                 project=project,
                 autopilot_request_owner=_task_account_scope(context),
-            ),
+            ), context),
         )
     if cmd in ("/runtime", "/models"):
         return server.control_command(stripped, project=project)
@@ -3389,9 +3399,9 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
             return task_boundary_error
         return _idempotent_http_action(
             context, idempotency_key, "workbench\0%s\0%s" % (project, arg.strip()),
-            lambda: server.workbench_agent(
+            lambda: _narrate_http_command("workbench_agent", {"prompt": arg.strip(), "project": project}, lambda: server.workbench_agent(
                 prompt=arg.strip(), tier="auto", max_steps=12, project=project,
-            ),
+            ), context),
         )
     if cmd in (
         "/report", "/endreport", "/checklist", "/plan",
@@ -3529,7 +3539,7 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
             ):
                 mode = requested_mode
                 task = parts[1] if len(parts) > 1 else ""
-        return server.master_orchestrate(task=task, mode=mode)
+        return _idempotent_http_action(context, idempotency_key, "master\0" + stripped, lambda: _narrate_http_command("master_orchestrate", {"task": task, "mode": mode}, lambda: server.master_orchestrate(task=task, mode=mode), context))
     if cmd in ("/pass", "/good"):
         if state.last_iid:
             msg = server.record_outcome(state.last_iid, "tests_passed")
@@ -3682,7 +3692,7 @@ def _run_catalogued_tool_gated(line, tool_name, kwargs, handler, *, state, conte
     try:
         if tool_name in _SCOPED_TASK_TOOLS and _task_account_scope(context) is not None:
             return _served_task_tool(tool_name, kwargs, context)
-        return str(handler(**kwargs))
+        return _narrate_http_command(tool_name, kwargs, lambda: str(handler(**kwargs)), context)
     except TypeError as error:
         return "%s: %s" % (tool_name, error)
     except Exception as error:  # a tool fault is a chat answer, not a 500
@@ -3862,7 +3872,7 @@ def _handle_work_intent(content, project="", authorized=False, context=None,
             ChatHandoffProvenance, ChatLaneService,
         )
         from sonder_runtime.bootstrap.app import default_app
-
+        acknowledgement = _work_ack(server, content, worker_cap, classified_intent, project)
         def run_admitted_work():
             try:
                 receipts = ChatWorkReceiptService(default_app().session_repository())
@@ -3893,10 +3903,11 @@ def _handle_work_intent(content, project="", authorized=False, context=None,
             except Exception as error:
                 raise _LiveSessionCaptureFailure from error
             try:
-                output = server.route_work_request(
-                    content, project=project, _classified_intent=classified_intent,
-                    _admitted_decision=decision,
-                )
+                output = _run_work_scoped(current_work_run_id(), http_work_runs.link_run,
+                    acknowledgement, activity_tracker.current_response_id() or "", lambda: server.route_work_request(
+                        content, project=project, _classified_intent=classified_intent,
+                        _admitted_decision=decision,
+                    ))
             except BaseException:
                 # A lane may already have had side effects. Preserve uncertainty
                 # rather than manufacturing a successful return or a retry.
@@ -3913,23 +3924,14 @@ def _handle_work_intent(content, project="", authorized=False, context=None,
                 decision.lane, session_ref, admission.event_id,
                 terminal.event_id, source.event_id if source else "",
                 routing_reason=decision.reason,
-                # Bound inside the replay guard so a cached replay names the
-                # run that actually produced the answer.
                 work_run_id=current_work_run_id(),
             )
-
-        # The lane runs as a bounded work run: a wall-clock budget and an
-        # explicit cancel stop its effects, and a client that stops waiting
-        # can still fetch the persisted answer by run id.
         try:
-            outcome = _WORK_RUNNER.run(
-                _state_principal(context),
-                lambda: _idempotent_http_action(
-                    context, idempotency_key, action, run_admitted_work,
-                ),
-                classify=_work_run_record,
-                thread_wrapper=_bind_current_activity(),
-            )
+            return _work_admission_result(_idempotent_http_action(context, idempotency_key, action, lambda: _start_narrated_work(
+                _WORK_RUNNER, _state_principal(context), run_admitted_work, acknowledgement,
+                http_work_runs, classify=_work_run_record, thread_wrapper=_bind_current_activity(),
+                session_ref=session_ref,
+            )), session_ref)
         except WorkCapacityExhausted as error:
             raise sonder_lifecycle.AdmissionRejected(
                 429, "WORK_CAPACITY_EXHAUSTED",
@@ -3937,21 +3939,6 @@ def _handle_work_intent(content, project="", authorized=False, context=None,
                 "with POST /v1/work-runs/<id>/cancel" % error,
                 retryable=True,
             ) from None
-        if not outcome.finished:
-            return ChatWorkResult(
-                _work_run_pending_text(outcome.run_id), "running",
-                session_ref=session_ref, work_run_id=outcome.run_id,
-            )
-        result = outcome.result
-        if isinstance(result, ChatWorkResult):
-            return result if result.work_run_id else replace(result, work_run_id=outcome.run_id)
-        # A plain string can only originate in the existing durable replay
-        # guard, which refused or could not re-run the action; no new lane
-        # return or admission receipt is claimed for it.
-        return ChatWorkResult(
-            result if isinstance(result, str) else "", "refused" if isinstance(result, str) else "unknown",
-            session_ref=session_ref, work_run_id=outcome.run_id,
-        )
     return _idempotent_http_action(
         context, idempotency_key, action,
         lambda: server.route_work_request(
@@ -6160,7 +6147,7 @@ class Handler(BaseHTTPRequestHandler):
                     ],
                 ],
             }
-            self._send_json_payload(payload)
+            self._send_json_payload(_narrated_status(payload))
             return
         if path == _CLIENT_SCHEMA_ROUTE:
             context = self._request_auth_context()
@@ -6318,11 +6305,11 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_work_run_request(self, method, path, context=None):
         """``GET /v1/work-runs[/<id>]`` and ``POST /v1/work-runs/<id>/cancel``."""
         from sonder_runtime.interfaces.http.facades import work_runs
-
         return work_runs.serve_request(
             self, method, path, context, runner=_WORK_RUNNER,
             developer_authorized=_developer_authorized, principal_of=_state_principal,
             store_errors=(OSError, sqlite3.Error), log=_serve_logger,
+            status_projection=lambda row: _enrich_work_record(row, include_detail=_execution_feed_detail_allowed(context or self._request_auth_context())), cancel_projection=_cancel_linked_work,
         )
 
     def _handle_fanout_get(self):
@@ -6603,6 +6590,7 @@ class Handler(BaseHTTPRequestHandler):
                 conn.close()
         reply({'ok': True})
 
+    @_deferred_post
     def do_POST(self):
         # One turn scope per request: the ambient OperationContext and the
         # Observatory turn are bound inside it and always unwound, and a
@@ -7534,6 +7522,8 @@ class Handler(BaseHTTPRequestHandler):
                         # MCP wrapper: it intentionally has no knowledge of
                         # HTTP principals and would reject an API-key owner or
                         # developer account a second time.
+                        # Natural fanout's existing JSON answer is synchronous;
+                        # an admission acknowledgement cannot replace its receipt.
                         reply = server._model_fanout_authorized(
                             natural_model["prompt"], scope=natural_model["scope"],
                             profile=natural_model.get("profile", ""),
@@ -7578,16 +7568,11 @@ class Handler(BaseHTTPRequestHandler):
                             correlation_id=self._correlation(),
                             with_receipt=True,
                         )
-                        if isinstance(reply, ChatWorkResult):
-                            chat_work_receipt = reply.public_receipt()
-                            # The lane may already have had side effects. An
-                            # unknown typed outcome cannot fall through to a
-                            # fresh model answer that appears to complete it.
-                            if reply.status == "unknown":
-                                reply = "Work outcome is unknown. Inspect the session receipt before retrying."
-                            else:
-                                reply = reply.text if reply.text.strip() else "Work was not started."
                         execution_routed = reply is not None
+                    if isinstance(reply, ChatWorkResult):
+                        chat_work_receipt = reply.public_receipt()
+                        reply = ("Work outcome is unknown. Inspect the session receipt before retrying."
+                                 if reply.status == "unknown" else reply.text or "Work was not started.")
                     if structured_schema is None and reply is not None:
                         content = reply
                     elif structured_schema is None:

@@ -12,6 +12,7 @@ import time
 
 from sonder_runtime.adapters.persistence import fanout_store
 from sonder_runtime.domain.fanout_admission import fanout_limits
+from sonder_runtime.domain.work_narration import progress
 
 
 def build_receipt(run_id, *, admission):
@@ -129,4 +130,6 @@ def build_receipt(run_id, *, admission):
         "admission": admission(run, rows, limits),
         "answers": sorted(answers, key=lambda row: row["model"].casefold()),
         "failures": sorted(failures, key=lambda row: row["model"].casefold()),
+        "progress": progress(fanout={"runs": [{**run, "results": rows}],
+                                     "events": fanout_store.events(run_id, limit=80)}),
     }

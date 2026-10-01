@@ -40,6 +40,9 @@ class ChatWorkResult:
     # Opaque id of the served work run holding the durable answer, when the
     # turn was executed as a bounded HTTP work run.
     work_run_id: str = ""
+    # Deterministic host acknowledgement returned before a long-running lane
+    # begins.  This is plain text assembled from the lane decision.
+    acknowledgement: str = ""
 
     def public_receipt(self) -> dict[str, str]:
         fields = {
@@ -51,6 +54,7 @@ class ChatWorkResult:
             "admission_event_id": self.admission_event_id,
             "return_event_id": self.return_event_id,
             "source_event_id": self.source_event_id,
+            "acknowledgement": self.acknowledgement,
         }
         receipt = {key: value for key, value in fields.items() if value}
         if self.work_run_id:

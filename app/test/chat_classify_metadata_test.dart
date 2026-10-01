@@ -78,17 +78,44 @@ void main() {
       content: 'ignored: the placeholder replaces it',
       completion: {
         'sonder_receipt': {
-          'chat_work': {'status': 'running', 'work_run_id': _runId}
-        }
+          'chat_work': {'status': 'running', 'work_run_id': _runId},
+        },
       },
     );
     final running = _assistant(reply.text, metadata: reply.metadata);
     expect(workRunOf(running)?.id, _runId);
     expect(classifyReply(running), ReplyKind.workRun);
 
-    final settled = _assistant('the answer',
-        metadata: reply.metadata!.withWork(workStatus: 'returned'));
+    final settled = _assistant(
+      'the answer',
+      metadata: reply.metadata!.withWork(workStatus: 'returned'),
+    );
     expect(workRunOf(settled), isNull);
     expect(classifyReply(settled), ReplyKind.answer);
+  });
+
+  test('chat work acknowledgement becomes the first assistant text', () {
+    final reply = chatReplyFrom(
+      content: 'ignored model handoff',
+      completion: {
+        'sonder_receipt': {
+          'chat_work': {
+            'status': 'running',
+            'work_run_id': _runId,
+            'acknowledgement':
+                'I will inspect the project, then validate the result.',
+          },
+        },
+      },
+    );
+    expect(reply.text, 'I will inspect the project, then validate the result.');
+    expect(reply.metadata!.acknowledgement, contains('inspect'));
+  });
+
+  test('plain chat keeps the model reply unchanged', () {
+    const content = 'The cache is already warm; no work run was started.';
+    final reply = chatReplyFrom(content: content, completion: const {});
+    expect(reply.text, content);
+    expect(reply.metadata, isNull);
   });
 }

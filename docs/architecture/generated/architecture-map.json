@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 388,
+      "file_count": 389,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -273,6 +273,7 @@
         "sonder_runtime/adapters/observability/session_list_formatting.py",
         "sonder_runtime/adapters/observability/session_replay_formatting.py",
         "sonder_runtime/adapters/observability/trace_buffer.py",
+        "sonder_runtime/adapters/observability/work_narration_facts.py",
         "sonder_runtime/adapters/offload_schema_argument.py",
         "sonder_runtime/adapters/ollama/__init__.py",
         "sonder_runtime/adapters/ollama/gateway.py",
@@ -437,7 +438,7 @@
       ]
     },
     {
-      "file_count": 392,
+      "file_count": 393,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -691,6 +692,7 @@
         "sonder_runtime/application/ports/updates.py",
         "sonder_runtime/application/ports/vision_gateway.py",
         "sonder_runtime/application/ports/web.py",
+        "sonder_runtime/application/ports/work_narration.py",
         "sonder_runtime/application/ports/worker_registry.py",
         "sonder_runtime/application/ports/workflows.py",
         "sonder_runtime/application/preferences/__init__.py",
@@ -835,7 +837,7 @@
       ]
     },
     {
-      "file_count": 69,
+      "file_count": 72,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -873,6 +875,8 @@
         "sonder_runtime/bootstrap/evaluation.py",
         "sonder_runtime/bootstrap/generic_agent_dispatch.py",
         "sonder_runtime/bootstrap/host_tools.py",
+        "sonder_runtime/bootstrap/http_command_narration.py",
+        "sonder_runtime/bootstrap/http_work_narration.py",
         "sonder_runtime/bootstrap/lane_tests.py",
         "sonder_runtime/bootstrap/legacy_interfaces.py",
         "sonder_runtime/bootstrap/legacy_mcp.py",
@@ -906,11 +910,12 @@
         "sonder_runtime/bootstrap/strategy_observers.py",
         "sonder_runtime/bootstrap/subprocess_mcp.py",
         "sonder_runtime/bootstrap/thread_resources.py",
-        "sonder_runtime/bootstrap/typed_tools.py"
+        "sonder_runtime/bootstrap/typed_tools.py",
+        "sonder_runtime/bootstrap/work_narration.py"
       ]
     },
     {
-      "file_count": 267,
+      "file_count": 268,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1177,6 +1182,7 @@
         "sonder_runtime/domain/updates/runtime_update_formatting.py",
         "sonder_runtime/domain/updates/stash_formatting.py",
         "sonder_runtime/domain/verification_progress.py",
+        "sonder_runtime/domain/work_narration.py",
         "sonder_runtime/domain/work_stealing.py",
         "sonder_runtime/domain/worker_capacity.py",
         "sonder_runtime/domain/worker_epoch_fence.py"
