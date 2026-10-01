@@ -39,8 +39,10 @@ List<String> _recordClipboard(WidgetTester tester) {
 
 String _joined(List<CodeToken> tokens) => tokens.map((t) => t.text).join();
 
-List<String> _of(List<CodeToken> tokens, CodeTokenKind kind) =>
-    [for (final t in tokens) if (t.kind == kind) t.text];
+List<String> _of(List<CodeToken> tokens, CodeTokenKind kind) => [
+      for (final t in tokens)
+        if (t.kind == kind) t.text
+    ];
 
 void main() {
   setUpAll(loadGoldenFonts);
@@ -54,8 +56,8 @@ void main() {
       final tokens = tokenizeCode(code, 'cpp');
       expect(_joined(tokens), code);
       expect(_of(tokens, CodeTokenKind.keyword), ['for', 'const', 'auto']);
-      expect(_of(tokens, CodeTokenKind.comment),
-          ['// warm at load', '/*ttl=*/']);
+      expect(
+          _of(tokens, CodeTokenKind.comment), ['// warm at load', '/*ttl=*/']);
       expect(_of(tokens, CodeTokenKind.number), ['3600']);
       expect(_of(tokens, CodeTokenKind.string), ['"pso"']);
     });
@@ -115,12 +117,11 @@ void main() {
           LinkDecision.open);
       expect(decideLink('www.example.com', 'https://example.com'),
           LinkDecision.open);
-      expect(decideLink('mail me', 'mailto:ops@example.com'),
-          LinkDecision.open);
+      expect(
+          decideLink('mail me', 'mailto:ops@example.com'), LinkDecision.open);
     });
 
-    test('text naming another site, credentials or look-alike hosts ask',
-        () {
+    test('text naming another site, credentials or look-alike hosts ask', () {
       expect(decideLink('paypal.com', 'https://evil.example/login'),
           LinkDecision.confirm);
       expect(decideLink('the bank', 'https://bank.example@evil.example/'),
@@ -200,8 +201,8 @@ void main() {
     testWidgets('a web link opens outside the app', (tester) async {
       await tester.pumpWidget(_app(const ConversationContent(
           content: '[the pipeline docs](https://learn.microsoft.com/d3d12)')));
-      await tester.tap(find.textContaining('the pipeline docs',
-          findRichText: true));
+      await tester
+          .tap(find.textContaining('the pipeline docs', findRichText: true));
       await tester.pump();
       expect(opened, [Uri.parse('https://learn.microsoft.com/d3d12')]);
     });
@@ -209,8 +210,8 @@ void main() {
     testWidgets('a file link is shown with Copy link, not opened',
         (tester) async {
       final copied = _recordClipboard(tester);
-      await tester.pumpWidget(
-          _app(const ConversationContent(content: '[notes](file:///C:/x.txt)')));
+      await tester.pumpWidget(_app(
+          const ConversationContent(content: '[notes](file:///C:/x.txt)')));
       await tester.tap(find.textContaining('notes', findRichText: true));
       await tester.pumpAndSettle();
       expect(opened, isEmpty);
