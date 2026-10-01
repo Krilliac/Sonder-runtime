@@ -6,6 +6,7 @@ library;
 
 export 'kit/actions.dart';
 export 'kit/category_scaffold.dart';
+export 'kit/disclosure.dart';
 export 'kit/feedback.dart';
 export 'kit/metrics.dart';
 export 'kit/motion.dart';
