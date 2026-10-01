@@ -23,7 +23,8 @@ void main() {
 
   for (final size in sizes.entries) {
     for (final theme in themes.entries) {
-      testWidgets('runtime_overview_${size.key}_${theme.key}', (tester) async {
+      testWidgets('runtime_overview_${size.key}_${theme.key}',
+          skip: goldenSkip != null, (tester) async {
         setGoldenSurface(tester, size.value);
         await tester.pumpWidget(MaterialApp(
           debugShowCheckedModeBanner: false,

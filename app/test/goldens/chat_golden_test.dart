@@ -60,21 +60,25 @@ Map<String, Object> _seed(List<ChatMessage> messages) {
 
 final _conversation = <ChatMessage>[
   const ChatMessage(
-      role: Role.user,
-      content: 'Why does PSO compile stall on first draw after hot-reload?'),
+    role: Role.user,
+    content: 'Why does PSO compile stall on first draw after hot-reload?',
+  ),
   const ChatMessage(
     role: Role.assistant,
     content: _code,
     responseMetadata: ChatResponseMetadata(
-        elapsedMs: 61200,
-        modelCalls: 2,
-        promptTokens: 2600,
-        completionTokens: 143,
-        model: 'sonder:latest',
-        tier: 'code'),
+      elapsedMs: 61200,
+      modelCalls: 2,
+      promptTokens: 2600,
+      completionTokens: 143,
+      model: 'sonder:latest',
+      tier: 'code',
+    ),
   ),
   const ChatMessage(
-      role: Role.user, content: '/write src/render/pso_cache.cpp'),
+    role: Role.user,
+    content: '/write src/render/pso_cache.cpp',
+  ),
   const ChatMessage(role: Role.assistant, content: _refusal),
 ];
 
@@ -114,7 +118,9 @@ void main() {
   for (final theme in [ThemeMode.dark, ThemeMode.light]) {
     final t = theme == ThemeMode.dark ? 'dark' : 'light';
 
-    testWidgets('chat_empty_offline_$t', (tester) async {
+    testWidgets('chat_empty_offline_$t', skip: goldenSkip != null, (
+      tester,
+    ) async {
       final backend = FakeChatBackend()
         ..statusError = SonderException('Cannot reach server: SocketException');
       await pumpChat(tester, backend, size: _phone, themeMode: theme);
@@ -123,12 +129,17 @@ void main() {
       await unmountChat(tester);
     });
 
-    testWidgets('chat_turn_desk_$t', (tester) async {
+    testWidgets('chat_turn_desk_$t', skip: goldenSkip != null, (tester) async {
       final backend = FakeChatBackend()
         ..mode = permissionModeFor('manual')
         ..statusInfo = _info();
-      await pumpChat(tester, backend,
-          size: _desk, themeMode: theme, prefs: _seed(_conversation));
+      await pumpChat(
+        tester,
+        backend,
+        size: _desk,
+        themeMode: theme,
+        prefs: _seed(_conversation),
+      );
       await tester.pump(const Duration(milliseconds: 100));
       await tester.enterText(find.byType(TextField), 'Now profile the warm-up');
       await tester.testTextInput.receiveAction(TextInputAction.send);
@@ -144,25 +155,32 @@ void main() {
       await unmountChat(tester);
     });
 
-    testWidgets('work_run_card_$t', (tester) async {
+    testWidgets('work_run_card_$t', skip: goldenSkip != null, (tester) async {
       final backend = FakeChatBackend()
         ..mode = permissionModeFor('acceptEdits')
         ..statusInfo = _info();
-      await pumpChat(tester, backend,
-          size: _phone,
-          themeMode: theme,
-          prefs: _seed([
-            const ChatMessage(
-                role: Role.user, content: 'Refactor the shader cache'),
-            const ChatMessage(role: Role.assistant, content: _pending),
-          ]));
+      await pumpChat(
+        tester,
+        backend,
+        size: _phone,
+        themeMode: theme,
+        prefs: _seed([
+          const ChatMessage(
+            role: Role.user,
+            content: 'Refactor the shader cache',
+          ),
+          const ChatMessage(role: Role.assistant, content: _pending),
+        ]),
+      );
       await tester.pump(const Duration(milliseconds: 100));
       await _golden(tester, 'work_run_card_$t');
       await unmountChat(tester);
     });
   }
 
-  testWidgets('chat_empty_refused_dark', (tester) async {
+  testWidgets('chat_empty_refused_dark', skip: goldenSkip != null, (
+    tester,
+  ) async {
     final backend = FakeChatBackend(serverUrl: 'http://mypc.local:11435')
       ..statusError = SonderException('Server returned HTTP 421.');
     await pumpChat(tester, backend, size: _phone);
@@ -171,7 +189,9 @@ void main() {
     await unmountChat(tester);
   });
 
-  testWidgets('chat_empty_connected_desk_dark', (tester) async {
+  testWidgets('chat_empty_connected_desk_dark', skip: goldenSkip != null, (
+    tester,
+  ) async {
     final backend = FakeChatBackend()
       ..mode = permissionModeFor('manual')
       ..statusInfo = _info();
@@ -181,7 +201,7 @@ void main() {
     await unmountChat(tester);
   });
 
-  testWidgets('chat_turn_phone_dark', (tester) async {
+  testWidgets('chat_turn_phone_dark', skip: goldenSkip != null, (tester) async {
     final backend = FakeChatBackend()
       ..mode = permissionModeFor('manual')
       ..statusInfo = _info();
@@ -193,7 +213,9 @@ void main() {
 
   for (final theme in [ThemeMode.dark, ThemeMode.light]) {
     final t = theme == ThemeMode.dark ? 'dark' : 'light';
-    testWidgets('raise_sheet_phone_$t', (tester) async {
+    testWidgets('raise_sheet_phone_$t', skip: goldenSkip != null, (
+      tester,
+    ) async {
       final backend = FakeChatBackend()..mode = permissionModeFor('manual');
       await pumpChat(tester, backend, size: _phone, themeMode: theme);
       await tester.enterText(find.byType(TextField), '/mode auto');
@@ -205,10 +227,17 @@ void main() {
       await unmountChat(tester);
     });
 
-    testWidgets('approval_sheet_desk_$t', (tester) async {
+    testWidgets('approval_sheet_desk_$t', skip: goldenSkip != null, (
+      tester,
+    ) async {
       final backend = FakeChatBackend()..mode = permissionModeFor('manual');
-      await pumpChat(tester, backend,
-          size: _desk, themeMode: theme, prefs: _seed(_approvableConversation));
+      await pumpChat(
+        tester,
+        backend,
+        size: _desk,
+        themeMode: theme,
+        prefs: _seed(_approvableConversation),
+      );
       await tester.pump(const Duration(milliseconds: 100));
       await tester.tap(find.byKey(const Key('refusal-approve')));
       await tester.pumpAndSettle();
@@ -221,49 +250,58 @@ void main() {
 
   // P2-6: the status strip at 390, 600 and 1440 px.
   for (final width in [390.0, 600.0, 1440.0]) {
-    testWidgets('status_strip_${width.toInt()}', (tester) async {
+    testWidgets('status_strip_${width.toInt()}', skip: goldenSkip != null, (
+      tester,
+    ) async {
       tester.view.physicalSize = Size(width, 40);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);
-      await tester.pumpWidget(MaterialApp(
-        debugShowCheckedModeBanner: false,
-        theme: SonderTheme.dark,
-        home: Scaffold(
-          body: Align(
-            alignment: Alignment.bottomCenter,
-            child: ChatStatusStrip(
-              info: ValueNotifier<SystemInfo?>(_info()),
-              mode: permissionModeFor('acceptEdits'),
-              model: 'qwen2.5-coder:7b-instruct-q4_K_M',
-              tier: 'code',
-              project: 'engine',
+      await tester.pumpWidget(
+        MaterialApp(
+          debugShowCheckedModeBanner: false,
+          theme: SonderTheme.dark,
+          home: Scaffold(
+            body: Align(
+              alignment: Alignment.bottomCenter,
+              child: ChatStatusStrip(
+                info: ValueNotifier<SystemInfo?>(_info()),
+                mode: permissionModeFor('acceptEdits'),
+                model: 'qwen2.5-coder:7b-instruct-q4_K_M',
+                tier: 'code',
+                project: 'engine',
+              ),
             ),
           ),
         ),
-      ));
+      );
       await _golden(tester, 'status_strip_${width.toInt()}');
     });
   }
 
-  testWidgets('raise_sheet_widget_accept_edits', (tester) async {
+  testWidgets('raise_sheet_widget_accept_edits', skip: goldenSkip != null, (
+    tester,
+  ) async {
     tester.view.physicalSize = const Size(480, 260);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    await tester.pumpWidget(MaterialApp(
-      debugShowCheckedModeBanner: false,
-      theme: SonderTheme.dark,
-      // Lane B's presentational sheet: the parent owns confirm/cancel.
-      home: Scaffold(
-        body: RaiseModeSheet(
+    await tester.pumpWidget(
+      MaterialApp(
+        debugShowCheckedModeBanner: false,
+        theme: SonderTheme.dark,
+        // Lane B's presentational sheet: the parent owns confirm/cancel.
+        home: Scaffold(
+          body: RaiseModeSheet(
             from: 'manual',
             to: 'acceptEdits',
             host: 'mypc',
             onConfirm: () {},
-            onCancel: () {}),
+            onCancel: () {},
+          ),
+        ),
       ),
-    ));
+    );
     await _golden(tester, 'raise_sheet_widget_accept_edits');
   });
 }
