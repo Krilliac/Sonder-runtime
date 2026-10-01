@@ -136,6 +136,11 @@ def format_run_result(title: str, data: dict, *, digest: bool = False, context: 
     Small streams are lossless; larger ones retain a 1,500-character head and
     2,500-character tail. Metadata and digest have separate budgets so neither
     can displace the tail. ``digest`` remains opt-in for existing callers.
+
+    ``context`` is what the caller established before the run (``script_run``'s
+    artifact-risk report). It directly follows the exit line, ahead of every
+    field the run produced, the digest and the streams, and is never clipped:
+    its length comes out of the output window instead, head first.
     """
     timed_out = data.get("timed_out", False) or (data.get("error") or "").startswith("timed out")
     status = "timed_out" if timed_out else "ok" if data.get("ok") else "failed"
@@ -160,12 +165,14 @@ def format_run_result(title: str, data: dict, *, digest: bool = False, context: 
                 value = "%s (%s)" % (value, data["guard_reason"])
             metadata.append("  %s: %s" % (field, value))
     metadata.extend(_code_notes(data))
-    if context:
-        metadata.append(context)
+    # The context is paid for by the output window (head, then tail), so the
+    # metadata and digest budgets below are the same with or without it.
+    reserve = len(context) + 1 if context else 0
+    head, tail = max(0, 1500 - reserve), max(0, 2500 - max(0, reserve - 1500))
     stdout, stderr = data.get("stdout") or "", data.get("stderr") or ""
     streams = [(name, value) for name, value in (("stdout", stdout), ("stderr", stderr)) if value]
     combined = "\n".join(value for _, value in streams)
-    full = len(combined) <= 5000
+    full = len(combined) <= max(0, 5000 - reserve)
     if full:
         output = "\n".join(name + ":\n" + value for name, value in streams)
     else:
@@ -180,7 +187,9 @@ def format_run_result(title: str, data: dict, *, digest: bool = False, context: 
                 offset += len(value) + 1
             return "\n".join(parts)
 
-        output = window(0, 1500) + "\n... (output omitted) ...\n" + window(len(combined) - 2500, len(combined))
+        output = "\n".join(part for part in (
+            window(0, head), "... (output omitted) ...", window(len(combined) - tail, len(combined)),
+        ) if part)
     footer = []
     if not full:
         footer.append(_output_reference(data, combined))
@@ -188,7 +197,9 @@ def format_run_result(title: str, data: dict, *, digest: bool = False, context: 
         footer.append("  output truncated: true")
     footer_text = _clip("\n".join(footer), 500)
     # Retain every metadata field name, even with pathological argv/errors.
-    metadata_text = _metadata(metadata, min(1500, MAX_RESULT_CHARS - len(output) - len(footer_text) - 500))
-    available = MAX_RESULT_CHARS - sum(map(len, (verdict, metadata_text, output, footer_text))) - 5
+    metadata_text = _metadata(
+        metadata, min(1500, MAX_RESULT_CHARS - reserve - len(output) - len(footer_text) - 500),
+    )
+    available = MAX_RESULT_CHARS - reserve - sum(map(len, (verdict, metadata_text, output, footer_text))) - 5
     block = _digest(combined, min(DIGEST_MAX_CHARS, available), streams) if digest and combined else ""
-    return "\n".join(part for part in (verdict, metadata_text, block, output, footer_text) if part)
+    return "\n".join(part for part in (verdict, context, metadata_text, block, output, footer_text) if part)

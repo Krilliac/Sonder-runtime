@@ -109,6 +109,23 @@ def test_large_metadata_cannot_displace_output_tail(digest):
         assert field in rendered
 
 
+@pytest.mark.parametrize("filler", [0, 4990, 300_000])
+@pytest.mark.parametrize("report_chars", [40, 1200, 2400])
+def test_context_directly_follows_the_exit_line_whole(filler, report_chars):
+    # script_run's artifact-risk report is assessed before the run: nothing the
+    # run produced may precede it, and output pressure may not clip it.
+    context = "artifact risk: {%s}\nexecution allowed by effective policy report" % ("r" * report_chars)
+    stdout = "x" * filler + "\nFAILED tests/x.py::t - AssertionError\n1 failed\n"
+    rendered = format_run_result("script run", _result(stdout), digest=True, context=context)
+    assert rendered.startswith("exit 1 (failed, 0.042 s)\n" + context + "\nscript run\n")
+    assert len(rendered) <= 6000
+    assert stdout[-1000:] in rendered
+    digest = rendered.split("\ndigest:\n", 1)[1].split("\nstdout:\n", 1)[0]
+    assert "FAILED tests/x.py::t - AssertionError" in digest and "1 failed" in digest
+    for field in ("command", "cwd", "ok", "returncode", "timed_out", "elapsed_ms"):
+        assert "\n  %s: " % field in rendered
+
+
 @pytest.mark.parametrize("fields, expected", [
     ({"ok": True, "returncode": 0}, "exit 0 (ok, 0.042 s)"),
     ({"timed_out": True, "returncode": None}, "exit None (timed_out, 0.042 s)"),
