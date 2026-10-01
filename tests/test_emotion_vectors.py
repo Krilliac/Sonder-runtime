@@ -249,6 +249,35 @@ def test_emotion_command_leaves_the_tracked_repo_file_untouched():
     assert os.path.exists(server.emotion_vectors.state_path())
 
 
+def test_a_refused_override_degrades_reads_but_still_blocks_writes(monkeypatch, tmp_path, caplog):
+    """A stale SONDER_EMOTION_VECTORS (a removed worktree) crashed every chat
+    turn: system_prompt() raised before the model was called. Reads now fall
+    back to the default vectors with one warning; the file outside the
+    workspace is still never read, and writes through it still refuse."""
+    import logging
+
+    import pytest
+
+    _bundled(monkeypatch, tmp_path)
+    outside = tmp_path / "old-worktree" / "emotion_vectors.json"
+    outside.parent.mkdir()
+    outside.write_text('{"joy": 0.9}', encoding="utf-8")
+    monkeypatch.setenv("SONDER_EMOTION_VECTORS", str(outside))
+    monkeypatch.setattr(emotion_vectors, "_REJECTED_OVERRIDES", set())
+
+    with caplog.at_level(logging.WARNING, logger="sonder.emotion_vectors"):
+        path = emotion_vectors.active_path()
+        emotion_vectors.system_prompt()
+        emotion_vectors.active_path()
+    assert path != str(outside.resolve())
+    assert emotion_vectors.read_vectors().get("joy") != 0.9
+    warnings = [r for r in caplog.records if "ignoring SONDER_EMOTION_VECTORS" in r.getMessage()]
+    assert len(warnings) == 1
+    with pytest.raises(ValueError, match="must stay inside workspace"):
+        emotion_vectors.update_vectors({"calm": 0.3}, mode="replace")
+    assert outside.read_text(encoding="utf-8") == '{"joy": 0.9}'
+
+
 def test_override_cannot_name_other_state_home_files(monkeypatch, tmp_path):
     """Only the live vectors copy is admitted inside the state home.
 

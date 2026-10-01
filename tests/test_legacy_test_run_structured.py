@@ -9,6 +9,7 @@ child process.
 from __future__ import annotations
 
 import os
+import re
 import textwrap
 from types import SimpleNamespace
 
@@ -252,10 +253,17 @@ def test_a_real_legacy_pytest_run_goes_through_the_structured_runner(stack, monk
     monkeypatch.setattr(harness_tools, "_run", lambda *a, **k: pytest.fail("legacy argv ran"))
 
     output = server.test_run(root=str(project), framework="pytest", timeout=60)
-    assert output.startswith("test run (pytest)")
+    # Line 1 is the exit line; the structured runner's result follows it: the
+    # host-owned command template (its JUnit report placeholder) and stdout
+    # rebuilt from the parsed report, failure location included.
+    verdict, _, rest = output.partition("\n")
+    assert re.fullmatch(r"exit 1 \(failed, \d+\.\d{3} s\)", verdict), verdict
+    assert rest.startswith("test run (pytest)\n  command: [")
+    command = rest.splitlines()[1]
+    assert '"-m", "pytest"' in command and '"--junitxml={report}"' in command
     assert "  ok: False" in output and "  returncode: 1" in output
-    assert "FAILED test_mod.py::test_bad" in output
-    head, _, digest = output.partition("\ndigest:\n")
+    assert "\nstdout:\nFAILED test_mod.py::test_bad - assert 1 == 2 (test_mod.py:5)\n" in output
+    digest = output.split("\ndigest:\n", 1)[1].split("\nstdout:\n", 1)[0]
     assert "1 failed, 1 passed" in digest
 
     output = server.test_run(root=str(project), framework="auto", pattern="test_ok", timeout=60)

@@ -23,8 +23,10 @@ from contextlib import contextmanager, redirect_stdout
 from sonder_runtime.domain.common.errors import DependencyUnavailable
 from sonder_runtime.application import foreground_turns
 from sonder_runtime.domain.runtime_model_configuration import OPTIONAL_LOCAL_TIERS
+from sonder_runtime.adapters import creation_workspace
 from sonder_runtime.adapters.filesystem import file_ops
 from sonder_runtime.platform import paths as server_paths
+from sonder_runtime.platform.config_environment import env_bool_from_env
 import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
 from sonder_runtime.adapters.observability.repl_formatting import (
     elapsed_label as _elapsed_label,
@@ -1667,7 +1669,9 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /scaffold <kind> <name> [root]  write a full project skeleton (cpp-msvc, csharp, rust, ...)
   /workspace [path]  show/set the directory used for guarded project work;
                      /files /read /write /append /edit /mkdir /delete then
-                     resolve relative paths inside it and refuse escapes
+                     resolve relative paths inside it and refuse escapes;
+                     work with none set gets a dated folder under the first
+                     workspace root (SONDER_AUTO_WORKSPACE=0 asks instead)
   /workspace-create <path>  create a guarded directory, select it, and resume queued work
   /env [refresh]     show the host OS, shells, and installed toolchains
   /toolstatus <name> run the fixed local version probe for a discovered tool
@@ -3107,8 +3111,10 @@ def _recovery_posture_command():
     ).format()
 
 
-# Asked whenever work is requested before a directory is selected: the
-# natural-language work route and ``/work``/``/agent`` share it.
+# Asked when work is requested before a directory is selected and no default
+# folder was made for it (``SONDER_AUTO_WORKSPACE=0``, ``/workspace clear``,
+# the ``/workspace-create`` gate refused, or no configured root can hold one).
+# The natural-language work route and ``/work``/``/agent`` share it.
 _WORKSPACE_ASK = (
     "That looks like project work — which folder should I use?\n"
     "  Existing: /workspace <path>\n"
@@ -3116,6 +3122,32 @@ _WORKSPACE_ASK = (
     "Or say more about what you meant and I will clarify before touching files.\n"
     "Guarded project work and runs stay inside the selected directory."
 )
+
+# Printed once when work arrives with no folder selected and one was made.
+_DEFAULT_WORKSPACE_LINE = (
+    "workspace: %s (created because none was selected — /workspace <path> to use"
+    " another folder)"
+)
+
+
+def _auto_workspace_enabled():
+    """``SONDER_AUTO_WORKSPACE`` (``[state].auto_workspace``); on unless set false."""
+    return env_bool_from_env("SONDER_AUTO_WORKSPACE", True)
+
+
+def _configured_workspace_roots():
+    """``[state].workspace_roots`` in order: the roots managed REPL work grants.
+
+    Startup exports the validated list as ``SONDER_FILE_ROOTS``
+    (``_export_runtime_environment``), the same list the application config
+    hands to managed work, so reading it here never builds the application.
+    """
+    return tuple(
+        part.strip()
+        for part in os.environ.get("SONDER_FILE_ROOTS", "").split(os.pathsep)
+        if part.strip()
+    )
+
 
 # Exception types reported as a refused request instead of ending the console.
 # Managed work raises them for its policy refusals: before any step runs (no
@@ -3402,6 +3434,9 @@ def main(*, machine_output=False):
     workspace_root = ""
     pending_workspace_work = ""
     queued_workspace_work = ""
+    # ``/workspace clear`` means the operator picks folders from now on: the
+    # next work request asks rather than making a default folder again.
+    default_workspace_declined = False
     # None = whatever the runtime resolves by default; /model pins one.
     active_tier = None
     # Exact discovered model selected by /model <tag>.  Keep it separately
@@ -3508,7 +3543,7 @@ def main(*, machine_output=False):
             print("workspace selected; resuming requested work in %s" % workspace_root)
 
     def do_workspace_select(raw):
-        nonlocal workspace_root
+        nonlocal workspace_root, default_workspace_declined
         text = str(raw or "").strip()
         if not text:
             print("workspace: %s" % (workspace_root or "(not selected)"))
@@ -3516,6 +3551,7 @@ def main(*, machine_output=False):
         if text.lower() in ("none", "clear", "off"):
             server._clear_managed_repl_conversation()
             workspace_root = ""
+            default_workspace_declined = True
             print("workspace cleared; the next work request will ask for a directory")
             return
         path, error = _workspace_path(text)
@@ -3567,6 +3603,40 @@ def main(*, machine_output=False):
                     pass
                 return "/workspace " + path
         return ("/workspace-create " if create else "/workspace ") + text
+
+    def select_default_workspace(task):
+        """Make, select and announce this session's default folder for ``task``.
+
+        Returns False when the caller should ask instead.  The folder is
+        planned without touching the disk, then created only if the same gate
+        ``/workspace-create`` passes allows it, so plan mode, or manual mode
+        with nobody to approve, falls back to the unchanged question.  Once
+        selected it stays the workspace, so follow-up work lands beside it.
+        """
+        nonlocal workspace_root, pending_workspace_work
+        if default_workspace_declined or not _auto_workspace_enabled():
+            return False
+        try:
+            target = creation_workspace.plan_session_workspace(
+                task, _configured_workspace_roots(),
+            )
+        except creation_workspace.CreationWorkspaceError as exc:
+            print(_paint("(no default folder: %s)" % S.safe_text(str(exc)), "muted"))
+            return False
+        may_run, _refusal = _named_command_gate("/workspace-create", str(target))
+        if not may_run:
+            return False
+        try:
+            created = creation_workspace.create_session_workspace(target)
+        except creation_workspace.CreationWorkspaceError as exc:
+            _emit("ERROR: default workspace not created: %s" % exc)
+            return False
+        server._clear_managed_repl_conversation()
+        workspace_root = str(created)
+        # A task held by an earlier question is superseded by this request.
+        pending_workspace_work = ""
+        print(_DEFAULT_WORKSPACE_LINE % workspace_root)
+        return True
 
     def ask_for_workspace(task):
         """Hold ``task`` until ``/workspace`` selects a directory, and ask."""
@@ -4440,7 +4510,7 @@ def main(*, machine_output=False):
                     elif cmd in ("/work", "/agent"):
                         if not arg.strip():
                             _emit("usage: /work <task>")
-                        elif not workspace_root:
+                        elif not workspace_root and not select_default_workspace(arg.strip()):
                             # The memory project name is not a directory; ask
                             # for one and resume this task once it is chosen.
                             ask_for_workspace(arg.strip())
@@ -4826,8 +4896,9 @@ def main(*, machine_output=False):
                                 print(_paint("(using folder from your message; working on: %s)" % remainder, "muted"))
                             run_workspace_work(task)
                             continue
-                        ask_for_workspace(line)
-                        continue
+                        if not select_default_workspace(line):
+                            ask_for_workspace(line)
+                            continue
                     run_workspace_work(line)
                     continue
 
