@@ -6,6 +6,7 @@ import atexit
 import os
 from pathlib import Path
 import shutil
+import sys
 import tempfile
 
 
@@ -343,10 +344,17 @@ def isolated_default_runtime(monkeypatch):
     worker got a closed graph ("configured membership must be active").
     Every ``_default_*_close`` callback is swapped, found by name rather than
     a hand-kept list that falls behind the next one added.
+
+    Use it for any test that composes the default runtime with a config,
+    including through ``main([...])`` or ``serve.main(config)`` run in
+    process; the teardown guard below fails a test that leaves one bound.
     """
     from sonder_runtime.adapters.application_lifecycle import ApplicationLifecycle
     from sonder_runtime.bootstrap import app as bootstrap
 
+    # The teardown guard finds this module by name; fail here, loudly, rather
+    # than let a move or rename leave the guard looking at nothing.
+    assert bootstrap.__name__ == _DEFAULT_RUNTIME_MODULE, bootstrap.__name__
     callbacks = [name for name in vars(bootstrap)
                  if name.startswith("_default_") and name.endswith("_close")]
     assert "_default_application_close" in callbacks, callbacks
@@ -356,6 +364,85 @@ def isolated_default_runtime(monkeypatch):
         monkeypatch.setattr(bootstrap, name, None)
     monkeypatch.setattr(bootstrap, "_default_runtime_closing", False)
     return bootstrap
+
+
+# What a test can leave bound in bootstrap.app's process-default runtime: the
+# config a default_app(config=...) selected, a graph its lifecycle composed
+# from a config, and a graph a host installed as owned. Later tests on the
+# same xdist worker inherit whatever is left: their default_app() composes
+# from the earlier test's config (and its state home), and their
+# default_app(config=...) claims and closes the earlier graph.
+_DEFAULT_RUNTIME_MODULE = "sonder_runtime.bootstrap.app"
+_DEFAULT_RUNTIME_SLOTS = (
+    "_default_config",
+    "a default Application composed from a config",
+    "_owned_default_application",
+)
+_default_runtime_before_test = (None, None, None)
+
+
+def _default_runtime_bindings():
+    """What bootstrap.app has bound right now. Reads only; never composes.
+
+    The module is looked up, never imported: a module nobody imported has
+    nothing bound, and importing it here would load bootstrap.app's whole
+    adapter graph into tests that never use it (on a loaded Windows host that
+    alone destabilised the real-child test_managed_runtime_owner relaunch
+    test). The lifecycle's slot is read directly because ``current()`` takes
+    the build lock, and a guard must never wait on a build a test left
+    running.
+    """
+    bootstrap = sys.modules.get(_DEFAULT_RUNTIME_MODULE)
+    if bootstrap is None:
+        return (None, None, None)
+    application = bootstrap._application_lifecycle._application
+    configured = application if getattr(application, "config", None) is not None else None
+    return (bootstrap._default_config, configured, bootstrap._owned_default_application)
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_runtest_setup(item):
+    """Record what is bound before any of this test's fixtures run."""
+    global _default_runtime_before_test
+    _default_runtime_before_test = _default_runtime_bindings()
+    return (yield)
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_runtest_teardown(item):
+    """Fail a test that leaves the process-default runtime bound.
+
+    This runs after every fixture finalizer, monkeypatch's undo included, so
+    it sees exactly what the next test on this worker will inherit. It
+    compares identities with what was bound before this test's setup, so a
+    test that only reuses what an earlier test left is not blamed for it.
+    """
+    result = yield
+    before = _default_runtime_before_test
+    after = _default_runtime_bindings()
+    left = [
+        slot
+        for slot, was, now in zip(_DEFAULT_RUNTIME_SLOTS, before, after, strict=True)
+        if now is not None and now is not was
+    ]
+    if left:
+        culprit = ""
+        if before[0] is not None and after[0] is before[0]:
+            culprit = (
+                " The _default_config behind it was already bound when this test"
+                " started, so an earlier test on this worker left it; fix that"
+                " test first."
+            )
+        pytest.fail(
+            f"{item.nodeid} left bootstrap.app's process-default runtime bound "
+            f"({', '.join(left)}). Later tests on this worker inherit it: "
+            "default_app() composes from that config, and "
+            "default_app(config=...) claims and closes that graph. Request the "
+            "isolated_default_runtime fixture, or call "
+            f"bootstrap.app.reset_for_tests() in a finally block.{culprit}",
+            pytrace=False,
+        )
+    return result
 
 
 @pytest.fixture

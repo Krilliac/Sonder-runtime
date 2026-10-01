@@ -154,6 +154,14 @@ touching anything they control.
   `OllamaGateway.configure_default_providers(...)` — the same explicit
   injection the serve bootstrap performs, rebound per-test so runtime doubles
   cannot leak across xdist workers (`tests/conftest.py:57-78`).
+- A teardown guard (hook wrappers on `pytest_runtest_setup` and
+  `pytest_runtest_teardown`) fails any test that leaves `bootstrap.app`'s
+  process-default runtime bound: `_default_config`, a default Application
+  composed from a config, or an owned one. Later tests on the same worker
+  would compose from that config or close that graph. A test that runs
+  `main([...])`, `serve.main(config)` or `default_app(config=...)` in process
+  requests the `isolated_default_runtime` fixture (or calls
+  `reset_for_tests()` in a `finally`).
 - Opt-in fixture `without_standing` strips the measured-standing prefix from
   agent end reports; use it only in tests about something else —
   `tests/test_agent_verification_gate.py` owns asserting the prefix itself
