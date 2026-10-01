@@ -87,6 +87,10 @@ class CategoryScaffold extends StatefulWidget {
   /// App bar leading widget for the wide layout and the narrow list.
   final Widget? leading;
 
+  /// Width of [leading], for a labelled control such as "← Chat" that does
+  /// not fit the default square slot.
+  final double? leadingWidth;
+
   /// Shown above every page's content, e.g. an offline or stale-data notice.
   final Widget? banner;
 
@@ -113,6 +117,7 @@ class CategoryScaffold extends StatefulWidget {
     this.onSelected,
     this.actions = const [],
     this.leading,
+    this.leadingWidth,
     this.banner,
     this.bottomBar,
     this.railFooter,
@@ -181,6 +186,7 @@ class _CategoryScaffoldState extends State<CategoryScaffold> {
     return Scaffold(
       appBar: AppBar(
         leading: widget.leading,
+        leadingWidth: widget.leading == null ? null : widget.leadingWidth,
         automaticallyImplyLeading: widget.leading == null,
         title: Text(widget.title),
         actions: [...widget.actions, const SizedBox(width: SonderSpace.sm)],
@@ -320,6 +326,7 @@ class _CategoryScaffoldState extends State<CategoryScaffold> {
     return Scaffold(
       appBar: AppBar(
         leading: widget.leading,
+        leadingWidth: widget.leading == null ? null : widget.leadingWidth,
         automaticallyImplyLeading: widget.leading == null,
         title: Text(widget.title),
         actions: [...widget.actions, const SizedBox(width: SonderSpace.xs)],
