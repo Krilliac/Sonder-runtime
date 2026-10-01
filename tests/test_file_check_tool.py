@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import importlib.machinery
 import subprocess
+import sys
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -9,6 +12,46 @@ import pytest
 import sonder_runtime.adapters.code_check as code_check
 from sonder_runtime.adapters.code_check import check_file
 from sonder_runtime.bootstrap.code_check_agent_tools import post_edit_file_check
+
+
+def _module_entry(name: str, installed: bool):
+    """A ``sys.modules`` entry that answers both module probes for ``name``.
+
+    ``None`` makes ``import name`` raise and ``importlib.util.find_spec(name)``
+    return None; a module carrying a spec makes both succeed. Either way the
+    machine's real install state is never consulted.
+    """
+    if not installed:
+        return None
+    module = types.ModuleType(name)
+    module.__spec__ = importlib.machinery.ModuleSpec(name, None)
+    return module
+
+
+def _pin_detect_linter_probes(monkeypatch, *, ruff_on_path=False, ruff_module=False, pyflakes=False):
+    """Pin every availability probe ``harness_tools._detect_linter`` makes.
+
+    Ruff counts as available on PATH *or* as an importable module (``lint_run``
+    then runs ``python -I -m ruff``), flake8 is looked up on PATH, and pyflakes
+    is imported. CI installs ruff from requirements-dev.txt, which supplies both
+    the executable and the module, so blocking PATH alone left ruff visible.
+    """
+    import harness_tools
+    monkeypatch.setattr(harness_tools.shutil, "which",
+                        lambda name: "/usr/bin/ruff" if ruff_on_path and name == "ruff" else None)
+    monkeypatch.setitem(sys.modules, "ruff", _module_entry("ruff", ruff_module))
+    monkeypatch.setitem(sys.modules, "pyflakes", _module_entry("pyflakes", pyflakes))
+
+
+def _pin_file_check_linters(monkeypatch, *, pyflakes=False, ruff=None):
+    """Pin the linters ``check_file`` can reach for a syntactically valid file.
+
+    It asks ``importlib.util.find_spec("pyflakes")``, then ``_ruff_path()``
+    (``SONDER_LINTER_PATH``, else PATH), and notes "no linter available" when
+    neither answers, so unpinned the result depends on what is installed.
+    """
+    monkeypatch.setitem(sys.modules, "pyflakes", _module_entry("pyflakes", pyflakes))
+    monkeypatch.setattr(code_check, "_ruff_path", lambda: ruff)
 
 
 def test_python_syntax_error_is_reported(tmp_path: Path):
@@ -20,12 +63,21 @@ def test_python_syntax_error_is_reported(tmp_path: Path):
     assert "3:" in output
 
 
-def test_clean_python_is_bounded_and_clean(tmp_path: Path):
+@pytest.mark.parametrize(("pyflakes", "ruff", "ran", "report"), [
+    (True, None, ["pyflakes"], "file_check clean.py: none"),
+    (False, "ruff", ["ruff"], "file_check clean.py: none"),
+    (False, None, [], "file_check clean.py: none\nnote: no linter available"),
+], ids=["pyflakes", "ruff-only", "no-linter"])
+def test_clean_python_is_bounded_and_clean(monkeypatch, tmp_path: Path, pyflakes, ruff, ran, report):
+    _pin_file_check_linters(monkeypatch, pyflakes=pyflakes, ruff=ruff)
+    checkers = []
+    monkeypatch.setattr(code_check, "_external", lambda command, checker, deadline: checkers.append(checker) or [])
     path = tmp_path / "clean.py"
     path.write_text("value = 1\n", encoding="utf-8")
     output = check_file(path, project_root=tmp_path)
     assert len(output) <= 2000
-    assert output.endswith(": none") or "no linter available" in output
+    assert output == report
+    assert checkers == ran
 
 
 def test_cpp_is_explicitly_skipped(tmp_path: Path):
@@ -117,11 +169,22 @@ def test_max_items_sorts_and_bounds_report(monkeypatch, tmp_path: Path):
     assert len(output) <= 2000
 
 
-def test_python_clean_linter_fallback_never_claims_ruff(monkeypatch, tmp_path: Path):
+@pytest.mark.parametrize(("pyflakes", "expected"), [(True, "pyflakes"), (False, "py_compile")],
+                         ids=["pyflakes-installed", "nothing-installed"])
+def test_python_clean_linter_fallback_never_claims_ruff(monkeypatch, tmp_path: Path, pyflakes, expected):
     import harness_tools
-    monkeypatch.setattr(harness_tools.shutil, "which", lambda name: None)
-    result = harness_tools._detect_linter(tmp_path)
-    assert result in {"pyflakes", "py_compile"}
+    # Ruff is unavailable to both probes: off PATH and not importable.
+    _pin_detect_linter_probes(monkeypatch, pyflakes=pyflakes)
+    assert harness_tools._detect_linter(tmp_path) == expected
+
+
+@pytest.mark.parametrize(("on_path", "as_module"), [(True, False), (False, True)],
+                         ids=["ruff-on-path", "ruff-module-only"])
+def test_python_linter_detection_names_ruff_when_available(monkeypatch, tmp_path: Path, on_path, as_module):
+    import harness_tools
+    # pyflakes is installed too: an available ruff still takes precedence.
+    _pin_detect_linter_probes(monkeypatch, ruff_on_path=on_path, ruff_module=as_module, pyflakes=True)
+    assert harness_tools._detect_linter(tmp_path) == "ruff"
 
 
 def test_project_root_refuses_escape(tmp_path: Path):
@@ -142,7 +205,9 @@ def test_post_edit_hook_requires_gate_and_only_checks_successful_target():
     assert calls == [("file_check", {"path": "x.py", "max_items": 30})]
 
 
-def test_post_edit_hook_runs_real_checker_for_bad_and_clean_edits(tmp_path: Path):
+def test_post_edit_hook_runs_real_checker_for_bad_and_clean_edits(monkeypatch, tmp_path: Path):
+    # The real checker, without whichever external linter this machine has.
+    _pin_file_check_linters(monkeypatch)
     path = tmp_path / "edited.py"
     path.write_text("value = 1\n\ndef f(:\n    pass\n", encoding="utf-8")
     calls = []
@@ -192,6 +257,8 @@ def test_observed_edit_detects_syntax_in_the_same_observation(monkeypatch, tmp_p
     # Qualify the required membership independently of the separate surface
     # assertion, which stays RED until that ownership-scoped edit is integrated.
     monkeypatch.setattr(permission_modes, "EXECUTION_TOOLS", permission_modes.EXECUTION_TOOLS | {"file_check"})
+    # The real checker, without whichever external linter this machine has.
+    _pin_file_check_linters(monkeypatch)
     path = tmp_path / "edited.py"
 
     def edit(path, old, new, **kwargs):
