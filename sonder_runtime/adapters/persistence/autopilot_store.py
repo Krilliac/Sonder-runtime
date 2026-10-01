@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS autopilot_runs (
     current_task INTEGER,
     cycles INTEGER NOT NULL DEFAULT 0,
     failures INTEGER NOT NULL DEFAULT 0,
+    infra_retries INTEGER NOT NULL DEFAULT 0,
     checkpoints INTEGER NOT NULL DEFAULT 0,
     replans INTEGER NOT NULL DEFAULT 0,
     max_failures INTEGER NOT NULL DEFAULT 3,
@@ -118,6 +119,7 @@ CREATE INDEX IF NOT EXISTS idx_autopilot_steering_run
 _RUN_COLUMN_MIGRATIONS = {
     "request_owner": "TEXT DEFAULT ''",
     "checkpoints": "INTEGER NOT NULL DEFAULT 0",
+    "infra_retries": "INTEGER NOT NULL DEFAULT 0",
     "replans": "INTEGER NOT NULL DEFAULT 0",
     "max_replans": "INTEGER NOT NULL DEFAULT 2",
     "adaptive": "INTEGER NOT NULL DEFAULT 1",
@@ -217,6 +219,9 @@ def _row_dict(row) -> dict | None:
             parsed = []
         data[target] = parsed if isinstance(parsed, list) else []
     data["allow_web"] = bool(data.get("allow_web"))
+    # Keep the public shape stable for databases created before the column
+    # existed, and make the value an integer even if a legacy row is NULL.
+    data["infra_retries"] = int(data.get("infra_retries") or 0)
     data["adaptive"] = bool(data.get("adaptive"))
     data["pause_requested"] = bool(data.get("pause_requested"))
     data["cancel_requested"] = bool(data.get("cancel_requested"))
@@ -470,6 +475,7 @@ def save_progress(
     current_task: int | None = None,
     cycles_delta: int = 0,
     failures_delta: int = 0,
+    infra_retries_delta: int = 0,
     checkpoints_delta: int = 0,
     replans_delta: int = 0,
     summary: str | None = None,
@@ -480,12 +486,13 @@ def save_progress(
 ) -> dict | None:
     now = time.time()
     assignments = [
-        "cycles=cycles+?", "failures=failures+?", "checkpoints=checkpoints+?",
+        "cycles=cycles+?", "failures=failures+?", "infra_retries=infra_retries+?",
+        "checkpoints=checkpoints+?",
         "replans=replans+?", "lease_until=?", "updated_ts=?",
     ]
     values: list[object] = [
         int(cycles_delta), int(failures_delta),
-        int(checkpoints_delta), int(replans_delta),
+        int(infra_retries_delta), int(checkpoints_delta), int(replans_delta),
         now + max(60, min(int(lease_seconds), 3600)), now,
     ]
     if plan is not None:

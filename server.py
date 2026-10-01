@@ -22430,6 +22430,18 @@ def _autopilot_plan_model(run: dict) -> dict:
 
 
 def _autopilot_review_model(run: dict, issue: str) -> dict:
+    def generator_factory():
+        run_tier = autopilot_controller.normalize_tier(run.get("tier", "code"))
+        tier = runtime_policy.route_tier("review", _refresh_runtime_policy(create=True), fallback=run_tier)
+        model, cloud, _augment, tier_label = _serve_target(tier, False)
+        if model is None or cloud or _provider_bridge.is_hosted(_bridge_provider_for_tier(tier_label)) or tier_label not in autopilot_controller.LOCAL_TIERS:
+            raise RuntimeError("autopilot requires an available local model tier")
+        system = _build_system(
+            _prompts.render("autopilot_system", role="reviewer"), False, "", model=model, cloud=False,
+        )
+        # A2 (#616) replaces 1800 with agent_generation_budget.json_num_predict(); keep these in sync when both land.
+        return _make_tier_generate(tier_label, model, system, 0.05, 1800, 0, cloud=False, local_only=True)
+
     ledger = []
     for task in run.get("plan") or []:
         ledger.append({
@@ -22473,15 +22485,7 @@ def _autopilot_review_model(run: dict, issue: str) -> dict:
         assessments = payload.get("pending_assessment") or []
         if not isinstance(assessments, list):
             raise ValueError("adaptive pending assessment must be a JSON list")
-        # Sanitize benign local-model noise instead of failing the whole run.
-        # A 7B reviewer routinely assesses already-completed tasks (unknown
-        # pending id), repeats a task, or emits a junk verdict -- each of which
-        # previously raised, survived a fruitless retry, and killed the run
-        # mid-execution with valid pending tasks still queued. Drop the
-        # unusable entries: the controller only ever acts on a "stale" verdict
-        # for a genuinely-pending task, so discarding non-pending / malformed /
-        # duplicate assessments changes no real decision. Any pending task the
-        # reviewer left unassessed still defaults to "keep" below.
+        # Drop unusable assessments; missing pending tasks default to keep.
         assessed = {}
         reasons = {}
         for item in assessments:
@@ -22509,24 +22513,10 @@ def _autopilot_review_model(run: dict, issue: str) -> dict:
         if stale and normalized["decision"] == "continue":
             raise ValueError("continue is invalid while a pending task is stale")
         if normalized["decision"] == "replan" and not stale:
-            # "replan" with nothing marked stale is not actionable -- there is
-            # nothing to replace -- so it means the same thing as "continue with
-            # the existing pending plan". Coerce it rather than raising: a local
-            # 7B reviewer routinely says "replan" while marking every pending
-            # task keep, and failing the whole autonomous run over that
-            # inconsistency (it previously raised, the retry repeated it, and the
-            # run died mid-execution with valid pending tasks still queued) is far
-            # worse than just continuing. The controller already treats a
-            # replan-with-no-tasks/no-stale as continue by falling through; this
-            # keeps the returned payload consistent with that.
+            # No stale task means no actionable replan: retain the current plan.
             payload["decision"] = "continue"
 
-    return _autopilot_json_model(
-        run,
-        "reviewer",
-        prompt,
-        validate,
-    )
+    return autopilot_controller.review_json_model(generator_factory, prompt, validate, _extract_agent_json)
 
 
 def _autopilot_work_model(
@@ -22765,6 +22755,8 @@ def _autopilot_start(
     _maybe_live_reload()
     refusal = intents.containment_egress_refusal(objective)
     if refusal:
+        return refusal
+    if refusal := autopilot_controller.verifier_preflight():
         return refusal
     try:
         tier = _runtime_lane_tier("autopilot", tier)

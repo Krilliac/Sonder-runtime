@@ -58,6 +58,187 @@ def _task_evidence(task):
     )
 
 
+@pytest.fixture
+def infra_clock(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(autopilot_controller, "_monotonic", lambda: now[0])
+    monkeypatch.setattr(autopilot_controller.time, "sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
+    return now
+
+
+@pytest.mark.parametrize("kind,detail,status", [
+    ("provider_unavailable", "health probe timed out", None),
+    ("transport", "read timed out", None),
+    ("http", "HTTP 503 backend_unavailable", 503),
+    ("busy_timeout", "pool queue exhausted", None),
+])
+def test_infra_errors_retry_then_pause_without_task_failures(infra_clock, kind, detail, status):
+    from sonder_runtime.adapters.model_transport import ModelCallError
+
+    calls = []
+    run = autopilot_store.create_run("Retry infrastructure", max_failures=1)
+
+    def work(_run, _task, _prior):
+        calls.append(infra_clock[0])
+        raise ModelCallError(kind, detail, status=status)
+
+    result = autopilot_controller.execute_run(
+        run["id"], "owner", owner_pid=os.getpid(), plan_fn=lambda _: _plan(),
+        work_fn=work, review_fn=lambda *_: pytest.fail("infra is not a review verdict"),
+    )
+    assert result["status"] == "paused"
+    assert result["last_error"] == "provider unavailable"
+    assert result["failures"] == result["cycles"] == 0
+    assert result["max_failures"] == 1
+    assert result["infra_retries"] == 3
+    assert calls == [0, 30, 90, 210]
+    assert result["plan"][0]["status"] == "infra_retry"
+    assert result["plan"][0]["infra_retries"] == 3
+    assert result["plan"][0]["attempts"] == 0
+    assert "infra: 3 retries" in result["final_report"]
+    assert not any(event["kind"] == "task_fail" for event in autopilot_store.events(run["id"]))
+
+    # A manual resume may probe a repaired provider, but cannot replenish the
+    # task's durable automatic retry budget when the provider is still down.
+    still_offline = autopilot_controller.execute_run(
+        run["id"], "resumer", owner_pid=os.getpid(), plan_fn=lambda _: pytest.fail("plan exists"),
+        work_fn=work, review_fn=_complete,
+    )
+    assert still_offline["status"] == "paused"
+    assert still_offline["infra_retries"] == 3
+    assert len(calls) == 5
+    assert calls[-1] == 210
+
+    resumed = autopilot_controller.execute_run(
+        run["id"], "resumer", owner_pid=os.getpid(), plan_fn=lambda _: pytest.fail("plan exists"),
+        work_fn=lambda _run, task, _prior: _task_evidence(task), review_fn=_complete,
+    )
+    assert resumed["status"] == "completed"
+    assert resumed["failures"] == 0
+    assert resumed["infra_retries"] == 3
+    assert resumed["plan"][0]["attempts"] == 1
+
+
+@pytest.mark.parametrize("limit,expected", [("0", 0), ("1", 1), ("99", 3), ("invalid", 3)])
+def test_infra_retry_budget_is_configurable_and_bounded(monkeypatch, infra_clock, limit, expected):
+    from sonder_runtime.adapters.model_transport import ModelCallError
+
+    monkeypatch.setenv("SONDER_AUTOPILOT_INFRA_RETRIES", limit)
+    run = autopilot_store.create_run("Bound retries")
+    calls = []
+
+    def work(*_):
+        calls.append(1)
+        raise ModelCallError("provider_unavailable", "offline")
+
+    result = autopilot_controller.execute_run(
+        run["id"], "owner", owner_pid=os.getpid(), plan_fn=lambda _: _plan(),
+        work_fn=work, review_fn=_complete,
+    )
+    assert result["status"] == "paused"
+    assert result["infra_retries"] == expected
+    assert len(calls) == expected + 1
+
+
+@pytest.mark.parametrize("action", ["pause", "cancel", "wall"])
+def test_infra_backoff_observes_operator_controls_and_wall_budget(monkeypatch, infra_clock, action):
+    from sonder_runtime.adapters.model_transport import ModelCallError
+
+    run = autopilot_store.create_run("Interrupt backoff")
+    calls = []
+
+    def sleep(seconds):
+        infra_clock[0] += seconds
+        if action == "pause":
+            autopilot_store.request_pause(run["id"])
+        elif action == "cancel":
+            autopilot_store.request_cancel(run["id"])
+
+    monkeypatch.setattr(autopilot_controller.time, "sleep", sleep)
+
+    def work(*_):
+        calls.append(1)
+        raise ModelCallError("provider_unavailable", "offline")
+
+    result = autopilot_controller.execute_run(
+        run["id"], "owner", owner_pid=os.getpid(), plan_fn=lambda _: _plan(),
+        work_fn=work, review_fn=_complete, max_wall_seconds_budget=5,
+    )
+    assert result["status"] == ("cancelled" if action == "cancel" else "paused")
+    assert len(calls) == 1
+    assert result["failures"] == 0
+    assert infra_clock[0] <= 5
+
+
+@pytest.mark.parametrize("kind,detail,status", [
+    ("invalid_input", "bad model request", 400),
+    ("protocol", "read timed out in model prose", None),
+    ("http", "unrelated service failure", 503),
+    ("http", "request timeout", 408),
+    ("empty_response", "output exhausted", None),
+])
+def test_non_transport_model_error_keeps_existing_failure_behavior(infra_clock, kind, detail, status):
+    from sonder_runtime.adapters.model_transport import ModelCallError
+
+    def work(*_):
+        raise ModelCallError(kind, detail, status=status)
+
+    run = autopilot_store.create_run("Invalid input")
+    result = autopilot_controller.execute_run(
+        run["id"], "owner", owner_pid=os.getpid(), plan_fn=lambda _: _plan(),
+        work_fn=work, review_fn=_complete,
+    )
+    assert result["status"] == "failed"
+    assert detail in result["last_error"]
+    assert infra_clock[0] == 0
+
+
+def test_infra_recovery_preserves_ordinary_task_failure_budget(infra_clock):
+    from sonder_runtime.adapters.model_transport import ModelCallError
+
+    run = autopilot_store.create_run("Recover then fail validation", max_failures=1)
+    calls = []
+
+    def work(*_):
+        calls.append(infra_clock[0])
+        if len(calls) == 1:
+            raise ModelCallError("transport", "read timed out")
+        return "ERROR: real task failure"
+
+    result = autopilot_controller.execute_run(
+        run["id"], "owner", owner_pid=os.getpid(), plan_fn=lambda _: _plan(),
+        work_fn=work, review_fn=_complete,
+    )
+    assert calls == [0, 30]
+    assert result["status"] == "blocked"
+    assert result["cycles"] == result["failures"] == result["infra_retries"] == 1
+    assert result["plan"][0]["attempts"] == 1
+    assert result["plan"][0]["status"] == "failed"
+
+
+def test_infra_recovery_completes_within_the_original_cycle_budget(infra_clock):
+    from sonder_runtime.adapters.model_transport import ModelCallError
+
+    run = autopilot_store.create_run("Recover and validate", max_failures=1)
+    calls = []
+
+    def work(_run, task, _prior):
+        calls.append(infra_clock[0])
+        if len(calls) == 1:
+            raise ModelCallError("provider_unavailable", "health probe timed out")
+        return _task_evidence(task)
+
+    result = autopilot_controller.execute_run(
+        run["id"], "owner", owner_pid=os.getpid(), plan_fn=lambda _: _plan(),
+        work_fn=work, review_fn=_complete, max_cycles=2,
+    )
+    assert result["status"] == "completed"
+    assert result["cycles"] == 2
+    assert result["failures"] == 0
+    assert result["infra_retries"] == 1
+    assert [task["attempts"] for task in result["plan"]] == [1, 1]
+
+
 def test_normalize_plan_injects_validation_and_deduplicates():
     normalized = autopilot_controller.normalize_plan(
         _plan([

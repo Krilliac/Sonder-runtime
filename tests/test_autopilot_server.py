@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 import autopilot_controller
@@ -8,10 +10,23 @@ import sonder_runtime.interfaces.http.serve as sonder_serve
 
 @pytest.fixture(autouse=True)
 def isolated_autopilot_db(monkeypatch, tmp_path):
+    import permission_modes
+    from sonder_runtime.platform import paths
+
+    previous_home = paths._configured_home()
+    paths.configure_home(tmp_path)
+    (tmp_path / "permission_mode.json").write_text('{"mode": "auto"}', encoding="utf-8")
+    monkeypatch.setattr(permission_modes, "_LOADED", False)
+    monkeypatch.setattr(permission_modes, "_STATE", dict(permission_modes._STATE, mode="manual", elevated=False))
+    monkeypatch.setattr(permission_modes, "_rule_lookup", lambda _name: None)
     monkeypatch.setenv("SONDER_AUTOPILOT_DB", str(tmp_path / "autopilot.db"))
     autopilot_store.reset_schema_cache_for_tests()
     yield
     autopilot_store.reset_schema_cache_for_tests()
+    if previous_home is None:
+        paths.reset_home()
+    else:
+        paths.configure_home(previous_home)
 
 
 def _plan(_run):
@@ -37,6 +52,127 @@ def _work(_run, task, _prior):
 
 def _review(_run, _issue):
     return {"decision": "complete", "reason": "verified", "tasks": []}
+
+
+@pytest.mark.parametrize("mode", ["manual", "acceptEdits", "auto"])
+@pytest.mark.parametrize("require_verifier", [None, "0", "true", "1"])
+def test_start_verifier_preflight_uses_scratch_home_before_launch(monkeypatch, tmp_path, mode, require_verifier):
+    import permission_modes
+
+    (tmp_path / "permission_mode.json").write_text(json.dumps({"mode": mode}), encoding="utf-8")
+    if require_verifier is None:
+        monkeypatch.delenv("SONDER_AUTOPILOT_REQUIRE_VERIFIER", raising=False)
+    else:
+        monkeypatch.setenv("SONDER_AUTOPILOT_REQUIRE_VERIFIER", require_verifier)
+    launched = []
+    monkeypatch.setattr(server, "_launch_autopilot", lambda *args, **kwargs: launched.append(args) or True)
+    before = dict(permission_modes._UNATTENDED)
+    output = server.autopilot_start("Verify the scratch project")
+    refused_start = mode != "auto" and require_verifier == "1"
+    if not refused_start:
+        assert output.startswith("autopilot started")
+        assert len(launched) == 1
+    else:
+        assert output.startswith(
+            "ERROR: no verifier tool is allowed unattended in mode %s; a validate task cannot pass" % mode
+        )
+        assert not launched
+        assert autopilot_store.get_run() is None
+    displays = [output, server.autopilot_status()]
+    if not refused_start:
+        displays.append(server.autopilot_status(autopilot_store.get_run()["id"]))
+    for display in displays:
+        if mode == "auto":
+            assert "verifiers: allowed [test_run, workspace_run, script_run, build_run, run_code, lint_run, typecheck_run] refused []" in display
+            assert "warning: validate tasks cannot pass unattended" not in display
+        else:
+            assert "verifiers: allowed [] refused [test_run, workspace_run, script_run, build_run, run_code, lint_run, typecheck_run]" in display
+            assert "warning: validate tasks cannot pass unattended in mode %s" % mode in display
+    assert permission_modes._UNATTENDED == before
+
+
+@pytest.mark.parametrize("require_verifier", ["0", "1"])
+def test_start_verifier_preflight_honors_explicit_tool_allow_rule(monkeypatch, tmp_path, require_verifier):
+    import permission_modes
+
+    (tmp_path / "permission_mode.json").write_text('{"mode": "manual"}', encoding="utf-8")
+    monkeypatch.setenv("SONDER_AUTOPILOT_REQUIRE_VERIFIER", require_verifier)
+    monkeypatch.setattr(permission_modes, "_rule_lookup", lambda name: {"action": "allow", "pattern": "test_run"} if name == "test_run" else None)
+    monkeypatch.setattr(server, "_launch_autopilot", lambda *args, **kwargs: True)
+    output = server.autopilot_start("Verify with the approved tool")
+    assert output.startswith("autopilot started")
+    assert "verifiers: allowed [test_run] refused [workspace_run" in output
+    assert "warning: validate tasks cannot pass unattended" not in output
+
+
+def test_waiting_start_warns_without_refusing_manual_mode(monkeypatch, tmp_path):
+    """Advisory preflight must preserve synchronous execution as well as launch."""
+    (tmp_path / "permission_mode.json").write_text('{"mode": "manual"}', encoding="utf-8")
+    monkeypatch.delenv("SONDER_AUTOPILOT_REQUIRE_VERIFIER", raising=False)
+    executed = []
+
+    def execute(run_id, **_kwargs):
+        executed.append(run_id)
+        return autopilot_store.get_run(run_id)
+
+    monkeypatch.setattr(server, "_execute_autopilot", execute)
+    output = server.autopilot_start("Verify synchronously", wait=True)
+    assert executed == [autopilot_store.get_run()["id"]]
+    assert "verifiers: allowed [] refused [test_run, workspace_run" in output
+    assert "warning: validate tasks cannot pass unattended in mode manual" in output
+
+
+def _fake_reviewer_transport(monkeypatch, replies):
+    prompts = []
+
+    def generate(prompt):
+        prompts.append(prompt)
+        reply = replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    monkeypatch.setattr(server, "_serve_target", lambda *args: ("fake-local", False, False, "code"))
+    monkeypatch.setattr(server, "_bridge_provider_for_tier", lambda _: "ollama")
+    monkeypatch.setattr(server, "_build_system", lambda *args, **kwargs: "system")
+    monkeypatch.setattr(server, "_make_tier_generate", lambda *args, **kwargs: generate)
+    return prompts
+
+
+@pytest.mark.parametrize("reply", ["reviewer-garbage", '{"decision": "bogus"}'])
+def test_reviewer_invalid_json_or_schema_repairs_once_then_coerces(monkeypatch, caplog, reply):
+    prompts = _fake_reviewer_transport(monkeypatch, [reply, reply])
+    result = server._autopilot_review_model({"tier": "code", "plan": []}, "host completion gates passed")
+    assert result["decision"] == "continue"
+    assert result.get("tasks", []) == []
+    assert len(prompts) == 2
+    assert "HOST SCHEMA ERROR" not in prompts[0]
+    assert "HOST SCHEMA ERROR" in prompts[1]
+    assert reply in caplog.text
+
+
+def test_reviewer_accepts_repaired_response(monkeypatch):
+    prompts = _fake_reviewer_transport(monkeypatch, ["garbage", '{"decision": "pause", "reason": "inspect"}'])
+    result = server._autopilot_review_model({"tier": "code", "plan": []}, "checkpoint")
+    assert result["decision"] == "pause"
+    assert len(prompts) == 2
+
+
+def test_reviewer_transport_error_is_not_schema_coercion(monkeypatch):
+    from sonder_runtime.adapters.model_transport import ModelCallError
+
+    error = ModelCallError("provider_unavailable", "health probe timed out")
+    prompts = _fake_reviewer_transport(monkeypatch, [error])
+    with pytest.raises(ModelCallError):
+        server._autopilot_review_model({"tier": "code", "plan": []}, "checkpoint")
+    assert len(prompts) == 1
+
+
+def test_planner_invalid_json_still_raises_after_one_repair(monkeypatch):
+    prompts = _fake_reviewer_transport(monkeypatch, ["garbage", "garbage"])
+    with pytest.raises(ValueError, match="planner model failed"):
+        server._autopilot_plan_model({"tier": "code", "plan": []})
+    assert len(prompts) == 2
 
 
 def test_waiting_start_runs_end_to_end_without_ollama(monkeypatch):
@@ -169,8 +305,8 @@ def test_planner_still_rejects_implementation_under_observe_policy(monkeypatch):
 def test_reviewer_receives_checkpoint_evidence_and_continue_decision(monkeypatch):
     captured = {}
 
-    def fake_json(_run, role, prompt, validator):
-        captured.update({"role": role, "prompt": prompt})
+    def fake_json(_factory, prompt, validator, _extract):
+        captured.update({"prompt": prompt})
         payload = {
             "decision": "continue",
             "reason": "plan remains correct",
@@ -181,7 +317,7 @@ def test_reviewer_receives_checkpoint_evidence_and_continue_decision(monkeypatch
         validator(payload)
         return payload
 
-    monkeypatch.setattr(server, "_autopilot_json_model", fake_json)
+    monkeypatch.setattr(autopilot_controller, "review_json_model", fake_json)
     result = server._autopilot_review_model({
         "objective": "adapt", "failures": 0, "max_failures": 3,
         "max_tasks": 12, "checkpoints": 1, "replans": 0, "max_replans": 2,
@@ -198,7 +334,6 @@ def test_reviewer_receives_checkpoint_evidence_and_continue_decision(monkeypatch
     }, "adaptive checkpoint after task-01")
 
     assert result["decision"] == "continue"
-    assert captured["role"] == "reviewer"
     assert '"evidence_actions": ["file_read: inspect"]' in captured["prompt"]
     assert '"instruction": "Run focused tests"' in captured["prompt"]
     assert '"pending_assessment"' in captured["prompt"]
@@ -206,7 +341,7 @@ def test_reviewer_receives_checkpoint_evidence_and_continue_decision(monkeypatch
 
 
 def test_reviewer_rejects_continue_when_pending_assessment_is_stale(monkeypatch):
-    def fake_json(_run, _role, _prompt, validator):
+    def fake_json(_factory, _prompt, validator, _extract):
         payload = {
             "decision": "continue",
             "reason": "nothing else needed",
@@ -217,7 +352,7 @@ def test_reviewer_rejects_continue_when_pending_assessment_is_stale(monkeypatch)
         validator(payload)
         return payload
 
-    monkeypatch.setattr(server, "_autopilot_json_model", fake_json)
+    monkeypatch.setattr(autopilot_controller, "review_json_model", fake_json)
     with pytest.raises(ValueError, match="continue is invalid"):
         server._autopilot_review_model({
             "objective": "adapt", "max_tasks": 6, "max_replans": 1,
@@ -241,7 +376,7 @@ def test_reviewer_replan_with_nothing_stale_is_coerced_to_continue(monkeypatch):
     # inconsistency, and the ENTIRE autonomous run failed mid-execution with
     # valid pending tasks still queued. A replan with nothing to act on means
     # the same as continue -- coerce it, do not fail the run.
-    def fake_json(_run, _role, _prompt, validator):
+    def fake_json(_factory, _prompt, validator, _extract):
         payload = {
             "decision": "replan",
             "reason": "the plan still looks fine actually",
@@ -253,7 +388,7 @@ def test_reviewer_replan_with_nothing_stale_is_coerced_to_continue(monkeypatch):
         validator(payload)  # must NOT raise; must coerce decision in place
         return payload
 
-    monkeypatch.setattr(server, "_autopilot_json_model", fake_json)
+    monkeypatch.setattr(autopilot_controller, "review_json_model", fake_json)
     result = server._autopilot_review_model({
         "objective": "adapt", "max_tasks": 6, "max_replans": 1,
         "plan": [
@@ -281,7 +416,7 @@ def test_reviewer_drops_assessments_of_non_pending_tasks_instead_of_failing(monk
     # pending tasks.
     captured = {}
 
-    def fake_json(_run, _role, _prompt, validator):
+    def fake_json(_factory, _prompt, validator, _extract):
         payload = {
             "decision": "continue",
             "reason": "looks fine",
@@ -299,7 +434,7 @@ def test_reviewer_drops_assessments_of_non_pending_tasks_instead_of_failing(monk
         captured.update(payload)
         return payload
 
-    monkeypatch.setattr(server, "_autopilot_json_model", fake_json)
+    monkeypatch.setattr(autopilot_controller, "review_json_model", fake_json)
     result = server._autopilot_review_model({
         "objective": "count files", "max_tasks": 6, "max_replans": 1,
         "plan": [
@@ -326,7 +461,7 @@ def test_reviewer_drops_assessments_of_non_pending_tasks_instead_of_failing(monk
 def test_reviewer_fills_omitted_pending_assessments_as_keep(monkeypatch):
     captured = {}
 
-    def fake_json(_run, _role, _prompt, validator):
+    def fake_json(_factory, _prompt, validator, _extract):
         payload = {
             "decision": "replan",
             "reason": "one premise is stale",
@@ -339,7 +474,7 @@ def test_reviewer_fills_omitted_pending_assessments_as_keep(monkeypatch):
         captured.update(payload)
         return payload
 
-    monkeypatch.setattr(server, "_autopilot_json_model", fake_json)
+    monkeypatch.setattr(autopilot_controller, "review_json_model", fake_json)
     result = server._autopilot_review_model({
         "objective": "adapt", "max_tasks": 6, "max_replans": 1,
         "plan": [
