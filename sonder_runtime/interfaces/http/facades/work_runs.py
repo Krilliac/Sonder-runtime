@@ -24,7 +24,9 @@ ROUTE = "/v1/work-runs"
 def serve_request(handler: Any, method: str, path: str, context: Any, *, runner: Any,
                   developer_authorized: Callable[[Any], bool],
                   principal_of: Callable[[Any], str],
-                  store_errors: tuple[type[BaseException], ...], log: Any) -> bool:
+                  store_errors: tuple[type[BaseException], ...], log: Any,
+                  status_projection: Callable[[dict], dict] | None = None,
+                  cancel_projection: Callable[[dict], dict] | None = None) -> bool:
     """Serve one work-run request; ``False`` for another route.
 
     ``context`` is the request's auth context, or ``None`` to read it from
@@ -52,13 +54,18 @@ def serve_request(handler: Any, method: str, path: str, context: Any, *, runner:
     principal = principal_of(context)
     try:
         if method == "GET" and not parts:
-            handler._send_json_payload({"runs": runner.recent(principal)},
+            payload = {"runs": runner.recent(principal)}
+            if status_projection is not None:
+                payload["runs"] = [status_projection(row) for row in payload["runs"]]
+            handler._send_json_payload(payload,
                                        headers={"Cache-Control": "no-store"})
             return True
         if method == "GET" and len(parts) == 1:
             record = runner.get(run_id, principal)
         elif method == "POST" and len(parts) == 2 and parts[1] == "cancel":
             record = runner.cancel(run_id, principal)
+            if record is not None and cancel_projection is not None:
+                record = cancel_projection(record)
         else:
             handler._send_json_payload({"error": {"message": "method not allowed",
                                                   "type": "invalid_request"}}, status=405)
@@ -75,6 +82,8 @@ def serve_request(handler: Any, method: str, path: str, context: Any, *, runner:
                                               "type": "not_found", "code": "NOT_FOUND"}},
                                    status=404)
         return True
+    if status_projection is not None:
+        record = status_projection(record)
     handler._send_json_payload(record, headers={"Cache-Control": "no-store"})
     return True
 

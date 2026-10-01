@@ -3382,6 +3382,10 @@ def _with_conversation_lifetime(function):
     return invoke
 
 
+from sonder_runtime.bootstrap.work_narration import repl_narration
+
+
+@repl_narration
 @_with_conversation_lifetime
 def main(*, machine_output=False):
     global CURRENT_TOKEN

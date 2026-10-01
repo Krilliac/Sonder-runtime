@@ -15,31 +15,64 @@ const _runId = 'wr-7c1e9a4b2d6f40c8a3e5b1d7f9c2e4a6';
 const _hi = [ChatMessage(role: Role.user, content: 'refactor the PSO cache')];
 
 void main() {
-  test('a running chat_work receipt yields a work run, not raw API text',
-      () async {
-    final reply = await http.runWithClient(
-      () => SonderApi(baseUrl: 'http://127.0.0.1:11435').chatDetailed(_hi),
-      () => MockClient(
-          (_) async => fixtureResponse('chat_work_running.json', 200)),
-    );
-    expect(reply.pendingWorkRunId, _runId);
-    expect(reply.metadata!.workRunId, _runId);
-    expect(reply.metadata!.workStatus, 'running');
-    expect(reply.metadata!.workRunning, isTrue);
-    expect(reply.text, isNot(contains('GET /v1/work-runs')));
-    expect(reply.text, isNot(contains('POST /v1/work-runs')));
-    expect(reply.text, contains(_runId));
-  });
+  test(
+    'a running chat_work receipt yields a work run, not raw API text',
+    () async {
+      final reply = await http.runWithClient(
+        () => SonderApi(baseUrl: 'http://127.0.0.1:11435').chatDetailed(_hi),
+        () => MockClient(
+          (_) async => fixtureResponse('chat_work_running.json', 200),
+        ),
+      );
+      expect(reply.pendingWorkRunId, _runId);
+      expect(reply.metadata!.workRunId, _runId);
+      expect(reply.metadata!.workStatus, 'running');
+      expect(reply.metadata!.workRunning, isTrue);
+      expect(reply.text, isNot(contains('GET /v1/work-runs')));
+      expect(reply.text, isNot(contains('POST /v1/work-runs')));
+      expect(reply.text, contains(_runId));
+    },
+  );
+
+  test(
+    'parses bounded progress and keeps terminal runs polling until complete',
+    () {
+      final run = WorkRun.fromJson({
+        'id': _runId,
+        'status': 'returned',
+        'progress_complete': false,
+        'final_summary': 'Two agents finished; one is validating.',
+        'progress': [
+          {
+            'id': 'p1',
+            'run_id': _runId,
+            'text': 'Agent 1 finished the scan.',
+            'kind': 'task_finished',
+            'at': 12.5,
+            'final': false,
+          },
+          {'id': 'bad', 'text': '', 'at': 'nan'},
+        ],
+      });
+      expect(run.narrationComplete, isFalse);
+      expect(run.finalSummary, 'Two agents finished; one is validating.');
+      expect(run.progress, hasLength(1));
+      expect(run.progress.single.text, 'Agent 1 finished the scan.');
+    },
+  );
 
   test('work-run fields survive a ChatStore round trip', () {
     const m = ChatMessage(
       role: Role.assistant,
       content: 'x',
-      responseMetadata:
-          ChatResponseMetadata(workRunId: _runId, workStatus: 'running'),
+      responseMetadata: ChatResponseMetadata(
+        workRunId: _runId,
+        workStatus: 'running',
+      ),
     );
     final back = ChatMessage.fromJson(
-        jsonDecode(jsonEncode(m.toJson())) as Map<String, dynamic>);
+      jsonDecode(jsonEncode(m.toJson())) as Map<String, dynamic>,
+    );
     expect(back.responseMetadata!.workRunId, _runId);
     expect(back.responseMetadata!.workRunning, isTrue);
     final done = back.responseMetadata!.withWork(workStatus: 'returned');
