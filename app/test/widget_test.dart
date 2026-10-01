@@ -102,11 +102,14 @@ void main() {
     await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
     await tester.pumpAndSettle();
 
-    // Model picker in the title bar shows the local model once settings resolve.
+    // The composer's model picker shows the local model once settings
+    // resolve.
     expect(find.textContaining('sonder'), findsWidgets);
-    expect(find.text('Sonder Runtime'), findsOneWidget);
-    expect(find.textContaining('Not a standalone model'), findsOneWidget);
-    expect(find.textContaining('served locally by Ollama'), findsOneWidget);
+    // A calm welcome; the architecture explanation lives in the docs and on
+    // Runtime, not repeated on the empty conversation.
+    expect(find.text('What should we work on?'), findsOneWidget);
+    expect(find.textContaining('Not a standalone model'), findsNothing);
+    expect(find.byKey(const Key('suggestion-/stats')), findsOneWidget);
     // Empty state shows the message composer.
     expect(find.byType(TextField), findsOneWidget);
     // The status strip speaks the REPL's status line. Nothing is fabricated

@@ -5,6 +5,7 @@ import '../api.dart';
 import '../theme.dart';
 import '../ui/status_line.dart';
 import '../ui/status_vocab.dart';
+import '../workspace_ui.dart' show conversationWidth;
 import 'live_line.dart' show monoCellWidth;
 
 /// Build the REPL status state from what chat knows.
@@ -67,36 +68,44 @@ class ChatStatusStrip extends StatelessWidget {
             tier: tier,
             project: project);
         final base = tokens.mono(11, color: tokens.muted);
+        // A quiet line on the canvas, aligned with the composer's text
+        // rather than a full-width bar.
         return Container(
           key: const Key('chat-status-strip'),
           width: double.infinity,
-          constraints: const BoxConstraints(minHeight: 28),
-          decoration: BoxDecoration(
-            color: tokens.panel,
-            border: Border(top: BorderSide(color: tokens.hairline)),
-          ),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
+          constraints: const BoxConstraints(minHeight: 24),
+          padding: const EdgeInsets.fromLTRB(
+              SonderSpace.md, 0, SonderSpace.md, SonderSpace.xs),
           child: SafeArea(
             top: false,
-            child: LayoutBuilder(builder: (context, constraints) {
-              final cell = monoCellWidth(context, base);
-              final cols =
-                  cell <= 0 ? 80 : (constraints.maxWidth / cell).floor();
-              final fields = statusSegments(state, cols);
-              final line = statusLine(state, cols);
-              return Semantics(
-                label: 'Status: $line',
-                child: ExcludeSemantics(
-                  child: Text.rich(
-                    TextSpan(children: _spans(fields, tokens, base)),
-                    key: const Key('chat-status-line'),
-                    maxLines: 1,
-                    softWrap: false,
-                    overflow: TextOverflow.clip,
-                  ),
+            child: Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: conversationWidth),
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: SonderSpace.lg),
+                  child: LayoutBuilder(builder: (context, constraints) {
+                    final cell = monoCellWidth(context, base);
+                    final cols =
+                        cell <= 0 ? 80 : (constraints.maxWidth / cell).floor();
+                    final fields = statusSegments(state, cols);
+                    final line = statusLine(state, cols);
+                    return Semantics(
+                      label: 'Status: $line',
+                      child: ExcludeSemantics(
+                        child: Text.rich(
+                          TextSpan(children: _spans(fields, tokens, base)),
+                          key: const Key('chat-status-line'),
+                          maxLines: 1,
+                          softWrap: false,
+                          overflow: TextOverflow.clip,
+                        ),
+                      ),
+                    );
+                  }),
                 ),
-              );
-            }),
+              ),
+            ),
           ),
         );
       },
