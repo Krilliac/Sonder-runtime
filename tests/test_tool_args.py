@@ -212,4 +212,21 @@ def test_agent_loop_recovers_arguments_before_dispatch(monkeypatch):
     assert "argument normalization: dropped unknown argument unknown" in prompts[1]
 
 
-# The decision-envelope hook test lands in the follow-up after PR #616 merges.
+@pytest.mark.parametrize("boundary", ["server", "packaged"])
+def test_name_arguments_alias_survives_structural_validation(boundary):
+    """The decision parser must keep A8's alternate envelope through validation.
+
+    Both generators must canonicalize {"name", "arguments"} before the
+    structural checks, which read "tool" and would otherwise reject the
+    decision as having neither "tool" nor "final".
+    """
+    import server
+    from sonder_runtime.adapters.agent_decision_generation import generate_decision
+    raw = '{"name":"file_read","arguments":{"path":"a.py"}}'
+    if boundary == "server":
+        decision, original, error = server._agent_generate_decision(lambda _: raw, "read", repair_limit=0)
+    else:
+        decision, original, error = generate_decision(lambda _: raw, "read", repair_limit=0, write_chunk_hint=1000)
+    assert error is None
+    assert decision == {"tool": "file_read", "args": {"path": "a.py"}}
+    assert original == raw
