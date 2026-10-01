@@ -13,6 +13,7 @@ from .traits import ToolTraits, TriState, traits_from_effects
 # Existing host-owned read contracts in server.REPOSITORY_READ_ONLY_TOOLS,
 # command_catalog._READ_ONLY, typed_tools and permission_modes native grades.
 READ_ONLY_TOOLS = frozenset({
+    "tool_help", "file_check",
     "file_policy", "workspace_inventory", "workspace_compare", "directory_tree",
     "file_find", "dependency_inventory", "repository_symbol_index", "log_inspect",
     "file_read", "file_digest", "directory_digest", "file_read_range", "context_pack",
