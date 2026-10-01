@@ -11,6 +11,30 @@ import tempfile
 
 _FLEET_TEST_ROOT = Path(tempfile.mkdtemp(prefix="sonder-pytest-fleet-"))
 
+# Tests that started with the state home outside every test-owned directory.
+_ESCAPED_STATE_HOMES: list[tuple[str, str]] = []
+
+
+def _test_owned(path: Path) -> bool:
+    """Whether *path* is inside the system temp directory.
+
+    The repository-root conftest creates the session's state home with
+    ``mkdtemp`` and every ``tmp_path`` lives there too; an operator's real
+    state home (``%LOCALAPPDATA%\\sonder``, ``~/.local/share/sonder``) never
+    does. Deliberately not trusting ``SONDER_HOME`` itself: if the root conftest
+    did not load, that variable may name the real home.
+    """
+    try:
+        resolved = Path(path).resolve()
+        root = Path(tempfile.gettempdir()).resolve()
+    except OSError:
+        return False
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
 # This hook module is loaded before pytest imports test modules.  Pinning the
 # environment here ensures fleet_store/master_orchestrator never open the live
 # restart-safe ledger during collection, setup_function(), subprocess tests, or
@@ -56,13 +80,39 @@ def _isolate_runtime_home():
             paths.configure_home(previous)
 
 
+
+def emotion_vector_cleanup(live_copy: Path):
+    """Return ``(owned, remove)`` for one test's emotion-vector copy.
+
+    ``remove`` deletes *live_copy* only when it lies in a test-owned
+    directory; for anything else it is a no-op, so no test run can delete an
+    operator's live tuning file.
+    """
+    owned = _test_owned(live_copy)
+
+    def remove():
+        if not owned:
+            return
+        try:
+            live_copy.unlink()
+        except (FileNotFoundError, OSError):
+            pass
+
+    return owned, remove
+
 @pytest.fixture(autouse=True)
-def _isolate_emotion_vectors_state(_isolate_runtime_home):
+def _isolate_emotion_vectors_state(request, _isolate_runtime_home):
     """Drop the live emotion-vector copy from the shared test state home.
 
     Live tuning writes ``<state home>/emotion_vectors.json``, which then
     shadows the bundled default for every later prompt build.  Remove it on
     both sides of each test so no test inherits another's tone vectors.
+
+    Only ever inside a test-owned home. If an earlier test leaked a real state
+    home (dropped SONDER_HOME, an override left behind), the path below is an
+    operator's live tuning file: deleting it before and after every later test
+    silently destroyed the user's vectors on any local run. The escape is
+    recorded and reported at the end of the session instead.
     """
     from sonder_runtime.platform import paths
 
@@ -70,16 +120,25 @@ def _isolate_emotion_vectors_state(_isolate_runtime_home):
     # ``os.name``/path flavours, and re-resolving the home under those patches
     # at teardown tried to build a WindowsPath on POSIX.
     live_copy = paths.default_home() / "emotion_vectors.json"
-
-    def remove():
-        try:
-            live_copy.unlink()
-        except (FileNotFoundError, OSError):
-            pass
+    owned, remove = emotion_vector_cleanup(live_copy)
+    if not owned:
+        _ESCAPED_STATE_HOMES.append((request.node.nodeid, str(live_copy.parent)))
 
     remove()
     yield
     remove()
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    """Name every test that ran against a state home outside the test root."""
+    del exitstatus, config
+    if not _ESCAPED_STATE_HOMES:
+        return
+    terminalreporter.section("state home escaped test isolation", sep="=", red=True)
+    for nodeid, home in _ESCAPED_STATE_HOMES[:20]:
+        terminalreporter.write_line(f"{nodeid}: {home}")
+    if len(_ESCAPED_STATE_HOMES) > 20:
+        terminalreporter.write_line(f"... and {len(_ESCAPED_STATE_HOMES) - 20} more")
 
 
 @pytest.fixture(autouse=True)
@@ -135,6 +194,35 @@ def _isolate_fleet_ledger(_isolate_runtime_home):
         fleet_store.clear_all()
     except Exception:
         pass
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_legacy_server_graph():
+    """Start each test without a graph ``server._application()`` built earlier.
+
+    The legacy module composes its graph lazily and keeps it, owned, for the
+    life of the process. So the first test on an xdist worker to reach it left
+    every later test there running against a graph composed for someone else,
+    with the module's ownership flag set -- and a later test that bound its
+    own impostor graph saw ``run_mcp`` retire the impostor instead:
+    ``'types.SimpleNamespace' object has no attribute 'close_providers'``.
+    Retire exactly the graph the module constructed, whether it is still
+    bound or a monkeypatch restoring ``_APP_GRAPH`` has already orphaned it;
+    a graph another owner bound is not the module's to close. A double that
+    a test's patched ``build_application`` returned is only dropped.
+    """
+    import server
+    from sonder_runtime.bootstrap.application_graph import Application
+
+    with server._APP_GRAPH_LOCK:
+        built = server._APP_GRAPH_BUILT_BY_SERVER
+        if built is not None and server._APP_GRAPH is built:
+            server._APP_GRAPH = None
+        server._APP_GRAPH_BUILT_BY_SERVER = None
+        server._APP_GRAPH_OWNED_BY_SERVER = False
+    if type(built) is Application:
+        built.close_providers(timeout=5)
     yield
 
 
@@ -240,6 +328,34 @@ def _legacy_model_target(server, tier, strict):
 
     model, cloud, augment, tier_label = server._serve_target(tier, strict)
     return ModelTarget(model, cloud, tier_label, augment)
+
+
+@pytest.fixture
+def isolated_default_runtime(monkeypatch):
+    """Give one test an empty process-default application runtime.
+
+    ``bootstrap.app`` keeps the default graph's cleanup callbacks beside the
+    lifecycle that holds it. Tests that swapped in a fresh lifecycle but only
+    some of those callbacks left the rest bound to a graph an earlier test had
+    composed: their ``default_app(config=...)`` claimed that graph's cleanup,
+    closed it, and reset only the swapped-in lifecycle, so once monkeypatch
+    restored the original lifecycle every later ``default_app()`` on the
+    worker got a closed graph ("configured membership must be active").
+    Every ``_default_*_close`` callback is swapped, found by name rather than
+    a hand-kept list that falls behind the next one added.
+    """
+    from sonder_runtime.adapters.application_lifecycle import ApplicationLifecycle
+    from sonder_runtime.bootstrap import app as bootstrap
+
+    callbacks = [name for name in vars(bootstrap)
+                 if name.startswith("_default_") and name.endswith("_close")]
+    assert "_default_application_close" in callbacks, callbacks
+    monkeypatch.setattr(bootstrap, "_application_lifecycle",
+                        ApplicationLifecycle(bootstrap._build_default_application))
+    for name in (*callbacks, "_default_config", "_owned_default_application"):
+        monkeypatch.setattr(bootstrap, name, None)
+    monkeypatch.setattr(bootstrap, "_default_runtime_closing", False)
+    return bootstrap
 
 
 @pytest.fixture
