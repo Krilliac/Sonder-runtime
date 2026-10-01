@@ -112,7 +112,7 @@ void main() {
     expect(
         find.descendant(of: export, matching: find.text('ok')), findsOneWidget);
     expect(
-        find.text('1 subscribers · 1204 emitted · 0 dropped · 512/4096 '
+        find.text('1 subscriber · 1204 emitted · 0 dropped · 512/4096 '
             'retained'),
         findsOneWidget);
     // The full digest is what gets copied.

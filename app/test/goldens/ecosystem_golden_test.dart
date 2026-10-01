@@ -22,8 +22,8 @@ void main() {
   setUpAll(loadGoldenFonts);
 
   final cases = {
-    'ready_desk': (const Size(760, 1180), ecosystemReadySynthetic(), true),
-    'fallback_phone': (const Size(390, 1240), ecosystemFallback(), false),
+    'ready_desk': (const Size(760, 1480), ecosystemReadySynthetic(), true),
+    'fallback_phone': (const Size(390, 1520), ecosystemFallback(), false),
   };
   final themes = {'dark': SonderTheme.dark, 'light': SonderTheme.light};
 
