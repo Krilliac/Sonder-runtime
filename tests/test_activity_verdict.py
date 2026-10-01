@@ -28,12 +28,13 @@ render their own verdict and **19 of them are not verifiers** -- ``git_merge``,
       activity  ->   ok=True
 
 Why this is scoped to a derived tool set rather than applied to every
-observation -- measured, not argued: ``file_read`` of a 23-byte YAML whose
-first line is ``ok: false`` makes ``grounded_outcomes.rendered_verdict``
-return ``False``. A blanket read would let *file content* mark a successful
-read as failed, which is the same defect pointing the other way, and the
-content is caller-supplied. So the correction applies only to tools whose
-rendered text this server itself produced, and
+observation -- measured, not argued: a raw ``file_read`` response containing
+``ok: false`` makes ``grounded_outcomes.rendered_verdict`` return ``False``.
+Agent file reads now number their content, so that response returns ``None``;
+the tool-set guard must still hold independently of the display format.
+A blanket read of raw content would let *file content* mark a successful
+read as failed. The content is caller-supplied, so the correction applies only
+to tools whose rendered text this server itself produced, and
 ``test_rendered_verdict_tools_match_their_renderers`` re-derives that set from
 the renderer call sites by AST so the list cannot drift.
 """
@@ -194,8 +195,8 @@ def test_a_successful_renderer_tool_is_still_recorded_ok(monkeypatch):
 def test_tool_content_cannot_flip_the_verdict(tmp_path, monkeypatch):
     """The over-reach guard: ``file_read`` content is not a verdict.
 
-    Measured -- ``rendered_verdict`` on this observation returns False, so a
-    blanket read would file a successful read as a failure.
+    A5 requires numbered agent pages, so the content no longer resembles a
+    renderer-owned verdict field. Reading it must still record success.
     """
     root = tmp_path / "root"
     root.mkdir()
@@ -206,7 +207,23 @@ def test_tool_content_cannot_flip_the_verdict(tmp_path, monkeypatch):
     observation, recorded_ok = _observe("file_read", {"path": str(config)})
 
     assert not str(observation).startswith("ERROR:"), observation
-    assert grounded_outcomes.rendered_verdict(observation) is False
+    assert observation.splitlines()[1:] == ["     1  ok: false", "     2  name: demo"]
+    assert grounded_outcomes.rendered_verdict(observation) is None
+    assert recorded_ok is True
+
+
+def test_raw_tool_content_cannot_flip_the_verdict(monkeypatch):
+    """The tool-set guard must not rely on numbered content hiding verdicts."""
+    rendered = server._format_file_result("file read", {
+        "path": "config.yaml", "bytes": 21, "truncated": False,
+        "text": "ok: false\nname: demo\n",
+    })
+    assert grounded_outcomes.rendered_verdict(rendered) is False
+    monkeypatch.setattr(server, "_agent_dispatch", lambda *a, **k: rendered)
+
+    observation, recorded_ok = _observe("file_read", {"path": "config.yaml"})
+
+    assert observation == rendered
     assert recorded_ok is True
 
 

@@ -398,3 +398,43 @@ def test_direct_legacy_mcp_retires_a_locally_built_graph_when_safety_refuses(
     assert calls == [graph]
     assert server._APP_GRAPH is None
     assert server._APP_GRAPH_OWNED_BY_SERVER is False
+
+
+def test_direct_legacy_mcp_never_retires_a_graph_bound_over_its_own(monkeypatch):
+    """Server ownership is the graph it built, not whatever is bound later.
+
+    Once the module had composed its own graph, an object bound over it --
+    here an impostor the membership binding refuses -- inherited the bare
+    ownership flag, and ``run_mcp``'s finalizer handed it ``close_providers``.
+    CI hit this whenever an earlier test on the same xdist worker had built
+    the server graph first.
+    """
+    import server
+    from sonder_runtime.adapters.inference.ollama_pool import WorkerPoolUnavailable
+
+    calls = []
+    original_close = bootstrap_app.Application.close_providers
+    monkeypatch.setattr(server, "_APP_GRAPH", None)
+    monkeypatch.setattr(server, "_APP_GRAPH_OWNED_BY_SERVER", False)
+    monkeypatch.setattr(server.mcp, "run", lambda: calls.append("adapter"))
+
+    def close(graph, timeout=None):
+        calls.append(graph)
+        return original_close(graph, timeout=timeout)
+
+    monkeypatch.setattr(bootstrap_app.Application, "close_providers", close)
+    graph = server._application()
+    impostor = SimpleNamespace(close_providers=lambda **_kwargs: calls.append("impostor"))
+    monkeypatch.setattr(server, "_APP_GRAPH", impostor)
+
+    with pytest.raises(WorkerPoolUnavailable, match="trusted application membership"):
+        server.run_mcp(safety_checked=True)
+
+    assert calls == []
+    assert server._APP_GRAPH is impostor
+    # The graph the module built is still its own to retire once it is bound.
+    monkeypatch.setattr(server, "_APP_GRAPH", graph)
+    server._close_server_owned_application(timeout=5)
+    assert calls == [graph]
+    assert server._APP_GRAPH is None
+    assert server._APP_GRAPH_OWNED_BY_SERVER is False

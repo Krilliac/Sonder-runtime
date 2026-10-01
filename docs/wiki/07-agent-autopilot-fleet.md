@@ -69,6 +69,41 @@ compare-and-set SQL is the concurrency authority. Invariants:
 Control: `/autopilot status|resume|cancel`, or the master orchestrator
 tools. See [autopilot-interruption](../runbooks/autopilot-interruption.md).
 
+Writing runs without an explicit project (`default`, empty, or an unresolved
+project name) use `<state-home>/creations/<run-id>/`. Autopilot persists this
+folder in its project field, shown by the app and by `working in:` in start,
+status, and report text. Standalone writing agents also allocate a creations
+folder before opening their lanes. Inside the agent loop only a named project
+that resolves to no directory is upgraded; an omitted project stays unbound for
+host-owned callers that keep their own root (the selfmod editor's candidate
+workspace, the web research agent, unsafe lab). Existing project directories keep their
+selected scope; read-only observe runs keep their existing behavior. A default
+state home inside a Sonder Git checkout is refused instead of writing artifacts
+into the Runtime source. Configured workspace grants still apply to delegation.
+
+The console is the exception: its managed work grants only
+`[state].workspace_roots` and refuses roots that overlap the state home, so
+its default folder goes under the first usable workspace root instead (see
+[workspace scope](20-terminal-ui-conventions.md#workspace-scope-for-file-commands)).
+
+When unattended execution verifiers are refused (for example in `acceptEdits`),
+an implementation may pass using successful read-back of every changed file
+followed by host-owned, non-executing syntax checks: Python AST/compile, JSON,
+TOML, HTML tag structure, and XML/SVG parsing. Self-contained HTML/SVG/XML requests
+also reject external HTTP(S) `src`/`href` dependencies. Receipts retain paths,
+read-back tool names, checker identities, and file digests; later writes invalidate
+the evidence. These checks establish static structure, not runtime behavior.
+
+Unsupported artifacts with successful write/read-back evidence are marked
+`passed_unverified`: **written, not executed: needs `<command>` to verify**.
+Execution-dependent validation tasks stay pending with the required approval
+and command visible. Runnable report tasks still run, then Autopilot pauses for
+approval without consuming a failure/retry budget or claiming completion.
+Explicit resume retries pending validation. Modes that permit an execution
+verifier (including an explicit allow rule) still require the real verifier.
+Malformed files, missing or stale read-back, failed mutations, and unknown
+mutation paths remain failures; no permission or path-confinement gate changes.
+
 Steering (`/autopilot steer|clarify <id> <message>`) is owner-scoped and
 fails closed for unowned runs. Runs started from the console
 (`/autopilot plan|run`, `/mission start`) carry an opaque console owner

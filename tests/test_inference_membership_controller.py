@@ -571,6 +571,7 @@ def test_refresh_rejects_invalid_timeout_before_starting_a_thread(timeout):
         assert control.close(timeout=0)
 
 
+@pytest.mark.usefixtures("isolated_default_runtime")
 @pytest.mark.parametrize("primary_remote", [False, True])
 @pytest.mark.parametrize("command", ["serve", "mcp", "repl", "bound_direct"])
 def test_entrypoint_legacy_requests_share_typed_membership_admission(
@@ -582,7 +583,6 @@ def test_entrypoint_legacy_requests_share_typed_membership_admission(
     from sonder_runtime.adapters.persistence import migrations, operations_store
     from sonder_runtime.adapters.persistence.sqlite import bridge_migration
     from sonder_runtime.bootstrap import app as bootstrap, legacy_root
-    from sonder_runtime.adapters.application_lifecycle import ApplicationLifecycle
     from sonder_runtime.interfaces.http import serve
     from sonder_runtime.interfaces.repl import repl
     from sonder_runtime.platform.config import SonderConfig, StateConfig
@@ -598,9 +598,6 @@ def test_entrypoint_legacy_requests_share_typed_membership_admission(
     monkeypatch.setattr(server, "BASE", config.ollama.url)
     monkeypatch.setattr(server, "_APP_GRAPH", None)
     monkeypatch.setattr(legacy_root, "_owned_application", None)
-    monkeypatch.setattr(bootstrap, "_application_lifecycle", ApplicationLifecycle(bootstrap._build_default_application))
-    for name in ("_default_config", "_default_compute_close", "_default_delegation_close", "_default_inference_close"):
-        monkeypatch.setattr(bootstrap, name, None)
     monkeypatch.setattr(entrypoint, "_load_config", lambda _: config)
     monkeypatch.setattr(entrypoint, "_export_runtime_environment", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(bridge_migration, "require_epoch_2", lambda _: None)
@@ -912,6 +909,7 @@ def test_legacy_membership_binding_rejects_impostors_before_adapter_or_pool_call
         ollama_pool.reset_typed_workers()
 
 
+@pytest.mark.usefixtures("isolated_default_runtime")
 def test_owned_default_binding_accepts_genuine_typed_local_application(monkeypatch, tmp_path):
     from sonder_runtime.bootstrap import app as bootstrap
     from sonder_runtime.adapters.application_lifecycle import ApplicationLifecycle
@@ -921,9 +919,6 @@ def test_owned_default_binding_accepts_genuine_typed_local_application(monkeypat
     application = bootstrap.build_application(config=SonderConfig(state=StateConfig(home=str(tmp_path))))
     monkeypatch.setattr(bootstrap, "_application_lifecycle", ApplicationLifecycle(
         lambda: pytest.fail("owned application fell back to factory")))
-    for name in ("_owned_default_application", "_default_config", "_default_compute_close",
-                 "_default_delegation_close", "_default_inference_close"):
-        monkeypatch.setattr(bootstrap, name, None)
     try:
         bootstrap.install_owned_application(application)
         assert bootstrap.default_app(config=application.config) is application
@@ -954,6 +949,7 @@ def test_direct_mcp_requires_exact_application_pool_and_primary_link(monkeypatch
         ollama_pool.reset_typed_workers()
 
 
+@pytest.mark.usefixtures("isolated_default_runtime")
 @pytest.mark.parametrize("impostor", ["controller_duck", "pool_duck", "raw_pool"])
 def test_owned_default_binding_rejects_structural_inference_before_install(monkeypatch, tmp_path, impostor):
     from sonder_runtime.bootstrap import app as bootstrap
@@ -972,9 +968,6 @@ def test_owned_default_binding_rejects_structural_inference_before_install(monke
         proposed = replace(application, inference_pool=replacement)
     calls = []
     monkeypatch.setattr(bootstrap._application_lifecycle, "install_owned", lambda _: calls.append("installed"))
-    for name in ("_owned_default_application", "_default_config", "_default_compute_close",
-                 "_default_delegation_close", "_default_inference_close"):
-        monkeypatch.setattr(bootstrap, name, None)
     try:
         with pytest.raises(ValueError, match="membership binding"):
             bootstrap.install_owned_application(proposed)
@@ -985,6 +978,7 @@ def test_owned_default_binding_rejects_structural_inference_before_install(monke
         ollama_pool.reset_typed_workers()
 
 
+@pytest.mark.usefixtures("isolated_default_runtime")
 @pytest.mark.parametrize("seam", ["root", "interfaces", "mcp", "run_mcp", "owned", "default", "owned_default"])
 @pytest.mark.parametrize("mismatch", ["local_config_remote_pool", "remote_config_local_pool",
     "source_duck", "source_subclass", "source_origins", "source_clock", "source_authority",
@@ -1039,9 +1033,8 @@ def test_binding_requires_configured_origins_and_exact_static_source(monkeypatch
     monkeypatch.setattr(server, "_APP_GRAPH", proposed if seam == "run_mcp" else None)
     monkeypatch.setattr(legacy_root, "_owned_application", None)
     monkeypatch.setattr(bootstrap, "_application_lifecycle", ApplicationLifecycle(lambda: proposed))
-    for name in ("_owned_default_application", "_default_compute_close", "_default_delegation_close",
-                 "_default_inference_close"):
-        monkeypatch.setattr(bootstrap, name, proposed if name == "_owned_default_application" and seam == "owned_default" else None)
+    if seam == "owned_default":
+        monkeypatch.setattr(bootstrap, "_owned_default_application", proposed)
     monkeypatch.setattr(bootstrap, "_default_config", proposed.config)
     try:
         with pytest.raises(WorkerPoolUnavailable if seam == "run_mcp" else ValueError):

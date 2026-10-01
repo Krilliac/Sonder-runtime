@@ -1,5 +1,8 @@
+from pathlib import Path
+
 import intents
 import server
+from sonder_runtime.platform import paths
 
 
 def _no_active(monkeypatch):
@@ -138,7 +141,7 @@ def test_negated_or_ambiguous_worker_counts_do_not_activate_fleet(monkeypatch):
     assert all("hardware-bounded fleet" not in (output or "") for output in outputs)
 
 
-def test_simple_work_uses_foreground_without_model_triage(monkeypatch):
+def _route_simple_work(monkeypatch, project):
     calls = []
     monkeypatch.setattr(
         server,
@@ -150,13 +153,27 @@ def test_simple_work_uses_foreground_without_model_triage(monkeypatch):
         "workbench_agent",
         lambda **kwargs: calls.append(kwargs) or "work complete",
     )
+    return server.route_work_request("Build the Flutter app.", project=project), calls
 
-    output = server.route_work_request("Build the Flutter app.", project="demo")
+
+def test_simple_work_uses_foreground_without_model_triage(monkeypatch, tmp_path):
+    output, calls = _route_simple_work(monkeypatch, str(tmp_path))
 
     assert "mode: foreground workbench" in output
     assert "tier: code ->" in output
-    assert calls[0]["project"] == "demo"
+    # An existing project directory reaches the workbench unchanged.
+    assert calls[0]["project"] == str(tmp_path)
     assert calls[0]["allow_location"] is False
+
+
+def test_simple_work_with_a_bare_project_label_gets_a_creations_folder(monkeypatch):
+    output, calls = _route_simple_work(monkeypatch, "demo")
+
+    assert "mode: foreground workbench" in output
+    # A label that names no directory must not fall back to the server's cwd.
+    routed = Path(calls[0]["project"])
+    assert routed.parent == (paths.default_home() / "creations").resolve()
+    assert routed.is_dir()
 
 
 def test_compound_work_uses_bounded_local_model_decision(monkeypatch):
