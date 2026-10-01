@@ -1138,6 +1138,32 @@
     },
     {
       "function": {
+        "description": "Check one guarded source file with available local checkers",
+        "name": "file_check",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "max_items": {
+              "default": 30,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "path": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
         "description": "Copy one bounded binary-safe file",
         "name": "file_copy",
         "parameters": {
@@ -2048,6 +2074,37 @@
           "required": [
             "query"
           ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Describe one advertised tool or find up to five by query",
+        "name": "tool_help",
+        "parameters": {
+          "additionalProperties": false,
+          "oneOf": [
+            {
+              "required": [
+                "name"
+              ]
+            },
+            {
+              "required": [
+                "query"
+              ]
+            }
+          ],
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "query": {
+              "type": "string"
+            }
+          },
           "type": "object"
         }
       },
