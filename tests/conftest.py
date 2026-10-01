@@ -11,6 +11,30 @@ import tempfile
 
 _FLEET_TEST_ROOT = Path(tempfile.mkdtemp(prefix="sonder-pytest-fleet-"))
 
+# Tests that started with the state home outside every test-owned directory.
+_ESCAPED_STATE_HOMES: list[tuple[str, str]] = []
+
+
+def _test_owned(path: Path) -> bool:
+    """Whether *path* is inside the system temp directory.
+
+    The repository-root conftest creates the session's state home with
+    ``mkdtemp`` and every ``tmp_path`` lives there too; an operator's real
+    state home (``%LOCALAPPDATA%\\sonder``, ``~/.local/share/sonder``) never
+    does. Deliberately not trusting ``SONDER_HOME`` itself: if the root conftest
+    did not load, that variable may name the real home.
+    """
+    try:
+        resolved = Path(path).resolve()
+        root = Path(tempfile.gettempdir()).resolve()
+    except OSError:
+        return False
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
 # This hook module is loaded before pytest imports test modules.  Pinning the
 # environment here ensures fleet_store/master_orchestrator never open the live
 # restart-safe ledger during collection, setup_function(), subprocess tests, or
@@ -56,13 +80,39 @@ def _isolate_runtime_home():
             paths.configure_home(previous)
 
 
+
+def emotion_vector_cleanup(live_copy: Path):
+    """Return ``(owned, remove)`` for one test's emotion-vector copy.
+
+    ``remove`` deletes *live_copy* only when it lies in a test-owned
+    directory; for anything else it is a no-op, so no test run can delete an
+    operator's live tuning file.
+    """
+    owned = _test_owned(live_copy)
+
+    def remove():
+        if not owned:
+            return
+        try:
+            live_copy.unlink()
+        except (FileNotFoundError, OSError):
+            pass
+
+    return owned, remove
+
 @pytest.fixture(autouse=True)
-def _isolate_emotion_vectors_state(_isolate_runtime_home):
+def _isolate_emotion_vectors_state(request, _isolate_runtime_home):
     """Drop the live emotion-vector copy from the shared test state home.
 
     Live tuning writes ``<state home>/emotion_vectors.json``, which then
     shadows the bundled default for every later prompt build.  Remove it on
     both sides of each test so no test inherits another's tone vectors.
+
+    Only ever inside a test-owned home. If an earlier test leaked a real state
+    home (dropped SONDER_HOME, an override left behind), the path below is an
+    operator's live tuning file: deleting it before and after every later test
+    silently destroyed the user's vectors on any local run. The escape is
+    recorded and reported at the end of the session instead.
     """
     from sonder_runtime.platform import paths
 
@@ -70,16 +120,25 @@ def _isolate_emotion_vectors_state(_isolate_runtime_home):
     # ``os.name``/path flavours, and re-resolving the home under those patches
     # at teardown tried to build a WindowsPath on POSIX.
     live_copy = paths.default_home() / "emotion_vectors.json"
-
-    def remove():
-        try:
-            live_copy.unlink()
-        except (FileNotFoundError, OSError):
-            pass
+    owned, remove = emotion_vector_cleanup(live_copy)
+    if not owned:
+        _ESCAPED_STATE_HOMES.append((request.node.nodeid, str(live_copy.parent)))
 
     remove()
     yield
     remove()
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    """Name every test that ran against a state home outside the test root."""
+    del exitstatus, config
+    if not _ESCAPED_STATE_HOMES:
+        return
+    terminalreporter.section("state home escaped test isolation", sep="=", red=True)
+    for nodeid, home in _ESCAPED_STATE_HOMES[:20]:
+        terminalreporter.write_line(f"{nodeid}: {home}")
+    if len(_ESCAPED_STATE_HOMES) > 20:
+        terminalreporter.write_line(f"... and {len(_ESCAPED_STATE_HOMES) - 20} more")
 
 
 @pytest.fixture(autouse=True)
