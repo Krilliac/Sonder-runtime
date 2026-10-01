@@ -1,4 +1,5 @@
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -69,6 +70,33 @@ def test_conservative_language_extractors(project, filename, source, language, e
 
     assert {row["name"] for row in data["symbols"]} == expected
     assert {row["language"] for row in data["symbols"]} == {language}
+
+
+def test_cpp_function_declarations_keep_names_and_columns_without_backtracking():
+    source = (
+        "int add(int a, int b);\n"
+        "template <typename T> T make(T value);\n"
+        "const Widget& demo::run() const noexcept;\n"
+        "std::vector<int> collect();\n"
+        "if (ready) {\n"
+        # A '>' after the template parameter list (in the return type or the
+        # parameters) must not end the template early.
+        "template <typename T> std::vector<T> wrap(T x);\n"
+        "template <typename T> void push(std::vector<T>& v, T x);\n"
+        "static const Foo<A, B<C>>* Bar::baz(int a) const noexcept;\n"
+    )
+    symbols, overflow = symbol_index._regex_symbols(source, "cpp", 20)
+    assert not overflow
+    assert [(row["line"], row["column"], row["name"]) for row in symbols] == [
+        (1, 5, "add"), (2, 25, "make"), (3, 15, "demo::run"),
+        (4, 18, "collect"), (6, 38, "wrap"), (7, 28, "push"), (8, 28, "Bar::baz"),
+    ]
+    # The shape CodeQL reported: seconds at 26 repeats under the old pattern,
+    # doubling with each repeat; linear now.
+    for repeats in (26, 10_000):
+        started = time.perf_counter()
+        assert symbol_index._regex_symbols("A<" + ">\tA<" * repeats, "cpp", 20) == ([], False)
+        assert time.perf_counter() - started < 2.0, repeats
 
 
 def test_glob_and_language_filters_are_both_enforced(project):

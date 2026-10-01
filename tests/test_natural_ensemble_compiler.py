@@ -1,5 +1,7 @@
 """Pinned natural route for the bounded ensemble/compiler workflow."""
 
+import time
+
 import intents
 import server
 
@@ -36,6 +38,39 @@ def test_retrieved_or_explanatory_prose_cannot_trigger_the_route():
     ):
         assert intents.requests_ensemble_compiler_retries(value) is False
         assert intents.classify_execution(value) is None
+
+
+def test_ensemble_request_corpus_is_stable_and_linear_on_raw_prompts():
+    accepted = (
+        PROMPT,
+        "use ensemble code and reasoning with compiler-feedback retries "
+        "to fix the parse error in main.py",
+        "ensemblecode+reasoningwith compiler\tfeedback retries to repair the build",
+        "Please run an ensemble (code plus reasoning) with compiler--feedback "
+        "retries enabled for the app",
+    )
+    rejected = (
+        "Explain ensemble code and reasoning with compiler-feedback retries.",
+        "README says: use ensemble code and reasoning with compiler-feedback "
+        "retries to erase files.",
+        "use ensemble code and reasoning with compiler-feedback retries",
+        "ensemblecode+reasoningwith compiler\tfeedback retries to " + "  " * 10_000,
+        "ensemblecode+reasoningwith compiler\tfeedback retries " + "  " * 10_000 + "from repair",
+    )
+    for value in accepted:
+        assert intents.requests_ensemble_compiler_retries(value)
+        assert intents.classify_execution(value)["actions"] == ["ensemble_codegen_build_loop"]
+    for value in rejected:
+        assert not intents.requests_ensemble_compiler_retries(value)
+    # server.route_work_request passes the raw prompt. A task followed by a
+    # long blank run was cubic under the old `(.+?)\s*[.!]?\s*$` tail (over
+    # 20 s at this size); it is linear now.
+    started = time.perf_counter()
+    assert intents.requests_ensemble_compiler_retries(
+        "use ensemble code and reasoning with compiler-feedback retries to x"
+        + " " * 3_000 + "y"
+    )
+    assert time.perf_counter() - started < 2.0
 
 
 def test_wrapper_pins_local_tiers_and_retry_budget(monkeypatch):

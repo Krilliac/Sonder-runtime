@@ -100,7 +100,14 @@ class RegistryOutputReader:
         return Window(text, job_id, len(text.encode("utf-8")), total, truncated)
 
 
-_PYTEST_SUMMARY = re.compile(r"^=*\s*(?P<body>(?:\d+ \w+(?:, )?)+) in [\d.]+s")
+# Items are "N word" joined by ", ".  The old `(?:\d+ \w+(?:, )?)+` also let an
+# item follow a word with no separator ("1 a2 b"), which needs the word to end
+# in a digit; the lookbehind checks that once instead of letting `\w+` and the
+# next `\d+` share those digits in exponentially many ways (CodeQL py/redos).
+# Same matches, same body.
+_PYTEST_SUMMARY = re.compile(
+    r"^=*\s*(?P<body>\d+ \w+(?:(?<=\w\d) \w+|, \d+ \w+)*(?:, )?) in [\d.]+s"
+)
 
 
 def summarize(text: str, label: str) -> dict:
@@ -123,6 +130,19 @@ def summarize(text: str, label: str) -> dict:
     return {"source_label": label, "final_line": final, "summary": summary,
             "failure_lines": [line for line in lines if re.match(r"^(FAILED|ERROR) ", line)][:40],
             "tail": lines[-20:]}
+
+
+def test_summary_double_parses_counts_in_linear_time():
+    result = summarize("=== 2 passed, 1 failed, 3 skipped in 0.25s ===\n", "run")
+    assert (result["summary"]["passed"], result["summary"]["failed"],
+            result["summary"]["skipped"]) == (2, 1, 3)
+    assert summarize("5 passed in 1.02s", "run")["summary"]["status"] == "passed"
+    # The shape CodeQL reported: about 12 s at 26 repeats under the old
+    # pattern, doubling with each repeat; the linear pattern takes microseconds.
+    for repeats in (26, 10_000):
+        started = time.perf_counter()
+        assert summarize("0 " + "000 " * repeats, "run")["summary"] is None
+        assert time.perf_counter() - started < 2.0, repeats
 
 
 class Stack:
