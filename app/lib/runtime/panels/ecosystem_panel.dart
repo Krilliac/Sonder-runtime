@@ -481,7 +481,8 @@ class _EcosystemPanelState extends State<EcosystemPanel> {
     final stats = export == null
         ? 'The runtime reported no Observatory section.'
         : export.exportEnabled
-            ? '${count(export.subscribers)} subscribers · '
+            ? '${count(export.subscribers)} '
+                'subscriber${export.subscribers == 1 ? '' : 's'} · '
                 '${count(export.emittedEvents)} emitted · '
                 '${count(export.droppedEvents)} dropped · '
                 '${count(export.retainedEvents)}/${count(export.bufferCapacity)} '
