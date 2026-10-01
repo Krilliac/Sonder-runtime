@@ -703,6 +703,7 @@ def test_backup_fails_closed_on_invalid_config(isolated_home, monkeypatch, capsy
     assert called == []
 
 
+@pytest.mark.usefixtures("isolated_default_runtime")
 def test_backup_exports_configured_source_home(
     isolated_home, tmp_path, monkeypatch, capsys
 ):
@@ -750,6 +751,7 @@ def test_smoke_exports_the_home_it_preflighted(
     assert seen["home"] == str(configured_home)
 
 
+@pytest.mark.usefixtures("isolated_default_runtime")
 def test_backup_verify_json_flag_emits_json(isolated_home, tmp_path, capsys):
     assert main(["migrate", "--store", "operations"]) == 0
     capsys.readouterr()
@@ -768,6 +770,7 @@ def test_backup_verify_json_flag_emits_json(isolated_home, tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["ok"] is True
 
 
+@pytest.mark.usefixtures("isolated_default_runtime")
 def test_backup_latest_prints_newest_dated_backup_path(
     isolated_home, tmp_path, capsys
 ):
@@ -786,6 +789,7 @@ def test_backup_latest_prints_newest_dated_backup_path(
     assert payload["backup"]["created_at_valid"] is True
 
 
+@pytest.mark.usefixtures("isolated_default_runtime")
 def test_backup_latest_skips_newer_raw_pre_epoch2_copy(
     isolated_home, tmp_path, capsys
 ):
@@ -803,6 +807,7 @@ def test_backup_latest_skips_newer_raw_pre_epoch2_copy(
     assert capsys.readouterr().out == backup_dir + "\n"
 
 
+@pytest.mark.usefixtures("isolated_default_runtime")
 def test_backup_latest_fails_when_no_backup_is_dated(
     isolated_home, tmp_path, capsys
 ):
@@ -815,6 +820,7 @@ def test_backup_latest_fails_when_no_backup_is_dated(
     assert "no backup with a valid created_at_utc" in captured.err
 
 
+@pytest.mark.usefixtures("isolated_default_runtime")
 def test_backup_and_restore_via_cli(isolated_home, tmp_path, capsys):
     assert main(["migrate", "--store", "operations"]) == 0
     capsys.readouterr()
