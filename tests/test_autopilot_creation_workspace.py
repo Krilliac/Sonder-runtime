@@ -138,7 +138,7 @@ def _long_paths_supported() -> bool:
         return False
 
 
-def _nested_home(base: Path, tail: int) -> Path:
+def _nested_home(base: Path, tail: int) -> tuple[Path, bool]:
     """``base`` plus nesting so that the root and a ``tail`` suffix total _PROJECT_LENGTH."""
     base = base.resolve()
     room = _PROJECT_LENGTH - tail - len(str(base)) - 1
@@ -149,10 +149,10 @@ def _nested_home(base: Path, tail: int) -> Path:
                 "under Windows' %d-character directory limit without LongPathsEnabled"
                 % (len(str(base)), _WINDOWS_DIRECTORY_LIMIT)
             )
-        return base / ("nested-" * 12) / ("nested-" * 12)
+        return base / ("nested-" * 12) / ("nested-" * 12), False
     count = -(-room // 84)  # components of at most 84 characters, far below 255
     width, extra = divmod(room - (count - 1), count)
-    return base.joinpath(*("n" * (width + (index < extra)) for index in range(count)))
+    return base.joinpath(*("n" * (width + (index < extra)) for index in range(count))), True
 
 
 def test_long_default_workspace_is_not_truncated(monkeypatch, tmp_path, isolated):
@@ -160,10 +160,15 @@ def test_long_default_workspace_is_not_truncated(monkeypatch, tmp_path, isolated
 
     # <root>/<date>-<slug>-<hex>; the name's length is fixed for a given task.
     tail = len(os.sep + creation_workspace.session_workspace_name("write an artifact"))
-    root = _nested_home(tmp_path / "workspaces", tail)
+    root, sized = _nested_home(tmp_path / "workspaces", tail)
     monkeypatch.setenv("SONDER_DEFAULT_WORKSPACE_ROOT", str(root))
     run = autopilot_store.create_run("write an artifact")
     assert len(run["project"]) > 200
+    if sized:
+        # Pin the Windows-safe length everywhere: CI runs this test only on
+        # Linux, where nothing else would notice the path creeping past the
+        # limit (a larger _PROJECT_LENGTH, or a longer run id or folder name).
+        assert len(run["project"]) == _PROJECT_LENGTH <= _WINDOWS_DIRECTORY_LIMIT
     assert Path(run["project"]).parent == root.resolve()
     assert Path(run["project"]).is_dir()
 
