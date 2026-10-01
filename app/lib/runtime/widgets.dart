@@ -1,295 +1,227 @@
 part of 'runtime_screen.dart';
 
-class _MeterBar extends StatelessWidget {
-  final String label;
-  final double percent;
-  final String detail;
-  final Color? color;
+/// What a tracked action shows under its control: a live progress line
+/// while it runs (when there is something to say), then its outcome, and
+/// for a failed local or launcher action the startup log, inline.
+///
+/// Null when there is nothing to show, so it fits a row's `below:` slot.
+Widget? _trackedView(
+  _RuntimeScreenState s,
+  String id, {
+  String? busyLabel,
+  Key? busyKey,
+  Key? failureKey,
+}) {
+  final tracked = s._tracked[id];
+  if (tracked == null) return null;
+  if (tracked.busy) {
+    final text = [
+      if (busyLabel != null) busyLabel,
+      if (tracked.progress != null && tracked.progress!.isNotEmpty)
+        tracked.progress!,
+    ].join(' · ');
+    if (text.isEmpty) return null;
+    return _BusyLine(key: busyKey, text: text);
+  }
+  final outcome = tracked.outcome;
+  if (outcome == null) return null;
+  final local = tracked.local;
+  if (local != null) {
+    return _FailureView(
+      key: failureKey,
+      outcome: outcome,
+      result: local,
+      onDismiss: () => s._dismiss(id),
+    );
+  }
+  return OutcomeView(outcome, onDismiss: () => s._dismiss(id));
+}
 
-  const _MeterBar({
-    required this.label,
-    required this.percent,
-    required this.detail,
-    this.color,
-  });
+/// `◈ working  Starting server… · Host start is waiting for health`.
+class _BusyLine extends StatelessWidget {
+  final String text;
+  const _BusyLine({super.key, required this.text});
 
   @override
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
-    final value = (percent / 100).clamp(0.0, 1.0).toDouble();
-    final barColor = color ?? tokens.accent;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.baseline,
-          textBaseline: TextBaseline.alphabetic,
-          children: [
-            SizedBox(
-              width: 96,
-              child: Text(label, style: Theme.of(context).textTheme.labelLarge),
-            ),
-            Expanded(
-              child: Text(detail, style: tokens.mono(12, color: tokens.text2)),
-            ),
-            const SizedBox(width: 8),
-            Text(
-              '${percent.toStringAsFixed(1)}%',
-              style: tokens.mono(12, weight: FontWeight.w500),
-            ),
-          ],
+    return Semantics(
+      liveRegion: true,
+      label: 'working: $text',
+      excludeSemantics: true,
+      child: Row(children: [
+        SizedBox(
+          width: 14,
+          height: 14,
+          child: CircularProgressIndicator(
+              strokeWidth: 2, color: tokens.accentText),
         ),
-        const SizedBox(height: 6),
-        LinearProgressIndicator(
-          value: value,
-          minHeight: 4,
-          color: barColor,
-          backgroundColor: tokens.hairline,
-          borderRadius: BorderRadius.circular(2),
+        const SizedBox(width: SonderSpace.md),
+        Expanded(
+          child: Text(text,
+              style: Theme.of(context)
+                  .textTheme
+                  .bodyMedium
+                  ?.copyWith(color: tokens.text2)),
+        ),
+      ]),
+    );
+  }
+}
+
+/// A failed local or launcher action: its message, and the startup log
+/// opened in place (it used to be a blocking dialog).
+class _FailureView extends StatefulWidget {
+  final ActionOutcome outcome;
+  final LocalActionResult result;
+  final VoidCallback? onDismiss;
+
+  const _FailureView({
+    super.key,
+    required this.outcome,
+    required this.result,
+    this.onDismiss,
+  });
+
+  @override
+  State<_FailureView> createState() => _FailureViewState();
+}
+
+class _FailureViewState extends State<_FailureView> {
+  bool _logOpen = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final result = widget.result;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        OutcomeView(
+          ActionOutcome(widget.outcome.kind, widget.outcome.title,
+              detail: result.message.isEmpty ? null : result.message,
+              word: widget.outcome.word),
+          onDismiss: widget.onDismiss,
+        ),
+        if (result.hasLogDetail)
+          Padding(
+            padding: const EdgeInsets.only(top: SonderSpace.xs),
+            child: Wrap(spacing: SonderSpace.sm, children: [
+              if (result.logTail.isNotEmpty)
+                TextButton.icon(
+                  key: const Key('runtime-failure-log'),
+                  onPressed: () => setState(() => _logOpen = !_logOpen),
+                  icon: Icon(
+                      _logOpen ? Icons.expand_less : Icons.description_outlined,
+                      size: 18),
+                  label:
+                      Text(_logOpen ? 'Hide startup log' : 'View startup log'),
+                ),
+              if (result.logPath.isNotEmpty)
+                TextButton.icon(
+                  key: result.logTail.isEmpty
+                      ? const Key('runtime-failure-log')
+                      : null,
+                  onPressed: () async {
+                    await Clipboard.setData(
+                        ClipboardData(text: result.logPath));
+                    if (context.mounted) {
+                      showSonderToast(context, 'Startup log path copied');
+                    }
+                  },
+                  icon: const Icon(Icons.copy_outlined, size: 18),
+                  label: const Text('Copy log path'),
+                ),
+            ]),
+          ),
+        SonderReveal(
+          visible: _logOpen && result.logTail.isNotEmpty,
+          child: Padding(
+            padding: const EdgeInsets.only(top: SonderSpace.sm),
+            child: RawOutput(result.logTail,
+                label: 'Startup log', collapsedLines: 18),
+          ),
         ),
       ],
     );
   }
 }
 
-class _StatusRow extends StatelessWidget {
+/// A slash command shown as a copyable mono line, for things that are only
+/// done from the console ("/runtime set workbench=general").
+class _CommandLine extends StatelessWidget {
+  final String command;
   final String label;
-  final String value;
-  final bool ok;
 
-  /// When [ok] is false, render "off by design" (muted `–`) instead of a
-  /// problem dot. Single-PC rows read `– off`, never red (plan P2-10).
-  final bool off;
-  final VoidCallback? onCopy;
-
-  const _StatusRow({
-    required this.label,
-    required this.value,
-    required this.ok,
-    this.off = false,
-    this.onCopy,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final tokens = SonderTokens.of(context);
-    final muted = !ok && off;
-    final color = ok
-        ? tokens.ok
-        : muted
-            ? tokens.muted
-            : tokens.danger;
-    final word = ok
-        ? 'ok'
-        : muted
-            ? 'off'
-            : 'problem';
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Semantics(
-            label: word,
-            child: SizedBox(
-              width: 10,
-              child: muted
-                  ? Text('–',
-                      key: const Key('status-row-off'),
-                      style: tokens.mono(12, color: color))
-                  : Padding(
-                      padding: const EdgeInsets.only(top: 6),
-                      child: Container(
-                        key: Key(ok ? 'status-row-ok' : 'status-row-problem'),
-                        width: 7,
-                        height: 7,
-                        decoration: BoxDecoration(
-                          color: color,
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                      ),
-                    ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          // Phones stack the label over the value (plan §2.4) instead of
-          // squeezing the value into a narrow column.
-          Expanded(
-            child: LayoutBuilder(builder: (context, constraints) {
-              final labelText =
-                  Text(label, style: Theme.of(context).textTheme.labelLarge);
-              final valueText = SelectableText(value,
-                  style: tokens.mono(12, color: muted ? tokens.text2 : null));
-              if (constraints.maxWidth < 360) {
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [labelText, const SizedBox(height: 2), valueText],
-                );
-              }
-              return Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  SizedBox(width: 120, child: labelText),
-                  const SizedBox(width: 12),
-                  Expanded(child: valueText),
-                ],
-              );
-            }),
-          ),
-          if (onCopy != null)
-            IconButton(
-              tooltip: 'Copy $label',
-              onPressed: onCopy,
-              icon: const Icon(Icons.copy, size: 16),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-/// One section of the System screen: an eyebrow, a hairline, its content.
-/// Sections are breaks in one column rather than cards, so the screen reads
-/// as a single instrument panel and the anchors the rail scrolls to stay
-/// exactly where they were.
-class _Section extends StatelessWidget {
-  final String title;
-  final Widget child;
-
-  const _Section({required this.title, required this.child});
-
-  @override
-  Widget build(BuildContext context) {
-    final tokens = SonderTokens.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(top: 6, bottom: 6),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(title, style: Theme.of(context).textTheme.labelSmall),
-          const SizedBox(height: 8),
-          Divider(height: 1, color: tokens.hairline),
-          const SizedBox(height: 12),
-          child,
-        ],
-      ),
-    );
-  }
-}
-
-class _OutputCard extends StatelessWidget {
-  final String text;
-  final Widget? action;
-
-  const _OutputCard({required this.text, this.action});
+  const _CommandLine(this.command, {required this.label});
 
   @override
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
     return Container(
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.only(left: SonderSpace.md),
       decoration: BoxDecoration(
-        color: tokens.panel,
+        color: tokens.canvas,
         borderRadius: BorderRadius.circular(SonderRadius.row),
         border: Border.all(color: tokens.hairline),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _OutputText(text),
-          if (action != null) ...[
-            const SizedBox(height: 8),
-            Align(alignment: Alignment.centerRight, child: action!),
-          ],
-        ],
-      ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Flexible(
+          child: SelectableText(command,
+              maxLines: 1, style: tokens.mono(12.5, color: tokens.text)),
+        ),
+        IconButton(
+          tooltip: 'Copy $label',
+          iconSize: 16,
+          icon: const Icon(Icons.copy_outlined),
+          onPressed: () async {
+            await Clipboard.setData(ClipboardData(text: command));
+            if (context.mounted) showSonderToast(context, 'Command copied');
+          },
+        ),
+      ]),
     );
   }
 }
 
-/// Persistent, above-the-fold report for a failed runtime action. The message
-/// already names what failed and where the startup log is; the button reopens
-/// the log tail after the modal has been dismissed.
-class _RuntimeFailureCard extends StatelessWidget {
-  final String label;
-  final LocalActionResult result;
-  final VoidCallback onShowLog;
-
-  const _RuntimeFailureCard({
-    required this.label,
-    required this.result,
-    required this.onShowLog,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Container(
-      key: const Key('runtime-failure'),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: cs.errorContainer,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: cs.error),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Icon(Icons.error_outline, size: 18, color: cs.onErrorContainer),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  label.isEmpty ? 'Action failed' : '$label failed',
-                  style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                        color: cs.onErrorContainer,
-                      ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          SelectableText(
-            result.message,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: cs.onErrorContainer,
-                  fontFamily: SonderTheme.mono,
-                  height: 1.3,
-                ),
-          ),
-          if (result.hasLogDetail) ...[
-            const SizedBox(height: 8),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: TextButton.icon(
-                key: const Key('runtime-failure-log'),
-                onPressed: onShowLog,
-                icon: const Icon(Icons.description_outlined, size: 18),
-                label: const Text('View startup log'),
-              ),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-class _OutputText extends StatelessWidget {
+/// The line under a [Meter] that says what its figure counts.
+class _MeterCaption extends StatelessWidget {
   final String text;
-
-  const _OutputText(this.text);
+  const _MeterCaption(this.text);
 
   @override
-  Widget build(BuildContext context) {
-    return SelectableText(
-      text.isEmpty ? '(empty)' : text,
-      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-            fontFamily: SonderTheme.mono,
-            height: 1.3,
-          ),
-    );
-  }
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.only(top: SonderSpace.xs),
+        child: Text(text, style: Theme.of(context).textTheme.bodySmall),
+      );
+}
+
+/// The column every page builds on: sections stacked with the kit's rhythm.
+class _PageColumn extends StatelessWidget {
+  final List<Widget> children;
+  const _PageColumn({required this.children});
+
+  @override
+  Widget build(BuildContext context) => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: children,
+      );
+}
+
+/// A section that has nothing to show because the status has not loaded.
+class _NotLoadedSection extends StatelessWidget {
+  final String title;
+  final bool loading;
+
+  const _NotLoadedSection({required this.title, required this.loading});
+
+  @override
+  Widget build(BuildContext context) => SettingsSection(
+        title: title,
+        children: [
+          loading
+              ? SkeletonRows(rows: 2, semanticLabel: 'Loading $title')
+              : const RuntimeEmptyRow('No status loaded yet.',
+                  icon: Icons.cloud_off_outlined),
+        ],
+      );
 }

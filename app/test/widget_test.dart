@@ -381,28 +381,33 @@ void main() {
         findsOneWidget);
     expect(find.byTooltip('Back to chat'), findsOneWidget);
     expect(find.text('Chat'), findsOneWidget);
-    expect(find.byKey(const Key('system-section-nav')), findsOneWidget);
+    // Narrow windows list the categories first; one page opens at a time.
+    expect(find.byKey(const Key('runtime-nav')), findsOneWidget);
     expect(
       find.descendant(
-        of: find.byKey(const Key('system-section-nav')),
-        matching: find.text('Learning'),
+        of: find.byKey(const Key('runtime-nav')),
+        matching: find.text('Memory & learning'),
       ),
       findsOneWidget,
     );
-    // The Runtime overview now leads the page, so the architecture note
-    // sits further down the page's own vertical list.
+    // How the runtime fits together is said once, on About.
     await tester.scrollUntilVisible(
-      find.text('Runtime architecture'),
-      400,
+      find.byKey(const Key('category-about')),
+      300,
       scrollable: find
           .descendant(
-            of: find.byType(SystemScreen),
+            of: find.byKey(const Key('runtime-nav')),
             matching: find.byWidgetPredicate((w) =>
                 w is Scrollable && w.axisDirection == AxisDirection.down),
           )
           .first,
     );
-    expect(find.text('Runtime architecture'), findsOneWidget);
+    await tester.ensureVisible(find.byKey(const Key('category-about')));
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.tap(find.byKey(const Key('category-about')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('How it fits together'), findsOneWidget);
     expect(
       find.textContaining('not a standalone foundation model'),
       findsOneWidget,
@@ -411,6 +416,10 @@ void main() {
       find.textContaining('training runs through PEFT/Hugging Face'),
       findsOneWidget,
     );
+    // Back from a page returns to the list, which keeps the way to Chat.
+    await tester.tap(find.byTooltip('All runtime sections'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
     expect(find.byTooltip('Back to chat'), findsOneWidget);
 
     await tester.tap(find.byTooltip('Back to chat'));
@@ -431,21 +440,11 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
 
-    // The page's own vertical scrollable, not whatever Scrollable happens
-    // to be first in the tree (the chat route underneath, or a horizontal
-    // strip): dragging that one never hit-tests.
-    final list = find
-        .descendant(
-          of: find.byType(SystemScreen),
-          matching: find.byWidgetPredicate(
-              (w) => w is Scrollable && w.axisDirection == AxisDirection.down),
-        )
-        .last;
-    await tester.scrollUntilVisible(
-      find.byKey(const Key('autopilot-goal')),
-      240,
-      scrollable: list,
-    );
+    // Autopilot lives on the Activity page.
+    await tester.tap(find.byKey(const Key('category-activity')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.ensureVisible(find.byKey(const Key('autopilot-goal')));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
 
@@ -453,8 +452,12 @@ void main() {
     expect(find.byKey(const Key('autopilot-goal')), findsOneWidget);
     expect(find.byKey(const Key('autopilot-plan')), findsOneWidget);
     expect(find.byKey(const Key('autopilot-run')), findsOneWidget);
-    expect(find.text('Workspace'), findsOneWidget);
+    // Off works in the workspace; on observes only.
     expect(find.text('Observe only'), findsOneWidget);
+    expect(find.byKey(const Key('autopilot-observe')), findsOneWidget);
+    expect(find.textContaining('works in the workspace'), findsOneWidget);
+    expect(find.text('Public web'), findsOneWidget);
+    expect(find.text('Adaptive review'), findsOneWidget);
   });
 
   testWidgets('System shows the shared local runtime policy', (tester) async {
@@ -558,50 +561,62 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.scrollUntilVisible(
-      find.byKey(const Key('runtime-policy-panel')),
-      360,
-      scrollable: find.byType(Scrollable).first,
-    );
+    // Models: the shared policy, aliases and lanes as rows.
+    await tester.tap(find.byKey(const Key('category-models')));
     await tester.pumpAndSettle();
-
-    expect(find.text('Local Runtime Policy'), findsOneWidget);
-    expect(find.text('Shared policy r4'), findsOneWidget);
-    expect(find.text('fast  qwen2.5:3b'), findsOneWidget);
-    expect(find.text('review  general'), findsOneWidget);
+    expect(find.byKey(const Key('runtime-policy-panel')), findsOneWidget);
+    expect(find.text('Local model aliases'), findsOneWidget);
+    expect(find.textContaining('Shared policy r4'), findsOneWidget);
+    expect(
+        find.descendant(
+            of: find.byKey(const Key('policy-alias-fast')),
+            matching: find.text('qwen2.5:3b')),
+        findsOneWidget);
+    expect(
+        find.descendant(
+            of: find.byKey(const Key('policy-lane-review')),
+            matching: find.textContaining('general')),
+        findsOneWidget);
+    // Guarded edits stay a slash command, shown to copy.
     expect(
       find.textContaining('/runtime set workbench=general'),
       findsOneWidget,
     );
 
-    await tester.scrollUntilVisible(
-      find.byKey(const Key('mcp-runtime-panel')),
-      280,
-      scrollable: find.byType(Scrollable).first,
-    );
+    // Permissions: MCP tool convergence.
+    await tester.tap(find.byKey(const Key('category-permissions')));
     await tester.pumpAndSettle();
-
-    expect(find.text('Runtime Convergence'), findsOneWidget);
+    await tester.ensureVisible(find.byKey(const Key('mcp-runtime-panel')));
+    await tester.pumpAndSettle();
+    expect(find.text('MCP tools'), findsOneWidget);
     expect(find.text('MCP current'), findsOneWidget);
-    expect(find.text('108 tools'), findsOneWidget);
-    expect(find.text('3 atomic refreshes'), findsOneWidget);
-    expect(find.text('Live tool-list updates'), findsOneWidget);
+    expect(find.text('108'), findsOneWidget);
+    expect(find.text('Live updates'), findsOneWidget);
 
-    await tester.scrollUntilVisible(
-      find.byKey(const Key('learning-health-panel')),
-      300,
-      scrollable: find.byType(Scrollable).first,
-    );
+    // Memory & learning: quality, provenance and signals.
+    await tester.tap(find.byKey(const Key('category-memory')));
     await tester.pumpAndSettle();
-
-    expect(find.text('Learning Quality'), findsOneWidget);
-    expect(find.text('Learning healthy'), findsOneWidget);
-    expect(find.text('974 lessons'), findsOneWidget);
-    expect(find.text('3710 outcomes'), findsOneWidget);
-    expect(find.text('interaction  461'), findsOneWidget);
-    expect(find.text('seed  513'), findsOneWidget);
-    expect(find.text('tests passed  3559'), findsOneWidget);
-    expect(find.textContaining('Memory hygiene is clean'), findsOneWidget);
+    expect(find.byKey(const Key('learning-health-panel')), findsOneWidget);
+    expect(find.text('Learning quality'), findsOneWidget);
+    expect(find.text('healthy'), findsOneWidget);
+    expect(find.text('974'), findsOneWidget);
+    expect(find.text('3710'), findsOneWidget);
+    expect(
+        find.descendant(
+            of: find.byKey(const Key('lesson-source-interaction')),
+            matching: find.text('461')),
+        findsOneWidget);
+    expect(
+        find.descendant(
+            of: find.byKey(const Key('lesson-source-seed')),
+            matching: find.text('513')),
+        findsOneWidget);
+    expect(
+        find.descendant(
+            of: find.byKey(const Key('outcome-signal-tests_passed')),
+            matching: find.textContaining('3559')),
+        findsOneWidget);
+    expect(find.textContaining('Clean: no duplicate'), findsOneWidget);
 
     if (Platform.environment['SONDER_CAPTURE_UI'] == '1') {
       await tester.runAsync(() async {
@@ -684,18 +699,16 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    await tester.scrollUntilVisible(
-      find.byKey(const Key('deployment-panel')),
-      240,
-      scrollable: find.byType(Scrollable).first,
-    );
+    await tester.tap(find.byKey(const Key('category-cluster')));
     await tester.pumpAndSettle();
+    expect(find.byKey(const Key('deployment-panel')), findsOneWidget);
 
     expect(find.text('Deployment profile'), findsOneWidget);
     expect(find.text('Two PC (pooled-pair)'), findsOneWidget);
     expect(find.text('secondary, primary'), findsOneWidget);
+    // Each capability states the runtime's reason beside "– off".
     expect(
-      find.textContaining('Unavailable — Fencing and acknowledged replication'),
+      find.textContaining('Fencing and acknowledged replication'),
       findsNWidgets(2),
     );
     expect(find.text('Automatic failback'), findsOneWidget);
@@ -791,44 +804,36 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    await tester.scrollUntilVisible(
-      find.byKey(const Key('operational-capabilities-panel')),
-      240,
-      scrollable: find.byType(Scrollable).first,
-    );
-    await tester.pumpAndSettle();
 
-    expect(find.text('Distributed capability surface'), findsOneWidget);
+    // The inference pool sits on Models; worker pages load only on Inspect.
+    await tester.tap(find.byKey(const Key('category-models')));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.byKey(const Key('inference-pool')));
+    await tester.pumpAndSettle();
+    expect(find.text('1/2 healthy workers'), findsOneWidget);
+    expect(find.text('Requests may route to one worker.'), findsOneWidget);
     expect(find.text('Inspect worker page'), findsOneWidget);
     expect(find.text('Refresh worker cache'), findsOneWidget);
     expect(find.textContaining('https://private-worker'), findsNothing);
-    expect(
-      find.textContaining('Available — Owned dispatcher is installed.'),
-      findsOneWidget,
-    );
-    expect(
-        find.text(
-            '1/2 healthy workers; Available — Requests may route to one worker.'),
+
+    // The rest of the capability surface sits on Cluster, each with the
+    // runtime's own reason.
+    await tester.tap(find.byKey(const Key('category-cluster')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('operational-capabilities-panel')),
         findsOneWidget);
-    expect(
-        find.textContaining('Unavailable — Tensor sharding is not integrated.'),
-        findsOneWidget);
-    expect(find.textContaining('Unavailable — External provider required.'),
-        findsOneWidget);
+    expect(find.text('Distributed capabilities'), findsOneWidget);
+    expect(find.text('Owned dispatcher is installed.'), findsOneWidget);
+    expect(find.text('Tensor sharding is not integrated.'), findsOneWidget);
+    expect(find.text('External provider required.'), findsOneWidget);
     expect(
       find.textContaining(
         'Configured fixed-peer memory replication is an explicit bounded authenticated fact-only batch transport;',
       ),
       findsOneWidget,
     );
-    expect(
-      find.text('Unavailable — automatic takeover is not available.'),
-      findsOneWidget,
-    );
-    expect(
-      find.text('Unavailable — automatic failback is not available.'),
-      findsOneWidget,
-    );
+    expect(find.text('Automatic takeover is not available.'), findsOneWidget);
+    expect(find.text('Automatic failback is not available.'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -888,15 +893,13 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    await tester.scrollUntilVisible(
-      find.byKey(const Key('learning-health-panel')),
-      300,
-      scrollable: find.byType(Scrollable).first,
-    );
+    await tester.tap(find.byKey(const Key('category-memory')));
     await tester.pumpAndSettle();
+    expect(find.byKey(const Key('learning-health-panel')), findsOneWidget);
 
     // The honest number is the one on the meter.
     expect(find.text('Caller-judged'), findsOneWidget);
+    expect(find.text('52.7%'), findsOneWidget);
     expect(find.textContaining('186 judged by a caller'), findsOneWidget);
     // Autograded is shown, but labelled as self-marked rather than as quality.
     expect(find.textContaining('self-marked'), findsOneWidget);
@@ -952,14 +955,11 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    await tester.scrollUntilVisible(
-      find.byKey(const Key('learning-health-panel')),
-      300,
-      scrollable: find.byType(Scrollable).first,
-    );
+    await tester.tap(find.byKey(const Key('category-memory')));
     await tester.pumpAndSettle();
+    expect(find.byKey(const Key('learning-health-panel')), findsOneWidget);
 
-    expect(find.text('Learning attention'), findsOneWidget);
+    expect(find.text('attention'), findsOneWidget);
     expect(find.textContaining('Memory hygiene needs review'), findsOneWidget);
     expect(find.textContaining('2 duplicate rows'), findsOneWidget);
     expect(find.textContaining('1 missing embeddings'), findsOneWidget);
@@ -1079,16 +1079,35 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+    // The run lives on Activity: its counts, then its plan and checklist.
+    await tester.tap(find.byKey(const Key('category-activity')));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.byKey(const Key('autopilot-run-card')));
+    await tester.pumpAndSettle();
 
-    expect(find.text('Persistent checklist'), findsOneWidget);
-    expect(
-      find.text(
-        '3/3 tasks settled • 3 cycles • 0/2 failures • '
-        '1 checkpoint • 1/2 replans',
-      ),
-      findsOneWidget,
-    );
+    expect(find.text('Latest run'), findsOneWidget);
+    expect(find.text('completed'), findsWidgets);
+    expect(find.text('3 of 3 tasks settled'), findsOneWidget);
+    for (final (label, value) in [
+      ('Cycles', '3'),
+      ('Failures', '0 of 2'),
+      ('Checkpoints', '1'),
+      ('Replans', '1 of 2'),
+    ]) {
+      expect(find.text(label), findsOneWidget, reason: label);
+      expect(find.text(value), findsWidgets, reason: label);
+    }
+    expect(find.text('Plan'), findsOneWidget);
     expect(find.textContaining('Validate completion gates'), findsWidgets);
+    // Events and the end report stay raw, behind disclosures.
+    expect(find.text('Run events (3)'), findsOneWidget);
+    expect(find.text('End report'), findsOneWidget);
+    expect(find.textContaining('3 tasks passed'), findsNothing);
+    await tester.ensureVisible(find.text('End report'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('End report'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('3 tasks passed'), findsOneWidget);
 
     if (Platform.environment['SONDER_CAPTURE_UI'] == '1') {
       await tester.runAsync(() async {
@@ -1411,13 +1430,9 @@ void main() {
         find.descendant(of: primaryFeed, matching: matching);
     expect(find.text('bounded event 0'), findsNothing);
     expect(find.text('bounded event 1'), findsNothing);
-    // SelectableText owns both a visible Text and an internal EditableText;
-    // assert the single public widget instead of counting implementation
-    // descendants as duplicate feed rows.
-    expect(
-      inPrimary(find.widgetWithText(SelectableText, 'bounded event 2')),
-      findsOneWidget,
-    );
+    // A summary-only event shows its summary once, as the row's title (its
+    // preview would repeat it word for word).
+    expect(inPrimary(find.text('bounded event 2')), findsOneWidget);
     expect(inPrimary(find.text('edit harness.dart')), findsOneWidget);
     expect(inPrimary(find.text('12/14 events')), findsOneWidget);
     expect(inPrimary(find.text('Sequence gap')), findsOneWidget);
@@ -1471,15 +1486,12 @@ void main() {
       MaterialApp(home: SystemScreen(settings: Settings(), liveUpdates: false)),
     );
     await tester.pumpAndSettle();
-    await tester.scrollUntilVisible(
-      find.byKey(const Key('start-server')),
-      240,
-      scrollable: find.byType(Scrollable).first,
-    );
+    await tester.tap(find.byKey(const Key('category-server')));
     await tester.pumpAndSettle();
+    expect(find.byKey(const Key('start-server')), findsOneWidget);
 
     expect(find.text('Start server'), findsOneWidget);
-    expect(find.text('Starting server...'), findsNothing);
+    expect(find.text('Starting…'), findsNothing);
     expect(find.byKey(const Key('runtime-busy')), findsNothing);
     expect(find.byKey(const Key('runtime-failure')), findsNothing);
     expect(tester.takeException(), isNull);

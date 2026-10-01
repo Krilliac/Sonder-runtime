@@ -151,7 +151,24 @@ abstract interface class RuntimeDataSource {
   Future<List<JobSummary>> jobs();
   Future<List<FanoutSummary>> fanoutRuns();
   Future<List<ComputeNode>> computeNodes();
-  Future<ApprovalsPage> approvals();
+
+  /// `GET /v1/approvals`. The approve flow reads it again ([limit] 200)
+  /// right before the sheet opens, so the sheet shows the server's own
+  /// pending entry rather than a list row that may have gone stale.
+  Future<ApprovalsPage> approvals({int limit = 20});
+
+  /// `POST /v1/approvals/<callId>`: approve exactly that call once, bound to
+  /// the [tool] and [digest] the person was shown. One request, never
+  /// retried. Throws [SonderException]; a server without the route throws
+  /// code [ApprovalsApi.unavailableCode].
+  Future<IssuedApproval> approveCall(String callId,
+      {required Duration ttl, String tool = '', String digest = ''});
+
+  /// `POST /v1/approvals/revoke/<nonce>`.
+  Future<void> revokeApproval(String nonce);
+
+  /// `GET /v1/permission-mode`; null when the server has no mode route.
+  Future<PermissionMode?> permissionMode();
 
   /// `GET /v1/tools/inventory`, optionally one [category] (admin).
   Future<ToolInventory> toolInventory({String? category});
@@ -308,8 +325,26 @@ class HttpRuntimeDataSource implements RuntimeDataSource {
       .toList();
 
   @override
-  Future<ApprovalsPage> approvals() async => ApprovalsPage.fromSnapshot(
-      await ApprovalsApi(_endpoint, timeout: timeout).list());
+  Future<ApprovalsPage> approvals({int limit = 20}) async =>
+      ApprovalsPage.fromSnapshot(
+          await ApprovalsApi(_endpoint, timeout: timeout).list(limit: limit));
+
+  @override
+  Future<IssuedApproval> approveCall(String callId,
+          {required Duration ttl, String tool = '', String digest = ''}) =>
+      ApprovalsApi(_endpoint, timeout: timeout)
+          .approve(callId, ttl: ttl, tool: tool, digest: digest);
+
+  @override
+  Future<void> revokeApproval(String nonce) =>
+      ApprovalsApi(_endpoint, timeout: timeout).revoke(nonce);
+
+  @override
+  Future<PermissionMode?> permissionMode() => SonderApi(
+        baseUrl: baseUrl,
+        apiKey: apiKey,
+        accountSession: accountSession,
+      ).fetchPermissionMode();
 
   @override
   Future<ToolInventory> toolInventory({String? category}) =>
