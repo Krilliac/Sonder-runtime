@@ -30,7 +30,16 @@ def _http_server(monkeypatch):
         thread.join(timeout=5)
 
 
-def _stream_request(port, *, first_byte_deadline):
+def _stream_request(port, *, on_received=None):
+    """POST a streamed chat turn; return the raw response once the server closes.
+
+    ``on_received`` sees everything received so far after each read.  The
+    socket timeout only guards against a hang.  The first byte is not timed:
+    it follows all the work the server does before committing to the stream
+    (Host-name and model-catalog lookups, store setup), which takes well under
+    a second on Linux but seconds on Windows, where a refused loopback
+    connection (the harness's unreachable Ollama) alone takes about 2 s.
+    """
     body = json.dumps({
         "model": "sonder", "stream": True,
         "messages": [{"role": "user", "content": "hello"}],
@@ -40,33 +49,42 @@ def _stream_request(port, *, first_byte_deadline):
         b"Content-Type: application/json\r\nContent-Length: %d\r\n\r\n"
         % (port, len(body))
     ) + body
-    with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
-        started = time.monotonic()
+    received = b""
+    with socket.create_connection(("127.0.0.1", port), timeout=30) as sock:
         sock.sendall(request)
-        sock.settimeout(first_byte_deadline)
-        first = sock.recv(65536)
-        first_at = time.monotonic() - started
-        sock.settimeout(10)
-        received = first
         while True:
             chunk = sock.recv(65536)
             if not chunk:
                 break
             received += chunk
-    return first_at, received.decode("utf-8")
+            if on_received is not None:
+                on_received(received)
+    return received.decode("utf-8")
 
 
 def test_stream_headers_and_keepalives_arrive_before_generation_finishes(monkeypatch):
-    def slow_answer(*_args, **_kwargs):
-        time.sleep(1.5)
+    # The answer is held back until the client has the response head and two
+    # keep-alive frames, so a server that sends nothing until the answer is
+    # ready fails here, on a fast host or a slow one.
+    client_has_stream = threading.Event()
+    seen_while_generating = []
+
+    def answer_once_client_has_stream(*_args, **_kwargs):
+        seen_while_generating.append(client_has_stream.wait(10))
         return "late answer"
 
-    monkeypatch.setattr(ts.server, "answer_with_history", slow_answer)
-    with _http_server(monkeypatch) as port:
-        first_at, text = _stream_request(port, first_byte_deadline=1.0)
+    def on_received(data):
+        _head, separator, stream = data.partition(b"\r\n\r\n")
+        if separator and stream.count(b": keep-alive") >= 2:
+            client_has_stream.set()
 
-    # Headers were sent long before the 1.5 s generation finished.
-    assert first_at < 1.0
+    monkeypatch.setattr(ts.server, "answer_with_history", answer_once_client_has_stream)
+    with _http_server(monkeypatch) as port:
+        text = _stream_request(port, on_received=on_received)
+
+    # The head and two keep-alives reached the client while generation was
+    # still running, not after it finished.
+    assert seen_while_generating[:1] == [True]
     head, _, stream = text.partition("\r\n\r\n")
     assert head.startswith("HTTP/1.0 200") or head.startswith("HTTP/1.1 200")
     assert "text/event-stream" in head
@@ -85,7 +103,7 @@ def test_model_error_after_commit_is_a_terminal_sse_error(monkeypatch):
 
     monkeypatch.setattr(ts.server, "answer_with_history", failing)
     with _http_server(monkeypatch) as port:
-        _first_at, text = _stream_request(port, first_byte_deadline=5)
+        text = _stream_request(port)
 
     head, _, stream = text.partition("\r\n\r\n")
     assert " 200 " in head.splitlines()[0]

@@ -34,7 +34,8 @@ void main() {
 
   for (final size in sizes.entries) {
     for (final theme in themes.entries) {
-      testWidgets('settings_connect_${size.key}_${theme.key}', (tester) async {
+      testWidgets('settings_connect_${size.key}_${theme.key}',
+          skip: goldenSkip != null, (tester) async {
         setGoldenSurface(tester, size.value);
         await tester.pumpWidget(MaterialApp(
           debugShowCheckedModeBanner: false,

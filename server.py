@@ -2007,11 +2007,12 @@ def _generate_text(prompt, tier="fast", system="", temperature=0.2,
 _APP_GRAPH = None
 _APP_GRAPH_LOCK = threading.Lock()
 _APP_GRAPH_OWNED_BY_SERVER = False
+_APP_GRAPH_BUILT_BY_SERVER = None  # the exact graph _application() constructed
 
 
 def _application():
     """Lazily build the SPEC-3 composition-root graph (no import-time cost)."""
-    global _APP_GRAPH, _APP_GRAPH_OWNED_BY_SERVER
+    global _APP_GRAPH, _APP_GRAPH_OWNED_BY_SERVER, _APP_GRAPH_BUILT_BY_SERVER
     with _APP_GRAPH_LOCK:
         if _APP_GRAPH is None:
             from sonder_runtime.bootstrap import app as _bootstrap_app
@@ -2020,6 +2021,7 @@ def _application():
                 preference_module_provider=lambda: preference_learning,
             )
             _APP_GRAPH_OWNED_BY_SERVER = True
+            _APP_GRAPH_BUILT_BY_SERVER = _APP_GRAPH
         # Every graph this runtime serves feeds the ledger, whether it built
         # the graph itself or an entrypoint handed one over (the handoff also
         # installs it; adding the same observer again is a no-op).
@@ -2041,12 +2043,14 @@ def _install_typed_build_feed(application) -> None:
 
 def _close_server_owned_application(*, timeout=5) -> None:
     """Retire only a graph that this legacy module constructed itself."""
-    global _APP_GRAPH, _APP_GRAPH_OWNED_BY_SERVER
+    global _APP_GRAPH, _APP_GRAPH_OWNED_BY_SERVER, _APP_GRAPH_BUILT_BY_SERVER
     with _APP_GRAPH_LOCK:
-        if not _APP_GRAPH_OWNED_BY_SERVER or _APP_GRAPH is None:
-            return
         application = _APP_GRAPH
-        _APP_GRAPH = None
+        # Ownership is identity, not the flag alone: anything bound over the graph
+        # built here (an impostor the binding just refused) never gets a cleanup call.
+        if not _APP_GRAPH_OWNED_BY_SERVER or application is None or application is not _APP_GRAPH_BUILT_BY_SERVER:
+            return
+        _APP_GRAPH = _APP_GRAPH_BUILT_BY_SERVER = None
         _APP_GRAPH_OWNED_BY_SERVER = False
     # Never hold the legacy graph lock while a provider close can block or
     # invoke a compatibility hook.  Externally configured graphs are left to
