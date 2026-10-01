@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:sonder_runtime/theme.dart';
 import 'package:sonder_runtime/ui/kit.dart';
 import 'package:sonder_runtime/ui/status_vocab.dart';
+import 'package:sonder_runtime/workspace_ui.dart' show WorkspaceDestination;
 
 Widget _app(Widget home) => MaterialApp(
       debugShowCheckedModeBanner: false,
@@ -273,6 +274,118 @@ void main() {
     });
   });
 
+  group('ShellScope', () {
+    ShellScope scope({
+      required Widget child,
+      ShellLeaveGuards? guards,
+      bool sidebarVisible = true,
+      VoidCallback? openNavigation,
+      ShellSection? section,
+    }) =>
+        ShellScope(
+          current: WorkspaceDestination.settings,
+          sidebarVisible: sidebarVisible,
+          navigate: (_) {},
+          openNavigation: openNavigation ?? () {},
+          section: section,
+          leaveGuards: guards,
+          child: child,
+        );
+
+    testWidgets('a leave guard registers while mounted and can keep the page',
+        (tester) async {
+      final guards = ShellLeaveGuards();
+      var dirty = true;
+      var asked = 0;
+      Widget page(bool mounted) => _app(scope(
+            guards: guards,
+            child: mounted
+                ? ShellLeaveGuard(
+                    canLeave: () async {
+                      asked++;
+                      return !dirty;
+                    },
+                    child: const Text('settings'),
+                  )
+                : const Text('gone'),
+          ));
+
+      await tester.pumpWidget(page(true));
+      expect(guards.isEmpty, isFalse);
+      expect(await guards.canLeave(), isFalse);
+      dirty = false;
+      expect(await guards.canLeave(), isTrue);
+      expect(asked, 2);
+
+      // Unmounted pages no longer guard.
+      await tester.pumpWidget(page(false));
+      expect(guards.isEmpty, isTrue);
+      expect(await guards.canLeave(), isTrue);
+      expect(asked, 2);
+    });
+
+    testWidgets('a guard uses its latest callback, and is inert without a shell',
+        (tester) async {
+      final guards = ShellLeaveGuards();
+      await tester.pumpWidget(_app(scope(
+        guards: guards,
+        child: ShellLeaveGuard(
+            canLeave: () async => false, child: const SizedBox()),
+      )));
+      await tester.pumpWidget(_app(scope(
+        guards: guards,
+        child: ShellLeaveGuard(
+            canLeave: () async => true, child: const SizedBox()),
+      )));
+      expect(await guards.canLeave(), isTrue);
+
+      // No shell: the page still builds and nothing registers anywhere.
+      await tester.pumpWidget(_app(ShellLeaveGuard(
+          canLeave: () async => false, child: const Text('alone'))));
+      expect(find.text('alone'), findsOneWidget);
+      expect(guards.isEmpty, isTrue);
+    });
+
+    testWidgets('the menu button shows only where the sidebar is hidden',
+        (tester) async {
+      var opened = 0;
+      Widget page({bool? sidebarVisible}) => _app(Builder(
+            builder: (context) => sidebarVisible == null
+                ? const Scaffold(body: ShellMenuButton())
+                : scope(
+                    sidebarVisible: sidebarVisible,
+                    openNavigation: () => opened++,
+                    child: const Scaffold(body: ShellMenuButton()),
+                  ),
+          ));
+
+      await tester.pumpWidget(page());
+      expect(find.byTooltip('Open navigation'), findsNothing);
+      await tester.pumpWidget(page(sidebarVisible: true));
+      expect(find.byTooltip('Open navigation'), findsNothing);
+      await tester.pumpWidget(page(sidebarVisible: false));
+      await tester.tap(find.byTooltip('Open navigation'));
+      expect(opened, 1);
+    });
+
+    testWidgets('each section request is a new object pages can tell apart',
+        (tester) async {
+      _sectionsSeen.clear();
+      Widget page(ShellSection? section) =>
+          _app(scope(section: section, child: const _SectionProbe()));
+      final first = ShellSection('connection');
+      await tester.pumpWidget(page(first));
+      // The same request again: nothing to apply, no rebuild.
+      await tester.pumpWidget(page(first));
+      expect(_sectionsSeen, hasLength(1));
+      // Asking for the same section again is a new request.
+      await tester.pumpWidget(page(ShellSection('connection')));
+      expect(_sectionsSeen, hasLength(2));
+      expect(_sectionsSeen.last!.id, 'connection');
+      expect(identical(_sectionsSeen.first, _sectionsSeen.last), isFalse);
+    });
+  });
+
   group('feedback', () {
     testWidgets('a toast leads with the status word', (tester) async {
       await tester.pumpWidget(_app(Scaffold(
@@ -303,4 +416,17 @@ void main() {
       expect(find.text('Show less'), findsOneWidget);
     });
   });
+}
+
+final _sectionsSeen = <ShellSection?>[];
+
+/// Records the section each time ShellScope makes it rebuild.
+class _SectionProbe extends StatelessWidget {
+  const _SectionProbe();
+
+  @override
+  Widget build(BuildContext context) {
+    _sectionsSeen.add(ShellScope.maybeOf(context)!.section);
+    return const SizedBox();
+  }
 }
