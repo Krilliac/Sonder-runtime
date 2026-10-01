@@ -3542,7 +3542,7 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
                 return str(error)
             master_project = project if workspace_project is None else workspace_project
             return _idempotent_http_action(
-                context, idempotency_key, "master " + stripped,
+                context, idempotency_key, "master\0" + stripped,
                 lambda: _narrate_http_command(
                     "master_orchestrate", {"task": parsed.task, "mode": parsed.mode},
                     lambda: execute_master_command(
