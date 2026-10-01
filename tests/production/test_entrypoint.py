@@ -145,6 +145,18 @@ def test_require_account_translates_default_api_key_mode(
     assert os.environ["SONDER_AUTH_MODE"] == "account"
 
 
+@pytest.mark.parametrize("enabled, exported", [(True, "1"), (False, "0")])
+def test_exported_runtime_environment_carries_auto_workspace(
+    restored_process_environment, enabled, exported,
+):
+    """The console reads ``[state].auto_workspace`` only through this export."""
+    from sonder_runtime.__main__ import _export_runtime_environment
+    from sonder_runtime.platform.config import SonderConfig, StateConfig
+
+    _export_runtime_environment(SonderConfig(state=StateConfig(auto_workspace=enabled)))
+    assert os.environ["SONDER_AUTO_WORKSPACE"] == exported
+
+
 def test_the_environment_snapshot_actually_restores_what_the_export_changed():
     """The guard above must be proven, not assumed.
 
