@@ -43,12 +43,17 @@ unconditionally refuse, for every combination of the run flags.
 from __future__ import annotations
 
 import ast
+import importlib
 import inspect
 import itertools
+import os
 import re
+import sys
+import textwrap
 
 import server
 import tool_capabilities as capabilities
+from sonder_runtime.adapters import fleet_creations
 
 
 # Floors, not expected values: they exist so an empty extractor fails loudly
@@ -405,24 +410,71 @@ def _flag_gated_tools(flag):
     return frozenset(gated)
 
 
-def _agent_impl_call_keywords(function):
-    """Constant keyword arguments a caller pins on its ``_agent_impl`` call."""
-    tree = ast.parse(inspect.getsource(function))
+def _resolve_call_target(function, tree, expression):
+    """The object a call inside ``function`` names, or a loud failure."""
+    if isinstance(expression, ast.Attribute):
+        owner = _resolve_call_target(function, tree, expression.value)
+        return getattr(owner, expression.attr)
+    if isinstance(expression, ast.Name):
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                for alias in node.names:
+                    if (alias.asname or alias.name) == expression.id:
+                        module = importlib.import_module(node.module)
+                        return getattr(module, alias.name)
+        if expression.id in function.__globals__:
+            return function.__globals__[expression.id]
+    raise AssertionError("cannot follow %s out of %s" % (
+        ast.unparse(expression), function.__qualname__,
+    ))
+
+
+def _agent_impl_call_sites(function, name="_agent_impl", _seen=None):
+    """Every call site of ``name`` reachable from ``function``'s source.
+
+    Returns ``{(filename, first_line, last_line)}``.  Follows the indirection
+    the fleet worker uses: handing the callable to a helper
+    (``repository_worker(..., agent_impl=_agent_impl)``) makes every call of
+    that parameter inside the helper a call site too.  Any other reference
+    to the callable -- an alias, a partial, a container -- fails loudly: a
+    census that skipped it would certify a call it never saw.
+    """
+    seen = set() if _seen is None else _seen
+    if (function, name) in seen:
+        return set()
+    seen.add((function, name))
+    lines, first = inspect.getsourcelines(function)
+    filename = os.path.normcase(os.path.realpath(inspect.getsourcefile(function)))
+    tree = ast.parse(textwrap.dedent("".join(lines)))
+    sites, followed = set(), set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         target = node.func
-        name = target.attr if isinstance(target, ast.Attribute) else getattr(
+        called = target.attr if isinstance(target, ast.Attribute) else getattr(
             target, "id", "",
         )
-        if name != "_agent_impl":
-            continue
-        return {
-            keyword.arg: keyword.value.value
-            for keyword in node.keywords
-            if keyword.arg and isinstance(keyword.value, ast.Constant)
-        }
-    return {}
+        if called == name:
+            sites.add((filename, first + node.lineno - 1, first + node.end_lineno - 1))
+            followed.add(id(target))
+        handed = [*enumerate(node.args), *((kw.arg, kw.value) for kw in node.keywords)]
+        for slot, value in handed:
+            if slot is None or not (isinstance(value, ast.Name) and value.id == name):
+                continue
+            helper = _resolve_call_target(function, tree, target)
+            if isinstance(slot, int):
+                slot = list(inspect.signature(helper).parameters)[slot]
+            sites |= _agent_impl_call_sites(helper, slot, seen)
+            followed.add(id(value))
+    stray = sorted(
+        first + node.lineno - 1 for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and node.id == name and id(node) not in followed
+    )
+    assert not stray, (
+        "%s uses %s on line(s) %s in a shape this census cannot follow"
+        % (function.__qualname__, name, stray)
+    )
+    return sites
 
 
 def test_flag_gate_extractors_cannot_go_vacuous():
@@ -524,24 +576,153 @@ def test_autopilot_workspace_allowlist_survives_the_project_bound_gate(tmp_path)
     assert frozenset(unbound) == frozenset(server._AUTOPILOT_WORKSPACE_TOOLS)
 
 
-def test_orchestrator_worker_help_names_no_tool_its_own_flags_refuse():
-    """F4: ``_orchestrator_agent_worker`` pins ``allow_web=False``.
+class _AgentReached(Exception):
+    """Raised by the recording ``_agent_impl`` so no model is ever started."""
 
-    The flags are read out of the call itself rather than restated here, so
-    changing the call changes what this test checks.
+
+def _record_orchestrator_worker_agent_calls(monkeypatch, tmp_path):
+    """Drive every ``_orchestrator_agent_worker`` path into a recording agent.
+
+    Paths are enumerated, not listed: every combination of the factory's bool
+    keywords (``build``), each against a caller-bound repository and against a
+    host-provisioned greenfield root.  A shape the factory or worker refuses
+    before any agent starts advertises nothing, but every combination must
+    reach ``_agent_impl`` one way or its path went unchecked.
+    Returns ``[(path, args, kwargs, (filename, line))]``.
     """
-    keywords = _agent_impl_call_keywords(server._orchestrator_agent_worker)
-    assert keywords, "no _agent_impl call found in _orchestrator_agent_worker"
-    assert keywords.get("allow_web") is False, keywords
-    help_text = server._agent_tool_help(
-        read_only=bool(keywords.get("read_only")),
-        project_bound=True,
-        allow_web=bool(keywords.get("allow_web")),
-        allow_location=bool(keywords.get("allow_location")),
+    calls = []
+
+    def recording_agent_impl(*args, **kwargs):
+        caller = sys._getframe(1)
+        calls.append((args, kwargs, (caller.f_code.co_filename, caller.f_lineno)))
+        raise _AgentReached
+
+    monkeypatch.setattr(server, "_agent_impl", recording_agent_impl)
+    monkeypatch.setattr(server.unsafe_lab, "active", lambda: False)
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    creations = fleet_creations.create_workspace("drift-probe", 1, state_home=tmp_path)
+    flags = tuple(
+        name
+        for name, parameter in inspect.signature(
+            server._orchestrator_agent_worker
+        ).parameters.items()
+        if isinstance(parameter.default, bool)
     )
-    advertised = _help_advertised(help_text)
-    dead = sorted(advertised & _flag_gated_tools("allow_web"))
-    assert dead == [], (
-        "every master_orchestrate worker run advertises %d web tool(s) that "
-        "its own allow_web=False refuses: %s" % (len(dead), dead)
+    recorded = []
+    try:
+        for combination in itertools.product((False, True), repeat=len(flags)):
+            keywords = dict(zip(flags, combination, strict=True))
+            reached = False
+            for shape, project, assigned in (
+                ("bound", str(repository), str(repository)),
+                ("greenfield", "", str(creations.workers[0])),
+            ):
+                before = len(calls)
+                try:
+                    worker = server._orchestrator_agent_worker("code", project, **keywords)
+                    worker("inspect the project", assigned)
+                except _AgentReached:
+                    pass
+                except (RuntimeError, ValueError):
+                    pass  # refused before any agent started: nothing advertised
+                path = "%s %s" % (keywords, shape)
+                recorded.extend((path, *call) for call in calls[before:])
+                reached = reached or len(calls) > before
+            assert reached, (
+                "_orchestrator_agent_worker(%s) never reached _agent_impl" % keywords
+            )
+    finally:
+        fleet_creations.release_workspace(creations)
+    return recorded
+
+
+def test_orchestrator_worker_help_names_no_tool_its_own_flags_refuse(
+    monkeypatch, tmp_path,
+):
+    """F4: every fleet worker path pins ``allow_web=False``.
+
+    ``_orchestrator_agent_worker`` hands ``_agent_impl`` to
+    ``fleet_workers.repository_worker``, whose one call serves paths with
+    different flags: repository fleets run ``read_only``; build fleets write in
+    host-provisioned creation folders under a host tool allowlist that the
+    transcript renders verbatim.  So the flags are captured from the real call
+    on every path rather than restated here -- changing the call changes what
+    this test checks -- and a static census proves that no call site went
+    unexercised and no exercised call came from a site it never counted.
+    """
+    sites = _agent_impl_call_sites(server._orchestrator_agent_worker)
+    assert sites, "no _agent_impl call reachable from _orchestrator_agent_worker"
+    calls = _record_orchestrator_worker_agent_calls(monkeypatch, tmp_path)
+    exercised = set()
+    for path, _args, _kwargs, (filename, line) in calls:
+        filename = os.path.normcase(os.path.realpath(filename))
+        matched = {
+            site for site in sites
+            if site[0] == filename and site[1] <= line <= site[2]
+        }
+        assert matched, (
+            "%s called _agent_impl from %s:%d, a site the census never found"
+            % (path, filename, line)
+        )
+        exercised |= matched
+    assert exercised == sites, (
+        "no worker path exercised these _agent_impl call sites: %s"
+        % sorted(sites - exercised)
     )
+
+    web_gated = _flag_gated_tools("allow_web")
+    assert web_gated
+    dispatchable = capabilities.dispatch_names(server._agent_dispatch)
+    turn = inspect.signature(server._agent_turn)
+    for path, args, kwargs, _site in calls:
+        bound = turn.bind(*args, **kwargs)
+        bound.apply_defaults()
+        run = bound.arguments
+        assert run["allow_web"] is False, (path, run)
+        project_scope, error = server._agent_project_scope(run["project"])
+        assert project_scope and not error, (path, run["project"], error)
+        # The gates _agent_turn renders the transcript's tool help through.
+        gates = {
+            "read_only": run["read_only"],
+            "project_bound": bool(project_scope),
+            "allow_web": run["allow_web"],
+            "allow_location": run["allow_location"],
+        }
+        advertised = _help_advertised(server._agent_tool_help(**gates))
+        assert advertised, "help went empty on %s" % path
+        dead = sorted(advertised & web_gated)
+        assert dead == [], (
+            "master_orchestrate worker path %s advertises %d web tool(s) that "
+            "its own allow_web=False refuses: %s" % (path, len(dead), dead)
+        )
+        refused = sorted(
+            "%s (%s)" % (name, server._agent_run_tool_refusal(name, **gates))
+            for name in advertised
+            if server._agent_run_tool_refusal(name, **gates)
+        )
+        assert refused == [], (
+            "master_orchestrate worker path %s advertises tool(s) its own run "
+            "gates refuse: %s" % (path, refused)
+        )
+        if run["tool_allowlist"] is None:
+            continue
+        # Rendered as "HOST TOOL ALLOWLIST (cannot be expanded by the model)",
+        # in the canonical spelling _agent_turn uses, so each name is a promise.
+        allowlist = frozenset(
+            server._canonical_agent_tool_name(name)
+            for name in run["tool_allowlist"] if name
+        )
+        assert allowlist, "empty host tool allowlist on %s" % path
+        broken = sorted(
+            "%s (%s)" % (
+                name,
+                server._agent_run_tool_refusal(name, **gates) or "not dispatchable",
+            )
+            for name in allowlist
+            if name not in dispatchable or server._agent_run_tool_refusal(name, **gates)
+        )
+        assert broken == [], (
+            "master_orchestrate worker path %s renders a host tool allowlist "
+            "naming tool(s) that cannot run on it: %s" % (path, broken)
+        )
