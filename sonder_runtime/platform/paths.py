@@ -185,6 +185,32 @@ def default_home() -> Path:
     return Path.home() / ".local" / "share" / "sonder"
 
 
+def default_workspace_root(*, env=None, platform_name=None) -> Path | None:
+    """The app-owned folder that holds work started without a project.
+
+    ``SONDER_DEFAULT_WORKSPACE_ROOT`` (``[state].default_workspace_root``)
+    wins.  Otherwise it is ``%USERPROFILE%\\Sonder\\workspaces`` on Windows and
+    ``~/Sonder/workspaces`` elsewhere: per user, visible in the user's home
+    like Codex's and Claude's app-managed workspaces, and outside the state
+    home.  Returns None when no user home is known; the caller must not guess
+    one, because the state home's own fallback (``C:\\Sonder``) would contain it.
+    """
+    values = os.environ if env is None else env
+    try:
+        override = str(values.get("SONDER_DEFAULT_WORKSPACE_ROOT", "")).strip()
+        if override:
+            return Path(override).expanduser()
+        if (os.name if platform_name is None else platform_name) == "nt":
+            profile = str(values.get("USERPROFILE", "")).strip()
+        else:
+            profile = str(values.get("HOME", "")).strip()
+            if not profile and env is None:
+                profile = str(Path.home())  # the password database, as Python does
+    except (RuntimeError, KeyError):  # expanduser/home() with no user home
+        return None
+    return Path(profile) / "Sonder" / "workspaces" if profile else None
+
+
 def _home_needs_candidate_traverse() -> bool:
     """A uid-separated selfmod candidate must traverse the home (0711)."""
     return bool(os.environ.get("SONDER_SELFMOD_CANDIDATE_UID", "").strip())

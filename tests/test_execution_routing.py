@@ -1,4 +1,7 @@
+import re
 from pathlib import Path
+
+import pytest
 
 import intents
 import server
@@ -166,14 +169,23 @@ def test_simple_work_uses_foreground_without_model_triage(monkeypatch, tmp_path)
     assert calls[0]["allow_location"] is False
 
 
-def test_simple_work_with_a_bare_project_label_gets_a_creations_folder(monkeypatch):
-    output, calls = _route_simple_work(monkeypatch, "demo")
+@pytest.mark.parametrize("project", ["demo", ""])
+def test_simple_work_without_a_project_gets_a_default_workspace_folder(
+        monkeypatch, tmp_path, project):
+    # HTTP chat sends "" when the request names no project.
+    root = tmp_path / "Sonder" / "workspaces"
+    monkeypatch.setenv("SONDER_DEFAULT_WORKSPACE_ROOT", str(root))
+    monkeypatch.chdir(Path(server.__file__).resolve().parent)  # the source checkout
+    output, calls = _route_simple_work(monkeypatch, project)
 
     assert "mode: foreground workbench" in output
-    # A label that names no directory must not fall back to the server's cwd.
+    # A label that names no directory must not fall back to the server's cwd;
+    # it lands where the console puts its folders, named from the request.
     routed = Path(calls[0]["project"])
-    assert routed.parent == (paths.default_home() / "creations").resolve()
+    assert routed.parent == root.resolve()
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}-flutter-app-[0-9a-f]{4}", routed.name)
     assert routed.is_dir()
+    assert not routed.is_relative_to(paths.default_home().resolve())
 
 
 def test_compound_work_uses_bounded_local_model_decision(monkeypatch):

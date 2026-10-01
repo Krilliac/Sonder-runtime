@@ -134,29 +134,40 @@ versioned and additive-only. Interactive terminals ignore the flag.
   selected workspace, like a natural-language work request. The memory
   project name is never used as a directory.
 - With no workspace selected, a work request gets a default folder,
-  `creations/<YYYY-MM-DD>-<a few words of the task>-<4 hex>`, under the
-  first `[state].workspace_roots` entry that exists and is not inside a
-  Sonder source checkout (a `creations` folder that is a link or junction
-  is refused, as for autopilot runs). The folder is created only if the
+  `<YYYY-MM-DD>-<a few words of the task>-<4 hex>`, in the app-owned
+  default workspace root. Like Codex's and Claude's managed workspaces it
+  is per user and visible, and it does not depend on what this machine
+  lists in `[state].workspace_roots`: `%USERPROFILE%\Sonder\workspaces` on
+  Windows, `~/Sonder/workspaces` elsewhere, or `[state].default_workspace_root`
+  (env `SONDER_DEFAULT_WORKSPACE_ROOT`). The folder is created only if the
   `/workspace-create` permission gate allows it (manual mode with an
   operator asks and shows the path), then selected and announced on one
   line, and the task runs there:
 
   ```text
-  workspace: D:\Projects\creations\2026-10-01-cool-webpage-3f9a (created because none was selected — /workspace <path> to use another folder)
+  workspace: C:\Users\you\Sonder\workspaces\2026-10-01-cool-webpage-3f9a (created because none was selected — /workspace <path> to use another folder)
   ```
 
   Follow-up work in the same session lands in the same folder; a new
-  session gets a new folder. The folder is deliberately not under the
-  state home: managed work grants only configured workspace roots and
-  refuses any root that overlaps private control state, which the state
-  home holds, so a state-home folder could never be worked in.
+  session gets a new folder. App and autopilot runs without a project use
+  the same root, so all creations are in one place.
+- Managed console work grants that root by design, without it being listed
+  in `[state].workspace_roots`, and only that one tree. Sonder creates the
+  root itself, and it is granted only while it exists, is an absolute
+  folder that is not a link or junction, is outside every Sonder source
+  checkout, and overlaps no private control state (the state home, its
+  stores, the running checkout). If any check fails it is simply not
+  granted: the console asks instead and configured roots keep working.
 - The console asks for a folder instead, holding the task until
   `/workspace` or `/workspace-create` selects one, when
   `SONDER_AUTO_WORKSPACE=0` (or `[state].auto_workspace = false`), after
   `/workspace clear`, when the gate refuses (plan mode, or manual mode
-  with nobody to approve), and when no configured root can hold a folder.
-  Only the last case adds a line first: `(no default folder: <reason>)`.
+  with nobody to approve), and when the default root fails a check above
+  (or no user home is known). Only the last case adds a line first:
+  `(no default folder: <reason>)`.
+- File commands (`/read`, `/write`, ...) still need the workspace inside
+  Sonder's file roots (`SONDER_FILE_ROOTS` or the roots file); the grant
+  above covers managed work, not the global file roots.
 - When managed work raises a `PermissionError` or `ValueError`, the
   console prints `ERROR: work refused: <reason>` and keeps running. The
   reason is the exception's own message. Managed work uses these types for
@@ -167,6 +178,11 @@ versioned and additive-only. Interactive terminals ignore the flag.
   those two types escaping the run is reported the same way. That includes
   an `OSError` with `EACCES` and a `JSONDecodeError`, which may be faults
   rather than refusals. Exceptions of any other type are not caught here.
+- A configured workspace root that overlaps private control state (for
+  example the state home itself, or the source checkout the console runs
+  from) refuses every managed request. The refusal names that root, the
+  private path it overlaps, and the `sonder.toml` to remove it from:
+  `configured workspace root <root> overlaps Sonder's private control state at <path>; remove it from [state].workspace_roots in <sonder.toml> (or from SONDER_FILE_ROOTS if it is set there)`.
 
 ## Interrupting a turn
 
