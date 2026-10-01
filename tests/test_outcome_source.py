@@ -340,6 +340,37 @@ def test_learning_health_reports_the_unknown_population_rather_than_hiding_it():
     assert report["reviewed_outcomes"] == 0
 
 
+def test_the_rendered_report_states_the_real_split_and_the_unplaced_rows():
+    """The operator reads the text, not the dict.
+
+    The rendered view kept the pre-#62 footnote -- "split inferred from signal
+    name, not a recorded source: record_outcome callers who use tests_passed
+    ... land in the autograded bucket" -- after the split began reading
+    `outcomes.source`. It told a reader to distrust an exact split, and it said
+    nothing about the rows that split cannot place, which the dict published.
+    """
+    conn = _conn()
+    for n in range(5):
+        _interaction(conn, "u%d" % n)
+        conn.execute(
+            "INSERT INTO outcomes(interaction_id, signal, reward, source) "
+            "VALUES(?, 'accepted', 0.8, 'unknown')",
+            ("u%d" % n,),
+        )
+    # The old footnote's own example: a caller who ran the tests and said so.
+    _interaction(conn, "c0")
+    ms.record_outcome_row(conn, "c0", "tests_passed", 1.0, source="caller")
+    conn.commit()
+    text = learning_health.format_report(learning_health.build_report(conn))
+    assert "inferred from signal name" not in text
+    assert "reviewed (judged by a caller): 1 |" in text
+    assert "autograded (runtime marking its own curriculum): 0 |" in text
+    assert (
+        "legacy/unknown provenance (no recorded source; in neither bucket): 5"
+        in text
+    )
+
+
 # --- writers ----------------------------------------------------------------
 
 

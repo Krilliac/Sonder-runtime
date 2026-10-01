@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "9955cd57226643c47b724ca5829564bad3ec18eddb87786c36390abc7427269b",
+    "catalog_digest": "8c081a5125c18f66c0d76e595e3266784ec4bb2a3da04084eba3db6b296df1a6",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "9955cd57226643c47b724ca5829564bad3ec18eddb87786c36390abc7427269b",
+      "catalog_digest": "8c081a5125c18f66c0d76e595e3266784ec4bb2a3da04084eba3db6b296df1a6",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -2536,6 +2536,30 @@
             "type": "object"
           },
           "name": "file_batch_write"
+        },
+        {
+          "description": "Check one source file for syntax and available local diagnostics.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "max_items": {
+                "default": 30,
+                "title": "Max Items",
+                "type": "integer"
+              },
+              "path": {
+                "title": "Path",
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "title": "file_checkArguments",
+            "type": "object"
+          },
+          "name": "file_check"
         },
         {
           "description": "Copy one bounded binary-safe file inside allowed roots.",
@@ -7007,6 +7031,28 @@
           "name": "tool_capability_manifest"
         },
         {
+          "description": "Describe one advertised agent tool, or find up to five by query.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "name": {
+                "default": "",
+                "title": "Name",
+                "type": "string"
+              },
+              "query": {
+                "default": "",
+                "title": "Query",
+                "type": "string"
+              }
+            },
+            "title": "tool_helpArguments",
+            "type": "object"
+          },
+          "name": "tool_help"
+        },
+        {
           "description": "Report the categorized host tool inventory (compilers, build systems,\n    test runners, linters, debuggers, package managers, runtimes, containers,\n    VCS, database clients, media/doc tools, cloud CLIs, editors, shells).\n\n    Filter by ``category`` or a tool ``name``. Paths are redacted; versions\n    come only from fixed, bounded, host-owned probes. ``refresh`` re-probes\n    the host instead of using the cached snapshot. Local-only host data.\n    ",
           "effects": [],
           "execution_class": "pure",
@@ -10855,6 +10901,29 @@
       "risk": "mutation",
       "summary": "Transactionally create/overwrite a bounded JSON list of project files.",
       "tool": "file_batch_write"
+    },
+    {
+      "aliases": [],
+      "category": "dev",
+      "name": "/file_check",
+      "native": false,
+      "params": [
+        {
+          "default": null,
+          "name": "path",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "default": 30,
+          "name": "max_items",
+          "required": false,
+          "type": "int"
+        }
+      ],
+      "risk": "execution",
+      "summary": "Check one source file for syntax and available local diagnostics.",
+      "tool": "file_check"
     },
     {
       "aliases": [],
@@ -16281,6 +16350,29 @@
     },
     {
       "aliases": [],
+      "category": "agents",
+      "name": "/tool_help",
+      "native": false,
+      "params": [
+        {
+          "default": "",
+          "name": "name",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "query",
+          "required": false,
+          "type": "str"
+        }
+      ],
+      "risk": "safe",
+      "summary": "Describe one advertised agent tool, or find up to five by query.",
+      "tool": "tool_help"
+    },
+    {
+      "aliases": [],
       "category": "runtime",
       "name": "/tool_inventory",
       "native": false,
@@ -18849,15 +18941,15 @@
   ],
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES plus sonder_runtime.platform.memory_replication_config",
   "counts": {
-    "capabilities": 227,
-    "commands": 344,
+    "capabilities": 229,
+    "commands": 346,
     "configuration": 248,
     "events": 43,
-    "native_tools": 66,
+    "native_tools": 68,
     "schemas": 4,
-    "tools": 227
+    "tools": 229
   },
-  "digest": "f609749c8a65d823b7dfb64468400517f2becd3f4dc233bb578a0d62373e31b0",
+  "digest": "564c28be5ce714523ad6d92615e1fd1442e6e62a6272f4ecb9b9ef64e2c88cc7",
   "events": [
     {
       "name": "session.started",
@@ -20380,6 +20472,29 @@
       }
     },
     {
+      "description": "Check one guarded source file with available local checkers",
+      "name": "file_check",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "max_items": {
+            "default": 30,
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    {
       "description": "Copy one bounded binary-safe file",
       "name": "file_copy",
       "parameters": {
@@ -21210,6 +21325,34 @@
       }
     },
     {
+      "description": "Describe one advertised tool or find up to five by query",
+      "name": "tool_help",
+      "parameters": {
+        "additionalProperties": false,
+        "oneOf": [
+          {
+            "required": [
+              "name"
+            ]
+          },
+          {
+            "required": [
+              "query"
+            ]
+          }
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
       "description": "List developer tools installed on this host (compilers, build systems, test runners, linters, debuggers, package managers, runtimes, containers, VCS, DB clients, media/doc tools, cloud CLIs, editors, shells) with versions; filter by category or name; refresh re-probes with fixed read-only version switches.",
       "name": "tool_inventory",
       "parameters": {
@@ -21468,9 +21611,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "9955cd57226643c47b724ca5829564bad3ec18eddb87786c36390abc7427269b",
+    "catalog_digest": "8c081a5125c18f66c0d76e595e3266784ec4bb2a3da04084eba3db6b296df1a6",
     "client": {
-      "digest": "9955cd57226643c47b724ca5829564bad3ec18eddb87786c36390abc7427269b",
+      "digest": "8c081a5125c18f66c0d76e595e3266784ec4bb2a3da04084eba3db6b296df1a6",
       "events": [
         {
           "name": "approval.denied",
@@ -22708,6 +22851,7 @@
           "extract_grounded",
           "fetch_artifact",
           "file_batch_write",
+          "file_check",
           "file_copy",
           "file_delete",
           "file_digest",
@@ -22840,6 +22984,7 @@
           "text_patch",
           "text_search",
           "tool_capability_manifest",
+          "tool_help",
           "tool_inventory",
           "tool_manifest",
           "toolchain_status",
@@ -23226,6 +23371,11 @@
             "name": "file_batch_write",
             "schema_available": true,
             "summary": "Transactionally create/overwrite a bounded JSON list of project files."
+          },
+          {
+            "name": "file_check",
+            "schema_available": true,
+            "summary": "Check one source file for syntax and available local diagnostics."
           },
           {
             "name": "file_copy",
@@ -23886,6 +24036,11 @@
             "name": "tool_capability_manifest",
             "schema_available": true,
             "summary": "Return the live tool schemas and a deterministic fingerprint of them.\n\n    This is visibility only: it cannot add, remove, approve, or invoke tools.\n    Clients can use ``tools`` to construct a valid call, and retain the\n    SHA-256 value with a run receipt to notice when a live-reloaded runtime\n    presents a different capability surface.  The digest is of the canonical\n    JSON form of that exact returned ``tools`` list, not merely its names.\n    "
+          },
+          {
+            "name": "tool_help",
+            "schema_available": true,
+            "summary": "Describe one advertised agent tool, or find up to five by query."
           },
           {
             "name": "tool_inventory",
@@ -26462,6 +26617,30 @@
             "type": "object"
           },
           "name": "file_batch_write"
+        },
+        {
+          "description": "Check one source file for syntax and available local diagnostics.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "max_items": {
+                "default": 30,
+                "title": "Max Items",
+                "type": "integer"
+              },
+              "path": {
+                "title": "Path",
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "title": "file_checkArguments",
+            "type": "object"
+          },
+          "name": "file_check"
         },
         {
           "description": "Copy one bounded binary-safe file inside allowed roots.",
@@ -30931,6 +31110,28 @@
             "type": "object"
           },
           "name": "tool_capability_manifest"
+        },
+        {
+          "description": "Describe one advertised agent tool, or find up to five by query.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "name": {
+                "default": "",
+                "title": "Name",
+                "type": "string"
+              },
+              "query": {
+                "default": "",
+                "title": "Query",
+                "type": "string"
+              }
+            },
+            "title": "tool_helpArguments",
+            "type": "object"
+          },
+          "name": "tool_help"
         },
         {
           "description": "Report the categorized host tool inventory (compilers, build systems,\n    test runners, linters, debuggers, package managers, runtimes, containers,\n    VCS, database clients, media/doc tools, cloud CLIs, editors, shells).\n\n    Filter by ``category`` or a tool ``name``. Paths are redacted; versions\n    come only from fixed, bounded, host-owned probes. ``refresh`` re-probes\n    the host instead of using the cached snapshot. Local-only host data.\n    ",
@@ -35212,6 +35413,28 @@
           "name": "file_batch_write"
         },
         {
+          "description": "Check one source file for syntax and available local diagnostics.",
+          "inputSchema": {
+            "properties": {
+              "max_items": {
+                "default": 30,
+                "title": "Max Items",
+                "type": "integer"
+              },
+              "path": {
+                "title": "Path",
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "title": "file_checkArguments",
+            "type": "object"
+          },
+          "name": "file_check"
+        },
+        {
           "description": "Copy one bounded binary-safe file inside allowed roots.",
           "inputSchema": {
             "properties": {
@@ -39417,6 +39640,26 @@
           "name": "tool_capability_manifest"
         },
         {
+          "description": "Describe one advertised agent tool, or find up to five by query.",
+          "inputSchema": {
+            "properties": {
+              "name": {
+                "default": "",
+                "title": "Name",
+                "type": "string"
+              },
+              "query": {
+                "default": "",
+                "title": "Query",
+                "type": "string"
+              }
+            },
+            "title": "tool_helpArguments",
+            "type": "object"
+          },
+          "name": "tool_help"
+        },
+        {
           "description": "Report the categorized host tool inventory (compilers, build systems,\n    test runners, linters, debuggers, package managers, runtimes, containers,\n    VCS, database clients, media/doc tools, cloud CLIs, editors, shells).\n\n    Filter by ``category`` or a tool ``name``. Paths are redacted; versions\n    come only from fixed, bounded, host-owned probes. ``refresh`` re-probes\n    the host instead of using the cached snapshot. Local-only host data.\n    ",
           "inputSchema": {
             "properties": {
@@ -42694,6 +42937,31 @@
                 "operations_json"
               ],
               "title": "file_batch_writeArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Check one source file for syntax and available local diagnostics.",
+            "name": "file_check",
+            "parameters": {
+              "properties": {
+                "max_items": {
+                  "default": 30,
+                  "title": "Max Items",
+                  "type": "integer"
+                },
+                "path": {
+                  "title": "Path",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "title": "file_checkArguments",
               "type": "object"
             }
           },
@@ -47302,6 +47570,29 @@
         },
         {
           "function": {
+            "description": "Describe one advertised agent tool, or find up to five by query.",
+            "name": "tool_help",
+            "parameters": {
+              "properties": {
+                "name": {
+                  "default": "",
+                  "title": "Name",
+                  "type": "string"
+                },
+                "query": {
+                  "default": "",
+                  "title": "Query",
+                  "type": "string"
+                }
+              },
+              "title": "tool_helpArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
             "description": "Report the categorized host tool inventory (compilers, build systems,\n    test runners, linters, debuggers, package managers, runtimes, containers,\n    VCS, database clients, media/doc tools, cloud CLIs, editors, shells).\n\n    Filter by ``category`` or a tool ``name``. Paths are redacted; versions\n    come only from fixed, bounded, host-owned probes. ``refresh`` re-probes\n    the host instead of using the cached snapshot. Local-only host data.\n    ",
             "name": "tool_inventory",
             "parameters": {
@@ -48133,9 +48424,9 @@
   },
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "0741ee574d473f80476eb59d90f1e0f3d2e84f3f059e70fac9b8eff975cd0c34",
+    "server.py": "e125fd580dc4201e88096f423d707ea16ae50c0ce8ff74eb7043a8b22b0047a2",
     "sonder_runtime/application/tools/generated_catalogs.py": "332f23bad788ee427203c64a35f9e36affa2ec11af0ea08889ac9aaa821b0d89",
-    "sonder_runtime/bootstrap/native_mcp.py": "8c778cf8a20121d07f9ed742dc0b1926f53c28126f76fed8c3a358c330ec120e",
+    "sonder_runtime/bootstrap/native_mcp.py": "2cbf4a0a006084aeb19c6615d04fffee9af89b1fdc8ee7d1fd582e1a9616c9f8",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/domain/operational_capabilities.py": "6f8f2083343ac1b0de076cd4d545b5f99602a9916c185bd15d965ffa0c405fe6",
     "sonder_runtime/interfaces/sdk/discovery.py": "db8aeca8dd84d06cbbf834495db30b211956393375676f23899a28685aea015b",
@@ -50452,6 +50743,28 @@
           "operations_json"
         ],
         "title": "file_batch_writeArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Check one source file for syntax and available local diagnostics.",
+      "name": "file_check",
+      "parameters": {
+        "properties": {
+          "max_items": {
+            "default": 30,
+            "title": "Max Items",
+            "type": "integer"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "file_checkArguments",
         "type": "object"
       }
     },
@@ -54657,6 +54970,26 @@
       "parameters": {
         "properties": {},
         "title": "tool_capability_manifestArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Describe one advertised agent tool, or find up to five by query.",
+      "name": "tool_help",
+      "parameters": {
+        "properties": {
+          "name": {
+            "default": "",
+            "title": "Name",
+            "type": "string"
+          },
+          "query": {
+            "default": "",
+            "title": "Query",
+            "type": "string"
+          }
+        },
+        "title": "tool_helpArguments",
         "type": "object"
       }
     },
