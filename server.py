@@ -370,6 +370,8 @@ from sonder_runtime.adapters.bounded_cloud_generation import (
 )
 from sonder_runtime.adapters.fanout_health import record_health as _fanout_health_policy
 from sonder_runtime.adapters.fanout_receipt import build_receipt as _fanout_receipt_policy
+from sonder_runtime.adapters.fanout_synthesis import sources as _fanout_sources_policy
+from sonder_runtime.application.artifacts.candidates import CandidateFanIn
 from sonder_runtime.adapters.agent_work_coverage import (
     BUILD_DRIVERS as _AGENT_BUILD_DRIVERS,
     NO_OP_COMMAND_FLAGS as _AGENT_NO_OP_COMMAND_FLAGS,
@@ -1930,7 +1932,7 @@ def _make_generate(
                 if aggregate_thinking_chars is not None
                 else len(thinking) if isinstance(thinking, str) else 0
             )
-            gen.last_response_meta = {
+            response_metadata = {
                 "done_reason": str(out.get("done_reason") or "").strip().casefold(),
                 **{
                     key: out.get(key)
@@ -1949,6 +1951,9 @@ def _make_generate(
                 # private reasoning text.
                 **({"thinking_chars": thinking_chars} if thinking_chars > 0 else {}),
             }
+            gen.last_response_meta = response_metadata
+            if (metadata_local := getattr(gen, "_response_metadata_local", None)) is not None:
+                metadata_local.value = response_metadata
             ok = True
         except ModelCallError as error:
             # Empty responses can carry sanitized transport observations (for
@@ -7578,6 +7583,8 @@ def parallel_generate_run(
     gen = _make_tier_generate(tier, model, system, temperature, num_predict, num_ctx, cloud=cloud)
     started = time.time()
     generation_results = [None] * variants
+    fanin = CandidateFanIn(prompt, check)
+    fanin.bind_generator(gen)
 
     def one(i):
         candidate_prompt = (
@@ -7586,6 +7593,7 @@ def parallel_generate_run(
         )
         try:
             response = gen(candidate_prompt)
+            fanin.require_complete_generation(gen)
             code = grounding.extract_code_block(response)
             if not code:
                 return {
@@ -7615,9 +7623,9 @@ def parallel_generate_run(
             }
 
     with owned_runtime_pool(max_workers=max_workers) as pool:
-        futures = {pool.submit(one, i): i for i in range(variants)}
+        futures = {pool.submit(fanin.produce, one, i): i for i in range(variants)}
         for future in as_completed(futures):
-            result = future.result()
+            result = fanin.consume(future.result(), futures[future])
             generation_results[result["index"]] = result
     elapsed = round(time.time() - started, 3)
     passed = sum(1 for r in generation_results if r and r.get("ok"))
@@ -7684,6 +7692,7 @@ def parallel_generate_run_languages(
     cloud = _is_cloud_tier(tier, model)
     started = time.time()
     results = [None] * len(jobs)
+    fanin = CandidateFanIn(prompt, check)
 
     def one(index, lang, variant):
         fence = lang
@@ -7693,12 +7702,14 @@ def parallel_generate_run_languages(
             % (lang, fence)
         )
         gen = _make_tier_generate(tier, model, system, temperature, num_predict, num_ctx, cloud=cloud)
+        fanin.bind_generator(gen)
         candidate_prompt = (
             "%s\n\nGenerate %s candidate %d. It must compile and terminate quickly."
             % (prompt, lang, variant)
         )
         try:
             response = gen(candidate_prompt)
+            fanin.require_complete_generation(gen)
             code = grounding.extract_code_block(response, lang)
             if not code:
                 return {
@@ -7736,12 +7747,12 @@ def parallel_generate_run_languages(
             }
 
     with owned_runtime_pool(max_workers=max_workers) as pool:
-        futures = [
-            pool.submit(one, index, lang, variant)
+        futures = {
+            pool.submit(fanin.produce, one, index, lang, variant): index
             for index, (lang, variant) in enumerate(jobs)
-        ]
+        }
         for future in as_completed(futures):
-            result = future.result()
+            result = fanin.consume(future.result(), futures[future])
             results[result["index"]] = result
     elapsed = round(time.time() - started, 3)
     passed = sum(1 for r in results if r and r.get("ok"))
@@ -24349,63 +24360,20 @@ FANOUT_SYNTHESIS_TIMEOUT_SECONDS = 120
 
 
 def _fanout_synthesis_sources(run):
-    """Return the sealed question plus exact stored answer previews and hashes.
-
-    The caller is already authorized to read the receipt.  This function is
-    nevertheless server-only: it is the sole point where the vault prompt is
-    decrypted, and the plaintext is never persisted or returned separately.
-    """
+    """Authorize completed source slots before decrypting the original task."""
     if run.get("status") != "completed":
         raise ModelCallError("configuration", "fanout run must be completed before synthesis")
-    answered = [row for row in fanout_store.list_results(run["id"]) if row.get("status") == "answered"]
-    if len(answered) < 2:
-        raise ModelCallError("configuration", "fanout synthesis requires at least two answered results")
-    if any(not row.get("answer_truncation_known") for row in answered):
-        raise ModelCallError("configuration", "fanout synthesis refuses legacy answers with unknown truncation truth")
-    if any(row.get("answer_truncated") for row in answered):
-        raise ModelCallError("configuration", "fanout synthesis refuses truncated answer previews")
-    try:
-        original_prompt = fanout_prompt_vault.decrypt_prompt(
-            fanout_store.execution_prompt_ciphertext(run["id"]) or ""
-        )
-    except fanout_prompt_vault.PromptVaultError as exc:
-        raise ModelCallError("configuration", "sealed fanout prompt is unavailable for synthesis") from exc
-    sources = []
-    hashes = []
-    for row in answered:
-        # ``answer`` is the receipt's exact already-redacted, bounded preview;
-        # do not substitute raw counts or re-redact/re-truncate it here.
-        preview = row.get("answer")
-        if not isinstance(preview, str):
-            raise ModelCallError("protocol", "fanout receipt has a non-text answer preview")
-        source = {
-            "model": str(row.get("model") or ""),
-            "answer": preview,
-            "elapsed_ms": row.get("elapsed_ms"),
-            "answer_chars": row.get("answer_chars"),
-            "stored_answer_chars": len(preview),
-            "answer_truncated": bool(row.get("answer_truncated")),
-            "thinking_chars": row.get("thinking_chars"),
-            "done_reason": row.get("done_reason") or None,
-        }
-        sources.append(source)
-        hashes.append({
-            "model": source["model"],
-            "preview_sha256": hashlib.sha256(preview.encode("utf-8")).hexdigest(),
-        })
-    try:
-        bundle = json.dumps(
-            {"question": original_prompt, "sources": sources},
-            ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
-        )
-    except (TypeError, ValueError, OverflowError, RecursionError) as exc:
-        raise ModelCallError("protocol", "fanout receipt cannot be serialized for synthesis") from exc
-    if len(bundle) > FANOUT_SYNTHESIS_MAX_SOURCE_CHARS:
-        raise ModelCallError(
-            "configuration", "fanout synthesis source exceeds %d characters; no sources were dropped"
-            % FANOUT_SYNTHESIS_MAX_SOURCE_CHARS,
-        )
-    return bundle, hashes
+    def load_prompt():
+        try:
+            return fanout_prompt_vault.decrypt_prompt(
+                fanout_store.execution_prompt_ciphertext(run["id"]) or ""
+            )
+        except fanout_prompt_vault.PromptVaultError as exc:
+            raise ModelCallError("configuration", "sealed fanout prompt is unavailable for synthesis") from exc
+    return _fanout_sources_policy(
+        run, rows=fanout_store.list_results(run["id"]), load_prompt=load_prompt,
+        max_source_chars=FANOUT_SYNTHESIS_MAX_SOURCE_CHARS,
+    )
 
 
 def _fanout_synthesis_model(selector):

@@ -25,7 +25,8 @@ import sonder_runtime.adapters.persistence.fleet_store as fleet_store
 import sonder_runtime.domain.adaptive_concurrency as adaptive_concurrency
 import sonder_runtime.domain.events as events
 import sonder_runtime.domain.fleet_pressure as fleet_pressure
-from sonder_runtime.application.artifacts import ArtifactReadiness, ArtifactReadinessBarrier
+from sonder_runtime.application.artifacts import ArtifactReadiness
+from sonder_runtime.application.artifacts.master_fanin import validate_master_slots_for_run
 import fleet_provenance
 
 
@@ -2231,6 +2232,7 @@ def run_delegated(
         })
     outputs = []
     readiness_by_producer = {}
+    readiness_errors = {}
     fanout_started = time.monotonic()
     lane_inputs = {
         agent_id: (prompt, assigned)
@@ -2282,6 +2284,8 @@ def run_delegated(
             if isinstance(output, ReadyWorkerOutput):
                 readiness_by_producer[agent_id] = output.readiness
                 output = output.output
+            else:
+                readiness_errors[agent_id] = "missing producer readiness evidence"
             outputs.append((agent_id, output))
 
     def _lane_error(agent_id: str, exc: BaseException) -> None:
@@ -2381,10 +2385,6 @@ def run_delegated(
             "outputs": [],
             "output": final if final in ABORT_MARKERS else "ERROR: %s" % error,
         }
-    # Fan-in is an evidence boundary: every successful child must publish a
-    # complete, digest-bound readiness record for this exact master run before
-    # provenance aggregation or the audit model can consume its output. Failed
-    # children have already been handled above and do not publish an artifact.
     rendered_outputs = {
         agent_id: (
             _render_repository_result(output)
@@ -2392,64 +2392,40 @@ def run_delegated(
         )
         for agent_id, output in outputs
     }
-    # Allow a child that completed early to wait for a long sibling, while
-    # retaining a bounded 24-hour ceiling for stale evidence.
     readiness_age_seconds = min(
         24 * 60 * 60,
         max(15 * 60, time.monotonic() - fanout_started + 5 * 60),
     )
-    readiness = ArtifactReadinessBarrier(
+    readiness_errors.update(validate_master_slots_for_run(
+        run_id=master_id,
+        expected_producers=child_ids,
+        readiness_by_producer=readiness_by_producer,
+        content_by_producer=rendered_outputs,
+        source_revisions={
+            agent_id: fleet_provenance.task_digest(lane_inputs[agent_id][0])
+            for agent_id in child_ids
+        },
+        require_verifier_receipt={agent_id: True for agent_id in child_ids},
+        # Recompute the host checks at fan-in; never trust the producer's copy.
+        expected_verifier_receipts={
+            agent_id: _readiness_verifier_receipt(
+                agent_id, master_id, fleet_provenance.task_digest(lane_inputs[agent_id][0]),
+                rendered_outputs[agent_id], fleet_provenance.validate_result(
+                    rendered_outputs[agent_id], lane_inputs[agent_id][1], project=project_scope,
+                ) if lane_inputs[agent_id][1] else {"worker_finished": True},
+            ) for agent_id in rendered_outputs
+        },
         max_age=timedelta(seconds=readiness_age_seconds),
-    )
-    try:
-        if set(readiness_by_producer) != set(rendered_outputs):
-            raise ValueError("fan-in is missing producer readiness evidence")
-        if any(not isinstance(item, ArtifactReadiness) for item in readiness_by_producer.values()):
-            raise ValueError("fan-in contains invalid producer readiness evidence")
-        readiness.join(
-            (
-                readiness_by_producer[agent_id]
-                for agent_id in rendered_outputs
-            ),
-            run_id=master_id,
-            expected_producers=rendered_outputs,
-            content_by_producer=rendered_outputs,
-            expected_source_revisions={
-                agent_id: fleet_provenance.task_digest(lane_inputs[agent_id][0])
-                for agent_id in rendered_outputs
-            },
-            expected_verifier_receipts={
-                agent_id: _readiness_verifier_receipt(
-                    agent_id, master_id,
-                    fleet_provenance.task_digest(lane_inputs[agent_id][0]),
-                    rendered_outputs[agent_id],
-                    fleet_provenance.validate_result(
-                        rendered_outputs[agent_id], lane_inputs[agent_id][1],
-                        project=project_scope,
-                    ) if lane_inputs[agent_id][1] else {"worker_finished": True},
-                )
-                for agent_id in rendered_outputs
-            },
-            require_verifier_receipt=True,
-        )
-    except ValueError as exc:
-        error = "artifact readiness barrier rejected fan-in: %s" % exc
-        final = _finish(master_id, error=error)
-        return {
-            "mode": "delegated",
-            "master_id": master_id,
-            "agents": child_ids,
-            "worker_slots": worker_slots,
-            "concurrency": concurrency_report,
-            "outputs": _public_outputs(outputs),
-            "output": final if final in ABORT_MARKERS else "ERROR: %s" % error,
-        }
-    if repository_task and any(
+    ))
+    no_valid = all(agent_id in readiness_errors for agent_id, _output in outputs)
+    if no_valid or repository_task and any(
         not isinstance(output, RepositoryWorkerResult)
         or not same_project_root(output.project, project_scope)
         for _agent_id, output in outputs
+        if _agent_id not in readiness_errors
     ):
-        error = "repository aggregation rejected an unscoped child result"
+        error = ("artifact readiness barrier rejected fan-in: no validated child artifact"
+                 if no_valid else "repository aggregation rejected an unscoped child result")
         final = _finish(master_id, error=error)
         return {
             "mode": "delegated",
@@ -2457,7 +2433,7 @@ def run_delegated(
             "agents": child_ids,
             "worker_slots": worker_slots,
             "concurrency": concurrency_report,
-            "outputs": [],
+            "outputs": _public_outputs(outputs) if no_valid else [],
             "output": final if final in ABORT_MARKERS else "ERROR: %s" % error,
         }
     child_metrics = [
@@ -2468,10 +2444,12 @@ def run_delegated(
             project=project_scope,
         )
         for (_agent_id, output), assigned in zip(
-            outputs,
+            ((agent_id, output) for agent_id, output in outputs
+             if agent_id not in readiness_errors),
             [
                 assignments[child_ids.index(agent_id)]
                 for agent_id, _output in outputs
+                if agent_id not in readiness_errors
             ] if assignments else [()] * len(outputs),
         )
     ]
@@ -2554,7 +2532,18 @@ def run_delegated(
             "Decisions made and Open risks, not an Evidence gaps questionnaire.",
             "",
         ])
+    # Children that failed or aborted produced no output and, as before the
+    # readiness barrier, are not mentioned to the audit model.  Only a child
+    # that produced output rejected by the barrier gets a withheld marker.
     for agent_id, output in outputs:
+        if agent_id in readiness_errors:
+            audit_prompt.extend([
+                "--- %s ---" % agent_id,
+                "[ARTIFACT REJECTED: %s; output withheld from synthesis]"
+                % readiness_errors[agent_id],
+                "",
+            ])
+            continue
         rendered = (
             _render_repository_result(output)
             if isinstance(output, RepositoryWorkerResult) else str(output or "")
@@ -2578,7 +2567,9 @@ def run_delegated(
     if repository_task:
         merged = (
             "=== HOST AGGREGATION SCOPE ===\nproject=%s\nchildren=%s\n\n%s"
-            % (project_scope, ",".join(agent_id for agent_id, _ in outputs), merged)
+            % (project_scope, ",".join(
+                agent_id for agent_id, _ in outputs if agent_id not in readiness_errors
+            ), merged)
         )
     if objectives:
         aggregate_metrics = fleet_provenance.validate_aggregate_output(
