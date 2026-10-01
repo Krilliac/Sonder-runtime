@@ -21,14 +21,46 @@ _NOISE_EVENTS = frozenset({
 })
 
 
+# Credential assignments (`DB_PASSWORD=...`, `api-key: ...`, `pwd2=...`) are
+# found by walking maximal identifier runs once and testing each run's name,
+# not by one regex that both locates the name and requires `=` after it. That
+# regex failed only after scanning to the end of a run, and was then retried
+# from every position inside it: quadratic on a long run of '-' or repeated
+# 'pwd' (CodeQL py/polynomial-redos). The value is matched only after a
+# credential name, so a non-credential assignment never swallows one nested
+# inside its value (`x=password=secret`).
+_NAME = re.compile(r"(?i)[A-Z0-9_-]+")
+_CREDENTIAL_NAME = re.compile(r"(?i)password|passwd|pwd|token|secret|api[-_]?key|credential")
+_ASSIGNED_VALUE = re.compile(r"\s*[=:]\s*([^\s,;]+)")
+# A JWT is three dot-joined runs. The dotted tail is optional so a run that is
+# not one still matches, and is kept, instead of failing and being rescanned
+# from each later 'eyJ' inside it.
+_JWT = re.compile(r"\beyJ[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)?)?")
+
+
+def _redact_assignments(text: str) -> str:
+    parts, cursor = [], 0
+    for name in _NAME.finditer(text):
+        if name.start() < cursor or not _CREDENTIAL_NAME.search(name.group()):
+            continue
+        value = _ASSIGNED_VALUE.match(text, name.end())
+        if value is None:
+            continue
+        parts.append(text[cursor:value.start(1)])
+        parts.append("<redacted>")
+        cursor = value.end(1)
+    parts.append(text[cursor:])
+    return "".join(parts)
+
+
 def _text(value: Any, limit: int = 240) -> str:
     if not isinstance(value, (str, int, float)):
         return ""
     text = re.sub(r"[\x00-\x20\x7f]+", " ", str(value)).strip()
     text = re.sub(r"(?i)(bearer\s+)[^\s,;]+", r"\1<redacted>", text)
-    text = re.sub(r"(?i)((?:[A-Z0-9_-]+[_-])?(?:password|passwd|pwd|token|secret|api[-_]?key|credential)[A-Z0-9_-]*\s*[=:]\s*)[^\s,;]+", r"\1<redacted>", text)
+    text = _redact_assignments(text)
     text = re.sub(r"(?i)(https?://)([^/@\s:]+):([^/@\s]+)@", r"\1<redacted>@", text)
-    text = re.sub(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b", "<redacted-token>", text)
+    text = _JWT.sub(lambda m: "<redacted-token>" if m.group(1) else m.group(0), text)
     return text[:limit]
 
 

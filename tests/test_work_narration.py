@@ -1,3 +1,6 @@
+import time
+
+from sonder_runtime.domain import work_narration
 from sonder_runtime.domain.work_narration import (
     acknowledgement, activity_progress, autopilot_progress, fanout_progress,
     fleet_progress, progress,
@@ -142,6 +145,28 @@ def test_progress_redacts_credentials_in_durable_event_text():
     assert "Bearer xyz" not in rows[0]["text"]
     assert "u:p@" not in rows[0]["text"]
     assert "<redacted>" in rows[0]["text"]
+
+
+def test_progress_redacts_a_credential_nested_in_another_assignment():
+    # The shape a value-consuming rewrite of the credential pattern leaks:
+    # `x=` is not a credential, but its value holds one.
+    rows = autopilot_progress({"run": {"id": "auto-nested", "status": "running"},
+                               "events": [{"event_id": 1, "ts": 1, "kind": "retry",
+                                            "message": "env x=password=hunter2 secret_key=k1 pwd2: p3"}]})
+    text = rows[0]["text"]
+    assert "hunter2" not in text and "k1" not in text and "p3" not in text
+    assert "x=password=<redacted>" in text
+
+
+def test_redaction_stays_linear_on_inputs_that_made_it_quadratic():
+    # ~30k chars each. The single-regex credential pattern rescanned a run
+    # from every position inside it and took seconds on each of these
+    # (CodeQL py/polynomial-redos); a linear pass takes milliseconds, so the
+    # bound separates the two by orders of magnitude, not by a hair.
+    for payload in ("-" * 30_000, "pwd" * 10_000, "eyJ-" * 7_500):
+        started = time.perf_counter()
+        work_narration._text(payload, 240)
+        assert time.perf_counter() - started < 2.0, payload[:8]
 
 
 def test_progress_is_bounded_and_rate_limits_nonterminal_events():
