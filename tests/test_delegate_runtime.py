@@ -97,6 +97,30 @@ def test_delegate_rejects_project_outside_inherited_workspace(tmp_path):
         outside.rmdir()
 
 
+def test_an_outside_project_is_refused_alike_whether_or_not_it_exists(tmp_path):
+    # Probing a caller-named path before the containment check made the two
+    # refusals an existence oracle for any folder on the machine: "must be an
+    # existing directory" for an absent one, "outside" for a present one.
+    lanes, context = _service(tmp_path)
+    present = tmp_path.parent / (tmp_path.name + "-present")
+    absent = tmp_path.parent / (tmp_path.name + "-absent")
+    present.mkdir()
+    try:
+        refusals = []
+        for folder in (present, absent, tmp_path / ".." / absent.name):
+            with pytest.raises(PermissionError) as refused:
+                dispatch_delegate(
+                    lanes,
+                    {"task": "inspect", "project": str(folder)},
+                    context,
+                    state_home=tmp_path / "state",
+                )
+            refusals.append(str(refused.value))
+        assert len(set(refusals)) == 1 and "outside" in refusals[0]
+    finally:
+        present.rmdir()
+
+
 def test_delegate_rejects_malformed_project_without_creating_creation_folder(tmp_path):
     lanes, context = _service(tmp_path)
     state_home = tmp_path / "state"
