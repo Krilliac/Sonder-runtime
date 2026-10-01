@@ -43,7 +43,8 @@ def _url(req):
 def _isolated(monkeypatch):
     for name in ("SONDER_EMBED_BASE_URL", "SONDER_EMBED_FALLBACK",
                  "SONDER_EMBED_COOLDOWN_SECONDS", "SONDER_EMBED_ON_CPU",
-                 "SONDER_EMBED_REVISION", "SONDER_EMBED_KEEP_ALIVE"):
+                 "SONDER_EMBED_REVISION", "SONDER_EMBED_KEEP_ALIVE",
+                 "SONDER_EMBED_NUM_CTX"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("OLLAMA_HOST", LOCAL)
     # Restored by monkeypatch after this fixture's teardown, so no test leaks a
@@ -208,6 +209,37 @@ def test_keep_alive_is_opt_in_and_validated(monkeypatch, value, sent):
     assert embeddings.embed("hi", model="nomic-embed-text:latest") is not None
     body = calls[-1][1]
     assert body.get("keep_alive", "absent") == sent
+
+
+@pytest.mark.parametrize("value, sent", [
+    (None, "absent"), ("4096", 4096), ("2048", 2048), ("abc", "absent"), ("64", "absent"),
+    ("0", "absent"), ("-1", "absent"),
+])
+def test_num_ctx_is_opt_in_and_validated(monkeypatch, value, sent):
+    # Measured 2026-09-30 on Node1 (Ollama 0.33, 31.8 GiB Vulkan budget): an
+    # embed request without num_ctx loads qwen3-embedding:4b with the server's
+    # default 32k context, a 10.8 GB runner for a 4 GB model, so it could never
+    # stay resident next to the 22 GB reasoning model. A bounded num_ctx keeps
+    # the embedder at its weights plus a small KV.
+    _dedicate(monkeypatch)
+    if value is not None:
+        monkeypatch.setenv("SONDER_EMBED_NUM_CTX", value)
+    calls = []
+    monkeypatch.setattr(embeddings.ollama_endpoint, "open_url", _opener(calls))
+    assert embeddings.embed("hi", model="nomic-embed-text:latest") is not None
+    body = calls[-1][1]
+    assert body.get("options", {}).get("num_ctx", "absent") == sent
+    if sent == "absent":
+        assert "options" not in body
+
+
+def test_num_ctx_joins_the_cpu_option(monkeypatch):
+    _dedicate(monkeypatch, fallback="local")
+    monkeypatch.setenv("SONDER_EMBED_NUM_CTX", "4096")
+    calls = []
+    monkeypatch.setattr(embeddings.ollama_endpoint, "open_url", _opener(calls, node="down"))
+    assert embeddings.embed("hi", model="nomic-embed-text:latest") is not None
+    assert calls[-1][1]["options"] == {"num_gpu": 0, "num_ctx": 4096}
 
 
 @pytest.mark.parametrize("value, expected", [("", "none"), ("LOCAL", "local"), ("cloud", "none")])

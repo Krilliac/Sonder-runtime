@@ -139,6 +139,35 @@ def _isolate_fleet_ledger(_isolate_runtime_home):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_legacy_server_graph():
+    """Start each test without a graph ``server._application()`` built earlier.
+
+    The legacy module composes its graph lazily and keeps it, owned, for the
+    life of the process. So the first test on an xdist worker to reach it left
+    every later test there running against a graph composed for someone else,
+    with the module's ownership flag set -- and a later test that bound its
+    own impostor graph saw ``run_mcp`` retire the impostor instead:
+    ``'types.SimpleNamespace' object has no attribute 'close_providers'``.
+    Retire exactly the graph the module constructed, whether it is still
+    bound or a monkeypatch restoring ``_APP_GRAPH`` has already orphaned it;
+    a graph another owner bound is not the module's to close. A double that
+    a test's patched ``build_application`` returned is only dropped.
+    """
+    import server
+    from sonder_runtime.bootstrap.application_graph import Application
+
+    with server._APP_GRAPH_LOCK:
+        built = server._APP_GRAPH_BUILT_BY_SERVER
+        if built is not None and server._APP_GRAPH is built:
+            server._APP_GRAPH = None
+        server._APP_GRAPH_BUILT_BY_SERVER = None
+        server._APP_GRAPH_OWNED_BY_SERVER = False
+    if type(built) is Application:
+        built.close_providers(timeout=5)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _isolate_typed_ollama_endpoint(monkeypatch):
     """Restore the process-global typed Ollama endpoint around each test.
 
@@ -240,6 +269,34 @@ def _legacy_model_target(server, tier, strict):
 
     model, cloud, augment, tier_label = server._serve_target(tier, strict)
     return ModelTarget(model, cloud, tier_label, augment)
+
+
+@pytest.fixture
+def isolated_default_runtime(monkeypatch):
+    """Give one test an empty process-default application runtime.
+
+    ``bootstrap.app`` keeps the default graph's cleanup callbacks beside the
+    lifecycle that holds it. Tests that swapped in a fresh lifecycle but only
+    some of those callbacks left the rest bound to a graph an earlier test had
+    composed: their ``default_app(config=...)`` claimed that graph's cleanup,
+    closed it, and reset only the swapped-in lifecycle, so once monkeypatch
+    restored the original lifecycle every later ``default_app()`` on the
+    worker got a closed graph ("configured membership must be active").
+    Every ``_default_*_close`` callback is swapped, found by name rather than
+    a hand-kept list that falls behind the next one added.
+    """
+    from sonder_runtime.adapters.application_lifecycle import ApplicationLifecycle
+    from sonder_runtime.bootstrap import app as bootstrap
+
+    callbacks = [name for name in vars(bootstrap)
+                 if name.startswith("_default_") and name.endswith("_close")]
+    assert "_default_application_close" in callbacks, callbacks
+    monkeypatch.setattr(bootstrap, "_application_lifecycle",
+                        ApplicationLifecycle(bootstrap._build_default_application))
+    for name in (*callbacks, "_default_config", "_owned_default_application"):
+        monkeypatch.setattr(bootstrap, name, None)
+    monkeypatch.setattr(bootstrap, "_default_runtime_closing", False)
+    return bootstrap
 
 
 @pytest.fixture

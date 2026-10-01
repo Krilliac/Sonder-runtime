@@ -306,7 +306,14 @@ retries on a loopback primary with the model forced onto the CPU, and
 `OLLAMA_MAX_LOADED_MODELS=1` that fallback still evicts the chat model.
 `SONDER_EMBED_KEEP_ALIVE` (for example `24h`, or `-1` for no expiry) sets
 Ollama's `keep_alive` on embedding requests. Use it so a busy remote host does
-not unload the embedder when it is idle.
+not unload the embedder when it is idle. `SONDER_EMBED_NUM_CTX` (for example
+`4096`; values below 256 are ignored) sets `num_ctx` on embedding requests so
+the embedder's runner is not sized to the host's default context (32k on a
+large GPU budget turns a 4 GB embedder into a 10.8 GB runner).
+The doctor's `sonder_inference_gpu` check does not count a remote embedder as
+a GPU contender, and reports ok when `OLLAMA_LLM_LIBRARY=cpu` pins the local
+Ollama daemon to the CPU library (it names what that setting keeps off the
+GPU).
 Loopback-only features (semantic tier routing, `memory_embedding_backfill`,
 the learning-health revision refresh) stay off while the embedder is remote.
 `sonder doctor` reports whether the embedding model is installed where
