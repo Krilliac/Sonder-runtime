@@ -1,4 +1,5 @@
 """The durable run, worker, status text and app payload share one safe root."""
+import json
 from pathlib import Path
 
 import pytest
@@ -70,6 +71,31 @@ def test_default_workspace_survives_store_reload(isolated):
     recovered = autopilot_store.get_run(run["id"])
     assert recovered["project"] == run["project"]
     assert Path(recovered["project"]).is_dir()
+
+
+def test_project_less_internal_loop_keeps_its_own_root(monkeypatch, tmp_path, isolated):
+    """The selfmod editor passes no project and its policy refuses host extra_roots.
+
+    Binding an omitted project to a creations folder inside the loop injected
+    ``extra_roots`` into every file call, so the editor could touch nothing.
+    """
+    workspace = tmp_path / "candidate"
+    workspace.mkdir()
+    target = str(workspace / "a.py")
+    run = {"workspace_path": str(workspace), "files": ["a.py"], "budgets": {
+        "max_tool_calls": 20, "max_runtime_seconds": 600, "max_files_inspected": 50}}
+    replies = [json.dumps({"tool": "file_read", "args": {"path": target}})]
+    dispatched = []
+    monkeypatch.setattr(server, "_make_generate", lambda *a, **k: (
+        lambda *a, **k: replies.pop(0) if replies else '{"final":"done"}'))
+    monkeypatch.setattr(server, "_agent_dispatch_observed", lambda tool, args, **k: (
+        dispatched.append((tool, dict(args))) or "x = 1"))
+    server._agent_impl(
+        "edit the candidate", max_steps=3, allow_web=False, auto_checklist=True,
+        tool_allowlist={"file_read", "file_edit"}, tool_policy=server._selfmod_agent_policy(run),
+    )
+    assert dispatched == [("file_read", {"path": target})]
+    assert not (isolated / "creations").exists()
 
 
 def test_long_default_workspace_is_not_truncated(monkeypatch, isolated):

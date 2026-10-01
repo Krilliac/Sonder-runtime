@@ -174,4 +174,25 @@ def prepare_writing_project(project: object) -> tuple[str, str]:
         return "", "workspace request failed: %s" % exc
 
 
-__all__ = ["CreationWorkspaceError", "resolve_writing_workspace", "writing_project", "prepare_writing_project"]
+def prepare_loop_project(project: object, *, writing: bool) -> tuple[object, str]:
+    """Inside the agent loop, upgrade only a *named* project that names no directory.
+
+    The entrypoints (``agent``, the workbench, autopilot start) already map an
+    omitted, default or unresolved project before the loop runs.  An omitted
+    project reaching the loop is the unbound contract of host-owned callers
+    that keep their own roots: the selfmod editor works in its candidate
+    workspace under a policy that refuses host-injected ``extra_roots``, the
+    web research agent writes nothing, and unsafe lab clears the project on
+    purpose.  Binding those to a fresh creations folder refused every selfmod
+    file call.  A named label (``default``, an unknown project name) is still
+    upgraded so it can never fall back to the server's working directory.
+    """
+    if writing and str(project or "").strip():
+        return prepare_writing_project(project)
+    return project, ""
+
+
+__all__ = [
+    "CreationWorkspaceError", "resolve_writing_workspace", "writing_project",
+    "prepare_writing_project", "prepare_loop_project",
+]

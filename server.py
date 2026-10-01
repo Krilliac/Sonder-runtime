@@ -173,7 +173,7 @@ import reloadable_mcp
 import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
 import autopilot_controller
 from sonder_runtime.adapters.agent_artifact_gate import AgentArtifactGate, validation_deferral
-from sonder_runtime.adapters.creation_workspace import prepare_writing_project
+from sonder_runtime.adapters.creation_workspace import prepare_loop_project, prepare_writing_project
 from sonder_runtime.adapters.persistence import fanout_store
 import fanout_prompt_vault
 from sonder_runtime.adapters.model_transport import ModelCallError
@@ -20498,7 +20498,7 @@ def _agent_turn(
     controller = _standalone_lanes.current()
     if controller is not None:
         controller.restrict(read_only=lane_read_only, cloud=cloud)
-    project, project_error = prepare_writing_project(project) if not (read_only or cloud) else (project, "")
+    project, project_error = prepare_loop_project(project, writing=not (read_only or cloud))
     project_scope, scope_error = _agent_project_scope(project)
     project_error = project_error or scope_error
     if project_error:
@@ -20715,7 +20715,7 @@ def _agent_turn(
         _start_agent_checklist(prompt, project, read_only)
         if auto_checklist else ("", {})
     )
-    # Writing runs have a real root, including run-scoped default creations.
+    # Entry-point and named-default writing runs have a real root; see prepare_loop_project.
     transcript = "Task:\n%s\n\n%s" % (
         prompt,
         # Every gate this run will actually apply, not just the three that
