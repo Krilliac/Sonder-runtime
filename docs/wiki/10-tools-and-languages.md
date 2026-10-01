@@ -290,9 +290,27 @@ does not return memory content, discovered strings, paths, addresses, or command
 lines and never requests write/injection/debug rights. Unsupported platforms,
 protected processes, access denial, and incomplete scans fail explicitly.
 
+Agent `file_read` accepts `{"path": "src/example.py", "offset": 1, "limit": 120}`
+and returns a numbered page of at most 400 lines and 6,000 characters. Its header
+reports the total line count and the next offset when more lines remain. Long
+lines are cut after 2,000 characters with an explicit `...[+n]` omitted-character
+count; binary files are refused with their size. `start_line`/`end_line` and
+`file`/`filename`/`file_path` remain accepted agent aliases. Native MCP and typed
+`file_read` keep their existing `max_bytes` argument and raw text response.
+
+`file_edit` matches exact text first, then trailing-whitespace-normalized lines,
+then indentation-normalized lines. LF input works with CRLF files; replacements
+use the file's dominant line ending and leave bytes outside the edited spans
+unchanged. A whitespace fallback reports a note and reindents the replacement.
+An ambiguous match exceeding `count` is refused with the matching line numbers;
+include more context or explicitly raise `count`. The result echoes at most 60
+numbered lines around the edit, with three context lines on either side. Python
+and JSON edits also report syntax validation; an invalid edit is kept and flagged.
+
 `text_patch` previews strict unified diffs rooted at an explicit project
 directory. With `apply=true`, it performs an all-file transaction for create
-and modify operations only. Context must match exactly; deletes, renames,
+and modify operations only. Context must match exactly apart from line endings
+(LF diff context also applies to CRLF files); deletes, renames,
 binary/non-UTF-8 data, sensitive paths, links, escapes, and over-budget input
 are rejected.
 
