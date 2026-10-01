@@ -4,7 +4,6 @@ Writing agents with no explicitly selected project must never inherit the
 runtime server's current directory.  Their artifacts live below the state
 home in a directory dedicated to the run.  This adapter owns the small amount
 of path validation needed at that boundary and has no server-module import.
-<<<<<<< HEAD
 
 The console's default session folder uses the same rules under a configured
 workspace root instead (see :func:`plan_session_workspace` for why).
@@ -15,12 +14,6 @@ import datetime
 import os
 import secrets
 import unicodedata
-=======
-"""
-from __future__ import annotations
-
-import os
->>>>>>> origin/main
 import uuid
 import re
 from pathlib import Path
@@ -30,7 +23,6 @@ from sonder_runtime.platform import paths
 
 _DEFAULT_PROJECTS = frozenset({"", "default"})
 _SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-<<<<<<< HEAD
 # A session folder name keeps a few words of the request that opened it.
 _SLUG_WORDS = 4
 _SLUG_CHARS = 32
@@ -46,8 +38,6 @@ _SLUG_FILLER = frozenset((
     "something thing stuff "
     "for to of in on at by with and or from into as"
 ).split())
-=======
->>>>>>> origin/main
 
 
 class CreationWorkspaceError(ValueError):
@@ -110,7 +100,6 @@ def _validate_run_id(run_id: object) -> str:
     return value
 
 
-<<<<<<< HEAD
 def _creation_target(
     run_id: object,
     *,
@@ -186,8 +175,6 @@ def _establish(
     return resolved_target
 
 
-=======
->>>>>>> origin/main
 def resolve_writing_workspace(
     project: object,
     run_id: object,
@@ -205,7 +192,6 @@ def resolve_writing_workspace(
     """
     if not _is_default_project(project):
         return Path(str(project)).expanduser()
-<<<<<<< HEAD
     return _establish(run_id, state_home=state_home, source_root=source_root)
 
 
@@ -291,51 +277,6 @@ def create_session_workspace(target: str | Path, *, source_root: str | Path | No
         planned.name, state_home=planned.parent.parent, source_root=source_root,
         home_label="workspace root",
     )
-=======
-
-    identifier = _validate_run_id(run_id)
-    home = Path(state_home).expanduser() if state_home is not None else paths.default_home()
-    try:
-        home_resolved = home.resolve(strict=False)
-    except OSError as exc:
-        raise CreationWorkspaceError("state home cannot be resolved") from exc
-    if _under_source_checkout(home_resolved, Path(source_root) if source_root else None):
-        raise CreationWorkspaceError("state home cannot be inside a Sonder source checkout")
-
-    creations = home_resolved / "creations"
-    target = creations / identifier
-    try:
-        # Check before creating anything: ``mkdir(exist_ok=True)`` would
-        # otherwise follow an attacker-planted symlink and briefly write into
-        # an arbitrary directory before the postcondition check below.
-        is_junction = getattr(os.path, "isjunction", lambda value: False)
-        if creations.is_symlink() or target.is_symlink() or is_junction(str(creations)) or is_junction(str(target)):
-            raise CreationWorkspaceError("creation workspace uses a symlink")
-        resolved_creations = creations.resolve(strict=False)
-        resolved_target = target.resolve(strict=False)
-        if _under_source_checkout(resolved_target, Path(source_root) if source_root else None):
-            raise CreationWorkspaceError("creation workspace cannot be inside a Sonder source checkout")
-        if not _is_within(resolved_creations, home_resolved) or not _is_within(
-            resolved_target, resolved_creations
-        ):
-            raise CreationWorkspaceError("creation workspace escaped its state home")
-        home_resolved.mkdir(parents=True, exist_ok=True)
-        creations.mkdir(parents=True, exist_ok=True)
-        target.mkdir(exist_ok=True)
-        resolved_creations = creations.resolve(strict=True)
-        resolved_target = target.resolve(strict=True)
-    except CreationWorkspaceError:
-        raise
-    except OSError as exc:
-        raise CreationWorkspaceError("creation workspace cannot be established") from exc
-    if not _is_within(resolved_creations, home_resolved) or not _is_within(
-        resolved_target, resolved_creations
-    ):
-        raise CreationWorkspaceError("creation workspace escaped its state home")
-    if _under_source_checkout(resolved_target, Path(source_root) if source_root else None):
-        raise CreationWorkspaceError("creation workspace cannot be inside a Sonder source checkout")
-    return resolved_target
->>>>>>> origin/main
 
 
 def writing_project(
@@ -391,10 +332,6 @@ def prepare_loop_project(project: object, *, writing: bool) -> tuple[object, str
 
 __all__ = [
     "CreationWorkspaceError", "resolve_writing_workspace", "writing_project",
-<<<<<<< HEAD
     "prepare_writing_project", "prepare_loop_project", "session_workspace_name",
     "plan_session_workspace", "create_session_workspace",
-=======
-    "prepare_writing_project", "prepare_loop_project",
->>>>>>> origin/main
 ]

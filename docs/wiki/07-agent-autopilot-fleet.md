@@ -81,14 +81,11 @@ selected scope; read-only observe runs keep their existing behavior. A default
 state home inside a Sonder Git checkout is refused instead of writing artifacts
 into the Runtime source. Configured workspace grants still apply to delegation.
 
-<<<<<<< HEAD
 The console is the exception: its managed work grants only
 `[state].workspace_roots` and refuses roots that overlap the state home, so
 its default folder goes under the first usable workspace root instead (see
 [workspace scope](20-terminal-ui-conventions.md#workspace-scope-for-file-commands)).
 
-=======
->>>>>>> origin/main
 When unattended execution verifiers are refused (for example in `acceptEdits`),
 an implementation may pass using successful read-back of every changed file
 followed by host-owned, non-executing syntax checks: Python AST/compile, JSON,
