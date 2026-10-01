@@ -6,6 +6,22 @@ import sonder_runtime.adapters.filesystem.file_ops as file_ops
 import server
 
 
+def _record_reads(monkeypatch, calls):
+    """Record every read attempt at both seams: the legacy ``file_read``
+    handler and the typed gateway the agent-lane page renderer authorises
+    through. A guard that works must leave ``calls`` empty."""
+    monkeypatch.setattr(server, "file_read", lambda *a, **k: calls.append((a, k)))
+    original = server._typed_tool
+
+    def typed(tool_name, arguments, **kwargs):
+        if tool_name == "file_read":
+            calls.append(((tool_name, arguments), kwargs))
+            return {"path": __file__}
+        return original(tool_name, arguments, **kwargs)
+
+    monkeypatch.setattr(server, "_typed_tool", typed)
+
+
 def test_read_only_denies_mutation_before_handler(monkeypatch):
     calls = []
     monkeypatch.setattr(server, "task_create", lambda *a, **k: calls.append((a, k)))
@@ -44,7 +60,7 @@ def test_project_bound_and_read_only_task_routing_is_explicit():
 
 def test_read_only_denies_bypass_args(monkeypatch):
     calls = []
-    monkeypatch.setattr(server, "file_read", lambda *a, **k: calls.append((a, k)))
+    _record_reads(monkeypatch, calls)
     out = server._agent_dispatch(
         "file_read", {"path": "README.md", "token": "x", "extra_roots": "C:\\"}, read_only=True
     )
@@ -54,7 +70,7 @@ def test_read_only_denies_bypass_args(monkeypatch):
 
 def test_read_only_denies_untrusted_extra_root_without_token(monkeypatch):
     calls = []
-    monkeypatch.setattr(server, "file_read", lambda *a, **k: calls.append((a, k)))
+    _record_reads(monkeypatch, calls)
 
     out = server._agent_dispatch(
         "file_read", {"path": "outside.txt", "extra_roots": "C:\\"}, read_only=True
@@ -171,7 +187,7 @@ def test_project_scoped_read_rejects_sonder_workspace_even_when_normally_authori
     outside.write_text("wrong repository", encoding="utf-8")
     monkeypatch.setattr(server.file_ops, "workspace_root", lambda: workspace)
     calls = []
-    monkeypatch.setattr(server, "file_read", lambda *a, **k: calls.append((a, k)))
+    _record_reads(monkeypatch, calls)
 
     out = server._agent_dispatch_observed(
         "file_read",
@@ -185,22 +201,40 @@ def test_project_scoped_read_rejects_sonder_workspace_even_when_normally_authori
     assert calls == []
 
 
-def test_read_only_allows_guarded_read(monkeypatch):
-    monkeypatch.setattr(server, "file_read", lambda path, **kwargs: "read:" + path)
-    assert server._agent_dispatch("file_read", {"path": "README.md"}, read_only=True) == "read:README.md"
+def _authorise_reads(monkeypatch, tmp_path, calls):
+    target = tmp_path / "page.txt"
+    target.write_text("alpha" + chr(10) + "beta" + chr(10), encoding="utf-8")
+    original = server._typed_tool
+
+    def typed(tool_name, arguments, **kwargs):
+        if tool_name == "file_read":
+            calls.append(arguments["path"])
+            return {"path": str(target)}
+        return original(tool_name, arguments, **kwargs)
+
+    monkeypatch.setattr(server, "_typed_tool", typed)
 
 
-def test_read_only_allows_normal_top_level_source(monkeypatch):
-    monkeypatch.setattr(server, "file_read", lambda path, **kwargs: "read:" + path)
-    assert server._agent_dispatch(
-        "file_read", {"path": "server.py"}, read_only=True
-    ) == "read:server.py"
+def test_read_only_allows_guarded_read(monkeypatch, tmp_path):
+    calls = []
+    _authorise_reads(monkeypatch, tmp_path, calls)
+    out = server._agent_dispatch("file_read", {"path": "README.md"}, read_only=True)
+    assert calls == ["README.md"]
+    assert "lines 1-2 of 2" in out and "alpha" in out
+
+
+def test_read_only_allows_normal_top_level_source(monkeypatch, tmp_path):
+    calls = []
+    _authorise_reads(monkeypatch, tmp_path, calls)
+    out = server._agent_dispatch("file_read", {"path": "server.py"}, read_only=True)
+    assert calls == ["server.py"]
+    assert "lines 1-2 of 2" in out
 
 
 @pytest.mark.parametrize("path", ["C:\\outside.txt", "../outside.txt", "~/.env"])
 def test_read_only_rejects_absolute_or_escaping_read(monkeypatch, path):
     calls = []
-    monkeypatch.setattr(server, "file_read", lambda *a, **k: calls.append((a, k)))
+    _record_reads(monkeypatch, calls)
 
     out = server._agent_dispatch("file_read", {"path": path}, read_only=True)
 
@@ -214,7 +248,7 @@ def test_read_only_rejects_absolute_or_escaping_read(monkeypatch, path):
 )
 def test_read_only_rejects_secret_or_control_state(monkeypatch, path):
     calls = []
-    monkeypatch.setattr(server, "file_read", lambda *a, **k: calls.append((a, k)))
+    _record_reads(monkeypatch, calls)
 
     out = server._agent_dispatch("file_read", {"path": path}, read_only=True)
 
