@@ -4,6 +4,7 @@ from __future__ import annotations
 import sys
 import types
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -238,7 +239,9 @@ def test_test_runner_word_is_optional(services):
     assert (request.runner, request.selector, request.project) == (
         "auto", "tests/test_x.py::test_y", "/w/proj",
     )
-    assert str(context.workspace_roots[0]) == "/w/proj"
+    # Workspace roots are Paths; compare them as Paths, since str() of a
+    # Windows path renders "/w/proj" as "\w\proj".
+    assert context.workspace_roots == (Path("/w/proj"),)
 
 
 def test_test_status_result_and_cancel_followups(services):
