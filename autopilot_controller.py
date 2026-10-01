@@ -114,7 +114,7 @@ def verifier_preflight() -> str:
     if allowed or os.environ.get("SONDER_AUTOPILOT_REQUIRE_VERIFIER", "0") != "1":
         return ""
     return (
-        "ERROR: no verifier tool is allowed unattended in mode %s; a validate task cannot pass\n%s"
+        "autopilot not started: no verifier tool is allowed unattended in mode %s; a validate task cannot pass\n%s"
         % (mode, _format_verifiers(mode, allowed, refused))
     )
 

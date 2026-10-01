@@ -74,7 +74,8 @@ def test_start_verifier_preflight_uses_scratch_home_before_launch(monkeypatch, t
         assert len(launched) == 1
     else:
         assert output.startswith(
-            "ERROR: no verifier tool is allowed unattended in mode %s; a validate task cannot pass" % mode
+            "autopilot not started: no verifier tool is allowed unattended in mode %s; "
+            "a validate task cannot pass" % mode
         )
         assert not launched
         assert autopilot_store.get_run() is None
