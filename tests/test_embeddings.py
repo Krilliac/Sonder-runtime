@@ -178,11 +178,32 @@ def test_serving_digest_is_authoritative_over_loopback_filesystem(
     )
 
 
-def test_embed_fails_closed_if_serving_digest_changes_mid_request(monkeypatch):
-    state = {"digest": "a" * 64}
+_REMOTE_EMBED_BASE = "https://example.test:11434"
+# One fenced embed: read the serving digest, request the vector, read it again.
+_FENCED_EMBED = [
+    _REMOTE_EMBED_BASE + "/api/tags",
+    _REMOTE_EMBED_BASE + "/api/embeddings",
+    _REMOTE_EMBED_BASE + "/api/tags",
+]
+
+
+def _remote_embedder(monkeypatch, state):
+    """Serve the embedder's digest from ``state``; return the URLs requested.
+
+    The origin has to be one the endpoint policy accepts. A plain-HTTP remote
+    origin is refused before any request is made, so a test built on one gets
+    ``None`` from ``embed`` without reaching the revision check it is meant to
+    exercise. These tests used ``http://example.test`` and passed that way,
+    with or without the check, from the HTTPS requirement (#344) until this
+    was found; asserting the requested URLs keeps them from going quiet again.
+    """
+    import json
+
+    calls = []
 
     def fake_urlopen(request, timeout=30):
         url = request if isinstance(request, str) else request.full_url
+        calls.append(url)
         if url.endswith("/api/tags"):
             return FakeResponse(json.dumps({
                 "models": [{
@@ -190,44 +211,47 @@ def test_embed_fails_closed_if_serving_digest_changes_mid_request(monkeypatch):
                     "digest": state["digest"],
                 }],
             }).encode("utf-8"))
-        state["digest"] = "b" * 64
+        state["digest"] = state.get("digest_after_embed", state["digest"])
         return FakeResponse(b'{"embedding": [1.0, 0.0]}')
 
-    import json
     monkeypatch.delenv("SONDER_EMBED_REVISION", raising=False)
     monkeypatch.setenv("SONDER_ALLOW_REMOTE_OLLAMA", "1")
-    monkeypatch.setattr(e, "BASE", "http://example.test:11434")
+    monkeypatch.setattr(e, "BASE", _REMOTE_EMBED_BASE)
     monkeypatch.setattr(e.ollama_endpoint, "open_url", fake_urlopen)
+    return calls
+
+
+def test_embed_returns_the_vector_when_the_serving_digest_holds(monkeypatch):
+    calls = _remote_embedder(monkeypatch, {"digest": "a" * 64})
+
+    vector = e.embed("task")
+
+    assert vector == [1.0, 0.0]
+    assert e.provenance(vector)["revision"] == "ollama-manifest-sha256:" + "a" * 64
+    assert calls == _FENCED_EMBED
+
+
+def test_embed_fails_closed_if_serving_digest_changes_mid_request(monkeypatch):
+    calls = _remote_embedder(
+        monkeypatch, {"digest": "a" * 64, "digest_after_embed": "b" * 64},
+    )
 
     assert e.embed("task") is None
+    # Same requests as the passing control above: only the digest differs.
+    assert calls == _FENCED_EMBED
 
 
 def test_provenance_stays_bound_after_another_revision_refresh(monkeypatch):
     state = {"digest": "a" * 64}
-
-    def fake_urlopen(request, timeout=30):
-        url = request if isinstance(request, str) else request.full_url
-        if url.endswith("/api/tags"):
-            return FakeResponse(json.dumps({
-                "models": [{
-                    "name": e.EMBED_IDENTITY,
-                    "digest": state["digest"],
-                }],
-            }).encode("utf-8"))
-        return FakeResponse(b'{"embedding": [1.0, 0.0]}')
-
-    import json
-    monkeypatch.delenv("SONDER_EMBED_REVISION", raising=False)
-    monkeypatch.setenv("SONDER_ALLOW_REMOTE_OLLAMA", "1")
-    monkeypatch.setattr(e, "BASE", "http://example.test:11434")
-    monkeypatch.setattr(e.ollama_endpoint, "open_url", fake_urlopen)
+    _remote_embedder(monkeypatch, state)
     vector = e.embed("task")
     bound = e.provenance(vector)["revision"]
+    assert bound == "ollama-manifest-sha256:" + "a" * 64
     state["digest"] = "b" * 64
     e.refresh_runtime_revision()
 
     assert e.provenance(vector)["revision"] == bound
-    assert e.EMBED_REVISION != bound
+    assert e.EMBED_REVISION == "ollama-manifest-sha256:" + "b" * 64
 
 
 def test_valid_vector_soft_rejects_values_outside_float32():
@@ -251,9 +275,12 @@ def test_remote_embedding_endpoint_is_blocked_before_network(monkeypatch):
         "open_url",
         lambda *args, **kwargs: calls.append(1),
     )
+    # HTTPS, so the missing opt-in is the only thing that can block it: plain
+    # HTTP is refused for its scheme even with the opt-in set.
+    remote = "https://models.example.test:11434"
 
-    assert e.serving_model_revision(base="http://models.example.test:11434") == ""
-    assert e.embed("private task", base="http://models.example.test:11434") is None
+    assert e.serving_model_revision(base=remote) == ""
+    assert e.embed("private task", base=remote) is None
     assert calls == []
 
 
