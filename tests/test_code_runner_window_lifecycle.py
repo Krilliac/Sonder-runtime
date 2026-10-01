@@ -55,10 +55,13 @@ def windows(monkeypatch, tmp_path):
     monkeypatch.setattr(code_runner, "_attach_windows_job", fake_job, raising=False)
     monkeypatch.setattr(code_runner, "_resume_windows_process", lambda proc: None, raising=False)
     monkeypatch.setattr(code_runner, "_close_windows_job", lambda job: None)
-    registry = getattr(code_runner, "_WindowRegistry", None)
-    if registry is not None:
-        monkeypatch.setattr(code_runner, "_WINDOWS", registry())
-    return launched, jobs
+    registry = code_runner._WindowRegistry()
+    monkeypatch.setattr(code_runner, "_WINDOWS", registry)
+    yield launched, jobs
+    # Cancel lifetime timers (and wait out an in-flight expiry, which holds
+    # the lock) while the fakes are still patched in. A timer outliving the
+    # test used to fire against the real ctypes calls with a fake handle.
+    registry.shutdown()
 
 
 def _launch():
@@ -213,3 +216,25 @@ def test_job_active_process_limit_is_enforced_by_windows(tmp_path):
     finally:
         code_runner._close_windows_job(job)
     assert out.strip() == "refused"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects")
+def test_close_windows_job_never_raises_for_an_unmarshalable_handle():
+    """ctypes.ArgumentError is not an OSError; teardown must still swallow it."""
+    code_runner._close_windows_job(object())
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects")
+def test_lifetime_expiry_survives_a_bad_job_handle():
+    """The expiry runs on a timer thread; an exception there is unhandled."""
+    registry = code_runner._WindowRegistry()
+    proc = _Proc()
+    proc._sonder_job_handle = object()
+
+    class _Timer:
+        def cancel(self):
+            pass
+
+    registry._windows[1] = {"proc": proc, "job": object(), "timer": _Timer(), "run_dir": None}
+    registry._expire(1)
+    assert registry._windows == {}

@@ -10,7 +10,7 @@ def test_root_names_are_identity_preserving_aliases():
     assert server._clip_agent_prompt_text is framing.clip_prompt_text
     assert server._frame_agent_observations is framing.frame_observations
     assert server._agent_observation_prompt is framing.observation_prompt
-    assert framing.OBSERVATION_PROMPT_CHARS == 9000
+    assert framing.OBSERVATION_PROMPT_CHARS == 20000
 
 
 def test_clipping_keeps_both_ends_within_the_limit():

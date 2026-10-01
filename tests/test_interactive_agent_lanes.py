@@ -563,11 +563,13 @@ def test_tool_request_uses_scoped_typed_gateway_and_records_artifact(env):
     assert '"name": "write_file"' in first_request.system
     assert '"path"' in first_request.system
     assert len(gateway_requests) == 1
-    visible_selection_id = next(
-        line.split(": ", 1)[1]
-        for line in first_request.system.splitlines()
-        if line.startswith("Tool schema selection id: ")
-    )
+    # A7 keeps the system prefix stable by putting the per-turn ID at the user tail.
+    selection_line = first_request.prompt.splitlines()[-1]
+    assert selection_line.startswith("[tool schema selection id: ")
+    assert selection_line.endswith("]")
+    visible_selection_id = selection_line.removeprefix(
+        "[tool schema selection id: "
+    ).removesuffix("]")
     assert gateway_requests[0].schema_selection.selection_id == visible_selection_id
     assert gateway_requests[0].schema_selection.visible_names == frozenset({"write_file"})
     assert len(observed) == 1

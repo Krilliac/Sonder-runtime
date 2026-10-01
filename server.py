@@ -12954,12 +12954,10 @@ def file_read_range(
             {"path": path, "start_line": start_line, "end_line": end_line},
             token=token, approval=approval, extra_roots=extra_roots,
         )
+        output = _format_file_result("file range", data)
     except Exception as exc:
         _record_direct_tool("file_read_range", args, ok=False, started=started, summary=str(exc))
         return "ERROR: %s" % exc
-    lines = ["file range: %s lines %s-%s" % (data["path"], data["start_line"], data["end_line"])]
-    lines.extend("%6d  %s" % (row["line"], row["text"]) for row in data["lines"])
-    output = "\n".join(lines)
     _record_direct_tool(
         "file_read_range", args, ok=True, started=started,
         summary="%d lines" % len(data["lines"]), output=output,
@@ -17103,7 +17101,7 @@ AGENT_TOOL_HELP = """Available tools:
 - directory_create: {"path": "output/reports", "parents": true}
 - file_find: {"query": "*.py", "root": ".", "max_results": 50}
 - repository_symbol_index: {"path": ".", "glob": "*", "language": "auto|python|javascript|typescript|c|cpp|csharp|rust|go", "max_files": 200, "max_total_bytes": 2000000, "max_file_bytes": 256000, "max_symbols": 2000}
-- file_read: {"path": "README.md"}
+- file_read: {"path": "README.md", "offset": 1, "limit": 120}
 - file_digest: {"path": "artifact.bin", "max_bytes": 32000000}
 - directory_digest: {"path": ".", "max_depth": 12, "max_files": 2000, "max_total_bytes": 32000000, "max_file_bytes": 32000000, "max_results": 2500}
 - file_read_range: {"path": "server.py", "start_line": 1, "end_line": 200}
@@ -17123,7 +17121,7 @@ AGENT_TOOL_HELP = """Available tools:
 - file_batch_write: {"operations_json": [{"path": "a.txt", "content": "...", "mode": "create|overwrite"}]}
 - json_patch: {"path": "config.json", "operations_json": [{"op": "test", "path": "/version", "value": 1}, {"op": "replace", "path": "/version", "value": 2}], "mode": "preview|apply"}
 - text_patch: {"root": ".", "patch": "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n", "apply": false}
-- file_edit: {"path": "notes.txt", "old": "before", "new": "after", "count": 1}
+- file_edit: {"path": "notes.txt", "old": "before", "new": "after", "count": 1} -- must match exactly once; whitespace and CRLF tolerant; result echoes the region with line numbers
 - file_copy: {"source": "assets/input.bin", "destination": "build/input.bin", "overwrite": false}
 - file_move: {"source": "build/draft.bin", "destination": "dist/final.bin", "overwrite": false}
 - file_delete: {"path": "notes.txt", "dry_run": true}
@@ -18250,6 +18248,8 @@ def _agent_dispatch(
     args = args or {}
     if not isinstance(args, dict):
         return "ERROR: tool args must be a JSON object"
+    if tool_name == "file_read":
+        args = {**args, "path": args.get("path") or args.get("file") or args.get("filename") or args.get("file_path") or ""}
     # A model never holds a credential. A string ``token`` or ``approval`` in
     # a proposal is dropped before anything reads it, on every agent path and
     # not only the autonomous ones; the in-process objects the host injects
@@ -18785,12 +18785,10 @@ def _agent_dispatch(
             extra_roots=args.get("extra_roots", ""),
         )
     if tool_name == "file_read":
-        return file_read(
-            path=args.get("path", ""),
-            max_bytes=args.get("max_bytes", 256000),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
+        from sonder_runtime.adapters.inspection_executor import render_agent_file_page
+        return render_agent_file_page(
+            args, read=_typed_tool, record=_record_direct_tool,
+            activity=activity_tracker, reload=_maybe_live_reload,
         )
     if tool_name == "file_digest":
         return file_digest(
@@ -19584,6 +19582,8 @@ def _project_scope_args(tool_name, args, project):
     ):
         return args
     scoped = dict(args)
+    if tool_name == "file_read":
+        scoped["path"] = scoped.get("path") or scoped.get("file") or scoped.get("filename") or scoped.get("file_path") or ""
     # Never compose a model-supplied root with the trusted host root.  This is
     # the host-resolved path boundary; child processes remain user-level code,
     # not an operating-system sandbox.
@@ -20148,7 +20148,7 @@ _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS = frozenset({
 # ceilings are derived from the same number (batch_coalescing.AGENT_STEP_CEILING).
 _AGENT_MAX_STEPS_CEILING = 20
 # Characters of one tool observation shown to the model in the agent loop.
-_AGENT_MODEL_OBSERVATION_CHARS = 6000
+_AGENT_MODEL_OBSERVATION_CHARS = 8000
 # Batch results with one section per target, keyed by tool: their model view
 # gives every section an equal share of the budget instead of a head slice.
 _AGENT_SECTIONED_OBSERVATION_PREFIXES = {
@@ -20159,7 +20159,7 @@ _AGENT_SECTIONED_OBSERVATION_PREFIXES = {
 def _agent_model_observation_view(tool_name, text):
     """Model-facing view of one tool observation; the host keeps the full text.
 
-    Ordinary observations keep their head slice.  A sectioned batch result
+    Ordinary observations keep a marked head and tail. A sectioned batch result
     (one ``context_pack`` holding several files) is fitted so every file stays
     visible with a marked clip, because a head slice would silently hide every
     file after the first few thousand characters.
@@ -20167,7 +20167,9 @@ def _agent_model_observation_view(tool_name, text):
     text = str(text)
     prefix = _AGENT_SECTIONED_OBSERVATION_PREFIXES.get(tool_name)
     if prefix is None:
-        return text[:_AGENT_MODEL_OBSERVATION_CHARS]
+        if len(text) <= _AGENT_MODEL_OBSERVATION_CHARS:
+            return text
+        return text[:5000] + ("...[%d chars omitted; use file_read offset/limit or output_digest]..." % (len(text) - 8000)) + text[-3000:]
     return _fit_sectioned_agent_text(
         text, _AGENT_MODEL_OBSERVATION_CHARS, prefix,
         clip_hint=(
@@ -20257,7 +20259,7 @@ def _agent_batch_guard_telemetry(event):
 
 _LOCAL_AGENT_NUM_PREDICT = 1200
 _CLOUD_AGENT_WRITE_CHUNK_HINT = 24000
-
+from sonder_runtime.adapters import agent_generation_budget as _agent_generation_budget
 
 
 def _local_agent_brief(project_scope: str = "") -> str:
@@ -20554,8 +20556,9 @@ def _agent_turn(
             system or default_agent_system, False, "", model=model, cloud=False)
     )
     agent_num_predict = (
-        _CLOUD_AGENT_NUM_PREDICT if cloud else _LOCAL_AGENT_NUM_PREDICT
+        _CLOUD_AGENT_NUM_PREDICT if cloud else _agent_generation_budget.decision_num_predict(provider, cloud, True)
     )
+    agent_temperature = _tier_generation.decision_temperature(provider)
     # A host-owned pre-model context producer needs the same resolved window
     # the generator actually uses. Pin it for this turn rather than observing
     # one window and silently dispatching with another after metadata refresh.
@@ -20567,10 +20570,10 @@ def _agent_turn(
         if cloud else None
     )
     gen = _make_tier_generate(
-        tier_label, model, system, 0.1, agent_num_predict, agent_num_ctx, cloud=cloud,
+        tier_label, model, system, agent_temperature, agent_num_predict, agent_num_ctx, cloud=cloud,
         cancel_check=cancel_check,
         accept_native_tool_calls=True,
-        compact_cloud_reasoning=True,
+        compact_cloud_reasoning=True, generation_kind="decision",
     )
     if capture_session is not None:
         gen = wrap_model_generator(
@@ -20580,12 +20583,12 @@ def _agent_turn(
             tier=tier_label or tier,
             system=system,
             options={
-                "temperature": 0.1,
+                "temperature": agent_temperature,
                 "num_predict": agent_num_predict,
                 "num_ctx": 0,
             },
             options_factory=lambda _prompt, _history, raw: _legacy_model_step_options(
-                raw, temperature=0.1, num_predict=agent_num_predict, num_ctx=0,
+                raw, temperature=agent_temperature, num_predict=agent_num_predict, num_ctx=0,
             ),
             first_user_message=prompt,
             failure_code=_legacy_model_failure_code,
@@ -21045,11 +21048,8 @@ def _agent_turn(
         nonlocal claim_review_policy_refused, claim_review_verified
         tool_name = str(review.get("tool") or "")
         tool_args = review.get("args") or {}
-        # Validate the same host-scoped arguments that dispatch will use.  A
-        # repository model commonly echoes the absolute PROJECT ROOT from its
-        # prompt; checking the raw model arguments first incorrectly rejected
-        # that path even though the host had already authorized and confined
-        # the run to ``project_scope``.
+        # Callback policy checks model intent; repository guards and dispatch
+        # use host-scoped paths so injected authority is not a model bypass.
         policy_tool_args = _project_scope_args(
             tool_name, tool_args, project_scope,
         )
@@ -21062,7 +21062,7 @@ def _agent_turn(
                 % tool_name
             )
         if not policy_error and tool_policy is not None:
-            policy_error = str(tool_policy(tool_name, policy_tool_args) or "")
+            policy_error = str(tool_policy(tool_name, tool_args) or "")
         if not policy_error and cloud:
             policy_error = _cloud_agent_tool_policy_error(tool_name)
         if not policy_error:
@@ -21080,7 +21080,7 @@ def _agent_turn(
             ensure_not_cancelled()
             observation_text = str(_agent_dispatch_observed(
                 tool_name,
-                tool_args,
+                policy_tool_args,
                 allow_web=False,
                 read_only=True,
                 project=project_scope,
@@ -21346,8 +21346,8 @@ def _agent_turn(
                 _predictor.note_miss()
         _predictor.record_transition(_spec_state, tool_name)
         _last_tool_name = tool_name
-        # Keep policy and dispatch on one canonical, host-confined view of a
-        # repository tool call.  Previously the early read-only check saw raw
+        # Keep repository guards and dispatch on one host-confined view of a
+        # tool call; callback policy sees model args. The read-only check saw raw
         # model paths while dispatch later rebased them under ``project_scope``.
         # Absolute in-project paths were therefore rejected before dispatch,
         # causing fleet workers to exhaust max_steps without any file evidence.
@@ -21374,6 +21374,9 @@ def _agent_turn(
             and call_signature in successful_inspection_results
         )
         prior_identical_failures = failed_call_counts.get(call_signature, 0)
+        from sonder_runtime.domain.agents.policy_refusal_guard import repeated_policy_refusal
+        if refusal := repeated_policy_refusal(observations):
+            return _early_exit("ERROR: host policy refused 3 consecutive calls: " + refusal)
         if prior_identical_failures >= 3:
             if auto_checklist:
                 _agent_checklist_fail(
@@ -21396,7 +21399,7 @@ def _agent_turn(
                 % tool_name
             )
         if not policy_error and tool_policy is not None:
-            policy_error = str(tool_policy(tool_name, policy_tool_args) or "")
+            policy_error = str(tool_policy(tool_name, tool_args) or "")
         if not policy_error and cloud:
             policy_error = _cloud_agent_tool_policy_error(
                 tool_name, unsafe=unsafe,
@@ -22287,6 +22290,7 @@ def _autopilot_tool_policy(run: dict):
                 "ERROR: HOST POLICY: autonomous runs cannot set "
                 "include_ignored=true."
             )
+        # Preserve the trusted host sentinel for direct, already-scoped callers.
         host_scoped_text_patch = (
             tool_name == "text_patch"
             and bool(project_scope)
@@ -22295,7 +22299,7 @@ def _autopilot_tool_policy(run: dict):
             and args.get("extra_roots") == project_scope
         )
         if (
-            any(args.get(name) for name in ("token", "approval", "extra_roots"))
+            any(name in args for name in ("token", "approval", "extra_roots"))
             and not host_scoped_text_patch
         ):
             return "ERROR: HOST POLICY: autonomous runs cannot use bypass credentials or extra roots."
@@ -22359,7 +22363,7 @@ def _autopilot_json_model(run: dict, role: str, prompt: str, validator) -> dict:
         model=model,
         cloud=False,
     )
-    gen = _make_tier_generate(tier_label, model, system, 0.05, 1800, 0, cloud=False, local_only=True)
+    gen = _make_tier_generate(tier_label, model, system, 0.05, _agent_generation_budget.json_num_predict(_bridge_provider_for_tier(tier_label)), 0, cloud=False, local_only=True, generation_kind="json")
     correction = ""
     last_error = "invalid JSON"
     for _attempt in range(2):
