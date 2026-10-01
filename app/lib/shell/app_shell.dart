@@ -251,11 +251,13 @@ class _AppShellState extends State<AppShell>
   /// Switch to [destination] (at [section]), after the current page's leave
   /// guards agree.
   Future<void> _navigate(WorkspaceDestination destination,
-      {String? section}) async {
+      {String? section, Map<String, String> params = const {}}) async {
     if (!mounted) return;
     _closeDrawer();
     if (destination == _current) {
-      if (section != null) setState(() => _section = ShellSection(section));
+      if (section != null) {
+        setState(() => _section = ShellSection(section, params: params));
+      }
       if (destination == WorkspaceDestination.chat) _focusComposerSoon();
       return;
     }
@@ -271,7 +273,7 @@ class _AppShellState extends State<AppShell>
     final left = _current;
     setState(() {
       _current = destination;
-      _section = section == null ? null : ShellSection(section);
+      _section = section == null ? null : ShellSection(section, params: params);
       if (destination != WorkspaceDestination.chat) {
         _pageSerial++;
         _pageNavigatorKey = GlobalKey<NavigatorState>();
@@ -301,8 +303,9 @@ class _AppShellState extends State<AppShell>
     });
   }
 
-  void _openSection(WorkspaceDestination destination, String section) =>
-      unawaited(_navigate(destination, section: section));
+  void _openSection(WorkspaceDestination destination, String section,
+          {Map<String, String> params = const {}}) =>
+      unawaited(_navigate(destination, section: section, params: params));
 
   void _syncChatLayer() {
     _chatFade
