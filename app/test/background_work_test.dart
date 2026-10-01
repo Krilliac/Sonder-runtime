@@ -3,40 +3,72 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
-import '../lib/background_work.dart';
-import '../lib/chat/commands.dart';
-import '../lib/models.dart';
-import '../lib/api.dart';
+import 'package:sonder_runtime/agents/agent_status.dart';
+import 'package:sonder_runtime/background_work.dart';
+import 'package:sonder_runtime/ui/status_vocab.dart';
+import 'package:sonder_runtime/chat/commands.dart';
+import 'package:sonder_runtime/models.dart';
+import 'package:sonder_runtime/api.dart';
 
 void main() {
   for (final kind in ['fleet', 'autopilot']) {
     test('$kind cancellation uses the existing control command', () async {
       final requests = <http.Request>[];
       await http.runWithClient(
-        () => SonderApi(baseUrl: 'http://127.0.0.1:1').cancelBackground(kind, '$kind-1', project: 'project'),
+        () => SonderApi(baseUrl: 'http://127.0.0.1:1')
+            .cancelBackground(kind, '$kind-1', project: 'project'),
         () => MockClient((request) async {
           requests.add(request);
           expect(request.url.path, '/v1/chat/completions');
           final body = jsonDecode(request.body) as Map<String, dynamic>;
           expect(body['model'], 'sonder');
           expect(body['project'], 'project');
-          expect(body['messages'].last['content'], kind == 'fleet' ? '/agentcancel fleet-1' : '/autopilot cancel autopilot-1');
-          return http.Response(jsonEncode({'choices': [{'message': {'content': 'cancellation requested'}}]}), 200);
+          expect(
+              body['messages'].last['content'],
+              kind == 'fleet'
+                  ? '/agentcancel fleet-1'
+                  : '/autopilot cancel autopilot-1');
+          return http.Response(
+              jsonEncode({
+                'choices': [
+                  {
+                    'message': {'content': 'cancellation requested'}
+                  }
+                ]
+              }),
+              200);
         }),
       );
       expect(requests, hasLength(1));
     });
   }
   test('a refused cancellation is not success', () async {
-    await expectLater(http.runWithClient(
-      () => SonderApi(baseUrl: 'http://127.0.0.1:1').cancelBackground('fleet', 'master-1'),
-      () => MockClient((_) async => http.Response(jsonEncode({'choices': [{'message': {'content': 'ERROR: not allowed'}}]}), 200)),
-    ), throwsA(isA<SonderException>()));
+    await expectLater(
+        http.runWithClient(
+          () => SonderApi(baseUrl: 'http://127.0.0.1:1')
+              .cancelBackground('fleet', 'master-1'),
+          () => MockClient((_) async => http.Response(
+              jsonEncode({
+                'choices': [
+                  {
+                    'message': {'content': 'ERROR: not allowed'}
+                  }
+                ]
+              }),
+              200)),
+        ),
+        throwsA(isA<SonderException>()));
   });
   test('choice commands preserve long tasks and omit oversize actions', () {
     final command = '/master_orchestrate fleet 0 ${'task ' * 600}';
-    expect(OrchestrationChoice.fromJson({'label': 'Fleet', 'command': command}).command, command);
-    expect(OrchestrationChoice.fromJson({'label': 'Fleet', 'command': 'x' * 32769}).command, isEmpty);
+    expect(
+        OrchestrationChoice.fromJson({'label': 'Fleet', 'command': command})
+            .command,
+        command);
+    expect(
+        OrchestrationChoice.fromJson({'label': 'Fleet', 'command': 'x' * 32769})
+            .command,
+        isEmpty);
   });
   test('background work keeps all groups and fleet children', () {
     final work = BackgroundWork.fromJson({
@@ -74,6 +106,37 @@ void main() {
     expect(work.fleets.single.countSummary, '1 done · 1 running · 1 queued');
     expect(work.fleets.single.children.single.preview, 'finished');
     expect(work.autopilot.single.taskCountSummary, '1/3 tasks');
+  });
+
+  test('times are measured on the server clock and never invented', () {
+    final work = BackgroundWork.fromJson({
+      'captured_at': 1000.0,
+      'groups': {
+        'fleets': [
+          {
+            'id': 'fleet-1',
+            'status': 'done',
+            'requested_agents': 3,
+            'updated_ts': 880.0,
+            'created_ts': 100.0,
+            'counts': {'done': 2, 'failed': 1},
+          },
+        ],
+      },
+    });
+    final fleet = work.fleets.single;
+    expect(work.capturedAt, 1000);
+    expect(updatedAgo(fleet.updatedTs, work.capturedAt), '2m ago');
+    expect(updatedAgo(0, work.capturedAt), isNull);
+    expect(updatedAgo(fleet.updatedTs, 0), isNull);
+    expect(elapsedText(0), isNull, reason: 'no elapsed time without a start');
+    expect(fleet.countSummary, '2 done · 0 running · 0 queued · 1 failed');
+    final progress = fleetProgress(fleet);
+    expect((progress.done, progress.failed, progress.total), (2, 1, 3));
+    expect(backgroundStatus('done').word, 'Done');
+    expect(backgroundStatus('awaiting_input').kind, StatusKind.warn);
+    expect(backgroundMatches('running', AgentFilter.working), isTrue);
+    expect(backgroundMatches('running', AgentFilter.unread), isFalse);
   });
 
   test('background metadata is bounded and round trips', () {
