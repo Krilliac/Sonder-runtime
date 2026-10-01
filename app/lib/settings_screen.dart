@@ -149,6 +149,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _signInBusy = false;
   bool _sessionBusy = false;
 
+  /// Who signed in during this run, for that exact session only. The
+  /// stored session holds no user name (token and origin are its whole
+  /// record), so a restored session shows its server alone.
+  String? _signedInUser;
+  String? _signedInToken;
+
   /// The last `/v1/models` answer, for the model picker.
   ModelChoices? _models;
   String? _modelsServer;
@@ -730,6 +736,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// Save stores both together.
   Future<void> _adoptSession(AccountSession session) async {
     final origin = session.origin;
+    final user = _username.text.trim();
+    _signedInUser = user.isEmpty ? null : user;
+    _signedInToken = session.token;
     SettingsSaveResult? stored;
     if (session.matches(_saved.serverUrl)) {
       try {
@@ -768,6 +777,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   void _dropSession() {
     _account = null;
+    _signedInUser = null;
+    _signedInToken = null;
     _password.clear();
     _saved = _saved.copyWith(withoutAccountSession: true);
   }

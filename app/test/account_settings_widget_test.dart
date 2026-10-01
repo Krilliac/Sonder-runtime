@@ -78,6 +78,11 @@ void main() {
           find.textContaining('Sign out revokes this session'), findsOneWidget);
       expect(find.text('Signed-in server'), findsOneWidget);
       expect(find.text('https://host.test'), findsOneWidget);
+      // Known for a sign-in made now; never stored with the session.
+      expect(find.text('Signed in as'), findsOneWidget);
+      expect(find.text('alice'), findsOneWidget);
+      expect(credentials.values['sonder_account_session'],
+          isNot(contains('alice')));
       // Switching accounts needs Sign out or Forget first: no login form.
       expect(find.text('Login'), findsNothing);
 
