@@ -12954,12 +12954,10 @@ def file_read_range(
             {"path": path, "start_line": start_line, "end_line": end_line},
             token=token, approval=approval, extra_roots=extra_roots,
         )
+        output = _format_file_result("file range", data)
     except Exception as exc:
         _record_direct_tool("file_read_range", args, ok=False, started=started, summary=str(exc))
         return "ERROR: %s" % exc
-    lines = ["file range: %s lines %s-%s" % (data["path"], data["start_line"], data["end_line"])]
-    lines.extend("%6d  %s" % (row["line"], row["text"]) for row in data["lines"])
-    output = "\n".join(lines)
     _record_direct_tool(
         "file_read_range", args, ok=True, started=started,
         summary="%d lines" % len(data["lines"]), output=output,
@@ -17101,7 +17099,7 @@ AGENT_TOOL_HELP = """Available tools:
 - directory_create: {"path": "output/reports", "parents": true}
 - file_find: {"query": "*.py", "root": ".", "max_results": 50}
 - repository_symbol_index: {"path": ".", "glob": "*", "language": "auto|python|javascript|typescript|c|cpp|csharp|rust|go", "max_files": 200, "max_total_bytes": 2000000, "max_file_bytes": 256000, "max_symbols": 2000}
-- file_read: {"path": "README.md"}
+- file_read: {"path": "README.md", "offset": 1, "limit": 120}
 - file_digest: {"path": "artifact.bin", "max_bytes": 32000000}
 - directory_digest: {"path": ".", "max_depth": 12, "max_files": 2000, "max_total_bytes": 32000000, "max_file_bytes": 32000000, "max_results": 2500}
 - file_read_range: {"path": "server.py", "start_line": 1, "end_line": 200}
@@ -17121,7 +17119,7 @@ AGENT_TOOL_HELP = """Available tools:
 - file_batch_write: {"operations_json": [{"path": "a.txt", "content": "...", "mode": "create|overwrite"}]}
 - json_patch: {"path": "config.json", "operations_json": [{"op": "test", "path": "/version", "value": 1}, {"op": "replace", "path": "/version", "value": 2}], "mode": "preview|apply"}
 - text_patch: {"root": ".", "patch": "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n", "apply": false}
-- file_edit: {"path": "notes.txt", "old": "before", "new": "after", "count": 1}
+- file_edit: {"path": "notes.txt", "old": "before", "new": "after", "count": 1} -- must match exactly once; whitespace and CRLF tolerant; result echoes the region with line numbers
 - file_copy: {"source": "assets/input.bin", "destination": "build/input.bin", "overwrite": false}
 - file_move: {"source": "build/draft.bin", "destination": "dist/final.bin", "overwrite": false}
 - file_delete: {"path": "notes.txt", "dry_run": true}
@@ -18260,6 +18258,8 @@ def _agent_dispatch(
     args = args or {}
     if not isinstance(args, dict):
         return "ERROR: tool args must be a JSON object"
+    if tool_name == "file_read":
+        args = {**args, "path": args.get("path") or args.get("file") or args.get("filename") or args.get("file_path") or ""}
     # A model never holds a credential. A string ``token`` or ``approval`` in
     # a proposal is dropped before anything reads it, on every agent path and
     # not only the autonomous ones; the in-process objects the host injects
@@ -18790,12 +18790,10 @@ def _agent_dispatch(
             extra_roots=args.get("extra_roots", ""),
         )
     if tool_name == "file_read":
-        return file_read(
-            path=args.get("path", ""),
-            max_bytes=args.get("max_bytes", 256000),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
+        from sonder_runtime.adapters.inspection_executor import render_agent_file_page
+        return render_agent_file_page(
+            args, read=_typed_tool, record=_record_direct_tool,
+            activity=activity_tracker, reload=_maybe_live_reload,
         )
     if tool_name == "file_digest":
         return file_digest(
@@ -19587,6 +19585,8 @@ def _project_scope_args(tool_name, args, project):
     ):
         return args
     scoped = dict(args)
+    if tool_name == "file_read":
+        scoped["path"] = scoped.get("path") or scoped.get("file") or scoped.get("filename") or scoped.get("file_path") or ""
     # Never compose a model-supplied root with the trusted host root.  This is
     # the host-resolved path boundary; child processes remain user-level code,
     # not an operating-system sandbox.
