@@ -809,6 +809,7 @@ def test_owner_loss_during_commit_never_publishes_success(repository, monkeypatc
         connection.close()
 
 
+@pytest.mark.usefixtures("isolated_default_runtime")
 @pytest.mark.parametrize("surface", ["repl", "legacy-mcp"])
 def test_toml_cli_uses_actual_postgres_graph(
     storage_config, tmp_path, monkeypatch, surface
