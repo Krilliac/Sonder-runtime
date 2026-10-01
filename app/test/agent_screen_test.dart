@@ -5,8 +5,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:sonder_runtime/agent_lanes.dart';
 import 'package:sonder_runtime/agent_screen.dart';
 import 'package:sonder_runtime/api.dart';
+import 'package:sonder_runtime/agents/transcript_view.dart';
 import 'package:sonder_runtime/background_work.dart';
 import 'package:sonder_runtime/theme.dart';
+import 'package:sonder_runtime/ui/kit.dart';
 import 'package:sonder_runtime/workspace_ui.dart';
 
 class SearchAgents extends FakeAgents {
@@ -59,7 +61,8 @@ class LongTitleAgents extends ReportingAgents {
 class FakeAgents extends SonderApi {
   FakeAgents() : super(baseUrl: 'http://unused');
   @override
-  Future<BackgroundWork> backgroundWork({String project = ''}) async => const BackgroundWork();
+  Future<BackgroundWork> backgroundWork({String project = ''}) async =>
+      const BackgroundWork();
   final calls = <String>[];
   final inspections = <({String id, int cursor, bool wait})>[];
   bool failCommand = false;
@@ -218,6 +221,110 @@ class BackgroundAgents extends FakeAgents {
   }
 }
 
+/// A lane that read a file, plus a prose answer.
+class ToolAgents extends FakeAgents {
+  @override
+  Future<AgentSnapshot> agentInspect(String id,
+      {int cursor = 0, bool wait = false}) async {
+    inspections.add((id: id, cursor: cursor, wait: wait));
+    return AgentSnapshot.fromJson({
+      'lane': lane(id),
+      'messages': const [],
+      'events': cursor > 0
+          ? const []
+          : [
+              {
+                'sequence': 1,
+                'event_type': 'model.response',
+                'payload': {
+                  'content':
+                      '{"tool": "read_file", "arguments": {"path": "src/parser.dart"}}'
+                },
+              },
+              {
+                'sequence': 2,
+                'event_type': 'tool.requested',
+                'payload': {
+                  'name': 'read_file',
+                  'call_id': 'call-1',
+                  'arguments': {'path': 'src/parser.dart', 'limit': 200},
+                },
+              },
+              {
+                'sequence': 3,
+                'event_type': 'tool.result',
+                'payload': {
+                  'name': 'read_file',
+                  'call_id': 'call-1',
+                  'success': true,
+                  'output': 'void parse() {}',
+                },
+              },
+              {
+                'sequence': 4,
+                'event_type': 'model.response',
+                'payload': {'content': 'The parser has no error recovery.'},
+              },
+            ],
+      'next_cursor': 4,
+    });
+  }
+}
+
+/// [ToolAgents] with the fleet and autopilot run of [BackgroundAgents].
+class ToolBackgroundAgents extends ToolAgents {
+  @override
+  Future<BackgroundWork> backgroundWork({String project = ''}) =>
+      BackgroundAgents().backgroundWork(project: project);
+}
+
+/// The lane list answers only when [gate] completes.
+class SlowListAgents extends FakeAgents {
+  final gate = Completer<void>();
+  @override
+  Future<AgentLanePage> agentLanes(
+      {int cursor = 0, String? parentSessionId}) async {
+    await gate.future;
+    return super.agentLanes(cursor: cursor);
+  }
+}
+
+/// Answers the first inspection, then fails until [failure] is cleared.
+class FlakyAgents extends FakeAgents {
+  Object? failure;
+  @override
+  Future<AgentSnapshot> agentInspect(String id,
+      {int cursor = 0, bool wait = false}) {
+    if (failure != null && cursor > 0) return Future.error(failure!);
+    return super.agentInspect(id, cursor: cursor, wait: wait);
+  }
+}
+
+/// Lanes with long transcripts, for scroll positions. Like the server,
+/// every inspection returns the messages; only events are cursor-paged.
+class LongAgents extends FakeAgents {
+  @override
+  Future<AgentSnapshot> agentInspect(String id,
+      {int cursor = 0, bool wait = false}) async {
+    inspections.add((id: id, cursor: cursor, wait: wait));
+    return AgentSnapshot.fromJson({
+      'lane': lane(id),
+      'messages': [
+        for (var i = 1; i <= 40; i++)
+          {
+            'id': '$id-$i',
+            'sequence': i,
+            'author': i.isOdd ? 'parent' : 'child',
+            'content': 'Message $i for $id',
+            'delivery_state': 'handled',
+          },
+      ],
+      'events': const [],
+      'next_cursor': 40,
+    });
+  }
+}
+
 Future<void> open(WidgetTester tester, FakeAgents api,
     {Size size = const Size(1100, 800)}) async {
   tester.view.physicalSize = size;
@@ -261,9 +368,9 @@ void main() {
     expect(find.text('Load more conversations'), findsOneWidget);
     await tester.tap(find.byTooltip('Clear search'));
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Filter agent status'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Unread reports').last);
+    // Status filters are pills; each states its loaded count.
+    expect(find.bySemanticsLabel('Unread, 1'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('agent-filter-unread')));
     await tester.pumpAndSettle();
     expect(find.text('Parser agent'), findsNothing);
     expect(find.text('Docs agent'), findsOneWidget);
@@ -572,8 +679,13 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Parser agent'));
     await tester.pumpAndSettle();
-    expect(find.text('Tier code'), findsOneWidget);
-    expect(find.text('Revision 7'), findsOneWidget);
+    // Tier and revision are quiet mono facts beside the status pill.
+    expect(find.text('tier code'), findsOneWidget);
+    expect(find.text('revision 7'), findsOneWidget);
+    expect(
+        find.bySemanticsLabel(
+            'Server execution status: Running · tier code · revision 7'),
+        findsOneWidget);
     await tester.tap(find.text('Task, workspace and run details'));
     await tester.pumpAndSettle();
     expect(find.text('Running · tier code · revision 7'), findsOneWidget);
@@ -614,35 +726,50 @@ void main() {
     tester.view.resetDevicePixelRatio();
   });
 
-  testWidgets('background groups expose fleet children and cancellation', (
-    tester,
-  ) async {
+  testWidgets(
+      'background work opens details with progress, agents and confirmed cancellation',
+      (tester) async {
     final api = BackgroundAgents();
     await open(tester, api);
+    expect(find.byKey(const Key('background-group')), findsOneWidget);
     expect(find.byKey(const Key('fleet-group')), findsOneWidget);
     expect(find.byKey(const Key('autopilot-group')), findsOneWidget);
-    await tester.tap(find.byKey(const Key('fleet-group')));
-    await tester.pumpAndSettle();
+    // Rows state progress in words, beside a bar that is never the only cue.
+    expect(find.textContaining('1 of 3 done'), findsOneWidget);
     expect(
-      find.textContaining('1 done · 1 running · 1 queued'),
-      findsOneWidget,
-    );
+        find.bySemanticsLabel(RegExp(
+            r'^Fleet: Build a fleet\. Running, 1 of 3 done, 1 running, 1 queued')),
+        findsOneWidget);
+    expect(find.textContaining('1 of 2 tasks'), findsOneWidget);
+
     await tester.tap(find.byKey(const Key('fleet-fleet-1')));
     await tester.pumpAndSettle();
+    expect(find.text('1 done'), findsOneWidget);
+    expect(find.text('1 running'), findsOneWidget);
+    expect(find.text('1 queued'), findsOneWidget);
     expect(find.text('Child task'), findsOneWidget);
-    await tester.tap(find.byTooltip('Cancel fleet'));
+    expect(find.byKey(const Key('fleet-child-child-1')), findsOneWidget);
+
+    // Cancelling asks first; declining sends nothing.
+    await tester.tap(find.text('Cancel fleet'));
     await tester.pumpAndSettle();
-    expect(api.cancelled, contains('fleet/fleet-1/'));
-    await tester.ensureVisible(find.byKey(const Key('autopilot-group')));
-    await tester.tap(find.byKey(const Key('autopilot-group')));
+    expect(find.text('Cancel this fleet?'), findsOneWidget);
+    await tester.tap(find.text('Keep running'));
     await tester.pumpAndSettle();
-    await tester.ensureVisible(find.byTooltip('Open autopilot details'));
-    await tester.tap(find.byTooltip('Open autopilot details'));
+    expect(api.cancelled, isEmpty);
+    await tester.tap(find.text('Cancel fleet'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Cancel fleet').last);
+    await tester.pumpAndSettle();
+    expect(api.cancelled, ['fleet/fleet-1/']);
+
+    await tester.tap(find.byKey(const Key('autopilot-auto-1')));
     await tester.pumpAndSettle();
     expect(find.text('Keep the goal moving'), findsWidgets);
-    await tester.tap(find.text('Close').last);
+    expect(find.text('Task one'), findsOneWidget);
+    await tester.tap(find.text('Cancel autopilot'));
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Cancel autopilot'));
+    await tester.tap(find.text('Cancel autopilot run'));
     await tester.pumpAndSettle();
     expect(api.cancelled, contains('autopilot/auto-1/'));
     await tester.pumpWidget(const SizedBox());
@@ -690,5 +817,338 @@ void main() {
     await tester.pumpWidget(const SizedBox());
     tester.view.resetPhysicalSize();
     tester.view.resetDevicePixelRatio();
+  });
+
+  testWidgets('inside the app shell the page draws no way back to Chat',
+      (tester) async {
+    tester.view.physicalSize = const Size(1100, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    WorkspaceDestination? shellDestination;
+    // Pushed over another page, where the old chrome drew a back arrow.
+    await tester.pumpWidget(MaterialApp(
+        theme: SonderTheme.dark, home: const Scaffold(body: Text('base'))));
+    final navigator = tester.state<NavigatorState>(find.byType(Navigator));
+    unawaited(navigator.push(MaterialPageRoute<void>(
+        builder: (_) => ShellScope(
+              current: WorkspaceDestination.agents,
+              sidebarVisible: true,
+              navigate: (destination) => shellDestination = destination,
+              openNavigation: () => fail('the sidebar is visible'),
+              child: AgentScreen(
+                  api: MetadataAgents(),
+                  onNavigate: (_) => fail('the shell owns navigation')),
+            ))));
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Back to chat'), findsNothing);
+    expect(find.byTooltip('Workspace navigation'), findsNothing);
+    expect(find.text('Chat'), findsNothing);
+    expect(find.byTooltip('Open navigation'), findsNothing);
+    expect(find.byTooltip('Agent conversation shortcuts'), findsOneWidget);
+    // In-page links leave through the shell.
+    await tester.tap(find.text('Parser agent'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Task, workspace and run details'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Open Runtime'));
+    await tester.pumpAndSettle();
+    expect(shellDestination, WorkspaceDestination.runtime);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('narrow shell pages open the navigation drawer, not Chat',
+      (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    var opened = 0;
+    await tester.pumpWidget(MaterialApp(
+        theme: SonderTheme.dark,
+        home: ShellScope(
+          current: WorkspaceDestination.agents,
+          sidebarVisible: false,
+          navigate: (_) {},
+          openNavigation: () => opened++,
+          child: AgentScreen(api: FakeAgents()),
+        )));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Open navigation'));
+    expect(opened, 1);
+    // A transcript keeps its in-page way back to the list.
+    await tester.tap(find.text('Parser agent'));
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('All agent conversations'), findsOneWidget);
+    expect(find.byTooltip('Open navigation'), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('the shell can ask before leaving unsent drafts', (tester) async {
+    tester.view.physicalSize = const Size(1100, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    AgentLeaveGuard? guard;
+    await tester.pumpWidget(MaterialApp(
+        theme: SonderTheme.dark,
+        home: AgentScreen(
+            api: FakeAgents(), registerLeaveGuard: (value) => guard = value)));
+    await tester.pumpAndSettle();
+    expect(guard, isNotNull);
+    expect(await guard!(), isTrue, reason: 'nothing unsent: leave at once');
+    await tester.tap(find.text('Parser agent'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+        find.byWidgetPredicate((widget) =>
+            widget is TextField &&
+            widget.decoration?.labelText == 'Message this agent'),
+        'Unsent correction');
+    final leaving = guard!();
+    await tester.pumpAndSettle();
+    expect(find.text('Leave agent conversations?'), findsOneWidget);
+    await tester.tap(find.text('Keep editing'));
+    await tester.pumpAndSettle();
+    expect(await leaving, isFalse);
+    expect(find.text('Unsent correction'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    expect(guard, isNull, reason: 'unregistered when the screen goes');
+  });
+
+  testWidgets('tool calls are cards with readable arguments, not JSON prose',
+      (tester) async {
+    await open(tester, ToolAgents());
+    await tester.tap(find.text('Parser agent'));
+    await tester.pumpAndSettle();
+    // The tool request the model wrote is represented by its card only.
+    expect(find.textContaining('"tool"'), findsNothing);
+    expect(find.text('The parser has no error recovery.'), findsOneWidget);
+    expect(
+        find.bySemanticsLabel(
+            RegExp(r'^read_file, done, src/parser\.dart\. Show details$')),
+        findsOneWidget);
+    expect(find.text('Arguments'), findsNothing);
+    await tester.tap(find.text('read_file'));
+    await tester.pumpAndSettle();
+    expect(find.text('Arguments'), findsOneWidget);
+    expect(find.text('path'), findsOneWidget);
+    expect(find.text('limit'), findsOneWidget);
+    expect(find.text('200'), findsOneWidget);
+    expect(find.text('void parse() {}'), findsOneWidget);
+    await tester.tap(find.text('Raw JSON'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('"path": "src/parser.dart"'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
+  });
+
+  testWidgets('list rows carry the status word, not colour alone',
+      (tester) async {
+    await open(tester, SearchAgents());
+    expect(find.bySemanticsLabel(RegExp(r'^Parser agent\. Running$')),
+        findsOneWidget);
+    expect(
+        find.bySemanticsLabel(
+            RegExp(r'^Docs agent\. Completed, 1 unread report$')),
+        findsOneWidget);
+    // The word is drawn too, beside the glyph.
+    expect(find.textContaining('Running'), findsOneWidget);
+    expect(find.textContaining('Completed'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
+  });
+
+  testWidgets('loading shows skeletons, never a blocking spinner',
+      (tester) async {
+    final api = SlowListAgents();
+    tester.view.physicalSize = const Size(1100, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(
+        MaterialApp(theme: SonderTheme.dark, home: AgentScreen(api: api)));
+    await tester.pump();
+    expect(find.byType(SkeletonRows), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    api.gate.complete();
+    await tester.pumpAndSettle();
+    expect(find.byType(SkeletonRows), findsNothing);
+    expect(find.text('Parser agent'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+
+    // A conversation's first page loads behind message-shaped placeholders.
+    final delayed = DelayedAgents();
+    await tester.pumpWidget(
+        MaterialApp(theme: SonderTheme.dark, home: AgentScreen(api: delayed)));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Parser agent'));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.byType(TranscriptSkeleton), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    delayed.first.complete(await delayed.agentInspect('b'));
+    await tester.pumpAndSettle();
+    expect(find.byType(TranscriptSkeleton), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('a failed refresh keeps the loaded conversation visible',
+      (tester) async {
+    final api = FlakyAgents();
+    await open(tester, api);
+    await tester.tap(find.text('Parser agent'));
+    await tester.pumpAndSettle();
+    expect(find.text('Task for a'), findsOneWidget);
+    api.failure = TimeoutException('offline');
+    // The next two-second inspection fails.
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pumpAndSettle();
+    expect(find.text('Task for a'), findsOneWidget);
+    expect(find.textContaining('took too long'), findsOneWidget);
+    expect(find.textContaining('Reconnecting'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
+  });
+
+  testWidgets('Cancel work asks first; declining sends nothing',
+      (tester) async {
+    final api = FakeAgents();
+    await open(tester, api);
+    await tester.tap(find.text('Parser agent'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Cancel work'));
+    await tester.pumpAndSettle();
+    expect(find.text('Cancel Parser agent?'), findsOneWidget);
+    await tester.tap(find.text('Keep working'));
+    await tester.pumpAndSettle();
+    expect(api.calls, isEmpty);
+    await tester.tap(find.text('Cancel work'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Cancel work').last);
+    await tester.pumpAndSettle();
+    expect(api.calls.single, matches(r'^a/cancel/ui-[0-9a-f]{32}$'));
+    await tester.pumpWidget(const SizedBox());
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
+  });
+
+  testWidgets('each conversation keeps its own scroll position',
+      (tester) async {
+    await open(tester, LongAgents());
+    Finder transcript() => find
+        .descendant(
+            of: find.byKey(const Key('agent-transcript')),
+            matching: find.byType(Scrollable))
+        .first;
+    double offset() =>
+        tester.state<ScrollableState>(transcript()).position.pixels;
+    await tester.tap(find.text('Parser agent'));
+    await tester.pumpAndSettle();
+    await tester.drag(transcript(), const Offset(0, -600));
+    await tester.pumpAndSettle();
+    final parser = offset();
+    expect(parser, greaterThan(300));
+    await tester.tap(find.text('Docs agent'));
+    await tester.pumpAndSettle();
+    expect(offset(), 0);
+    await tester.tap(find.text('Parser agent'));
+    await tester.pumpAndSettle();
+    expect(offset(), parser);
+    await tester.pumpWidget(const SizedBox());
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
+  });
+
+  testWidgets('switching faster than the cross-fade never shares a scroller',
+      (tester) async {
+    await open(tester, LongAgents());
+    await tester.tap(find.text('Parser agent'));
+    await tester.pumpAndSettle();
+    // Each tap lands while the previous transcript is still fading out.
+    for (final name in ['Docs agent', 'Parser agent', 'Docs agent']) {
+      await tester.tap(find.text(name).first);
+      await tester.pump(const Duration(milliseconds: 40));
+    }
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(find.text('Message 1 for b'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
+  });
+
+  testWidgets('system back from a narrow transcript returns to the list',
+      (tester) async {
+    final api = FakeAgents();
+    await open(tester, api, size: const Size(390, 844));
+    await tester.tap(find.text('Parser agent'));
+    await tester.pumpAndSettle();
+    expect(find.text('Docs agent'), findsNothing);
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.text('Docs agent'), findsOneWidget);
+    expect(api.calls, isEmpty);
+    await tester.pumpWidget(const SizedBox());
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
+  });
+
+  testWidgets('the phone transcript meets tap-target and label guidelines',
+      (tester) async {
+    final handle = tester.ensureSemantics();
+    await open(tester, ToolAgents(), size: const Size(390, 844));
+    await tester.tap(find.text('Parser agent'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('read_file'));
+    await tester.pumpAndSettle();
+    await expectLater(tester, meetsGuideline(androidTapTargetGuideline));
+    await expectLater(tester, meetsGuideline(labeledTapTargetGuideline));
+    handle.dispose();
+    await tester.pumpWidget(const SizedBox());
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
+  });
+
+  testWidgets('phone transcript and background detail fit at text scale 2.0',
+      (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    for (final scale in [1.5, 2.0]) {
+      // A fresh screen per scale; the last one ended on a detail page.
+      await tester.pumpWidget(const SizedBox());
+      await tester.pumpWidget(MediaQuery(
+          data: MediaQueryData(
+              size: const Size(390, 844), textScaler: TextScaler.linear(scale)),
+          child: MaterialApp(
+              theme: SonderTheme.dark,
+              home: AgentScreen(api: ToolBackgroundAgents()))));
+      await tester.pumpAndSettle();
+      final list = find
+          .descendant(
+              of: find.byKey(const Key('agent-list')),
+              matching: find.byType(Scrollable))
+          .first;
+      await tester.scrollUntilVisible(find.text('Parser agent'), 200,
+          scrollable: list);
+      await tester.tap(find.text('Parser agent'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('read_file'));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull, reason: 'transcript at $scale');
+      await tester.tap(find.byTooltip('All agent conversations'));
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(
+          find.byKey(const Key('fleet-fleet-1')), -200,
+          scrollable: list);
+      await tester.tap(find.byKey(const Key('fleet-fleet-1')));
+      await tester.pumpAndSettle();
+      expect(find.text('Child task'), findsOneWidget);
+      expect(tester.takeException(), isNull, reason: 'fleet at $scale');
+    }
+    await tester.pumpWidget(const SizedBox());
   });
 }
