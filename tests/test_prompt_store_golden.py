@@ -1,10 +1,13 @@
-"""Every externalised prompt renders byte-for-byte what the old code emitted.
+"""Every externalised prompt renders byte-for-byte its approved golden text.
 
 ``tests/fixtures/prompt_golden.json`` was captured from the hard-coded
 prompts on the commit before they moved to ``prompts/*.md`` (see
 ``tests/fixtures/prompt_golden_capture.py``), using fixed sample values that
 include ``$``, ``{}``, ``%`` and backslashes. Here the shipped defaults are
 rendered with the fields each call site derives from those same samples.
+The three autopilot entries incorporate A7's intentional shared worker prefix,
+trailing system role and explicit reviewer JSON-only instruction. All other
+entries retain the original capture; the historical test name is kept stable.
 """
 import json
 import pathlib

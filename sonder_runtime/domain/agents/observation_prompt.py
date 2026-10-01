@@ -6,11 +6,22 @@ observations into one-line summaries, and wraps the block in the immutable
 untrusted-data envelope so instructions inside repository files, web content
 or command output are never presented as host instructions. It is
 explicit-input and side-effect free. Moved from ``server.py`` in the WP1
-Three-Hundredth Slice with its behaviour byte-for-byte intact.
+Three-Hundredth Slice; append-only compaction keeps stable cache prefixes.
 """
 from __future__ import annotations
 
-OBSERVATION_PROMPT_CHARS = 9000
+import re
+
+
+def parse_observation_budget(value, default=20000):
+    """Parse a caller-supplied observation budget without reading process env."""
+    try:
+        return max(512, int(value))
+    except (TypeError, ValueError):
+        return max(512, int(default))
+
+
+OBSERVATION_PROMPT_CHARS = 20000
 
 # Tool output can contain repository prose, web pages, command output, and a
 # prior model's free-form ``reason``.  It is useful evidence, but none of it
@@ -54,6 +65,62 @@ def frame_observations(text, limit):
     return header + clip_prompt_text(text, body_limit) + footer
 
 
+_STEP_TOOL_RE = re.compile(r"\bstep\s+(\d+)\b.*?\btool=([^\s:]+)", re.I)
+
+
+def _summary_line(item, index):
+    """Summarize the first output line without losing the host step/tool identity."""
+    lines = [line.strip() for line in item.splitlines() if line.strip()]
+    first_line = lines[0] if lines else ""
+    match = _STEP_TOOL_RE.search(first_line)
+    step = match.group(1) if match else str(index + 1)
+    tool = match.group(2) if match else "unknown"
+    if match and len(lines) > 1:
+        first_line = lines[1]
+    return "step %s tool=%s -> %s" % (step, tool, clip_prompt_text(first_line, 180))
+
+
+def _compact_snapshot(values, target, content_budget):
+    """Freeze an overflow generation; recent verbatim evidence outranks the target.
+
+    Six recent entries are retained verbatim when they fit the hard ceiling.
+    Large observations can make that impossible: keep the newest complete entry
+    when possible, then fit an older suffix or explicitly clip that single entry.
+    Full evidence stays in the host ledger, never in a process-global cache.
+    """
+    recent_header = "Recent tool observations (full host ledger retained):\n"
+    summary_budget = min(1400, target // 5)
+    first_recent = max(0, len(values) - 6)
+    recent = "\n\n".join(values[first_recent:])
+    reserve = summary_budget + 2 if first_recent else 0
+    if len(recent_header) + len(recent) <= content_budget:
+        reserve = min(reserve, content_budget - len(recent_header) - len(recent))
+    if len(recent_header) + len(recent) + reserve > content_budget:
+        first_recent = len(values) - 1
+        recent = values[-1]
+        reserve = summary_budget + 2 if first_recent else 0
+        # Prefer a whole just-read file, even if that exceeds the 60% target.
+        recent_budget = max(target - len(recent_header) - reserve, len(recent))
+        recent_budget = max(0, min(recent_budget, content_budget - len(recent_header) - reserve))
+        while first_recent > max(0, len(values) - 6):
+            candidate = values[first_recent - 1] + "\n\n" + recent
+            if len(candidate) > recent_budget:
+                break
+            recent = candidate
+            first_recent -= 1
+        recent = clip_prompt_text(recent, recent_budget)
+    recent = recent_header + recent
+    if first_recent:
+        summary = "Earlier observation summaries (%d compacted):\n" % first_recent
+        summary += "\n".join(
+            _summary_line(item, index) for index, item in enumerate(values[:first_recent])
+        )
+        summary_budget = min(summary_budget, max(0, content_budget - len(recent) - 2))
+        summary = clip_prompt_text(summary, summary_budget)
+        return clip_prompt_text(summary + "\n\n" + recent if summary else recent, content_budget)
+    return clip_prompt_text(recent, content_budget)
+
+
 def observation_prompt(
     observations, max_chars=OBSERVATION_PROMPT_CHARS,
 ):
@@ -74,47 +141,19 @@ def observation_prompt(
     if len(full) <= content_budget:
         return frame_observations(full, max_chars)
 
-    # Reserve the immutable envelope first.  If the caller asks for an
-    # unusually small window, preserve the boundary even if that leaves no
-    # observation body; an unframed clipped observation is worse than none.
-    summary_budget = min(1400, content_budget // 5)
-    recent_header = "Recent tool observations (full host ledger retained):\n"
-    recent_budget = max(0, content_budget - summary_budget - len(recent_header) - 4)
-    selected = []
-    selected_chars = 0
-    first_selected = len(values)
-    for index in range(len(values) - 1, -1, -1):
-        value = values[index]
-        separator = 2 if selected else 0
-        if selected_chars + separator + len(value) <= recent_budget:
-            selected.insert(0, value)
-            selected_chars += separator + len(value)
-            first_selected = index
+    # Stateless replay of the append-only policy.  A generation is compacted
+    # to 60% once it first exceeds the budget; later entries are appended to
+    # that frozen snapshot until the hard budget binds again.  Replaying those
+    # generations from the complete ledger avoids a mutable server-side cache
+    # while keeping each generation's header byte-stable.
+    target = max(0, int(content_budget * 0.6))
+    result = "Tool observations so far:\n"
+    for index, value in enumerate(values):
+        candidate = result + value if index == 0 else result + "\n\n" + value
+        if len(candidate) <= content_budget:
+            result = candidate
             continue
-        if not selected and recent_budget:
-            selected.append(clip_prompt_text(value, recent_budget))
-            first_selected = index
-        break
-
-    recent = recent_header + "\n\n".join(selected)
-    older = values[:first_selected]
-    if not older:
-        return frame_observations(recent, max_chars)
-
-    summary_lines = []
-    for item in older[-8:]:
-        first_line = next((line.strip() for line in item.splitlines() if line.strip()), "")
-        summary_lines.append("- " + clip_prompt_text(first_line, 180))
-    omitted = max(0, len(older) - len(summary_lines))
-    summary_header = "Earlier observation summaries (%d compacted" % len(older)
-    if omitted:
-        summary_header += ", %d older omitted" % omitted
-    summary = summary_header + "):\n" + "\n".join(summary_lines)
-    summary = clip_prompt_text(summary, summary_budget)
-    result = summary + "\n\n" + recent
-    if len(result) <= content_budget:
-        return frame_observations(result, max_chars)
-    # Preserve the recent window if header arithmetic changes in future edits.
+        result = _compact_snapshot(values[: index + 1], target, content_budget)
     return frame_observations(result, max_chars)
 
 
