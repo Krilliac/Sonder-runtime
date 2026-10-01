@@ -1,19 +1,19 @@
 /// Read-only jobs, fanout and compute views (plan P1-10). Each list loads
-/// only when its "Details" disclosure is opened, so the phone never pays for
-/// admin reads it did not ask for. 403 and 404 read as off-by-design
-/// (`– n/a`), not as failures.
+/// only when its disclosure is opened, so a phone never pays for admin reads
+/// it did not ask for. 403 and 404 read as off-by-design (`– n/a`), not as
+/// failures.
 library;
 
 import 'package:flutter/material.dart';
 
 import '../api.dart';
-import '../theme.dart';
+import '../ui/kit.dart';
 import 'overview.dart';
 import 'runtime_data.dart';
+import 'runtime_rows.dart';
 import 'status_word.dart';
-import 'work_runs_panel.dart';
 
-StatusKind _lifecycleStatus(String status) {
+StatusKind lifecycleStatus(String status) {
   if (const {'running', 'pending', 'queued', 'started', 'active'}
       .contains(status)) {
     return StatusKind.running;
@@ -32,67 +32,36 @@ StatusKind _lifecycleStatus(String status) {
   return StatusKind.unknown;
 }
 
-class JobsPanel extends StatelessWidget {
+/// Durable jobs (`GET /v1/jobs`, admin), behind a disclosure.
+class JobsList extends StatelessWidget {
   final RuntimeDataSource source;
   final DateTime? now;
-  const JobsPanel({super.key, required this.source, this.now});
+  const JobsList({super.key, required this.source, this.now});
 
   @override
   Widget build(BuildContext context) {
     final clock = now ?? DateTime.now();
-    return Column(
-      key: const Key('jobs-panel'),
-      crossAxisAlignment: CrossAxisAlignment.start,
+    return SettingsSection(
+      title: 'Jobs',
+      description: 'Durable background jobs on this server.',
       children: [
-        _LazyList<JobSummary>(
+        LazyRuntimeList<JobSummary>(
           key: const Key('jobs-details'),
-          title: 'Jobs',
+          title: 'Recent jobs',
+          what: 'jobs',
           load: source.jobs,
           empty: 'No jobs',
-          row: (job) => _Row(
-            status: _lifecycleStatus(job.status),
+          row: (job) => RuntimeRow(
+            kind: lifecycleStatus(job.status),
             word: job.status.isEmpty ? null : job.status,
-            text: [
-              job.kind.isEmpty ? 'job' : job.kind,
-              job.id,
-              if (job.updatedAt != null)
-                '${compactDuration(clock.difference(job.updatedAt!))} ago',
-            ].join(' · '),
-          ),
-        ),
-        _LazyList<FanoutSummary>(
-          key: const Key('fanout-details'),
-          title: 'Model fanout',
-          load: source.fanoutRuns,
-          empty: 'No fanout runs',
-          row: (run) => _Row(
-            status: _lifecycleStatus(run.status),
-            word: run.status.isEmpty ? null : run.status,
-            text: [
-              run.id,
-              '${run.answered}/${run.selected} answered',
-              if (run.failed > 0) '${run.failed} failed',
-              if (run.running > 0) '${run.running} running',
-            ].join(' · '),
-          ),
-        ),
-        _LazyList<ComputeNode>(
-          key: const Key('compute-details'),
-          title: 'Compute nodes',
-          load: source.computeNodes,
-          empty: 'No compute nodes configured',
-          row: (node) => _Row(
-            status: node.stale && node.health == 'unknown'
-                ? StatusKind.unknown
-                : _lifecycleStatus(node.health),
-            word: node.health.isEmpty ? null : node.health,
-            text: [
-              node.id,
-              node.local ? 'this PC' : 'peer',
-              if (node.activeJobs != null) '${node.activeJobs} active jobs',
-              if (node.stale) 'stale',
-              if (node.probeError.isNotEmpty) node.probeError,
-            ].join(' · '),
+            title: RuntimeRowTitle(job.kind.isEmpty ? 'job' : job.kind),
+            subtitle: RuntimeRowDetail(
+                [
+                  job.id,
+                  if (job.updatedAt != null)
+                    '${compactDuration(clock.difference(job.updatedAt!))} ago',
+                ].join(' · '),
+                mono: true),
           ),
         ),
       ],
@@ -100,49 +69,100 @@ class JobsPanel extends StatelessWidget {
   }
 }
 
-class _Row extends StatelessWidget {
-  final StatusKind status;
-  final String? word;
-  final String text;
-  const _Row({required this.status, required this.text, this.word});
+/// Model fanout history (`GET /v1/fanout`), behind a disclosure.
+class FanoutList extends StatelessWidget {
+  final RuntimeDataSource source;
+  const FanoutList({super.key, required this.source});
 
   @override
   Widget build(BuildContext context) {
-    final tokens = SonderTokens.of(context);
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 3),
-      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        RuntimeStatusWord(status, word: word, width: 116),
-        Expanded(
-            child: Text(text,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: tokens.mono(12, color: tokens.text2))),
-      ]),
+    return SettingsSection(
+      title: 'Model fanout',
+      description: 'One prompt answered by several models at once.',
+      children: [
+        LazyRuntimeList<FanoutSummary>(
+          key: const Key('fanout-details'),
+          title: 'Recent fanout runs',
+          what: 'fanout runs',
+          load: source.fanoutRuns,
+          empty: 'No fanout runs',
+          row: (run) => RuntimeRow(
+            kind: lifecycleStatus(run.status),
+            word: run.status.isEmpty ? null : run.status,
+            title: RuntimeRowTitle(run.id, mono: true, maxLines: 1),
+            subtitle: RuntimeRowDetail([
+              '${run.answered}/${run.selected} answered',
+              if (run.failed > 0) '${run.failed} failed',
+              if (run.running > 0) '${run.running} running',
+            ].join(' · ')),
+          ),
+        ),
+      ],
     );
   }
 }
 
-/// A collapsed "Details" disclosure that loads its rows the first time it
-/// opens, and again on Refresh.
-class _LazyList<T> extends StatefulWidget {
+/// Compute nodes (`GET /v1/compute/nodes`, admin), behind a disclosure.
+class ComputeNodesList extends StatelessWidget {
+  final RuntimeDataSource source;
+  const ComputeNodesList({super.key, required this.source});
+
+  @override
+  Widget build(BuildContext context) {
+    return SettingsSection(
+      title: 'Compute nodes',
+      description: 'This PC and the peers it can place whole jobs on.',
+      children: [
+        LazyRuntimeList<ComputeNode>(
+          key: const Key('compute-details'),
+          title: 'Nodes',
+          what: 'compute nodes',
+          load: source.computeNodes,
+          empty: 'No compute nodes configured',
+          row: (node) => RuntimeRow(
+            kind: node.stale && node.health == 'unknown'
+                ? StatusKind.unknown
+                : lifecycleStatus(node.health),
+            word: node.health.isEmpty ? null : node.health,
+            title: RuntimeRowTitle(node.id, mono: true, maxLines: 1),
+            subtitle: RuntimeRowDetail([
+              node.local ? 'this PC' : 'peer',
+              if (node.activeJobs != null) '${node.activeJobs} active jobs',
+              if (node.stale) 'stale',
+              if (node.probeError.isNotEmpty) node.probeError,
+            ].join(' · ')),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// A disclosure that loads its rows the first time it opens, and again on
+/// Refresh.
+class LazyRuntimeList<T> extends StatefulWidget {
   final String title;
+
+  /// What the rows are, for the refresh tooltip ("jobs").
+  final String what;
   final Future<List<T>> Function() load;
   final String empty;
   final Widget Function(T item) row;
-  const _LazyList({
+
+  const LazyRuntimeList({
     super.key,
     required this.title,
+    required this.what,
     required this.load,
     required this.empty,
     required this.row,
   });
 
   @override
-  State<_LazyList<T>> createState() => _LazyListState<T>();
+  State<LazyRuntimeList<T>> createState() => _LazyRuntimeListState<T>();
 }
 
-class _LazyListState<T> extends State<_LazyList<T>> {
+class _LazyRuntimeListState<T> extends State<LazyRuntimeList<T>> {
   List<T>? _items;
   Object? _error;
   bool _loading = false;
@@ -165,62 +185,63 @@ class _LazyListState<T> extends State<_LazyList<T>> {
     }
   }
 
-  Widget _body() {
+  List<Widget> _body() {
     final error = _error;
     if (error is SonderException &&
         (error.httpStatus == 403 || error.httpStatus == 401)) {
-      return const RuntimePanelNote(
-          status: StatusKind.skipped,
-          word: 'n/a',
-          text: 'Needs an administrator account.');
+      return const [
+        RuntimePanelNote(
+            status: StatusKind.skipped,
+            word: 'n/a',
+            text: 'Needs an administrator account.'),
+      ];
     }
     if (error is SonderException && error.httpStatus == 404) {
-      return const RuntimePanelNote(
-          status: StatusKind.skipped,
-          word: 'n/a',
-          text: 'Not available on this server.');
+      return const [
+        RuntimePanelNote(
+            status: StatusKind.skipped,
+            word: 'n/a',
+            text: 'Not available on this server.'),
+      ];
     }
     if (error != null) {
-      return RuntimePanelNote(
-        status: StatusKind.fail,
-        text: error is SonderException ? error.message : 'Could not load.',
-        action: TextButton(onPressed: _fetch, child: const Text('Retry')),
-      );
+      return [
+        RuntimePanelNote(
+          status: StatusKind.fail,
+          text: error is SonderException ? error.message : 'Could not load.',
+          action: TextButton(onPressed: _fetch, child: const Text('Retry')),
+        ),
+      ];
     }
     final items = _items;
     if (items == null) {
-      return const RuntimePanelNote(
-          status: StatusKind.unknown, word: 'checking', text: 'Loading…');
+      return [SkeletonRows(rows: 2, semanticLabel: 'Loading ${widget.what}')];
     }
-    if (items.isEmpty) {
-      return RuntimePanelNote(status: StatusKind.note, text: widget.empty);
-    }
-    return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [for (final item in items) widget.row(item)]);
+    if (items.isEmpty) return [RuntimeEmptyRow(widget.empty)];
+    return [for (final item in items) widget.row(item)];
   }
 
   @override
   Widget build(BuildContext context) {
-    return Theme(
-      data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
-      child: ExpansionTile(
-        tilePadding: EdgeInsets.zero,
-        childrenPadding: const EdgeInsets.only(bottom: 8),
-        expandedCrossAxisAlignment: CrossAxisAlignment.start,
-        title: Text('${widget.title} · Details',
-            style: Theme.of(context).textTheme.labelLarge),
-        trailing: _items != null || _error != null
-            ? IconButton(
-                tooltip: 'Refresh ${widget.title.toLowerCase()}',
-                onPressed: _loading ? null : _fetch,
-                icon: const Icon(Icons.refresh, size: 18),
-              )
-            : null,
-        onExpansionChanged: (open) {
-          if (open && _items == null && !_loading) _fetch();
-        },
-        children: [_body()],
+    final loaded = _items != null || _error != null;
+    return Disclosure(
+      title: widget.title,
+      subtitle: loaded
+          ? (_items == null ? null : '${_items!.length} shown')
+          : 'Loads when opened',
+      trailing: loaded
+          ? IconButton(
+              tooltip: 'Refresh ${widget.what}',
+              onPressed: _loading ? null : _fetch,
+              icon: const Icon(Icons.refresh, size: 18),
+            )
+          : null,
+      onChanged: (open) {
+        if (open && _items == null && !_loading) _fetch();
+      },
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: dividedRows(context, [const SizedBox.shrink(), ..._body()]),
       ),
     );
   }
