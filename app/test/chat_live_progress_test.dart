@@ -77,8 +77,7 @@ void main() {
       expect(
           p.observe(_activity([
             _span('r2',
-                events: [_tool('file_read'), _tool('file_read')],
-                toolCalls: 2)
+                events: [_tool('file_read'), _tool('file_read')], toolCalls: 2)
           ])),
           isTrue);
       expect(p.phase, 'file_read');
@@ -88,7 +87,11 @@ void main() {
       expect(p.phase, 'model call 2');
       p.observe(_activity([
         _span('r2',
-            events: [_modelCall, {'kind': 'model_escalation'}], modelCalls: 1)
+            events: [
+              _modelCall,
+              {'kind': 'model_escalation'}
+            ],
+            modelCalls: 1)
       ]));
       expect(p.phase, 'escalating');
     });
@@ -180,10 +183,10 @@ void main() {
       () async {
         controller.add(utf8.encode(': keep-alive\n\n'));
         await release.future;
-        controller.add(utf8.encode(
-            'data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n'
-            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
-            'data: [DONE]\n\n'));
+        controller.add(
+            utf8.encode('data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n'
+                'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+                'data: [DONE]\n\n'));
         await controller.close();
       }();
       return http.StreamedResponse(controller.stream, 200,
@@ -192,7 +195,8 @@ void main() {
     expect(events.whereType<TurnPhase>().map((e) => e.phase),
         ['thinking', 'file_read', 'writing']);
     // The phase comes before the text it announces.
-    final writing = events.indexWhere((e) => e is TurnPhase && e.phase == 'writing');
+    final writing =
+        events.indexWhere((e) => e is TurnPhase && e.phase == 'writing');
     expect(events[writing + 1], isA<TurnDelta>());
     expect(events.last, isA<TurnDone>());
   });
@@ -209,8 +213,7 @@ void main() {
           data: MediaQueryData(
               size: const Size(800, 600), disableAnimations: reduceMotion),
           child: Scaffold(
-            body: LiveLineView(
-                live: live, onStop: () {}, outputLength: output),
+            body: LiveLineView(live: live, onStop: () {}, outputLength: output),
           ),
         ),
       ));
@@ -240,8 +243,9 @@ void main() {
           find.textContaining('slow local model? try the fast route',
               findRichText: true),
           findsOneWidget);
-      expect(find.textContaining('working · thinking · 20s',
-          findRichText: true), findsOneWidget);
+      expect(
+          find.textContaining('working · thinking · 20s', findRichText: true),
+          findsOneWidget);
     });
 
     testWidgets('server progress under the same phase resets the stall clock',
@@ -257,8 +261,8 @@ void main() {
       }
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 300));
-      expect(find.textContaining('no output', findRichText: true),
-          findsNothing);
+      expect(
+          find.textContaining('no output', findRichText: true), findsNothing);
       for (var i = 0; i < 10; i++) {
         tick();
       }
@@ -278,11 +282,12 @@ void main() {
         tick();
       }
       await tester.pump();
-      expect(find.textContaining('no output', findRichText: true),
-          findsNothing);
+      expect(
+          find.textContaining('no output', findRichText: true), findsNothing);
     });
 
-    testWidgets('with reduced motion the glyph holds still and the timer '
+    testWidgets(
+        'with reduced motion the glyph holds still and the timer '
         'keeps counting', (tester) async {
       await pumpLine(tester, reduceMotion: true);
       for (var s = 1; s <= 3; s++) {
