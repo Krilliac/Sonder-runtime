@@ -132,6 +132,9 @@ class _ChatScreenState extends State<ChatScreen>
   void openCommandBrowser() => unawaited(_openCommandBrowser());
 
   @override
+  void openPermissionModePicker() => unawaited(_openPermissionModePicker());
+
+  @override
   void focusComposer() {
     if (mounted) _inputFocus.requestFocus();
   }
