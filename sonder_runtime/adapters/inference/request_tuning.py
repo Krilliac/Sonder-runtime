@@ -72,6 +72,11 @@ BUILTIN_FAMILIES: tuple[Mapping[str, object], ...] = (
     }),
 )
 
+DECISION_SAMPLING: Mapping[str, Mapping[str, float | int]] = MappingProxyType({
+    "thinking": MappingProxyType({"temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0}),
+    "non_thinking": MappingProxyType({"temperature": 0.7, "top_p": 0.8, "top_k": 20}),
+})
+
 
 def _flag(env: Mapping[str, str], name: str, *, default: str) -> str:
     raw = str(env.get(name, "") or "").strip().lower() or default
@@ -85,9 +90,11 @@ def _flag(env: Mapping[str, str], name: str, *, default: str) -> str:
 
 
 def _names(value: object) -> set[str]:
-    if not isinstance(value, list):
-        return set()
-    return {item.strip().lower() for item in value if isinstance(item, str)}
+    if isinstance(value, Mapping):
+        return {str(item).strip().lower() for item, enabled in value.items() if enabled}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return {item.strip().lower() for item in value if isinstance(item, str)}
+    return set()
 
 
 def advertised_features(document: Mapping[str, object] | None) -> frozenset[str]:
@@ -218,6 +225,7 @@ def sampling_defaults_enabled(env: Mapping[str, str] | None = None) -> bool:
 def apply_sampling_defaults(
     payload: dict, model: str, *, thinking: bool | None,
     env: Mapping[str, str] | None = None,
+    profile: str | None = None,
 ) -> str | None:
     """Fill the family's recommended values for fields the caller left unset.
 
@@ -225,8 +233,14 @@ def apply_sampling_defaults(
     template's default applies).  Returns the family name applied, or
     ``None`` when the flag is off or no family matches.
     """
-    if not sampling_defaults_enabled(env) or not isinstance(model, str) or not model:
+    if (profile != "decision" and not sampling_defaults_enabled(env)) \
+            or not isinstance(model, str) or not model:
         return None
+    if profile == "decision":
+        row = DECISION_SAMPLING["thinking" if thinking else "non_thinking"]
+        for key, value in row.items():
+            payload.setdefault(key, value)
+        return "decision"
     for family in sampling_families(env):
         if not family.matches(model):
             continue
@@ -256,19 +270,23 @@ def tune_request(payload: dict, think: object, document: Mapping[str, object] | 
     """Apply the thinking decision, then the sampling defaults, to ``payload``."""
     supported = thinking_supported(document, env) if think is not None else False
     forwarded = apply_thinking(payload, think, supported=supported)
+    profile = payload.pop("sampling_profile", None)
     model = payload.get("model")
     if model == "default":
         model = default_model_hint(document) or model
-    apply_sampling_defaults(payload, str(model or ""), thinking=forwarded, env=env)
+    apply_sampling_defaults(
+        payload, str(model or ""), thinking=forwarded, env=env, profile=profile,
+    )
 
 
 __all__ = [
     "BUILTIN_FAMILIES",
+    "DECISION_SAMPLING",
     "ENV_SAMPLING_DEFAULTS",
     "ENV_SAMPLING_TABLE",
     "ENV_THINKING",
-    "SamplingFamily",
     "THINKING_REFUSAL",
+    "SamplingFamily",
     "advertised_features",
     "apply_sampling_defaults",
     "apply_thinking",

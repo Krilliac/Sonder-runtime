@@ -166,11 +166,19 @@ SONDER_OLLAMA_CA_BUNDLE=C:\path\to\worker-ca.pem
 SONDER_EMBED_MODEL=nomic-embed-text:latest     # must be installed on the worker
 SONDER_EMBED_FALLBACK=none                     # or: local (CPU on the primary)
 SONDER_EMBED_KEEP_ALIVE=24h                    # keep the embedder resident there
+SONDER_EMBED_NUM_CTX=4096                      # bound the embedder's runner context
 ```
 
 - Without `SONDER_EMBED_KEEP_ALIVE`, Ollama unloads an idle embedder after
   five minutes. A worker that is busy with other work can take tens of seconds
   to reload it, which is longer than recall callers wait.
+- Without `SONDER_EMBED_NUM_CTX`, Ollama sizes the embedder's runner to the
+  worker's default context. On a worker with a large GPU budget that default
+  is 32k: a 4 GB embedder became a 10.8 GB runner (measured 2026-09-30,
+  `qwen3-embedding:4b-q8_0` on a 46 GB node) and could not stay resident next
+  to a 22 GB reasoning model. Embeddings are capped at `SONDER_EMBED_MAX_CHARS`
+  characters, so `4096` is a safe bound; Ollama clamps it to a smaller model
+  maximum (nomic: 2048). Values below 256 are ignored.
 
 - A worker that is down costs one timed-out call, then a
   `SONDER_EMBED_COOLDOWN_SECONDS` circuit (default 30 s). A 4xx, such as a
