@@ -60,6 +60,7 @@ from sonder_runtime.platform.memory_replication_config import (
     memory_replication_errors,
 )
 from sonder_runtime.platform.spanda_config import SpandaConfig, spanda_errors
+from sonder_runtime.platform.playbooks_config import PlaybooksConfig, playbooks_errors
 from sonder_runtime.platform import unsafe_lab_policy
 from sonder_runtime.platform.config_environment import (
     EnvironmentFileError,
@@ -638,6 +639,7 @@ class SonderConfig:
         default_factory=ControlStateRehearsalConfig
     )
     spanda: SpandaConfig = field(default_factory=SpandaConfig)
+    playbooks: PlaybooksConfig = field(default_factory=PlaybooksConfig)
     build_tools: BuildToolsConfig = field(default_factory=BuildToolsConfig)
 
     def as_redacted_dict(self) -> dict:
@@ -662,6 +664,7 @@ class SonderConfig:
             "observability",
             "backup",
             "spanda",
+            "playbooks",
         ):
             value = getattr(self, section)
             out[section] = {
@@ -965,6 +968,7 @@ _SECTION_TYPES = {
     "observability": ObservabilityConfig,
     "backup": BackupConfig,
     "spanda": SpandaConfig,
+    "playbooks": PlaybooksConfig,
 }
 
 
@@ -1783,6 +1787,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
     errors.extend(_artifact_mobility_storage_errors(config))
     errors.extend(control_state_rehearsal_errors(config))
     errors.extend(spanda_errors(config))
+    errors.extend(playbooks_errors(config))
     errors.extend(deployment_errors(config))
     if config.schema_version != 1:
         errors.append(

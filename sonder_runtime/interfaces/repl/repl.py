@@ -91,6 +91,7 @@ from sonder_runtime.interfaces.repl.facades.build_tools import (
     summary_rows as _build_summary_rows,
     usage_error as _build_usage_error,
 )
+from sonder_runtime.interfaces.cli.playbooks import run_repl_command as _run_playbooks_command
 
 # Optional: the live filtering "/" menu. Absent or unusable (piped stdin,
 # non-Windows, dumb terminal) the REPL falls back to plain input().
@@ -1782,6 +1783,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /fact <text>       remember a durable fact for the active project
   /fact forget <id> confirm  remove one listed active-project fact
   /facts             list facts and IDs for the active project
+  /playbooks [action]  review agent-written playbook notes: list, show, approve, reject, edit, rm, reload, correction
   /exit, /quit, /q   leave
 """
 
@@ -4740,6 +4742,8 @@ def main(*, machine_output=False):
                             _emit(server.sonder_remember_fact(a, project=project))
                     elif cmd == "/facts":
                         _print_facts(project)
+                    elif cmd == "/playbooks":
+                        _emit(_run_playbooks_command(arg))
                     elif cmd in ("/exit", "/quit", "/q"):
                         break
                     else:

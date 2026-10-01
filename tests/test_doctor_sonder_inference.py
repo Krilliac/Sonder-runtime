@@ -32,7 +32,9 @@ def _health(status="ready", *, api_version=1, synthetic=False):
 
 def _gateway(*, health=None, status=200, refused=False):
     def get(url, headers, timeout):
-        assert timeout <= 2.0
+        # The health probe defaults to 5 s and is capped at 6 s
+        # (SONDER_INFERENCE_HEALTH_TIMEOUT_SECONDS); doctor must stay bounded.
+        assert timeout <= 6.0
         if refused:
             raise ConnectionRefusedError(111, "refused")
         if "/identity" in url:
