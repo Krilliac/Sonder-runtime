@@ -810,7 +810,11 @@ def _check_sonder_inference_gpu(*, env=None) -> dict:
     CPU, means two runtimes load onto one card and the Inference server's
     weights or KV spill into shared memory (decode 2-15x slower, no error).
     Also warns when ``SONDER_KEEP_PRIMARY_RESIDENT=1`` pins a model while
-    other local Ollama models can load.  Nothing is changed.
+    other local Ollama models can load.  An embedder sent to another host
+    (``SONDER_EMBED_BASE_URL``) never loads here, and with
+    ``OLLAMA_LLM_LIBRARY=cpu`` the local daemon finds no GPU at all, so the
+    check reports ok and names what it would otherwise have flagged.
+    Nothing is changed.
     """
     import os
 
@@ -832,9 +836,11 @@ def _check_sonder_inference_gpu(*, env=None) -> dict:
             local = False
     elif not gpu_residency.keep_primary_resident(source):
         return _skip("no tier is bound to sonder_inference")
-    findings = gpu_residency.gpu_sharing_findings(source, bindings, inference_local=local)
-    if findings:
-        return {"status": STATUS_WARN, "detail": "; ".join(findings)}
+    report = gpu_residency.gpu_sharing_report(source, bindings, inference_local=local)
+    if report["findings"]:
+        return {"status": STATUS_WARN, "detail": "; ".join(report["findings"])}
+    if report["note"]:
+        return {"status": STATUS_OK, "detail": report["note"]}
     return {"status": STATUS_OK, "detail": "no other local model is configured to share the GPU"}
 
 

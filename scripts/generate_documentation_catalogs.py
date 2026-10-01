@@ -223,16 +223,28 @@ def _runtime_reference() -> dict[str, Any]:
     return result
 
 
+def _is_layer_directory(path: Path) -> bool:
+    """A package subdirectory that is source, not a bytecode cache or a dotdir.
+
+    ``__pycache__`` exists only where the package has been imported without
+    PYTHONDONTWRITEBYTECODE, so listing it made the generated map depend on
+    the environment: CI (imports before the docs gate) committed a 0-file
+    ``__pycache__`` layer that a workstation with bytecode writing disabled
+    could never reproduce, and ``--check`` disagreed between the two.
+    """
+    return path.is_dir() and path.name != "__pycache__" and not path.name.startswith(".")
+
+
 def _architecture_map() -> dict[str, Any]:
     layers = []
-    for directory in sorted(path for path in PACKAGE.iterdir() if path.is_dir()):
+    for directory in sorted(path for path in PACKAGE.iterdir() if _is_layer_directory(path)):
         files = sorted(path.relative_to(ROOT).as_posix() for path in directory.rglob("*.py"))
         layers.append({"name": directory.name, "python_files": files, "file_count": len(files)})
     ownership_module = importlib.import_module(
         "sonder_runtime.application.architecture.ownership_catalog"
     )
     ownership = ownership_module.default_layer_ownership_catalog(
-        row["name"] for row in layers if row["name"] != "__pycache__"
+        row["name"] for row in layers
     )
     return {
         "schema": "sonder-architecture-map-v1",

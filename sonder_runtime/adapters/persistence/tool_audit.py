@@ -20,7 +20,6 @@ call closed instead of deleting evidence.
 from __future__ import annotations
 
 import hashlib
-import itertools
 import json
 import os
 import re
@@ -88,9 +87,20 @@ class DurableToolAuditRepository:
             raise ValueError(
                 "tool audit retention must keep at least one full rotated file")
         self._rotated_name = re.compile(
-            r"%s\.\d{8}T\d{6}Z(?:\.\d+)?%s\Z"
+            r"%s\.(\d{8}T\d{6}Z)(?:\.(\d+))?%s\Z"
             % (re.escape(self.path.stem), re.escape(self.path.suffix)))
         self._lock = threading.Lock()
+
+    def _rotation_order(self, name: str) -> tuple[str, int]:
+        """(stamp, index) of a rotated chain: its position in rotation order.
+
+        Name text is not that order: within one second the chains are
+        ``<stem>.<stamp><suffix>``, ``.1``, ``.2``, ... and ``.10`` sorts
+        before ``.2`` while the unsuffixed (oldest) sorts last. File mtimes
+        are no substitute either; a coarse file clock ties them.
+        """
+        match = self._rotated_name.match(name)
+        return (match.group(1), int(match.group(2) or 0)) if match else ("", -1)
 
     def append(self, request: ToolGatewayRequest, receipt: ToolReceipt) -> None:
         with self._lock:
@@ -205,16 +215,16 @@ class DurableToolAuditRepository:
         incoming = self.path.stat().st_size if self.path.exists() else 0
         if not incoming:
             return []
+        # rotated_files() is already oldest first, by rotation order.
         rotated = []
         for candidate in self.rotated_files():
             try:
-                stat = candidate.stat()
+                size = candidate.stat().st_size
             except OSError:
                 continue
-            rotated.append((stat.st_mtime_ns, candidate.name, candidate, stat.st_size))
-        rotated.sort()
+            rotated.append((candidate, size))
         count = len(rotated) + 1
-        total = sum(item[3] for item in rotated) + incoming
+        total = sum(item[1] for item in rotated) + incoming
         pruned: list[Path] = []
         while rotated and (count > self.limits.max_rotated_files
                            or total > self.limits.max_rotated_bytes):
@@ -222,7 +232,7 @@ class DurableToolAuditRepository:
                 raise ToolAuditError(
                     "tool audit retention quota exhausted (%d rotated files, "
                     "%d bytes); pruning is disabled" % (len(rotated), total - incoming))
-            _mtime, _name, candidate, size = rotated.pop(0)
+            candidate, size = rotated.pop(0)
             pruned.append(candidate)
             count -= 1
             total -= size
@@ -233,12 +243,14 @@ class DurableToolAuditRepository:
         if not self.path.exists():
             return ""
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-        for index in itertools.count():
-            suffix = ".%d" % index if index else ""
-            candidate = self.path.with_name(
-                "%s.%s%s%s" % (self.path.stem, stamp, suffix, self.path.suffix))
-            if not candidate.exists():
-                break
+        # Strictly increasing within a second: a pruned index is never reused,
+        # so name order stays rotation order (which retention prunes by).
+        taken = [self._rotation_order(path.name)[1] for path in self.rotated_files()
+                 if self._rotation_order(path.name)[0] == stamp]
+        index = max(taken) + 1 if taken else 0
+        suffix = ".%d" % index if index else ""
+        candidate = self.path.with_name(
+            "%s.%s%s%s" % (self.path.stem, stamp, suffix, self.path.suffix))
         self.path.replace(candidate)
         return candidate.name
 
@@ -266,8 +278,9 @@ class DurableToolAuditRepository:
         """Earlier chains this file was rotated away from, oldest first."""
         pattern = "%s.*%s" % (self.path.stem, self.path.suffix)
         return tuple(sorted(
-            candidate for candidate in self.path.parent.glob(pattern)
-            if candidate != self.path and self._rotated_name.match(candidate.name)
+            (candidate for candidate in self.path.parent.glob(pattern)
+             if candidate != self.path and self._rotated_name.match(candidate.name)),
+            key=lambda candidate: self._rotation_order(candidate.name),
         )) if self.path.parent.exists() else ()
 
     def verify(self) -> None:

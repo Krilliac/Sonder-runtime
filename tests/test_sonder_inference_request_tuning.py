@@ -166,6 +166,25 @@ def test_table_override_and_validation():
             request_tuning.sampling_families({"SONDER_INFERENCE_SAMPLING_TABLE": bad})
 
 
+def test_decision_sampling_profile_is_opt_in_and_has_thinking_rows():
+    thinking = {}
+    assert request_tuning.apply_sampling_defaults(
+        thinking, "qwen3.8:27b", thinking=True, profile="decision",
+    ) == "decision"
+    assert thinking == {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0}
+    non_thinking = {}
+    request_tuning.apply_sampling_defaults(
+        non_thinking, "qwen3.8:27b", thinking=False, profile="decision",
+    )
+    assert non_thinking == {"temperature": 0.7, "top_p": 0.8, "top_k": 20}
+
+
+def test_reasoning_budget_feature_can_be_advertised_as_mapping():
+    assert "reasoning_budget" in request_tuning.advertised_features(
+        {"sonder": {"features": {"reasoning_budget": True}}}
+    )
+
+
 # -- telemetry ---------------------------------------------------------------------
 
 
@@ -251,6 +270,35 @@ def test_doctor_warns_about_every_local_gpu_contender():
     assert result["status"] == "warn"
     assert "qwen3:4b" in result["detail"]  # fast tier stays on local Ollama
     assert "SONDER_EMBED_ON_CPU=1" in result["detail"]
+
+
+def test_doctor_does_not_blame_a_remote_embedder():
+    # Live-stack false positive (2026-09-30): embeddings went to Node1 via
+    # SONDER_EMBED_BASE_URL, yet the doctor still advised SONDER_EMBED_ON_CPU=1
+    # for an embedder that never loads on this machine.
+    env = dict(INFERENCE_GENERAL, SONDER_EMBED_BASE_URL="https://10.77.0.2:8443",
+               SONDER_ALLOW_REMOTE_OLLAMA="1")
+    result = _gpu_check(env)
+    assert result["status"] == "warn"  # the fast tier still shares the GPU
+    assert "qwen3:4b" in result["detail"]
+    assert "embedder" not in result["detail"]
+    # A dedicated endpoint on this same machine is still a local load.
+    same_box = dict(INFERENCE_GENERAL, SONDER_EMBED_BASE_URL="http://127.0.0.1:11435")
+    assert "SONDER_EMBED_ON_CPU=1" in _gpu_check(same_box)["detail"]
+
+
+def test_doctor_is_ok_when_local_ollama_is_pinned_to_the_cpu_library():
+    # OLLAMA_LLM_LIBRARY=cpu makes the local daemon discover no GPU at all
+    # (proven 2026-09-30 on 0.34.4: `ollama ps` 100% CPU, nvidia-smi flat), so
+    # nothing it loads can share the card. The doctor says so instead of
+    # warning, and names what it would otherwise have flagged.
+    env = dict(INFERENCE_GENERAL, OLLAMA_LLM_LIBRARY="cpu")
+    result = _gpu_check(env)
+    assert result["status"] == "ok"
+    assert "OLLAMA_LLM_LIBRARY=cpu" in result["detail"]
+    assert "qwen3:4b" in result["detail"]
+    # Any other library value keeps the warning.
+    assert _gpu_check(dict(INFERENCE_GENERAL, OLLAMA_LLM_LIBRARY="cuda_v13"))["status"] == "warn"
 
 
 def test_doctor_is_ok_when_nothing_else_shares_the_gpu():

@@ -490,6 +490,29 @@ def _keep_alive():
     return raw
 
 
+EMBED_NUM_CTX_ENV = "SONDER_EMBED_NUM_CTX"
+_EMBED_NUM_CTX_MIN = 256
+
+
+def _num_ctx():
+    """SONDER_EMBED_NUM_CTX as an Ollama ``num_ctx`` option, or None.
+
+    Opt-in. Without it Ollama sizes the embedder's runner to the server's
+    default context: on a host with a large GPU budget that default is 32k,
+    which turned a 4 GB embedder into a 10.8 GB runner (measured 2026-09-30,
+    qwen3-embedding:4b-q8_0 on Node1) and kept it from staying resident next
+    to the reasoning model. Embeddings never need more than EMBED_MAX_CHARS
+    worth of tokens, so 4096 is a safe bound for every embedder shipped here
+    (Ollama clamps it to a smaller model maximum, such as nomic's 2048).
+    Values below 256 or non-integers are ignored.
+    """
+    raw = os.environ.get(EMBED_NUM_CTX_ENV, "").strip()
+    if not raw.isdigit():
+        return None
+    value = int(raw)
+    return value if value >= _EMBED_NUM_CTX_MIN else None
+
+
 def _embed_on_cpu() -> bool:
     """Whether SONDER_EMBED_ON_CPU asks Ollama to keep the embedder off the GPU.
 
@@ -635,8 +658,14 @@ def _embed_at(text, timeout=30, base=None, model=None, force_cpu=False):
                 _EMBED_STATE.fallback_reason = "npu_unavailable"
                 npu_fallback_pending = True
         body = {"model": selected_model, "prompt": prompt}
+        options = {}
         if force_cpu or _embed_on_cpu():
-            body["options"] = {"num_gpu": 0}
+            options["num_gpu"] = 0
+        num_ctx = _num_ctx()
+        if num_ctx is not None:
+            options["num_ctx"] = num_ctx
+        if options:
+            body["options"] = options
         keep_alive = _keep_alive()
         if keep_alive is not None:
             body["keep_alive"] = keep_alive

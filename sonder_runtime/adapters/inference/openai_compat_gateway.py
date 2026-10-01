@@ -79,6 +79,7 @@ from ..model_request_admission import (
     HostModelRequestAdmission,
     host_model_request_admission,
 )
+from ..model_transport import ModelCallError
 from ..provider_bindings import provider_id_for_label
 from .telemetry import from_openai_compatible
 
@@ -451,7 +452,20 @@ class OpenAICompatibleGateway:
         if not isinstance(message, dict):
             raise DependencyUnavailable("endpoint returned an invalid message")
         text = message.get("content")
-        return require_model_text(text)
+        try:
+            return require_model_text(text)
+        except DependencyUnavailable as exc:
+            # A thinking-only completion can legitimately contain no visible
+            # text when the provider consumed its cap. Preserve the provider's
+            # finish reason so the agent decision loop can perform its bounded
+            # length repair instead of treating this as an opaque outage.
+            if (choices[0].get("finish_reason") == "length"
+                    and (text is None or isinstance(text, str) and not text.strip())):
+                raise ModelCallError(
+                    "empty_response",
+                    '{"done_reason": "length"}: %s' % exc,
+                ) from exc
+            raise
 
     def _headers(
         self, cfg: OpenAICompatibleConfig,
