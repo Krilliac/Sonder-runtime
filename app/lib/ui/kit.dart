@@ -12,3 +12,4 @@ export 'kit/motion.dart';
 export 'kit/settings_section.dart';
 export 'kit/shell_scope.dart';
 export 'kit/skeleton.dart';
+export 'kit/structured.dart';
