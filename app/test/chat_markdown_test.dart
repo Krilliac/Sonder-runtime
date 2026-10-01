@@ -9,7 +9,7 @@ import 'package:sonder_runtime/workspace_ui.dart';
 
 import 'goldens/golden_fonts.dart';
 
-Widget _app(Widget child, {Size? size}) => MaterialApp(
+Widget _app(Widget child) => MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: SonderTheme.dark,
       home: Scaffold(

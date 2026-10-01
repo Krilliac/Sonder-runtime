@@ -137,7 +137,7 @@ class ModelPickerButton extends StatelessWidget {
             child: Center(
               widthFactor: 1,
               child: Container(
-                height: 28,
+                constraints: const BoxConstraints(minHeight: 28),
                 padding: const EdgeInsets.fromLTRB(
                     SonderSpace.md, 0, SonderSpace.xs, 0),
                 decoration: BoxDecoration(

@@ -92,52 +92,55 @@ class _QuietActionState extends State<QuietAction> {
                 ? tokens.raised.withValues(alpha: 0.7)
                 : Colors.transparent;
     final hasLabel = widget.label.isNotEmpty;
-    final pill = AnimatedContainer(
-      duration: SonderMotion.of(context, SonderMotion.fast),
-      curve: SonderMotion.standard,
-      height: 28,
-      width: hasLabel ? null : 28,
-      padding: hasLabel
-          ? const EdgeInsets.symmetric(horizontal: SonderSpace.sm)
-          : EdgeInsets.zero,
-      decoration: BoxDecoration(
-        color: background,
-        borderRadius: BorderRadius.circular(SonderRadius.row),
-        border: Border.all(
-          color: _focus ? tokens.accentText : Colors.transparent,
-          width: 1.5,
+    final labelStyle = text.labelMedium?.copyWith(color: foreground);
+    final label = widget.richLabel != null
+        ? Text.rich(widget.richLabel!,
+            maxLines: 1, overflow: TextOverflow.ellipsis, style: labelStyle)
+        : Text(widget.label,
+            maxLines: 1, overflow: TextOverflow.ellipsis, style: labelStyle);
+    // The pill grows with the text scale; its label ellipsizes when the
+    // action has a width to fit (in a Row it is sized by its text).
+    final pill = LayoutBuilder(
+      builder: (context, constraints) => AnimatedContainer(
+        duration: SonderMotion.of(context, SonderMotion.fast),
+        curve: SonderMotion.standard,
+        constraints: BoxConstraints(minHeight: 28, minWidth: hasLabel ? 0 : 28),
+        padding: hasLabel
+            ? const EdgeInsets.symmetric(horizontal: SonderSpace.sm)
+            : EdgeInsets.zero,
+        decoration: BoxDecoration(
+          color: background,
+          borderRadius: BorderRadius.circular(SonderRadius.row),
+          border: Border.all(
+            color: _focus ? tokens.accentText : Colors.transparent,
+            width: 1.5,
+          ),
         ),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(widget.icon,
-              size: 15,
-              color: widget.selected
-                  ? foreground
-                  : (widget.iconColor ?? foreground)),
-          if (hasLabel) ...[
-            const SizedBox(width: SonderSpace.xs + SonderSpace.xxs),
-            // Sized by its text: the action may sit in a Row, which gives
-            // its children unbounded width.
-            if (widget.richLabel != null)
-              Text.rich(widget.richLabel!,
-                  maxLines: 1,
-                  style: text.labelMedium?.copyWith(color: foreground))
-            else
-              Text(widget.label,
-                  maxLines: 1,
-                  style: text.labelMedium?.copyWith(color: foreground)),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(widget.icon,
+                size: 15,
+                color: widget.selected
+                    ? foreground
+                    : (widget.iconColor ?? foreground)),
+            if (hasLabel) ...[
+              const SizedBox(width: SonderSpace.xs + SonderSpace.xxs),
+              if (constraints.hasBoundedWidth)
+                Flexible(child: label)
+              else
+                label,
+            ],
+            if (widget.trailing != null) ...[
+              const SizedBox(width: SonderSpace.xs),
+              IconTheme.merge(
+                data: IconThemeData(color: foreground, size: 16),
+                child: widget.trailing!,
+              ),
+            ],
           ],
-          if (widget.trailing != null) ...[
-            const SizedBox(width: SonderSpace.xs),
-            IconTheme.merge(
-              data: IconThemeData(color: foreground, size: 16),
-              child: widget.trailing!,
-            ),
-          ],
-        ],
+        ),
       ),
     );
     final name = widget.semanticLabel ?? widget.tooltip ?? widget.label;
