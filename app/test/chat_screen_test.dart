@@ -227,9 +227,9 @@ void main() {
         theme: SonderTheme.dark,
         home: Scaffold(
           body: TranscriptTurn(
-            entry: ChatEntry(
+            entry: const ChatEntry(
               1,
-              const ChatMessage(
+              ChatMessage(
                 role: Role.assistant,
                 content: 'Delegated.',
                 responseMetadata: ChatResponseMetadata(
