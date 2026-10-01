@@ -44,6 +44,7 @@ import io
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
 import socket
@@ -54,15 +55,16 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import Sequence
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from ...application.chat import stream_sink
-from ...application.context import OperationContext
+from ...application.context import OperationContext, current_operation_context
 from ...application.ports.model_gateway import (
     Embedding,
     ModelRequest,
@@ -86,6 +88,7 @@ from ...domain.model_capabilities import (
 from ...domain.routing.backend_conformance import BackendIdentity
 from ...platform.metrics import default_registry
 from ..model_request_admission import HostModelRequestAdmission
+from ..observability import activity_tracker
 from ..provider_bindings import PROVIDER_TIERS
 from .openai_compat_gateway import (
     ERROR_BODY_LIMIT,
@@ -107,7 +110,9 @@ DEFAULT_BASE_URL = "http://127.0.0.1:11437"
 DEFAULT_MODEL = "default"
 DEFAULT_TIMEOUT_SECONDS = 300.0
 DEFAULT_HEALTH_TTL_SECONDS = 5.0
-HEALTH_PROBE_TIMEOUT_SECONDS = 2.0
+HEALTH_PROBE_TIMEOUT_SECONDS = 5.0
+DEFAULT_HEALTH_STALE_SECONDS = 120.0
+BUSY_RETRY_SECONDS = 5.0
 READY_FILE_LIMIT = 65_536
 DETAIL_LIMIT = 240
 # A non-streaming chat completion is one JSON object; anything larger than
@@ -126,6 +131,8 @@ ENV_ALLOW_REMOTE = "SONDER_ALLOW_REMOTE_INFERENCE"
 ENV_READY_FILE = "SONDER_INFERENCE_READY_FILE"
 ENV_TIMEOUT = "SONDER_INFERENCE_TIMEOUT_SECONDS"
 ENV_HEALTH_TTL = "SONDER_INFERENCE_HEALTH_TTL_SECONDS"
+ENV_HEALTH_TIMEOUT = "SONDER_INFERENCE_HEALTH_TIMEOUT_SECONDS"
+ENV_HEALTH_STALE = "SONDER_INFERENCE_HEALTH_STALE_SECONDS"
 ENV_FALLBACK = "SONDER_INFERENCE_FALLBACK"
 
 # Pinned by the ecosystem contract (section 3.4): correlation ids outside this
@@ -148,6 +155,7 @@ STATUS_KEYS = (
     "provider", "state", "healthy", "checked_at", "detail", "capabilities",
     "base_url", "version", "api_version", "models", "synthetic", "identity",
     "telemetry", "fallback", "fallback_count", "tier_models",
+    "busy",
 )
 
 _BIND_ADDRESS_REWRITES = {"0.0.0.0": "127.0.0.1", "::": "::1"}
@@ -187,11 +195,27 @@ class SonderInferenceUnreachable(DependencyUnavailable):
     message with the fix.
     """
 
+    kind = "provider_unavailable"
+
     def __init__(self, message: str, *, reason: str | None = None,
                  summary: str | None = None) -> None:
         super().__init__(message)
         self.reason = reason or message
         self.summary = summary or message
+
+
+class SonderInferenceBusyTimeout(DependencyUnavailable):
+    """A backend read timeout; retry here once, never on another provider."""
+
+    kind = "busy_timeout"
+
+
+@dataclass(frozen=True)
+class SonderInferenceResponse(ModelResponse):
+    """Additive provider measurements without changing other gateways' DTOs."""
+
+    timings: Mapping[str, int | float] | None = None
+    finish_reason: str | None = None
 
 
 # -- transport ---------------------------------------------------------------
@@ -395,6 +419,8 @@ class SonderInferenceConfig:
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     health_ttl_seconds: float = DEFAULT_HEALTH_TTL_SECONDS
     base_url_source: str = "default"
+    health_timeout_seconds: float = HEALTH_PROBE_TIMEOUT_SECONDS
+    health_stale_seconds: float = DEFAULT_HEALTH_STALE_SECONDS
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "base_url", normalize_base_url(self.base_url))
@@ -414,6 +440,10 @@ class SonderInferenceConfig:
             raise InvalidInput("%s must be in (0, 86400]" % ENV_TIMEOUT)
         if not 0.0 <= float(self.health_ttl_seconds) <= 3_600.0:
             raise InvalidInput("%s must be in [0, 3600]" % ENV_HEALTH_TTL)
+        if not 0.0 < float(self.health_timeout_seconds) <= 6.0:
+            raise InvalidInput("%s must be in (0, 6]" % ENV_HEALTH_TIMEOUT)
+        if not 0.0 <= float(self.health_stale_seconds) <= 3_600.0:
+            raise InvalidInput("%s must be in [0, 3600]" % ENV_HEALTH_STALE)
 
     @property
     def loopback(self) -> bool:
@@ -559,6 +589,8 @@ def config_from_env(env: Mapping[str, str] | None = None) -> SonderInferenceConf
         allow_remote=allow_remote_raw == "1",
         timeout_seconds=_parse_float(source, ENV_TIMEOUT, DEFAULT_TIMEOUT_SECONDS),
         health_ttl_seconds=_parse_float(source, ENV_HEALTH_TTL, DEFAULT_HEALTH_TTL_SECONDS),
+        health_timeout_seconds=_parse_float(source, ENV_HEALTH_TIMEOUT, HEALTH_PROBE_TIMEOUT_SECONDS),
+        health_stale_seconds=_parse_float(source, ENV_HEALTH_STALE, DEFAULT_HEALTH_STALE_SECONDS),
         base_url_source=origin,
     )
 
@@ -586,6 +618,29 @@ def check_endpoint_policy(settings: SonderInferenceConfig) -> None:
         )
 
 
+def _conversation_context(context: OperationContext) -> OperationContext:
+    # The bridge may build a new per-call context. The enclosing operation
+    # owns the stable session; never substitute a fresh correlation id for it.
+    ambient = current_operation_context()
+    if context.session_id or ambient is None or ambient.principal_id != context.principal_id:
+        return context
+    return ambient
+
+
+def _conversation_key(context: OperationContext) -> str | None:
+    operation = _conversation_context(context)
+    session = operation.session_id
+    if isinstance(session, str) and CORRELATION_VALUE.fullmatch(session):
+        return session
+    # These entrypoints bind a run-long correlation, unlike tier-helper and
+    # offload, which mint an id per call. Do not make those look cache-stable.
+    correlation = operation.correlation_id
+    if (isinstance(correlation, str) and correlation.startswith(("standalone-", "repl-work-"))
+            and CORRELATION_VALUE.fullmatch(correlation)):
+        return correlation
+    return None
+
+
 def correlation_headers(context: OperationContext) -> dict[str, str]:
     """Correlation headers for one call (contract section 3.4)."""
     headers: dict[str, str] = {}
@@ -596,6 +651,15 @@ def correlation_headers(context: OperationContext) -> dict[str, str]:
     workload = WORKLOAD_BY_SOURCE.get(context.source)
     if workload is not None:
         headers["X-Sonder-Workload"] = workload
+    operation = _conversation_context(context)
+    priority = {"http": "interactive", "repl": "interactive", "mcp": "interactive",
+                "worker": "subagent", "system": "background"}.get(operation.source)
+    session = _conversation_key(context)
+    if session and (operation.source == "worker" or session.startswith(("standalone-", "repl-work-"))):
+        headers["X-Sonder-Agent-Id"] = session
+        priority = "subagent"
+    if priority is not None:
+        headers["X-Sonder-Priority"] = priority
     return headers
 
 
@@ -616,19 +680,39 @@ def _error_fields(body: bytes) -> tuple[str, str]:
         document = json.loads(body.decode("utf-8")) if body else None
     except (UnicodeDecodeError, ValueError, RecursionError):
         return "", ""
-    return _error_document_fields(document)
+    return _error_document_fields(document, bound_message=False)
 
 
-def _error_document_fields(document: object) -> tuple[str, str]:
+def _error_document_fields(document: object, *, bound_message: bool = True) -> tuple[str, str]:
     error = document.get("error") if isinstance(document, dict) else None
     if not isinstance(error, dict):
         return "", ""
     code = error.get("code")
-    message = error.get("message")
+    message = error.get("message") or error.get("detail")
+    message = message if isinstance(message, str) else ""
     return (
         code if isinstance(code, str) else "",
-        _bounded(message) if isinstance(message, str) else "",
+        _bounded(message) if bound_message else message,
     )
+
+
+def _response_timings(timings: dict, usage: dict) -> dict[str, int | float] | None:
+    """Only bounded backend measurements belong in the response/activity feed."""
+    result: dict[str, int | float] = {}
+    for key in ("cache_n", "prompt_n", "predicted_n", "queue_ms", "draft_n", "draft_n_accepted"):
+        value = timings.get(key)
+        if key == "queue_ms":
+            valid = type(value) in (int, float) and 0 <= value <= 86_400_000
+        else:
+            valid = type(value) is int and 0 <= value <= 1_000_000_000
+        if valid:
+            result[key] = value
+    if "cache_n" not in result:
+        details = usage.get("prompt_tokens_details")
+        cached = details.get("cached_tokens") if isinstance(details, dict) else None
+        if type(cached) is int and 0 <= cached <= 1_000_000_000:
+            result["cache_n"] = cached
+    return result or None
 
 
 @dataclass(frozen=True)
@@ -645,6 +729,8 @@ class HealthSnapshot:
     auth_rejected: bool = False
     host_rejected: bool = False
     overloaded: bool = False
+    timed_out: bool = False
+    busy: bool = False
 
     @property
     def api_version(self) -> object:
@@ -713,10 +799,16 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         self._lock = threading.Lock()
         self._refresh_lock = threading.Lock()
         self._health_cache: HealthSnapshot | None = None
+        self._health_probe_monotonic = float("-inf")
         self._identity_cache: dict[tuple[str, str], tuple[float, IdentityObservation]] = {}
         # Settings of the call in flight on this thread, so the transport's
         # error classifiers can name the endpoint and update its health.
         self._call = threading.local()
+
+    @property
+    def last_response_meta(self) -> dict[str, object]:
+        """Measurements for this thread's last call; failures clear old data."""
+        return dict(getattr(self._call, "response_meta", {}))
 
     # -- configuration & consent ------------------------------------------
 
@@ -806,6 +898,8 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
 
     def _classify_http_error(self, status: int, body: bytes) -> SonderError | None:
         code, message = _error_fields(body)
+        busy_timeout = status == 503 and code == "backend_unavailable" and "read timed out" in message.lower()
+        message = _bounded(message)
         label = "HTTP %d%s" % (status, " %s" % code if code else "")
         suffix = ": %s" % message if message else ""
         if status == 503 and code == "not_ready":
@@ -819,6 +913,10 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
             return self.unreachable_error(settings, detail)
         if status == 503 and code == "overloaded":
             return CapacityExceeded("sonder-inference is at its connection limit (%s)" % label)
+        if busy_timeout:
+            return SonderInferenceBusyTimeout(
+                "sonder-inference busy_timeout (%s)%s" % (label, suffix)
+            )
         if status in (401, 403):
             return self._forbidden(status, code, message)
         if status == 429:
@@ -845,7 +943,14 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
     def _fresh_cache(self, settings: SonderInferenceConfig, requested_at: float) -> HealthSnapshot | None:
         with self._lock:
             cached = self._health_cache
+            probed_at = self._health_probe_monotonic
         if cached is None or cached.base_url != settings.base_url:
+            return None
+        if cached.busy:
+            if requested_at - cached.checked_monotonic >= settings.health_stale_seconds:
+                return None
+            if probed_at > requested_at or requested_at - probed_at < settings.health_ttl_seconds:
+                return cached
             return None
         # A snapshot taken after this caller asked is fresh whatever the TTL:
         # it is the single-flight probe another caller just finished.
@@ -856,14 +961,15 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
 
     def health(
         self, *, settings: SonderInferenceConfig | None = None,
-        timeout: float = HEALTH_PROBE_TIMEOUT_SECONDS, refresh: bool = False,
+        timeout: float | None = None, refresh: bool = False,
     ) -> HealthSnapshot:
         """Return cached health, probing ``/v1/sonder/health`` when stale.
 
         Probes are single-flight: concurrent callers that find the cache
         stale wait for one probe instead of each opening a connection (which
         would itself push a busy server over its connection limit).  An
-        ``overloaded`` answer is transient and is never cached.
+        Timeout/overload may reuse recent healthy evidence, labelled busy.
+        Its age is never renewed without a successful probe.
         """
         settings = settings or self.settings()
         check_endpoint_policy(settings)
@@ -878,11 +984,20 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                 if cached is not None:
                     return cached
             snapshot = self._probe_health(
-                settings, max(0.05, min(HEALTH_PROBE_TIMEOUT_SECONDS, timeout)),
+                settings, settings.health_timeout_seconds if timeout is None else max(0.001, min(6.0, timeout)),
             )
-            if not snapshot.overloaded:
-                with self._lock:
+            with self._lock:
+                cached = self._health_cache
+                now = self._monotonic()
+                if (snapshot.timed_out or snapshot.overloaded) and (
+                    cached is not None and cached.base_url == settings.base_url
+                    and cached.state == "ready"
+                    and 0 <= now - cached.checked_monotonic < settings.health_stale_seconds
+                ):
+                    snapshot = replace(cached, busy=True, detail="busy: using recent healthy observation")
+                if not snapshot.overloaded:
                     self._health_cache = snapshot
+                    self._health_probe_monotonic = now
         return snapshot
 
     def _probe_health(self, settings: SonderInferenceConfig, timeout: float) -> HealthSnapshot:
@@ -900,7 +1015,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         except SonderInferenceUnreachable as exc:
             return snapshot("unavailable", exc.reason)
         except DeadlineExceeded:
-            return snapshot("unavailable", "health probe timed out after %.1fs" % timeout)
+            return snapshot("unavailable", "health probe timed out after %.1fs" % timeout, timed_out=True)
         except SonderError as exc:
             return snapshot("unavailable", "health probe failed: %s" % exc)
         except Exception as exc:  # noqa: BLE001 - a probe reports, it never crashes its caller
@@ -957,13 +1072,23 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         )
 
     def _require_ready(self, settings: SonderInferenceConfig, timeout: float) -> HealthSnapshot:
-        snap = self.health(settings=settings, timeout=timeout)
+        started = time.monotonic()
+        budget = min(settings.health_timeout_seconds, timeout)
+        snap = self.health(settings=settings, timeout=budget)
+        remaining = timeout - (time.monotonic() - started)
+        if (snap.timed_out or snap.overloaded) and remaining > 0:
+            snap = self.health(settings=settings, timeout=min(2 * budget, 6.0, remaining), refresh=True)
         if snap.api_mismatch:
             raise DependencyUnavailable(snap.detail)
         if snap.auth_rejected or snap.host_rejected:
             raise Forbidden("sonder-inference %s" % snap.detail)
         if snap.overloaded:
-            raise CapacityExceeded("sonder-inference %s; retry shortly" % snap.detail)
+            # Preserve capacity classification for an overloaded endpoint with
+            # no healthy evidence; this must not activate the Ollama fallback.
+            error = CapacityExceeded("sonder-inference at %s %s; retry shortly"
+                                     % (settings.display_base_url, snap.detail))
+            error.kind = "provider_unavailable"
+            raise error
         if snap.state != "ready":
             raise self.unreachable_error(settings, snap.detail)
         return snap
@@ -1096,7 +1221,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         entry.update(
             provider=PROVIDER_ID, state="unavailable", healthy=False,
             capabilities=sorted(CAPABILITIES), models=[], fallback=None,
-            fallback_count=0,
+            fallback_count=0, busy=False,
         )
         try:
             settings = self.settings()
@@ -1115,6 +1240,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         entry.update(
             state=snap.state,
             healthy=snap.state == "ready",
+            busy=snap.busy,
             checked_at=_rfc3339(snap.checked_at),
             detail=snap.detail,
             version=document.get("version") if isinstance(document.get("version"), str) else None,
@@ -1128,7 +1254,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         if snap.state in ("ready", "degraded") and not snap.api_mismatch:
             base = settings.base_url
             entry["telemetry"] = {key: base + path for key, path in TELEMETRY_PATHS.items()}
-        if snap.state == "ready":
+        if snap.state == "ready" and not snap.busy:
             try:
                 identity = self.backend_identity()
             except Exception as exc:  # noqa: BLE001 - identity is optional display data
@@ -1166,7 +1292,58 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                     or any(not isinstance(item, str) or not item for item in stop)):
                 raise InvalidInput("option 'stop' must be a string or at most 4 strings")
             payload["stop"] = list(stop)
+        budget = options.get("reasoning_budget_tokens")
+        if budget is not None:
+            if type(budget) is not int or not 0 <= budget <= 1_000_000:
+                raise InvalidInput("option 'reasoning_budget_tokens' must be an integer in [0, 1000000]")
+            payload["reasoning_budget_tokens"] = budget
+        message = options.get("reasoning_budget_message")
+        if message is not None:
+            if not isinstance(message, str) or len(message) > 16_384:
+                raise InvalidInput("option 'reasoning_budget_message' must be text of at most 16384 characters")
+            payload["reasoning_budget_message"] = message
         return payload
+
+    def _retry_delay(self, error: SonderInferenceBusyTimeout) -> float:
+        cause = error.__cause__
+        headers = cause.headers if isinstance(cause, urllib.error.HTTPError) else None
+        raw = next((value for key, value in (headers or {}).items()
+                    if str(key).lower() == "retry-after"), None)
+        delay = BUSY_RETRY_SECONDS
+        if raw is not None:
+            try:
+                delay = float(raw)
+            except (ValueError, TypeError):
+                try:
+                    delay = max(0.0, (parsedate_to_datetime(raw) - self._wall_clock()).total_seconds())
+                except (ValueError, TypeError, OverflowError):
+                    pass
+        if not math.isfinite(delay) or delay < 0:
+            delay = BUSY_RETRY_SECONDS
+        return min(delay, BUSY_RETRY_SECONDS)
+
+    def _post_with_busy_retry(self, payload, cfg, settings, context, live) -> dict:
+        # Both attempts and the backoff share one transport budget. Only an
+        # HTTP error before SSE content can reach this classifier in production.
+        deadline = time.monotonic() + self._call_timeout(settings, context)
+        for attempt in range(2):
+            timeout = min(self._call_timeout(settings, context), deadline - time.monotonic())
+            if timeout <= 0:
+                raise DeadlineExceeded("sonder-inference retry budget exhausted")
+            try:
+                return self._post("/v1/chat/completions", payload, cfg, timeout, context=context)
+            except SonderInferenceBusyTimeout as exc:
+                if attempt or (live is not None and (live.generated or live.cancelled)):
+                    raise
+                delay = self._retry_delay(exc)
+                if deadline - time.monotonic() <= delay:
+                    raise
+                if context.cancellation is not None:
+                    context.cancellation.wait(delay)
+                else:
+                    time.sleep(delay)
+                self._check_liveness(context, phase="during busy retry")
+        raise AssertionError("bounded retry exhausted")
 
     def _call_timeout(self, settings: SonderInferenceConfig, context: OperationContext) -> float:
         remaining = self._check_liveness(context)
@@ -1174,6 +1351,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         return timeout if remaining is None else min(timeout, remaining)
 
     def generate(self, request: ModelRequest, context: OperationContext) -> ModelResponse:
+        self._call.response_meta = {}
         if not (request.prompt or "").strip():
             raise InvalidInput("model request prompt is empty")
         settings = self.settings()
@@ -1194,12 +1372,14 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         }
         if live is not None:
             payload["stream_options"] = {"include_usage": True}
+        cache_key = _conversation_key(context)
+        if cache_key is not None:
+            payload["prompt_cache_key"] = cache_key
         self._call.settings = settings
         snap = self._require_ready(settings, timeout)
         tune_request(payload, think, snap.document, self._env)
-        timeout = self._call_timeout(settings, context)
         started = time.monotonic()
-        data = self._post("/v1/chat/completions", payload, cfg, timeout, context=context)
+        data = self._post_with_busy_retry(payload, cfg, settings, context, live)
         self._check_liveness(context, phase="during model call")
         extension = data.get("sonder")
         if isinstance(extension, dict) and "api_version" in extension:
@@ -1220,14 +1400,34 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         if not isinstance(usage, dict):
             raise DependencyUnavailable("sonder-inference returned an invalid usage object")
         timings = data.get("timings") if isinstance(data.get("timings"), dict) else {}
-        telemetry = from_openai_compatible(data, with_usage=True)
+        extension = usage.get("sonder")
+        nested = extension.get("timings") if isinstance(extension, dict) else None
+        if isinstance(nested, dict):
+            timings = {**timings, **nested}
+        measured = _response_timings(timings, usage)
+        telemetry = from_openai_compatible({**data, "timings": timings}, with_usage=True)
         prompt_count = usage.get("prompt_tokens")
         if prompt_count is None:
             prompt_count = timings.get("prompt_n")
         output_count = usage.get("completion_tokens")
         if output_count is None:
             output_count = timings.get("predicted_n")
-        response = ModelResponse(
+        choices = data.get("choices")
+        finish = choices[0].get("finish_reason") if (
+            isinstance(choices, list) and choices and isinstance(choices[0], dict)
+        ) else None
+        finish = finish if finish in ("stop", "length", "content_filter", "tool_calls", "function_call") else None
+        self._call.response_meta = {key: value for key, value in (
+            ("finish_reason", finish), ("done_reason", finish), ("timings", measured),
+        ) if value is not None}
+        # The public activity projection retains summary, while the owning
+        # span also gets structured measurements. Never attach response text.
+        activity_tracker.record_event(
+            "inference_outcome", provider=PROVIDER_ID,
+            summary=json.dumps(self._call.response_meta, sort_keys=True),
+            **self._call.response_meta,
+        )
+        response = SonderInferenceResponse(
             text=require_model_text(text),
             model=served,
             tier=request.tier or PROVIDER_ID,
@@ -1235,6 +1435,8 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
             tokens_in=optional_token_count(prompt_count, "prompt token count"),
             tokens_out=optional_token_count(output_count, "completion token count"),
             telemetry=telemetry,
+            timings=measured,
+            finish_reason=finish,
         )
         default_registry().observe_inference(PROVIDER_ID, telemetry)
         return response
