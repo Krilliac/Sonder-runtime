@@ -56,6 +56,36 @@ import tool_capabilities as capabilities
 from sonder_runtime.adapters import fleet_creations
 
 
+def test_agent_help_and_file_check_have_complete_guarded_surfaces():
+    """A8's new tools must be reachable through every advertised local lane."""
+    import permission_modes
+    from sonder_runtime.bootstrap.native_mcp import native_tool_registry
+    from sonder_runtime.domain.project_scope_keys import project_scoped_path_key
+
+    for name in ("tool_help", "file_check"):
+        assert name in _registered_tools()
+        assert name in capabilities.dispatch_names(server._agent_dispatch)
+        assert name in server._AUTOPILOT_OBSERVE_TOOLS
+        assert name in server._AUTOPILOT_WORKSPACE_TOOLS
+        assert name in _help_advertised(server.AGENT_TOOL_HELP)
+        assert name in capabilities.CAPABILITIES
+        assert native_tool_registry().get(name) is not None
+    assert "tool_help" in server.REPOSITORY_READ_ONLY_TOOLS
+    assert "tool_help" in _help_advertised(server.REPOSITORY_AGENT_TOOL_HELP)
+    assert "file_check" not in server.REPOSITORY_READ_ONLY_TOOLS
+    assert "file_check" not in _help_advertised(server.REPOSITORY_AGENT_TOOL_HELP)
+    assert "file_check" not in _help_advertised(server._agent_tool_help(read_only=True))
+    assert "file_check" in permission_modes.EXECUTION_TOOLS
+    assert permission_modes.risk_of("file_check") == "execution"
+    assert permission_modes.risk_of("tool_help") == "safe"
+    assert "file_check" in server._PROJECT_SCOPED_PATH_TOOLS
+    assert "file_check" in server._PROJECT_BOUND_AGENT_TOOLS
+    assert "file_check" in server._CLOUD_AGENT_LOCAL_ONLY_TOOLS
+    assert project_scoped_path_key("file_check") == "path"
+    assert "tool_help" in _help_advertised(server._agent_tool_help(cloud=True))
+    assert "file_check" not in _help_advertised(server._agent_tool_help(cloud=True))
+
+
 # Floors, not expected values: they exist so an empty extractor fails loudly
 # instead of satisfying every subset assertion below.
 _MIN_REGISTERED_TOOLS = 150
@@ -73,6 +103,9 @@ def _help_advertised(help_text):
     names = set()
     for line in help_text.splitlines():
         stripped = line.lstrip()
+        if stripped.startswith("other tools ("):
+            names.update(name.strip() for name in stripped.partition("): ")[2].split(",")
+                         if name.strip().isidentifier())
         if not stripped.startswith("- "):
             continue
         name, separator, _ = stripped[2:].partition(":")
@@ -186,6 +219,9 @@ def _loop_docstring_advertised():
 # --------------------------------------------------------------------------
 
 def test_extractors_cannot_go_vacuous():
+    assert _help_advertised(
+        'other tools (same JSON shape; ask tool_help {"name": ...}): file_check, tool_help'
+    ) == {"file_check", "tool_help"}
     registered = _registered_tools()
     assert len(registered) >= _MIN_REGISTERED_TOOLS
     assert "memory_search" in registered
@@ -195,10 +231,15 @@ def test_extractors_cannot_go_vacuous():
     # from their own module with the same ``@mcp.tool()`` decorator (inside a
     # ``register(mcp, ...)`` function). Their source is part of the AST view.
     from sonder_runtime.bootstrap import computer_use_tools, openrouter_tools, playbooks
+    from sonder_runtime.bootstrap.agent_help_tools import discover_agent_tool_registrars
+    import importlib
+    registrars = (computer_use_tools, openrouter_tools, playbooks) + tuple(
+        importlib.import_module("sonder_runtime.bootstrap." + name)
+        for name, _register in discover_agent_tool_registrars())
 
     module = ast.parse(inspect.getsource(server))
     nested = [node
-              for registrar_module in (computer_use_tools, openrouter_tools, playbooks)
+              for registrar_module in registrars
               for node in ast.walk(ast.parse(inspect.getsource(registrar_module)))
               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
     decorated = set()
@@ -304,8 +345,14 @@ def test_autopilot_allowlists_only_name_dispatchable_tools():
 
 
 def test_autopilot_observe_allowlist_survives_repository_read_only_policy():
-    """Observe runs are read_only, so the allowlist must clear that gate too."""
-    for name in sorted(server._AUTOPILOT_OBSERVE_TOOLS):
+    """Observe help must filter execution tools retained in the host allowlist."""
+    advertised = _help_advertised(server._agent_tool_help(
+        read_only=True, allowlist=server._AUTOPILOT_OBSERVE_TOOLS,
+    ))
+    assert advertised
+    assert "tool_help" in advertised
+    assert "file_check" not in advertised
+    for name in sorted(advertised):
         assert name in server.REPOSITORY_READ_ONLY_TOOLS, (
             "%s is advertised to an observe-policy autopilot run, which "
             "_agent_impl runs read_only, but repository policy denies it"
