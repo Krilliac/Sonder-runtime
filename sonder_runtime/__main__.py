@@ -1028,6 +1028,8 @@ def _export_runtime_environment(config, *, include_typed_runtime: bool = True) -
         os.environ["SONDER_FILE_ROOTS"] = os.pathsep.join(
             config.state.workspace_roots
         )
+    # The console reads this when work arrives with no folder selected.
+    os.environ["SONDER_AUTO_WORKSPACE"] = "1" if config.state.auto_workspace else "0"
     if include_typed_runtime:
         os.environ["SONDER_HOST"] = config.server.host
         os.environ["SONDER_PORT"] = str(config.server.port)
