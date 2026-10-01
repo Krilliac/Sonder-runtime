@@ -202,7 +202,9 @@ def test_root_agent_entrypoint_binds_and_discards_context(env, monkeypatch):
         return json.dumps(call(lanes.current(), "list"))
 
     monkeypatch.setattr(server, "_agent_impl", loop)
-    result = server.agent("inspect child lanes", checklist=False)
+    result = server.agent(
+        "inspect child lanes", checklist=False, project=str(env[-1]),
+    )
     assert seen and not seen[0].available and lanes.current() is None
     assert "lanes" in result
 
