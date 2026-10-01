@@ -42,9 +42,9 @@ def _remote_record(pool):
 
 
 def _patch_entrypoint(monkeypatch, tmp_path, config, prober):
+    # The caller's ``isolated_default_runtime`` fixture swaps the default app runtime.
     import server
     import sonder_runtime.__main__ as entrypoint
-    from sonder_runtime.adapters.application_lifecycle import ApplicationLifecycle
     from sonder_runtime.adapters.inference import ollama_pool
     from sonder_runtime.adapters.persistence import migrations, operations_store
     from sonder_runtime.adapters.persistence.sqlite import bridge_migration
@@ -56,11 +56,6 @@ def _patch_entrypoint(monkeypatch, tmp_path, config, prober):
     monkeypatch.setattr(server, "BASE", config.ollama.url)
     monkeypatch.setattr(server, "_APP_GRAPH", None)
     monkeypatch.setattr(legacy_root, "_owned_application", None)
-    monkeypatch.setattr(bootstrap, "_application_lifecycle",
-                        ApplicationLifecycle(bootstrap._build_default_application))
-    for name in ("_default_config", "_default_compute_close", "_default_delegation_close",
-                 "_default_inference_close"):
-        monkeypatch.setattr(bootstrap, name, None)
     monkeypatch.setattr(entrypoint, "_load_config", lambda _: config)
     monkeypatch.setattr(entrypoint, "_export_runtime_environment", lambda *_a, **_k: None)
     monkeypatch.setattr(bridge_migration, "require_epoch_2", lambda _: None)
@@ -73,6 +68,7 @@ def _patch_entrypoint(monkeypatch, tmp_path, config, prober):
     return entrypoint, bootstrap, ollama_pool
 
 
+@pytest.mark.usefixtures("isolated_default_runtime")
 @pytest.mark.parametrize("command", ["serve", "mcp"])
 def test_long_lived_entrypoint_admits_configured_static_remote_worker(monkeypatch, tmp_path, command):
     import server
