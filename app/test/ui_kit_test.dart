@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sonder_runtime/theme.dart';
 import 'package:sonder_runtime/ui/kit.dart';
@@ -478,6 +479,96 @@ void main() {
       await tester.tap(find.text('Show all 30 lines'));
       await tester.pumpAndSettle();
       expect(find.text('Show less'), findsOneWidget);
+    });
+  });
+
+  group('QuietAction', () {
+    testWidgets('a compact pill inside a full 48 dp target, named and '
+        'announced as selected', (tester) async {
+      var taps = 0;
+      await tester.pumpWidget(_app(Scaffold(
+        body: Center(
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            QuietAction(
+              icon: Icons.copy_outlined,
+              label: 'Copy',
+              semanticLabel: 'Copy response',
+              onPressed: () => taps++,
+            ),
+            const QuietAction(
+              icon: Icons.check_circle,
+              label: 'Useful',
+              semanticLabel: 'Marked useful',
+              selected: true,
+              onPressed: null,
+            ),
+            QuietAction(
+              icon: Icons.refresh,
+              tooltip: 'Ask again',
+              onPressed: () {},
+            ),
+          ]),
+        ),
+      )));
+      await tester.tap(find.text('Copy'));
+      expect(taps, 1);
+      expect(tester.getSize(find.byType(QuietAction).first).height, 48);
+      // The icon-only action is still a full target.
+      expect(
+          tester.getSize(find.byType(QuietAction).last), const Size(48, 48));
+      final handle = tester.ensureSemantics();
+      expect(
+          tester.getSemantics(find.bySemanticsLabel('Marked useful')),
+          matchesSemantics(
+              label: 'Marked useful',
+              isButton: true,
+              isSelected: true,
+              hasSelectedState: true,
+              hasEnabledState: true));
+      await expectLater(tester, meetsGuideline(androidTapTargetGuideline));
+      await expectLater(tester, meetsGuideline(labeledTapTargetGuideline));
+      handle.dispose();
+    });
+
+    testWidgets('keyboard activation runs the action', (tester) async {
+      var taps = 0;
+      await tester.pumpWidget(_app(Scaffold(
+        body: Center(
+          child: QuietAction(
+              icon: Icons.copy_outlined,
+              label: 'Copy',
+              onPressed: () => taps++),
+        ),
+      )));
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      expect(taps, 1);
+    });
+  });
+
+  group('RingMeter', () {
+    test('the arc steps to warn and danger at its thresholds', () {
+      const tokens = SonderTokens.dark;
+      expect(RingMeter.colorFor(tokens, 0.26), tokens.accentText);
+      expect(RingMeter.colorFor(tokens, 0.75), tokens.warn);
+      expect(RingMeter.colorFor(tokens, 0.9), tokens.danger);
+    });
+
+    testWidgets('the number is in its label, never only in the arc',
+        (tester) async {
+      await tester.pumpWidget(_app(const Scaffold(
+        body: Center(
+          child: RingMeter(
+              value: 0.26,
+              semanticLabel: 'Context: 2,100 of 8,192 tokens used (26%)'),
+        ),
+      )));
+      expect(
+          find.bySemanticsLabel('Context: 2,100 of 8,192 tokens used (26%)'),
+          findsOneWidget);
+      expect(tester.getSize(find.byType(RingMeter)), const Size(18, 18));
     });
   });
 }

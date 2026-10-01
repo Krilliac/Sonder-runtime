@@ -2,109 +2,247 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../theme.dart';
-import 'controller.dart';
+import '../ui/kit.dart' show SonderReveal;
 import '../ui/status_line.dart';
 import '../ui/status_vocab.dart';
+import 'controller.dart';
 
-/// Seconds after which the live line suggests a faster route.
+/// Seconds without output after which the live line says so (the stall
+/// cue) and suggests a faster route.
 const slowTurnSeconds = 20;
 
-/// `◈ working · routing · 12s · sonder:latest   [Stop]` (P1-1, §2.2).
+/// The transcript's glyph gutter (❯ you, ◈ Sonder) and the gap after it.
+/// The live line puts its working glyph in the same column.
+const transcriptGutter = 24.0;
+const transcriptGutterGap = SonderSpace.md;
+
+/// The live line of an in-flight turn (P1-1, §2.2):
 ///
-/// The controller ticks [live] at 1 Hz, so the elapsed seconds rebuild this
-/// line and never the transcript around it.
-class LiveLineView extends StatelessWidget {
+/// ```
+/// ◈  working · reading files · 12s · sonder:latest              ■ Stop
+///    ! no output for 24s · slow local model? try the fast route
+/// ```
+///
+/// The ◈ sits in the transcript gutter and breathes once a second; the text
+/// is the REPL's live line (`status_line.liveLine`) without its glyph. The
+/// controller ticks [live] at 1 Hz, so the timer keeps counting with
+/// animations off. After [slowTurnSeconds] with no output — no new text
+/// ([outputLength]) and no progress from the server ([live] changing within
+/// a second) — the glyph turns warn and the stall line opens.
+class LiveLineView extends StatefulWidget {
   final ValueListenable<LiveTurn?> live;
   final VoidCallback? onStop;
 
-  const LiveLineView({super.key, required this.live, this.onStop});
+  /// Characters of answer text received so far. Growth is output.
+  final int outputLength;
+
+  const LiveLineView({
+    super.key,
+    required this.live,
+    this.onStop,
+    this.outputLength = 0,
+  });
+
+  @override
+  State<LiveLineView> createState() => _LiveLineViewState();
+}
+
+class _LiveLineViewState extends State<LiveLineView> {
+  LiveTurn? _turn;
+
+  /// [LiveTurn.elapsedSeconds] when the turn last showed progress.
+  int _lastProgress = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _turn = widget.live.value;
+    _lastProgress = _turn?.elapsedSeconds ?? 0;
+    widget.live.addListener(_onLive);
+  }
+
+  @override
+  void didUpdateWidget(covariant LiveLineView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.live, widget.live)) {
+      oldWidget.live.removeListener(_onLive);
+      widget.live.addListener(_onLive);
+      _onLive();
+    }
+    if (widget.outputLength > oldWidget.outputLength) {
+      _lastProgress = _turn?.elapsedSeconds ?? _lastProgress;
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.live.removeListener(_onLive);
+    super.dispose();
+  }
+
+  /// Every change of [LiveTurn] is either the controller's clock tick (the
+  /// elapsed seconds advance) or the server reporting progress (a phase
+  /// event, which leaves the seconds alone). Only the second resets the
+  /// stall clock.
+  void _onLive() {
+    final next = widget.live.value;
+    final prev = _turn;
+    if (next != null) {
+      final newTurn = prev == null || next.startedAt != prev.startedAt;
+      final progressed = next.elapsedSeconds == prev?.elapsedSeconds ||
+          next.phase != prev?.phase ||
+          next.tokensIn != prev?.tokensIn;
+      if (newTurn || progressed) _lastProgress = next.elapsedSeconds;
+    }
+    if (mounted) setState(() => _turn = next);
+  }
 
   @override
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
-    return ValueListenableBuilder<LiveTurn?>(
-      valueListenable: live,
-      builder: (context, turn, _) {
-        final seconds = turn?.elapsedSeconds ?? 0;
-        final state = LiveState(
-          phase: turn?.phase ?? 'working',
-          elapsedS: seconds,
-          model: turn?.model ?? '',
-          tokensIn: turn?.tokensIn,
-          slow: seconds >= slowTurnSeconds,
-        );
-        final style = tokens.mono(12, color: tokens.text2);
-        return LayoutBuilder(builder: (context, constraints) {
-          // Leave room for the Stop button, then fit the REPL's line to the
-          // cells that remain.
-          final cell = _cellWidth(context, style);
-          final room = constraints.maxWidth - (onStop == null ? 0 : 88);
-          final cols = cell <= 0 ? 80 : (room / cell).floor();
-          final text = liveLine(state, cols);
-          final slowHint = state.slow ? state.slowHint : '';
-          return Semantics(
-            key: const Key('live-line'),
-            container: true,
-            label: 'Sonder Runtime is working, ${state.phase}, '
-                '${elapsedLabel(seconds)}',
-            child: Row(
-              children: [
-                Expanded(
-                  child: ExcludeSemantics(
-                    child: Text.rich(
-                      _paint(text, slowHint, tokens, style),
+    final turn = _turn;
+    final seconds = turn?.elapsedSeconds ?? 0;
+    final quiet = seconds - _lastProgress < 0 ? 0 : seconds - _lastProgress;
+    final stalled = turn != null && quiet >= slowTurnSeconds;
+    final state = LiveState(
+      phase: turn?.phase ?? 'working',
+      elapsedS: seconds,
+      model: turn?.model ?? '',
+      tokensIn: turn?.tokensIn,
+    );
+    final tone = stalled ? tokens.warn : StatusKind.running.color(tokens);
+    final style = tokens.mono(12, color: tokens.text2);
+    final quietText = 'no output for ${elapsedLabel(quiet)}';
+    return Semantics(
+      key: const Key('live-line'),
+      container: true,
+      label: 'Sonder Runtime is working, ${state.phase}, '
+          '${elapsedLabel(seconds)}${stalled ? ', $quietText' : ''}',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              SizedBox(
+                width: transcriptGutter,
+                child: ExcludeSemantics(
+                  child: _BreathingGlyph(
+                      seconds: seconds, color: tone, still: stalled),
+                ),
+              ),
+              const SizedBox(width: transcriptGutterGap),
+              Expanded(
+                child: ExcludeSemantics(
+                  child: LayoutBuilder(builder: (context, constraints) {
+                    // The glyph and its space live in the gutter, so the
+                    // REPL line gets two extra cells and drops them.
+                    final cell = monoCellWidth(context, style);
+                    final cols =
+                        cell <= 0 ? 80 : (constraints.maxWidth / cell).floor();
+                    var line = liveLine(state, cols + 2);
+                    final glyph = '${StatusKind.running.glyph} ';
+                    if (line.startsWith(glyph)) {
+                      line = line.substring(glyph.length);
+                    }
+                    return Text.rich(
+                      _paint(line, tone, style),
+                      key: const Key('live-line-text'),
                       maxLines: 1,
                       overflow: TextOverflow.clip,
                       softWrap: false,
+                    );
+                  }),
+                ),
+              ),
+              if (widget.onStop != null)
+                Padding(
+                  padding: const EdgeInsets.only(left: SonderSpace.sm),
+                  child: TextButton.icon(
+                    key: const Key('live-stop'),
+                    onPressed: widget.onStop,
+                    icon: const Icon(Icons.stop_rounded, size: 18),
+                    label: const Text('Stop'),
+                    style: TextButton.styleFrom(
+                      minimumSize: const Size(0, 32),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: SonderSpace.md),
+                      tapTargetSize: MaterialTapTargetSize.padded,
+                      foregroundColor: tokens.text2,
                     ),
                   ),
                 ),
-                if (onStop != null)
-                  Padding(
-                    padding: const EdgeInsets.only(left: 8),
-                    child: OutlinedButton(
-                      key: const Key('live-stop'),
-                      onPressed: onStop,
-                      style: OutlinedButton.styleFrom(
-                        minimumSize: const Size(72, 40),
-                        visualDensity: VisualDensity.compact,
-                      ),
-                      child: const Text('Stop'),
-                    ),
-                  ),
-              ],
+            ],
+          ),
+          SonderReveal(
+            visible: stalled,
+            child: Padding(
+              padding: const EdgeInsets.only(
+                  left: transcriptGutter + transcriptGutterGap,
+                  bottom: SonderSpace.xs),
+              child: ExcludeSemantics(
+                child: Text.rich(
+                  TextSpan(children: [
+                    TextSpan(
+                        text: '${StatusKind.warn.glyph} $quietText',
+                        style: style.copyWith(
+                            color: tokens.warn, fontWeight: FontWeight.w500)),
+                    TextSpan(
+                        text:
+                            ' ${statusGlyphs['sep']} ${const LiveState().slowHint}',
+                        style: style),
+                  ]),
+                  key: const Key('live-stall'),
+                ),
+              ),
             ),
-          );
-        });
-      },
+          ),
+        ],
+      ),
     );
   }
 
-  /// Head in accent, the slow hint in warn, the rest muted.
-  static InlineSpan _paint(
-      String text, String slowHint, SonderTokens tokens, TextStyle style) {
-    final head = '${StatusKind.running.glyph} working';
-    final spans = <InlineSpan>[];
-    var rest = text;
-    if (rest.startsWith(head)) {
-      spans.add(TextSpan(
+  /// "working" in the live tone, the rest in the secondary text colour.
+  static InlineSpan _paint(String line, Color tone, TextStyle style) {
+    const head = 'working';
+    if (!line.startsWith(head)) return TextSpan(text: line, style: style);
+    return TextSpan(children: [
+      TextSpan(
           text: head,
-          style: style.copyWith(
-              color: StatusKind.running.color(tokens),
-              fontWeight: FontWeight.w600)));
-      rest = rest.substring(head.length);
-    }
-    final i = slowHint.isEmpty ? -1 : rest.indexOf(slowHint);
-    if (i >= 0) {
-      spans.add(TextSpan(text: rest.substring(0, i), style: style));
-      spans.add(
-          TextSpan(text: slowHint, style: style.copyWith(color: tokens.warn)));
-      spans.add(
-          TextSpan(text: rest.substring(i + slowHint.length), style: style));
-    } else {
-      spans.add(TextSpan(text: rest, style: style));
-    }
-    return TextSpan(children: spans);
+          style: style.copyWith(color: tone, fontWeight: FontWeight.w600)),
+      TextSpan(text: line.substring(head.length), style: style),
+    ]);
+  }
+}
+
+/// The working glyph. It eases between full and half strength on the
+/// controller's 1 Hz tick, so it never schedules frames of its own between
+/// ticks; with reduced motion, or once stalled, it holds still.
+class _BreathingGlyph extends StatelessWidget {
+  final int seconds;
+  final Color color;
+  final bool still;
+
+  const _BreathingGlyph({
+    required this.seconds,
+    required this.color,
+    required this.still,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = SonderTokens.of(context);
+    final reduce = MediaQuery.maybeDisableAnimationsOf(context) == true;
+    final dim = !reduce && !still && seconds.isOdd;
+    return AnimatedOpacity(
+      key: const Key('live-glyph'),
+      opacity: dim ? 0.45 : 1,
+      duration: reduce ? Duration.zero : SonderMotion.slow,
+      curve: SonderMotion.standard,
+      child: Text(StatusKind.running.glyph,
+          textAlign: TextAlign.center,
+          style: tokens.mono(14, color: color, weight: FontWeight.w600)),
+    );
   }
 }
 

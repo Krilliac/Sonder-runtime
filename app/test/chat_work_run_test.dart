@@ -115,7 +115,7 @@ void main() {
     expect(find.text('Still running on the PC. The answer will appear here.'),
         findsOneWidget);
     // Not an answer: no rating chips.
-    expect(find.text('useful'), findsNothing);
+    expect(find.text('Useful'), findsNothing);
     await unmountChat(tester);
   });
 

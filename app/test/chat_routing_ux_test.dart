@@ -29,8 +29,14 @@ void main() {
       await pumpChat(tester, backend);
       await tester.pump();
 
-      expect(find.text('sonder · Sonder Inference (qwen3:14b)'),
-          findsOneWidget); // the pill
+      // The composer's picker names what will answer; its accessible name
+      // carries the full binding.
+      final semantics = tester.ensureSemantics();
+      expect(find.text('sonder · qwen3:14b'), findsOneWidget);
+      expect(
+          find.bySemanticsLabel('Model: sonder · Sonder Inference (qwen3:14b)'),
+          findsOneWidget);
+      semantics.dispose();
       await _openPicker(tester);
       expect(
           find.text('general · Sonder Inference (qwen3:14b)'), findsOneWidget);
