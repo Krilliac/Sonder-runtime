@@ -22443,8 +22443,8 @@ def _autopilot_review_model(run: dict, issue: str) -> dict:
         system = _build_system(
             _prompts.render("autopilot_system", role="reviewer"), False, "", model=model, cloud=False,
         )
-        # A2 (#616) replaces 1800 with agent_generation_budget.json_num_predict(); keep these in sync when both land.
-        return _make_tier_generate(tier_label, model, system, 0.05, 1800, 0, cloud=False, local_only=True)
+        # Same thinking-aware JSON budget as the planner/worker reviewer above (#616).
+        return _make_tier_generate(tier_label, model, system, 0.05, _agent_generation_budget.json_num_predict(_bridge_provider_for_tier(tier_label)), 0, cloud=False, local_only=True, generation_kind="json")
 
     ledger = []
     for task in run.get("plan") or []:

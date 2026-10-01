@@ -159,6 +159,21 @@ def test_reviewer_accepts_repaired_response(monkeypatch):
     assert len(prompts) == 2
 
 
+def test_reviewer_uses_the_thinking_aware_json_budget(monkeypatch):
+    """The reviewer once hard-coded 1800 tokens while the planner used the
+    provider-aware JSON budget (#616), so a thinking model could spend the
+    reviewer's whole budget reasoning and return no decision."""
+    _fake_reviewer_transport(monkeypatch, ['{"decision": "continue"}'])
+    calls = []
+    generate = server._make_tier_generate
+    monkeypatch.setattr(server, "_make_tier_generate", lambda *args, **kwargs: (calls.append((args, kwargs)), generate(*args, **kwargs))[1])
+    monkeypatch.setattr(server._agent_generation_budget, "json_num_predict", lambda provider=None, cloud=False, thinking_pinned=False: 4242 if provider == "ollama" else -1)
+    server._autopilot_review_model({"tier": "code", "plan": []}, "checkpoint")
+    (args, kwargs), = calls
+    assert args[4] == 4242
+    assert kwargs.get("generation_kind") == "json"
+
+
 def test_reviewer_transport_error_is_not_schema_coercion(monkeypatch):
     from sonder_runtime.adapters.model_transport import ModelCallError
 
