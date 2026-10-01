@@ -48,11 +48,21 @@ results, and now at least two validated-complete artifacts; master refuses
 synthesis when no child artifact validates.
 
 Provider token-limit termination and storage truncation are rejected.
+Parallel generation reads the reply's `done_reason`. Ollama tiers report it
+directly. A tier bound to sonder-inference reports it through the provider
+bridge, which carries the reply's finish reason since #616. A provider that
+reports no finish reason cannot be classified, so its reply is not rejected:
+the generic OpenAI-compatible gateway reports one only on an empty
+length-capped reply, which already fails as an error.
+
 The shared Python candidate generator uses an optional thread-local completion
 metadata observer to prevent sibling responses overwriting each other's
-completion evidence. Ordinary callers retain their return values and public
-metadata behavior. No probe, model request, retry, wait or background thread
-is added.
+completion evidence. The observer is bound to the raw generator closure, which
+records each reply. The tier wrapper that `_make_tier_generate` returns (#610)
+forwards attribute reads to that closure but not writes, so binding the
+wrapper would leave the observer unset and fall back to the shared metadata.
+Ordinary callers retain their return values and public metadata behavior. No
+probe, model request, retry, wait or background thread is added.
 
 See [verification](readiness-scoped-review-validation.md) for measurements and
 [scoped reviewer context](SCOPED-REVIEWER-CONTEXT.md) for role changes.
