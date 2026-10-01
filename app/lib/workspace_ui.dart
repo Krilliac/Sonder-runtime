@@ -8,10 +8,11 @@ import 'ui/strings.dart';
 
 export 'ui/status_vocab.dart' show StatusKind;
 
+/// The four peer destinations, in sidebar order (Ctrl/⌘+1 … 4).
 enum WorkspaceDestination {
   chat('Chat', Icons.chat_bubble_outline),
-  agents('Agents', Icons.account_tree_outlined),
-  runtime('Runtime', Icons.dashboard_customize_outlined),
+  agents('Agents', Icons.hub_outlined),
+  runtime('Runtime', Icons.space_dashboard_outlined),
   settings('Settings', Icons.settings_outlined);
 
   final String label;
@@ -19,7 +20,8 @@ enum WorkspaceDestination {
   const WorkspaceDestination(this.label, this.icon);
 }
 
-/// Shared peer navigation. Routing remains with the owning chat workspace.
+/// Peer navigation for a page shown outside the app shell (the shell's
+/// sidebar replaces it; see `ShellScope`).
 class WorkspaceMenu extends StatelessWidget {
   final WorkspaceDestination current;
   final ValueChanged<WorkspaceDestination> onSelected;
@@ -47,27 +49,6 @@ class WorkspaceMenu extends StatelessWidget {
                 ]))
         ],
       );
-}
-
-class WorkspaceNavigation extends StatelessWidget {
-  final WorkspaceDestination current;
-  final ValueChanged<WorkspaceDestination> onSelected;
-  const WorkspaceNavigation(
-      {super.key, required this.current, required this.onSelected});
-
-  @override
-  Widget build(BuildContext context) =>
-      Column(mainAxisSize: MainAxisSize.min, children: [
-        for (final destination in WorkspaceDestination.values)
-          ListTile(
-              dense: true,
-              selected: destination == current,
-              leading: Icon(destination.icon, size: 20),
-              title: Text(destination.label),
-              onTap: destination == current
-                  ? null
-                  : () => onSelected(destination)),
-      ]);
 }
 
 /// The legacy three-tone notice API. Kept so existing call sites compile;
