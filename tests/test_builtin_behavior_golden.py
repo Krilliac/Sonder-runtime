@@ -103,6 +103,66 @@ def test_builtin_risk_matches_origin_golden(actual_catalog):
     assert not mismatches, "built-in risk drift: %s" % json.dumps(mismatches, sort_keys=True)
 
 
+def test_master_tool_remains_catalogued_alongside_native_alias(actual_catalog):
+    """Native /master and the MCP spelling each retain their own catalog row."""
+    import command_catalog
+
+    commands = {command.name: command for command in actual_catalog}
+    master = commands["/master_orchestrate"]
+    assert master.tool == "master_orchestrate"
+    assert master.risk == "ask"
+    assert master.native is False
+    native = commands["/master"]
+    assert native.native is True
+    assert native.tool == "master_orchestrate"
+    assert native.risk == "ask"
+    assert native.all_names == ("/master",)
+    assert master.all_names == ("/master_orchestrate",)
+    assert command_catalog.by_name("/master") is native
+    assert command_catalog.by_name("/master_orchestrate") is master
+    for spelling in ("/master", "/master_orchestrate"):
+        assert "master_orchestrate" in command_catalog.console_tools()[spelling]
+        assert "master_orchestrate" in command_catalog.http_slash_tools()[spelling]
+    assert commands["/delegate"].risk == "execution"
+
+
+@pytest.mark.parametrize(("native_name", "tool_name"), [
+    ("/master", "master_orchestrate"),
+    ("/test", "test_run"),
+])
+def test_declared_branch_tool_keeps_own_name_and_native_schema(
+    actual_catalog, monkeypatch, native_name, tool_name,
+):
+    """Sharing a dispatch branch must not collapse an explicitly mapped tool."""
+    import command_catalog
+
+    tool = next(row for row in sys.modules["server"].mcp._tool_manager.list_tools()
+                if row.name == tool_name)
+    monkeypatch.setattr(tool, "parameters", {
+        "properties": {"task": {"type": "string"}}, "required": ["task"],
+    })
+    groups = command_catalog._native_groups()
+    groups = [tuple(dict.fromkeys((*group, "/" + tool_name)))
+              if native_name in group else group for group in groups]
+    monkeypatch.setattr(command_catalog, "_native_groups", lambda: groups)
+    command_catalog.catalog.cache_clear()
+
+    native = command_catalog.by_name(native_name)
+    direct = command_catalog.by_name("/" + tool_name)
+    assert native.name == native_name and native.native is True
+    assert direct.name == "/" + tool_name and direct.native is False
+    assert native.tool == direct.tool == tool_name
+    assert not set(native.all_names) & set(direct.all_names)
+    assert native.params == direct.params
+    assert native.params[0].name == "task"
+    for spelling in (native_name, "/" + tool_name):
+        assert command_catalog.parse_invocation(f'{spelling} task="hello world"') == (
+            tool_name, {"task": "hello world"},
+        )
+    # Ordinary name-derived aliases still collapse into the native command.
+    assert command_catalog.by_name("/agent") is command_catalog.by_name("/work")
+
+
 def test_builtin_speculation_allowlist_matches_origin_golden():
     golden = _load(BEHAVIOR_FIXTURE)
     expected = set(golden["speculatable"])

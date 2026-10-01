@@ -690,6 +690,13 @@ class ChatController extends ChangeNotifier {
 
   int _indexOf(int id) => _entries.indexWhere((e) => e.id == id);
 
+  // Control commands must use the runtime control route even when the
+  // person selected a concrete chat model. Ordinary prose keeps that choice.
+  static bool _isControlCommand(String text) => RegExp(
+        r'^/(?:delegate|master|master_orchestrate)(?:\s|$)',
+        caseSensitive: false,
+      ).hasMatch(text.trim());
+
   void _replace(int id, ChatEntry Function(ChatEntry) update) {
     final i = _indexOf(id);
     if (i >= 0) _entries[i] = update(_entries[i]);
@@ -720,7 +727,8 @@ class ChatController extends ChangeNotifier {
     _add(const ChatMessage(role: Role.assistant, content: '', pending: true));
     _pendingId = _entries.last.id;
     _turnThreadId = _currentThreadId;
-    live.value = LiveTurn(startedAt: DateTime.now(), model: _model);
+    final requestModel = _isControlCommand(trimmed) ? 'sonder' : _model;
+    live.value = LiveTurn(startedAt: DateTime.now(), model: requestModel);
     _liveTimer?.cancel();
     _liveTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       final current = live.value;
@@ -732,7 +740,7 @@ class ChatController extends ChangeNotifier {
 
     final request = TurnRequest(
       history: history,
-      model: _model,
+      model: requestModel,
       contextSize: contextSize,
       sessionId: sessionFor(_currentThreadId),
       project: _project,

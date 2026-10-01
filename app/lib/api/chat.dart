@@ -71,6 +71,8 @@ ChatResponseMetadata chatMetadataFrom(
     'work_status': work['status'],
     'acknowledgement': work['acknowledgement'],
     'overflow': receipt['overflow'],
+    'agent_lane': receipt['agent_lane'],
+    'orchestration': receipt['orchestration'],
     if (refusalJson != null) 'refusal': refusalJson,
   });
 }

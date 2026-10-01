@@ -4622,28 +4622,16 @@ def main(*, machine_output=False):
                                     path=path, dry_run=True, token=token,
                                 ),
                             )
-                    elif cmd == "/master":
-                        text = arg.strip()
-                        mode = "ask"
-                        task = text
-                        if text:
-                            parts = text.split(None, 1)
-                            mode_alias = {
-                                "delagte": "delegate",
-                                "delegte": "delegate",
-                                "paralell": "parallel",
-                                "inlne": "inline",
-                                "workflow": "fleet",
-                            }
-                            requested_mode = mode_alias.get(parts[0].lower(), parts[0].lower())
-                            if requested_mode in (
-                                "ask", "inline", "master", "delegate",
-                                "delegated", "agents", "parallel", "fleet", "swarm",
-                                "fanout",
-                            ):
-                                mode = requested_mode
-                                task = parts[1] if len(parts) > 1 else ""
-                        _emit(server.master_orchestrate(task=task, mode=mode))
+                    elif cmd in ("/master", "/master_orchestrate", "/delegate"):
+                        # One parser for every surface: the served control command
+                        # owns "[inline|delegate|fleet] [N] <task>" (0 = a
+                        # capacity-sized wave, never the hardware maximum) and
+                        # /delegate, so the console cannot drift from the app.
+                        reply = server.control_command(line, session=session_id, project=project)
+                        if reply is None:
+                            from sonder_runtime.interfaces.orchestration_commands import USAGE
+                            reply = USAGE
+                        _emit(reply)
                     elif cmd == "/lessons":
                         _print_lessons()
                     elif cmd in ("/pass", "/good"):

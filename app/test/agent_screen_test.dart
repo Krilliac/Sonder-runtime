@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:sonder_runtime/agent_lanes.dart';
 import 'package:sonder_runtime/agent_screen.dart';
 import 'package:sonder_runtime/api.dart';
+import 'package:sonder_runtime/background_work.dart';
 import 'package:sonder_runtime/theme.dart';
 import 'package:sonder_runtime/workspace_ui.dart';
 
@@ -57,6 +58,8 @@ class LongTitleAgents extends ReportingAgents {
 
 class FakeAgents extends SonderApi {
   FakeAgents() : super(baseUrl: 'http://unused');
+  @override
+  Future<BackgroundWork> backgroundWork({String project = ''}) async => const BackgroundWork();
   final calls = <String>[];
   final inspections = <({String id, int cursor, bool wait})>[];
   bool failCommand = false;
@@ -161,6 +164,57 @@ class ReportingAgents extends FakeAgents {
       {required String commandId}) async {
     acknowledged = true;
     return AgentReceipt.fromJson({'command_id': commandId, 'revision': 2});
+  }
+}
+
+class BackgroundAgents extends FakeAgents {
+  final cancelled = <String>[];
+
+  @override
+  Future<BackgroundWork> backgroundWork({String project = ''}) async =>
+      BackgroundWork.fromJson({
+        'groups': {
+          'lanes': const [],
+          'fleets': [
+            {
+              'id': 'fleet-1',
+              'task': 'Build a fleet',
+              'status': 'running',
+              'requested_agents': 3,
+              'worker_slots': 2,
+              'counts': {'done': 1, 'running': 1, 'queued': 1},
+              'children': [
+                {
+                  'id': 'child-1',
+                  'task': 'Child task',
+                  'status': 'running',
+                  'preview': 'working',
+                },
+              ],
+              'cancelable': true,
+            },
+          ],
+          'autopilot': [
+            {
+              'id': 'auto-1',
+              'objective': 'Keep the goal moving',
+              'status': 'running',
+              'phase': 'executing',
+              'current_task': 'Task one',
+              'task_counts': {'total': 2, 'done': 1, 'running': 1},
+              'cancelable': true,
+            },
+          ],
+        },
+      });
+
+  @override
+  Future<void> cancelBackground(
+    String kind,
+    String id, {
+    String project = '',
+  }) async {
+    cancelled.add('$kind/$id/$project');
   }
 }
 
@@ -555,6 +609,42 @@ void main() {
     await tester.tap(find.text('Go to Chat'));
     await tester.pumpAndSettle();
     expect(destination, WorkspaceDestination.chat);
+    await tester.pumpWidget(const SizedBox());
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
+  });
+
+  testWidgets('background groups expose fleet children and cancellation', (
+    tester,
+  ) async {
+    final api = BackgroundAgents();
+    await open(tester, api);
+    expect(find.byKey(const Key('fleet-group')), findsOneWidget);
+    expect(find.byKey(const Key('autopilot-group')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('fleet-group')));
+    await tester.pumpAndSettle();
+    expect(
+      find.textContaining('1 done · 1 running · 1 queued'),
+      findsOneWidget,
+    );
+    await tester.tap(find.byKey(const Key('fleet-fleet-1')));
+    await tester.pumpAndSettle();
+    expect(find.text('Child task'), findsOneWidget);
+    await tester.tap(find.byTooltip('Cancel fleet'));
+    await tester.pumpAndSettle();
+    expect(api.cancelled, contains('fleet/fleet-1/'));
+    await tester.ensureVisible(find.byKey(const Key('autopilot-group')));
+    await tester.tap(find.byKey(const Key('autopilot-group')));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.byTooltip('Open autopilot details'));
+    await tester.tap(find.byTooltip('Open autopilot details'));
+    await tester.pumpAndSettle();
+    expect(find.text('Keep the goal moving'), findsWidgets);
+    await tester.tap(find.text('Close').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Cancel autopilot'));
+    await tester.pumpAndSettle();
+    expect(api.cancelled, contains('autopilot/auto-1/'));
     await tester.pumpWidget(const SizedBox());
     tester.view.resetPhysicalSize();
     tester.view.resetDevicePixelRatio();
