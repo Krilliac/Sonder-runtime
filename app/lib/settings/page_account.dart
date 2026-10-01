@@ -84,6 +84,7 @@ extension _AccountPage on _SettingsScreenState {
 
   Widget _sessionSection(BuildContext context, AccountSession account) {
     final here = account.matches(_server.text);
+    final user = account.token == _signedInToken ? _signedInUser : null;
     return SettingsSection(
       title: 'Session',
       description: 'Sign out revokes this session on the server. Forget '
@@ -95,6 +96,7 @@ extension _AccountPage on _SettingsScreenState {
           mono: true,
           kind: here ? StatusKind.ok : StatusKind.warn,
         ),
+        if (user != null) FactRow(label: 'Signed in as', value: user),
         if (!here)
           Padding(
             padding: const EdgeInsets.fromLTRB(
