@@ -31,6 +31,9 @@ home = "/var/lib/sonder"
 workspace_roots = ["/srv/sonder/workspaces"]
 minimum_free_disk_bytes = 5368709120
 sqlite_busy_timeout_ms = 5000
+# Console work with no folder selected gets a dated folder under the first
+# usable workspace root (env SONDER_AUTO_WORKSPACE); false asks instead.
+auto_workspace = true
 
 [memory_replication]
 # Disabled by default. This is a bounded, explicit, project-scoped fact-copy

@@ -356,6 +356,24 @@ def test_env_compatibility_and_precedence(tmp_path):
     assert config.server.port == 14000  # CLI beats env
 
 
+def test_auto_workspace_defaults_on_and_follows_toml_env_and_overrides(tmp_path):
+    assert load_config(env=_CLEAN_ENV).state.auto_workspace is True
+    toml = tmp_path / "sonder.toml"
+    toml.write_text("[state]\nauto_workspace = false\n", encoding="utf-8")
+    assert load_config(toml, env=_CLEAN_ENV).state.auto_workspace is False
+    # env beats TOML; an empty value keeps the configured one.
+    assert load_config(toml, env={"SONDER_AUTO_WORKSPACE": "1"}).state.auto_workspace is True
+    assert load_config(toml, env={"SONDER_AUTO_WORKSPACE": " "}).state.auto_workspace is False
+    assert load_config(env={"SONDER_AUTO_WORKSPACE": "0"}).state.auto_workspace is False
+    assert load_config(
+        env=_CLEAN_ENV, overrides={"state.auto_workspace": "off"},
+    ).state.auto_workspace is False
+    toml.write_text('[state]\nauto_workspace = "no"\n', encoding="utf-8")
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(toml, env=_CLEAN_ENV)
+    assert "[state].auto_workspace must be a boolean" in excinfo.value.errors
+
+
 def test_historical_state_home_alias_is_supported_and_canonical_home_wins(tmp_path):
     historical = tmp_path / "historical"
     canonical = tmp_path / "canonical"
