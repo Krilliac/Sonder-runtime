@@ -26,6 +26,7 @@ from pathlib import Path
 from sonder_runtime.adapters.process_liveness import pid_alive as _process_pid_alive
 from sonder_runtime.domain.automation import state_machine as _sm
 from sonder_runtime.platform import paths as _platform_paths
+from sonder_runtime.adapters.creation_workspace import writing_project
 
 
 # SPEC-3 Phase 6: the canonical status classification lives in the domain
@@ -306,6 +307,7 @@ def create_run(
     if not objective:
         raise ValueError("autopilot objective is required")
     run_id = "auto-%s" % uuid.uuid4().hex[:12]
+    selected_project = writing_project(project, run_id) if policy != "observe" else project
     now = time.time()
     with _write_transaction() as conn:
         conn.execute(
@@ -318,7 +320,7 @@ def create_run(
             (
                 run_id,
                 objective,
-                _clamp_text(project, 200),
+                selected_project if selected_project != project else _clamp_text(project, 200),
                 _clamp_text(request_owner, 128),
                 _clamp_text(tier, 40),
                 _clamp_text(policy, 40),
