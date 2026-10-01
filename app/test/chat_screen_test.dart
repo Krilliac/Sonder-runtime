@@ -5,7 +5,9 @@ import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sonder_runtime/api.dart';
+import 'package:sonder_runtime/chat/controller.dart';
 import 'package:sonder_runtime/chat/transcript.dart';
+import 'package:sonder_runtime/theme.dart';
 import 'package:sonder_runtime/models.dart';
 
 import 'chat_fakes.dart';
@@ -168,6 +170,86 @@ void main() {
     // The tier from the receipt reaches the status line.
     expect(_statusLine(tester), startsWith('code · sonder'));
     await unmountChat(tester);
+  });
+
+  testWidgets('orchestration choices send the complete command', (
+    tester,
+  ) async {
+    final backend = FakeChatBackend();
+    await pumpChat(tester, backend);
+    await _send(tester, 'make something');
+    backend.lastTurn.done(
+      'Choose a mode',
+      metadata: const ChatResponseMetadata(
+        orchestration: OrchestrationReceipt(
+          choices: [
+            OrchestrationChoice(
+              label: 'Fleet',
+              command: '/master_orchestrate fleet 0 make something',
+            ),
+          ],
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(
+        const Key('orchestration-/master_orchestrate fleet 0 make something'),
+      ),
+    );
+    await tester.pump();
+    expect(backend.turns, hasLength(2));
+    expect(
+      backend.lastTurn.request.history.last.content,
+      '/master_orchestrate fleet 0 make something',
+    );
+    await unmountChat(tester);
+  });
+
+  testWidgets('lane acknowledgement opens the requested Agents lane', (
+    tester,
+  ) async {
+    String? opened;
+    final actions = TranscriptActions(
+      onStop: () {},
+      onFeedback: (_) {},
+      onRetry: (_) {},
+      onChangeMode: () {},
+      onApprove: null,
+      fetchWorkRun: (_) async => const WorkRun(id: 'x', status: 'unknown'),
+      cancelWorkRun: (_) async => const WorkRun(id: 'x', status: 'unknown'),
+      listWorkRuns: () async => const [],
+      onWorkRunResolved: (_, __) {},
+      onOpenAgentLane: (id) => opened = id,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: SonderTheme.dark,
+        home: Scaffold(
+          body: TranscriptTurn(
+            entry: ChatEntry(
+              1,
+              const ChatMessage(
+                role: Role.assistant,
+                content: 'Delegated.',
+                responseMetadata: ChatResponseMetadata(
+                  agentLane: AgentLaneReceipt(
+                    laneId: 'lane-123',
+                    folder: 'C:/creations/lane-123',
+                  ),
+                ),
+              ),
+            ),
+            live: ValueNotifier<LiveTurn?>(null),
+            actions: actions,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('open-agent-lane')));
+    expect(opened, 'lane-123');
+    await tester.pumpWidget(const SizedBox());
   });
 
   testWidgets('failures: plain text, retry, announced (P2-12, P2-13)',

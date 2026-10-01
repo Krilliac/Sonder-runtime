@@ -1,3 +1,4 @@
+import contextlib
 from contextlib import contextmanager
 import http.client
 import io
@@ -986,6 +987,12 @@ def _http_server(monkeypatch):
     warm_operations = getattr(ts.sonder_lifecycle.get(), "operations", None)
     if callable(warm_operations):  # some tests install a minimal fake lifecycle
         warm_operations()
+    # serve.run() also warms the command catalog as it binds; a cold build is
+    # ~4 s inside the first slash request on a loaded Windows worker. A test
+    # that patched the tool registry away still fails in the request path.
+    with contextlib.suppress(Exception):
+        ts.command_catalog.http_slash_tools()
+        ts.command_catalog.catalog()
     httpd = ts.ThreadingHTTPServer(("127.0.0.1", 0), ts.Handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
