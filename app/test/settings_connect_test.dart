@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -40,6 +42,10 @@ class FakeConnection extends SettingsConnection {
   final registerSecrets = <String?>[];
   bool requireBootstrap = true;
 
+  /// When set, each `/v1/models` probe waits for the next completer here.
+  final gates = <Completer<void>>[];
+  int probes = 0;
+
   FakeConnection({this.testError});
 
   /// Per-row routing fields of `/v1/models`.
@@ -48,6 +54,9 @@ class FakeConnection extends SettingsConnection {
   @override
   Future<ModelCatalog> testServer(
       String serverUrl, String apiKey, AccountSession? account) async {
+    final gate = probes < gates.length ? gates[probes] : null;
+    probes++;
+    if (gate != null) await gate.future;
     if (testError != null) throw testError!;
     return ModelCatalog(ids: models, origins: origins);
   }
@@ -59,6 +68,20 @@ class FakeConnection extends SettingsConnection {
   Future<EcosystemStatus?> routingStatus(
           String serverUrl, String apiKey, AccountSession? account) async =>
       routing;
+
+  /// What the host launcher answers; null throws "cannot reach".
+  LauncherStatus? launcher;
+  final launcherCalls = <String>[];
+
+  @override
+  Future<LauncherStatus> launcherStatus(String launcherUrl, String token) async {
+    launcherCalls.add(launcherUrl);
+    final status = launcher;
+    if (status == null) {
+      throw SonderException('Cannot reach host launcher: refused');
+    }
+    return status;
+  }
 
   @override
   Future<String> register(
@@ -77,8 +100,11 @@ Future<void> pumpSettings(
   WidgetTester tester, {
   required SettingsConnection connection,
   String serverUrl = 'http://mypc.local:11435',
+  Settings? settings,
   Size size = const Size(1000, 1800),
   ThemeData? theme,
+  String? category,
+  ValueChanged<Settings>? onChanged,
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
@@ -89,11 +115,34 @@ Future<void> pumpSettings(
   await tester.pumpWidget(MaterialApp(
     theme: theme ?? SonderTheme.dark,
     home: SettingsScreen(
-      settings: Settings(serverUrl: serverUrl),
-      onChanged: (_) {},
+      settings: settings ?? Settings(serverUrl: serverUrl),
+      onChanged: onChanged ?? (_) {},
       connection: connection,
+      initialCategory: category,
     ),
   ));
+  await tester.pumpAndSettle();
+}
+
+/// Opens a Settings page: from the rail on a wide window, or back to the
+/// list first on a phone.
+Future<void> openSettingsPage(WidgetTester tester, String id) async {
+  final back = find.byTooltip('All settings sections');
+  if (back.evaluate().isNotEmpty) {
+    await tester.tap(back);
+    await tester.pumpAndSettle();
+  }
+  await tester.tap(find.byKey(Key('category-$id')));
+  await tester.pumpAndSettle();
+}
+
+/// A Settings text field by its key suffix: `settingsField('server-url')`.
+Finder settingsField(String name) => find.byKey(Key('settings-$name'));
+
+/// Saves through the unsaved-changes bar, once it has risen.
+Future<void> saveSettings(WidgetTester tester) async {
+  await tester.pumpAndSettle();
+  await tester.tap(find.byKey(const Key('settings-save')));
   await tester.pumpAndSettle();
 }
 
@@ -172,6 +221,7 @@ void main() {
         connection: FakeConnection(
             testError: SonderException('host is not allowed',
                 httpStatus: 421, code: 'HOST_NOT_ALLOWED')));
+    await openSettingsPage(tester, SettingsCategory.connection);
     await tapTest(tester);
     final notice = find.byKey(const Key('settings-connection-notice'));
     expect(
@@ -197,7 +247,9 @@ void main() {
               ecosystemJson(inference: inferenceStatusJson()))
           .status;
     await pumpSettings(tester,
-        connection: connection, serverUrl: 'http://127.0.0.1:11435');
+        connection: connection,
+        serverUrl: 'http://127.0.0.1:11435',
+        category: SettingsCategory.connection);
     await tapTest(tester);
     expect(
         find.textContaining('Sonder Inference serves 2 routes (mock:tiny); '
@@ -222,7 +274,9 @@ void main() {
         'llama3:8b': ModelOrigin(kind: 'model', provider: 'ollama'),
       };
     await pumpSettings(tester,
-        connection: connection, serverUrl: 'http://127.0.0.1:11435');
+        connection: connection,
+        serverUrl: 'http://127.0.0.1:11435',
+        category: SettingsCategory.connection);
     await tapTest(tester);
     expect(
         find.textContaining('Sonder Inference serves 2 routes (qwen3:14b); '
@@ -233,7 +287,9 @@ void main() {
   testWidgets('connect card status words', (tester) async {
     final connection = FakeConnection();
     await pumpSettings(tester,
-        connection: connection, serverUrl: 'http://127.0.0.1:11435');
+        connection: connection,
+        serverUrl: 'http://127.0.0.1:11435',
+        category: SettingsCategory.connection);
     await tapTest(tester);
     // Lane B's StatusMark draws the glyph and the word as separate texts.
     final reachable = find.widgetWithText(StatusMark, 'reachable');
@@ -246,6 +302,22 @@ void main() {
     expect(find.textContaining("Can't reach 127.0.0.1"), findsOneWidget);
   });
 
+  testWidgets('a result for an address since edited is not shown',
+      (tester) async {
+    final gate = Completer<void>();
+    final connection = FakeConnection()..gates.add(gate);
+    await pumpSettings(tester,
+        connection: connection,
+        serverUrl: 'http://127.0.0.1:11435',
+        category: SettingsCategory.connection);
+    await tester.tap(find.byKey(const Key('settings-test-connection')));
+    await tester.pump();
+    await tester.enterText(settingsField('server-url'), 'http://127.0.0.1:1');
+    gate.complete();
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('settings-connection-notice')), findsNothing);
+  });
+
   testWidgets('bootstrap secret appears after 403, is sent once, never saved',
       (tester) async {
     final credentials = MemoryCredentials();
@@ -253,26 +325,28 @@ void main() {
     addTearDown(() => Settings.testingCredentialStore = null);
     final connection = FakeConnection();
     await pumpSettings(tester,
-        connection: connection, serverUrl: 'https://pc.test');
-    expect(find.byKey(const Key('settings-bootstrap-secret')), findsNothing);
-    await tester.enterText(find.widgetWithText(TextField, 'Username'), 'alice');
-    await tester.enterText(
-        find.widgetWithText(TextField, 'Password'), 'password123');
-    await tester.ensureVisible(find.text('Register'));
+        connection: connection,
+        serverUrl: 'https://pc.test',
+        category: SettingsCategory.account);
+    expect(settingsField('bootstrap-secret'), findsNothing);
+    await tester.enterText(settingsField('username'), 'alice');
+    await tester.enterText(settingsField('password'), 'password123');
     await tester.tap(find.text('Register'));
     await tester.pumpAndSettle();
-    expect(find.byKey(const Key('settings-bootstrap-secret')), findsOneWidget);
+    expect(settingsField('bootstrap-secret'), findsOneWidget);
     expect(connection.registerSecrets, [null]);
-    await tester.enterText(
-        find.byKey(const Key('settings-bootstrap-secret')), 's3cr3t-boot');
+    await tester.enterText(settingsField('bootstrap-secret'), 's3cr3t-boot');
     await tester.tap(find.text('Register'));
     await tester.pumpAndSettle();
     expect(connection.registerSecrets, [null, 's3cr3t-boot']);
     expect(find.text('Account alice created (role admin).'), findsOneWidget);
-    expect(find.byKey(const Key('settings-bootstrap-secret')), findsNothing);
-    await tester.ensureVisible(find.text('Save'));
-    await tester.tap(find.text('Save'));
-    await tester.pumpAndSettle();
+    expect(settingsField('bootstrap-secret'), findsNothing);
+    // Sign-in fields are not settings: nothing is waiting to be saved.
+    expect(find.byKey(const Key('settings-save')), findsNothing);
+    // Save a real change, then check nothing at rest holds the secret.
+    await openSettingsPage(tester, SettingsCategory.privacy);
+    await tester.tap(find.byKey(const Key('settings-approximate-location')));
+    await saveSettings(tester);
     final preferences = await SharedPreferences.getInstance();
     expect(preferences.getString('sonder_server_url'), 'https://pc.test');
     for (final key in preferences.getKeys()) {
@@ -285,20 +359,19 @@ void main() {
       (tester) async {
     final connection = FakeConnection();
     await pumpSettings(tester,
-        connection: connection, serverUrl: 'https://pc.test');
-    await tester.enterText(find.widgetWithText(TextField, 'Username'), 'alice');
-    await tester.enterText(
-        find.widgetWithText(TextField, 'Password'), 'password123');
-    await tester.ensureVisible(find.text('Register'));
+        connection: connection,
+        serverUrl: 'https://pc.test',
+        category: SettingsCategory.account);
+    await tester.enterText(settingsField('username'), 'alice');
+    await tester.enterText(settingsField('password'), 'password123');
     await tester.tap(find.text('Register'));
     await tester.pumpAndSettle();
-    await tester.enterText(
-        find.byKey(const Key('settings-bootstrap-secret')), 's3cr3t-boot');
-    await tester.enterText(
-        find.widgetWithText(TextField, 'Server URL'), 'https://other.test');
+    await tester.enterText(settingsField('bootstrap-secret'), 's3cr3t-boot');
+    await openSettingsPage(tester, SettingsCategory.connection);
+    await tester.enterText(settingsField('server-url'), 'https://other.test');
     await tester.pumpAndSettle();
-    expect(find.byKey(const Key('settings-bootstrap-secret')), findsNothing);
-    await tester.ensureVisible(find.text('Register'));
+    await openSettingsPage(tester, SettingsCategory.account);
+    expect(settingsField('bootstrap-secret'), findsNothing);
     await tester.tap(find.text('Register'));
     await tester.pumpAndSettle();
     expect(connection.registerSecrets, [null, null]);
@@ -349,12 +422,11 @@ void main() {
     Settings.testingCredentialStore = ThrowingCredentials();
     addTearDown(() => Settings.testingCredentialStore = null);
     await pumpSettings(tester,
-        connection: FakeConnection(), serverUrl: 'http://127.0.0.1:11435');
-    await tester.enterText(
-        find.widgetWithText(TextField, 'API key (optional)'), 'deploy-key');
-    await tester.pump();
-    await tester.tap(find.byKey(const Key('settings-save')));
-    await tester.pumpAndSettle();
+        connection: FakeConnection(),
+        serverUrl: 'http://127.0.0.1:11435',
+        category: SettingsCategory.connection);
+    await tester.enterText(settingsField('api-key'), 'deploy-key');
+    await saveSettings(tester);
     expect(find.textContaining('System keyring unavailable: key not saved'),
         findsOneWidget);
     final preferences = await SharedPreferences.getInstance();
@@ -381,18 +453,21 @@ void main() {
     expect(nothingToStore.warning, isNull);
   });
 
-  testWidgets('eye icons say what they do; forget is disabled without session',
+  testWidgets('eye icons say what they do; forget needs a session',
       (tester) async {
-    await pumpSettings(tester, connection: FakeConnection());
+    await pumpSettings(tester,
+        connection: FakeConnection(), category: SettingsCategory.connection);
     expect(find.byTooltip('Show API key'), findsOneWidget);
     await tester.tap(find.byTooltip('Show API key'));
     await tester.pump();
     expect(find.byTooltip('Hide API key'), findsOneWidget);
     expect(find.byTooltip('Show launcher token'), findsOneWidget);
-    final forget = tester.widget<ButtonStyleButton>(find.ancestor(
-        of: find.text('Forget local session'),
-        matching: find.byWidgetPredicate((w) => w is ButtonStyleButton)));
-    expect(forget.onPressed, isNull);
+    // Without a session there is nothing to sign out of or forget: the
+    // page offers the sign-in form instead.
+    await openSettingsPage(tester, SettingsCategory.account);
+    expect(find.text('Forget local session'), findsNothing);
+    expect(find.text('Sign out'), findsNothing);
+    expect(find.text('Login'), findsOneWidget);
     // One return control.
     expect(find.byTooltip('Back to chat'), findsOneWidget);
     expect(find.byIcon(Icons.arrow_back), findsOneWidget);
@@ -417,9 +492,43 @@ void main() {
         ),
       ));
       await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const Key('settings-test-connection')));
-      await tester.pumpAndSettle();
-      expect(tester.takeException(), isNull, reason: 'scale $scale');
+      expect(tester.takeException(), isNull, reason: 'list at $scale');
+      for (final page in [
+        SettingsCategory.general,
+        SettingsCategory.connection,
+        SettingsCategory.account,
+        SettingsCategory.appearance,
+        SettingsCategory.privacy,
+        SettingsCategory.desktop,
+        SettingsCategory.observatory,
+        SettingsCategory.about,
+      ]) {
+        // The list's own scrollable (the search field has one too).
+        await tester.scrollUntilVisible(
+            find.byKey(Key('category-$page')), 120,
+            scrollable: find
+                .descendant(
+                    of: find.byKey(const Key('settings-categories')),
+                    matching: find.byType(Scrollable))
+                .first);
+        // Fully in view, not just peeking in at an edge.
+        await tester.ensureVisible(find.byKey(Key('category-$page')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(Key('category-$page')));
+        await tester.pumpAndSettle();
+        if (page == SettingsCategory.connection) {
+          await tester.ensureVisible(
+              find.byKey(const Key('settings-test-connection')));
+          await tester.pumpAndSettle();
+          await tapTest(tester);
+          // A pending change raises the bar: it has to fit too.
+          await tester.enterText(settingsField('server-url'), 'http://pc:1');
+          await tester.pumpAndSettle();
+        }
+        expect(tester.takeException(), isNull, reason: '$page at $scale');
+        await tester.tap(find.byTooltip('All settings sections'));
+        await tester.pumpAndSettle();
+      }
     }
     tester.view.resetPhysicalSize();
     tester.view.resetDevicePixelRatio();
@@ -432,6 +541,22 @@ void main() {
         connection: FakeConnection(), size: const Size(390, 844));
     await expectLater(tester, meetsGuideline(androidTapTargetGuideline));
     await expectLater(tester, meetsGuideline(labeledTapTargetGuideline));
+    for (final page in [
+      SettingsCategory.general,
+      SettingsCategory.connection,
+      SettingsCategory.account,
+      SettingsCategory.appearance,
+      SettingsCategory.privacy,
+      SettingsCategory.desktop,
+      SettingsCategory.observatory,
+      SettingsCategory.about,
+    ]) {
+      await openSettingsPage(tester, page);
+      await expectLater(tester, meetsGuideline(androidTapTargetGuideline),
+          reason: page);
+      await expectLater(tester, meetsGuideline(labeledTapTargetGuideline),
+          reason: page);
+    }
     handle.dispose();
   });
 }

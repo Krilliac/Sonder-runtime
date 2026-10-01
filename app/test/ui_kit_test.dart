@@ -185,6 +185,27 @@ void main() {
       expect(find.text('Start server'), findsOneWidget);
     });
 
+    testWidgets('a long label wraps under large text instead of overflowing',
+        (tester) async {
+      await tester.pumpWidget(MediaQuery(
+        data: const MediaQueryData(textScaler: TextScaler.linear(2)),
+        child: _app(Scaffold(
+          body: Center(
+            child: SizedBox(
+              width: 200,
+              child: AsyncActionButton(
+                label: 'Test host control',
+                icon: Icons.power_settings_new_outlined,
+                onPressed: () async {},
+              ),
+            ),
+          ),
+        )),
+      ));
+      expect(tester.takeException(), isNull);
+      expect(find.text('Test host control'), findsOneWidget);
+    });
+
     testWidgets('a failure shows failed and reaches onError', (tester) async {
       Object? seen;
       await tester.pumpWidget(_app(Scaffold(
@@ -402,6 +423,49 @@ void main() {
       await tester.pump(const Duration(milliseconds: 500));
       expect(find.text('Link copied'), findsOneWidget);
       expect(find.bySemanticsLabel(RegExp('ok: Link copied')), findsOneWidget);
+    });
+
+    testWidgets('a toast works under a theme without floating snack bars',
+        (tester) async {
+      _surface(tester, const Size(1200, 800));
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (context) => TextButton(
+              onPressed: () => showSonderToast(context, 'Settings saved'),
+              child: const Text('save'),
+            ),
+          ),
+        ),
+      ));
+      await tester.tap(find.text('save'));
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      expect(find.text('Settings saved'), findsOneWidget);
+    });
+
+    testWidgets('an outcome lines its detail up under its title',
+        (tester) async {
+      await tester.pumpWidget(_app(Scaffold(
+        body: Padding(
+          padding: const EdgeInsets.all(16),
+          child: OutcomeView(
+            const ActionOutcome.failed('Revocation not confirmed.',
+                detail: 'Retry Sign out, or forget the session.'),
+            onDismiss: () {},
+          ),
+        ),
+      )));
+      final title = tester.getRect(find.text('Revocation not confirmed.'));
+      final detail =
+          tester.getRect(find.text('Retry Sign out, or forget the session.'));
+      final dismiss = tester.getRect(find.byTooltip('Dismiss'));
+      expect(detail.left, title.left);
+      // The detail follows the title, not the 48 dp dismiss button.
+      expect(detail.top - title.bottom, lessThan(8));
+      expect((title.center.dy - dismiss.center.dy).abs(), lessThan(4));
+      expect(find.bySemanticsLabel('error: Revocation not confirmed.'),
+          findsOneWidget);
     });
 
     testWidgets('RawOutput collapses long output behind Show all',

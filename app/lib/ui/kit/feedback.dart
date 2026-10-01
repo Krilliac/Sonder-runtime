@@ -25,6 +25,9 @@ void showSonderToast(
     ..hideCurrentSnackBar()
     ..showSnackBar(SnackBar(
       duration: duration,
+      // Explicit, not inherited: a width needs a floating snack bar, and a
+      // page under a theme without one must not assert.
+      behavior: SnackBarBehavior.floating,
       width: wide ? 380 : null,
       content: Semantics(
         liveRegion: true,
@@ -236,47 +239,63 @@ class OutcomeView extends StatelessWidget {
     final tokens = SonderTokens.of(context);
     final text = Theme.of(context).textTheme;
     final color = outcome.kind.color(tokens);
+    final dismiss = onDismiss;
+    // The word and the title share a baseline; the detail and any output
+    // start under the title, not under the word.
+    final body = Row(
+      crossAxisAlignment: CrossAxisAlignment.baseline,
+      textBaseline: TextBaseline.alphabetic,
+      children: [
+        ExcludeSemantics(
+          child: Text('${outcome.kind.glyph} ${outcome.kind.word}',
+              style: tokens.mono(12.5, color: color, weight: FontWeight.w600)),
+        ),
+        const SizedBox(width: SonderSpace.md),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              ExcludeSemantics(
+                child: Text(outcome.title,
+                    style: text.bodyMedium?.copyWith(color: tokens.text)),
+              ),
+              if (outcome.detail != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: SonderSpace.xxs),
+                  child: SelectableText(outcome.detail!,
+                      style: text.bodySmall?.copyWith(color: tokens.text2)),
+                ),
+              if (outcome.output != null && outcome.output!.trim().isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: SonderSpace.sm),
+                  child: RawOutput(outcome.output!),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
     return Semantics(
       liveRegion: true,
       container: true,
       label: '${outcome.kind.word}: ${outcome.title}',
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            ExcludeSemantics(
-              child: Text('${outcome.kind.glyph} ${outcome.kind.word}',
-                  style: tokens.mono(12.5,
-                      color: color, weight: FontWeight.w600)),
-            ),
-            const SizedBox(width: SonderSpace.md),
-            Expanded(
-              child: ExcludeSemantics(
-                child: Text(outcome.title,
-                    style: text.bodyMedium?.copyWith(color: tokens.text)),
+      child: dismiss == null
+          ? body
+          : Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              // The first line sits on the centre of the 48 dp button.
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.only(top: SonderSpace.md),
+                  child: body,
+                ),
               ),
-            ),
-            if (onDismiss != null)
               IconButton(
                 tooltip: 'Dismiss',
                 iconSize: 16,
                 icon: const Icon(Icons.close),
-                onPressed: onDismiss,
+                onPressed: dismiss,
               ),
-          ]),
-          if (outcome.detail != null)
-            Padding(
-              padding: const EdgeInsets.only(top: SonderSpace.xs),
-              child: SelectableText(outcome.detail!,
-                  style: text.bodySmall?.copyWith(color: tokens.text2)),
-            ),
-          if (outcome.output != null && outcome.output!.trim().isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(top: SonderSpace.sm),
-              child: RawOutput(outcome.output!),
-            ),
-        ],
-      ),
+            ]),
     );
   }
 }
