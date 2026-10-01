@@ -38,12 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 0,
-      "name": "__pycache__",
-      "python_files": []
-    },
-    {
-      "file_count": 389,
+      "file_count": 393,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -59,8 +54,10 @@
         "sonder_runtime/adapters/accelerators/npu/providers.py",
         "sonder_runtime/adapters/accelerators/npu/service.py",
         "sonder_runtime/adapters/admin_formatting.py",
+        "sonder_runtime/adapters/agent_artifact_gate.py",
         "sonder_runtime/adapters/agent_call_signature.py",
         "sonder_runtime/adapters/agent_decision_generation.py",
+        "sonder_runtime/adapters/agent_generation_budget.py",
         "sonder_runtime/adapters/agent_terminal_evidence.py",
         "sonder_runtime/adapters/agent_work_coverage.py",
         "sonder_runtime/adapters/application_lifecycle.py",
@@ -109,6 +106,7 @@
         "sonder_runtime/adapters/context_formatting.py",
         "sonder_runtime/adapters/context_planning.py",
         "sonder_runtime/adapters/conversational_subagents.py",
+        "sonder_runtime/adapters/creation_workspace.py",
         "sonder_runtime/adapters/debug_tools_executor.py",
         "sonder_runtime/adapters/debugging/__init__.py",
         "sonder_runtime/adapters/debugging/capture_source.py",
@@ -399,6 +397,7 @@
         "sonder_runtime/adapters/security/unsafe_lab.py",
         "sonder_runtime/adapters/semantic_tier.py",
         "sonder_runtime/adapters/session_turn_claims.py",
+        "sonder_runtime/adapters/static_artifact_validation.py",
         "sonder_runtime/adapters/storage.py",
         "sonder_runtime/adapters/subagents.py",
         "sonder_runtime/adapters/system_clock.py",
@@ -912,7 +911,7 @@
       ]
     },
     {
-      "file_count": 267,
+      "file_count": 270,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -928,8 +927,11 @@
         "sonder_runtime/domain/agents/claim_review.py",
         "sonder_runtime/domain/agents/decision_parsing.py",
         "sonder_runtime/domain/agents/evidence_quality.py",
+        "sonder_runtime/domain/agents/file_page_rendering.py",
         "sonder_runtime/domain/agents/observation_prompt.py",
+        "sonder_runtime/domain/agents/policy_refusal_guard.py",
         "sonder_runtime/domain/agents/roles.py",
+        "sonder_runtime/domain/agents/sampling_policy.py",
         "sonder_runtime/domain/agents/tool_naming.py",
         "sonder_runtime/domain/agents/verification_reach.py",
         "sonder_runtime/domain/approval.py",

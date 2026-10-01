@@ -9,6 +9,7 @@ from __future__ import annotations
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import replace
+import os
 import time
 from uuid import uuid4
 
@@ -16,6 +17,7 @@ import sonder_runtime.adapters.legacy_chat_bridge as legacy_chat_bridge
 from .model_transport import ModelCallError
 from ..application.chat import provider_bridge, stream_sink
 from ..application.context import current_operation_context, local_owner_context
+from ..domain.agents import sampling_policy
 
 _LOCAL_ONLY = ContextVar("tier_generation_local_only", default=False)
 
@@ -73,7 +75,7 @@ def scope(tier, *, graph, consent, timeout=None, cancel_check=None):
 
 
 class _TierGenerator:
-    def __init__(self, raw, provider, tier, options, consent, queue, local):
+    def __init__(self, raw, provider, tier, options, consent, queue, local, tuning):
         self.raw = raw
         self.provider = provider
         self.tier = tier
@@ -82,6 +84,7 @@ class _TierGenerator:
         self.queue = queue
         self.local = local or _LOCAL_ONLY.get()
         self.origin = current_operation_context()
+        self.tuning = tuning
 
     def __getattr__(self, name):
         return getattr(self.raw, name)
@@ -106,8 +109,37 @@ class _TierGenerator:
             raise ModelCallError("configuration", "hosted provider requires cloud consent for this operation", status=403, attempts=0)
         with provider_bridge.bind_helper_context(context), stream_sink.armed(None), stream_sink.claimed_for_call():
             admission = local_agent_admission(timeout_seconds=context.remaining_seconds) if self.queue else nullcontext()
-            with provider_bridge.bind_rung(self.provider, self.tier), admission:
+            with provider_bridge.bind_rung(self.provider, self.tier, options=self.tuning), admission:
                 return self.raw(*args, **kwargs)
+
+
+def decision_temperature(provider):
+    return sampling_policy.decision_temperature(os.environ) if provider in provider_bridge.THINKING_PROVIDERS else 0.1
+
+
+def _thinking_advertised(graph, provider):
+    """Read this provider's health once; a missing capability changes no mode.
+
+    The dispatcher has no public gateway accessor. Keep the narrow lookup here
+    until it does; never aggregate provider_status (which probes unrelated tiers).
+    """
+    from .inference.request_tuning import advertised_features, THINKING_MARKERS
+    from .provider_dispatch.gateway import ProviderDispatchGateway
+    from .provider_dispatch.fallback import PreSendFallbackGateway
+
+    gateway = getattr(graph, "model_gateway", None)
+    if isinstance(gateway, ProviderDispatchGateway):
+        gateway = gateway._providers.get(provider)
+    if isinstance(gateway, PreSendFallbackGateway):
+        gateway = gateway.primary
+    health = getattr(gateway, "health", None)
+    if not callable(health):
+        return False
+    try:
+        snapshot = health()
+    except Exception:  # readiness and its errors remain the gateway's responsibility
+        return False
+    return bool(advertised_features(getattr(snapshot, "document", None)) & THINKING_MARKERS)
 
 
 def make_generate(factory, tier, args, options, *, graph, consent):
@@ -115,8 +147,23 @@ def make_generate(factory, tier, args, options, *, graph, consent):
     options = dict(options)
     queue = options.pop("queue", True)
     local = options.pop("local_only", False)
+    kind = options.pop("generation_kind", None)
+    tuning = {}
+    if kind in ("decision", "json") and provider in provider_bridge.THINKING_PROVIDERS:
+        env = dict(os.environ)
+        policy = sampling_policy.sampling_policy(env, generation_kind=kind, temperature=args[2])
+        args = (*args[:2], policy.temperature, *args[3:])
+        advertised = _thinking_advertised(graph, provider) if policy.thinking_mode != "auto" or kind == "json" else False
+        tuning = policy.options(thinking_advertised=advertised)
+        if kind == "decision":
+            from .inference.request_tuning import apply_sampling_defaults, sampling_defaults_enabled
+
+            if sampling_defaults_enabled(env):
+                apply_sampling_defaults(
+                    tuning, str(args[0]), thinking=tuning.get("think", True), env=env, profile="decision",
+                )
     if provider is not None:
         options["cloud"] = False  # the binding, never the model's spelling, owns transport
     with provider_bridge.bind_rung(provider, tier):
         raw = factory(*args, **options)
-    return _TierGenerator(raw, provider, tier, options, consent, queue, local)
+    return _TierGenerator(raw, provider, tier, options, consent, queue, local, tuning)

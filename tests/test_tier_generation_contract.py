@@ -216,6 +216,10 @@ def test_agent_turn_routes_through_provider_and_keeps_hosted_system_private(monk
     assert "Hello there." in result
     assert len(calls) == 1
     assert calls[0][0].tier == "code"
+    assert calls[0][0].options["num_predict"] == {
+        "sonder_inference": 4096, "openai_compatible": 1200,
+        "openrouter": server._CLOUD_AGENT_NUM_PREDICT,
+    }[provider]
     if provider == "openrouter":
         assert calls[0][0].system == "request-system"
 
@@ -287,3 +291,125 @@ def test_helper_does_not_claim_or_write_the_enclosing_chat_stream(monkeypatch):
     with stream_sink.armed(stream):
         assert server._generate_text("plan", tier="code") == "private plan"
         assert not stream.claimed
+
+
+def _generation_host(graph, wire):
+    """Load the real small server entrypoints without booting its global stores.
+
+    Keep transport/capture side effects fake; execute the actual generator and
+    its agent construction statements to catch wiring regressions as well as
+    the pure policies. Normal server fixtures still cover the complete host.
+    """
+    import ast
+    from pathlib import Path
+    import time
+    import os
+    from sonder_runtime.adapters import agent_generation_budget, tier_generation
+    from sonder_runtime.application.chat import provider_bridge
+
+    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+
+    def chat(payload, **_kwargs):
+        wire.append(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+        binding = provider_bridge.active_rung()
+        if binding is not None:
+            out, _response = provider_bridge.generate_via_gateway(
+                graph.model_gateway, payload, tier=binding.tier,
+                context=local_owner_context(correlation_id="test", source="test"),
+            )
+        else:
+            out = {"message": {"content": '{"final":"done"}'}, "prompt_eval_count": 2, "eval_count": 3}
+        return out, out["message"]["content"]
+
+    namespace = {
+        "os": os, "time": time, "_provider_bridge": provider_bridge,
+        "_tier_generation": tier_generation, "_APP_GRAPH": graph,
+        "_agent_generation_budget": agent_generation_budget,
+        "_LOCAL_AGENT_NUM_PREDICT": 1200,
+        "_CLOUD_AGENT_NUM_PREDICT": 16384, "_CLOUD_AGENT_OUTPUT_BUDGET": 65536,
+        "_cloud_allowed_policy": lambda _: True, "_ollama_endpoint_is_local": lambda: True,
+        "_is_cloud_model_name": lambda _: False, "_auto_model_context": lambda _: 4096,
+        "_platform_local_model_options": lambda temperature, num_predict, num_ctx, **kw: {
+            "temperature": temperature, "num_predict": num_predict, "num_ctx": num_ctx,
+        },
+        "context_policy": SimpleNamespace(native=False), "_keep_alive_for": lambda _: "5m",
+        "_chat_request": chat, "ModelCallError": ModelCallError,
+        "_model_usage_count": lambda x: x, "_model_usage_source": lambda *x: "measured",
+        "activity_tracker": SimpleNamespace(record_model_call=lambda **kw: None),
+    }
+    module = ast.Module(body=[funcs["_make_generate"], funcs["_make_tier_generate"]], type_ignores=[])
+    exec(compile(module, "server.py", "exec"), namespace)
+
+    def construct_agent(provider):
+        body = funcs["_agent_turn"].body
+        start = next(i for i, n in enumerate(body) if isinstance(n, ast.Assign)
+                     and any(isinstance(t, ast.Name) and t.id == "agent_num_predict" for t in n.targets))
+        end = next(i for i in range(start, len(body)) if isinstance(body[i], ast.Assign)
+                   and any(isinstance(t, ast.Name) and t.id == "gen" for t in body[i].targets))
+        namespace.update(provider=provider, cloud=False, pre_model_context=None, model="model",
+                         tier_label="code", system="system", cancel_check=None)
+        exec(compile(ast.Module(body=body[start:end + 1], type_ignores=[]), "server.py", "exec"), namespace)
+        return namespace["gen"]
+
+    return namespace, construct_agent
+
+
+@pytest.mark.parametrize("provider,expected", [("sonder_inference", 4096), ("ollama", 1200)])
+def test_isolated_agent_construction_sets_real_cap_and_preserves_ollama_bytes(monkeypatch, provider, expected):
+    requests = []
+    class Gateway:
+        def generate(self, request, _context):
+            requests.append(request)
+            return ModelResponse('{"final":"done"}', "fake", request.tier, tokens_in=2, tokens_out=3)
+
+    graph = SimpleNamespace(provider_bindings=ProviderBindings.uniform(provider), model_gateway=Gateway())
+    wire = []
+    namespace, construct = _generation_host(graph, wire)
+    monkeypatch.delenv("SONDER_AGENT_NUM_PREDICT", raising=False)
+    monkeypatch.delenv("SONDER_AGENT_TEMPERATURE", raising=False)
+    gen = construct(provider if provider != "ollama" else None)
+    assert gen("task") == '{"final":"done"}'
+    assert json.loads(wire[-1])["options"]["num_predict"] == expected
+    if provider == "sonder_inference":
+        assert requests[0].options["num_predict"] == 4096
+    else:
+        original = wire[-1]
+        monkeypatch.setenv("SONDER_AGENT_TEMPERATURE", "0.6")
+        monkeypatch.setenv("SONDER_AGENT_SAMPLING", "0.95,20,0")
+        monkeypatch.setenv("SONDER_AGENT_DECISION_THINKING", "off")
+        construct(None)("task")
+        assert wire[-1] == original
+        namespace["_make_generate"]("model", "system", .1, 1200, 0)("task")
+        assert wire[-1] == original
+
+
+def test_isolated_planner_json_budget_and_thinking_are_provider_scoped(monkeypatch):
+    import ast
+    from pathlib import Path
+    from sonder_runtime.domain.agents.decision_parsing import extract_agent_json
+
+    requests = []
+    class Gateway:
+        def health(self):
+            return SimpleNamespace(document={"sonder": {"features": ["thinking"]}})
+        def generate(self, request, _context):
+            requests.append(request)
+            return ModelResponse('{"tasks":[]}', "fake", request.tier, tokens_in=2, tokens_out=3)
+    graph = SimpleNamespace(provider_bindings=ProviderBindings.uniform("sonder_inference"), model_gateway=Gateway())
+    namespace, _construct = _generation_host(graph, [])
+    namespace.update(
+        autopilot_controller=SimpleNamespace(normalize_tier=lambda x: x, LOCAL_TIERS={"code"}),
+        _serve_target=lambda *x: ("model", False, False, "code"),
+        _bridge_provider_for_tier=lambda _: "sonder_inference",
+        _build_system=lambda *a, **kw: "system", _prompts=SimpleNamespace(render=lambda *a, **kw: "system"),
+        _extract_agent_json=extract_agent_json,
+    )
+    source = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    function = next(n for n in source.body if isinstance(n, ast.FunctionDef) and n.name == "_autopilot_json_model")
+    exec(compile(ast.Module(body=[function], type_ignores=[]), "server.py", "exec"), namespace)
+    monkeypatch.setenv("SONDER_AUTOPILOT_JSON_NUM_PREDICT", "5000")
+    monkeypatch.setenv("SONDER_AUTOPILOT_JSON_THINK", "auto")
+    assert namespace["_autopilot_json_model"]({}, "planner", "plan", lambda _: None) == {"tasks": []}
+    assert requests[0].options["num_predict"] == 5000
+    assert requests[0].options["think"] is False
