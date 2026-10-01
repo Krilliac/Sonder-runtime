@@ -113,8 +113,54 @@ def test_project_less_internal_loop_keeps_its_own_root(monkeypatch, tmp_path, is
     assert not _workspaces().exists()
 
 
+# Windows refuses to create a directory whose path is 248 characters or longer
+# (MAX_PATH minus room for an 8.3 name) unless the host sets LongPathsEnabled.
+# Node1 does not, and pytest's temp base there is already ~90 characters, so a
+# fixed 168-character nesting overflowed (WinError 3 at mkdir). The test only
+# needs a project path over 200 characters: size the nesting to land it at
+# _PROJECT_LENGTH under any base. Where the base itself leaves no room, fall
+# back to the original nesting on hosts that can create it, else skip.
+_PROJECT_LENGTH = 225
+_WINDOWS_DIRECTORY_LIMIT = 247
+
+
+def _long_paths_supported() -> bool:
+    if os.name != "nt":
+        return True
+    import winreg
+
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\FileSystem",
+        ) as key:
+            return winreg.QueryValueEx(key, "LongPathsEnabled")[0] == 1
+    except OSError:
+        return False
+
+
+def _nested_home(base: Path, tail: int) -> Path:
+    """``base`` plus nesting so that the root and a ``tail`` suffix total _PROJECT_LENGTH."""
+    base = base.resolve()
+    room = _PROJECT_LENGTH - tail - len(str(base)) - 1
+    if room < 1:
+        if not _long_paths_supported():
+            pytest.skip(
+                "temp base is %d characters: no project path over 200 characters fits "
+                "under Windows' %d-character directory limit without LongPathsEnabled"
+                % (len(str(base)), _WINDOWS_DIRECTORY_LIMIT)
+            )
+        return base / ("nested-" * 12) / ("nested-" * 12)
+    count = -(-room // 84)  # components of at most 84 characters, far below 255
+    width, extra = divmod(room - (count - 1), count)
+    return base.joinpath(*("n" * (width + (index < extra)) for index in range(count)))
+
+
 def test_long_default_workspace_is_not_truncated(monkeypatch, tmp_path, isolated):
-    root = tmp_path / ("nested-" * 12) / ("nested-" * 12) / "workspaces"
+    from sonder_runtime.adapters import creation_workspace
+
+    # <root>/<date>-<slug>-<hex>; the name's length is fixed for a given task.
+    tail = len(os.sep + creation_workspace.session_workspace_name("write an artifact"))
+    root = _nested_home(tmp_path / "workspaces", tail)
     monkeypatch.setenv("SONDER_DEFAULT_WORKSPACE_ROOT", str(root))
     run = autopilot_store.create_run("write an artifact")
     assert len(run["project"]) > 200
