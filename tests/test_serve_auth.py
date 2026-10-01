@@ -2976,6 +2976,64 @@ def test_cors_denies_hostile_origin_and_echoes_only_allowlisted(monkeypatch):
         assert status == 403
 
 
+@pytest.mark.parametrize("allowlist,path", [
+    ("CORS_ORIGINS", "/v1/chat/completions"),
+    ("OBSERVATORY_ORIGINS", "/v1/sonder/ecosystem"),
+])
+@pytest.mark.parametrize("separator", ["\r", "\n", "\r\n"])
+def test_cors_never_reflects_crlf_origin_even_if_allowlisted(monkeypatch, allowlist, path, separator):
+    origin = "https://allowed.example" + separator + "X-Injected: yes"
+    monkeypatch.setattr(ts, "CORS_ORIGINS", frozenset())
+    monkeypatch.setattr(ts, "OBSERVATORY_ORIGINS", frozenset())
+    monkeypatch.setattr(ts, allowlist, frozenset({origin, "https://allowed.example"}))
+
+    class Probe:
+        def __init__(self, value):
+            self.headers = {"Origin": value}
+            self.command = "GET"
+            self.path = path
+            self.sent = []
+
+        def send_header(self, name, value):
+            self.sent.append((name, value))
+
+        def _observatory_origin_request(self, value):
+            return ts.Handler._observatory_origin_request(self, value)
+
+    malformed = Probe(origin)
+    ts.Handler._cors(malformed)
+    assert malformed.sent == []
+
+    absent = Probe(None)
+    ts.Handler._cors(absent)
+    assert absent.sent == []
+
+    valid = Probe("https://allowed.example")
+    ts.Handler._cors(valid)
+    assert ("Access-Control-Allow-Origin", "https://allowed.example") in valid.sent
+
+
+def test_cors_never_reflects_folded_origin_header_over_http(monkeypatch):
+    # The stdlib parser keeps an obs-folded header's CRLF in its value, so this
+    # is the wire form of the attack: only an allowlist entry equal to it could
+    # ever have been reflected.
+    folded = "https://allowed.example\r\n X-Injected: yes"
+    monkeypatch.setattr(ts, "CORS_ORIGINS", frozenset({folded, "https://allowed.example"}))
+    with _http_server(monkeypatch) as port:
+        status, headers, _ = _request(
+            port, "OPTIONS", "/v1/chat/completions", headers={"Origin": folded},
+        )
+        assert status == 204
+        assert "Access-Control-Allow-Origin" not in headers
+        assert "X-Injected" not in headers
+        status, headers, _ = _request(
+            port, "OPTIONS", "/v1/chat/completions",
+            headers={"Origin": "https://allowed.example"},
+        )
+        assert status == 204
+        assert headers["Access-Control-Allow-Origin"] == "https://allowed.example"
+
+
 def test_post_body_limit_and_content_type_return_real_4xx(monkeypatch):
     monkeypatch.setattr(ts, "MAX_REQUEST_BYTES", 4)
     with _http_server(monkeypatch) as port:

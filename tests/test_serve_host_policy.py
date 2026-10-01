@@ -11,7 +11,7 @@ import pytest
 import sonder_runtime.interfaces.http.serve as ts
 from sonder_runtime.interfaces.http.host_policy import (
     HOST_CREDENTIALED, HOST_TRUSTED, forwarded_client_ip, host_allowed, host_decision,
-    machine_host_names, parse_host_header,
+    machine_host_names, parse_host_header, reflectable_origin,
 )
 from sonder_runtime.platform.config import ConfigError, load_config
 
@@ -277,6 +277,15 @@ def test_host_policy_pure_rules():
     assert host_decision("public.example:8443", allowed_hosts=("public.example:443",)) is None
     assert host_decision("public.example:8443", allowed_hosts=("public.example:443",),
                          credentials_required=True) == HOST_CREDENTIALED
+
+
+def test_reflectable_origin_refuses_any_line_break():
+    assert reflectable_origin("https://app.example:8443") == "https://app.example:8443"
+    assert reflectable_origin("null") == "null"
+    assert reflectable_origin(None) is None
+    for folded in ("https://app.example\r\n X-Injected: yes", "https://app.example\rX: y",
+                   "https://app.example\nX: y", "\r\n"):
+        assert reflectable_origin(folded) is None
 
 
 def test_allowed_hosts_config_is_validated():
