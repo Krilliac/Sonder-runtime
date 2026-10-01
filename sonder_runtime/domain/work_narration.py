@@ -31,7 +31,10 @@ _NOISE_EVENTS = frozenset({
 # inside its value (`x=password=secret`).
 _NAME = re.compile(r"(?i)[A-Z0-9_-]+")
 _CREDENTIAL_NAME = re.compile(r"(?i)password|passwd|pwd|token|secret|api[-_]?key|credential")
-_ASSIGNED_VALUE = re.compile(r"\s*[=:]\s*([^\s,;]+)")
+# Separator, then value. Whitespace before the separator is skipped in Python
+# (str.isspace is the test re's \s applies), so the pattern starts with a fixed
+# character rather than a repetition (CodeQL py/polynomial-redos).
+_ASSIGNED_VALUE = re.compile(r"[=:]\s*([^\s,;]+)")
 # A JWT is three dot-joined runs. The dotted tail is optional so a run that is
 # not one still matches, and is kept, instead of failing and being rescanned
 # from each later 'eyJ' inside it.
@@ -43,7 +46,10 @@ def _redact_assignments(text: str) -> str:
     for name in _NAME.finditer(text):
         if name.start() < cursor or not _CREDENTIAL_NAME.search(name.group()):
             continue
-        value = _ASSIGNED_VALUE.match(text, name.end())
+        start = name.end()
+        while start < len(text) and text[start].isspace():
+            start += 1
+        value = _ASSIGNED_VALUE.match(text, start)
         if value is None:
             continue
         parts.append(text[cursor:value.start(1)])
