@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.domain.agents.decision_parsing import extract_agent_json
+from sonder_runtime.domain.agents.tool_args import normalize_decision_aliases
 
 
 DECISION_REPAIR_LIMIT = 2
@@ -102,7 +103,9 @@ def generate_decision(
     error = None
     for attempt in range(repair_limit + 1):
         try:
-            decision = extract_agent_json(raw)
+            # A8: canonicalize the alternate {"name", "arguments"} envelope
+            # before the structural checks below read "tool"/"args".
+            decision = normalize_decision_aliases(extract_agent_json(raw))
             if not isinstance(decision, dict):
                 raise ValueError("agent decision must be a JSON object")
             if require_final and "final" not in decision:
