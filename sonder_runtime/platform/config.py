@@ -178,6 +178,9 @@ class StateConfig:
     workspace_roots: tuple[str, ...] = ()
     minimum_free_disk_bytes: int = 5_368_709_120
     sqlite_busy_timeout_ms: int = 5_000
+    # Console work with no folder selected gets a dated folder under the first
+    # usable workspace root instead of a question (SONDER_AUTO_WORKSPACE).
+    auto_workspace: bool = True
 
 
 @dataclass(frozen=True)
@@ -1517,6 +1520,9 @@ def _apply_environment(
         )
         if roots:
             state = replace(state, workspace_roots=roots)
+    # Empty keeps the configured value, as env_bool_from_env reads it later.
+    if env.get("SONDER_AUTO_WORKSPACE", "").strip():
+        state = replace(state, auto_workspace=_env_bool(env["SONDER_AUTO_WORKSPACE"]))
     if env.get("OLLAMA_HOST", "").strip():
         raw = env["OLLAMA_HOST"].strip()
         url = raw if "://" in raw else f"http://{raw}"
