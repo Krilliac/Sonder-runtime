@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from sonder_runtime.adapters.legacy_chat_bridge import chat_request
+from sonder_runtime.adapters import legacy_chat_bridge
 from sonder_runtime.adapters.model_error_formatting import format_runtime_model_call_error
 from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.adapters.inference.sonder_inference_gateway import SonderInferenceConfig
@@ -87,7 +87,7 @@ def test_bridged_provider_error_names_provider_and_bound_base_url(base_url):
     gateway = SimpleNamespace(settings=lambda: settings, generate=generate)
     with bind_rung("sonder_inference", "code") as rung:
         with pytest.raises(ModelCallError) as caught:
-            chat_request(
+            legacy_chat_bridge.chat_request(
                 gateway, {"messages": [{"role": "user", "content": "probe"}]}, rung,
                 context=local_owner_context(correlation_id="provider-error-probe"),
             )

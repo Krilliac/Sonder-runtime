@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from sonder_runtime.adapters import legacy_chat_bridge
 from sonder_runtime.adapters.inference.openai_compat_gateway import (
     OpenAICompatibleConfig,
     OpenAICompatibleGateway,
@@ -12,7 +13,6 @@ from sonder_runtime.adapters.inference.sonder_inference_gateway import (
     SonderInferenceConfig,
     SonderInferenceUnreachable,
 )
-from sonder_runtime.adapters.legacy_chat_bridge import chat_request
 from sonder_runtime.adapters.model_error_formatting import format_runtime_model_call_error
 from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.adapters.provider_dispatch.fallback import PreSendFallbackGateway
@@ -37,7 +37,7 @@ from sonder_runtime.domain.common.errors import (
 def _bridge_error(gateway, provider="sonder_inference"):
     with bind_rung(provider, "code") as rung:
         with pytest.raises(ModelCallError) as caught:
-            chat_request(
+            legacy_chat_bridge.chat_request(
                 gateway, {"messages": [{"role": "user", "content": "probe"}]}, rung,
                 context=local_owner_context(correlation_id="provider-error-test"),
             )
@@ -183,7 +183,7 @@ def test_success_does_not_resolve_error_display_metadata():
         generate=lambda request, context: ModelResponse(text="ok", model="test", tier="code"),
     )
     with bind_rung("sonder_inference", "code") as rung:
-        out, text = chat_request(
+        out, text = legacy_chat_bridge.chat_request(
             gateway, {"messages": [{"role": "user", "content": "probe"}]}, rung,
             context=local_owner_context(correlation_id="success-test"),
         )
