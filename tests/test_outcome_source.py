@@ -388,6 +388,34 @@ def test_the_runtime_code_gate_negative_writes_machine(tmp_path, monkeypatch):
     ).fetchone()[0] == "machine"
 
 
+def test_the_schema_gate_rejection_writes_machine_and_feeds_eviction(
+    tmp_path, monkeypatch,
+):
+    """Same shape as the code gate: an exact link, host-checked, unjudged.
+
+    It went through the heuristic attribution writer's default and was filed
+    `attributed`, which also exempted it from the eviction gate that every
+    exact machine verdict feeds.
+    """
+    import server
+
+    path = tmp_path / "srv-schema.db"
+    monkeypatch.setattr(server, "_DB_PATH", str(path))
+    conn = ms.connect(path)
+    _interaction(conn, "schema-1")
+    ms.add_lesson(conn, "L1", "a lesson", None, "src")
+    ms.log_lesson_usage(conn, ["L1"], "schema-1", "the task")
+    conn.close()
+
+    server._file_schema_rejection("schema-1")
+
+    conn = ms.connect(path)
+    assert tuple(conn.execute(
+        "SELECT signal, source FROM outcomes WHERE interaction_id='schema-1'"
+    ).fetchone()) == ("rejected", "machine")
+    assert ms.lesson_usage_stats(conn)["L1"]["losses_since_win"] == 1
+
+
 # --- item 5: the bypass, now that provenance exists -------------------------
 
 
@@ -395,7 +423,7 @@ def test_the_attribution_writer_now_credits_lesson_usage(tmp_path, monkeypatch):
     """`_record_outcome_signal` skipped the lesson_usage credit entirely.
 
     With provenance it can route through the wrapper: the credit is recorded
-    and tagged `machine`, and the eviction gate filters it out.
+    and tagged `attributed`, and the eviction gate filters it out.
     """
     import server
 

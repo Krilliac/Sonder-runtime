@@ -56,19 +56,20 @@ def _lesson_sources(conn) -> tuple[dict[str, int], int, int]:
     return dict(sorted(sources.items())), grounded, orphaned
 
 
-# Signals a machine produced by running the code, versus signals something
-# with judgement recorded after looking at the answer. They measure different
-# things and must not be averaged into one number: the autograded population is
+# Verdicts a machine produced, versus verdicts something with judgement
+# recorded after looking at the answer. They measure different things and must
+# not be averaged into one number: the autograded population is dominated by
 # self-generated curriculum/ladder work (curriculum_run.py, game_ladder.py)
 # that the runtime both sets and marks, and it outnumbers reviewed outcomes by
 # more than an order of magnitude. A blended "positive percent" therefore
 # reports how often the runtime passes its own exams, while reading like how
 # often the model is right on a caller's real task.
-_AUTOGRADED_SIGNALS = frozenset({"tests_passed", "failed", "compiled"})
-
-# `outcomes.source` (#62) replaced the signal-name proxy above for the reviewed
-# split. The proxy was the best reading available of an unrecorded fact, and it
-# was wrong in both directions: `accepted` is written by artifact_verify and
+#
+# `outcomes.source` (#62) replaced a signal-name proxy for this split
+# (`tests_passed`/`failed`/`compiled` meant autograded; the constant is gone
+# because nothing read it but a test that therefore checked nothing). The
+# proxy was the best reading available of an unrecorded fact, and it was wrong
+# in both directions: `accepted` is written by artifact_verify and
 # ground_artifact with nobody reviewing anything, and a caller who ran the tests
 # themselves and honestly reported `tests_passed` was filed as autograded.
 # Provenance is now recorded by the writer, so the split is read, not inferred.
