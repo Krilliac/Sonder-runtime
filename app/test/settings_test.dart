@@ -202,6 +202,125 @@ void main() {
     );
   });
 
+  test('copyWith keeps every field and drops the session only on request',
+      () {
+    final session =
+        AccountSession(token: 'account', origin: 'https://host.test');
+    final settings = Settings(
+      serverUrl: 'https://host.test',
+      apiKey: 'deployment',
+      accountSession: session,
+      themeMode: 'light',
+      model: 'code',
+      allowHosted: true,
+      contextSize: '32768',
+      keepServerRunning: true,
+      allowApproximateLocation: true,
+      launcherUrl: 'https://host.test:11436',
+      launcherToken: 'launcher-token',
+      observatoryExecutable: '/opt/obs',
+      observatoryWebUrl: 'http://127.0.0.1:4173/',
+      cleartextKeyHosts: const ['192.168.1.20:11435'],
+    );
+    final copy = settings.copyWith();
+    expect(copy.serverUrl, settings.serverUrl);
+    expect(copy.apiKey, 'deployment');
+    expect(copy.accountSession, same(session));
+    expect(copy.themeMode, 'light');
+    expect(copy.model, 'code');
+    expect(copy.allowHosted, isTrue);
+    expect(copy.contextSize, '32768');
+    expect(copy.keepServerRunning, isTrue);
+    expect(copy.allowApproximateLocation, isTrue);
+    expect(copy.launcherUrl, 'https://host.test:11436');
+    expect(copy.launcherToken, 'launcher-token');
+    expect(copy.observatoryExecutable, '/opt/obs');
+    expect(copy.observatoryWebUrl, 'http://127.0.0.1:4173/');
+    expect(copy.cleartextKeyHosts, ['192.168.1.20:11435']);
+    // The host list is a copy, not shared.
+    expect(identical(copy.cleartextKeyHosts, settings.cleartextKeyHosts),
+        isFalse);
+    expect(settings.copyWith(themeMode: 'dark').accountSession, same(session));
+    expect(
+        settings.copyWith(withoutAccountSession: true).accountSession, isNull);
+  });
+
+  test('the theme persists alone, with the legacy boolean', () async {
+    SharedPreferences.setMockInitialValues({'sonder_server_url': 'https://a'});
+    await Settings.saveThemeMode('light');
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getString('sonder_theme_mode'), 'light');
+    expect(prefs.getBool('sonder_dark_mode'), isFalse);
+    await Settings.saveThemeMode('system');
+    expect(prefs.getString('sonder_theme_mode'), 'system');
+    expect(prefs.getBool('sonder_dark_mode'), isTrue);
+    await Settings.saveThemeMode('neon');
+    expect(prefs.getString('sonder_theme_mode'), 'dark');
+    // Nothing else is written.
+    expect(prefs.getKeys(),
+        {'sonder_server_url', 'sonder_theme_mode', 'sonder_dark_mode'});
+  });
+
+  test('a fresh session is stored only for the saved server', () async {
+    SharedPreferences.setMockInitialValues(
+        {'sonder_server_url': 'https://host.test'});
+    final store = _MemoryCredentialStore();
+    final session =
+        AccountSession(token: 'account', origin: 'https://host.test');
+    // A server URL the caller has not saved: refused, nothing written.
+    await expectLater(
+        Settings.storeAccountSession(session,
+            serverUrl: 'https://other.test', credentialStore: store),
+        throwsStateError);
+    expect(store.values, isEmpty);
+    // The caller's server matches, but the persisted one does not.
+    SharedPreferences.setMockInitialValues(
+        {'sonder_server_url': 'https://other.test'});
+    await expectLater(
+        Settings.storeAccountSession(session,
+            serverUrl: 'https://host.test', credentialStore: store),
+        throwsStateError);
+    expect(store.values, isEmpty);
+
+    SharedPreferences.setMockInitialValues(
+        {'sonder_server_url': 'https://host.test'});
+    final result = await Settings.storeAccountSession(session,
+        serverUrl: 'https://host.test', credentialStore: store);
+    expect(result.credentialsStored, isTrue);
+    expect(jsonDecode(store.values['sonder_account_session']!),
+        {'token': 'account', 'origin': 'https://host.test'});
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.containsKey('sonder_account_session'), isFalse);
+    final loaded = await Settings.load(credentialStore: store);
+    expect(loaded.accountSession!.origin, 'https://host.test');
+  });
+
+  test('a fresh session is never stored at rest on the web', () async {
+    Settings.debugMemoryOnlyCredentials = true;
+    addTearDown(() => Settings.debugMemoryOnlyCredentials = null);
+    SharedPreferences.setMockInitialValues(
+        {'sonder_server_url': 'https://host.test'});
+    final store = _MemoryCredentialStore()
+      ..values['sonder_account_session'] = 'stale';
+    final result = await Settings.storeAccountSession(
+        AccountSession(token: 'account', origin: 'https://host.test'),
+        serverUrl: 'https://host.test',
+        credentialStore: store);
+    expect(result.memoryOnly, isTrue);
+    expect(store.values, isEmpty);
+  });
+
+  test('a keyring failure while storing a session is reported', () async {
+    SharedPreferences.setMockInitialValues(
+        {'sonder_server_url': 'https://host.test'});
+    final result = await Settings.storeAccountSession(
+        AccountSession(token: 'account', origin: 'https://host.test'),
+        serverUrl: 'https://host.test',
+        credentialStore: _FailingCredentialStore());
+    expect(result.credentialsStored, isFalse);
+    expect(result.keyringUnavailable, isTrue);
+  });
+
   test('new installs use the Sonder route and preference namespace', () async {
     SharedPreferences.setMockInitialValues({
       'server_url': 'https://old.example:11435',
