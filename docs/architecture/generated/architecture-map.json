@@ -38,11 +38,6 @@
   ],
   "layers": [
     {
-      "file_count": 0,
-      "name": "__pycache__",
-      "python_files": []
-    },
-    {
       "file_count": 388,
       "name": "adapters",
       "python_files": [
