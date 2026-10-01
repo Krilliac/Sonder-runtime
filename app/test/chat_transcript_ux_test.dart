@@ -283,6 +283,37 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
+  testWidgets('a phone at text scale 2 lays out without overflow',
+      (tester) async {
+    tester.platformDispatcher.textScaleFactorTestValue = 2.0;
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    final backend = FakeChatBackend()
+      ..mode = permissionModeFor('acceptEdits')
+      ..models = const ['sonder', 'general']
+      ..statusInfo = SystemInfo.fromJson({
+        'context': {'context_limit': 8192, 'estimated_tokens': 2100},
+      });
+    await pumpChat(tester, backend,
+        size: const Size(390, 844), prefs: _seed(_twoTurns));
+    await _settle(tester);
+    expect(tester.takeException(), isNull);
+    // A live turn, with its stall line, too.
+    await tester.enterText(find.byType(TextField), 'Profile it');
+    await tester.testTextInput.receiveAction(TextInputAction.send);
+    await tester.pump();
+    backend.lastTurn.phase('model call 2');
+    for (var i = 0; i < 22; i++) {
+      await tester.pump(const Duration(seconds: 1));
+    }
+    await _settle(tester);
+    expect(tester.takeException(), isNull);
+    expect(find.textContaining('no output for', findRichText: true),
+        findsOneWidget);
+    backend.lastTurn.done('ok');
+    await _settle(tester);
+    await unmountChat(tester);
+  });
+
   testWidgets('a phone conversation keeps 48 dp labelled targets',
       (tester) async {
     final semantics = tester.ensureSemantics();

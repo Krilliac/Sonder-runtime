@@ -92,7 +92,8 @@ class ConversationContent extends StatelessWidget {
         tableCellsPadding: const EdgeInsets.symmetric(
             horizontal: SonderSpace.md, vertical: SonderSpace.sm),
         blockSpacing: SonderSpace.md,
-        listIndent: SonderSpace.xxl,
+        // The marker column holds "10." at any text size.
+        listIndent: MediaQuery.textScalerOf(context).scale(SonderSpace.xxl),
       ),
     );
   }

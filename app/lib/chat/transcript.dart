@@ -803,7 +803,8 @@ class _Gutter extends StatelessWidget {
 }
 
 /// Shows [child] (an action row) with a short fade; while hidden it takes
-/// no pointer events, but keyboard focus still reaches it (and reveals it).
+/// no pointer events, but keyboard focus still reaches it (and reveals it)
+/// and screen readers still find it.
 class _Reveal extends StatelessWidget {
   final bool visible;
   final Widget child;
@@ -814,6 +815,8 @@ class _Reveal extends StatelessWidget {
         opacity: visible ? 1 : 0,
         duration: SonderMotion.of(context, SonderMotion.fast),
         curve: SonderMotion.standard,
+        // Hidden from the pointer, never from screen readers.
+        alwaysIncludeSemantics: true,
         child: IgnorePointer(ignoring: !visible, child: child),
       );
 }
@@ -908,8 +911,8 @@ class _AnswerActionsState extends State<_AnswerActions> {
     final given = _given;
     final useful = given.contains('useful');
     final edited = given.contains('edited');
-    return Row(
-      mainAxisSize: MainAxisSize.min,
+    // Wraps rather than overflowing at large text sizes.
+    return Wrap(
       children: [
         _CopyAction(
           key: const Key('answer-copy'),
