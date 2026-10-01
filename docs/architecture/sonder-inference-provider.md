@@ -55,6 +55,8 @@ task does not switch thinking or sampling modes between decisions.
 | `SONDER_ALLOW_REMOTE_INFERENCE` | `0` | `1` permits a non-loopback base URL (see consent). |
 | `SONDER_INFERENCE_TIMEOUT_SECONDS` | `300` | Per-call ceiling, never beyond the operation deadline. |
 | `SONDER_INFERENCE_HEALTH_TTL_SECONDS` | `5` | How long a health observation is reused. |
+| `SONDER_INFERENCE_HEALTH_TIMEOUT_SECONDS` | `5` | Probe budget in seconds, greater than zero and at most 6. Generation retries a timeout/overloaded probe once with twice this budget, capped at 6 seconds and the operation's remaining budget. |
+| `SONDER_INFERENCE_HEALTH_STALE_SECONDS` | `120` | Maximum age of healthy evidence usable when a probe times out or reports overloaded (0 disables reuse; maximum 3600). Status/detail reports `busy`; reuse never renews the healthy observation's age. |
 | `SONDER_INFERENCE_FALLBACK` | `none` | `none` or `ollama`; anything else fails composition. |
 | `SONDER_INFERENCE_THINKING` | `auto` | Forward `think` as `chat_template_kwargs.enable_thinking`: `auto` (when the health document advertises it), `on`, `off`. |
 | `SONDER_INFERENCE_SAMPLING_DEFAULTS` | `0` | `1` fills the model family's recommended sampling values for fields the caller left unset. |
@@ -87,6 +89,38 @@ and gateway mapping determine whether those reasoning controls are honored.
 Base URL resolution order: `SONDER_INFERENCE_BASE_URL`, then the ready file,
 then the default. Invalid values (unknown tier keys, non-numeric timeouts,
 `SONDER_ALLOW_REMOTE_INFERENCE` other than `0`/`1`) raise `InvalidInput`.
+
+A busy probe with recent healthy evidence allows generation to proceed. A
+definitive failure (credentials, API version, connection refusal or starting/
+draining) still refuses the call. A 503 `backend_unavailable` containing
+`read timed out` is a `busy_timeout`: retry once at the same endpoint after
+`Retry-After` (seconds or HTTP date, capped at 5 seconds), defaulting to 5
+seconds for missing/invalid values. Backoff and both sends share the call
+budget and honor cancellation; partial streams are never replayed. These
+post-send failures never trigger the Ollama fallback.
+
+Calls with a context session send its stable `prompt_cache_key`; worker
+sessions also send `X-Sonder-Agent-Id`. Standalone and managed REPL agent
+run correlations (`standalone-*`, `repl-work-*`) serve the same purpose when
+there is no session. Without a stable identity the cache key is omitted.
+`X-Sonder-Run-Id` remains the call's correlation ID. `X-Sonder-Priority` is
+`interactive` for HTTP/REPL/MCP, `subagent` for workers and agent runs, and
+`background` for system work. Ambient identity is used only for the same
+principal. Autopilot/fleet callers must bind a stable run session upstream
+to get per-run cache affinity; fresh `tier-helper-*` IDs are not stable keys.
+
+Explicit `reasoning_budget_tokens` (0–1000000) and
+`reasoning_budget_message` (at most 16384 characters) pass through alongside
+the existing sampling options. `think` keeps the advertised-capability/
+operator-override behavior above. Gateway responses extend `ModelResponse`
+with optional `timings` and `finish_reason`. Timings accept only bounded
+backend measurements: `cache_n`, `prompt_n`, `predicted_n`, `queue_ms`,
+`draft_n`, `draft_n_accepted`, preferring `usage.sonder.timings` over legacy
+top-level timings, with `usage.prompt_tokens_details.cached_tokens` as a
+cache-count fallback. Missing measurements remain absent. The gateway's
+thread-local `last_response_meta` and `inference_outcome` activity event
+retain this metadata; the public detailed feed carries it in the event
+summary, without prompt or response content.
 
 ## Consent
 
