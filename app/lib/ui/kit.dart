@@ -10,4 +10,5 @@ export 'kit/feedback.dart';
 export 'kit/metrics.dart';
 export 'kit/motion.dart';
 export 'kit/settings_section.dart';
+export 'kit/shell_scope.dart';
 export 'kit/skeleton.dart';
