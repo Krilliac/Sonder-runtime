@@ -42,6 +42,21 @@ _PATH = {"type": "string", "minLength": 1}
 _ROOT = {"type": "string"}
 _INT = {"type": "integer"}
 _BOOL = {"type": "boolean"}
+_AGENT_ASSIST_TOOLS = (
+    ToolDescriptor(
+        "tool_help", "Describe one advertised tool or find up to five by query",
+        {"type": "object", "properties": {"name": {"type": "string"}, "query": {"type": "string"}},
+         "oneOf": [{"required": ["name"]}, {"required": ["query"]}], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "file_check", "Check one guarded source file with available local checkers",
+        {"type": "object", "properties": {"path": _PATH,
+         "max_items": {"type": "integer", "default": 30, "minimum": 1, "maximum": 100}},
+         "required": ["path"], "additionalProperties": False},
+        effects=frozenset({ToolEffect.READ_FILES, ToolEffect.EXECUTE}),
+        execution_class=ExecutionClass.HOST,
+    ),
+)
 _ARCHIVE_ENTRIES = {"type": "integer", "minimum": 1, "maximum": 10_000}
 _ARCHIVE_FILE_BYTES = {"type": "integer", "minimum": 1, "maximum": 256_000_000}
 _ARCHIVE_TOTAL_BYTES = {"type": "integer", "minimum": 1, "maximum": 1_000_000_000}
@@ -823,7 +838,7 @@ def native_tool_registry() -> InMemoryToolRegistry:
 
     return InMemoryToolRegistry(
         replace(item, traits=builtin_traits(item.name, item.effects))
-        for item in sorted(_NATIVE_TOOLS, key=lambda item: item.name)
+        for item in sorted((*_NATIVE_TOOLS, *_AGENT_ASSIST_TOOLS), key=lambda item: item.name)
     )
 
 
@@ -1364,6 +1379,10 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
         if typed_route:
             logger.debug(f"routing to typed tool gateway: {canonical_name!r}")
             return typed_result(typed_tools, canonical_name, canonical_arguments, context, selected)
+        if canonical_name in {"tool_help", "file_check"}:
+            from .code_check_agent_tools import native_agent_assist
+            return native_agent_assist(canonical_name, canonical_arguments, registry,
+                                       context.workspace_roots)
         if canonical_name in _INSPECTION_NAMES:
             logger.debug(f"routing to inspection service: {canonical_name!r}")
             result = application.inspections.inspect(

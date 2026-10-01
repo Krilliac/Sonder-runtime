@@ -88,7 +88,9 @@ def _outcomes(monkeypatch):
     rows = []
     monkeypatch.setattr(
         server, "_record_outcome_signal",
-        lambda interaction_id, signal: rows.append((interaction_id, signal)),
+        lambda interaction_id, signal, source=None: rows.append(
+            (interaction_id, signal, source)
+        ),
     )
     return rows
 
@@ -342,7 +344,9 @@ def test_an_ungrounded_extraction_is_filed_as_a_rejected_outcome(monkeypatch):
         source=SOURCE, schema=json.dumps(SCHEMA), tier="code", learn=True,
     )
     assert out.startswith("ERROR:")
-    assert rows == [("iid-ungrounded", "rejected")]
+    # `machine`: the host checked this interaction's own spans against the
+    # source -- an exact link that nobody judged (see _file_schema_rejection).
+    assert rows == [("iid-ungrounded", "rejected", "machine")]
 
 
 def test_a_grounded_extraction_files_nothing(monkeypatch):

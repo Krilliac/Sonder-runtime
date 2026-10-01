@@ -5690,7 +5690,7 @@ def _require_schema_match(text, schema):
 
 
 def _file_schema_rejection(interaction_id):
-    """File a schema violation as a caller-judged `rejected` outcome.
+    """File a schema violation as a machine-graded `rejected` outcome.
 
     A schema failure is the rare thing the outcome store is starved of: a
     negative verdict on delegated work, produced without anyone having to
@@ -5701,18 +5701,27 @@ def _file_schema_rejection(interaction_id):
     a *plausible* generation from a time-bounded ledger; here the failing
     interaction id is known exactly, and guessing would be strictly worse.
 
-    `rejected` and not `failed`: `failed` is the machine-graded bucket that the
-    self-generated curriculum floods by more than an order of magnitude, where
-    a real caller-facing rejection is invisible to the only quality figure
-    worth trusting. A conforming response deliberately files nothing -- matching
-    a shape is not evidence that the answer was good, and recording `accepted`
-    for it would raise the reviewed rate on something that never measured
-    quality.
+    Provenance `machine`, for the reason the code gate's `failed` is: the host
+    checked THIS interaction's own output against the caller's schema, so the
+    link is exact, but nobody judged anything. This was written before
+    `outcomes.source` existed, to land in the caller-judged population by its
+    signal name; under recorded provenance that population is caller verdicts
+    only (#62), so this counts as autograded. It is still never buried in the
+    self-generated curriculum: `outcomes_by_source` keeps `machine` apart from
+    `self_curriculum`. It was briefly filed as `attributed` -- the heuristic
+    label this docstring rules out -- which also exempted it from the lesson
+    eviction gate that every exact machine verdict feeds.
+
+    A conforming response deliberately files nothing -- matching a shape is not
+    evidence that the answer was good, and recording `accepted` for it would
+    raise a pass rate on something that never measured quality.
     """
     if not interaction_id:
         return
     try:
-        _record_outcome_signal(interaction_id, "rejected")
+        _record_outcome_signal(
+            interaction_id, "rejected", source=reward_rules.OUTCOME_SOURCE_MACHINE,
+        )
     except Exception:
         # Bookkeeping must never mask the schema failure it is describing.
         pass
@@ -11070,8 +11079,16 @@ def _record_file_activity(
 _INTERACTION_ID_RE = re.compile(r"\[interaction_id:\s*([0-9A-Za-z_-]+)\]")
 
 
-def _record_outcome_signal(interaction_id: str, signal: str) -> None:
-    """Write one machine-attributed outcome, crediting the lesson that was used.
+def _record_outcome_signal(
+    interaction_id: str, signal: str, *,
+    source: str = reward_rules.OUTCOME_SOURCE_ATTRIBUTED,
+) -> None:
+    """Write one host-observed outcome, crediting the lesson that was used.
+
+    ``source`` defaults to ``attributed`` because the main caller,
+    ``_feed_grounded_outcome``, matches a later verification back to a
+    generation heuristically. A caller that knows the interaction id exactly --
+    the schema gate -- passes ``machine``.
 
     #62 unblocked this. It used to call ``record_outcome_row`` directly and so
     skipped three things the model-facing wrapper does. Two are now safe to
@@ -11084,11 +11101,12 @@ def _record_outcome_signal(interaction_id: str, signal: str) -> None:
       ``lesson_usage_stats`` aggregates reward with no provenance filter and
       feeds ``retriever.lesson_quarantine``, so crediting here would have let
       machine verdicts evict live lessons from retrieval. The credit now
-      carries ``outcome_source='machine'`` and the eviction gate excludes that
-      one source (``memory_rules.EVICTION_INELIGIBLE_OUTCOME_SOURCES``), so the
-      evidence is recorded and visible without reaching the gate. That
-      de-blends the metric instead of blending it, which is what the original
-      objection asked for.
+      carries this row's ``source``, and the eviction gate excludes exactly
+      ``attributed`` (``memory_rules.EVICTION_INELIGIBLE_OUTCOME_SOURCES``):
+      a heuristic match is recorded and visible without reaching the gate,
+      while an exact ``machine`` verdict drives it as the code gate's does.
+      That de-blends the metric instead of blending it, which is what the
+      original objection asked for.
     * **Still refused -- the distillation claim/cancel.** Not a provenance
       problem, a liveness one. This runs inside ``_feed_grounded_outcome`` on
       the tool-observation path, which has no way to *finish* a distillation:
@@ -11100,7 +11118,7 @@ def _record_outcome_signal(interaction_id: str, signal: str) -> None:
     try:
         memory_store.record_outcome_and_claim_lesson_distillation(
             conn, interaction_id, signal, reward_rules.reward_score(signal),
-            source=reward_rules.OUTCOME_SOURCE_ATTRIBUTED,
+            source=source,
             claim_distillation=False,
         )
     finally:
@@ -13153,7 +13171,7 @@ def workspace_run(
     except Exception as exc:
         _record_direct_tool("workspace_run", args, ok=False, started=started, summary=str(exc))
         return "ERROR: %s" % exc
-    output = _format_run_result("workspace run", data)
+    output = _format_run_result("workspace run", data, digest=True)
     _record_direct_tool(
         "workspace_run", args, ok=data["ok"], started=started,
         summary="exit %s" % data.get("returncode"),
@@ -14096,14 +14114,13 @@ def script_run(
     except Exception as exc:
         _record_direct_tool("script_run", args, ok=False, started=started, summary=str(exc))
         return "ERROR: %s" % exc
-    output = (
-        "artifact risk: %s\n%s\n%s"
+    output = _format_run_result("script run", data, digest=True, context=(
+        "artifact risk: %s\n%s"
         % (
             artifact_risk_module.format_result(risk),
             "execution allowed by effective policy %s" % risk.get("policy", "off"),
-            _format_run_result("script run", data),
         )
-    )
+    ))
     _record_direct_tool(
         "script_run", args, ok=data["ok"], started=started,
         summary="exit %s" % data.get("returncode"),
@@ -14573,7 +14590,7 @@ def run_code(
             evidence={"error": str(e)},
         )
         return "ERROR: %s" % e
-    output = code_runner.format_result(result)
+    output = _format_run_result("code run", dict(result, elapsed_ms=int((time.time() - started) * 1000)), digest=True)
     _record_direct_tool(
         "run_code",
         {"language": language, "timeout": timeout},
@@ -16997,7 +17014,7 @@ def repo_blame(
 @mcp.tool()
 def tool_manifest() -> str:
     """List the sonder-runtime MCP tools and what they are for."""
-    return _mcp_tool_manifest.render_tool_manifest()
+    return _mcp_tool_manifest.render_tool_manifest() + "\ntool_help: Describe advertised tool arguments.\nfile_check: Check a guarded source file."
 
 
 @mcp.tool()
@@ -17081,6 +17098,8 @@ def access_request_preview(path: str, mode: str = "read") -> str:
 
 
 AGENT_TOOL_HELP = """Available tools:
+- tool_help: {"query": "search"}
+- file_check: {"path": "file.py"}
 - agent_lane: {"action": "spawn|list|inspect|send_message|wait|interrupt|resume|cancel|reports|ack|retrieve_archive", "payload": {}} -- parent authority is inherited from this run. Spawn payload: command_id, task, workspace_root (within the configured project grant), optional title/tier/max_steps/max_output_tokens/max_wall_seconds. Other actions use lane_id; send_message uses command_id/content; controls use command_id; ack uses report_id/command_id; retrieve_archive uses lane_id/archive_id. Never supply parent identity or tokens.
 - run_code: {"code": "...", "language": "python|js|powershell|cpp|csharp", "stdin": "", "timeout": 10} -- source snippet only; never pass a shell command such as `cargo --version`
 - run_project: {"files_json": {"files": {"src/main.cpp": "..."}}, "commands_json": [{"cmd": ["g++", "src/main.cpp", "-o", "app"]}], "stdin": "", "timeout": 60}
@@ -17226,6 +17245,7 @@ or
 
 
 REPOSITORY_READ_ONLY_TOOLS = frozenset({
+    "tool_help",
     "file_policy", "workspace_inventory", "workspace_compare", "directory_tree", "file_find",
     "dependency_inventory",
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "directory_digest",
@@ -17260,6 +17280,7 @@ REPOSITORY_READ_ONLY_FORBIDDEN_ARGS = frozenset({
     "token", "approval", "extra_roots",
 })
 REPOSITORY_AGENT_TOOL_HELP = """Available tools:
+- tool_help: {"query": "search"}
 The JSON values below are schema placeholders, not suggested filenames or
 search terms. Replace every <...> value with an exact task-relevant path,
 symbol, filename, or glob. For a code/symbol audit, start with text_search for
@@ -17334,25 +17355,12 @@ or
 
 
 def _agent_tool_help(
-    read_only=False,
-    cloud=False,
-    unsafe=False,
-    project_bound=False,
-    allow_web=True,
-    allow_location=False,
+    read_only=False, cloud=False, unsafe=False,
+    project_bound=False, allow_web=True, allow_location=False,
+    allowlist=None, kind=None,
 ):
-    """Advertise exactly what THIS run's gates will admit.
-
-    Deriving the filter from ``_agent_run_tool_refusal`` instead of
-    restating one of its tool sets is what stops the two from drifting: the
-    local-only set was stripped here while the nested-model set never was, so a
-    hosted agent read in its own tool help that it could nest a model call that
-    dispatch hard-denies.  The same failure was live on three more gates --
-    ``project_bound`` left 21 names dead in ``AGENT_TOOL_HELP`` for every
-    project-bound run, and ``allow_web`` left the three web tools dead on every
-    ``master_orchestrate`` worker -- because those gates were never modelled
-    here at all.
-    """
+    """Advertise the run's admitted tools, sized by task kind when allowlisted."""
+    from sonder_runtime.domain.agents.tool_help import render_tool_help
     help_text = REPOSITORY_AGENT_TOOL_HELP if read_only else AGENT_TOOL_HELP
     existing = _agent_help_advertised_tools(help_text)
     generated = _generic_agent_dispatch.generated_help_lines(mcp, existing, _AGENT_SYSTEM_OPERATOR_TOOLS)
@@ -17369,15 +17377,14 @@ def _agent_tool_help(
             allow_location=allow_location,
         )
     )
-    if not denied:
-        return help_text
-    return "\n".join(
+    filtered = help_text if not denied else "\n".join(
         line for line in help_text.splitlines()
         if not any(
             line.lstrip().startswith("- %s:" % name)
             for name in denied
         )
     )
+    return render_tool_help(filtered, allowlist=None if allowlist is None else set(allowlist) - denied, task_kind=kind, catalog=_agent_help_tools.catalog_for(mcp))
 
 
 def _tool_capability_shadow_surfaces():
@@ -18366,6 +18373,11 @@ def _agent_dispatch(
             stdin=args.get("stdin", ""),
             timeout=args.get("timeout", 10),
         )
+    if tool_name == "tool_help":
+        return _agent_help_tools.dispatch_tool_help(mcp, args, _agent_help_advertised_tools(_agent_tool_help(read_only=read_only, project_bound=bool(repository_extra_roots), allow_web=allow_web, allow_location=allow_location)))
+    if tool_name == "file_check":
+        from sonder_runtime.bootstrap.code_check_agent_tools import dispatch_file_check
+        return dispatch_file_check(args.get("path", ""), args.get("max_items", 30), project_root=repository_extra_roots or None)
     if tool_name == "agent_lane":
         try:
             return json.dumps(
@@ -19409,6 +19421,7 @@ def _agent_dispatch(
 
 
 _PROJECT_SCOPED_PATH_TOOLS = frozenset({
+    "file_check",
     "file_read", "file_digest", "directory_digest", "file_read_range", "context_pack", "workspace_compare",
     "repo_log", "repo_show", "repo_blame",
     "data_inspect", "data_query", "data_convert", "sqlite_mutate", "image_inspect", "log_inspect", "file_write", "file_batch_write", "json_patch", "file_edit", "text_patch",
@@ -19460,7 +19473,7 @@ _PROJECT_BOUND_AGENT_TOOLS = (
     _PROJECT_SCOPED_PATH_TOOLS
     | _PROJECT_SCOPED_EXECUTION_TOOLS
     | frozenset({
-        "agent_lane", "ground_artifact", "program_search",
+        "agent_lane", "ground_artifact", "program_search", "tool_help",
         "web_search", "web_fetch",
         "weather_lookup", "approximate_location_lookup", "memory_search",
         "file_policy", "task_create", "task_list", "task_update", "task_show",
@@ -19484,6 +19497,7 @@ _CLOUD_AGENT_NESTED_MODEL_TOOLS = frozenset({
     "ensemble_codegen_build_loop",
 })
 _CLOUD_AGENT_LOCAL_ONLY_TOOLS = frozenset({
+    "file_check",
     "agent_lane",
     "environment_status", "toolchain_status", "hardware_profile", "file_policy",
     "tool_inventory", "output_digest",
@@ -19815,6 +19829,8 @@ def _agent_dispatch_observed(
                 tool_name, dispatch_args, read_only=read_only,
                 repository_extra_roots=project, **dispatch_options,
             )
+            from sonder_runtime.bootstrap.code_check_agent_tools import post_edit_file_check
+            observation = post_edit_file_check(tool_name, args, observation, lambda name, payload: _agent_dispatch_observed(name, payload, project=project, read_only=read_only, **dispatch_options))
         dispatched = True
         ok = not str(observation).startswith("ERROR:")
         if tool_name == "ensemble_codegen_build_loop":
@@ -20446,6 +20462,7 @@ def _agent_turn(
     cancel_check=None,
     session: str | None = None,
     pre_model_context=None,
+    tool_help_kind=None,
 ) -> str:
     """Run a Claude-like local agent loop that can call tools.
 
@@ -20734,6 +20751,7 @@ def _agent_turn(
             project_bound=bool(project_scope),
             allow_web=allow_web,
             allow_location=allow_location,
+            allowlist=allowed_tools, kind=tool_help_kind,
         ),
     )
     if unsafe:
@@ -20743,11 +20761,6 @@ def _agent_turn(
             "\n\nPROJECT ROOT: %s\nYour file/inspection tools are rooted at this "
             "directory: a relative path or '.' inspects the PROJECT, not Sonder's "
             "own workspace. Use paths relative to the project root." % project_scope
-        )
-    if allowed_tools is not None:
-        transcript += (
-            "\n\nHOST TOOL ALLOWLIST (cannot be expanded by the model):\n- %s"
-            % "\n- ".join(sorted(allowed_tools))
         )
     transcript += "\n\n" + _agent_verification_standing_notice()
     pre_model_context_rendered = False
@@ -21321,7 +21334,8 @@ def _agent_turn(
             return _early_exit(
                 "ERROR: agent decision missing 'tool' or 'final': %s" % decision
             )
-        tool_args = decision.get("args", {})
+        from sonder_runtime.domain.agents.tool_args import normalize_tool_args
+        tool_args, normalization_notes = normalize_tool_args(tool_name, decision.get("args", decision.get("arguments", {})), _agent_help_tools.argument_schema(mcp, tool_name))
         if not isinstance(tool_args, dict):
             if auto_checklist:
                 _agent_checklist_fail(
@@ -21553,11 +21567,12 @@ def _agent_turn(
                 if allow_location:
                     dispatch_options["allow_location"] = True
                 tool_dispatched = True
-                observation = _agent_dispatch_observed(
-                    tool_name, policy_tool_args, project=project_scope,
-                    **dispatch_options,
-                )
-        observation_text = str(observation)
+                with _agent_help_tools.help_scope(mcp, allowed_tools, _agent_run_tool_refusal, cloud=cloud, read_only=read_only, unsafe=unsafe, project_bound=bool(project_scope), allow_web=allow_web, allow_location=allow_location):
+                    observation = _agent_dispatch_observed(
+                        tool_name, policy_tool_args, project=project_scope,
+                        **dispatch_options,
+                    )
+        observation_text = str(observation) + ("\nargument normalization: " + "; ".join(normalization_notes).replace("\n", " ").replace("\r", " ")[:600] if normalization_notes else "")
         tool_ok = _agent_tool_observation_ok(tool_name, observation)
         abort_observation = None
         if tool_ok:
@@ -22194,7 +22209,7 @@ def workbench_agent(
 # against.  A name _agent_dispatch has no branch for -- or one the read-only
 # gate an observe run executes under would refuse -- spends autonomous steps
 # on a call that cannot run.  Keep both sets a subset of _agent_dispatch's
-# branches and the observe set a subset of REPOSITORY_READ_ONLY_TOOLS;
+# branches; rendered observe help also filters REPOSITORY_READ_ONLY_TOOLS.
 # tests/test_advertised_surface_drift.py asserts both.
 #
 # There is a THIRD gate these sets must clear, and it was missing from this
@@ -22206,6 +22221,7 @@ def workbench_agent(
 # not "fix" a future gap by editing the literals -- narrow at the point of use,
 # where the run's flags are known.
 _AUTOPILOT_OBSERVE_TOOLS = frozenset({
+    "tool_help", "file_check",
     "file_policy", "workspace_inventory", "workspace_compare", "directory_tree", "directory_digest", "file_find",
     "dependency_inventory",
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "data_inspect", "data_query", "text_search", "script_search",
@@ -22605,6 +22621,7 @@ def _autopilot_work_model(
             project=run.get("project", ""),
             allow_location=False,
             tool_allowlist=allowed,
+            tool_help_kind=task.get("kind", "inspect"),
             tool_policy=_autopilot_tool_policy(run),
             return_host_receipt=True,
             # The fence refuses effects once the run is cancelled or its lease
@@ -26905,6 +26922,9 @@ from sonder_runtime.bootstrap.computer_use_tools import register as _register_co
 _register_computer_use(mcp, _record_direct_tool, lambda: _application())
 from sonder_runtime.bootstrap.openrouter_tools import register as _register_openrouter  # noqa: E402
 _register_openrouter(mcp, _record_direct_tool)
+from sonder_runtime.bootstrap import agent_help_tools as _agent_help_tools  # noqa: E402
+for _agent_registrar_name, _agent_registrar in _agent_help_tools.discover_agent_tool_registrars():
+    _agent_registrar(mcp, _record_direct_tool)
 
 
 def route_computer_use(text):
