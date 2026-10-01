@@ -26,6 +26,7 @@ from pathlib import Path
 from sonder_runtime.adapters.process_liveness import pid_alive as _process_pid_alive
 from sonder_runtime.domain.automation import state_machine as _sm
 from sonder_runtime.platform import paths as _platform_paths
+from sonder_runtime.adapters.creation_workspace import writing_project
 
 
 # SPEC-3 Phase 6: the canonical status classification lives in the domain
@@ -69,6 +70,7 @@ CREATE TABLE IF NOT EXISTS autopilot_runs (
     current_task INTEGER,
     cycles INTEGER NOT NULL DEFAULT 0,
     failures INTEGER NOT NULL DEFAULT 0,
+    infra_retries INTEGER NOT NULL DEFAULT 0,
     checkpoints INTEGER NOT NULL DEFAULT 0,
     replans INTEGER NOT NULL DEFAULT 0,
     max_failures INTEGER NOT NULL DEFAULT 3,
@@ -118,6 +120,7 @@ CREATE INDEX IF NOT EXISTS idx_autopilot_steering_run
 _RUN_COLUMN_MIGRATIONS = {
     "request_owner": "TEXT DEFAULT ''",
     "checkpoints": "INTEGER NOT NULL DEFAULT 0",
+    "infra_retries": "INTEGER NOT NULL DEFAULT 0",
     "replans": "INTEGER NOT NULL DEFAULT 0",
     "max_replans": "INTEGER NOT NULL DEFAULT 2",
     "adaptive": "INTEGER NOT NULL DEFAULT 1",
@@ -217,6 +220,9 @@ def _row_dict(row) -> dict | None:
             parsed = []
         data[target] = parsed if isinstance(parsed, list) else []
     data["allow_web"] = bool(data.get("allow_web"))
+    # Keep the public shape stable for databases created before the column
+    # existed, and make the value an integer even if a legacy row is NULL.
+    data["infra_retries"] = int(data.get("infra_retries") or 0)
     data["adaptive"] = bool(data.get("adaptive"))
     data["pause_requested"] = bool(data.get("pause_requested"))
     data["cancel_requested"] = bool(data.get("cancel_requested"))
@@ -306,6 +312,7 @@ def create_run(
     if not objective:
         raise ValueError("autopilot objective is required")
     run_id = "auto-%s" % uuid.uuid4().hex[:12]
+    selected_project = writing_project(project, run_id) if policy != "observe" else project
     now = time.time()
     with _write_transaction() as conn:
         conn.execute(
@@ -318,7 +325,7 @@ def create_run(
             (
                 run_id,
                 objective,
-                _clamp_text(project, 200),
+                selected_project if selected_project != project else _clamp_text(project, 200),
                 _clamp_text(request_owner, 128),
                 _clamp_text(tier, 40),
                 _clamp_text(policy, 40),
@@ -470,6 +477,7 @@ def save_progress(
     current_task: int | None = None,
     cycles_delta: int = 0,
     failures_delta: int = 0,
+    infra_retries_delta: int = 0,
     checkpoints_delta: int = 0,
     replans_delta: int = 0,
     summary: str | None = None,
@@ -480,12 +488,13 @@ def save_progress(
 ) -> dict | None:
     now = time.time()
     assignments = [
-        "cycles=cycles+?", "failures=failures+?", "checkpoints=checkpoints+?",
+        "cycles=cycles+?", "failures=failures+?", "infra_retries=infra_retries+?",
+        "checkpoints=checkpoints+?",
         "replans=replans+?", "lease_until=?", "updated_ts=?",
     ]
     values: list[object] = [
         int(cycles_delta), int(failures_delta),
-        int(checkpoints_delta), int(replans_delta),
+        int(infra_retries_delta), int(checkpoints_delta), int(replans_delta),
         now + max(60, min(int(lease_seconds), 3600)), now,
     ]
     if plan is not None:

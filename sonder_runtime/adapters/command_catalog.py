@@ -175,6 +175,8 @@ CATEGORIES = {
 
 # Explicit placements that the prefix rules would get wrong.
 _CATEGORY_BY_TOOL = {
+    "tool_help": "agents",
+    "file_check": "dev",
     "sonder": "chat",
     "offload": "chat",
     "extract_grounded": "chat",

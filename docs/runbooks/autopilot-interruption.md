@@ -31,6 +31,23 @@ running may finish past it. Reaching either budget pauses the run with the
 reason in its summary. Review the progress, then `/autopilot resume <id>`
 to continue with fresh budgets.
 
+## Provider retries and verifier availability
+
+`SONDER_AUTOPILOT_INFRA_RETRIES` defaults to `3` (clamped to 0..3;
+invalid values use 3). Classified provider outages retry after 30, 60,
+and 120 seconds without consuming task attempts, cycles, or failures.
+Exhaustion pauses the run with `provider unavailable`; the retry count
+survives an explicit resume.
+
+`SONDER_AUTOPILOT_REQUIRE_VERIFIER` defaults to `0`. Verifier preflight
+is advisory: start and status show `verifiers: allowed [...] refused [...]`
+and, when none are allowed, a warning that validate tasks cannot pass
+unattended in the current permission mode. This preserves starting runs
+in the default `manual` mode. Set this variable to exactly `1` to refuse
+new starts before run creation when no verifier is allowed unattended.
+Other values keep the advisory behavior. Preflight does not change
+permission rules, spend approvals, or relax validation evidence gates.
+
 ## Stuck "running" with a dead owner
 
 Ownership uses process-liveness probes; a dead owner's work transitions
