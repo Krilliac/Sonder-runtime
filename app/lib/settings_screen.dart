@@ -1,223 +1,76 @@
 import 'dart:async';
 
-import 'account_session.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'account_session.dart';
 import 'api.dart';
 import 'local_manager.dart';
 import 'runtime/model_routing.dart';
-import 'runtime/status_word.dart';
 import 'settings.dart';
+import 'settings/connection.dart';
+import 'settings/context_size.dart';
+import 'settings/model_picker.dart';
+import 'settings/widgets.dart';
 import 'theme.dart';
+import 'ui/kit.dart';
+import 'ui/status_row.dart';
+import 'ui/strings.dart';
 import 'workspace_ui.dart';
 
-/// What "Test connection" found, as one status word plus one-line remedy
-/// (plan P1-3, P0-2).
-enum ServerReachability {
-  reachable('reachable', StatusKind.ok),
-  refused('refused (421)', StatusKind.refused),
-  needsHttps('needs HTTPS for sign-in', StatusKind.warn),
-  unauthorized('needs a key', StatusKind.warn),
-  rateLimited('wait', StatusKind.warn),
-  unreachable('unreachable', StatusKind.fail),
-  failed('error', StatusKind.fail);
+export 'settings/connection.dart';
 
-  final String word;
-  final StatusKind status;
-  const ServerReachability(this.word, this.status);
+part 'settings/page_account.dart';
+part 'settings/page_connection.dart';
+part 'settings/page_general.dart';
+part 'settings/page_more.dart';
+
+/// Stable ids of the Settings pages: deep links ([SettingsScreen]'s
+/// `initialCategory`) and the kit's `category-<id>` / `category-page-<id>`
+/// keys.
+abstract final class SettingsCategory {
+  static const general = 'general';
+  static const connection = 'connection';
+  static const account = 'account';
+  static const appearance = 'appearance';
+  static const privacy = 'privacy';
+
+  /// Native desktop builds only: the server the app itself starts.
+  static const desktop = 'desktop';
+  static const observatory = 'observatory';
+  static const about = 'about';
 }
 
-class ConnectionDiagnosis {
-  final ServerReachability state;
-  final String title;
-  final String detail;
-
-  /// The PC-side setting that fixes a 421, e.g. `SONDER_ALLOWED_HOSTS=mypc`.
-  final String? serverSetting;
-
-  /// Android emulator hint for `10.0.2.2`.
-  final String? adbHint;
-
-  const ConnectionDiagnosis(this.state, this.title,
-      {this.detail = '', this.serverSetting, this.adbHint});
-
-  bool get ok => state == ServerReachability.reachable;
-}
-
-bool _isLoopback(String host) =>
-    host == 'localhost' ||
-    host == '::1' ||
-    RegExp(r'^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$').hasMatch(host);
-
-int? _statusOf(Object error) {
-  if (error is SonderException) {
-    if (error.httpStatus != null) return error.httpStatus;
-    // Older transport builds only put the status in the message.
-    final match = RegExp(r'HTTP (\d{3})').firstMatch(error.message);
-    if (match != null) return int.parse(match.group(1)!);
-  }
-  return null;
-}
-
-/// A successful probe of [serverUrl].
+/// Settings: one calm page per category beside a category rail (a list,
+/// then a page, on phones).
 ///
-/// With [routing] from the runtime's provider bindings, a route bound to
-/// Sonder Inference is not counted as an Ollama model: [models] are split
-/// into routes and exact models, which always run on Ollama.
-ConnectionDiagnosis diagnoseReachable(String serverUrl,
-    {int modelCount = 0,
-    ModelRouting routing = const ModelRouting(),
-    List<String> models = const []}) {
-  final uri = Uri.tryParse(serverUrl.trim());
-  final host = uri?.host ?? '';
-  final count = modelCount == 1 ? '1 model' : '$modelCount models';
-  if (uri != null && uri.scheme == 'http' && !_isLoopback(host)) {
-    return ConnectionDiagnosis(
-      ServerReachability.needsHttps,
-      'Reachable at $host ($count), but sign-in needs HTTPS off this device.',
-      detail: 'The API key is withheld over plain HTTP unless you allow this '
-          'host below. For keys and accounts, serve the PC over HTTPS '
-          '(Tailscale Serve or a TLS proxy that keeps the Host header).',
-    );
-  }
-  final summary = routing.connectionSummary(models);
-  return ConnectionDiagnosis(ServerReachability.reachable,
-      'Connected to $host. ${summary ?? '$count available.'}');
-}
-
-/// A failed probe or sign-in, turned into what the person can do next.
-ConnectionDiagnosis diagnoseConnectionError(Object error, String serverUrl) {
-  final uri = Uri.tryParse(serverUrl.trim());
-  final host = uri?.host.isNotEmpty == true ? uri!.host : serverUrl.trim();
-  final port = uri?.hasPort == true ? uri!.port : 11435;
-  final status = _statusOf(error);
-  final code = error is SonderException ? error.code : '';
-  if (status == 421 || code == 'HOST_NOT_ALLOWED') {
-    final emulator = host == '10.0.2.2';
-    return ConnectionDiagnosis(
-      ServerReachability.refused,
-      'Refused: the server at $host refused this address.',
-      detail: "Connect with the PC's IP (or 127.0.0.1 with adb reverse), or "
-          'add $host to [server].allowed_hosts / SONDER_ALLOWED_HOSTS on the '
-          'PC and restart Sonder.',
-      serverSetting: 'SONDER_ALLOWED_HOSTS=$host',
-      adbHint: emulator
-          ? 'Android emulator: run adb reverse tcp:$port tcp:$port, then use '
-              'http://127.0.0.1:$port.'
-          : null,
-    );
-  }
-  if (status == 401 || status == 403) {
-    return ConnectionDiagnosis(
-      ServerReachability.unauthorized,
-      'Reached $host, but it needs a valid API key or account.',
-      detail: 'Paste the deployment API key from the PC, or sign in below.',
-    );
-  }
-  if (status == 429) {
-    final wait = error is SonderException ? error.retryAfterSeconds : null;
-    return ConnectionDiagnosis(
-      ServerReachability.rateLimited,
-      wait == null
-          ? 'Too many failed sign-ins from this network. Try again shortly.'
-          : 'Too many failed sign-ins from this network. Try again in $wait s.',
-    );
-  }
-  if (status != null) {
-    return ConnectionDiagnosis(
-        ServerReachability.failed, 'The server at $host answered HTTP $status.',
-        detail: error is SonderException ? error.message : '');
-  }
-  if (error is ArgumentError) {
-    return const ConnectionDiagnosis(
-      ServerReachability.needsHttps,
-      'Sign-in needs HTTPS off this device.',
-      detail: 'Use an https:// server URL for accounts, or keep using the '
-          'API key over the LAN.',
-    );
-  }
-  return ConnectionDiagnosis(
-    ServerReachability.unreachable,
-    "Can't reach $host.",
-    detail: 'Check that Sonder is running on the PC, that both devices are on '
-        'the same network or tailnet, and that the port ($port) is right.',
-  );
-}
-
-/// The first admin needs the bootstrap secret the server printed.
-class BootstrapSecretRequired implements Exception {
-  final String message;
-  const BootstrapSecretRequired(this.message);
-  @override
-  String toString() => message;
-}
-
-/// Network actions Settings performs, all through lane A's [SonderApi].
-/// Tests substitute a fake.
-class SettingsConnection {
-  const SettingsConnection();
-
-  /// `GET /v1/models`: ids plus each row's routing field.
-  Future<ModelCatalog> testServer(
-          String serverUrl, String apiKey, AccountSession? account) =>
-      SonderApi(baseUrl: serverUrl, apiKey: apiKey, accountSession: account)
-          .modelCatalog();
-
-  /// The runtime's provider bindings, or null when it cannot say (older
-  /// runtime, non-administrator key, any failure). Only wording depends on
-  /// it, so a failure never fails the connection test.
-  Future<EcosystemStatus?> routingStatus(
-      String serverUrl, String apiKey, AccountSession? account) async {
-    try {
-      final reading = await SonderApi(
-              baseUrl: serverUrl, apiKey: apiKey, accountSession: account)
-          .ecosystemStatus();
-      return reading.status;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  Future<String> login(
-          String serverUrl, String apiKey, String username, String password) =>
-      SonderApi(baseUrl: serverUrl, apiKey: apiKey).login(username, password);
-
-  Future<void> logout(String apiKey, AccountSession account) => SonderApi(
-          baseUrl: account.origin, apiKey: apiKey, accountSession: account)
-      .logout();
-
-  /// Returns "Account <u> created (role <r>)." on 200 or 201, through lane
-  /// A's [SonderApi.register] (the secret travels only as
-  /// `X-Sonder-Bootstrap-Secret`). A first-admin 403 becomes
-  /// [BootstrapSecretRequired] so the card can ask for the secret.
-  Future<String> register(
-    String serverUrl,
-    String apiKey,
-    String username,
-    String password, {
-    String? bootstrapSecret,
-  }) async {
-    try {
-      return await SonderApi(baseUrl: serverUrl, apiKey: apiKey).register(
-          username, password,
-          bootstrapSecret: bootstrapSecret?.trim() ?? '');
-    } on SonderException catch (error) {
-      if (error.needsBootstrapSecret) {
-        throw BootstrapSecretRequired(error.message);
-      }
-      rethrow;
-    }
-  }
-}
-
-/// Connection settings: server URL, API key, theme, plus a "Test connection"
-/// button that hits /v1/models so the user gets immediate feedback.
+/// Connection, account, model and privacy values are staged and written
+/// together by Save, which a sticky bar offers only while something is
+/// unsaved; leaving with unsaved changes asks first. The theme applies and
+/// persists at once. Every network action has its own busy state and shows
+/// its result under the control that ran it.
 class SettingsScreen extends StatefulWidget {
   final Settings settings;
   final ValueChanged<Settings> onChanged;
   final ValueChanged<WorkspaceDestination>? onNavigate;
   final SettingsConnection connection;
+
+  /// The page to open first, e.g. [SettingsCategory.account] for the
+  /// `/login` intercept. Null opens General on a wide window and the list of
+  /// pages on a phone (Connection on a phone that has never connected).
+  final String? initialCategory;
+
+  /// Prefills the sign-in user name (the `/login` intercept's argument).
+  /// Never a password.
+  final String? initialUsername;
+
+  /// Lets an app shell run the unsaved-changes guard before it switches to
+  /// another destination. Called with the guard when the screen mounts and
+  /// with null when it goes away; store it (do not call setState from this
+  /// callback). The guard resolves true when leaving is fine: nothing was
+  /// unsaved, or the person chose to discard it.
+  final void Function(Future<bool> Function()? guard)? registerLeaveGuard;
 
   const SettingsScreen({
     super.key,
@@ -225,6 +78,9 @@ class SettingsScreen extends StatefulWidget {
     required this.onChanged,
     this.onNavigate,
     this.connection = const SettingsConnection(),
+    this.initialCategory,
+    this.initialUsername,
+    this.registerLeaveGuard,
   });
 
   @override
@@ -232,129 +88,413 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
+  /// Reading width of every page: the app's conversation width.
+  static const _contentWidth = 760.0;
+
+  /// What is persisted and what the app runs with. Staged edits compare
+  /// against it; Save, the theme and a fresh sign-in move it.
+  late Settings _saved;
+
   late final TextEditingController _server;
   late final TextEditingController _key;
   late final TextEditingController _model;
   late final TextEditingController _contextSize;
-  late final TextEditingController _username;
-  late final TextEditingController _password;
   late final TextEditingController _launcherUrl;
   late final TextEditingController _launcherToken;
   late final TextEditingController _observatoryExecutable;
   late final TextEditingController _observatoryWebUrl;
+  late final List<TextEditingController> _stagedText;
+
+  /// Sign-in inputs: not settings, so never persisted and never "unsaved".
+  late final TextEditingController _username;
+  final TextEditingController _password = TextEditingController();
 
   /// First-admin bootstrap secret: memory only, never in [Settings], cleared
-  /// after each use and when this screen goes away (plan P0-9).
+  /// after each use, when the server URL changes and when this screen goes
+  /// away (plan P0-9).
   final TextEditingController _bootstrapSecret = TextEditingController();
   bool _needsBootstrap = false;
-  late String _themeMode;
-  late bool _allowHosted;
-  late bool _keepServerRunning;
-  late bool _allowApproximateLocation;
-
-  /// Plain-HTTP hosts allowed to receive the API key (see
-  /// [CleartextKeyPolicy]); edited only by the explicit per-host checkbox.
-  late Set<String> _cleartextKeyHosts;
-  AccountSession? _account;
-  bool _obscureKey = true;
-  bool _obscureLauncherToken = true;
-  bool _obscureBootstrap = true;
-  String? _status;
-  bool _statusOk = false;
-  ConnectionDiagnosis? _connection;
-  String? _keyringWarning;
-  bool _testing = false;
-  bool _dirty = false;
-  late final List<TextEditingController> _trackedControllers;
-
-  @override
-  void initState() {
-    super.initState();
-    _account = widget.settings.accountSession;
-    _server = TextEditingController(text: widget.settings.serverUrl);
-    _key = TextEditingController(text: widget.settings.apiKey);
-    _model = TextEditingController(text: widget.settings.model);
-    _contextSize = TextEditingController(text: widget.settings.contextSize);
-    _username = TextEditingController();
-    _password = TextEditingController();
-    _launcherUrl = TextEditingController(text: widget.settings.launcherUrl);
-    _launcherToken = TextEditingController(text: widget.settings.launcherToken);
-    _observatoryExecutable =
-        TextEditingController(text: widget.settings.observatoryExecutable);
-    _observatoryWebUrl =
-        TextEditingController(text: widget.settings.observatoryWebUrl);
-    _themeMode = widget.settings.themeMode;
-    _allowHosted = widget.settings.allowHosted;
-    _keepServerRunning = widget.settings.keepServerRunning;
-    _allowApproximateLocation = widget.settings.allowApproximateLocation;
-    _cleartextKeyHosts = {...widget.settings.cleartextKeyHosts};
-    _trackedControllers = [
-      _server,
-      _key,
-      _model,
-      _contextSize,
-      _username,
-      _password,
-      _launcherUrl,
-      _launcherToken,
-      _observatoryExecutable,
-      _observatoryWebUrl,
-    ];
-    for (final controller in _trackedControllers) {
-      controller.addListener(_markDirty);
-    }
-    _bootstrapServer = _server.text;
-    _server.addListener(_serverEdited);
-  }
 
   /// The server the bootstrap secret was asked for. The secret belongs to
   /// that PC only, so editing the URL forgets it rather than sending it to
   /// whatever host is typed next.
   String _bootstrapServer = '';
 
-  void _serverEdited() {
-    if (_server.text == _bootstrapServer) return;
+  late bool _allowHosted;
+  late bool _keepServerRunning;
+  late bool _allowApproximateLocation;
+
+  /// Plain-HTTP hosts allowed to receive the API key (see
+  /// [CleartextKeyPolicy]); changed only by an explicit per-host choice.
+  late Set<String> _cleartextKeyHosts;
+  AccountSession? _account;
+
+  bool _obscureKey = true;
+  bool _obscureLauncherToken = true;
+  bool _obscureBootstrap = true;
+
+  ConnectionDiagnosis? _connection;
+  ActionOutcome? _launcherOutcome;
+  ActionOutcome? _accountOutcome;
+  String? _keyringWarning;
+  String? _saveError;
+
+  /// Why the exact context entry was adjusted, until the next edit.
+  String? _contextNote;
+  bool _contextEdited = false;
+  final FocusNode _contextFocus = FocusNode();
+
+  /// Login and Register share one form, Sign out and Forget one session:
+  /// each waits for its sibling. Nothing else on the page is locked.
+  bool _signInBusy = false;
+  bool _sessionBusy = false;
+
+  /// Who signed in during this run, for that exact session only. The
+  /// stored session holds no user name (token and origin are its whole
+  /// record), so a restored session shows its server alone.
+  String? _signedInUser;
+  String? _signedInToken;
+
+  /// The last `/v1/models` answer, for the model picker.
+  ModelChoices? _models;
+  String? _modelsServer;
+
+  late final _StagedKeyPolicy _keyPolicy =
+      _StagedKeyPolicy(() => _cleartextKeyHosts);
+  late final String? _initialCategory;
+  bool _leaving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    final s = widget.settings;
+    _saved = s.copyWith();
+    _account = s.accountSession;
+    _server = TextEditingController(text: s.serverUrl);
+    _key = TextEditingController(text: s.apiKey);
+    _model = TextEditingController(text: s.model);
+    _contextSize = TextEditingController(text: s.contextSize);
+    _launcherUrl = TextEditingController(text: s.launcherUrl);
+    _launcherToken = TextEditingController(text: s.launcherToken);
+    _observatoryExecutable =
+        TextEditingController(text: s.observatoryExecutable);
+    _observatoryWebUrl = TextEditingController(text: s.observatoryWebUrl);
+    _username = TextEditingController(text: widget.initialUsername ?? '');
+    _allowHosted = s.allowHosted;
+    _keepServerRunning = s.keepServerRunning;
+    _allowApproximateLocation = s.allowApproximateLocation;
+    _cleartextKeyHosts = {...s.cleartextKeyHosts};
+    _stagedText = [
+      _server,
+      _key,
+      _model,
+      _contextSize,
+      _launcherUrl,
+      _launcherToken,
+      _observatoryExecutable,
+      _observatoryWebUrl,
+    ];
+    for (final controller in _stagedText) {
+      controller.addListener(_stagedEdited);
+    }
     _bootstrapServer = _server.text;
-    if (_needsBootstrap || _bootstrapSecret.text.isNotEmpty) {
-      setState(_forgetBootstrapSecret);
+    _server.addListener(_serverEdited);
+    _contextFocus.addListener(_contextFocusChanged);
+    _initialCategory = widget.initialCategory ??
+        (_firstRun ? SettingsCategory.connection : null);
+    widget.registerLeaveGuard?.call(_leaveGuard);
+  }
+
+  @override
+  void didUpdateWidget(covariant SettingsScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Only a new object is news: a parent rebuilding with the same one must
+    // not wind the baseline back past what this screen just saved.
+    if (!identical(oldWidget.settings, widget.settings)) {
+      _rebase(widget.settings);
     }
   }
 
   @override
   void dispose() {
-    for (final controller in _trackedControllers) {
-      controller.removeListener(_markDirty);
+    widget.registerLeaveGuard?.call(null);
+    for (final controller in _stagedText) {
+      controller.removeListener(_stagedEdited);
     }
     _server.removeListener(_serverEdited);
-    _server.dispose();
-    _key.dispose();
-    _model.dispose();
-    _contextSize.dispose();
+    _contextFocus.removeListener(_contextFocusChanged);
+    _contextFocus.dispose();
+    for (final controller in _stagedText) {
+      controller.dispose();
+    }
     _username.dispose();
     _password.dispose();
-    _launcherUrl.dispose();
-    _launcherToken.dispose();
-    _observatoryExecutable.dispose();
-    _observatoryWebUrl.dispose();
     _bootstrapSecret.clear();
     _bootstrapSecret.dispose();
     super.dispose();
   }
 
-  void _markDirty() {
-    if (mounted) setState(() => _dirty = true);
+  // -- Staged values ---------------------------------------------------------
+
+  void _stagedEdited() {
+    if (mounted) setState(() => _saveError = null);
   }
+
+  void _serverEdited() {
+    if (_server.text == _bootstrapServer) return;
+    _bootstrapServer = _server.text;
+    setState(() {
+      // A result for another address would mislead.
+      _connection = null;
+      if (_needsBootstrap || _bootstrapSecret.text.isNotEmpty) {
+        _forgetBootstrapSecret();
+      }
+    });
+  }
+
+  void _forgetBootstrapSecret() {
+    _bootstrapSecret.clear();
+    _needsBootstrap = false;
+  }
+
+  static void _setText(TextEditingController controller, String text) {
+    if (controller.text == text) return;
+    controller.value = TextEditingValue(
+        text: text, selection: TextSelection.collapsed(offset: text.length));
+  }
+
+  static bool _sameSession(AccountSession? a, AccountSession? b) =>
+      a?.token == b?.token && a?.origin == b?.origin;
+
+  /// Settings changed elsewhere while this screen stayed open (Chat's model
+  /// menu, a shell handing back what Settings saved): the baseline follows,
+  /// and so does any field still showing its old saved value. Edits made
+  /// here are kept.
+  void _rebase(Settings next) {
+    final before = _saved;
+    void follow(TextEditingController controller, String Function(Settings) of) {
+      final was = of(before);
+      final now = of(next);
+      if (was != now && controller.text.trim() == was.trim()) {
+        _setText(controller, now);
+      }
+    }
+
+    follow(_server, (s) => s.serverUrl);
+    follow(_key, (s) => s.apiKey);
+    follow(_model, (s) => s.model);
+    follow(_contextSize, (s) => s.contextSize);
+    follow(_launcherUrl, (s) => s.launcherUrl);
+    follow(_launcherToken, (s) => s.launcherToken);
+    follow(_observatoryExecutable, (s) => s.observatoryExecutable);
+    follow(_observatoryWebUrl, (s) => s.observatoryWebUrl);
+    if (_allowHosted == before.allowHosted) _allowHosted = next.allowHosted;
+    if (_keepServerRunning == before.keepServerRunning) {
+      _keepServerRunning = next.keepServerRunning;
+    }
+    if (_allowApproximateLocation == before.allowApproximateLocation) {
+      _allowApproximateLocation = next.allowApproximateLocation;
+    }
+    if (setEquals(_cleartextKeyHosts, before.cleartextKeyHosts.toSet())) {
+      _cleartextKeyHosts = {...next.cleartextKeyHosts};
+    }
+    if (_sameSession(_account, before.accountSession)) {
+      _account = next.accountSession;
+    }
+    _saved = next.copyWith();
+  }
+
+  String get _modelValue {
+    final model = _model.text.trim();
+    return model.isEmpty ? Settings.defaultModel : model;
+  }
+
+  int? get _contextTokens => parseContextTokens(
+      _contextSize.text.trim().isEmpty ? contextSizeDefault : _contextSize.text);
+
+  bool _textChanged(TextEditingController controller, String saved) =>
+      controller.text.trim() != saved.trim();
+
+  bool get _serverChanged => _textChanged(_server, _saved.serverUrl);
+  bool get _keyChanged => _textChanged(_key, _saved.apiKey);
+  bool get _modelChanged => _modelValue != _saved.model.trim();
+  bool get _contextChanged {
+    final staged = _contextTokens;
+    final saved = parseContextTokens(_saved.contextSize);
+    if (staged == null || saved == null) {
+      return _textChanged(_contextSize, _saved.contextSize);
+    }
+    return staged != saved;
+  }
+
+  bool get _launcherUrlChanged => _textChanged(_launcherUrl, _saved.launcherUrl);
+  bool get _launcherTokenChanged =>
+      _textChanged(_launcherToken, _saved.launcherToken);
+  bool get _hostsChanged =>
+      !setEquals(_cleartextKeyHosts, _saved.cleartextKeyHosts.toSet());
+  bool get _accountStaged => !_sameSession(_account, _saved.accountSession);
+  bool get _approximateLocationChanged =>
+      _allowApproximateLocation != _saved.allowApproximateLocation;
+  bool get _allowHostedChanged => _allowHosted != _saved.allowHosted;
+  bool get _keepServerRunningChanged =>
+      _keepServerRunning != _saved.keepServerRunning;
+  bool get _observatoryExecutableChanged =>
+      _textChanged(_observatoryExecutable, _saved.observatoryExecutable);
+  bool get _observatoryWebUrlChanged =>
+      _textChanged(_observatoryWebUrl, _saved.observatoryWebUrl);
+
+  /// Which pages hold staged changes.
+  Map<String, bool> get _changes => {
+        SettingsCategory.general: _modelChanged || _contextChanged,
+        SettingsCategory.connection: _serverChanged ||
+            _keyChanged ||
+            _hostsChanged ||
+            _launcherUrlChanged ||
+            _launcherTokenChanged,
+        SettingsCategory.account: _accountStaged,
+        SettingsCategory.privacy:
+            _approximateLocationChanged || _allowHostedChanged,
+        SettingsCategory.desktop: _keepServerRunningChanged,
+        SettingsCategory.observatory:
+            _observatoryExecutableChanged || _observatoryWebUrlChanged,
+      };
+
+  static const _pageNames = {
+    SettingsCategory.general: 'General',
+    SettingsCategory.connection: 'Connection',
+    SettingsCategory.account: 'Account',
+    SettingsCategory.privacy: 'Privacy',
+    SettingsCategory.desktop: 'Desktop',
+    SettingsCategory.observatory: 'Observatory',
+  };
+
+  List<String> get _changedPages => [
+        for (final entry in _changes.entries)
+          if (entry.value) _pageNames[entry.key]!,
+      ];
+
+  bool get _dirty => !_leaving && _changes.values.any((changed) => changed);
+
+  /// A phone still pointing at its own loopback has not been connected yet.
+  bool get _firstRun {
+    final host = Uri.tryParse(_server.text.trim())?.host ?? '';
+    return !LocalManager.canRunLocalTools &&
+        (host.isEmpty || isLoopbackServerHost(host));
+  }
+
+  /// Plain HTTP to another device with a key typed: the key would cross the
+  /// network unencrypted, so it is withheld unless this host is allowed.
+  bool get _cleartextKeyAtRisk =>
+      _key.text.trim().isNotEmpty &&
+      CleartextKeyPolicy.isCleartextRemote(_server.text);
+
+  /// The staged values as [Settings]. The theme is never staged.
+  Settings _current() => Settings(
+        serverUrl: _server.text.trim(),
+        apiKey: _key.text,
+        accountSession:
+            _account?.matches(_server.text) == true ? _account : null,
+        themeMode: _saved.themeMode,
+        allowHosted: _allowHosted,
+        contextSize: canonicalContextSize(_contextSize.text),
+        keepServerRunning: _keepServerRunning,
+        allowApproximateLocation: _allowApproximateLocation,
+        launcherUrl: _launcherUrl.text.trim(),
+        launcherToken: _launcherToken.text,
+        observatoryExecutable: _observatoryExecutable.text.trim(),
+        observatoryWebUrl: _observatoryWebUrl.text.trim(),
+        cleartextKeyHosts: _cleartextKeyHosts.toList()..sort(),
+        model: _modelValue,
+      );
+
+  /// For page code (extensions may not call the protected [setState]).
+  void _update(VoidCallback change) => setState(change);
+
+  /// A staged edit: it also clears a refused Save's reason.
+  void _stage(VoidCallback change) {
+    setState(() {
+      change();
+      _saveError = null;
+    });
+  }
+
+  void _setHostAllowed(String host, bool allowed) => _stage(() {
+        if (allowed) {
+          _cleartextKeyHosts.add(host);
+        } else {
+          _cleartextKeyHosts.remove(host);
+        }
+      });
+
+  void _contextEditedByHand() {
+    _contextEdited = true;
+    if (_contextNote != null) setState(() => _contextNote = null);
+  }
+
+  void _contextFocusChanged() {
+    if (!_contextFocus.hasFocus) _normalizeContextSize();
+  }
+
+  /// Leaving the exact entry clamps it into range, and says so.
+  void _normalizeContextSize() {
+    if (!_contextEdited || !mounted) return;
+    final text = _contextSize.text.trim();
+    final tokens = parseContextTokens(text);
+    if (tokens == null) return;
+    final clamped = clampContextTokens(tokens);
+    _contextEdited = false;
+    _setText(_contextSize, '$clamped');
+    setState(() => _contextNote = clamped == tokens
+        ? null
+        : clamped == contextSizeMin
+            ? 'Raised to $contextSizeMin, the smallest useful window.'
+            : 'Lowered to ${contextSizeLabel(clamped)}, the most the '
+                'runtime accepts.');
+  }
+
+  void _setContextPreset(int tokens) {
+    _contextEdited = false;
+    _setText(_contextSize, '$tokens');
+    setState(() => _contextNote = null);
+  }
+
+  void _discard() {
+    _setText(_server, _saved.serverUrl);
+    _setText(_key, _saved.apiKey);
+    _setText(_model, _saved.model);
+    _setText(_contextSize, _saved.contextSize);
+    _setText(_launcherUrl, _saved.launcherUrl);
+    _setText(_launcherToken, _saved.launcherToken);
+    _setText(_observatoryExecutable, _saved.observatoryExecutable);
+    _setText(_observatoryWebUrl, _saved.observatoryWebUrl);
+    setState(() {
+      _allowHosted = _saved.allowHosted;
+      _keepServerRunning = _saved.keepServerRunning;
+      _allowApproximateLocation = _saved.allowApproximateLocation;
+      _cleartextKeyHosts = {..._saved.cleartextKeyHosts};
+      _account = _saved.accountSession;
+      _saveError = null;
+      _contextNote = null;
+      _contextEdited = false;
+      _launcherOutcome = null;
+    });
+  }
+
+  // -- Leaving ---------------------------------------------------------------
 
   Future<bool> _confirmDiscard() async {
     if (!_dirty || !mounted) return true;
+    final pages = _changedPages;
+    final where = pages.length <= 1
+        ? pages.join()
+        : '${pages.sublist(0, pages.length - 1).join(', ')} and ${pages.last}';
     final discard = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Discard unsaved settings?'),
-        content: const Text(
-          'Changes to connection, privacy, or appearance settings have not '
-          'been saved.',
-        ),
+        content: Text(where.isEmpty
+            ? 'Your changes have not been saved.'
+            : 'Changes in $where have not been saved.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
@@ -370,277 +510,159 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return discard == true;
   }
 
-  void _forgetBootstrapSecret() {
-    _bootstrapSecret.clear();
-    _needsBootstrap = false;
+  /// The guard an app shell runs before switching away. A discard really
+  /// discards, since a shell may keep this screen alive.
+  Future<bool> _leaveGuard() async {
+    if (!mounted) return true;
+    if (!await _confirmDiscard()) return false;
+    if (mounted) {
+      _forgetBootstrapSecret();
+      _discard();
+    }
+    return true;
   }
 
   Future<void> _leaveSettings() async {
     if (!await _confirmDiscard() || !mounted) return;
     _forgetBootstrapSecret();
-    Navigator.of(context).pop();
+    setState(() => _leaving = true);
+    final popped = await Navigator.of(context).maybePop();
+    if (!popped && mounted) {
+      // Nowhere to go back to: the person still chose to discard.
+      setState(() => _leaving = false);
+      _discard();
+    }
   }
+
+  bool get _canNavigate =>
+      ShellScope.maybeOf(context) != null || widget.onNavigate != null;
 
   Future<void> _navigate(WorkspaceDestination destination) async {
     if (!await _confirmDiscard() || !mounted) return;
     _forgetBootstrapSecret();
-    widget.onNavigate?.call(destination);
-  }
-
-  void _changeBool(ValueChanged<bool> change, bool value) {
-    setState(() {
-      change(value);
-      _dirty = true;
-    });
-  }
-
-  Settings _current() => Settings(
-        serverUrl: _server.text,
-        apiKey: _key.text,
-        accountSession:
-            _account?.matches(_server.text) == true ? _account : null,
-        themeMode: _themeMode,
-        allowHosted: _allowHosted,
-        contextSize: _contextSize.text.trim().isEmpty
-            ? '8192'
-            : _contextSize.text.trim(),
-        keepServerRunning: _keepServerRunning,
-        allowApproximateLocation: _allowApproximateLocation,
-        launcherUrl: _launcherUrl.text,
-        launcherToken: _launcherToken.text,
-        observatoryExecutable: _observatoryExecutable.text.trim(),
-        observatoryWebUrl: _observatoryWebUrl.text.trim(),
-        cleartextKeyHosts: _cleartextKeyHosts.toList()..sort(),
-        model: _model.text.trim().isEmpty
-            ? Settings.defaultModel
-            : _model.text.trim(),
-      );
-
-  /// A phone still pointing at its own loopback has not been connected yet.
-  bool get _firstRun {
-    final host = Uri.tryParse(_server.text.trim())?.host ?? '';
-    return !LocalManager.canRunLocalTools &&
-        (host.isEmpty || _isLoopback(host));
-  }
-
-  Future<void> _test() async {
-    setState(() {
-      _testing = true;
-      _status = null;
-      _connection = null;
-    });
-    // Testing uses this screen's unsaved per-host choice, then restores the
-    // saved policy whatever happens.
-    final savedHosts = CleartextKeyPolicy.allowedHosts;
-    CleartextKeyPolicy.allowOnly(_cleartextKeyHosts);
-    try {
-      final account = _account?.matches(_server.text) == true ? _account : null;
-      final catalog =
-          await widget.connection.testServer(_server.text, _key.text, account);
-      final routing = await widget.connection
-          .routingStatus(_server.text, _key.text, account);
-      if (!mounted) return;
-      setState(() => _connection = diagnoseReachable(_server.text,
-          modelCount: catalog.ids.length,
-          routing: ModelRouting.of(routing, origins: catalog.origins),
-          models: catalog.ids));
-    } catch (error) {
-      if (!mounted) return;
-      setState(
-          () => _connection = diagnoseConnectionError(error, _server.text));
-    } finally {
-      CleartextKeyPolicy.allowOnly(savedHosts);
-      if (mounted) setState(() => _testing = false);
+    final shell = ShellScope.maybeOf(context);
+    if (shell != null) {
+      // Already confirmed: the shell's own guard must not ask again.
+      _discard();
+      shell.navigate(destination);
+    } else {
+      widget.onNavigate?.call(destination);
     }
   }
 
-  /// Plain HTTP to another device with a key typed: the key would cross the
-  /// network unencrypted, so it is withheld unless this host is allowed.
-  bool get _cleartextKeyAtRisk =>
-      _key.text.trim().isNotEmpty &&
-      CleartextKeyPolicy.isCleartextRemote(_server.text);
+  // -- Network actions -------------------------------------------------------
 
-  Widget _cleartextKeyChoice() {
-    final hostKey = CleartextKeyPolicy.hostKeyOf(_server.text);
-    final allowed = _cleartextKeyHosts.contains(hostKey);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        const SizedBox(height: 10),
-        WorkspaceNotice(
-          key: const Key('settings-cleartext-key-warning'),
-          tone: NoticeTone.warning,
-          message: allowed
-              ? 'The API key is sent to $hostKey over unencrypted HTTP. '
-                  'Anyone on the network path can read and reuse it.'
-              : 'The API key is not sent to $hostKey: this address uses '
-                  'unencrypted HTTP. Use HTTPS, or allow this host below.',
-        ),
-        CheckboxListTile(
-          key: const Key('settings-cleartext-key-allow'),
-          contentPadding: EdgeInsets.zero,
-          controlAffinity: ListTileControlAffinity.leading,
-          value: allowed,
-          title: Text('Send the API key to $hostKey over unencrypted HTTP'),
-          subtitle: const Text('Only on a network you trust. Applies to this '
-              'host and port only.'),
-          onChanged: hostKey.isEmpty
-              ? null
-              : (v) => setState(() {
-                    if (v == true) {
-                      _cleartextKeyHosts.add(hostKey);
-                    } else {
-                      _cleartextKeyHosts.remove(hostKey);
-                    }
-                    _dirty = true;
-                  }),
-        ),
-      ],
-    );
+  void _rememberModels(String server, ModelCatalog catalog, ModelRouting routing) {
+    _models = ModelChoices(catalog.ids, routing);
+    _modelsServer = server.trim();
   }
 
-  Future<void> _copyServerSetting(String setting) async {
-    await Clipboard.setData(ClipboardData(text: setting));
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Copied $setting')),
-    );
+  /// `GET /v1/models` and the routing document for the staged server, with
+  /// this screen's staged plain-HTTP choice for that host.
+  Future<(ModelCatalog, ModelRouting)> _probe(String server, String key) {
+    final account = _account?.matches(server) == true ? _account : null;
+    return _keyPolicy.run(server, () async {
+      final catalog = await widget.connection.testServer(server, key, account);
+      final status =
+          await widget.connection.routingStatus(server, key, account);
+      return (catalog, ModelRouting.of(status, origins: catalog.origins));
+    });
+  }
+
+  Future<void> _testConnection() async {
+    final server = _server.text;
+    setState(() => _connection = null);
+    ConnectionDiagnosis diagnosis;
+    try {
+      final (catalog, routing) = await _probe(server, _key.text);
+      if (mounted) _rememberModels(server, catalog, routing);
+      diagnosis = diagnoseReachable(server,
+          modelCount: catalog.ids.length,
+          routing: routing,
+          models: catalog.ids);
+    } catch (error) {
+      diagnosis = diagnoseConnectionError(error, server);
+    }
+    // A result for an address that has since been edited would mislead.
+    if (!mounted || _server.text != server) return;
+    setState(() => _connection = diagnosis);
+  }
+
+  Future<ModelChoices> _loadModelChoices() async {
+    final server = _server.text;
+    final (catalog, routing) = await _probe(server, _key.text);
+    if (mounted && _server.text == server) {
+      _rememberModels(server, catalog, routing);
+    }
+    return ModelChoices(catalog.ids, routing);
+  }
+
+  Future<void> _pickModel() async {
+    final cached = _modelsServer == _server.text.trim() ? _models : null;
+    final picked = await showModelPicker(context,
+        current: _modelValue, cached: cached, load: _loadModelChoices);
+    if (picked == null || !mounted) return;
+    _setText(_model, picked);
   }
 
   Future<void> _testLauncher() async {
     final settings = _current();
     final error = settings.launcherConfigurationError;
     if (!settings.hasHostLauncher || error != null) {
-      setState(() {
-        _statusOk = false;
-        _status = error ?? 'Configure the host launcher URL first.';
-      });
+      setState(() => _launcherOutcome = ActionOutcome(StatusKind.warn,
+          error ?? 'Enter the host launcher URL first.'));
       return;
     }
-    setState(() {
-      _testing = true;
-      _status = null;
-    });
+    setState(() => _launcherOutcome = null);
+    ActionOutcome outcome;
     try {
-      final status = await SonderLauncherApi(
-        baseUrl: settings.effectiveLauncherUrl,
-        token: settings.launcherToken,
-      ).status();
-      if (!mounted) return;
-      final foreignListener = status.serverState == 'foreign_listener';
-      final String message;
-      if (foreignListener) {
-        message = 'Host launcher is reachable, but another service is using '
-            'the configured main-server port.';
+      final status = await widget.connection
+          .launcherStatus(settings.effectiveLauncherUrl, settings.launcherToken);
+      if (status.serverState == 'foreign_listener') {
+        outcome = const ActionOutcome(
+            StatusKind.warn, 'The launcher answered, but another service holds '
+            'the main server port.');
       } else if (status.ok) {
-        message = 'Host launcher is ready; main server is '
-            '${status.serverRunning ? "running" : "stopped"}.';
+        outcome = ActionOutcome.ok('The launcher is ready; the main server is '
+            '${status.serverRunning ? 'running' : 'stopped'}.');
       } else {
-        message = 'Host launcher did not report ready.';
+        outcome = const ActionOutcome(
+            StatusKind.warn, 'The launcher did not report ready.');
       }
-      setState(() {
-        _statusOk = status.ok && !foreignListener;
-        _status = message;
-      });
     } on SonderException catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _statusOk = false;
-        _status = e.message;
-      });
-    } finally {
-      if (mounted) setState(() => _testing = false);
-    }
-  }
-
-  Future<void> _register() async {
-    await _accountAction(register: true);
-  }
-
-  Future<void> _login() async {
-    await _accountAction(register: false);
-  }
-
-  Future<void> _forgetApiSession() async {
-    setState(() {
-      _testing = true;
-      _status = null;
-    });
-    try {
-      await Settings.clearAccountSession();
-      if (!mounted) return;
-      _account = null;
-      _password.clear();
-      if (!mounted) return;
-      widget.onChanged(_current());
-      setState(() {
-        _statusOk = true;
-        _status =
-            'Account session forgotten locally. Server revocation was not requested.';
-      });
+      outcome = ActionOutcome.failed(e.message);
     } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        _statusOk = false;
-        _status = 'Could not remove the account session securely.';
-      });
-    } finally {
-      if (mounted) setState(() => _testing = false);
+      outcome = const ActionOutcome.failed('The launcher check failed.');
     }
+    if (mounted) setState(() => _launcherOutcome = outcome);
   }
 
-  Future<void> _signOut() async {
-    final account = _account;
-    if (account == null || !account.matches(_server.text)) return;
-    setState(() {
-      _testing = true;
-      _status = null;
-    });
-    try {
-      await widget.connection.logout(_key.text, account);
-      await Settings.clearAccountSession();
-      if (!mounted) return;
-      _account = null;
-      _password.clear();
-      widget.onChanged(_current());
-      setState(() {
-        _statusOk = true;
-        _status = 'Signed out. This account session was revoked.';
-      });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        _statusOk = false;
-        _status =
-            'Revocation not confirmed. Retry Sign out, or explicitly Forget local session. The session is retained for retry.';
-      });
-    } finally {
-      if (mounted) setState(() => _testing = false);
-    }
-  }
+  Future<void> _login() => _accountAction(register: false);
+
+  Future<void> _register() => _accountAction(register: true);
 
   Future<void> _accountAction({required bool register}) async {
     if (_account != null) {
-      setState(() {
-        _statusOk = false;
-        _status =
-            'Sign out or explicitly forget the current session before switching accounts.';
-      });
+      setState(() => _accountOutcome = const ActionOutcome(StatusKind.warn,
+          'Sign out or explicitly forget the current session before '
+          'switching accounts.'));
       return;
     }
+    final server = _server.text;
+    final key = _key.text;
     setState(() {
-      _testing = true;
-      _status = null;
+      _signInBusy = true;
+      _accountOutcome = null;
     });
     try {
-      final loginOrigin = serverOrigin(_server.text);
+      final loginOrigin = serverOrigin(server);
       if (register) {
         final secret = _needsBootstrap ? _bootstrapSecret.text : null;
-        String msg;
+        String message;
         try {
-          msg = await widget.connection.register(
-            _server.text,
-            _key.text,
+          message = await widget.connection.register(
+            server,
+            key,
             _username.text,
             _password.text,
             bootstrapSecret: secret,
@@ -652,669 +674,501 @@ class _SettingsScreenState extends State<SettingsScreen> {
         if (!mounted) return;
         setState(() {
           _needsBootstrap = false;
-          _statusOk = true;
-          _status = msg;
+          _accountOutcome = ActionOutcome.ok(message);
         });
       } else {
         final token = await widget.connection
-            .login(_server.text, _key.text, _username.text, _password.text);
+            .login(server, key, _username.text, _password.text);
         if (!mounted) return;
-        setState(() {
-          _account = AccountSession(token: token, origin: loginOrigin);
-          _password.clear();
-          _statusOk = true;
-          _status = 'Logged in. Save settings to store the token securely.';
-        });
+        _password.clear();
+        AccountSession session;
+        try {
+          session = AccountSession(token: token, origin: loginOrigin);
+        } on ArgumentError {
+          setState(() => _accountOutcome = const ActionOutcome.failed(
+              'The server did not return a usable session.'));
+          return;
+        }
+        await _adoptSession(session);
       }
     } on BootstrapSecretRequired {
       if (!mounted) return;
       setState(() {
         _needsBootstrap = true;
-        _statusOk = false;
-        _status = 'The first administrator account needs the bootstrap '
-            'secret that Sonder printed on the PC. Enter it below and '
-            'register again. It is used once and never saved.';
+        _accountOutcome = const ActionOutcome(
+          StatusKind.warn,
+          'The first administrator needs the bootstrap secret Sonder printed '
+          'on the PC.',
+          detail: 'Enter it as the bootstrap secret and register again. It '
+              'is used once and never saved.',
+        );
       });
     } on SonderException catch (e) {
       if (!mounted) return;
-      final diagnosis = diagnoseConnectionError(e, _server.text);
+      final diagnosis = diagnoseConnectionError(e, server);
+      final explained = diagnosis.state == ServerReachability.refused ||
+          diagnosis.state == ServerReachability.rateLimited;
       setState(() {
-        _statusOk = false;
-        if (diagnosis.state == ServerReachability.refused ||
-            diagnosis.state == ServerReachability.rateLimited) {
-          _connection = diagnosis;
-          _status = diagnosis.title;
-        } else {
-          _status = e.message;
-        }
+        if (explained) _connection = diagnosis;
+        _accountOutcome = ActionOutcome.failed(
+            explained ? diagnosis.title : e.message,
+            detail: explained && diagnosis.detail.isNotEmpty
+                ? diagnosis.detail
+                : null);
       });
     } on ArgumentError {
       if (!mounted) return;
-      setState(() {
-        _statusOk = false;
-        _status = 'Sign-in needs an https:// server URL off this device.';
-      });
+      setState(() => _accountOutcome = const ActionOutcome.failed(
+          'Sign-in needs an https:// server URL off this device.'));
     } catch (_) {
       if (!mounted) return;
-      setState(() {
-        _statusOk = false;
-        _status = 'Account request could not be completed.';
-      });
+      setState(() => _accountOutcome =
+          const ActionOutcome.failed('Account request could not be completed.'));
     } finally {
-      if (mounted) setState(() => _testing = false);
+      if (mounted) setState(() => _signInBusy = false);
     }
   }
 
-  Future<void> _save() async {
-    if (_account != null && !_account!.matches(_server.text)) {
+  /// A fresh sign-in. When it belongs to the saved server it is stored at
+  /// once, in the secure store and bound to its exact origin
+  /// ([Settings.storeAccountSession]), and handed to the app: no second
+  /// Save. A sign-in to a server URL that is not saved yet stays staged, and
+  /// Save stores both together.
+  Future<void> _adoptSession(AccountSession session) async {
+    final origin = session.origin;
+    final user = _username.text.trim();
+    _signedInUser = user.isEmpty ? null : user;
+    _signedInToken = session.token;
+    SettingsSaveResult? stored;
+    if (session.matches(_saved.serverUrl)) {
+      try {
+        stored = await Settings.storeAccountSession(session,
+            serverUrl: _saved.serverUrl);
+      } on StateError {
+        stored = null;
+      }
+    }
+    if (!mounted) return;
+    final result = stored;
+    if (result == null) {
       setState(() {
-        _statusOk = false;
-        _status =
-            'Return to the account server to sign out, or explicitly forget the local session before switching servers.';
+        _account = session;
+        _accountOutcome = ActionOutcome.ok('Signed in to $origin.',
+            detail: 'Save to keep this session with the new server URL.');
       });
+      return;
+    }
+    setState(() {
+      _account = session;
+      _saved = _saved.copyWith(accountSession: session);
+      _accountOutcome = result.credentialsStored
+          ? ActionOutcome.ok('Signed in to $origin.',
+              detail: 'The session is stored in the system keyring.')
+          : result.memoryOnly
+              ? ActionOutcome.ok('Signed in to $origin.',
+                  detail: 'The browser keeps the session in memory until '
+                      'the page reloads.')
+              : ActionOutcome(StatusKind.warn,
+                  'Signed in to $origin, but the system keyring is unavailable.',
+                  detail: 'The session lasts until the app closes.');
+    });
+    widget.onChanged(_saved.copyWith());
+  }
+
+  void _dropSession() {
+    _account = null;
+    _signedInUser = null;
+    _signedInToken = null;
+    _password.clear();
+    _saved = _saved.copyWith(withoutAccountSession: true);
+  }
+
+  Future<void> _signOut() async {
+    final account = _account;
+    if (account == null || !account.matches(_server.text)) return;
+    setState(() {
+      _sessionBusy = true;
+      _accountOutcome = null;
+    });
+    try {
+      await widget.connection.logout(_key.text, account);
+      await Settings.clearAccountSession();
+      if (!mounted) return;
+      setState(() {
+        _dropSession();
+        _accountOutcome = const ActionOutcome.ok('Signed out.',
+            detail: 'The server revoked this session.');
+      });
+      widget.onChanged(_saved.copyWith());
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _accountOutcome = const ActionOutcome.failed(
+          'Revocation not confirmed.',
+          detail: 'Retry Sign out, or explicitly Forget local session. The '
+              'session is kept for the retry.'));
+    } finally {
+      if (mounted) setState(() => _sessionBusy = false);
+    }
+  }
+
+  Future<void> _forgetSession() async {
+    setState(() {
+      _sessionBusy = true;
+      _accountOutcome = null;
+    });
+    try {
+      await Settings.clearAccountSession();
+      if (!mounted) return;
+      setState(() {
+        _dropSession();
+        _accountOutcome = const ActionOutcome.ok(
+            'Account session forgotten locally.',
+            detail: 'Server revocation was not requested.');
+      });
+      widget.onChanged(_saved.copyWith());
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _accountOutcome = const ActionOutcome.failed(
+          'Could not remove the account session securely.'));
+    } finally {
+      if (mounted) setState(() => _sessionBusy = false);
+    }
+  }
+
+  // -- Save, theme -----------------------------------------------------------
+
+  Future<void> _save(CategoryNavigator? pages) async {
+    void refuse(String message, {String? page}) {
+      setState(() => _saveError = message);
+      if (page != null && pages != null && pages.selectedId != page) {
+        pages.select(page);
+      }
+    }
+
+    final account = _account;
+    if (account != null && !account.matches(_server.text)) {
+      refuse('Sign out on the account server, or forget the local session, '
+          'before switching servers.');
+      return;
+    }
+    final contextError = contextSizeError(_contextSize.text);
+    if (contextError != null) {
+      refuse('Context size: $contextError', page: SettingsCategory.general);
       return;
     }
     final s = _current();
     final launcherError = s.launcherConfigurationError;
     if (launcherError != null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(launcherError)),
-      );
+      setState(() =>
+          _launcherOutcome = ActionOutcome(StatusKind.warn, launcherError));
+      refuse(launcherError, page: SettingsCategory.connection);
       return;
     }
     final observatoryError = s.observatoryConfigurationError;
     if (observatoryError != null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(observatoryError)),
-      );
+      refuse(observatoryError, page: SettingsCategory.observatory);
       return;
     }
-    // A blank field explicitly replaces a credential that was present when
-    // this screen opened. Do not leave an old keychain value usable.
+    // A blank field explicitly replaces a credential that was saved. Do not
+    // leave an old keychain value usable.
     SettingsSaveResult result;
     try {
-      if (widget.settings.apiKey.trim().isNotEmpty && s.apiKey.trim().isEmpty) {
+      if (_saved.apiKey.trim().isNotEmpty && s.apiKey.trim().isEmpty) {
         await Settings.clearApiKey();
       }
-      if (widget.settings.launcherToken.trim().isNotEmpty &&
+      if (_saved.launcherToken.trim().isNotEmpty &&
           s.launcherToken.trim().isEmpty) {
         await Settings.clearLauncherToken();
       }
       result = await s.save();
     } catch (_) {
       if (!mounted) return;
-      setState(() => _keyringWarning =
-          'System keyring unavailable: a removed key could not be deleted, '
-              'so nothing was saved. Try again once the keyring works.');
+      setState(() {
+        _keyringWarning = 'System keyring unavailable: a removed key could '
+            'not be deleted, so nothing was saved. Try again once the '
+            'keyring works.';
+        _saveError = 'Nothing was saved: the system keyring is unavailable.';
+      });
       return;
     }
+    // A connection check still running restores the policy just saved.
+    _keyPolicy.saved(s.cleartextKeyHosts);
     if (!mounted) return;
     widget.onChanged(s);
+    if (parseContextTokens(_contextSize.text) != null) {
+      _setText(_contextSize, s.contextSize);
+    }
     setState(() {
-      _dirty = false;
+      _saved = s.copyWith();
       _keyringWarning = result.warning;
+      _saveError = null;
+      _contextNote = null;
+      _contextEdited = false;
     });
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-          content: Text(result.warning == null
-              ? 'Settings saved'
-              : 'Settings saved; keys kept in memory only')),
+    showSonderToast(
+      context,
+      result.warning == null
+          ? 'Settings saved'
+          : 'Settings saved; keys kept in memory only',
+      kind: result.warning == null ? StatusKind.ok : StatusKind.warn,
     );
   }
 
-  InputDecoration _field(String label,
-          {String? hint, String? helper, IconData? icon, Widget? suffix}) =>
-      InputDecoration(
-        labelText: label,
-        hintText: hint,
-        helperText: helper,
-        helperMaxLines: 3,
-        prefixIcon: icon == null ? null : Icon(icon),
-        suffixIcon: suffix,
-        border: const OutlineInputBorder(),
-      );
+  /// The theme applies and persists at once: it carries no credential, so
+  /// it never waits for Save.
+  Future<void> _setTheme(String mode) async {
+    if (mode == _saved.themeMode) return;
+    setState(() => _saved = _saved.copyWith(themeMode: mode));
+    widget.onChanged(_saved.copyWith());
+    try {
+      await Settings.saveThemeMode(mode);
+    } catch (_) {
+      if (mounted) {
+        showSonderToast(context, "The theme changed but couldn't be saved.",
+            kind: StatusKind.warn);
+      }
+    }
+  }
 
-  Widget _eye(
-          {required bool obscured,
-          required String what,
-          required VoidCallback onPressed}) =>
-      IconButton(
-        tooltip: obscured ? 'Show $what' : 'Hide $what',
-        icon: Icon(obscured ? Icons.visibility : Icons.visibility_off),
-        onPressed: onPressed,
-      );
+  Future<void> _copyServerSetting(String setting) async {
+    await Clipboard.setData(ClipboardData(text: setting));
+    if (mounted) showSonderToast(context, 'Copied $setting');
+  }
 
-  /// Where "Open Observatory" on the Runtime page looks (contract 10):
-  /// the executable (desktop only) and the web URL used when none is found.
-  List<Widget> _observatoryGroup(BuildContext context) {
-    final webUrl = _observatoryWebUrl.text.trim();
-    final webError = observatoryWebUrlError(webUrl);
-    final remote =
-        webUrl.isNotEmpty && webError == null && !isLoopbackUrl(webUrl);
+  // -- Layout ----------------------------------------------------------------
+
+  /// "Open Runtime", where navigation exists (a shell, or the old routes).
+  Widget? _runtimeLink(String label) {
+    if (!_canNavigate) return null;
+    return TextButton(
+      onPressed: () => _navigate(WorkspaceDestination.runtime),
+      child: Text(label),
+    );
+  }
+
+  List<SonderCategory> _categories() {
+    final changes = _changes;
+    Widget? unsaved(String id) => changes[id] == true
+        ? const ModifiedDot(
+            tooltip: 'Unsaved changes', semanticLabel: 'unsaved changes')
+        : null;
+    final account = _account;
     return [
-      const _GroupLabel('Observatory'),
-      if (LocalManager.canRunLocalTools) ...[
-        TextField(
-          key: const Key('settings-observatory-executable'),
-          controller: _observatoryExecutable,
-          autocorrect: false,
-          decoration: _field(
-            'Observatory executable (optional)',
-            hint: '/usr/local/bin/sonder-observatory',
-            helper: 'Empty uses $observatoryBinEnv, then '
-                '$observatoryExecutableName on PATH. On macOS, the .app '
-                'bundle works too.',
-            icon: Icons.insights_outlined,
-          ),
+      SonderCategory(
+        id: SettingsCategory.general,
+        label: 'General',
+        icon: Icons.tune,
+        description: 'Default model and context size.',
+        keywords: const ['model', 'route', 'context', 'tokens', 'window'],
+        badge: unsaved(SettingsCategory.general),
+        builder: _generalPage,
+      ),
+      SonderCategory(
+        id: SettingsCategory.connection,
+        label: 'Connection',
+        icon: Icons.lan_outlined,
+        description: 'Server, API key and host launcher.',
+        keywords: const [
+          'server',
+          'url',
+          'api key',
+          'https',
+          'http',
+          'launcher',
+          'token',
+          'test',
+          'keyring',
+        ],
+        badge: unsaved(SettingsCategory.connection),
+        builder: _connectionPage,
+      ),
+      SonderCategory(
+        id: SettingsCategory.account,
+        label: 'Account',
+        icon: Icons.person_outline,
+        description: account == null
+            ? 'Sign in to this server.'
+            : 'Signed in to ${Uri.tryParse(account.origin)?.host ?? account.origin}.',
+        keywords: const [
+          'login',
+          'sign in',
+          'sign out',
+          'register',
+          'username',
+          'password',
+          'session',
+          'bootstrap',
+        ],
+        badge: unsaved(SettingsCategory.account),
+        builder: _accountPage,
+      ),
+      SonderCategory(
+        id: SettingsCategory.appearance,
+        label: 'Appearance',
+        icon: Icons.palette_outlined,
+        description: 'Light, dark or system theme.',
+        keywords: const ['theme', 'dark', 'light', 'system', 'colour'],
+        builder: _appearancePage,
+      ),
+      SonderCategory(
+        id: SettingsCategory.privacy,
+        label: 'Privacy',
+        icon: Icons.shield_outlined,
+        description: LocalManager.canRunLocalTools
+            ? 'Location, cloud tiers and stored keys.'
+            : 'Location and stored keys.',
+        keywords: const ['location', 'ip', 'cloud', 'hosted', 'keyring'],
+        badge: unsaved(SettingsCategory.privacy),
+        builder: _privacyPage,
+      ),
+      if (LocalManager.canRunLocalTools)
+        SonderCategory(
+          id: SettingsCategory.desktop,
+          label: 'Desktop',
+          icon: Icons.desktop_windows_outlined,
+          description: 'The server this app starts.',
+          keywords: const ['local server', 'background', 'headless'],
+          badge: unsaved(SettingsCategory.desktop),
+          builder: _desktopPage,
         ),
-        const SizedBox(height: 16),
-      ],
-      TextField(
-        key: const Key('settings-observatory-web-url'),
-        controller: _observatoryWebUrl,
-        keyboardType: TextInputType.url,
-        autocorrect: false,
-        decoration: _field(
-          'Observatory web URL (optional)',
-          helper: remote
-              ? 'A hosted Observatory opens in this browser and connects to '
-                  'the loopback URLs here. Add its origin to the runtime\'s '
-                  'SONDER_CORS_ORIGINS (and Sonder Inference\'s '
-                  '--cors-origin); browsers may also block a public page '
-                  'from reading loopback.'
-              : LocalManager.canRunLocalTools
-                  ? 'Opened when no Observatory executable is found. HTTPS off '
-                      'this device; a local preview build is on loopback port 4173.'
-                  : 'Used to build a link to copy; the browser cannot start '
-                      'the Observatory.',
-          icon: Icons.open_in_browser_outlined,
-        ).copyWith(errorText: webError, errorMaxLines: 3),
+      SonderCategory(
+        id: SettingsCategory.observatory,
+        label: 'Observatory',
+        icon: Icons.insights_outlined,
+        description: 'Where Runtime opens the Observatory.',
+        keywords: const ['executable', 'web url', 'path', 'cors'],
+        badge: unsaved(SettingsCategory.observatory),
+        builder: _observatoryPage,
+      ),
+      SonderCategory(
+        id: SettingsCategory.about,
+        label: 'About',
+        icon: Icons.info_outline,
+        description: 'Version and server.',
+        keywords: const ['version', 'build', 'platform'],
+        builder: _aboutPage,
       ),
     ];
   }
 
-  Widget _connectCard(BuildContext context) {
-    final tokens = SonderTokens.of(context);
-    final diagnosis = _connection;
-    final refused = diagnosis?.state == ServerReachability.refused;
-    final title = _firstRun || refused ? 'Connect to your PC' : 'Server';
-    return Container(
-      key: const Key('settings-connect-card'),
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
-      decoration: BoxDecoration(
-        color: tokens.panel,
-        borderRadius: BorderRadius.circular(SonderRadius.row),
-        border: Border.all(color: tokens.hairline),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text(title, style: Theme.of(context).textTheme.titleSmall),
-          if (_firstRun) ...[
-            const SizedBox(height: 6),
-            Text(
-              'Use the HTTPS address your PC publishes on your tailnet or '
-              'through a TLS proxy, for example https://your-host.example. '
-              'On an emulator, adb reverse lets you use http://127.0.0.1:11435.',
-              style: Theme.of(context)
-                  .textTheme
-                  .bodySmall
-                  ?.copyWith(color: tokens.text2),
-            ),
-          ],
-          const SizedBox(height: 12),
-          TextField(
-            controller: _server,
-            keyboardType: TextInputType.url,
-            autocorrect: false,
-            decoration: _field(
-              'Server URL',
-              hint: 'https://your-host.example',
-              helper: 'HTTPS is required off-device; HTTP is for loopback '
-                  'development only.',
-              icon: Icons.dns_outlined,
-            ),
-          ),
-          const SizedBox(height: 10),
-          Wrap(
-            spacing: 12,
-            runSpacing: 8,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              FilledButton.tonalIcon(
-                key: const Key('settings-test-connection'),
-                onPressed: _testing ? null : _test,
-                icon: _testing
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.wifi_tethering),
-                label: Text(_testing ? 'Testing…' : 'Test connection'),
-              ),
-              if (diagnosis != null)
-                RuntimeStatusWord(diagnosis.state.status,
-                    word: diagnosis.state.word, width: 200),
-            ],
-          ),
-          if (diagnosis != null) ...[
-            const SizedBox(height: 10),
-            WorkspaceNotice(
-              key: const Key('settings-connection-notice'),
-              kind: diagnosis.state.status,
-              title: diagnosis.title,
-              detail: diagnosis.detail.isEmpty ? null : diagnosis.detail,
-              hint: diagnosis.adbHint,
-              actions: [
-                if (diagnosis.serverSetting != null) ...[
-                  SelectableText(diagnosis.serverSetting!,
-                      style: tokens.mono(12)),
-                  TextButton.icon(
-                    onPressed: () =>
-                        _copyServerSetting(diagnosis.serverSetting!),
-                    icon: const Icon(Icons.copy, size: 16),
-                    label: const Text('Copy server setting'),
-                  ),
-                ],
-              ],
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
-    final tokens = SonderTokens.of(context);
-    final signedIn = _account?.matches(_server.text) == true;
-    return Scaffold(
-      appBar: AppBar(
-        automaticallyImplyLeading: false,
-        // One return control (plan P2-11), at the leading edge so its
-        // tooltip never collides with the window's own Close tooltip.
-        leadingWidth: 104,
-        leading: Padding(
-          padding: const EdgeInsets.only(left: 8),
-          child: Tooltip(
-            message: 'Back to chat',
-            child: TextButton.icon(
-              onPressed: _leaveSettings,
-              icon: const Icon(Icons.arrow_back, size: 20),
-              label: const Text('Chat'),
-            ),
+    final shell = ShellScope.maybeOf(context);
+    final Widget? leading;
+    double? leadingWidth;
+    final List<Widget> actions;
+    if (shell != null) {
+      // The shell's sidebar or drawer owns navigation.
+      leading = shell.sidebarVisible
+          ? null
+          : IconButton(
+              tooltip: 'Open navigation',
+              icon: const Icon(Icons.menu),
+              onPressed: shell.openNavigation,
+            );
+      actions = const [];
+    } else {
+      // One return control (plan P2-11), at the leading edge so its tooltip
+      // never collides with the window's own Close tooltip.
+      leading = Padding(
+        padding: const EdgeInsets.only(left: SonderSpace.sm),
+        child: Tooltip(
+          message: 'Back to chat',
+          child: TextButton.icon(
+            onPressed: _leaveSettings,
+            icon: const Icon(Icons.arrow_back, size: 20),
+            label: const Text('Chat'),
           ),
-        ),
-        title: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Flexible(
-              child: Text('Settings', overflow: TextOverflow.ellipsis),
-            ),
-            if (_dirty) ...[
-              const SizedBox(width: 8),
-              Semantics(
-                label: 'Unsaved changes',
-                child: Icon(
-                  Icons.circle,
-                  size: 9,
-                  color: Theme.of(context).colorScheme.primary,
-                ),
-              ),
-            ],
-          ],
-        ),
-        actions: [
-          if (widget.onNavigate != null)
-            WorkspaceMenu(
-                current: WorkspaceDestination.settings, onSelected: _navigate),
-        ],
-      ),
-      body: Column(
-        children: [
-          Expanded(
-            child: ListView(
-              padding: const EdgeInsets.symmetric(vertical: 20),
-              children: [
-                _Readable(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      const _GroupLabel('Connection', first: true),
-                      _connectCard(context),
-                      const SizedBox(height: 16),
-                      TextField(
-                        controller: _key,
-                        obscureText: _obscureKey,
-                        autocorrect: false,
-                        enableSuggestions: false,
-                        decoration: _field(
-                          'API key (optional)',
-                          helper: Settings.memoryOnlyCredentials
-                              ? 'Kept in memory only in the browser.'
-                              : 'Leave blank if the server has auth disabled',
-                          icon: Icons.key_outlined,
-                          suffix: _eye(
-                            obscured: _obscureKey,
-                            what: 'API key',
-                            onPressed: () =>
-                                setState(() => _obscureKey = !_obscureKey),
-                          ),
-                        ),
-                      ),
-                      if (_cleartextKeyAtRisk) _cleartextKeyChoice(),
-                      if (_keyringWarning != null) ...[
-                        const SizedBox(height: 10),
-                        WorkspaceNotice(
-                          key: const Key('settings-keyring-warning'),
-                          message: _keyringWarning!,
-                          tone: NoticeTone.warning,
-                        ),
-                      ],
-                      const SizedBox(height: 16),
-                      TextField(
-                        controller: _launcherUrl,
-                        keyboardType: TextInputType.url,
-                        autocorrect: false,
-                        decoration: _field(
-                          'Host launcher URL (optional)',
-                          hint: 'https://your-host:11436',
-                          helper:
-                              'Explicit HTTPS control endpoint for remote/mobile Start, Stop, and Restart. Never derived from the server URL.',
-                          icon: Icons.power_settings_new_outlined,
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      TextField(
-                        controller: _launcherToken,
-                        obscureText: _obscureLauncherToken,
-                        autocorrect: false,
-                        enableSuggestions: false,
-                        decoration: _field(
-                          'Host launcher token',
-                          helper:
-                              'Separate from the main API key; required for LAN startup control.',
-                          icon: Icons.vpn_key_outlined,
-                          suffix: _eye(
-                            obscured: _obscureLauncherToken,
-                            what: 'launcher token',
-                            onPressed: () => setState(() =>
-                                _obscureLauncherToken = !_obscureLauncherToken),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 10),
-                      Align(
-                        alignment: Alignment.centerLeft,
-                        child: OutlinedButton.icon(
-                          onPressed: _testing ? null : _testLauncher,
-                          icon: const Icon(Icons.power_settings_new_outlined),
-                          label: const Text('Test host control'),
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      TextField(
-                        controller: _model,
-                        autocorrect: false,
-                        decoration: _field(
-                          'Default model or route',
-                          hint: 'sonder, code, fast...',
-                          helper: 'Used for new conversations.',
-                          icon: Icons.memory_outlined,
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      TextField(
-                        controller: _contextSize,
-                        autocorrect: false,
-                        decoration: _field(
-                          'Context size',
-                          hint: '8192, 32k, 256k, 1m',
-                          helper:
-                              'Requested conversation capacity; server limits still apply.',
-                          icon: Icons.view_week_outlined,
-                        ),
-                      ),
-                      const _GroupLabel('Privacy & autonomy'),
-                      SwitchListTile(
-                        contentPadding: EdgeInsets.zero,
-                        title: const Text('Allow hosted/cloud tiers'),
-                        subtitle: const Text(
-                          'Opt-in only. Prompts sent to cloud tiers leave this machine.',
-                        ),
-                        value: _allowHosted,
-                        onChanged: (v) =>
-                            _changeBool((value) => _allowHosted = value, v),
-                      ),
-                      // Only a build that runs its own local server can keep
-                      // it running; phones and the web never start one.
-                      if (LocalManager.canRunLocalTools)
-                        SwitchListTile(
-                          contentPadding: EdgeInsets.zero,
-                          title: const Text(
-                              'Keep local server running after app closes'),
-                          subtitle: const Text(
-                            'Use this for headless/background mode. Turn it off if the app '
-                            'should stop its local server on exit.',
-                          ),
-                          value: _keepServerRunning,
-                          onChanged: (v) => _changeBool(
-                              (value) => _keepServerRunning = value, v),
-                        ),
-                      SwitchListTile(
-                        contentPadding: EdgeInsets.zero,
-                        title: const Text('Allow approximate IP location'),
-                        subtitle: const Text(
-                          'Off by default. For weather or nearby requests, the app asks '
-                          'ipwho.is for an approximate city/region. Raw IP is never sent '
-                          'to Sonder Runtime, displayed, or retained.',
-                        ),
-                        value: _allowApproximateLocation,
-                        onChanged: (v) => _changeBool(
-                          (value) => _allowApproximateLocation = value,
-                          v,
-                        ),
-                      ),
-                      const _GroupLabel('Account'),
-                      TextField(
-                        controller: _username,
-                        autocorrect: false,
-                        decoration:
-                            _field('Username', icon: Icons.person_outline),
-                      ),
-                      const SizedBox(height: 12),
-                      TextField(
-                        controller: _password,
-                        obscureText: true,
-                        autocorrect: false,
-                        enableSuggestions: false,
-                        decoration: _field(
-                          'Password',
-                          helper:
-                              'At least 8 characters. First account becomes admin.',
-                          icon: Icons.lock_outline,
-                        ),
-                      ),
-                      if (_needsBootstrap) ...[
-                        const SizedBox(height: 12),
-                        TextField(
-                          key: const Key('settings-bootstrap-secret'),
-                          controller: _bootstrapSecret,
-                          obscureText: _obscureBootstrap,
-                          autocorrect: false,
-                          enableSuggestions: false,
-                          decoration: _field(
-                            'Bootstrap secret',
-                            helper: 'Printed by Sonder on the PC for the first '
-                                'admin. Used once, never saved.',
-                            icon: Icons.admin_panel_settings_outlined,
-                            suffix: _eye(
-                              obscured: _obscureBootstrap,
-                              what: 'bootstrap secret',
-                              onPressed: () => setState(
-                                  () => _obscureBootstrap = !_obscureBootstrap),
-                            ),
-                          ),
-                        ),
-                      ],
-                      const SizedBox(height: 12),
-                      Text(_account == null
-                          ? 'No account session. Login preserves your deployment API key.'
-                          : 'Signed-in server: ${_account!.origin}'),
-                      const SizedBox(height: 6),
-                      Text(
-                        'Sign out revokes this session on the server. Forget local session '
-                        'removes it from this device only; it does not revoke it on the server.',
-                        style: Theme.of(context)
-                            .textTheme
-                            .bodySmall
-                            ?.copyWith(color: tokens.text2),
-                      ),
-                      const SizedBox(height: 12),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: [
-                          FilledButton.icon(
-                            onPressed: _testing ? null : _login,
-                            icon: const Icon(Icons.login),
-                            label: const Text('Login'),
-                          ),
-                          // Registering is for a first account or an admin;
-                          // it is hidden while a session is active.
-                          if (_account == null)
-                            OutlinedButton.icon(
-                              onPressed: _testing ? null : _register,
-                              icon: const Icon(Icons.person_add_alt),
-                              label: const Text('Register'),
-                            ),
-                          OutlinedButton.icon(
-                            onPressed: _testing || !signedIn ? null : _signOut,
-                            icon: const Icon(Icons.logout),
-                            label: const Text('Sign out'),
-                          ),
-                          OutlinedButton.icon(
-                            onPressed: _testing || _account == null
-                                ? null
-                                : _forgetApiSession,
-                            icon: const Icon(Icons.phonelink_erase_outlined),
-                            label: const Text('Forget local session'),
-                          ),
-                        ],
-                      ),
-                      if (_status != null) ...[
-                        const SizedBox(height: 12),
-                        WorkspaceNotice(
-                            message: _status!,
-                            tone: _statusOk
-                                ? NoticeTone.success
-                                : NoticeTone.warning),
-                      ],
-                      const _GroupLabel('Appearance'),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 8),
-                        child: Wrap(
-                          alignment: WrapAlignment.spaceBetween,
-                          crossAxisAlignment: WrapCrossAlignment.center,
-                          spacing: 12,
-                          runSpacing: 8,
-                          children: [
-                            Text(
-                              'Theme',
-                              style: Theme.of(context).textTheme.bodyMedium,
-                            ),
-                            SegmentedButton<String>(
-                              key: const Key('settings-theme-mode'),
-                              showSelectedIcon: false,
-                              style: SegmentedButton.styleFrom(
-                                textStyle: Theme.of(context)
-                                    .textTheme
-                                    .labelLarge
-                                    ?.copyWith(fontFamily: SonderTheme.sans),
-                              ),
-                              segments: const [
-                                ButtonSegment(
-                                    value: 'light', label: Text('Light')),
-                                ButtonSegment(
-                                    value: 'dark', label: Text('Dark')),
-                                ButtonSegment(
-                                    value: 'system', label: Text('Auto')),
-                              ],
-                              selected: {_themeMode},
-                              onSelectionChanged: (selection) => setState(() {
-                                _themeMode = selection.first;
-                                _dirty = true;
-                              }),
-                            ),
-                          ],
-                        ),
-                      ),
-                      ..._observatoryGroup(context),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-          SafeArea(
-            minimum: const EdgeInsets.fromLTRB(20, 8, 20, 12),
-            child: _Readable(
-              padding: EdgeInsets.zero,
-              child: SizedBox(
-                width: double.infinity,
-                child: FilledButton.icon(
-                  key: const Key('settings-save'),
-                  onPressed: _dirty ? _save : null,
-                  icon: const Icon(Icons.save_outlined),
-                  label: const Text('Save'),
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// The settings column and the Save bar share one reading width.
-class _Readable extends StatelessWidget {
-  final Widget child;
-  final EdgeInsets padding;
-  const _Readable(
-      {required this.child,
-      this.padding = const EdgeInsets.symmetric(horizontal: 20)});
-
-  @override
-  Widget build(BuildContext context) => Center(
-        child: ConstrainedBox(
-          constraints: BoxConstraints(maxWidth: 720 + padding.horizontal),
-          child: Padding(padding: padding, child: child),
         ),
       );
-}
-
-/// A group's name as an eyebrow over a hairline: the settings read as one
-/// column with quiet section breaks, not a stack of cards.
-class _GroupLabel extends StatelessWidget {
-  final String text;
-  final bool first;
-  const _GroupLabel(this.text, {this.first = false});
-
-  @override
-  Widget build(BuildContext context) {
-    final tokens = SonderTokens.of(context);
-    return Padding(
-      padding: EdgeInsets.only(top: first ? 4 : 28, bottom: 12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(text, style: Theme.of(context).textTheme.labelSmall),
-          const SizedBox(height: 8),
-          Divider(height: 1, color: tokens.hairline),
-        ],
+      leadingWidth = 104;
+      actions = [
+        if (widget.onNavigate != null)
+          WorkspaceMenu(
+              current: WorkspaceDestination.settings, onSelected: _navigate),
+      ];
+    }
+    final dirty = _dirty;
+    return CategoryScaffold(
+      title: 'Settings',
+      categories: _categories(),
+      initialId: _initialCategory,
+      leading: leading,
+      leadingWidth: leadingWidth,
+      actions: actions,
+      searchHint: 'Search settings',
+      contentMaxWidth: _contentWidth,
+      navigationKey: const Key('settings-categories'),
+      bottomBar: Builder(
+        builder: (context) {
+          final pages = CategoryNavigator.maybeOf(context);
+          return UnsavedChangesBar(
+            visible: dirty,
+            where: _changedPages,
+            error: _saveError,
+            contentMaxWidth: _contentWidth,
+            onDiscard: _discard,
+            onSave: () => _save(pages),
+          );
+        },
       ),
     );
+  }
+}
+
+/// The plain-HTTP key allowance while Settings checks unsaved values.
+///
+/// "Test connection" and the model list use this screen's unsaved per-host
+/// choice for the host they contact, and only that host: every other host
+/// keeps the saved policy, so requests elsewhere in the app are unaffected.
+/// Overlapping checks share one restore point, and the saved policy comes
+/// back when the last one ends, whatever happened (Save during a check
+/// updates the restore point instead of being undone).
+class _StagedKeyPolicy {
+  final Set<String> Function() _staged;
+  final _hosts = <String, int>{};
+  Set<String>? _restore;
+
+  _StagedKeyPolicy(this._staged);
+
+  Future<T> run<T>(String serverUrl, Future<T> Function() request) async {
+    final host = CleartextKeyPolicy.hostKeyOf(serverUrl);
+    _restore ??= {...CleartextKeyPolicy.allowedHosts};
+    _hosts.update(host, (n) => n + 1, ifAbsent: () => 1);
+    _apply();
+    try {
+      return await request();
+    } finally {
+      final left = _hosts[host]! - 1;
+      if (left == 0) {
+        _hosts.remove(host);
+      } else {
+        _hosts[host] = left;
+      }
+      if (_hosts.isEmpty) {
+        CleartextKeyPolicy.allowOnly(_restore!);
+        _restore = null;
+      } else {
+        _apply();
+      }
+    }
+  }
+
+  /// Settings were saved while checks run: restore to the new policy.
+  void saved(Iterable<String> hosts) {
+    if (_restore == null) return;
+    _restore = {...hosts};
+    _apply();
+  }
+
+  void _apply() {
+    final staged = _staged();
+    final allowed = {..._restore!};
+    for (final host in _hosts.keys) {
+      if (host.isEmpty) continue;
+      allowed.remove(host);
+      if (staged.contains(host)) allowed.add(host);
+    }
+    CleartextKeyPolicy.allowOnly(allowed);
   }
 }

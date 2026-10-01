@@ -163,7 +163,9 @@ class _AsyncActionButtonState extends State<AsyncActionButton> {
       curve: SonderMotion.standard,
       child: Row(mainAxisSize: MainAxisSize.min, children: [
         if (leading != null) ...[leading, const SizedBox(width: SonderSpace.sm)],
-        Text(label),
+        // Flexible, as in Material's own icon buttons: under large text in
+        // a narrow column the label wraps instead of overflowing.
+        Flexible(child: Text(label)),
       ]),
     );
     final Widget button = switch (widget.style) {

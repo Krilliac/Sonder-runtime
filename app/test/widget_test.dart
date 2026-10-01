@@ -1130,6 +1130,12 @@ void main() {
 
   testWidgets('Settings guards unsaved changes before leaving', (tester) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
+    tester.view.physicalSize = const Size(1200, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
     final settings = Settings();
 
     await tester.pumpWidget(
@@ -1149,21 +1155,33 @@ void main() {
       findsNothing,
     );
 
-    await tester.enterText(find.byType(TextField).first, 'http://127.0.0.1:1');
+    await tester.tap(find.byKey(const Key('category-connection')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+        find.byKey(const Key('settings-server-url')), 'http://127.0.0.1:1');
     await tester.pump();
     await tester.tap(find.text('Chat'));
     await tester.pumpAndSettle();
 
     expect(find.text('Discard unsaved settings?'), findsOneWidget);
+    expect(find.text('Changes in Connection have not been saved.'),
+        findsOneWidget);
     await tester.tap(find.text('Keep editing'));
     await tester.pumpAndSettle();
     expect(find.text('Settings'), findsOneWidget);
+    expect(find.text('http://127.0.0.1:1'), findsOneWidget);
   });
 
   testWidgets('Approximate location is explicit opt-in and persists', (
     tester,
   ) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
+    tester.view.physicalSize = const Size(1200, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
     final settings = Settings();
 
     await tester.pumpWidget(
@@ -1173,32 +1191,25 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    final label = find.text('Allow approximate IP location');
-    expect(find.byType(ListView), findsOneWidget);
-    await tester.drag(find.byType(ListView), const Offset(0, -600));
+    await tester.tap(find.byKey(const Key('category-privacy')));
     await tester.pumpAndSettle();
-    expect(label, findsOneWidget);
-    final tile = find.widgetWithText(
-      SwitchListTile,
-      'Allow approximate IP location',
-    );
-    expect(tester.widget<SwitchListTile>(tile).value, isFalse);
+    expect(find.text('Allow approximate location'), findsOneWidget);
+    final toggle = find.byKey(const Key('settings-approximate-location'));
+    expect(tester.widget<Switch>(toggle).value, isFalse);
+    // Nothing is saved, or offered for saving, until a change is made.
+    expect(find.byKey(const Key('settings-save')), findsNothing);
 
-    await tester.ensureVisible(tile);
+    await tester.tap(find.text('Allow approximate location'));
     await tester.pumpAndSettle();
-    await tester.tap(tile);
-    await tester.pump();
-    expect(tester.widget<SwitchListTile>(tile).value, isTrue);
-
-    final save = find.text('Save');
-    await tester.drag(find.byType(ListView), const Offset(0, -700));
-    await tester.pumpAndSettle();
-    expect(save, findsOneWidget);
-    await tester.tap(save);
-    await tester.pumpAndSettle();
-
+    expect(tester.widget<Switch>(toggle).value, isTrue);
     final preferences = await SharedPreferences.getInstance();
+    expect(preferences.getBool('sonder_allow_approximate_location'), isNull);
+
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+
     expect(preferences.getBool('sonder_allow_approximate_location'), isTrue);
+    expect(find.byKey(const Key('settings-save')), findsNothing);
   });
 
   testWidgets(
