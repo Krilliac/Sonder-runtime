@@ -905,7 +905,7 @@
       ]
     },
     {
-      "file_count": 267,
+      "file_count": 268,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -922,6 +922,7 @@
         "sonder_runtime/domain/agents/decision_parsing.py",
         "sonder_runtime/domain/agents/evidence_quality.py",
         "sonder_runtime/domain/agents/observation_prompt.py",
+        "sonder_runtime/domain/agents/policy_refusal_guard.py",
         "sonder_runtime/domain/agents/roles.py",
         "sonder_runtime/domain/agents/tool_naming.py",
         "sonder_runtime/domain/agents/verification_reach.py",
