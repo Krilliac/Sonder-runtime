@@ -25,7 +25,15 @@ jobs:
     steps:
       - name: Enable squash auto-merge
         env:
-          GH_TOKEN: ${{ github.token }}
+          # The merge GitHub performs for auto-merge is pushed as whoever
+          # enabled it. Enabled with this workflow's GITHUB_TOKEN, that push
+          # starts no workflows, so `ci` stopped running on main after
+          # bot-enabled merges (none from 2026-09-30 15:31Z). An owner token
+          # in the AUTO_MERGE_TOKEN secret (fine-grained PAT or App token with
+          # Contents + Pull requests write on this repository only) makes the
+          # merge an ordinary push that runs CI. Without the secret this falls
+          # back to the old token, so auto-merge itself never breaks.
+          GH_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN || github.token }}
         run: gh pr merge ${{ github.event.pull_request.number }} --auto --squash --repo ${{ github.repository }}
 
   disable-auto-merge:
@@ -41,5 +49,6 @@ jobs:
     steps:
       - name: Disable auto-merge
         env:
-          GH_TOKEN: ${{ github.token }}
+          # Same actor as enable-auto-merge (see the note there).
+          GH_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN || github.token }}
         run: gh pr merge ${{ github.event.pull_request.number }} --disable-auto --repo ${{ github.repository }}
