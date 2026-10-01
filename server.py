@@ -13153,7 +13153,7 @@ def workspace_run(
     except Exception as exc:
         _record_direct_tool("workspace_run", args, ok=False, started=started, summary=str(exc))
         return "ERROR: %s" % exc
-    output = _format_run_result("workspace run", data)
+    output = _format_run_result("workspace run", data, digest=True)
     _record_direct_tool(
         "workspace_run", args, ok=data["ok"], started=started,
         summary="exit %s" % data.get("returncode"),
@@ -14096,14 +14096,13 @@ def script_run(
     except Exception as exc:
         _record_direct_tool("script_run", args, ok=False, started=started, summary=str(exc))
         return "ERROR: %s" % exc
-    output = (
-        "artifact risk: %s\n%s\n%s"
+    output = _format_run_result("script run", data, digest=True, context=(
+        "artifact risk: %s\n%s"
         % (
             artifact_risk_module.format_result(risk),
             "execution allowed by effective policy %s" % risk.get("policy", "off"),
-            _format_run_result("script run", data),
         )
-    )
+    ))
     _record_direct_tool(
         "script_run", args, ok=data["ok"], started=started,
         summary="exit %s" % data.get("returncode"),
@@ -14573,7 +14572,7 @@ def run_code(
             evidence={"error": str(e)},
         )
         return "ERROR: %s" % e
-    output = code_runner.format_result(result)
+    output = _format_run_result("code run", dict(result, elapsed_ms=int((time.time() - started) * 1000)), digest=True)
     _record_direct_tool(
         "run_code",
         {"language": language, "timeout": timeout},

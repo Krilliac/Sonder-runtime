@@ -107,7 +107,8 @@ def test_enforcing_policy_refuses_runner_without_exact_handoff(tmp_path, monkeyp
     assert calls == []
 
 
-def test_script_run_report_includes_risk_before_execution(tmp_path, monkeypatch):
+@pytest.mark.parametrize("stdout", ["ok\n", "x" * 4990 + "\nok\n"], ids=["short", "near-window"])
+def test_script_run_report_includes_risk_before_execution(tmp_path, monkeypatch, stdout):
     root = _root(tmp_path, monkeypatch)
     path = root / "safe.py"
     path.write_text("print('ok')", encoding="utf-8")
@@ -115,15 +116,24 @@ def test_script_run_report_includes_risk_before_execution(tmp_path, monkeypatch)
     monkeypatch.setattr(
         server.workbench, "run_script",
         lambda *a, **k: {"ok": True, "returncode": 0, "command": ["python", str(path)],
-                         "stdout": "ok\n", "stderr": "", "timed_out": False,
+                         "stdout": stdout, "stderr": "", "timed_out": False,
                          "truncated": False, "duration_ms": 1},
     )
 
     output = server.script_run(str(path), risk_policy="off")
 
-    assert output.startswith("artifact risk: {")
-    assert '"policy":"report"' in output
-    assert "script run" in output
+    # Only the exit line may precede the risk assessment, and the assessment is
+    # whole however much the script printed: the run's own fields, its digest
+    # and its output all follow it.
+    verdict, risk, policy, rest = output.split("\n", 3)
+    assert verdict == "exit 0 (ok, 0.000 s)"
+    assert risk.startswith("artifact risk: {")
+    report = json.loads(risk[len("artifact risk: "):])
+    assert (report["policy"], report["risk"]) == ("report", "none_detected")
+    assert policy == "execution allowed by effective policy report"
+    assert rest.startswith("script run\n  command: ")
+    assert rest.index("\n  ok: True\n") < rest.index("\ndigest:\n") < rest.index("\nstdout:\n")
+    assert len(output) <= 6000
 
 
 def test_manifest_help_autopilot_and_reload_contract():
