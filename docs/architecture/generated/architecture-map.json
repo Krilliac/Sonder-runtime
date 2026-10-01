@@ -38,12 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 0,
-      "name": "__pycache__",
-      "python_files": []
-    },
-    {
-      "file_count": 388,
+      "file_count": 389,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -61,6 +56,7 @@
         "sonder_runtime/adapters/admin_formatting.py",
         "sonder_runtime/adapters/agent_call_signature.py",
         "sonder_runtime/adapters/agent_decision_generation.py",
+        "sonder_runtime/adapters/agent_generation_budget.py",
         "sonder_runtime/adapters/agent_terminal_evidence.py",
         "sonder_runtime/adapters/agent_work_coverage.py",
         "sonder_runtime/adapters/application_lifecycle.py",
@@ -910,7 +906,7 @@
       ]
     },
     {
-      "file_count": 268,
+      "file_count": 270,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -928,7 +924,9 @@
         "sonder_runtime/domain/agents/evidence_quality.py",
         "sonder_runtime/domain/agents/file_page_rendering.py",
         "sonder_runtime/domain/agents/observation_prompt.py",
+        "sonder_runtime/domain/agents/policy_refusal_guard.py",
         "sonder_runtime/domain/agents/roles.py",
+        "sonder_runtime/domain/agents/sampling_policy.py",
         "sonder_runtime/domain/agents/tool_naming.py",
         "sonder_runtime/domain/agents/verification_reach.py",
         "sonder_runtime/domain/approval.py",
