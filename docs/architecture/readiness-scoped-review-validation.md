@@ -2,8 +2,14 @@
 
 First verified on 2026-09-29 against base `45a3e093aa423c3a23f9e356419972d2332015e5`.
 Re-verified on 2026-10-01 after merging `origin/main` `dc6066101c148405742f0784d17b5f8ffc3c7012`
-into `feat/readiness-fanin-scoped-review`. The table compares that main with the
-merged branch. Measurements that were only taken on the original base say so.
+into `feat/readiness-fanin-scoped-review` (branch commit `515328ac`). The table
+and the full-suite parity compare that main with that commit. Measurements that
+were only taken on the original base say so.
+
+A later merge of main `f085be48` (#619) touched autopilot code only. On that merge
+the gates, the risk sweep (344, 0 changes), the tool-surface comparison (216,
+0 changes) and the focused suites were re-run, with #619's three autopilot test
+files added. `server.py` is then 26915 lines on main and 26883 on this branch.
 
 ## Measured scope
 
