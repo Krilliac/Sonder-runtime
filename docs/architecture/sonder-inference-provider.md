@@ -41,8 +41,9 @@ the operator to set `SONDER_EMBEDDING_PROVIDER=ollama`.
 
 ## Configuration
 
-Read lazily on every call (like `SONDER_OPENAI_*`); nothing is read at import
-or construction.
+Provider configuration is read lazily on every call (like `SONDER_OPENAI_*`).
+Agent generation controls below are frozen at generator construction so a
+task does not switch thinking or sampling modes between decisions.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -58,6 +59,30 @@ or construction.
 | `SONDER_INFERENCE_THINKING` | `auto` | Forward `think` as `chat_template_kwargs.enable_thinking`: `auto` (when the health document advertises it), `on`, `off`. |
 | `SONDER_INFERENCE_SAMPLING_DEFAULTS` | `0` | `1` fills the model family's recommended sampling values for fields the caller left unset. |
 | `SONDER_INFERENCE_SAMPLING_TABLE` | unset | JSON list replacing the built-in sampling family table. |
+| `SONDER_AGENT_NUM_PREDICT` | `4096` | Decision output cap for `sonder_inference`, including hidden reasoning. Positive integer, capped at 8192; invalid/nonpositive values use 4096. Ollama decisions retain 1200; hosted agent budgets retain their existing separate policy. |
+| `SONDER_AUTOPILOT_JSON_NUM_PREDICT` | `4096` | Planner/reviewer JSON output cap for `sonder_inference`, with the same validation and 8192 ceiling. Ollama retains 1800. |
+| `SONDER_AGENT_TEMPERATURE` | `0.1` | Agent decision temperature on `sonder_inference`; finite number from 0 to 2. Does not change other providers or ordinary helper calls. |
+| `SONDER_AGENT_SAMPLING` | unset | Optional `top_p,top_k,min_p` triple, for example `0.95,20,0`. Applied only to agent decisions on thinking-capable providers (currently `sonder_inference`). Probability values must be in [0,1]; top_k must be a nonnegative integer. |
+| `SONDER_AGENT_DECISION_THINKING` | `on` | `on`/`off` request explicit thinking only when this provider's health advertises support; `auto` leaves the serving template's default. The health decision is frozen at construction. Missing support sends no override. |
+| `SONDER_AUTOPILOT_JSON_THINK` | `auto` | Planner/reviewer `off`/`on`/`auto`. `auto` requests off only when health advertises thinking; otherwise no override. Ollama is unchanged. |
+
+The agent controls are limited to the decision and planner/reviewer entrypoints;
+changing them does not retune chat, learning, summaries or other tier helpers.
+Malformed sampling, temperature or thinking settings fail explicitly on those
+Inference entrypoints. Ollama and other providers do not read those settings.
+Use one configuration per experiment/run; a running decision generator keeps
+its initial settings even if the process environment changes.
+
+The request tuning module also exposes an explicit `decision` sampling profile:
+thinking temperature 0.6, top_p 0.95, top_k 20, min_p 0;
+non-thinking temperature 0.7, top_p 0.8, top_k 20. Agent decisions select that
+profile when `SONDER_INFERENCE_SAMPLING_DEFAULTS=1`, filling only unset values.
+With no explicit thinking override, the decision row assumes thinking.
+It does not replace the historical 0.1 agent temperature;
+use the agent environment controls above for E06/E12 sampling experiments.
+The bridge carries boolean `think` and explicit `reasoning_budget_tokens` /
+`reasoning_budget_message` options to the provider gateway; server-side support
+and gateway mapping determine whether those reasoning controls are honored.
 
 Base URL resolution order: `SONDER_INFERENCE_BASE_URL`, then the ready file,
 then the default. Invalid values (unknown tier keys, non-numeric timeouts,
