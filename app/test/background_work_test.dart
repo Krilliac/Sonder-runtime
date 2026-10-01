@@ -3,10 +3,10 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
-import '../lib/background_work.dart';
-import '../lib/chat/commands.dart';
-import '../lib/models.dart';
-import '../lib/api.dart';
+import 'package:sonder_runtime/background_work.dart';
+import 'package:sonder_runtime/chat/commands.dart';
+import 'package:sonder_runtime/models.dart';
+import 'package:sonder_runtime/api.dart';
 
 void main() {
   for (final kind in ['fleet', 'autopilot']) {
