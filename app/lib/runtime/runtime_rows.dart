@@ -144,7 +144,11 @@ class RuntimeRow extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Row(
-                      crossAxisAlignment: CrossAxisAlignment.baseline,
+                      // A status mark shares the title's baseline; a custom
+                      // leading (an icon, a time) centres on its line.
+                      crossAxisAlignment: leading == null
+                          ? CrossAxisAlignment.baseline
+                          : CrossAxisAlignment.center,
                       textBaseline: TextBaseline.alphabetic,
                       children: [
                         if (mark != null)

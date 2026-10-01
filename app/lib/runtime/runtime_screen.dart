@@ -458,9 +458,14 @@ class _RuntimeScreenState extends State<RuntimeScreen>
   }
 
   /// Polls only while this page is the visible route: a route pushed on
-  /// top (or a dialog) pauses them, like a backgrounded app does.
+  /// top (or a dialog) pauses them, like a backgrounded app does, and so
+  /// does an app shell that keeps Runtime alive behind another destination.
   bool get _visible {
     if (!mounted) return false;
+    final shell = context.getInheritedWidgetOfExactType<ShellScope>();
+    if (shell != null && shell.current != WorkspaceDestination.runtime) {
+      return false;
+    }
     final route = ModalRoute.of(context);
     return route == null || route.isCurrent;
   }
@@ -624,6 +629,9 @@ class _RuntimeScreenState extends State<RuntimeScreen>
       return ActionOutcome.ok(title ?? command, output: reply, word: 'done');
     } on SonderException catch (e) {
       return ActionOutcome.failed('$command failed', detail: e.message);
+    } catch (e) {
+      // Whatever went wrong, the entry that sent it must stop "working".
+      return ActionOutcome.failed('$command failed', detail: '$e');
     }
   }
 

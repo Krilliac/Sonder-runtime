@@ -1491,6 +1491,51 @@ void main() {
     }, () => client);
   });
 
+  testWidgets('polls pause while the shell shows another destination',
+      (tester) async {
+    var statusReads = 0;
+    final client = MockClient((request) async {
+      if (request.url.path == '/v1/sonder/status') {
+        statusReads++;
+        return http.Response('{"status": "ready", "models": []}', 200);
+      }
+      return http.Response('{}', 404);
+    });
+    Future<void> wait(Duration total) async {
+      for (var elapsed = Duration.zero;
+          elapsed < total;
+          elapsed += const Duration(milliseconds: 500)) {
+        await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 5)));
+        await tester.pump(const Duration(milliseconds: 500));
+      }
+    }
+
+    final screen = RuntimeScreen(
+        key: const ValueKey('runtime'),
+        settings: Settings(serverUrl: 'http://127.0.0.1:11435'));
+    Widget shell(WorkspaceDestination current) => MaterialApp(
+          home: ShellScope(
+            current: current,
+            sidebarVisible: true,
+            navigate: (_) {},
+            openNavigation: () {},
+            child: screen,
+          ),
+        );
+    await http.runWithClient(() async {
+      await tester.pumpWidget(shell(WorkspaceDestination.chat));
+      await settleLive(tester);
+      final hidden = statusReads;
+      await wait(const Duration(seconds: 8));
+      expect(statusReads, hidden, reason: 'kept alive behind Chat: no polls');
+      await tester.pumpWidget(shell(WorkspaceDestination.runtime));
+      await wait(const Duration(seconds: 6));
+      expect(statusReads, greaterThan(hidden), reason: 'shown: polls again');
+      await tester.pumpWidget(const SizedBox());
+    }, () => client);
+  });
+
   testWidgets('polls stop while the app is paused or a route covers Runtime',
       (tester) async {
     var statusReads = 0;
