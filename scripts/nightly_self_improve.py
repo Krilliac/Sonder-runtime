@@ -171,6 +171,21 @@ def _local_ollama_json(server, path: str, payload: dict | None, timeout: float):
 
 def _prewarm_code_model(server, timeout_seconds: int = 60) -> str:
     """Exercise the local chat route self-mod actually uses, then confirm residency."""
+    provider = getattr(server, "_bridge_provider_for_tier", lambda _tier: None)("code")
+    if provider is not None:
+        from sonder_runtime.adapters.tier_generation import local_only
+
+        try:
+            with local_only():
+                response = server._generate_text(
+                    "Reply READY.", tier="code", num_predict=32,
+                    timeout=max(60, int(timeout_seconds or 60)),
+                )
+            if not str(response or "").strip():
+                raise _CodeModelUnavailable("bound code provider returned no readiness response")
+            return "ready provider=%s" % provider
+        except Exception as exc:
+            raise _CodeModelUnavailable("bound code provider readiness probe failed: %s" % str(exc)[:160]) from exc
     model = str(getattr(server, "TIERS", {}).get("code") or "").strip()
     if not model:
         raise _CodeModelUnavailable("code tier has no configured model")

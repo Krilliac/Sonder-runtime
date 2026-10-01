@@ -486,6 +486,14 @@ where no stronger programmable interface exists.
 
 ## Verification record
 
+- 2026-09-30 provider-routing follow-up: tier bindings now cover agent,
+  workbench, autopilot, master/fleet and audit/helper model calls; local agent
+  and fleet calls use bounded pool admission
+  (`SONDER_POOL_ADMISSION_TIMEOUT_SECONDS`, default 30 seconds) while
+  interactive chat/offload retain the one-second fail-fast bound. Focused
+  local checks are pending integration with the full suite and live provider
+  qualification.
+
 - PR #554 merged as `5b4951e8891ad2fde0615cf59ce14ab6bf583033` after
   exact published head `1254e5d3149c13cced9c4191f041a73697ddbf10` passed
   Linux CI, Windows-focused tests, installer-owned runtime qualification,

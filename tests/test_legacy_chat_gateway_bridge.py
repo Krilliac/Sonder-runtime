@@ -435,27 +435,49 @@ def test_drain_during_a_bridged_call_lets_the_turn_finish(monkeypatch, no_ollama
     assert len(base.sent) == 1
 
 
-def test_http_web_research_on_a_bound_tier_fails_closed(monkeypatch, no_ollama):
-    """The research agent only runs on Ollama; a bound tier gets a 503 naming it."""
+def test_http_web_research_passes_bound_tier_to_provider_aware_agent(monkeypatch, no_ollama):
+    """The text tool loop now routes its own resolved tier through the bridge."""
     transport = _openai_transport()
     _install(monkeypatch, _graph(transport))
     monkeypatch.setattr(server.web_tools, "enabled", lambda: True)
-    monkeypatch.setattr(server, "_agent_impl",
-                        lambda *a, **k: pytest.fail("the Ollama agent ran for a bound tier"))
+    seen = []
+    def agent(task, **kwargs):
+        seen.append(kwargs["tier"])
+        return "researched"
+    monkeypatch.setattr(server, "_agent_impl", agent)
     with _http(monkeypatch, stub_web=False) as port:
         status, _headers, payload = _post_chat(port, {
             "model": "sonder",
             "messages": [{"role": "user", "content": "search the web for the latest python release"}],
         })
-    assert status == 503, payload
-    message = json.loads(payload)["error"]["message"]
-    assert "openai_compatible" in message and "'code'" in message
+    assert status == 200, payload
+    assert json.loads(payload)["choices"][0]["message"]["content"] == "researched"
+    assert seen == ["code"]
     assert transport.sent == [] and no_ollama == []
 
 
-def test_web_research_keeps_its_ollama_route_outside_http(monkeypatch, no_ollama):
-    """REPL and MCP call chat_web_response without gateway_bound (documented)."""
+def test_web_research_uses_the_same_agent_entrypoint_outside_http(monkeypatch, no_ollama):
+    """REPL and MCP share the provider-aware text tool loop."""
     _install(monkeypatch, _graph(_openai_transport()))
     monkeypatch.setattr(server.web_tools, "enabled", lambda: True)
     monkeypatch.setattr(server, "_agent_impl", lambda task, **k: "researched")
     assert server.chat_web_response("search the web for the latest python release") == "researched"
+
+
+def test_mcp_repl_chat_binds_its_resolved_tier_too(monkeypatch, no_ollama):
+    transport = _openai_transport()
+    _install(monkeypatch, _graph(transport))
+
+    # Keep retrieval/capture out of this transport test. Exercise the actual
+    # generator construction and request bridge inside the legacy answer seam.
+    def answer(conn, prompt, model, system, temperature, num_predict, num_ctx,
+               session, project, history, **kwargs):
+        gen = server._make_generate(model, system, temperature, num_predict, num_ctx)
+        return gen(prompt, history), None, {}
+
+    monkeypatch.setattr(server, "_answer", answer)
+    monkeypatch.setattr(server, "_gate_answer_code", lambda response, **kwargs: (response, None, False, {}))
+    result = server._sonder_impl_serialized("Hello", tier="general", session="none", project="none")
+    assert "provider answer" in result
+    assert len(transport.sent) == 1
+    assert no_ollama == []

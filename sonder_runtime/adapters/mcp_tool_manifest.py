@@ -80,6 +80,7 @@ MCP_TOOL_MANIFEST = {
     "context_health/diagnostics/live_reload_status/status/unload": "Observe and manage runtime health.",
     "record_outcome": "Feed grounded outcomes back into learning.",
     "sonder_stats/sonder_sessions/sonder_remember_fact/sonder_forget_fact": "Memory observability and durable facts.",
+    "playbook_note/playbook_read": "Write proposed owner-curated Markdown playbook notes or read approved topic entries.",
 }
 
 
