@@ -2358,6 +2358,34 @@
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "max_items": {
+            "default": 30,
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "file_check",
+      "surfaces": {
+        "cli": "file_check",
+        "client": "file_check",
+        "mcp": "file_check",
+        "openai": "file_check"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
           "destination": {
             "minLength": 1,
             "type": "string"
@@ -3327,6 +3355,39 @@
         "client": "text_search",
         "mcp": "text_search",
         "openai": "text_search"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "oneOf": [
+          {
+            "required": [
+              "name"
+            ]
+          },
+          {
+            "required": [
+              "query"
+            ]
+          }
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "tool_help",
+      "surfaces": {
+        "cli": "tool_help",
+        "client": "tool_help",
+        "mcp": "tool_help",
+        "openai": "tool_help"
       }
     },
     {

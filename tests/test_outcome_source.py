@@ -340,6 +340,37 @@ def test_learning_health_reports_the_unknown_population_rather_than_hiding_it():
     assert report["reviewed_outcomes"] == 0
 
 
+def test_the_rendered_report_states_the_real_split_and_the_unplaced_rows():
+    """The operator reads the text, not the dict.
+
+    The rendered view kept the pre-#62 footnote -- "split inferred from signal
+    name, not a recorded source: record_outcome callers who use tests_passed
+    ... land in the autograded bucket" -- after the split began reading
+    `outcomes.source`. It told a reader to distrust an exact split, and it said
+    nothing about the rows that split cannot place, which the dict published.
+    """
+    conn = _conn()
+    for n in range(5):
+        _interaction(conn, "u%d" % n)
+        conn.execute(
+            "INSERT INTO outcomes(interaction_id, signal, reward, source) "
+            "VALUES(?, 'accepted', 0.8, 'unknown')",
+            ("u%d" % n,),
+        )
+    # The old footnote's own example: a caller who ran the tests and said so.
+    _interaction(conn, "c0")
+    ms.record_outcome_row(conn, "c0", "tests_passed", 1.0, source="caller")
+    conn.commit()
+    text = learning_health.format_report(learning_health.build_report(conn))
+    assert "inferred from signal name" not in text
+    assert "reviewed (judged by a caller): 1 |" in text
+    assert "autograded (runtime marking its own curriculum): 0 |" in text
+    assert (
+        "legacy/unknown provenance (no recorded source; in neither bucket): 5"
+        in text
+    )
+
+
 # --- writers ----------------------------------------------------------------
 
 
@@ -388,6 +419,34 @@ def test_the_runtime_code_gate_negative_writes_machine(tmp_path, monkeypatch):
     ).fetchone()[0] == "machine"
 
 
+def test_the_schema_gate_rejection_writes_machine_and_feeds_eviction(
+    tmp_path, monkeypatch,
+):
+    """Same shape as the code gate: an exact link, host-checked, unjudged.
+
+    It went through the heuristic attribution writer's default and was filed
+    `attributed`, which also exempted it from the eviction gate that every
+    exact machine verdict feeds.
+    """
+    import server
+
+    path = tmp_path / "srv-schema.db"
+    monkeypatch.setattr(server, "_DB_PATH", str(path))
+    conn = ms.connect(path)
+    _interaction(conn, "schema-1")
+    ms.add_lesson(conn, "L1", "a lesson", None, "src")
+    ms.log_lesson_usage(conn, ["L1"], "schema-1", "the task")
+    conn.close()
+
+    server._file_schema_rejection("schema-1")
+
+    conn = ms.connect(path)
+    assert tuple(conn.execute(
+        "SELECT signal, source FROM outcomes WHERE interaction_id='schema-1'"
+    ).fetchone()) == ("rejected", "machine")
+    assert ms.lesson_usage_stats(conn)["L1"]["losses_since_win"] == 1
+
+
 # --- item 5: the bypass, now that provenance exists -------------------------
 
 
@@ -395,7 +454,7 @@ def test_the_attribution_writer_now_credits_lesson_usage(tmp_path, monkeypatch):
     """`_record_outcome_signal` skipped the lesson_usage credit entirely.
 
     With provenance it can route through the wrapper: the credit is recorded
-    and tagged `machine`, and the eviction gate filters it out.
+    and tagged `attributed`, and the eviction gate filters it out.
     """
     import server
 
