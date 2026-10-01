@@ -192,6 +192,23 @@ def _read_tool(
 # Initial shadow slice.  Grow this only as each descriptor can be checked against
 # every authoritative surface; absence from this mapping does not deny a tool.
 _DESCRIPTORS = (
+    ToolCapability(
+        name="tool_help", effect=Effect.READ_ONLY, visibility=_ALL_VISIBILITY,
+        permission=Permission.NONE, root=RootRequirement.NONE,
+        network=NetworkRequirement.NONE, cloud=CloudRequirement.ALLOWED,
+        secret_policy=SecretPolicy.NO_SECRET_INPUT,
+        execution_mode=ExecutionMode.IN_PROCESS, resources=frozenset({ResourceClass.CPU}),
+    ),
+    ToolCapability(
+        # Runs subprocess checkers (HOST_EXECUTION), so it is not on the
+        # read-only repository-agent surface; full agents and MCP only.
+        name="file_check", effect=Effect.READ_ONLY,
+        visibility=frozenset({Visibility.DIRECT_MCP, Visibility.FULL_AGENT}),
+        permission=Permission.HOST_EXECUTION, root=RootRequirement.GUARDED_SCOPE,
+        network=NetworkRequirement.NONE, cloud=CloudRequirement.LOCAL_ONLY,
+        secret_policy=SecretPolicy.CALLER_MUST_REDACT,
+        execution_mode=ExecutionMode.MIXED, resources=_READ_RESOURCES,
+    ),
     _read_tool(
         "environment_status", root=RootRequirement.NONE,
         resources=frozenset({ResourceClass.CPU, ResourceClass.RAM}),
@@ -469,8 +486,10 @@ def validate_shadow(
             errors.append("%s: required network is missing network resource class" % row.name)
         if row.root is RootRequirement.NONE and row.permission is Permission.GUARDED_READ:
             errors.append("%s: rootless tool cannot require a guarded project read" % row.name)
-        if row.root is RootRequirement.GUARDED_SCOPE and row.permission is not Permission.GUARDED_READ:
-            errors.append("%s: guarded root scope requires guarded-read permission" % row.name)
+        if row.root is RootRequirement.GUARDED_SCOPE and row.permission not in {
+            Permission.GUARDED_READ, Permission.HOST_EXECUTION,
+        }:
+            errors.append("%s: guarded root scope requires guarded-read or host-execution permission" % row.name)
     return tuple(sorted(errors))
 
 

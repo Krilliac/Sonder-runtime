@@ -4,6 +4,8 @@ from __future__ import annotations
 
 
 def project_scoped_path_key(tool_name):
+    if tool_name == "file_check":
+        return "path"
     if tool_name == "ensemble_codegen_build_loop":
         return "project_dir"
     if tool_name == "archive_extract":
