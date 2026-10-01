@@ -22,6 +22,7 @@ Two operator concerns on a single consumer GPU (16 GB class):
 from __future__ import annotations
 
 import os
+import urllib.parse
 from collections.abc import Callable, Mapping
 
 from ...domain import ollama_policy
@@ -31,12 +32,47 @@ from ..provider_bindings import PROVIDER_TIERS
 
 ENV_KEEP_PRIMARY_RESIDENT = "SONDER_KEEP_PRIMARY_RESIDENT"
 ENV_EMBED_ON_CPU = "SONDER_EMBED_ON_CPU"
+ENV_EMBED_BASE_URL = "SONDER_EMBED_BASE_URL"
+# Ollama's own switch that restricts its GPU discovery to one backend library.
+# ``cpu`` makes the daemon find no GPU at all (0.34.4, 2026-09-30: `ollama ps`
+# reports 100% CPU for every model and nvidia-smi does not move), so nothing
+# it loads can share the card with a local Sonder Inference server.
+ENV_OLLAMA_LLM_LIBRARY = "OLLAMA_LLM_LIBRARY"
 RESIDENT_KEEP_ALIVE = -1  # a JSON number: Ollama reads a negative value as "forever"
 _ON = frozenset({"1", "true", "yes", "on"})
 
 
 def _enabled(env: Mapping[str, str], name: str) -> bool:
     return str(env.get(name, "") or "").strip().lower() in _ON
+
+
+def local_ollama_pinned_to_cpu(env: Mapping[str, str] | None = None) -> bool:
+    """Whether OLLAMA_LLM_LIBRARY=cpu keeps the local daemon off every GPU.
+
+    Read from this process's environment, which on a workstation is the same
+    User environment the daemon inherits; a daemon started before the value
+    was set still has to be restarted, which the doctor detail says.
+    """
+    source = os.environ if env is None else env
+    return str(source.get(ENV_OLLAMA_LLM_LIBRARY, "") or "").strip().lower() == "cpu"
+
+
+def _embedder_loads_locally(env: Mapping[str, str]) -> bool:
+    """False when SONDER_EMBED_BASE_URL sends embeddings to another host.
+
+    A dedicated endpoint on a loopback address is still this machine's GPU.
+    The opt-in local fallback forces ``num_gpu: 0``, so it never counts.
+    """
+    raw = str(env.get(ENV_EMBED_BASE_URL, "") or "").strip()
+    if not raw:
+        return True
+    try:
+        host = urllib.parse.urlparse(ollama_policy.normalize(raw)).hostname
+    except ValueError:
+        return True
+    if not host:  # an unparsable origin is not provably remote
+        return True
+    return ollama_policy.is_loopback(raw)
 
 
 def keep_primary_resident(env: Mapping[str, str] | None = None) -> bool:
@@ -84,7 +120,38 @@ def local_ollama_tier_models(env: Mapping[str, str], bindings) -> dict[str, str]
 
 
 def gpu_sharing_findings(env: Mapping[str, str], bindings, *, inference_local: bool) -> list[str]:
-    """Plain statements of what would share the GPU with a local Inference."""
+    """Plain statements of what would share the GPU with a local Inference.
+
+    Nothing local Ollama loads can share the card while it is pinned to the
+    CPU library (``OLLAMA_LLM_LIBRARY=cpu``); see :func:`gpu_sharing_report`
+    for the statement the doctor prints in that case.
+    """
+    if local_ollama_pinned_to_cpu(env):
+        return []
+    return _contenders(env, bindings, inference_local=inference_local)
+
+
+def gpu_sharing_report(env: Mapping[str, str], bindings, *, inference_local: bool) -> dict:
+    """``{"findings": [...], "note": str}`` for the doctor.
+
+    ``findings`` is what :func:`gpu_sharing_findings` returns. ``note`` is a
+    single statement when OLLAMA_LLM_LIBRARY=cpu suppressed contenders: it
+    names them, so a daemon that was never restarted after the variable was
+    set is still visible to the operator.
+    """
+    contenders = _contenders(env, bindings, inference_local=inference_local)
+    if not local_ollama_pinned_to_cpu(env):
+        return {"findings": contenders, "note": ""}
+    note = "local Ollama is pinned to the CPU library (%s=cpu)" % ENV_OLLAMA_LLM_LIBRARY
+    if contenders:
+        note += (
+            ", so these cannot take the GPU (restart the daemon if it predates "
+            "the setting): %s" % "; ".join(contenders)
+        )
+    return {"findings": [], "note": note}
+
+
+def _contenders(env: Mapping[str, str], bindings, *, inference_local: bool) -> list[str]:
     findings: list[str] = []
     inference_tiers = sorted(
         tier for tier in PROVIDER_TIERS
@@ -101,6 +168,7 @@ def gpu_sharing_findings(env: Mapping[str, str], bindings, *, inference_local: b
                    ", ".join(inference_tiers))
             )
         if (bindings.embedding_provider == "ollama" and _local_ollama(env)
+                and _embedder_loads_locally(env)
                 and not _enabled(env, ENV_EMBED_ON_CPU)):
             findings.append(
                 "the Ollama embedder loads on the GPU beside the Sonder "
@@ -116,11 +184,15 @@ def gpu_sharing_findings(env: Mapping[str, str], bindings, *, inference_local: b
 
 
 __all__ = [
+    "ENV_EMBED_BASE_URL",
     "ENV_EMBED_ON_CPU",
     "ENV_KEEP_PRIMARY_RESIDENT",
+    "ENV_OLLAMA_LLM_LIBRARY",
     "RESIDENT_KEEP_ALIVE",
     "gpu_sharing_findings",
+    "gpu_sharing_report",
     "keep_alive_for",
     "keep_primary_resident",
+    "local_ollama_pinned_to_cpu",
     "local_ollama_tier_models",
 ]

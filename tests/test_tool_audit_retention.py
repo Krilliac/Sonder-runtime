@@ -8,6 +8,7 @@ pruning off, a full retention quota fails the call closed instead.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -139,6 +140,55 @@ def test_pruning_marker_exists_before_a_chain_is_deleted(tmp_path, monkeypatch):
 
     assert observed == [True]
     assert not oldest.exists()
+
+
+def _freeze_rotation_clock(monkeypatch, stamp="20260930T190000Z"):
+    """Every rotation in the test lands in the same UTC second."""
+    monkeypatch.setattr(tool_audit.time, "strftime", lambda fmt, t=None: stamp)
+
+
+def test_pruning_order_survives_same_second_rotations_and_equal_mtimes(tmp_path, monkeypatch):
+    """Rotations inside one second are `audit.<stamp>.jsonl`, `.1`, `.2`, ...;
+    on a coarse file clock (Windows ticks every ~15 ms) their mtimes tie too.
+    Retention must still prune the OLDEST chain, never a newer one."""
+    _freeze_rotation_clock(monkeypatch)
+    repository = DurableToolAuditRepository(
+        tmp_path / "audit.jsonl",
+        limits=ToolAuditLimits(max_records=1, max_rotated_files=2),
+    )
+    for index in range(8):
+        for path in tmp_path.glob("audit*.jsonl"):
+            os.utime(path, ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
+        repository.append(_request(index), _receipt(index))
+
+    kept = [p.read_text(encoding="utf-8") for p in repository.rotated_files()]
+    assert len(kept) == 2
+    assert "request-5" in kept[0] and "request-6" in kept[1]
+    assert not any("request-0" in text for text in kept)
+
+
+def test_rotated_files_are_ordered_by_rotation_not_by_name_text(tmp_path):
+    repository = DurableToolAuditRepository(tmp_path / "audit.jsonl")
+    stamp = "20260930T190000Z"
+    names = ["audit.%s.jsonl" % stamp] + ["audit.%s.%d.jsonl" % (stamp, i) for i in range(1, 12)]
+    names.append("audit.20260930T190001Z.jsonl")
+    for name in reversed(names):  # creation order is deliberately backwards
+        (tmp_path / name).write_text(name + "\n", encoding="utf-8")
+    assert [p.name for p in repository.rotated_files()] == names
+
+
+def test_rotation_never_reuses_a_pruned_name_within_one_second(tmp_path, monkeypatch):
+    """A freed lower index must not be handed to a newer chain, or the name
+    order stops meaning the rotation order."""
+    _freeze_rotation_clock(monkeypatch)
+    repository = DurableToolAuditRepository(
+        tmp_path / "audit.jsonl",
+        limits=ToolAuditLimits(max_records=1, max_rotated_files=2),
+    )
+    _append(repository, 6)
+    assert [p.name for p in repository.rotated_files()] == [
+        "audit.20260930T190000Z.3.jsonl", "audit.20260930T190000Z.4.jsonl",
+    ]
 
 
 def test_retention_ignores_files_it_did_not_rotate(tmp_path):
