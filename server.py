@@ -20149,7 +20149,7 @@ _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS = frozenset({
 # ceilings are derived from the same number (batch_coalescing.AGENT_STEP_CEILING).
 _AGENT_MAX_STEPS_CEILING = 20
 # Characters of one tool observation shown to the model in the agent loop.
-_AGENT_MODEL_OBSERVATION_CHARS = 6000
+_AGENT_MODEL_OBSERVATION_CHARS = 8000
 # Batch results with one section per target, keyed by tool: their model view
 # gives every section an equal share of the budget instead of a head slice.
 _AGENT_SECTIONED_OBSERVATION_PREFIXES = {
@@ -20160,7 +20160,7 @@ _AGENT_SECTIONED_OBSERVATION_PREFIXES = {
 def _agent_model_observation_view(tool_name, text):
     """Model-facing view of one tool observation; the host keeps the full text.
 
-    Ordinary observations keep their head slice.  A sectioned batch result
+    Ordinary observations keep a marked head and tail. A sectioned batch result
     (one ``context_pack`` holding several files) is fitted so every file stays
     visible with a marked clip, because a head slice would silently hide every
     file after the first few thousand characters.
@@ -20168,7 +20168,9 @@ def _agent_model_observation_view(tool_name, text):
     text = str(text)
     prefix = _AGENT_SECTIONED_OBSERVATION_PREFIXES.get(tool_name)
     if prefix is None:
-        return text[:_AGENT_MODEL_OBSERVATION_CHARS]
+        if len(text) <= _AGENT_MODEL_OBSERVATION_CHARS:
+            return text
+        return text[:5000] + ("...[%d chars omitted; use file_read offset/limit or output_digest]..." % (len(text) - 8000)) + text[-3000:]
     return _fit_sectioned_agent_text(
         text, _AGENT_MODEL_OBSERVATION_CHARS, prefix,
         clip_hint=(

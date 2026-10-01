@@ -83,6 +83,98 @@ def test_placeholder_overhead_is_counted_and_reports_remaining_overflow(tmp_path
     assert result.needs_compaction is True
 
 
+def test_archive_byte_eviction_has_a_seventy_percent_low_water_mark(tmp_path):
+    repo = SQLiteSessionRepository(tmp_path / "sessions.db")
+    request = repo.append(
+        "s1", "model.requested", {"request_id": "r1", "decision": "keep contract"},
+        event_id="request",
+    )
+    tool_medium = repo.append(
+        "s1", "tool.result", {"call_id": "medium", "content": "m" * 500},
+        event_id="medium",
+    )
+    tool_large = repo.append(
+        "s1", "tool.result", {"call_id": "large", "content": "l" * 1000},
+        event_id="large",
+    )
+    failed = repo.append(
+        "s1", "model.failed", {"request_id": "r1", "error_code": "timeout"},
+        event_id="failed",
+    )
+    archive_ids = iter(("archive-large", "archive-medium"))
+    service = SessionContextArchiveService(repo, event_id_factory=lambda: next(archive_ids))
+
+    result = service.prepare_context(
+        "s1", (request, tool_medium, tool_large, failed), budget_bytes=800,
+    )
+
+    # Once a snapshot crosses its budget, the eviction pass drains to the
+    # low-water mark instead of stopping on the first byte under the bound.
+    assert result.used_bytes <= 560
+    assert result.evicted_event_ids == ("large", "medium")
+
+
+def test_archive_prefix_is_stable_until_budget_crosses_low_water_mark(tmp_path):
+    database = tmp_path / "sessions.db"
+    repo = SQLiteSessionRepository(database)
+    request = repo.append(
+        "s1", "model.requested", {"request_id": "r1", "decision": "keep contract"},
+        event_id="request",
+    )
+    medium = repo.append(
+        "s1", "tool.result", {"call_id": "medium", "content": "m" * 500},
+        event_id="medium",
+    )
+    large = repo.append(
+        "s1", "tool.result", {"call_id": "large", "content": "l" * 1000},
+        event_id="large",
+    )
+    failed = repo.append(
+        "s1", "model.failed", {"request_id": "r1", "error_code": "timeout"},
+        event_id="failed",
+    )
+    source = (request, medium, large, failed)
+    archive_ids = iter(
+        ("archive-large-1", "archive-large-2", "archive-medium-1", "archive-medium-2")
+    )
+    first = SessionContextArchiveService(
+        repo, event_id_factory=lambda: next(archive_ids)
+    ).prepare_context("s1", source, budget_bytes=1_400)
+
+    reopened = SQLiteSessionRepository(database)
+    second = SessionContextArchiveService(
+        reopened, event_id_factory=lambda: next(archive_ids)
+    ).prepare_context("s1", source, budget_bytes=1_400)
+    assert second.retained_events == first.retained_events
+    assert second.references == first.references
+    assert second.placeholders == first.placeholders
+
+    crossed = SessionContextArchiveService(
+        reopened, event_id_factory=lambda: next(archive_ids)
+    ).prepare_context("s1", source, budget_bytes=700)
+    assert crossed.evicted_event_ids == ("large", "medium")
+    assert crossed.retained_events[0:1] == first.retained_events[0:1]
+
+
+def test_archive_reuses_previous_compaction_until_effective_budget_overflows(tmp_path):
+    repo = SQLiteSessionRepository(tmp_path / "sessions.db")
+    old = repo.append("s1", "tool.result", {"content": "o" * 1200}, event_id="old")
+    medium = repo.append("s1", "tool.result", {"content": "m" * 450}, event_id="medium")
+    service = SessionContextArchiveService(repo)
+    source = [old, medium]
+    first = service.prepare_context("s1", source, budget_bytes=1100)
+    assert first.evicted_event_ids == ("old",)
+    assert first.used_bytes <= 770
+    # Each raw snapshot still contains the large archived result. Reapply its
+    # durable reference before deciding whether any new compaction is needed.
+    for step in range(5):
+        source.append(repo.append("s1", "model.response", {"content": "new " * 10 + str(step)}, event_id="next-%d" % step))
+        current = SessionContextArchiveService(repo).prepare_context("s1", source, budget_bytes=1100)
+        assert current.references == first.references
+        assert current.placeholders == first.placeholders
+        assert current.retained_events[:1] == first.retained_events[:1]
+
+
 def test_protected_history_is_never_evicted_and_explicitly_reports_overflow(tmp_path):
     repo = SQLiteSessionRepository(tmp_path / "sessions.db")
     request, _, _, failed = _history(repo)
