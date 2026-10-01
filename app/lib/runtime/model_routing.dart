@@ -149,14 +149,19 @@ class ModelRouting {
     return id == 'sonder' ? 'sonder (local route)' : id;
   }
 
-  /// A Runtime → Models chip: the bound provider, or the server's owner.
-  String chipLabel(String id, String ownedBy) {
+  /// Who serves [id] on Runtime → Models: the provider a route is bound to,
+  /// or the server's owner field.
+  String servedBy(String id, String ownedBy) {
     final provider = routeProvider(id);
     if (provider != null && provider != ollamaProvider) {
-      return '$id - ${providerDisplayName(provider)}';
+      return providerDisplayName(provider);
     }
-    return '$id - $ownedBy';
+    return ownedBy;
   }
+
+  /// `code - Sonder Inference`: the id and [servedBy] on one line.
+  String chipLabel(String id, String ownedBy) =>
+      '$id - ${servedBy(id, ownedBy)}';
 
   /// The tier routes to describe, with their provider: the ecosystem
   /// bindings, else the `/v1/models` route rows (default routes excluded).

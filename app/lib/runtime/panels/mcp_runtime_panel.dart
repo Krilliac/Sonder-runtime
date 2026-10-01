@@ -1,13 +1,16 @@
 part of '../runtime_screen.dart';
 
+/// MCP tool convergence: tool implementations and schemas stage in
+/// isolation and replace the active registry only after the new source
+/// loads cleanly. Status and Refresh run on demand, here.
 class _McpRuntimePanel extends StatelessWidget {
+  final _RuntimeScreenState s;
   final McpRuntimeInfo runtime;
 
-  const _McpRuntimePanel({required this.runtime});
+  const _McpRuntimePanel({required this.s, required this.runtime});
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
     final healthy = runtime.status == 'current' && !runtime.hasWarning;
     final warnings = <String>[
       if (runtime.sourceChanged)
@@ -17,95 +20,76 @@ class _McpRuntimePanel extends StatelessWidget {
       if (runtime.lastNotificationError.isNotEmpty)
         'Tool-list notification: ${runtime.lastNotificationError}',
     ];
-    return Column(
+    final busy = s._busy('mcp');
+    final command = s._commandOf['mcp'];
+    return SettingsSection(
       key: const Key('mcp-runtime-panel'),
-      crossAxisAlignment: CrossAxisAlignment.start,
+      title: 'MCP tools',
+      description: 'New tool code loads in isolation and replaces the '
+          'active tools only once it loads cleanly.',
+      trailing: StatusPill(healthy ? StatusKind.ok : StatusKind.warn,
+          word: 'MCP ${runtime.status}', dense: true),
       children: [
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: [
-            Chip(
-              avatar: Icon(
-                healthy
-                    ? Icons.sync_lock_outlined
-                    : Icons.warning_amber_outlined,
-                size: 18,
-                color: healthy ? cs.primary : cs.error,
-              ),
-              label: Text('MCP ${runtime.status}'),
+        RuntimeStatStrip([
+          RuntimeStat('Tools', '${runtime.registeredTools}'),
+          RuntimeStat('Refreshes', '${runtime.refreshCount}'),
+          RuntimeStat('Tool list',
+              runtime.protocolListChanged ? 'Live updates' : 'Static'),
+        ]),
+        if (warnings.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.all(SonderSpace.lg),
+            child: WorkspaceNotice(
+              kind: StatusKind.warn,
+              title: warnings.first,
+              detail: warnings.length > 1 ? warnings.skip(1).join('\n') : null,
+              framed: false,
+              liveRegion: false,
             ),
-            Chip(
-              avatar: const Icon(Icons.build_outlined, size: 18),
-              label: Text('${runtime.registeredTools} tools'),
-            ),
-            Chip(
-              avatar: const Icon(Icons.refresh_outlined, size: 18),
-              label: Text('${runtime.refreshCount} atomic refreshes'),
-            ),
-            Chip(
-              avatar: Icon(
-                runtime.protocolListChanged
-                    ? Icons.notifications_active_outlined
-                    : Icons.notifications_off_outlined,
-                size: 18,
-              ),
-              label: Text(
-                runtime.protocolListChanged
-                    ? 'Live tool-list updates'
-                    : 'Static tool list',
-              ),
-            ),
-          ],
+          ),
+        ValueRow(
+          label: 'Loaded',
+          value: runtime.loadedShort.isEmpty ? 'unknown' : runtime.loadedShort,
+          mono: true,
         ),
-        const SizedBox(height: 12),
-        Text(
-          'Tool implementations and schemas stage in isolation, then replace '
-          'the active registry only after the updated source loads cleanly.',
-          style: Theme.of(context).textTheme.bodyMedium,
+        ValueRow(
+          label: 'Current source',
+          value:
+              runtime.currentShort.isEmpty ? 'unknown' : runtime.currentShort,
+          mono: true,
         ),
-        const SizedBox(height: 10),
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.all(10),
-          decoration: BoxDecoration(
-            color: cs.surfaceContainerHighest,
-            borderRadius: BorderRadius.circular(10),
+        if (runtime.path.isNotEmpty)
+          ValueRow(
+            label: 'Source file',
+            value: runtime.path,
+            mono: true,
+            copyable: true,
           ),
-          child: SelectableText(
-            'loaded  ${runtime.loadedShort.isEmpty ? 'unknown' : runtime.loadedShort}\n'
-            'current ${runtime.currentShort.isEmpty ? 'unknown' : runtime.currentShort}',
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  fontFamily: SonderTheme.mono,
-                ),
-          ),
-        ),
-        if (warnings.isNotEmpty) ...[
-          const SizedBox(height: 10),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: cs.errorContainer,
-              borderRadius: BorderRadius.circular(10),
+        SettingRow(
+          label: 'Check or reload tools',
+          description: 'Refresh retries the swap safely; the last good '
+              'tools stay active if it fails.',
+          trailing: Wrap(spacing: SonderSpace.sm, children: [
+            AsyncActionButton(
+              label: 'Check status',
+              busyLabel: 'Checking…',
+              doneLabel: null,
+              busy: busy && command == '/mcp status',
+              onPressed:
+                  busy ? null : () => s._slotCommand('mcp', '/mcp status'),
+              onError: (_, __) {},
             ),
-            child: SelectableText(
-              warnings.join('\n'),
-              style: TextStyle(color: cs.onErrorContainer),
+            AsyncActionButton(
+              label: 'Refresh tools',
+              busyLabel: 'Refreshing…',
+              doneLabel: null,
+              busy: busy && command == '/mcp refresh',
+              onPressed:
+                  busy ? null : () => s._slotCommand('mcp', '/mcp refresh'),
+              onError: (_, __) {},
             ),
-          ),
-        ],
-        if (runtime.path.isNotEmpty) ...[
-          const SizedBox(height: 10),
-          SelectableText(
-            'Loaded source: ${runtime.path}',
-            style: Theme.of(context).textTheme.bodySmall,
-          ),
-        ],
-        const SizedBox(height: 6),
-        Text(
-          'Inspect or retry safely with /mcp status or /mcp refresh.',
-          style: Theme.of(context).textTheme.bodySmall,
+          ]),
+          below: _trackedView(s, 'mcp'),
         ),
       ],
     );

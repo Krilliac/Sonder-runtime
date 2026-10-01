@@ -633,6 +633,137 @@ void main() {
       expect(tester.getSize(find.byType(RingMeter)), const Size(18, 18));
     });
   });
+
+  // From the Runtime package (merged).
+  testWidgets('busy from its owner reads running and takes no press',
+      (tester) async {
+    var runs = 0;
+    await tester.pumpWidget(_app(Scaffold(
+      body: Center(
+        child: AsyncActionButton(
+          label: 'Start server',
+          busyLabel: 'Starting…',
+          busy: true,
+          onPressed: () async => runs++,
+        ),
+      ),
+    )));
+    // An action that outlived the page that started it: the new button
+    // shows its progress at once.
+    expect(find.text('Starting…'), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    await tester.tap(find.text('Starting…'), warnIfMissed: false);
+    await tester.pump();
+    expect(runs, 0);
+  });
+
+  testWidgets('confirm runs the action only on yes', (tester) async {
+    var runs = 0;
+    var answer = false;
+    await tester.pumpWidget(_app(Scaffold(
+      body: Center(
+        child: AsyncActionButton(
+          label: 'Stop…',
+          busyLabel: 'Stopping…',
+          doneLabel: null,
+          confirm: () async => answer,
+          onPressed: () async => runs++,
+        ),
+      ),
+    )));
+    await tester.tap(find.text('Stop…'));
+    await tester.pumpAndSettle();
+    expect(runs, 0);
+    expect(find.text('Stop…'), findsOneWidget);
+    answer = true;
+    await tester.tap(find.text('Stop…'));
+    await tester.pumpAndSettle();
+    expect(runs, 1);
+  });
+
+  testWidgets('a long label ellipsizes in a tight cell', (tester) async {
+    await tester.pumpWidget(_app(Scaffold(
+      body: Center(
+        child: SizedBox(
+          width: 120,
+          child: AsyncActionButton(
+            label: 'Refresh worker cache now',
+            onPressed: () async {},
+          ),
+        ),
+      ),
+    )));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('builds its body only once opened, and says so', (tester) async {
+    final handle = tester.ensureSemantics();
+    final changes = <bool>[];
+    var built = 0;
+    await tester.pumpWidget(_app(Scaffold(
+      body: Disclosure(
+        title: 'Recent jobs',
+        subtitle: 'Loads when opened',
+        onChanged: changes.add,
+        child: Builder(builder: (_) {
+          built++;
+          return const Text('job-1');
+        }),
+      ),
+    )));
+    expect(built, 0);
+    expect(find.text('job-1'), findsNothing);
+    expect(find.bySemanticsLabel(RegExp('Recent jobs, collapsed')),
+        findsOneWidget);
+    await tester.tap(find.text('Recent jobs'));
+    await tester.pumpAndSettle();
+    expect(changes, [true]);
+    expect(find.text('job-1'), findsOneWidget);
+    expect(
+        find.bySemanticsLabel(RegExp('Recent jobs, expanded')), findsOneWidget);
+    await tester.tap(find.text('Recent jobs'));
+    await tester.pumpAndSettle();
+    expect(changes, [true, false]);
+    expect(find.text('job-1'), findsNothing);
+    await expectLater(tester, meetsGuideline(androidTapTargetGuideline));
+    handle.dispose();
+  });
+
+  testWidgets('a Meter value too long for its line moves under the label',
+      (tester) async {
+    await tester.pumpWidget(_app(const Scaffold(
+      body: Center(
+        child: SizedBox(
+          width: 200,
+          child: Meter(
+            value: 0.8,
+            label: 'Memory',
+            valueLabel: '974 lessons · 8 facts · 4416 interactions',
+          ),
+        ),
+      ),
+    )));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    final label = tester.getTopLeft(find.text('Memory'));
+    final value = tester
+        .getTopLeft(find.text('974 lessons · 8 facts · 4416 interactions'));
+    expect(value.dy, greaterThan(label.dy));
+  });
+
+  testWidgets('an outcome speaks its synonym word', (tester) async {
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(_app(const Scaffold(
+      body: OutcomeView(
+          ActionOutcome.ok('write_file call 3f9a12c0 once', word: 'approved')),
+    )));
+    expect(find.text('${StatusKind.ok.glyph} approved'), findsOneWidget);
+    expect(
+        find.bySemanticsLabel(
+            RegExp('^approved: write_file call 3f9a12c0 once')),
+        findsOneWidget);
+    handle.dispose();
+  });
 }
 
 final _sectionsSeen = <ShellSection?>[];

@@ -15,8 +15,12 @@ import 'package:sonder_runtime/runtime/work_runs_panel.dart';
 import 'package:sonder_runtime/settings.dart';
 import 'package:sonder_runtime/system_screen.dart' as legacy;
 import 'package:sonder_runtime/theme.dart';
+import 'package:sonder_runtime/ui/kit.dart';
+import 'package:sonder_runtime/ui/status_row.dart';
+import 'package:sonder_runtime/workspace_ui.dart' show WorkspaceDestination;
 
 import 'runtime_fixtures.dart';
+import 'runtime_rich_fixture.dart';
 
 Future<void> pumpRuntime(
   WidgetTester tester, {
@@ -24,6 +28,8 @@ Future<void> pumpRuntime(
   FakeRuntimeData? data,
   Size size = const Size(1280, 1000),
   ThemeData? theme,
+  String? category,
+  Settings? settings,
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
@@ -34,13 +40,20 @@ Future<void> pumpRuntime(
   await tester.pumpWidget(MaterialApp(
     theme: theme ?? SonderTheme.dark,
     home: RuntimeScreen(
-      settings: Settings(serverUrl: 'http://192.168.1.20:11435'),
+      settings: settings ?? Settings(serverUrl: 'http://192.168.1.20:11435'),
       initialInfo: info,
       liveUpdates: false,
       dataSource: data ?? FakeRuntimeData(),
       now: runtimeNow,
+      initialCategory: category,
     ),
   ));
+  await tester.pumpAndSettle();
+}
+
+/// Opens a category from the wide rail.
+Future<void> openCategory(WidgetTester tester, String id) async {
+  await tester.tap(find.byKey(Key('category-$id')));
   await tester.pumpAndSettle();
 }
 
@@ -50,7 +63,8 @@ Future<void> settleLive(WidgetTester tester) async {
     await tester
         .runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
     await tester.pump(const Duration(milliseconds: 50));
-    if (i > 4 && find.byType(LinearProgressIndicator).evaluate().isEmpty) {
+    if (i > 4 &&
+        find.byKey(const Key('runtime-refreshing')).evaluate().isEmpty) {
       break;
     }
   }
@@ -58,12 +72,36 @@ Future<void> settleLive(WidgetTester tester) async {
 }
 
 /// The live screen polls every 2 s, so it never "settles"; pump a few
-/// frames instead (enough for dialogs and ensureVisible animations).
+/// frames instead (enough for dialogs and page switches).
 Future<void> pumpFrames(WidgetTester tester) async {
   for (var i = 0; i < 6; i++) {
     await tester.pump(const Duration(milliseconds: 100));
   }
 }
+
+/// A status mark that reads as a problem (error or warn).
+final _problemMarks = find.byWidgetPredicate((widget) =>
+    widget is StatusMark &&
+    (widget.kind == StatusKind.fail ||
+        widget.kind == StatusKind.warn ||
+        widget.kind == StatusKind.refused));
+
+ButtonStyleButton _button(WidgetTester tester, Finder label) =>
+    tester.widget<ButtonStyleButton>(find.ancestor(
+        of: label, matching: find.bySubtype<ButtonStyleButton>()));
+
+const _digest =
+    '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08';
+
+PendingApproval _pending({String callId = '3f9a12c0d1e2f3a4'}) =>
+    PendingApproval(
+      callId: callId,
+      digest: _digest,
+      tool: 'write_file',
+      preview: 'path: src/render/pso_cache.cpp',
+      mode: 'manual',
+      refusedAt: runtimeNow.subtract(const Duration(minutes: 2)),
+    );
 
 void main() {
   // These fixtures use a plain-HTTP LAN host with a key: the person has
@@ -120,11 +158,36 @@ void main() {
       expect(byLabel['Agents']!.value, '1 running');
     });
 
+    test('tiles carry a headline, a detail and the page that owns them', () {
+      final rows = overviewRows(
+        serverUrl: 'http://192.168.1.20:11435',
+        info: healthySystemInfo(),
+        offline: false,
+        workRuns: [runningWorkRun()],
+        approvals: const ApprovalsPage(supported: true, pending: [
+          PendingApproval(callId: '3f9a12c0', tool: 'write_file'),
+        ]),
+        now: runtimeNow,
+      );
+      final byLabel = {for (final row in rows) row.label: row};
+      expect(byLabel['Server']!.headline, 'Connected');
+      expect(byLabel['Server']!.category, 'server');
+      expect(byLabel['Approvals']!.headline, '1 waiting');
+      expect(byLabel['Approvals']!.word, 'needs you');
+      expect(byLabel['Approvals']!.detail, 'write_file');
+      expect(byLabel['Approvals']!.category, 'permissions');
+      expect(byLabel['Work runs']!.headline, '1 running');
+      expect(byLabel['Work runs']!.detail, 'wr-7c1e… · 4m of 30m');
+      expect(byLabel['Work runs']!.category, 'activity');
+      expect(byLabel['Models']!.category, 'models');
+    });
+
     test('offline keeps a word, never a green dot', () {
       final rows = overviewRows(
           serverUrl: 'http://mypc.local:11435', info: null, offline: true);
       expect(rows.single.status, StatusKind.fail);
       expect(rows.single.value, "Can't reach mypc.local:11435");
+      expect(rows.single.headline, 'Offline');
     });
 
     test('403 on work runs reads as off-by-design, not failure', () {
@@ -146,62 +209,96 @@ void main() {
       expect(lines.map((line) => line.word), ['done', 'refused', 'error']);
       expect(lines.first.text, 'Model sonder:latest · 61.2s');
       expect(lines[1].text, '/write src/render/pso_cache.cpp (manual)');
+      // Event times are shown on the viewer's clock.
+      expect(lines.first.time, '12:41');
     });
 
-    test('compact durations', () {
+    test('compact durations and counts', () {
       expect(compactDuration(const Duration(seconds: 42)), '42s');
       expect(compactDuration(const Duration(minutes: 4, seconds: 12)), '4m');
       expect(compactDuration(const Duration(hours: 3, minutes: 12)), '3h 12m');
+      expect(compactCount(812), '812');
+      expect(compactCount(2100), '2.1k');
+      expect(compactCount(41200), '41.2k');
+      expect(compactCount(1200000), '1.2M');
     });
   });
 
-  testWidgets('Runtime title, Overview first, rail says Jump to section',
+  testWidgets('Runtime title, one page per category, Overview first',
       (tester) async {
     await pumpRuntime(tester, info: healthySystemInfo());
     expect(find.text('Runtime'), findsOneWidget);
     expect(find.text('System'), findsNothing);
+    expect(find.byKey(const Key('runtime-nav')), findsOneWidget);
+    for (final id in [
+      'overview',
+      'activity',
+      'models',
+      'memory',
+      'permissions',
+      'server',
+      'observatory',
+      'cluster',
+      'developer',
+      'about',
+    ]) {
+      expect(find.byKey(Key('category-$id')), findsOneWidget, reason: id);
+    }
+    // Updates & extensions are admin-only: hidden until the server reports
+    // them.
+    expect(find.byKey(const Key('category-updates')), findsNothing);
+    expect(find.byKey(const Key('category-page-overview')), findsOneWidget);
     expect(find.byKey(const Key('runtime-overview')), findsOneWidget);
-    final overviewTop =
-        tester.getTopLeft(find.byKey(const Key('runtime-overview'))).dy;
-    final workRunsTop = tester.getTopLeft(find.text('Work runs (0)')).dy;
-    expect(overviewTop, lessThan(workRunsTop));
-    expect(find.bySemanticsLabel('Jump to section'), findsOneWidget);
+    // One page at a time: the Activity page is not built under Overview.
+    expect(find.byKey(const Key('work-runs-panel')), findsNothing);
     // The compatibility name still resolves to the same screen type.
     expect(find.byType(legacy.SystemScreen), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('fresh single-PC server shows no problem dots', (tester) async {
-    await pumpRuntime(tester,
-        info: SystemInfo.fromJson({
-          'status': 'ready',
-          'models': const [],
-          'deployment': {
-            'profile': 'single-pc',
-            'capabilities': {
-              'automatic_takeover': {'available': false, 'reason': 'n/a'},
-              'automatic_failback': {'available': false, 'reason': 'n/a'},
-            },
-          },
-          'operational_capabilities': {
-            'schema_version': 1,
-            'mobility': {
-              'automatic_takeover_available': false,
-              'automatic_failback_available': false,
-            },
-          },
-        }));
-    final scroll = find.byKey(const Key('runtime-scroll'));
-    for (var i = 0; i < 40; i++) {
-      expect(find.byKey(const Key('status-row-problem')), findsNothing);
-      await tester.drag(scroll, const Offset(0, -400));
-      await tester.pump();
-    }
+  testWidgets('the rail shows where you are and opens one page',
+      (tester) async {
+    await pumpRuntime(tester, info: healthySystemInfo());
+    await openCategory(tester, 'activity');
+    expect(find.byKey(const Key('category-page-activity')), findsOneWidget);
+    expect(find.byKey(const Key('category-page-overview')), findsNothing);
+    final selected =
+        tester.widget<HoverSurface>(find.byKey(const Key('category-activity')));
+    expect(selected.selected, isTrue);
+    expect(
+        tester
+            .widget<HoverSurface>(find.byKey(const Key('category-overview')))
+            .selected,
+        isFalse);
+  });
+
+  testWidgets('fresh single-PC server shows no problems', (tester) async {
+    final info = SystemInfo.fromJson({
+      'status': 'ready',
+      'models': const [],
+      'deployment': {
+        'profile': 'single-pc',
+        'capabilities': {
+          'automatic_takeover': {'available': false, 'reason': 'n/a'},
+          'automatic_failback': {'available': false, 'reason': 'n/a'},
+        },
+      },
+      'operational_capabilities': {
+        'schema_version': 1,
+        'mobility': {
+          'automatic_takeover_available': false,
+          'automatic_failback_available': false,
+        },
+      },
+    });
+    await pumpRuntime(tester, info: info, category: 'cluster');
+    // Off by design reads "– off", never a problem mark.
+    expect(_problemMarks, findsNothing);
+    expect(find.text('off'), findsWidgets);
     // Takeover/failback are listed once (Deployment), not twice.
-    await tester.scrollUntilVisible(
-        find.text('Deployment & capabilities'), -400,
-        scrollable: find.byType(Scrollable).first);
     expect(find.text('Automatic failback'), findsOneWidget);
+    await openCategory(tester, 'server');
+    expect(_problemMarks, findsNothing);
     expect(tester.takeException(), isNull);
   });
 
@@ -216,8 +313,10 @@ void main() {
         updatedAt: runtimeNow.subtract(const Duration(minutes: 12)),
       ),
     ]);
-    await pumpRuntime(tester, info: healthySystemInfo(), data: data);
-    expect(find.text('Work runs (2)'), findsOneWidget);
+    await pumpRuntime(tester,
+        info: healthySystemInfo(), data: data, category: 'activity');
+    expect(find.byKey(const Key('work-runs-panel')), findsOneWidget);
+    expect(find.text('1 running · 2 recent'), findsOneWidget);
     expect(find.textContaining('4m of 30m budget'), findsOneWidget);
     expect(find.textContaining('12m ago'), findsOneWidget);
     await tester.tap(find.text('Stop…'));
@@ -231,21 +330,33 @@ void main() {
     await tester.tap(find.text('Stop run'));
     await tester.pumpAndSettle();
     expect(data.cancelled, ['wr-7c1e0000000000000000000000000001']);
-    expect(find.textContaining('Stop requested'), findsOneWidget);
+    // The result sits under the run it stopped.
+    final row =
+        find.byKey(const Key('work-run-wr-7c1e0000000000000000000000000001'));
+    expect(
+        find.descendant(
+            of: row, matching: find.textContaining('Stop requested')),
+        findsOneWidget);
   });
 
-  testWidgets('a second Stop while the first is pending sends nothing',
+  testWidgets('a Stop in flight disables its button: a second sends nothing',
       (tester) async {
     final gate = Completer<void>();
     final data = FakeRuntimeData(runs: [runningWorkRun()])
       ..cancelGate = gate.future;
-    await pumpRuntime(tester, info: healthySystemInfo(), data: data);
-    for (var i = 0; i < 2; i++) {
-      await tester.tap(find.text('Stop…'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Stop run'));
-      await tester.pump();
-    }
+    await pumpRuntime(tester,
+        info: healthySystemInfo(), data: data, category: 'activity');
+    await tester.tap(find.text('Stop…'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Stop run'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(data.cancelled, hasLength(1));
+    // The row reads "Stopping…" and its button takes no second press.
+    expect(find.text('Stop…'), findsNothing);
+    expect(_button(tester, find.text('Stopping…')).onPressed, isNull);
+    await tester.tap(find.text('Stopping…'), warnIfMissed: false);
+    await tester.pump();
     expect(data.cancelled, hasLength(1));
     gate.complete();
     await tester.pumpAndSettle();
@@ -253,30 +364,47 @@ void main() {
   });
 
   testWidgets('work runs: empty state and 403 role notice', (tester) async {
-    await pumpRuntime(tester, info: healthySystemInfo());
-    expect(find.text('No work runs'), findsWidgets);
+    await pumpRuntime(tester, info: healthySystemInfo(), category: 'activity');
+    expect(find.text('No work runs'), findsOneWidget);
     await pumpRuntime(tester,
         info: healthySystemInfo(),
+        category: 'activity',
         data: FakeRuntimeData(
             runsError: SonderException('forbidden', httpStatus: 403)));
     expect(find.text('Work runs need a developer or admin account.'),
         findsOneWidget);
   });
 
-  testWidgets('Overview Open jumps to the work runs section', (tester) async {
+  testWidgets('Overview tiles open the page that owns them (phone)',
+      (tester) async {
     await pumpRuntime(tester,
         info: healthySystemInfo(),
         data: FakeRuntimeData(runs: [runningWorkRun()]),
-        size: const Size(390, 844));
-    // Phones start with only the Overview open.
+        size: const Size(390, 844),
+        category: 'overview');
     expect(find.byKey(const Key('work-runs-panel')), findsNothing);
-    await tester.tap(find.text('Open'));
+    final tile = find.byKey(const Key('overview-tile-work-runs'));
+    await tester.ensureVisible(tile);
+    await tester.pumpAndSettle();
+    await tester.tap(tile);
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('work-runs-panel')), findsOneWidget);
+    // Back goes to the list of categories, not to Chat.
+    await tester.tap(find.byTooltip('All runtime sections'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('runtime-nav')), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('jobs details load only when opened; 403 is n/a', (tester) async {
+  testWidgets('Recent activity "All" opens Activity', (tester) async {
+    await pumpRuntime(tester, info: healthySystemInfo());
+    expect(find.text('Model sonder:latest · 61.2s'), findsOneWidget);
+    await tester.tap(find.text('All'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('category-page-activity')), findsOneWidget);
+  });
+
+  testWidgets('lists load only when opened; 403 is n/a', (tester) async {
     final data = FakeRuntimeData(
       jobList: [
         JobSummary(
@@ -291,31 +419,32 @@ void main() {
       ],
       computeError: SonderException('forbidden', httpStatus: 403),
     );
-    await pumpRuntime(tester, info: healthySystemInfo(), data: data);
-    await tester.scrollUntilVisible(find.text('Jobs · Details'), 300,
-        scrollable: find.byType(Scrollable).first);
+    await pumpRuntime(tester,
+        info: healthySystemInfo(), data: data, category: 'activity');
     expect(data.jobReads, 0);
-    await tester.ensureVisible(find.text('Jobs · Details'));
+    final jobs = find.byKey(const Key('jobs-details'));
+    await tester.ensureVisible(jobs);
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Jobs · Details'));
+    await tester.tap(find.text('Recent jobs'));
     await tester.pumpAndSettle();
     expect(data.jobReads, 1);
-    expect(find.textContaining('index · job-1 · 1m ago'), findsOneWidget);
-    await tester.ensureVisible(find.text('Model fanout · Details'));
+    expect(find.textContaining('job-1 · 1m ago'), findsOneWidget);
+
+    await openCategory(tester, 'models');
+    final fanout = find.byKey(const Key('fanout-details'));
+    await tester.ensureVisible(fanout);
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Model fanout · Details'));
+    await tester.tap(find.text('Recent fanout runs'));
     await tester.pumpAndSettle();
     expect(find.textContaining('3/3 answered'), findsOneWidget);
-    await tester.scrollUntilVisible(find.text('Compute nodes · Details'), 200,
-        scrollable: find.byType(Scrollable).first);
-    await tester.ensureVisible(find.text('Compute nodes · Details'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Compute nodes · Details'));
+
+    await openCategory(tester, 'cluster');
+    await tester.tap(find.text('Nodes'));
     await tester.pumpAndSettle();
     expect(find.text('Needs an administrator account.'), findsOneWidget);
   });
 
-  testWidgets('Inference destination opens the ecosystem panel',
+  testWidgets('Observatory page opens the Observatory; Models shows providers',
       (tester) async {
     final data = FakeRuntimeData(
         ecosystemReading: EcosystemReading.parse(ecosystemReadySynthetic()));
@@ -346,66 +475,70 @@ void main() {
     ));
     await tester.pumpAndSettle();
     expect(data.ecosystemReads, 1);
-    await tester.tap(find.text('Inference').first);
-    await tester.pumpAndSettle();
-    expect(find.text('Inference ready · export on'), findsOneWidget);
-    expect(find.byKey(const Key('ecosystem-panel')), findsOneWidget);
+    await openCategory(tester, 'models');
+    expect(find.byKey(const Key('ecosystem-inference')), findsOneWidget);
     expect(find.text('SYNTHETIC'), findsOneWidget);
-    await tester
-        .ensureVisible(find.byKey(const Key('ecosystem-open-observatory')));
-    await tester.pumpAndSettle();
+    // Providers live on Models, the export on Observatory.
+    expect(find.byKey(const Key('ecosystem-observatory')), findsNothing);
+    await openCategory(tester, 'observatory');
+    expect(find.byKey(const Key('ecosystem-panel')), findsOneWidget);
+    expect(find.byKey(const Key('ecosystem-inference')), findsNothing);
     await tester.tap(find.byKey(const Key('ecosystem-open-observatory')));
     await tester.pumpAndSettle();
     expect(
         launched.single, ['http://127.0.0.1:11435', 'http://127.0.0.1:11437']);
+    expect(
+        find.text('Opened the Observatory with 2 producers.'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('Models panel names the provider each route is bound to',
+  testWidgets('Models names the provider each route is bound to',
       (tester) async {
     await pumpRuntime(tester,
         info: healthySystemInfo(),
+        category: 'models',
         data: FakeRuntimeData(
             ecosystemReading: EcosystemReading.parse(
                 ecosystemJson(inference: inferenceStatusJson()))));
-    await tester.tap(find.text('Models').first);
-    await tester.pumpAndSettle();
-    expect(find.text('code - Sonder Inference'), findsOneWidget);
-    expect(find.text('code - local'), findsNothing);
+    final code = find.byKey(const Key('model-row-code'));
+    expect(find.descendant(of: code, matching: find.text('Sonder Inference')),
+        findsOneWidget);
+    expect(
+        find.descendant(of: code, matching: find.text('local')), findsNothing);
     expect(find.textContaining('Sonder Inference serves'), findsOneWidget);
     expect(find.textContaining('Ollama hosts and runs the local model weights'),
         findsNothing);
   });
 
-  testWidgets('Models panel claims only the routes the runtime offers',
+  testWidgets('Models claims only the routes the runtime offers',
       (tester) async {
     // healthySystemInfo offers the `code` route only; every tier is bound.
     await pumpRuntime(tester,
         info: healthySystemInfo(),
+        category: 'models',
         data: FakeRuntimeData(
             ecosystemReading: EcosystemReading.parse(
                 ecosystemJson(inference: inferenceStatusJson()))));
-    await tester.tap(find.text('Models').first);
-    await tester.pumpAndSettle();
     expect(
         find.textContaining(
             'Sonder Inference serves the code route with mock:tiny.'),
         findsOneWidget);
-    // The Sonder Inference panel still lists every configured binding; the
-    // Models explanation claims only the offered routes.
+    // The provider bindings still list every configured tier; the routes
+    // explanation claims only the offered ones.
     final panel = tester
         .widget<Text>(find.textContaining('Sonder Runtime routes requests'));
     expect(panel.data, isNot(contains('reasoning')));
     expect(panel.data, isNot(contains('vision')));
+    expect(find.byKey(const Key('ecosystem-tier-reasoning')), findsOneWidget);
   });
 
-  testWidgets('Models panel falls back to /v1/models rows for non-admins',
+  testWidgets('Models falls back to /v1/models rows for non-admins',
       (tester) async {
     await pumpRuntime(tester,
         info: healthySystemInfo(),
+        category: 'models',
         data: FakeRuntimeData(
-            ecosystemError: SonderException(
-                SonderApi.adminRequiredMessage,
+            ecosystemError: SonderException(SonderApi.adminRequiredMessage,
                 httpStatus: 403))
           ..catalog = const ModelCatalog(ids: [
             'sonder',
@@ -416,24 +549,26 @@ void main() {
                 provider: 'sonder_inference',
                 servedModel: 'qwen3:14b'),
           }));
-    await tester.tap(find.text('Models').first);
-    await tester.pumpAndSettle();
-    expect(find.text('code - Sonder Inference'), findsOneWidget);
+    final code = find.byKey(const Key('model-row-code'));
+    expect(find.descendant(of: code, matching: find.text('Sonder Inference')),
+        findsOneWidget);
     expect(
         find.textContaining(
             'Sonder Inference serves the code route with qwen3:14b.'),
         findsOneWidget);
+    expect(find.byKey(const Key('ecosystem-admin-required')), findsOneWidget);
   });
 
-  testWidgets('Models panel keeps the old wording when all is on Ollama',
+  testWidgets('Models keeps the old wording when all is on Ollama',
       (tester) async {
     await pumpRuntime(tester,
         info: healthySystemInfo(),
+        category: 'models',
         data: FakeRuntimeData(
             ecosystemReading: EcosystemReading.parse(ecosystemAllOllama())));
-    await tester.tap(find.text('Models').first);
-    await tester.pumpAndSettle();
-    expect(find.text('code - local'), findsOneWidget);
+    final code = find.byKey(const Key('model-row-code'));
+    expect(find.descendant(of: code, matching: find.text('local')),
+        findsOneWidget);
     expect(find.textContaining('Ollama hosts and runs the local model weights'),
         findsOneWidget);
   });
@@ -469,9 +604,7 @@ void main() {
       ]) {
         expect(
             localServerRow(
-                launcherDetected: false,
-                serverUrl: url,
-                connected: connected),
+                launcherDetected: false, serverUrl: url, connected: connected),
             ('Not detected on 127.0.0.1:11435', false));
       }
     });
@@ -481,76 +614,363 @@ void main() {
       (tester) async {
     await pumpRuntime(tester,
         info: healthySystemInfo(),
+        category: 'activity',
         data: FakeRuntimeData(
             ecosystemError: SonderException(
                 'Administrator authorization is required.',
                 httpStatus: 403)));
-    expect(find.text('Work runs (0)'), findsOneWidget);
-    await tester.scrollUntilVisible(
-        find.byKey(const Key('ecosystem-admin-required')), 300,
-        scrollable: find.byType(Scrollable).first);
+    expect(find.byKey(const Key('work-runs-panel')), findsOneWidget);
+    await openCategory(tester, 'observatory');
+    expect(find.byKey(const Key('ecosystem-admin-required')), findsOneWidget);
     expect(
         find.text('Administrator authorization is required.'), findsOneWidget);
   });
 
-  testWidgets('Cancel active with nothing running is an info notice',
+  testWidgets('Cancel active with nothing running is an info note',
       (tester) async {
-    await pumpRuntime(tester, info: healthySystemInfo(withAgents: false));
-    await tester.scrollUntilVisible(find.text('Cancel active'), 300,
-        scrollable: find.byType(Scrollable).first);
-    await tester.ensureVisible(find.text('Cancel active'));
-    await tester.pumpAndSettle();
+    await pumpRuntime(tester,
+        info: healthySystemInfo(withAgents: false), category: 'activity');
     await tester.tap(find.text('Cancel active'));
     await tester.pumpAndSettle();
     expect(find.textContaining('Nothing to cancel'), findsOneWidget);
+    expect(find.byKey(const Key('runtime-info-notice')), findsOneWidget);
     expect(find.text('Cancel active agents?'), findsNothing);
+    // The Developer quick command says the same in its console.
+    await openCategory(tester, 'developer');
+    await tester.tap(find.text('Cancel active'));
+    await tester.pumpAndSettle();
+    expect(find.text('Cancel active agents?'), findsNothing);
+    expect(find.textContaining('Nothing to cancel'), findsOneWidget);
+  });
+
+  testWidgets('Cancel active with agents running asks first', (tester) async {
+    await pumpRuntime(tester, info: healthySystemInfo(), category: 'activity');
+    await tester.tap(find.text('Cancel active'));
+    await tester.pumpAndSettle();
+    expect(find.text('Cancel active agents?'), findsOneWidget);
+    await tester.tap(find.text('Keep running'));
+    await tester.pumpAndSettle();
+    expect(find.text('Cancel active agents?'), findsNothing);
+    // Nothing was sent, so nothing is reported.
+    expect(find.byKey(const Key('runtime-info-notice')), findsNothing);
   });
 
   testWidgets('approvals: console fallback when the server has no route',
       (tester) async {
+    final data =
+        FakeRuntimeData(approvalsPage: const ApprovalsPage(supported: false));
     await pumpRuntime(tester,
-        info: healthySystemInfo(),
-        data: FakeRuntimeData(
-            approvalsPage: const ApprovalsPage(supported: false)));
+        info: healthySystemInfo(), data: data, category: 'permissions');
     expect(find.textContaining('/approve <call id>'), findsOneWidget);
+    expect(find.text('Approve once…'), findsNothing);
+    await openCategory(tester, 'overview');
     expect(find.text('approve from the console (/approvals)'), findsOneWidget);
+  });
+
+  group('approvals queue', () {
+    testWidgets(
+        'Approve once re-reads the call, asks with the sheet, posts once',
+        (tester) async {
+      final data = FakeRuntimeData(
+          approvalsPage: ApprovalsPage(supported: true, pending: [_pending()]));
+      await pumpRuntime(tester,
+          info: healthySystemInfo(), data: data, category: 'permissions');
+      expect(find.textContaining('write_file'), findsOneWidget);
+      expect(find.textContaining('path: src/render/pso_cache.cpp'),
+          findsOneWidget);
+      final readsBefore = data.approvalReads.length;
+
+      // Cancel sends nothing.
+      await tester.tap(find.text('Approve once…'));
+      await tester.pumpAndSettle();
+      expect(data.approvalReads.skip(readsBefore), contains(200));
+      expect(find.byKey(const Key('approval-sheet')), findsOneWidget);
+      expect(find.text('write_file · call 3f9a12c0'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('approval-cancel')));
+      await tester.pumpAndSettle();
+      expect(data.approved, isEmpty);
+
+      // Approve once sends exactly one request, bound to tool and digest.
+      await tester.tap(find.text('Approve once…'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('approval-confirm')));
+      await tester.pumpAndSettle();
+      expect(data.approved, [
+        ('3f9a12c0d1e2f3a4', const Duration(minutes: 15), 'write_file', _digest)
+      ]);
+      expect(
+          find.textContaining('write_file call 3f9a12c0 once'), findsOneWidget);
+      expect(find.textContaining('approved'), findsWidgets);
+    });
+
+    testWidgets('a call no longer pending is not approvable', (tester) async {
+      final data = FakeRuntimeData(
+          approvalsPage: ApprovalsPage(supported: true, pending: [_pending()]));
+      await pumpRuntime(tester,
+          info: healthySystemInfo(), data: data, category: 'permissions');
+      // It ran, or aged out, after the list was drawn.
+      data.approvalsPage = const ApprovalsPage(supported: true);
+      await tester.tap(find.text('Approve once…'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('approval-sheet')), findsNothing);
+      expect(data.approved, isEmpty);
+      expect(find.textContaining('is waiting for approval'), findsOneWidget);
+    });
+
+    testWidgets('a server without the approve route shows the console command',
+        (tester) async {
+      final data = FakeRuntimeData(
+          approvalsPage: ApprovalsPage(supported: true, pending: [_pending()]))
+        ..approveError = SonderException(
+            ApprovalsApi.consoleFallback('3f9a12c0d1e2f3a4'),
+            code: ApprovalsApi.unavailableCode,
+            httpStatus: 404);
+      await pumpRuntime(tester,
+          info: healthySystemInfo(), data: data, category: 'permissions');
+      await tester.tap(find.text('Approve once…'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('approval-confirm')));
+      await tester.pumpAndSettle();
+      expect(find.text('/approve 3f9a12c0d1e2f3a4'), findsOneWidget);
+    });
+
+    testWidgets('a 403 says approvals need a developer or admin account',
+        (tester) async {
+      final data = FakeRuntimeData(
+          approvalsPage: ApprovalsPage(supported: true, pending: [_pending()]))
+        ..approveError = SonderException('forbidden', httpStatus: 403);
+      await pumpRuntime(tester,
+          info: healthySystemInfo(), data: data, category: 'permissions');
+      await tester.tap(find.text('Approve once…'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('approval-confirm')));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Approvals need a developer or admin account'),
+          findsOneWidget);
+    });
+
+    testWidgets('Revoke cancels an open approval', (tester) async {
+      final data = FakeRuntimeData(
+        approvalsPage: ApprovalsPage(supported: true, open: [
+          IssuedApproval(
+              nonce: 'n_1234',
+              callId: '11aa22bb33cc44dd',
+              tool: 'git_commit',
+              expiresAt: runtimeNow.add(const Duration(minutes: 14))),
+        ]),
+      );
+      await pumpRuntime(tester,
+          info: healthySystemInfo(), data: data, category: 'permissions');
+      expect(find.text('once · 14m left'), findsOneWidget);
+      await tester.tap(find.text('Revoke'));
+      await tester.pumpAndSettle();
+      expect(data.revoked, ['n_1234']);
+      expect(find.textContaining('Revoked the approval for git_commit'),
+          findsOneWidget);
+    });
+  });
+
+  testWidgets('Permissions shows the mode read-only, with its risk matrix',
+      (tester) async {
+    final data = FakeRuntimeData()
+      ..mode = PermissionMode.fromJson({
+        'mode': 'manual',
+        'label': 'Manual',
+        'blurb': 'asks before changes',
+        'matrix': {'file_write': 'ask', 'destructive': 'deny'},
+      });
+    await pumpRuntime(tester,
+        info: healthySystemInfo(), data: data, category: 'permissions');
+    expect(find.text('Manual'), findsOneWidget);
+    expect(find.text('asks before changes'), findsOneWidget);
+    expect(find.text('File write'), findsOneWidget);
+    expect(find.text('Asks first'), findsOneWidget);
+    expect(find.text('Refused'), findsOneWidget);
+    // No second mode-changing surface unless the shell wires the one flow.
+    expect(find.byKey(const Key('permission-mode-change')), findsNothing);
+    expect(find.textContaining('mode chip under the chat composer'),
+        findsOneWidget);
+  });
+
+  testWidgets('Change mode… uses the flow the shell hands in', (tester) async {
+    var opened = 0;
+    tester.view.physicalSize = const Size(1280, 1000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    await tester.pumpWidget(MaterialApp(
+      theme: SonderTheme.dark,
+      home: RuntimeScreen(
+        settings: Settings(),
+        initialInfo: healthySystemInfo(),
+        liveUpdates: false,
+        dataSource: FakeRuntimeData(),
+        initialCategory: 'permissions',
+        onChangePermissionMode: () => opened++,
+      ),
+    ));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('permission-mode-change')));
+    expect(opened, 1);
   });
 
   testWidgets('phone layouts fit at text scale 1.0, 1.5 and 2.0',
       (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
     for (final scale in [1.0, 1.5, 2.0]) {
-      tester.view.physicalSize = const Size(390, 844);
-      tester.view.devicePixelRatio = 1;
-      await tester.pumpWidget(MediaQuery(
-        data: MediaQueryData(
-            size: const Size(390, 844), textScaler: TextScaler.linear(scale)),
-        child: MaterialApp(
-          theme: SonderTheme.dark,
-          home: RuntimeScreen(
-            settings: Settings(),
-            initialInfo: healthySystemInfo(),
-            liveUpdates: false,
-            dataSource: FakeRuntimeData(runs: [runningWorkRun()]),
-            now: runtimeNow,
+      for (final category in [
+        null,
+        'overview',
+        'activity',
+        'models',
+        'memory',
+        'permissions',
+        'server',
+        'observatory',
+        'cluster',
+        'developer',
+        'about',
+      ]) {
+        await tester.pumpWidget(MediaQuery(
+          data: MediaQueryData(
+              size: const Size(390, 844), textScaler: TextScaler.linear(scale)),
+          child: MaterialApp(
+            key: ValueKey('$scale-$category'),
+            theme: SonderTheme.dark,
+            home: RuntimeScreen(
+              settings: Settings(),
+              // Every panel has content, so every row shape is measured.
+              initialInfo: richSystemInfo(),
+              liveUpdates: false,
+              dataSource: richRuntimeData(),
+              now: runtimeNow,
+              initialCategory: category,
+            ),
           ),
-        ),
-      ));
-      await tester.pumpAndSettle();
-      expect(tester.takeException(), isNull, reason: 'scale $scale');
+        ));
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull,
+            reason: 'scale $scale, ${category ?? 'list'}');
+      }
     }
-    tester.view.resetPhysicalSize();
-    tester.view.resetDevicePixelRatio();
   });
 
   testWidgets('Runtime meets tap-target and label guidelines on a phone',
       (tester) async {
     final handle = tester.ensureSemantics();
+    for (final category in [
+      null,
+      'overview',
+      'activity',
+      'models',
+      'memory',
+      'permissions',
+      'server',
+      'developer',
+    ]) {
+      await pumpRuntime(tester,
+          info: richSystemInfo(),
+          data: richRuntimeData(),
+          size: const Size(390, 844),
+          category: category);
+      await expectLater(tester, meetsGuideline(androidTapTargetGuideline));
+      await expectLater(tester, meetsGuideline(labeledTapTargetGuideline));
+    }
+    handle.dispose();
+  });
+
+  group('chrome', () {
+    testWidgets('alone: a way back to Chat, the workspace menu and Refresh',
+        (tester) async {
+      WorkspaceDestination? went;
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      await tester.pumpWidget(MaterialApp(
+        theme: SonderTheme.dark,
+        home: RuntimeScreen(
+          settings: Settings(),
+          liveUpdates: false,
+          onNavigate: (destination) => went = destination,
+        ),
+      ));
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Back to chat'), findsOneWidget);
+      expect(find.text('Chat'), findsOneWidget);
+      expect(find.byTooltip('Workspace navigation'), findsOneWidget);
+      expect(find.byTooltip('Refresh'), findsOneWidget);
+      expect(went, isNull);
+    });
+
+    testWidgets('inside the shell: no back arrow, Chat or workspace menu',
+        (tester) async {
+      Future<void> pumpShell(bool sidebar, VoidCallback onOpen) async {
+        await tester.pumpWidget(MaterialApp(
+          theme: SonderTheme.dark,
+          home: ShellScope(
+            current: WorkspaceDestination.runtime,
+            sidebarVisible: sidebar,
+            navigate: (_) {},
+            openNavigation: onOpen,
+            child: RuntimeScreen(
+              settings: Settings(),
+              liveUpdates: false,
+              onNavigate: (_) {},
+            ),
+          ),
+        ));
+        await tester.pumpAndSettle();
+      }
+
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      await pumpShell(true, () {});
+      expect(find.byTooltip('Back to chat'), findsNothing);
+      expect(find.text('Chat'), findsNothing);
+      expect(find.byTooltip('Workspace navigation'), findsNothing);
+      expect(find.byTooltip('Open navigation'), findsNothing);
+      expect(find.byTooltip('Refresh'), findsOneWidget);
+      expect(find.text('Runtime'), findsOneWidget);
+
+      var opened = 0;
+      tester.view.physicalSize = const Size(390, 844);
+      await pumpShell(false, () => opened++);
+      await tester.tap(find.byTooltip('Open navigation'));
+      expect(opened, 1);
+      expect(find.byTooltip('Back to chat'), findsNothing);
+    });
+  });
+
+  testWidgets('rail badges: running work and approvals waiting',
+      (tester) async {
+    final handle = tester.ensureSemantics();
     await pumpRuntime(tester,
         info: healthySystemInfo(),
-        data: FakeRuntimeData(runs: [runningWorkRun()]),
-        size: const Size(390, 844));
-    await expectLater(tester, meetsGuideline(androidTapTargetGuideline));
-    await expectLater(tester, meetsGuideline(labeledTapTargetGuideline));
+        data: FakeRuntimeData(
+            runs: [runningWorkRun()],
+            approvalsPage:
+                ApprovalsPage(supported: true, pending: [_pending()])));
+    // One work run and one agent are running.
+    expect(find.bySemanticsLabel(RegExp('Activity.*2 running', dotAll: true)),
+        findsOneWidget);
+    expect(
+        find.bySemanticsLabel(
+            RegExp('Permissions.*1 approval waiting', dotAll: true)),
+        findsOneWidget);
     handle.dispose();
   });
 
@@ -601,6 +1021,76 @@ void main() {
         'GET /v1/approvals',
         'POST /v1/work-runs/wr-${'0' * 32}/cancel',
       ]);
+    });
+
+    test('approves one call bound to tool and digest, revokes by nonce',
+        () async {
+      final seen = <String>[];
+      await http.runWithClient(() async {
+        const source =
+            HttpRuntimeDataSource(baseUrl: 'http://pc.test:11435', apiKey: 'k');
+        final page = await source.approvals(limit: 200);
+        expect(page.pending.single.callId, '3f9a12c0');
+        final issued = await source.approveCall('3f9a12c0',
+            ttl: const Duration(minutes: 5),
+            tool: 'write_file',
+            digest: _digest);
+        expect(issued.nonce, 'n_c41a');
+        await source.revokeApproval('n_c41a');
+      },
+          () => MockClient((request) async {
+                seen.add('${request.method} ${request.url}');
+                if (request.method == 'POST' &&
+                    request.url.path == '/v1/approvals/3f9a12c0') {
+                  expect(request.headers['Idempotency-Key'], isNotEmpty);
+                  final body = jsonDecode(request.body) as Map;
+                  expect(body['ttl_seconds'], 300);
+                  expect(body['tool'], 'write_file');
+                  expect(body['digest'], _digest);
+                  return http.Response(
+                      jsonEncode({
+                        'nonce': 'n_c41a',
+                        'call_id': '3f9a12c0',
+                        'ttl_seconds': 300,
+                      }),
+                      200);
+                }
+                if (request.method == 'POST') {
+                  return http.Response('{"revoked": true}', 200);
+                }
+                return http.Response(
+                    jsonEncode({
+                      'pending': [
+                        {'call_id': '3f9a12c0', 'tool': 'write_file'}
+                      ],
+                      'approvals': const [],
+                    }),
+                    200);
+              }));
+      expect(seen, [
+        'GET http://pc.test:11435/v1/approvals?limit=200',
+        'POST http://pc.test:11435/v1/approvals/3f9a12c0',
+        'POST http://pc.test:11435/v1/approvals/revoke/n_c41a',
+      ]);
+    });
+
+    test('reads the permission mode; 404 is a server without modes', () async {
+      await http.runWithClient(() async {
+        const source = HttpRuntimeDataSource(baseUrl: 'http://pc.test');
+        final mode = await source.permissionMode();
+        expect(mode!.mode, 'manual');
+        expect(mode.matrix['file_write'], 'ask');
+      },
+          () => MockClient((_) async => http.Response(
+              jsonEncode({
+                'mode': 'manual',
+                'matrix': {'file_write': 'ask'},
+              }),
+              200)));
+      await http.runWithClient(() async {
+        const source = HttpRuntimeDataSource(baseUrl: 'http://pc.test');
+        expect(await source.permissionMode(), isNull);
+      }, () => MockClient((_) async => http.Response('{}', 404)));
     });
 
     test('parses jobs, fanout and compute pages', () async {
@@ -704,6 +1194,9 @@ void main() {
     expect(workRunDetail(run, runtimeNow), '4m of 30m budget');
     expect(workRunStatus(const WorkRun(id: 'x', status: 'budget_exceeded')),
         StatusKind.fail);
+    expect(workRunsSummary(null), isNull);
+    expect(workRunsSummary(const []), 'None yet');
+    expect(workRunsSummary([runningWorkRun()]), '1 running · 1 recent');
   });
 
   testWidgets('live refresh reads status, updates, extensions and extras',
@@ -809,34 +1302,39 @@ void main() {
             '/v1/work-runs',
             '/v1/approvals',
             '/v1/sonder/ecosystem',
+            '/v1/permission-mode',
           ]));
-      expect(find.text('Work runs (1)'), findsOneWidget);
-      expect(find.textContaining('none waiting · 1 open'), findsOneWidget);
-      await tester.scrollUntilVisible(find.text('Updates & extensions'), 400,
-          scrollable: find.byType(Scrollable).first);
+      // Overview: approvals and work runs, from the extras.
+      expect(find.text('None waiting'), findsOneWidget);
+      expect(find.text('1 approved once'), findsOneWidget);
+      expect(find.text('1 recent'), findsOneWidget);
+      // Updates & extensions appear once the server reports them.
+      await tester.tap(find.byKey(const Key('category-updates')));
       await pumpFrames(tester);
       expect(find.textContaining('0.9.0'), findsWidgets);
-      await tester.scrollUntilVisible(find.textContaining('ext.demo'), 300,
-          scrollable: find.byType(Scrollable).first);
-      // Collapse and reopen a group through its header.
-      await tester.ensureVisible(find.text('Updates & extensions'));
+      expect(find.text('ext.demo'), findsOneWidget);
+      // Leaving the page and coming back keeps it.
+      await tester.tap(find.byKey(const Key('category-overview')));
       await pumpFrames(tester);
-      await tester.tap(find.text('Updates & extensions'));
+      expect(find.text('ext.demo'), findsNothing);
+      await tester.tap(find.byKey(const Key('category-updates')));
       await pumpFrames(tester);
-      expect(find.textContaining('ext.demo'), findsNothing);
-      // The rail jumps to (and opens) a section.
-      await tester.tap(find.text('Updates').first);
-      await pumpFrames(tester);
-      expect(find.textContaining('ext.demo'), findsOneWidget);
+      expect(find.text('ext.demo'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     }, () => client);
   });
 
-  testWidgets('an HTTP error is shown as the server row, not as offline',
+  testWidgets('an HTTP error is a banner and the server tile, not offline',
       (tester) async {
     final client = MockClient((request) async =>
         http.Response('{"error":{"message":"denied"}}', 401));
     await http.runWithClient(() async {
+      tester.view.physicalSize = const Size(1280, 1000);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
       await tester.pumpWidget(MaterialApp(
         home: RuntimeScreen(
             settings: Settings(serverUrl: 'http://127.0.0.1:11435')),
@@ -846,6 +1344,194 @@ void main() {
       // Lane A keeps the server's own 401 reason instead of a generic
       // "Unauthorized" (describeServerError).
       expect(find.textContaining('denied'), findsWidgets);
+      expect(find.byKey(const Key('runtime-stale')), findsOneWidget);
+      // The Server rail entry flags the problem in words.
+      expect(
+          find.descendant(
+              of: find.byKey(const Key('category-server')),
+              matching: find.text('error')),
+          findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    }, () => client);
+  });
+
+  testWidgets('one running action does not lock the rest of the page',
+      (tester) async {
+    final reply = Completer<void>();
+    final client = MockClient((request) async {
+      if (request.url.path == '/v1/chat/completions') {
+        await reply.future;
+        return http.Response(
+            '{"choices":[{"message":{"content":"turns: 1284"}}]}', 200);
+      }
+      return http.Response('{}', 404);
+    });
+    await http.runWithClient(() async {
+      await pumpRuntime(tester,
+          info: healthySystemInfo(),
+          data: FakeRuntimeData(runs: [runningWorkRun()]),
+          category: 'developer');
+      await tester.tap(find.text('Stats'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+      // The command is in flight under its own entry...
+      expect(find.text('/stats'), findsOneWidget);
+      expect(find.text('working'), findsWidgets);
+      // ...and every other control still works.
+      expect(_button(tester, find.text('Context')).onPressed, isNotNull);
+      expect(_button(tester, find.text('Send')).onPressed, isNotNull);
+      await openCategory(tester, 'activity');
+      expect(_button(tester, find.text('Stop…')).onPressed, isNotNull);
+      expect(_button(tester, find.text('Run goal')).onPressed, isNotNull);
+      await openCategory(tester, 'developer');
+      reply.complete();
+      await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+      await tester.pumpAndSettle();
+      expect(find.text('turns: 1284'), findsOneWidget);
+    }, () => client);
+  });
+
+  testWidgets('console: each reply under its command, newest first, five kept',
+      (tester) async {
+    final client = MockClient((request) async {
+      final body = jsonDecode(request.body) as Map;
+      final messages = body['messages'] as List;
+      final command = (messages.last as Map)['content'] as String;
+      return http.Response(
+          jsonEncode({
+            'choices': [
+              {
+                'message': {'content': 'reply to $command'}
+              }
+            ]
+          }),
+          200);
+    });
+    await http.runWithClient(() async {
+      await pumpRuntime(tester,
+          info: healthySystemInfo(), category: 'developer');
+      for (var i = 1; i <= 6; i++) {
+        await tester.enterText(
+            find.byKey(const Key('runtime-command')), '/echo $i');
+        await tester.tap(find.byKey(const Key('runtime-command-send')));
+        await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+        await tester.pumpAndSettle();
+      }
+      expect(find.text('reply to /echo 6'), findsOneWidget);
+      expect(find.text('reply to /echo 2'), findsOneWidget);
+      // Only the last five stay.
+      expect(find.text('reply to /echo 1'), findsNothing);
+      expect(find.byKey(const Key('console-entry-1')), findsNothing);
+      // Each reply sits under its own command, newest first.
+      final newest = find.byKey(const Key('console-entry-6'));
+      expect(find.descendant(of: newest, matching: find.text('/echo 6')),
+          findsOneWidget);
+      expect(
+          find.descendant(of: newest, matching: find.text('reply to /echo 6')),
+          findsOneWidget);
+      expect(
+          tester.getTopLeft(newest).dy,
+          lessThan(
+              tester.getTopLeft(find.byKey(const Key('console-entry-5'))).dy));
+    }, () => client);
+  });
+
+  testWidgets('a failed server start shows its reason inline, not a dialog',
+      (tester) async {
+    final client = MockClient((request) async {
+      if (request.url.path == '/v1/launcher/start') {
+        return http.Response(
+            '{"error":{"message":"port 11435 is in use"}}', 409);
+      }
+      if (request.url.path == '/v1/launcher/status') {
+        return http.Response(
+            jsonEncode({
+              'ok': true,
+              'launcher': 'sonder-launcher 1.2',
+              'server_running': false,
+              'server_state': 'stopped',
+              'server_host': '127.0.0.1',
+              'server_port': 11435,
+            }),
+            200);
+      }
+      return http.Response('{}', 404);
+    });
+    await http.runWithClient(() async {
+      await pumpRuntime(tester,
+          info: healthySystemInfo(),
+          category: 'server',
+          settings: Settings(
+            serverUrl: 'http://127.0.0.1:11435',
+            launcherUrl: 'http://127.0.0.1:11436',
+            launcherToken: 'launcher-token-0123456789abcdef',
+          ));
+      expect(find.byKey(const Key('runtime-busy')), findsNothing);
+      expect(find.byKey(const Key('runtime-failure')), findsNothing);
+      await tester.tap(find.byKey(const Key('start-server')));
+      await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsNothing);
+      final failure = find.byKey(const Key('runtime-failure'));
+      expect(failure, findsOneWidget);
+      expect(
+          find.descendant(
+              of: failure, matching: find.text('Start server failed')),
+          findsOneWidget);
+      expect(
+          find.descendant(of: failure, matching: find.textContaining('in use')),
+          findsOneWidget);
+      // The rail flags the Server page.
+      expect(
+          find.descendant(
+              of: find.byKey(const Key('category-server')),
+              matching: find.text('warn')),
+          findsOneWidget);
+      await tester.pump(const Duration(seconds: 3));
+    }, () => client);
+  });
+
+  testWidgets('polls pause while the shell shows another destination',
+      (tester) async {
+    var statusReads = 0;
+    final client = MockClient((request) async {
+      if (request.url.path == '/v1/sonder/status') {
+        statusReads++;
+        return http.Response('{"status": "ready", "models": []}', 200);
+      }
+      return http.Response('{}', 404);
+    });
+    Future<void> wait(Duration total) async {
+      for (var elapsed = Duration.zero;
+          elapsed < total;
+          elapsed += const Duration(milliseconds: 500)) {
+        await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 5)));
+        await tester.pump(const Duration(milliseconds: 500));
+      }
+    }
+
+    final screen = RuntimeScreen(
+        key: const ValueKey('runtime'),
+        settings: Settings(serverUrl: 'http://127.0.0.1:11435'));
+    Widget shell(WorkspaceDestination current) => MaterialApp(
+          home: ShellScope(
+            current: current,
+            sidebarVisible: true,
+            navigate: (_) {},
+            openNavigation: () {},
+            child: screen,
+          ),
+        );
+    await http.runWithClient(() async {
+      await tester.pumpWidget(shell(WorkspaceDestination.chat));
+      await settleLive(tester);
+      final hidden = statusReads;
+      await wait(const Duration(seconds: 8));
+      expect(statusReads, hidden, reason: 'kept alive behind Chat: no polls');
+      await tester.pumpWidget(shell(WorkspaceDestination.runtime));
+      await wait(const Duration(seconds: 6));
+      expect(statusReads, greaterThan(hidden), reason: 'shown: polls again');
       await tester.pumpWidget(const SizedBox());
     }, () => client);
   });

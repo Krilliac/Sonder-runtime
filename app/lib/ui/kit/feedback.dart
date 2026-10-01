@@ -217,13 +217,22 @@ class ActionOutcome {
   /// Raw text output (a slash-command reply), shown as [RawOutput].
   final String? output;
 
-  const ActionOutcome(this.kind, this.title, {this.detail, this.output});
+  /// A synonym for the kind's word from the same vocabulary row ("done",
+  /// "approved"); defaults to [StatusKind.word].
+  final String? word;
 
-  const ActionOutcome.ok(String title, {String? detail, String? output})
-      : this(StatusKind.ok, title, detail: detail, output: output);
+  const ActionOutcome(this.kind, this.title,
+      {this.detail, this.output, this.word});
+
+  const ActionOutcome.ok(String title,
+      {String? detail, String? output, String? word})
+      : this(StatusKind.ok, title, detail: detail, output: output, word: word);
 
   const ActionOutcome.failed(String title, {String? detail, String? output})
       : this(StatusKind.fail, title, detail: detail, output: output);
+
+  /// The word shown and announced before the title.
+  String get shownWord => word ?? kind.word;
 }
 
 /// Renders an [ActionOutcome]: a glyph-and-word line, an optional detail and
@@ -247,7 +256,7 @@ class OutcomeView extends StatelessWidget {
       textBaseline: TextBaseline.alphabetic,
       children: [
         ExcludeSemantics(
-          child: Text('${outcome.kind.glyph} ${outcome.kind.word}',
+          child: Text('${outcome.kind.glyph} ${outcome.shownWord}',
               style: tokens.mono(12.5, color: color, weight: FontWeight.w600)),
         ),
         const SizedBox(width: SonderSpace.md),
@@ -278,7 +287,7 @@ class OutcomeView extends StatelessWidget {
     return Semantics(
       liveRegion: true,
       container: true,
-      label: '${outcome.kind.word}: ${outcome.title}',
+      label: '${outcome.shownWord}: ${outcome.title}',
       child: dismiss == null
           ? body
           : Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
