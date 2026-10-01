@@ -32,7 +32,9 @@ def _health(status="ready", *, api_version=1, synthetic=False):
 
 def _gateway(*, health=None, status=200, refused=False):
     def get(url, headers, timeout):
-        assert timeout <= 2.0
+        # The health probe defaults to 5 s and is capped at 6 s
+        # (SONDER_INFERENCE_HEALTH_TIMEOUT_SECONDS); doctor must stay bounded.
+        assert timeout <= 6.0
         if refused:
             raise ConnectionRefusedError(111, "refused")
         if "/identity" in url:
@@ -99,11 +101,13 @@ def test_invalid_bindings_fail_loudly():
     assert result["status"] == "fail" and "sonder-inference" in result["detail"]
 
 
-def test_scope_warning_names_the_surfaces_bindings_do_not_reach():
+def test_scope_ok_names_tier_bound_surfaces_and_explicit_ollama_boundaries():
     result = sonder_doctor._check_sonder_inference_scope(env=BOUND)
-    assert result["status"] == "warn"
-    for surface in ("REPL", "MCP", "autopilot", "fleet"):
+    assert result["status"] == "ok"
+    for surface in ("REPL", "MCP", "agents", "workbench", "autopilot", "fleet", "web research"):
         assert surface in result["detail"]
+    for boundary in ("explicit Ollama pins", "strict sonder aliases", "durable fanout"):
+        assert boundary in result["detail"]
 
 
 def test_default_and_bound_registries_include_the_checks():
@@ -151,7 +155,7 @@ def test_cli_fails_for_bound_unreachable_inference_and_skip_flag_removes_it(
     assert main(["doctor", "--json"]) == 1
     payload = json.loads(capsys.readouterr().out)
     statuses = {check["name"]: check["status"] for check in payload["checks"]}
-    assert statuses == {"sonder_inference": "fail", "sonder_inference_scope": "warn"}
+    assert statuses == {"sonder_inference": "fail", "sonder_inference_scope": "ok"}
 
     assert main(["doctor", "--json", "--skip-inference"]) == 0
     payload = json.loads(capsys.readouterr().out)

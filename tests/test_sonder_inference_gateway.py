@@ -372,11 +372,11 @@ def test_send_time_refusal_marks_cache_unavailable():
     assert len(calls) == 1  # the second refusal came from the cache
 
 
-def test_health_probe_timeout_is_bounded_to_two_seconds():
+def test_health_probe_timeout_is_bounded_to_five_seconds():
     fake = FakeInference()
     gateway = _gateway(fake, timeout_seconds=300.0)
     gateway.generate(ModelRequest(prompt="x", tier="fast"), _ctx(timeout=120.0))
-    assert fake.gets[0][2] <= 2.0
+    assert fake.gets[0][2] == 5.0
     assert fake.posts[0][3] <= 120.0
 
 
@@ -635,6 +635,7 @@ def test_provider_status_keys_and_types_when_ready():
         "fallback_count": 0,
         "tier_models": {tier: DEFAULT_MODEL for tier in
                         ("fast", "general", "code", "reasoning", "vision")},
+        "busy": False,
     }
 
 
@@ -1149,3 +1150,406 @@ def test_inference_metrics_have_their_own_bounded_backend_label():
     registry.observe_inference("unbounded-name", from_openai_compatible(_chat()))
     assert recorder.labels_seen
     assert set(recorder.labels_seen) == {"sonder_inference", "other"}
+
+
+# A3: trial3's busy proxy must not look like a dead provider.
+@pytest.mark.parametrize("failure", ["timeout", "overloaded"])
+def test_a3_recent_healthy_cache_survives_busy_probe_without_renewing_age(failure):
+    clock, fake = Clock(), FakeInference()
+    gateway = _gateway(fake, clock=clock)
+    healthy = gateway.health()
+    clock.now += 6
+    if failure == "timeout":
+        fake.get_error = TimeoutError("busy")
+    else:
+        fake.health, fake.health_status = OVERLOADED, 503
+    busy = gateway.health()
+    assert busy.state == "ready" and busy.busy
+    assert busy.checked_monotonic == healthy.checked_monotonic
+    assert busy.document == healthy.document
+    assert gateway.generate(ModelRequest(prompt="x", tier="fast"), _ctx()).text == "hello"
+    assert "busy" in gateway.readiness().detail
+    assert "busy" in gateway.capability_health().detail
+    status = gateway.provider_status()["sonder_inference"]
+    assert status["busy"] is True and status["healthy"] is True
+    clock.now = healthy.checked_monotonic + 121
+    with pytest.raises((DependencyUnavailable, CapacityExceeded)):
+        gateway.generate(ModelRequest(prompt="x", tier="fast"), _ctx())
+
+
+def test_a3_six_second_health_server_allows_call_with_recent_healthy_cache():
+    import time
+    from sonder_runtime.adapters.inference.sonder_inference_gateway import direct_get_transport
+
+    finished = threading.Event()
+
+    def handler(conn):
+        request = _read_request(conn)
+        if b"/v1/sonder/health" in request:
+            try:
+                time.sleep(6)
+                conn.sendall(_http_response(200, _health()))
+            finally:
+                finished.set()
+        else:
+            conn.sendall(_http_response(200, _chat("proceeded")))
+
+    port, close = _serve_raw(handler)
+    try:
+        gateway = SonderInferenceGateway(
+            SonderInferenceConfig(base_url="http://127.0.0.1:%d" % port,
+                                  health_ttl_seconds=0),
+            get_transport=FakeInference().get,
+        )
+        gateway.health()
+        gateway._get_transport = direct_get_transport
+        response = gateway.generate(ModelRequest(prompt="x", tier="fast"), _ctx())
+        assert response.text == "proceeded"
+    finally:
+        close()
+        assert finished.wait(7), "fake health handler must finish"
+
+
+def test_a3_stale_health_timeout_is_unavailable_and_retried_once():
+    clock, fake = Clock(), FakeInference()
+    gateway = _gateway(fake, clock=clock, base_url="http://127.0.0.1:18888")
+    gateway.health()
+    clock.now += 121
+    fake.get_error = TimeoutError("busy")
+    with pytest.raises(SonderInferenceUnreachable) as caught:
+        gateway.generate(ModelRequest(prompt="x", tier="fast"), _ctx())
+    assert caught.value.kind == "provider_unavailable"
+    assert "http://127.0.0.1:18888" in str(caught.value)
+    assert [item[2] for item in fake.gets[1:]] == [5.0, 6.0]
+    assert fake.posts == []
+
+
+def test_a3_health_retry_can_recover_without_a_cache():
+    fake = FakeInference()
+    gateway = _gateway(fake)
+    attempts = []
+
+    def get(url, headers, timeout):
+        attempts.append(timeout)
+        if len(attempts) == 1:
+            raise TimeoutError("busy")
+        return fake.get(url, headers, timeout)
+
+    gateway._get_transport = get
+    assert gateway.generate(ModelRequest(prompt="x", tier="fast"), _ctx()).text == "hello"
+    assert attempts == [5.0, 6.0]
+
+
+def test_a3_health_timeout_and_stale_window_are_configurable():
+    cfg = config_from_env({"SONDER_INFERENCE_HEALTH_TIMEOUT_SECONDS": "1.5",
+                           "SONDER_INFERENCE_HEALTH_STALE_SECONDS": "12"})
+    assert cfg.health_timeout_seconds == 1.5
+    assert cfg.health_stale_seconds == 12
+    fake = FakeInference()
+    fake.get_error = TimeoutError()
+    with pytest.raises(SonderInferenceUnreachable):
+        _gateway(fake, cfg).generate(ModelRequest(prompt="x", tier="fast"), _ctx())
+    assert [item[2] for item in fake.gets] == [1.5, 3.0]
+
+
+class _RetryToken:
+    cancelled = False
+
+    def __init__(self):
+        self.waits = []
+
+    def wait(self, timeout):
+        self.waits.append(timeout)
+        return self.cancelled
+
+
+@pytest.mark.parametrize("retry_after,delay", [(None, 5), ("2", 2), ("999999", 5),
+                                               ("invalid", 5), ("-1", 5)])
+def test_a3_backend_read_timeout_retries_once_then_is_busy_timeout(retry_after, delay):
+    def chat(url, *_):
+        error = _http_error(url, 503, "backend_unavailable", "backend read timed out")
+        if retry_after is not None:
+            error.headers["Retry-After"] = retry_after
+        return error
+
+    fake, token = FakeInference(chat=chat), _RetryToken()
+    with pytest.raises(DependencyUnavailable) as caught:
+        _gateway(fake).generate(ModelRequest(prompt="x", tier="fast"), _ctx(cancellation=token))
+    assert getattr(caught.value, "kind", None) == "busy_timeout"
+    assert not isinstance(caught.value, SonderInferenceUnreachable)
+    assert len(fake.posts) == 2
+    assert token.waits == [delay]
+
+
+def test_a3_backend_read_timeout_retry_can_succeed():
+    fake, token = FakeInference(), _RetryToken()
+    fake.chat = lambda url, *_: (
+        _http_error(url, 503, "backend_unavailable", "read timed out")
+        if len(fake.posts) == 1 else _chat("recovered")
+    )
+    response = _gateway(fake).generate(ModelRequest(prompt="x", tier="fast"),
+                                       _ctx(cancellation=token))
+    assert response.text == "recovered"
+    assert len(fake.posts) == 2 and token.waits == [5]
+
+
+def test_a3_partial_stream_is_never_replayed():
+    from sonder_runtime.application.chat import stream_sink
+
+    live = stream_sink.LiveTurnStream(lambda text: True)
+    fake, token = FakeInference(), _RetryToken()
+
+    def chat(url, *_):
+        live.emit("partial")
+        return _http_error(url, 503, "backend_unavailable", "read timed out")
+
+    fake.chat = chat
+    with stream_sink.armed(live), stream_sink.claimed_for_call(), pytest.raises(DependencyUnavailable):
+        _gateway(fake).generate(ModelRequest(prompt="x", tier="fast"), _ctx(cancellation=token))
+    assert len(fake.posts) == 1 and token.waits == []
+
+
+@pytest.mark.parametrize("source,session,priority,agent", [
+    ("http", "chat-1", "interactive", None),
+    ("repl", "chat-1", "interactive", None),
+    ("worker", "agent-run-1", "subagent", "agent-run-1"),
+    ("system", "maintenance-1", "background", None),
+])
+def test_a3_cache_key_is_stable_per_run_and_headers_describe_work(source, session, priority, agent):
+    from sonder_runtime.application.context import bind_operation_context
+
+    fake, gateway = FakeInference(), None
+    gateway = _gateway(fake)
+    for run in (session, session + "-next"):
+        ambient = local_owner_context(correlation_id="outer", source=source, session_id=run)
+        with bind_operation_context(ambient):
+            for turn in range(3):
+                gateway.generate(ModelRequest(prompt="x", tier="fast"),
+                                 _ctx(correlation="turn-%d" % turn, source=source))
+    keys = [p[1].get("prompt_cache_key") for p in fake.posts]
+    assert keys[:3] == [session] * 3
+    assert keys[3:] == [session + "-next"] * 3
+    assert fake.posts[0][2]["X-Sonder-Priority"] == priority
+    assert fake.posts[0][2].get("X-Sonder-Agent-Id") == agent
+    assert fake.posts[0][2]["X-Sonder-Run-Id"] == "turn-0"
+
+
+def test_a3_missing_session_does_not_use_per_call_correlation_as_cache_key():
+    fake = FakeInference()
+    _gateway(fake).generate(ModelRequest(prompt="x", tier="fast"), _ctx())
+    assert "prompt_cache_key" not in fake.posts[0][1]
+    assert "X-Sonder-Agent-Id" not in fake.posts[0][2]
+
+
+def test_a3_reasoning_budget_and_sampling_reach_request_body():
+    health = _health()
+    health["sonder"] = {"features": ["thinking", "reasoning_budget"]}
+    fake = FakeInference(health=health)
+    options = {"think": False, "reasoning_budget_tokens": 256,
+               "reasoning_budget_message": "Answer now", "top_p": 0.95,
+               "top_k": 20, "min_p": 0.0, "repeat_penalty": 1.1, "seed": 42}
+    _gateway(fake).generate(ModelRequest(prompt="x", tier="fast", options=options), _ctx())
+    body = fake.posts[0][1]
+    assert body["chat_template_kwargs"]["enable_thinking"] is False
+    for key, value in options.items():
+        if key != "think":
+            assert body[key] == value
+
+
+@pytest.mark.parametrize("location", ["nested", "cached_tokens", "missing"])
+def test_a3_timings_finish_reason_and_activity_are_reported(location, monkeypatch):
+    from sonder_runtime.adapters.observability import activity_tracker
+    from sonder_runtime.application.ports.model_gateway import ModelResponse
+
+    data = _chat()
+    data.pop("timings")
+    expected = {"cache_n": 3, "prompt_n": 4, "predicted_n": 6,
+                "queue_ms": 12.5, "draft_n": 8, "draft_n_accepted": 5}
+    if location == "nested":
+        data["usage"]["sonder"] = {"timings": {**expected, "secret": "never copy"}}
+    elif location == "cached_tokens":
+        data["usage"]["prompt_tokens_details"] = {"cached_tokens": 0}
+        expected = {"cache_n": 0}
+    else:
+        expected = None
+    data["choices"][0]["finish_reason"] = "length"
+    events = []
+    monkeypatch.setattr(activity_tracker, "record_event", lambda kind, **fields: events.append((kind, fields)))
+    gateway = _gateway(FakeInference(chat=lambda *_: data))
+    response = gateway.generate(ModelRequest(prompt="private prompt", tier="fast"), _ctx())
+    assert isinstance(response, ModelResponse)
+    assert response.timings == expected
+    assert response.finish_reason == "length"
+    assert gateway.last_response_meta["finish_reason"] == "length"
+    assert gateway.last_response_meta.get("timings") == expected
+    assert events[-1][1]["finish_reason"] == "length"
+    assert events[-1][1].get("timings") == expected
+    assert "private prompt" not in repr(events) and "never copy" not in repr(events)
+
+
+@pytest.mark.parametrize("correlation", ["standalone-012345", "repl-work-012345"])
+def test_a3_explicit_agent_run_correlations_are_stable_keys(correlation):
+    fake = FakeInference()
+    gateway = _gateway(fake)
+    for _ in range(3):
+        gateway.generate(ModelRequest(prompt="x", tier="fast"), _ctx(correlation=correlation, source="repl"))
+    assert [p[1].get("prompt_cache_key") for p in fake.posts] == [correlation] * 3
+    assert fake.posts[0][2]["X-Sonder-Agent-Id"] == correlation
+    assert fake.posts[0][2]["X-Sonder-Priority"] == "subagent"
+
+
+def test_a3_read_timeout_beyond_display_limit_and_lowercase_retry_header():
+    fake, token = FakeInference(), _RetryToken()
+
+    def chat(url, *_):
+        error = _http_error(url, 503, "backend_unavailable", "x" * 250 + " read timed out")
+        error.headers["retry-after"] = "0"
+        return error
+
+    fake.chat = chat
+    with pytest.raises(DependencyUnavailable) as caught:
+        _gateway(fake).generate(ModelRequest(prompt="x", tier="fast"), _ctx(cancellation=token))
+    assert getattr(caught.value, "kind", None) == "busy_timeout"
+    assert len(fake.posts) == 2 and token.waits == [0]
+
+
+@pytest.mark.parametrize("value", [True, -1, "2", float("nan"), float("inf")])
+def test_a3_invalid_optional_timings_do_not_become_measurements(value):
+    data = _chat()
+    data["timings"] = {}
+    data["usage"]["sonder"] = {"timings": {key: value for key in
+        ("cache_n", "prompt_n", "predicted_n", "queue_ms", "draft_n", "draft_n_accepted")}}
+    response = _gateway(FakeInference(chat=lambda *_: data)).generate(ModelRequest(prompt="x", tier="fast"), _ctx())
+    assert response.timings is None
+
+
+@pytest.mark.parametrize("failure", ["auth", "version", "starting", "refused"])
+def test_a3_good_cache_never_masks_definitive_health_failure(failure):
+    clock, fake = Clock(), FakeInference()
+    gateway = _gateway(fake, clock=clock)
+    gateway.health()
+    clock.now += 6
+    if failure == "auth":
+        fake.health, fake.health_status = {"error": {"code": "unauthorized"}}, 401
+    elif failure == "version":
+        fake.health = _health(api_version=2)
+    elif failure == "starting":
+        fake.health, fake.health_status = _health("starting"), 503
+    else:
+        fake.get_error = ConnectionRefusedError()
+    with pytest.raises((Forbidden, DependencyUnavailable)):
+        gateway.generate(ModelRequest(prompt="x", tier="fast"), _ctx())
+    assert fake.posts == []
+    assert len(fake.gets) == 2
+
+
+def test_a3_busy_retry_obeys_cancellation_and_short_deadline():
+    from sonder_runtime.domain.common.errors import Cancelled
+
+    class CancelDuringWait(_RetryToken):
+        def wait(self, timeout):
+            super().wait(timeout)
+            self.cancelled = True
+            return True
+
+    for token, timeout, expected in [(_RetryToken(), 0.1, DependencyUnavailable),
+                                     (CancelDuringWait(), 30, Cancelled)]:
+        fake = FakeInference(chat=lambda url, *_: _http_error(url, 503, "backend_unavailable", "read timed out"))
+        with pytest.raises(expected):
+            _gateway(fake).generate(ModelRequest(prompt="x", tier="fast"),
+                                    _ctx(cancellation=token, timeout=timeout))
+        assert len(fake.posts) == 1
+
+
+def test_a3_response_meta_does_not_leak_previous_success():
+    fake = FakeInference()
+    gateway = _gateway(fake)
+    gateway.generate(ModelRequest(prompt="x", tier="fast"), _ctx())
+    assert gateway.last_response_meta["finish_reason"] == "stop"
+    fake.chat = lambda *_: TimeoutError()
+    with pytest.raises(DeadlineExceeded):
+        gateway.generate(ModelRequest(prompt="x", tier="fast"), _ctx())
+    assert gateway.last_response_meta == {}
+
+
+def test_a3_ambient_session_never_crosses_principal_boundary():
+    from dataclasses import replace
+    from sonder_runtime.application.context import bind_operation_context
+
+    ambient = replace(_ctx(source="worker"), session_id="another-principal", principal_id="other")
+    fake = FakeInference()
+    with bind_operation_context(ambient):
+        _gateway(fake).generate(ModelRequest(prompt="x", tier="fast"), _ctx())
+    assert "prompt_cache_key" not in fake.posts[0][1]
+    assert "X-Sonder-Agent-Id" not in fake.posts[0][2]
+
+
+@pytest.mark.parametrize("name,value", [
+    ("SONDER_INFERENCE_HEALTH_TIMEOUT_SECONDS", "0"),
+    ("SONDER_INFERENCE_HEALTH_TIMEOUT_SECONDS", "nan"),
+    ("SONDER_INFERENCE_HEALTH_TIMEOUT_SECONDS", "inf"),
+    ("SONDER_INFERENCE_HEALTH_STALE_SECONDS", "-1"),
+    ("SONDER_INFERENCE_HEALTH_STALE_SECONDS", "inf"),
+])
+def test_a3_invalid_health_configuration_fails_closed(name, value):
+    with pytest.raises(InvalidInput):
+        config_from_env({name: value})
+
+
+def test_a3_busy_status_does_not_add_an_identity_probe():
+    clock, fake = Clock(), FakeInference()
+    gateway = _gateway(fake, clock=clock)
+    gateway.health()
+    clock.now += 6
+    fake.get_error = TimeoutError("busy")
+    status = gateway.provider_status()["sonder_inference"]
+    assert status["busy"] is True
+    assert len(fake.gets) == 2
+    assert all("/identity" not in item[0] for item in fake.gets)
+
+
+def test_a3_doctor_and_preflight_surface_busy(monkeypatch):
+    import sonder_doctor
+    from sonder_runtime.adapters import preflight
+    from sonder_runtime.adapters.inference import sonder_inference_gateway as module
+
+    clock, fake = Clock(), FakeInference()
+    gateway = _gateway(fake, clock=clock)
+    gateway.health()
+    clock.now += 6
+    fake.get_error = TimeoutError("busy")
+    env = {"SONDER_MODEL_BACKEND": "sonder-inference", "SONDER_EMBEDDING_PROVIDER": "ollama"}
+    doctor = sonder_doctor._check_sonder_inference(env=env, gateway=gateway)
+    assert doctor["status"] == "ok" and "busy" in doctor["detail"]
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(module, "SonderInferenceGateway", lambda: gateway)
+    check = preflight._sonder_inference_result()
+    assert check.ok and "busy" in check.detail
+
+
+def test_a3_busy_timeout_never_falls_back_to_ollama():
+    from sonder_runtime.adapters.provider_dispatch.fallback import PreSendFallbackGateway
+
+    class Tripwire:
+        def generate(self, *_):
+            pytest.fail("busy inference must never send a request to Ollama/127.0.0.1:11434")
+
+    fake = FakeInference(chat=lambda url, *_: _http_error(url, 503, "backend_unavailable", "read timed out"))
+    gateway = PreSendFallbackGateway(_gateway(fake), fallback=Tripwire())
+    with pytest.raises(DependencyUnavailable, match="busy_timeout"):
+        gateway.generate(ModelRequest(prompt="x", tier="fast"), _ctx(cancellation=_RetryToken()))
+    assert len(fake.posts) == 2
+
+
+def test_a3_activity_detailed_feed_preserves_content_free_measurements():
+    from sonder_runtime.adapters.observability import activity_tracker
+
+    with activity_tracker.response_span("a3-test") as span:
+        _gateway(FakeInference()).generate(ModelRequest(prompt="never publish this", tier="fast"), _ctx())
+        public = activity_tracker.public_response(span, include_detail=True)
+        event = next(e for e in public["events"] if e["kind"] == "inference_outcome")
+        summary = json.loads(event["summary"])
+        assert summary["finish_reason"] == "stop"
+        assert summary["timings"] == {"prompt_n": 4, "predicted_n": 6}
+        assert "never publish this" not in repr(public)

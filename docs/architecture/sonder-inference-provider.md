@@ -41,8 +41,9 @@ the operator to set `SONDER_EMBEDDING_PROVIDER=ollama`.
 
 ## Configuration
 
-Read lazily on every call (like `SONDER_OPENAI_*`); nothing is read at import
-or construction.
+Provider configuration is read lazily on every call (like `SONDER_OPENAI_*`).
+Agent generation controls below are frozen at generator construction so a
+task does not switch thinking or sampling modes between decisions.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -54,14 +55,72 @@ or construction.
 | `SONDER_ALLOW_REMOTE_INFERENCE` | `0` | `1` permits a non-loopback base URL (see consent). |
 | `SONDER_INFERENCE_TIMEOUT_SECONDS` | `300` | Per-call ceiling, never beyond the operation deadline. |
 | `SONDER_INFERENCE_HEALTH_TTL_SECONDS` | `5` | How long a health observation is reused. |
+| `SONDER_INFERENCE_HEALTH_TIMEOUT_SECONDS` | `5` | Probe budget in seconds, greater than zero and at most 6. Generation retries a timeout/overloaded probe once with twice this budget, capped at 6 seconds and the operation's remaining budget. |
+| `SONDER_INFERENCE_HEALTH_STALE_SECONDS` | `120` | Maximum age of healthy evidence usable when a probe times out or reports overloaded (0 disables reuse; maximum 3600). Status/detail reports `busy`; reuse never renews the healthy observation's age. |
 | `SONDER_INFERENCE_FALLBACK` | `none` | `none` or `ollama`; anything else fails composition. |
 | `SONDER_INFERENCE_THINKING` | `auto` | Forward `think` as `chat_template_kwargs.enable_thinking`: `auto` (when the health document advertises it), `on`, `off`. |
 | `SONDER_INFERENCE_SAMPLING_DEFAULTS` | `0` | `1` fills the model family's recommended sampling values for fields the caller left unset. |
 | `SONDER_INFERENCE_SAMPLING_TABLE` | unset | JSON list replacing the built-in sampling family table. |
+| `SONDER_AGENT_NUM_PREDICT` | `4096` | Decision output cap for `sonder_inference`, including hidden reasoning. Positive integer, capped at 8192; invalid/nonpositive values use 4096. Ollama decisions retain 1200; hosted agent budgets retain their existing separate policy. |
+| `SONDER_AUTOPILOT_JSON_NUM_PREDICT` | `4096` | Planner/reviewer JSON output cap for `sonder_inference`, with the same validation and 8192 ceiling. Ollama retains 1800. |
+| `SONDER_AGENT_TEMPERATURE` | `0.1` | Agent decision temperature on `sonder_inference`; finite number from 0 to 2. Does not change other providers or ordinary helper calls. |
+| `SONDER_AGENT_SAMPLING` | unset | Optional `top_p,top_k,min_p` triple, for example `0.95,20,0`. Applied only to agent decisions on thinking-capable providers (currently `sonder_inference`). Probability values must be in [0,1]; top_k must be a nonnegative integer. |
+| `SONDER_AGENT_DECISION_THINKING` | `on` | `on`/`off` request explicit thinking only when this provider's health advertises support; `auto` leaves the serving template's default. The health decision is frozen at construction. Missing support sends no override. |
+| `SONDER_AUTOPILOT_JSON_THINK` | `auto` | Planner/reviewer `off`/`on`/`auto`. `auto` requests off only when health advertises thinking; otherwise no override. Ollama is unchanged. |
+
+The agent controls are limited to the decision and planner/reviewer entrypoints;
+changing them does not retune chat, learning, summaries or other tier helpers.
+Malformed sampling, temperature or thinking settings fail explicitly on those
+Inference entrypoints. Ollama and other providers do not read those settings.
+Use one configuration per experiment/run; a running decision generator keeps
+its initial settings even if the process environment changes.
+
+The request tuning module also exposes an explicit `decision` sampling profile:
+thinking temperature 0.6, top_p 0.95, top_k 20, min_p 0;
+non-thinking temperature 0.7, top_p 0.8, top_k 20. Agent decisions select that
+profile when `SONDER_INFERENCE_SAMPLING_DEFAULTS=1`, filling only unset values.
+With no explicit thinking override, the decision row assumes thinking.
+It does not replace the historical 0.1 agent temperature;
+use the agent environment controls above for E06/E12 sampling experiments.
+The bridge carries boolean `think` and explicit `reasoning_budget_tokens` /
+`reasoning_budget_message` options to the provider gateway; server-side support
+and gateway mapping determine whether those reasoning controls are honored.
 
 Base URL resolution order: `SONDER_INFERENCE_BASE_URL`, then the ready file,
 then the default. Invalid values (unknown tier keys, non-numeric timeouts,
 `SONDER_ALLOW_REMOTE_INFERENCE` other than `0`/`1`) raise `InvalidInput`.
+
+A busy probe with recent healthy evidence allows generation to proceed. A
+definitive failure (credentials, API version, connection refusal or starting/
+draining) still refuses the call. A 503 `backend_unavailable` containing
+`read timed out` is a `busy_timeout`: retry once at the same endpoint after
+`Retry-After` (seconds or HTTP date, capped at 5 seconds), defaulting to 5
+seconds for missing/invalid values. Backoff and both sends share the call
+budget and honor cancellation; partial streams are never replayed. These
+post-send failures never trigger the Ollama fallback.
+
+Calls with a context session send its stable `prompt_cache_key`; worker
+sessions also send `X-Sonder-Agent-Id`. Standalone and managed REPL agent
+run correlations (`standalone-*`, `repl-work-*`) serve the same purpose when
+there is no session. Without a stable identity the cache key is omitted.
+`X-Sonder-Run-Id` remains the call's correlation ID. `X-Sonder-Priority` is
+`interactive` for HTTP/REPL/MCP, `subagent` for workers and agent runs, and
+`background` for system work. Ambient identity is used only for the same
+principal. Autopilot/fleet callers must bind a stable run session upstream
+to get per-run cache affinity; fresh `tier-helper-*` IDs are not stable keys.
+
+Explicit `reasoning_budget_tokens` (0–1000000) and
+`reasoning_budget_message` (at most 16384 characters) pass through alongside
+the existing sampling options. `think` keeps the advertised-capability/
+operator-override behavior above. Gateway responses extend `ModelResponse`
+with optional `timings` and `finish_reason`. Timings accept only bounded
+backend measurements: `cache_n`, `prompt_n`, `predicted_n`, `queue_ms`,
+`draft_n`, `draft_n_accepted`, preferring `usage.sonder.timings` over legacy
+top-level timings, with `usage.prompt_tokens_details.cached_tokens` as a
+cache-count fallback. Missing measurements remain absent. The gateway's
+thread-local `last_response_meta` and `inference_outcome` activity event
+retain this metadata; the public detailed feed carries it in the event
+summary, without prompt or response content.
 
 ## Consent
 
@@ -256,9 +315,10 @@ These never generate.
   `SONDER_INFERENCE_FALLBACK=ollama` covers; fail for an outage without a
   fallback and for anything no fallback can help (invalid `SONDER_INFERENCE_*`
   values, a remote URL without consent, rejected credentials or Host, an API
-  version mismatch from health or from the ready file, invalid bindings) and `sonder_inference_scope` (warn when bound: REPL, MCP,
-  autopilot and fleet generate through the legacy Ollama path regardless of
-  bindings). `--skip-inference` removes both.
+  version mismatch from health or from the ready file, invalid bindings).
+  `sonder_inference_scope` reports the tier-bound agent, autopilot, fleet and
+  helper surfaces; explicit Ollama pins, strict `sonder` aliases and durable
+  fanout remain outside that binding. `--skip-inference` removes both.
 - `serve`/`preflight` add a non-required `sonder_inference` check only; startup
   never blocks on Inference, and a check that fails unexpectedly is reported
   as a failed non-required check rather than raised.
@@ -267,16 +327,16 @@ These never generate.
 
 ## Which surfaces use the provider
 
-Provider bindings are honoured by ModelGateway consumers: `ChatService`
-(`POST /a2a` SendMessage) and session summarize/title offload. On this
-revision, `POST /v1/chat/completions` still runs the legacy Ollama chat path
-(`server.py` `_chat_request`); routing it through the gateway is contract
-section 4, owned by the chat-telemetry lane (its bridge module is
-`application/chat/provider_bridge.py` on that branch). REPL, MCP, autopilot
-and fleet generate through the legacy Ollama path regardless of bindings, which
-the `sonder_inference_scope` doctor check states. The `/v1/models` listing and
-the escalation rungs deduplicate by Ollama model name, which carries no
-meaning for Inference-bound tiers.
+Provider bindings are honoured by the chat and agent generation consumers:
+`ChatService` (`POST /a2a` SendMessage), session summarize/title offload,
+interactive agents, workbench turns, autopilot planner/task/review calls,
+master/fleet workers, ensembles, web research and audit/helper calls. Each
+call resolves its provider from the selected tier. Exact model pins, strict
+`sonder` aliases and durable fanout remain explicitly Ollama-bound; image and
+schema requests retain the chat refusal for non-Ollama providers, and the
+sealed single-send codegen canary refuses a bound non-Ollama provider. The
+`/v1/models` listing and escalation rungs may still deduplicate by Ollama model
+name; that identity has no meaning for an Inference-bound tier.
 
 ## Open questions (cross-repo shapes not pinned by the contract)
 

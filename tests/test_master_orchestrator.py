@@ -11,6 +11,7 @@ import pytest
 import master_orchestrator
 import server
 from sonder_runtime.application.artifacts.master_fanin import validate_master_slots_for_run
+from sonder_runtime.platform.runtime_threads import Thread
 
 
 def _repository_receipt(project, output="grounded result"):
@@ -1091,6 +1092,9 @@ def test_start_delegated_returns_before_background_workers_finish(monkeypatch):
 
 
 def test_cancel_master_skips_queued_workers_and_discards_running_result(monkeypatch):
+    # run_delegated also calls capacity(), independently of worker slots. Its
+    # cold model-size probe can outlast the handshake below on an offline host.
+    _fake_hardware(monkeypatch)
     monkeypatch.setattr(master_orchestrator, "parallel_worker_slots", lambda requested: 1)
     started = threading.Event()
     release = threading.Event()
@@ -1112,15 +1116,19 @@ def test_cancel_master_skips_queued_workers_and_discards_running_result(monkeypa
             agents=4,
         )
 
-    thread = threading.Thread(target=run)
+    thread = Thread(target=run)
     thread.start()
-    assert started.wait(2)
-    snap = master_orchestrator.snapshot(include_finished=False, limit=20)
-    master_id = next(row["id"] for row in snap["agents"] if row["role"] == "master")
+    try:
+        assert started.wait(2)
+        snap = master_orchestrator.snapshot(include_finished=False, limit=20)
+        master_id = next(row["id"] for row in snap["agents"] if row["role"] == "master")
 
-    canceled = master_orchestrator.request_cancel(master_id)
-    release.set()
-    thread.join(3)
+        canceled = master_orchestrator.request_cancel(master_id)
+    finally:
+        # Keep the worker/coordinator inside the test even if an assertion
+        # fails, before fixture teardown or interpreter shutdown can race it.
+        release.set()
+        thread.join(3)
 
     assert not thread.is_alive()
     assert canceled["matched"] == 5

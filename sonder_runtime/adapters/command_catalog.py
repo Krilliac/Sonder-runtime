@@ -237,6 +237,7 @@ _CATEGORY_BY_TOOL = {
     "sonder_sessions": "context",
     "sonder_stats": "memory",
     "sonder_remember_fact": "memory", "sonder_forget_fact": "memory",
+    "playbook_note": "memory", "playbook_read": "memory",
     "hardware_profile": "system",
     "environment_status": "system",
     "toolchain_status": "system",
@@ -331,7 +332,7 @@ _CATEGORY_BY_SLASH = {
     "/version": "basic",
     "/model": "chat", "/persona": "persona", "/prompts": "persona", "/consult": "chat",
     "/route": "chat", "/refactor": "dev", "/scaffold": "dev",
-    "/fact": "memory", "/facts": "memory", "/lessons": "memory",
+    "/fact": "memory", "/facts": "memory", "/lessons": "memory", "/playbooks": "memory",
     "/learn": "memory", "/good": "memory", "/bad": "memory",
     "/accept": "memory", "/pass": "memory", "/fail": "memory",
     "/todo": "planning", "/plan": "planning",
@@ -407,6 +408,7 @@ _DANGEROUS = frozenset({
 # it. It is not a place to park a tool that merely looks harmless: the
 # ``ask`` default above is the right answer for anything unverified.
 _READ_ONLY = frozenset({
+    "playbook_read",
     "computer_use_status",
     "task_list", "task_show", "checklist_show", "admin_status",
     "admin_whoami", "autopilot_status", "calibration_status", "learn_tiers",
@@ -492,6 +494,7 @@ _READ_ONLY = frozenset({
 # for. The literal is asserted by a test, because it is the only thing that
 # makes ``safe`` true.
 _UNREGISTERED_BRANCH_WORK = {
+    "/playbooks": "permission_approve",  # owner review can approve durable instructions
     # The scoped console facade gates the immutable prepared command itself.
     # Declare its work here even though static discovery cannot follow it.
     "/lanes": "agent_lane",

@@ -79,23 +79,23 @@ the provider's `ModelResponse.model`.
   `sonder_receipt.degraded = ["memory_recall_embeddings"]`.
 - With every tier on Ollama nothing above runs.
 
-The REPL, MCP tools, autopilot and fleet paths still call `_make_generate`
-directly and therefore stay on Ollama whatever the bindings say. `/v1/models`
-and the escalation ladder de-duplicate rungs by their Ollama model name, which
-means nothing for a tier served by another provider.
+REPL, MCP tools, interactive agents, workbench, autopilot and fleet paths
+resolve the provider from the selected tier. The same applies to ensembles,
+web research and audit/helper calls. `/v1/models` and the escalation ladder
+may de-duplicate rungs by their Ollama model name, which means nothing for a
+tier served by another provider.
 
-Some dispatchers on the HTTP chat route run before the model path and have
-their own model loop. Bindings do not reach them:
+These explicit boundaries remain Ollama-specific:
 
-| HTTP chat dispatcher | Behaviour with a non-Ollama binding |
+| Explicit Ollama boundary | Behaviour with a non-Ollama binding |
 |---|---|
-| Web research (`chat_web_response` -> `_agent_impl`, needs `SONDER_WEB_TOOLS`) | Its tool-using agent needs Ollama's native tool calls. When the tier it runs on (`code` for the default route) is bound elsewhere, the turn fails closed with 503 naming the binding (`SONDER_<TIER>_PROVIDER=ollama` restores it). Weather, location and capability answers need no model and are unaffected. REPL and MCP keep the Ollama route. |
-| Natural-language work intents (`_handle_work_intent`, developer only) | Autopilot/fleet lanes: stay on Ollama. |
-| Natural-language ensemble and fanout (developer only) | Poll named local models: stay on Ollama. |
+| Exact model pins, strict `sonder` aliases and durable fanout | Remain explicitly Ollama-bound. |
+| Images and decoder/schema requests | Refused for a non-Ollama binding, as in the chat path. |
+| Sealed single-send codegen canary | Refuses a bound non-Ollama provider. |
 
-When one of these returns the legacy `ERROR ...` answer (HTTP 200), or every
-provider send of the turn failed, the terminal event is `request.failed`, not
-`request.completed` (see the vocabulary below).
+When a provider-bound call returns the legacy `ERROR ...` answer (HTTP 200),
+or every provider send of the turn failed, the terminal event is
+`request.failed`, not `request.completed` (see the vocabulary below).
 
 ## Live producer
 
@@ -338,9 +338,9 @@ for the request carry `run_id = R` and `attributes.parent_request_id = R`.
 - Warnings cover `embedding_provider = sonder_inference`, a missing
   `SONDER_OBSERVATORY_ORIGINS` entry (a global `SONDER_CORS_ORIGINS` entry,
   such as the Flutter web app, does not count; the warning names those
-  origins), disabled export, synthetic providers, and the surfaces that do
-  not honour generation bindings (REPL, MCP, autopilot, fleet, and the HTTP
-  chat dispatchers listed above).
+  origins), disabled export, and synthetic providers. Generation bindings are
+  also reported in provider status for tier-bound agent, autopilot, fleet and
+  helper calls.
 - 404 when export is disabled and the gateway has no `provider_status`
   (contract section 9). With export disabled but a status surface, the
   document is still served with `export_enabled: false` and
@@ -374,7 +374,7 @@ rather than invented.
 
 | Behavior | Status | Boundary |
 |---|---|---|
-| HTTP chat and A2A through a non-Ollama provider | Experimental | Local model steps only; REPL, MCP, autopilot and fleet stay on Ollama, and so do HTTP work intents, ensemble and fanout; HTTP web research on a bound tier returns 503. |
+| HTTP chat, A2A and tier-bound agent work through a non-Ollama provider | Experimental | Logical tier bindings cover agents, autopilot, fleet, helpers, ensembles and web research. Exact model pins, strict `sonder` aliases and durable fanout remain explicitly Ollama-bound; images/schema keep the chat non-Ollama refusal. |
 | Observatory live producer (`/v1/observability/events`, discovery) | Experimental | Admin-gated, content-free, loopback by default; same-host clock merge only. |
 | `GET /v1/sonder/ecosystem` | Experimental | Provider rows are `unknown` unless the gateway reports `provider_status()`. |
 | Read-only telemetry capability | Unsupported | Remote telemetry needs the admin bearer key. |

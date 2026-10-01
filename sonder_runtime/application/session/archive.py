@@ -37,6 +37,16 @@ def _payload_bytes(event: SessionEvent) -> int:
     return len(_canonical(dict(event.payload)))
 
 
+def _placeholder(event: SessionEvent, archive_id: str) -> dict[str, object]:
+    return {
+        "role": "tool",
+        "content": f"[tool output archived: {archive_id}]",
+        "archive_id": archive_id,
+        "source_event_id": event.event_id,
+        "source_sequence": event.sequence,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class ArchiveReference:
     """A searchable, content-free pointer to one durable source event."""
@@ -292,7 +302,7 @@ class SessionContextArchiveService:
         *,
         budget_bytes: int,
     ) -> ArchivedContext:
-        """Evict largest eligible tool outputs until the context fits.
+        """Reuse durable replacements, then drain overflow toward 70% of budget.
 
         The returned placeholders are safe model-visible replacements.  They
         contain only an archive id and source identity; callers can retrieve
@@ -312,29 +322,42 @@ class SessionContextArchiveService:
         if any(left.sequence >= right.sequence for left, right in zip(values, values[1:])):
             raise InvalidInput("context events must be ordered")
 
-        total = sum(_payload_bytes(event) for event in values)
+        sizes = {event.event_id: _payload_bytes(event) for event in values}
+        total = sum(sizes.values())
         candidates = sorted(
             (event for event in values if event.event_type in _TOOL_RESULT_TYPES),
-            key=lambda event: (-_payload_bytes(event), -event.sequence, event.event_id),
+            key=lambda event: (-sizes[event.event_id], -event.sequence, event.event_id),
         )
         evicted: set[str] = set()
         references: list[ArchiveReference] = []
         placeholders: list[Mapping[str, object]] = []
+        # The next raw snapshot (including after restart) still contains the
+        # archived output. Account for its verified replacement first; testing
+        # the raw size would retrigger low-water eviction on every request.
         for event in candidates:
-            if total <= budget_bytes:
+            reference = self._existing_reference(event, _canonical(dict(event.payload)))
+            if reference is None:
+                continue
+            placeholder = _placeholder(event, reference.archive_id)
+            replacement_bytes = len(_canonical(placeholder))
+            if replacement_bytes >= sizes[event.event_id]:
+                continue
+            references.append(reference)
+            placeholders.append(placeholder)
+            evicted.add(event.event_id)
+            total += replacement_bytes - sizes[event.event_id]
+        target_bytes = (budget_bytes * 7) // 10 if total > budget_bytes else budget_bytes
+        for event in candidates:
+            if total <= target_bytes:
                 break
+            if event.event_id in evicted:
+                continue
             # A reference is useful only when its model-visible replacement is
             # smaller than the source payload.  Generate the identity before
             # appending so a tiny result is skipped without a side effect.
             archive_id = self._event_id_factory()
-            placeholder = {
-                "role": "tool",
-                "content": f"[tool output archived: {archive_id}]",
-                "archive_id": archive_id,
-                "source_event_id": event.event_id,
-                "source_sequence": event.sequence,
-            }
-            if len(_canonical(placeholder)) >= _payload_bytes(event):
+            placeholder = _placeholder(event, archive_id)
+            if len(_canonical(placeholder)) >= sizes[event.event_id]:
                 continue
             reference = self.archive_tool_output(event, archive_id=archive_id)
             references.append(reference)
@@ -350,7 +373,7 @@ class SessionContextArchiveService:
             # The placeholder is model-visible context and therefore counts
             # toward the same budget as retained source payloads.  Archive
             # metadata itself is outside this budget and contains no output.
-            total += len(_canonical(placeholder)) - _payload_bytes(event)
+            total += len(_canonical(placeholder)) - sizes[event.event_id]
         retained = tuple(event for event in values if event.event_id not in evicted)
         retained_bytes = sum(_payload_bytes(event) for event in retained)
         placeholder_bytes = sum(len(_canonical(item)) for item in placeholders)

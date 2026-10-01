@@ -54,6 +54,8 @@ import sonder_runtime.application.tasks.use_cases as task_use_cases
 import sonder_runtime.adapters.eval_history_reader as eval_history_adapter
 import sonder_runtime.application.evaluation_history.use_cases as eval_history_use_cases
 import sonder_runtime.adapters.memory_store as memory_store
+from sonder_runtime.bootstrap import playbook_context
+from sonder_runtime.bootstrap.playbooks import register_tools as _register_playbook_tools
 import sonder_runtime.application.session.transcript_export as session_transcript_export
 import orchestrator
 import retriever
@@ -170,6 +172,8 @@ from sonder_runtime.adapters.security.permission_policy import (
 import reloadable_mcp
 import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
 import autopilot_controller
+from sonder_runtime.adapters.agent_artifact_gate import AgentArtifactGate, validation_deferral
+from sonder_runtime.adapters.creation_workspace import prepare_loop_project, prepare_writing_project
 from sonder_runtime.adapters.persistence import fanout_store
 import fanout_prompt_vault
 from sonder_runtime.adapters.model_transport import ModelCallError
@@ -189,6 +193,7 @@ from sonder_runtime.application.routing import long_context_overflow as _overflo
 # a live reload of server.py cannot orphan an in-flight rung binding.
 from sonder_runtime.application.chat import provider_bridge as _provider_bridge
 from sonder_runtime.adapters import legacy_chat_bridge as _legacy_chat_bridge
+from sonder_runtime.adapters import tier_generation as _tier_generation
 from sonder_runtime.adapters import mcp_tool_manifest as _mcp_tool_manifest
 from sonder_runtime.application.context_health import (
     ContextHealthService,
@@ -1791,7 +1796,7 @@ def _make_generate(
     the decoder is not the same as verifying the result -- see
     `_require_schema_match`, which callers apply to the returned text.
     """
-    cloud = bool(cloud or _is_cloud_model_name(model))
+    cloud = bool(cloud or (_provider_bridge.active_rung() is None and _is_cloud_model_name(model)))
     if think is not None and not isinstance(think, bool):
         raise ValueError("think must be a boolean when supplied")
     if not isinstance(reasoning_continuation, bool):
@@ -1982,16 +1987,21 @@ def _no_retrieve(conn, task):
     return _no_retrieve_policy(conn, task)
 
 
+def _make_tier_generate(tier, *args, **kwargs):
+    return _tier_generation.make_generate(
+        _make_generate, tier, args, kwargs, graph=_APP_GRAPH,
+        consent=lambda: (_cloud_allowed_policy(os.environ), not _ollama_endpoint_is_local()),
+    )
+
+
 def _generate_text(prompt, tier="fast", system="", temperature=0.2,
                    num_predict=256, num_ctx=0, timeout=None):
     _refresh_live_cloud_tiers()
     model = TIERS.get(tier, TIERS["fast"])
-    # A helper call names its own tier; it must never inherit the enclosing
-    # chat rung's provider binding (it keeps its historical Ollama route).
-    with _provider_bridge.suspend_rung():
-        return _make_generate(
-            model, system, temperature, num_predict, num_ctx, timeout=timeout,
-        )(prompt)
+    return _make_tier_generate(
+        tier if tier in TIERS else "fast", model, system, temperature, num_predict,
+        num_ctx, timeout=timeout,
+    )(prompt)
 
 
 _APP_GRAPH = None
@@ -2230,7 +2240,7 @@ def _capture_named_provider_request(function):
             )
             return capture, pending
 
-        with deferred_provider_request_scope(admit if session_id is not None else None):
+        with playbook_context.session_scope(session_id), deferred_provider_request_scope(admit if session_id is not None else None):
             return function(*args, **kwargs)
 
     return wrapped
@@ -2310,60 +2320,12 @@ def _legacy_model_step_options(generator, *, temperature, num_predict, num_ctx):
 
 def _gateway_generate_text(prompt, tier="fast", system="", temperature=0.2,
                            num_predict=256, num_ctx=None, timeout=None):
-    """offload_fn routed through the SPEC-3 ChatService over the ModelGateway.
-
-    The port enforces the operation-context cloud-consent gate and returns
-    domain-typed errors; this edge translates them back to ModelCallError
-    (a urllib.error.URLError subclass) so existing callers that catch
-    URLError — session summarization/titling — keep their exact behavior.
-    An explicit num_ctx is forwarded through the port; when omitted the
-    gateway resolves the native session context via _make_generate.
-    """
-    from sonder_runtime.application.chat.handle_chat import ChatCommand
-    from sonder_runtime.application.context import (
-        current_operation_context,
-        local_owner_context,
-    )
-    from sonder_runtime.domain.common import errors as _errors
-
-    # An offload made inside a turn joins that turn's run (same correlation
-    # id R) so the next producer's events group with it.
-    ambient = current_operation_context()
-    context = local_owner_context(
-        correlation_id=(
-            ambient.correlation_id if ambient is not None
-            else "offload-%s" % os.urandom(4).hex()
-        ),
-        source="system",
+    from sonder_runtime.adapters.gateway_generation import gateway_generate_text
+    return gateway_generate_text(
+        _application, prompt, tier, system, temperature, num_predict, num_ctx, timeout,
         cloud_allowed=_cloud_allowed_policy(os.environ),
         remote_ollama_allowed=not _ollama_endpoint_is_local(),
-        timeout_seconds=float(timeout) if timeout else None,
     )
-    try:
-        # The offload asks for its own tier; the gateway routes it, never the
-        # enclosing chat rung's binding (the Ollama gateway re-enters
-        # _chat_request, which must take the ordinary path).
-        with _provider_bridge.suspend_rung():
-            result = _application().chat.complete(
-                ChatCommand(
-                    content=prompt, tier=tier, system=system,
-                    temperature=temperature, num_predict=num_predict,
-                    num_ctx=num_ctx,
-                ),
-                context,
-            )
-    except _errors.SonderError as exc:
-        # Translate the domain taxonomy back to the legacy transport error
-        # at the adapter edge so callers' URLError handling is unchanged.
-        kind = {
-            "DEADLINE_EXCEEDED": "timeout",
-            "CANCELLED": "cancelled",
-            "DEPENDENCY_UNAVAILABLE": "request",
-            "FORBIDDEN": "configuration",
-            "INVALID_INPUT": "configuration",
-        }.get(getattr(exc, "code", ""), "request")
-        raise ModelCallError(kind, str(exc)) from exc
-    return result.response_text
 
 
 def _internal_generate_for_route(model, cloud):
@@ -2451,30 +2413,17 @@ def _resolve_project(project):
 
 # The mutable, disk-backed parts of the system prompt, pinned for one turn.
 #
-# One turn can build the system prompt more than once, and each build re-read
-# system_profile.md, the emotion vectors and the goal store from disk.
-# Measured: a workbench-agent turn builds it twice (the agent loop, then the
-# negative-claim reviewer at finalization) and a routed work request builds it
-# three times (execution-mode router, then the agent, then that reviewer).
-# Every one of those prompts is sent to a model -- none is discarded -- so this
-# cannot be fixed by dropping a build. With an edit landing between two reads,
-# one turn told the router "never use the network" and, in the same turn, told
-# the agent "always use the network".
-#
-# Per-REQUEST freshness is deliberate: system_profile.py exists so an operator
-# can edit standing instructions while the server runs. Per-TURN consistency is
-# what was missing, so the parts are read once per turn and reused, not cached
-# for the life of the process.
-#
-# _runtime_identity_block() is deliberately NOT pinned. It names the model
-# answering THIS call, and the two consumers in a routed turn can run on
-# different tiers; pinning it would make the second prompt state the first
-# one's model, which is the exact failure that block exists to prevent.
+# One turn builds the system prompt two or three times (router, agent, claim
+# reviewer), all sent, so an edit landing between builds must not give them
+# contradictory instructions: profile, emotions and goal are read once per turn
+# and the playbook index once per session. Runtime identity is NOT pinned (it
+# names the model answering THIS call). Full rationale and measurements:
+# sonder_runtime/domain/prompt_composition.py.
 _SYSTEM_CONTEXT = threading.local()
 
 
 def _read_system_context():
-    """Read the disk-backed system-prompt parts: (profile, emotions, goal)."""
+    """Read profile/emotions/goal plus the session-stable playbook index."""
     profile = system_profile.system_prompt()
     emotions = emotion_vectors.system_prompt()
     # An active goal is re-stated every turn so a long objective cannot erode
@@ -2485,7 +2434,7 @@ def _read_system_context():
         goal_block = goal_store.context_block()
     except Exception:
         goal_block = ""
-    return profile, emotions, goal_block
+    return profile, emotions, goal_block, playbook_context.stable_index()
 
 
 @contextlib.contextmanager
@@ -2541,9 +2490,12 @@ def _build_system(system, trace, persona, model="", cloud=False, provider=None):
     # Outside a pinned turn this is an ordinary fresh read, so a single-build
     # caller behaves exactly as before.
     parts = getattr(_SYSTEM_CONTEXT, "parts", None)
-    profile, emotions, goal_block = parts or _read_system_context()
+    values = parts or _read_system_context()
+    profile, emotions, goal_block = values[:3]
+    playbook_index = values[3] if len(values) > 3 else ""
     return _join_system_parts(
-        _runtime_identity_block(model, cloud, provider), profile, emotions, goal_block,
+        _runtime_identity_block(model, cloud, provider), profile, emotions,
+        playbook_context.frame_owner_notes(playbook_index), goal_block,
         effective_system,
     )
 
@@ -4173,6 +4125,9 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
                  answers clean), but the turn is still captured (with its task
                  embedding) so record_outcome can ground and distill it.
     """
+    effective_system, playbook_selection = playbook_context.augment(
+        effective_system, prompt, cloud=cloud or _is_cloud_model_name(model) or _provider_bridge.hosted_rung_active() or not augment,
+    )
     gen = _make_generate(
         model, effective_system, temperature, num_predict, num_ctx,
         cloud=cloud, allow_cloud_fallback=allow_cloud_fallback,
@@ -4234,6 +4189,7 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
             task_embedding_revision=embedding_provenance.get("revision"),
             task_embedding_dim=embedding_provenance.get("dimension"),
         )
+        playbook_context.record_usage(conn, playbook_selection, iid)
         _capture_preferences(
             conn, prompt, source_interaction=iid,
             scope="project:%s" % project if project else "global",
@@ -4249,6 +4205,7 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
         task_embedding_revision=embedding_provenance.get("revision"),
         task_embedding_dim=embedding_provenance.get("dimension"),
     )
+    playbook_context.record_usage(conn, playbook_selection, iid)
     _capture_preferences(
         conn, prompt, source_interaction=iid,
         scope="project:%s" % project if project else "global",
@@ -4796,6 +4753,7 @@ else:
         "sonder-runtime", version=_runtime_version(),
     )
 _PERSISTENT_MCP = mcp
+playbook_note, playbook_read = _register_playbook_tools(mcp, config_getter=lambda: getattr(_APP_GRAPH, "config", None))
 
 
 def _bounded_timeout(value) -> int:
@@ -5206,16 +5164,6 @@ def _bridge_operation_context(timeout, cancel_check):
         cloud_allowed=_cloud_allowed_policy(os.environ),
         remote_ollama_allowed=not _ollama_endpoint_is_local(),
     )
-
-
-def _refuse_ollama_agent_on_bound_tier(tier, step):
-    """Fail closed (503) when an Ollama-only HTTP chat step meets a bound tier."""
-    _model, cloud, _augment, tier_label = _serve_target(tier, None)
-    if tier_label in (None, "cloud-disabled"):
-        return
-    provider = _bridge_provider_for_tier(tier_label, cloud)
-    if provider is not None:
-        raise _legacy_chat_bridge.ollama_agent_refusal(step, tier_label, provider)
 
 
 def _chat_request(
@@ -5771,7 +5719,19 @@ def _file_schema_rejection(interaction_id):
         pass
 
 
-def _offload_impl(
+def _offload_impl(prompt, tier="fast", system="", temperature=0.2, num_predict=1024,
+                  num_ctx=0, learn=True, timeout=TIMEOUT, cancel_check=None,
+                  schema=None, session=None):
+    with _tier_generation.scope(
+        tier, graph=_APP_GRAPH, timeout=_bound_request_timeout(timeout, TIMEOUT),
+        cancel_check=cancel_check,
+        consent=lambda: (_cloud_allowed_policy(os.environ), not _ollama_endpoint_is_local()),
+    ):
+        return _offload_tier_impl(prompt, tier, system, temperature, num_predict,
+                                 num_ctx, learn, timeout, cancel_check, schema, session)
+
+
+def _offload_tier_impl(
     prompt: str,
     tier: str = "fast",
     system: str = "",
@@ -5798,14 +5758,15 @@ def _offload_impl(
             "configuration",
             "unknown tier '%s'. Valid tiers: %s." % (tier, _valid_tier_names()),
         )
-    cloud = _is_cloud_tier(tier, model)
+    provider = _bridge_provider_for_tier(tier)
+    cloud = provider is None and _is_cloud_tier(tier, model)
     if cloud and not _cloud_allowed_policy(os.environ):
         raise ModelCallError(
             "configuration",
             _cloud_disabled_message().removeprefix("ERROR: "),
             cloud=True,
         )
-    if not cloud and (num_ctx is None or int(num_ctx or 0) <= 0):
+    if not cloud and provider is None and (num_ctx is None or int(num_ctx or 0) <= 0):
         num_ctx = _auto_model_context(model)
 
     if not _should_learn(tier, learn):
@@ -5868,6 +5829,8 @@ def _offload_impl(
                     cancel_check=cancel_check,
                     idempotent=True,
                 )
+            if provider is not None:
+                used_model = out.get("model") or model
             tokens_in = _model_usage_count(out.get("prompt_eval_count"))
             tokens_out = _model_usage_count(out.get("eval_count"))
             source = _model_usage_source(tokens_in, tokens_out)
@@ -5927,8 +5890,9 @@ def _offload_impl(
             )
 
     retrieve_kwargs = {}
-    if cloud:
-        gen = _make_generate(
+    if cloud or _provider_bridge.is_hosted(provider):
+        gen = _make_tier_generate(
+            tier,
             model,
             system,
             temperature,
@@ -5937,26 +5901,26 @@ def _offload_impl(
             cloud=True,
             timeout=request_timeout,
             cancel_check=cancel_check,
-            schema=schema,
+            schema=schema, queue=False,
         )
         retrieve_kwargs["retrieve_fn"] = _no_retrieve_policy
     else:
-        learning_model = resolve_sonder_model(_STRICT_DEFAULT)
+        learning_model = model if provider is not None else resolve_sonder_model(_STRICT_DEFAULT)
         if learning_model is None:
             raise ModelCallError(
                 "configuration",
                 "`sonder:latest` Ollama alias not found. Run setup_alias.py, "
                 "or call with strict=False to fall back to the base coder.",
             )
-        gen = _make_generate(
-            learning_model,
+        gen = _make_tier_generate(
+            tier, learning_model,
             system,
             temperature,
             num_predict,
             num_ctx,
             timeout=request_timeout,
             cancel_check=cancel_check,
-            schema=schema,
+            schema=schema, queue=False,
         )
     if capture_session is not None:
         gen = wrap_model_generator(
@@ -6693,15 +6657,18 @@ def _sonder_impl_serialized(
     def _generation_context(rung):
         # No pin: size from the selected model, not the process-wide session
         # default. This is what lets a 7B and a 30B use different KV windows.
+        provider = _provider_bridge.active_rung()
+        provider = provider.provider if provider is not None else None
         ctx = pinned_ctx
         if ctx is None:
-            ctx = 0 if rung.cloud else _auto_model_context(rung.model)
+            ctx = None if provider else 0 if rung.cloud else _auto_model_context(rung.model)
         return (
-            _build_system(system, trace, persona, model=rung.model, cloud=rung.cloud),
+            _build_system(system, trace, persona, model=rung.model, cloud=rung.cloud, provider=provider),
             ctx,
         )
 
     interaction_snapshot = None
+    rung_scope = contextlib.ExitStack()
     conn = _open_db()
     try:
         history = None
@@ -6722,6 +6689,9 @@ def _sonder_impl_serialized(
             tgt_model, cloud, augment, tier_label = (
                 rung.model, rung.cloud, rung.augment, rung.tier,
             )
+            rung_scope.close()
+            provider = None if model_override else _bridge_provider_for_tier(tier_label, cloud)
+            rung_scope.enter_context(_provider_bridge.bind_rung(provider, tier_label))
             effective_system, num_ctx_eff = _generation_context(rung)
             following = escalation_plan.next_rung(attempt)
             detail = ""
@@ -6792,6 +6762,7 @@ def _sonder_impl_serialized(
         return ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
                 "running? (the tray app / `ollama serve`)" % (_ollama_display(), e))
     finally:
+        rung_scope.close()
         conn.close()
 
     replacement = None
@@ -7605,7 +7576,7 @@ def parallel_generate_run(
         "Return one complete runnable Python solution in a single ```python code block. "
         "No prose outside the code block. Avoid input() and unbounded loops."
     )
-    gen = _make_generate(model, system, temperature, num_predict, num_ctx, cloud=cloud)
+    gen = _make_tier_generate(tier, model, system, temperature, num_predict, num_ctx, cloud=cloud)
     started = time.time()
     generation_results = [None] * variants
     fanin = CandidateFanIn(prompt, check)
@@ -7726,7 +7697,7 @@ def parallel_generate_run_languages(
             "No prose outside the code block. Avoid interactive input and unbounded loops."
             % (lang, fence)
         )
-        gen = _make_generate(model, system, temperature, num_predict, num_ctx, cloud=cloud)
+        gen = _make_tier_generate(tier, model, system, temperature, num_predict, num_ctx, cloud=cloud)
         fanin.bind_generator(gen)
         candidate_prompt = (
             "%s\n\nGenerate %s candidate %d. It must compile and terminate quickly."
@@ -10008,7 +9979,7 @@ def _orchestrator_worker(tier: str, learn: bool = False, timeout: int = 150):
     response_id = activity_tracker.current_response_id()
 
     def worker(prompt: str) -> str:
-        with activity_tracker.bind_response(response_id):
+        with activity_tracker.bind_response(response_id), ollama_pool.local_agent_admission(caller="fleet", timeout_seconds=timeout):
             return _offload_impl(
                 prompt=prompt,
                 tier=tier,
@@ -12996,12 +12967,10 @@ def file_read_range(
             {"path": path, "start_line": start_line, "end_line": end_line},
             token=token, approval=approval, extra_roots=extra_roots,
         )
+        output = _format_file_result("file range", data)
     except Exception as exc:
         _record_direct_tool("file_read_range", args, ok=False, started=started, summary=str(exc))
         return "ERROR: %s" % exc
-    lines = ["file range: %s lines %s-%s" % (data["path"], data["start_line"], data["end_line"])]
-    lines.extend("%6d  %s" % (row["line"], row["text"]) for row in data["lines"])
-    output = "\n".join(lines)
     _record_direct_tool(
         "file_read_range", args, ok=True, started=started,
         summary="%d lines" % len(data["lines"]), output=output,
@@ -14215,6 +14184,8 @@ def _vision_local_target() -> str:
     endpoint is not an acceptable fallback.  The runtime policy owns the tier
     binding; callers cannot turn a free-form model string into a backend target.
     """
+    if _bridge_provider_for_tier("vision") is not None:
+        raise ModelCallError("unsupported_feature", "image analysis is only available on Ollama-bound vision tiers", status=400, attempts=0)
     if not ollama_endpoint.is_loopback(BASE):
         raise ModelCallError(
             "configuration",
@@ -16180,11 +16151,9 @@ def chat_web_response(
 ) -> str | None:
     """Handle explicit web chat intent before the plain model fallback.
 
-    ``gateway_bound`` is set by the HTTP chat route, where provider bindings
-    apply: the research agent's tool-using model steps only exist on Ollama,
-    so a research turn whose tier is bound to another provider fails closed
-    (503 naming the binding) instead of reaching an Ollama the operator did
-    not bind.  REPL and MCP keep their documented Ollama route.
+    ``gateway_bound`` is retained for HTTP adapter compatibility. All surfaces
+    use the same provider-aware agent loop, with the resolved tier bound for
+    every model decision and audit.
     """
     _maybe_live_reload()
     refusal = intents.containment_egress_refusal(prompt)
@@ -16280,8 +16249,6 @@ def chat_web_response(
     # workspace discovery, which wastes serialized local-model steps on a pure
     # web question (observed: a spurious local text_search after web results
     # already answered the prompt).
-    if gateway_bound:
-        _refuse_ollama_agent_on_bound_tier(tier or "code", "web research")
     return _agent_impl(
         task,
         tier=tier or "code",
@@ -17145,7 +17112,7 @@ AGENT_TOOL_HELP = """Available tools:
 - directory_create: {"path": "output/reports", "parents": true}
 - file_find: {"query": "*.py", "root": ".", "max_results": 50}
 - repository_symbol_index: {"path": ".", "glob": "*", "language": "auto|python|javascript|typescript|c|cpp|csharp|rust|go", "max_files": 200, "max_total_bytes": 2000000, "max_file_bytes": 256000, "max_symbols": 2000}
-- file_read: {"path": "README.md"}
+- file_read: {"path": "README.md", "offset": 1, "limit": 120}
 - file_digest: {"path": "artifact.bin", "max_bytes": 32000000}
 - directory_digest: {"path": ".", "max_depth": 12, "max_files": 2000, "max_total_bytes": 32000000, "max_file_bytes": 32000000, "max_results": 2500}
 - file_read_range: {"path": "server.py", "start_line": 1, "end_line": 200}
@@ -17165,7 +17132,7 @@ AGENT_TOOL_HELP = """Available tools:
 - file_batch_write: {"operations_json": [{"path": "a.txt", "content": "...", "mode": "create|overwrite"}]}
 - json_patch: {"path": "config.json", "operations_json": [{"op": "test", "path": "/version", "value": 1}, {"op": "replace", "path": "/version", "value": 2}], "mode": "preview|apply"}
 - text_patch: {"root": ".", "patch": "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n", "apply": false}
-- file_edit: {"path": "notes.txt", "old": "before", "new": "after", "count": 1}
+- file_edit: {"path": "notes.txt", "old": "before", "new": "after", "count": 1} -- must match exactly once; whitespace and CRLF tolerant; result echoes the region with line numbers
 - file_copy: {"source": "assets/input.bin", "destination": "build/input.bin", "overwrite": false}
 - file_move: {"source": "build/draft.bin", "destination": "dist/final.bin", "overwrite": false}
 - file_delete: {"path": "notes.txt", "dry_run": true}
@@ -18009,6 +17976,7 @@ def _agent_negative_claim_review(
     cancel_check=None,
     cloud_budget_state=None,
     session_id: str | None = None,
+    tier: str = "sonder",
 ) -> dict:
     """Audit negative existence claims without letting the reviewer invent facts."""
     if not _AGENT_NEGATIVE_CLAIM_RE.search(str(final or "")):
@@ -18043,8 +18011,8 @@ def _agent_negative_claim_review(
             "spent": 0,
             "total": _CLOUD_AGENT_OUTPUT_BUDGET,
         }
-    gen = _make_generate(
-        model, system, 0.0, 260, 4096, cloud=cloud,
+    gen = _make_tier_generate(
+        tier, model, system, 0.0, 260, 4096, cloud=cloud,
         cancel_check=cancel_check, compact_cloud_reasoning=True,
     )
     if session_id is not None:
@@ -18303,6 +18271,8 @@ def _agent_dispatch(
     args = args or {}
     if not isinstance(args, dict):
         return "ERROR: tool args must be a JSON object"
+    if tool_name == "file_read":
+        args = {**args, "path": args.get("path") or args.get("file") or args.get("filename") or args.get("file_path") or ""}
     # A model never holds a credential. A string ``token`` or ``approval`` in
     # a proposal is dropped before anything reads it, on every agent path and
     # not only the autonomous ones; the in-process objects the host injects
@@ -18833,12 +18803,10 @@ def _agent_dispatch(
             extra_roots=args.get("extra_roots", ""),
         )
     if tool_name == "file_read":
-        return file_read(
-            path=args.get("path", ""),
-            max_bytes=args.get("max_bytes", 256000),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
+        from sonder_runtime.adapters.inspection_executor import render_agent_file_page
+        return render_agent_file_page(
+            args, read=_typed_tool, record=_record_direct_tool,
+            activity=activity_tracker, reload=_maybe_live_reload,
         )
     if tool_name == "file_digest":
         return file_digest(
@@ -19630,6 +19598,8 @@ def _project_scope_args(tool_name, args, project):
     ):
         return args
     scoped = dict(args)
+    if tool_name == "file_read":
+        scoped["path"] = scoped.get("path") or scoped.get("file") or scoped.get("filename") or scoped.get("file_path") or ""
     # Never compose a model-supplied root with the trusted host root.  This is
     # the host-resolved path boundary; child processes remain user-level code,
     # not an operating-system sandbox.
@@ -20192,7 +20162,7 @@ _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS = frozenset({
 # ceilings are derived from the same number (batch_coalescing.AGENT_STEP_CEILING).
 _AGENT_MAX_STEPS_CEILING = 20
 # Characters of one tool observation shown to the model in the agent loop.
-_AGENT_MODEL_OBSERVATION_CHARS = 6000
+_AGENT_MODEL_OBSERVATION_CHARS = 8000
 # Batch results with one section per target, keyed by tool: their model view
 # gives every section an equal share of the budget instead of a head slice.
 _AGENT_SECTIONED_OBSERVATION_PREFIXES = {
@@ -20203,7 +20173,7 @@ _AGENT_SECTIONED_OBSERVATION_PREFIXES = {
 def _agent_model_observation_view(tool_name, text):
     """Model-facing view of one tool observation; the host keeps the full text.
 
-    Ordinary observations keep their head slice.  A sectioned batch result
+    Ordinary observations keep a marked head and tail. A sectioned batch result
     (one ``context_pack`` holding several files) is fitted so every file stays
     visible with a marked clip, because a head slice would silently hide every
     file after the first few thousand characters.
@@ -20211,7 +20181,9 @@ def _agent_model_observation_view(tool_name, text):
     text = str(text)
     prefix = _AGENT_SECTIONED_OBSERVATION_PREFIXES.get(tool_name)
     if prefix is None:
-        return text[:_AGENT_MODEL_OBSERVATION_CHARS]
+        if len(text) <= _AGENT_MODEL_OBSERVATION_CHARS:
+            return text
+        return text[:5000] + ("...[%d chars omitted; use file_read offset/limit or output_digest]..." % (len(text) - 8000)) + text[-3000:]
     return _fit_sectioned_agent_text(
         text, _AGENT_MODEL_OBSERVATION_CHARS, prefix,
         clip_hint=(
@@ -20301,7 +20273,7 @@ def _agent_batch_guard_telemetry(event):
 
 _LOCAL_AGENT_NUM_PREDICT = 1200
 _CLOUD_AGENT_WRITE_CHUNK_HINT = 24000
-
+from sonder_runtime.adapters import agent_generation_budget as _agent_generation_budget
 
 
 def _local_agent_brief(project_scope: str = "") -> str:
@@ -20440,15 +20412,7 @@ def _take_agent_model_failure():
 
 
 def _agent_impl(*args, **kwargs) -> str:
-    """One agent turn, with the disk-backed system-prompt parts pinned.
-
-    The agent builds its system prompt at the top of the turn and the
-    negative-claim reviewer builds another at finalization (measured: two
-    builds, two reads of system_profile.md, in one turn). Both are sent to a
-    model, so they must not disagree about the operator's standing
-    instructions. See _stable_system_context; a nested call under an already
-    pinned turn reuses the outer reading.
-    """
+    """Pin system-prompt parts across a turn and its negative-claim review."""
     with _managed_agent_admission_scope(), _stable_system_context(), _standalone_lanes.model_loop_scope():
         controller = _standalone_lanes.current()
         if controller is not None:
@@ -20540,10 +20504,14 @@ def _agent_turn(
         return "unknown tier '%s'. Valid: sonder, %s." % (tier, _valid_tier_names())
     if model is None:
         return "`sonder:latest` Ollama alias not found."
+    provider = _bridge_provider_for_tier(tier_label)
+    cloud = cloud or _provider_bridge.is_hosted(provider)
     controller = _standalone_lanes.current()
     if controller is not None:
         controller.restrict(read_only=lane_read_only, cloud=cloud)
-    project_scope, project_error = _agent_project_scope(project)
+    project, project_error = prepare_loop_project(project, writing=not (read_only or cloud))
+    project_scope, scope_error = _agent_project_scope(project)
+    project_error = project_error or scope_error
     if project_error:
         if return_host_receipt:
             return autopilot_controller.HostTaskResult(
@@ -20595,23 +20563,24 @@ def _agent_turn(
             system or default_agent_system, False, "", model=model, cloud=False)
     )
     agent_num_predict = (
-        _CLOUD_AGENT_NUM_PREDICT if cloud else _LOCAL_AGENT_NUM_PREDICT
+        _CLOUD_AGENT_NUM_PREDICT if cloud else _agent_generation_budget.decision_num_predict(provider, cloud, True)
     )
+    agent_temperature = _tier_generation.decision_temperature(provider)
     # A host-owned pre-model context producer needs the same resolved window
     # the generator actually uses. Pin it for this turn rather than observing
     # one window and silently dispatching with another after metadata refresh.
     agent_num_ctx = (
-        _auto_model_context(model) if pre_model_context is not None and not cloud else 0
+        _auto_model_context(model) if pre_model_context is not None and not cloud and provider is None else 0
     )
     cloud_budget_state = (
         {"spent": 0, "total": _CLOUD_AGENT_OUTPUT_BUDGET}
         if cloud else None
     )
-    gen = _make_generate(
-        model, system, 0.1, agent_num_predict, agent_num_ctx, cloud=cloud,
+    gen = _make_tier_generate(
+        tier_label, model, system, agent_temperature, agent_num_predict, agent_num_ctx, cloud=cloud,
         cancel_check=cancel_check,
         accept_native_tool_calls=True,
-        compact_cloud_reasoning=True,
+        compact_cloud_reasoning=True, generation_kind="decision",
     )
     if capture_session is not None:
         gen = wrap_model_generator(
@@ -20621,12 +20590,12 @@ def _agent_turn(
             tier=tier_label or tier,
             system=system,
             options={
-                "temperature": 0.1,
+                "temperature": agent_temperature,
                 "num_predict": agent_num_predict,
                 "num_ctx": 0,
             },
             options_factory=lambda _prompt, _history, raw: _legacy_model_step_options(
-                raw, temperature=0.1, num_predict=agent_num_predict, num_ctx=0,
+                raw, temperature=agent_temperature, num_predict=agent_num_predict, num_ctx=0,
             ),
             first_user_message=prompt,
             failure_code=_legacy_model_failure_code,
@@ -20672,6 +20641,7 @@ def _agent_turn(
             _canonical_agent_tool_name(name) for name in tool_allowlist if name
         )
     )
+    artifact_gate = AgentArtifactGate(project_scope, prompt, allowed_tools, enabled=auto_checklist and not (read_only or cloud or unsafe))
     used_tool_names = set()
     successful_web_calls = set()
     successful_inspection_results = {}
@@ -20757,10 +20727,7 @@ def _agent_turn(
         _start_agent_checklist(prompt, project, read_only)
         if auto_checklist else ("", {})
     )
-    # Filesystem scope: a real directory roots file and execution tools there.
-    # A clear bare namespace label such as "default" remains checklist-only;
-    # path-like typos were rejected above rather than failing open to Sonder's
-    # own workspace.
+    # Entry-point and named-default writing runs have a real root; see prepare_loop_project.
     transcript = "Task:\n%s\n\n%s" % (
         prompt,
         # Every gate this run will actually apply, not just the three that
@@ -20802,6 +20769,7 @@ def _agent_turn(
         )
         pre_model_context_rendered = bool(context_text)
         transcript += context_text
+    transcript, _ = playbook_context.augment(transcript, prompt, cloud=cloud or _provider_bridge.hosted_rung_active())
 
     def ensure_not_cancelled():
         if (
@@ -20844,21 +20812,7 @@ def _agent_turn(
     delegated_verdict = None
 
     def _work_validated():
-        """Was the change actually checked, by either grounded route?
-
-        ``validation_ok`` and ``verification_ok`` answer the same question over
-        disjoint tool sets. Until the developer-workflow tools became
-        dispatchable, the only way to validate a mutation was to shell out
-        through ``workspace_run``; counting a passing, root-covering
-        test_run/build_run/lint_run/typecheck_run as anything less than a
-        validation would fail a run precisely *for reaching for the
-        purpose-built tool*, while the same run's end report called the
-        verification satisfied. This is the one place that contradiction is
-        resolved, so the report, the checklist and the receipt cannot disagree.
-
-        Not a relaxation: the added satisfying condition is a host-observed
-        passing verifier whose root covers every mutated path.
-        """
+        """Current, covering host evidence; delegated work retains its certificate gate."""
         nonlocal delegated_verdict
         controller = _standalone_lanes.current()
         if controller is not None and controller.delegated_work:
@@ -20868,7 +20822,7 @@ def _agent_turn(
             )
             return (delegated_verdict.valid is True
                     and (not parent_effect_dirty or validation_ok or verification_ok))
-        return validation_ok or verification_ok
+        return validation_ok or verification_ok or artifact_gate.assess()["passed"]
 
     def finish_final(final, *, failed=False):
         nonlocal validation_attempted, mutated, parent_effect_dirty, validation_ok, verification_ok
@@ -20929,6 +20883,9 @@ def _agent_turn(
                 final = "EVIDENCE_REQUIRED: original host observations could not be preserved.\n\n" + final
                 failed = True
         validated = False if failed else _work_validated()
+        artifact_assessment = artifact_gate.assess()
+        deferred = not (failed or delegated or validated) and artifact_assessment["deferred"]
+        validation_attempted |= artifact_assessment["attempted"]
         if delegated and delegated_verdict is not None:
             validation_attempted = True
         if auto_checklist:
@@ -20943,7 +20900,7 @@ def _agent_turn(
             _agent_checklist_mark(
                 checklist_id, checklist_states, 3, validation_status,
                 "grounded validation passed" if validated else (
-                    "no mutation required" if not mutated else "validation did not pass"
+                    "no mutation required" if not mutated else "needs approval for execution" if deferred else "validation did not pass"
                 ),
             )
             _agent_checklist_mark(
@@ -20953,12 +20910,12 @@ def _agent_turn(
         # so the activity feed keeps naming the work rather than the standing.
         model_summary = final.splitlines()[0] if final else "agent completed"
 
-        validation_failed = bool(auto_checklist and (mutated or delegated) and not validated)
+        validation_failed = bool(auto_checklist and (mutated or delegated) and not (validated or deferred))
         standing = ""
         # Only where a verifier was actually callable. Elsewhere the sentence
         # names tools the lane is forbidden from using and has no OFF state --
         # see _agent_verifier_reachable.
-        if not validated and not verification_ok and _agent_verifier_reachable(
+        if not deferred and not validated and not verification_ok and _agent_verifier_reachable(
             read_only, allowed_tools,
         ):
             demanded, reason = _agent_verification_standing()
@@ -21002,6 +20959,11 @@ def _agent_turn(
         activity_tracker.set_result_summary(
             _AGENT_VALIDATION_FAILED_LINE if validation_failed else model_summary
         )
+        if deferred:
+            final = "written, not executed: needs %s to verify\n\n%s" % (artifact_assessment["required"], final)
+            activity_tracker.set_response_status("unverified", "written; execution needs approval")
+        elif validated and artifact_assessment["passed"]:
+            final = "Static checks passed; artifact not executed.\n\n" + final
         certificate_fields = {}
         if delegated:
             if delegated_verdict is not None:
@@ -21020,7 +20982,7 @@ def _agent_turn(
             controller.terminal_projected = True
         if controller is not None:
             from sonder_runtime.application.ports.host_final import HostFinalFacts
-            final_class = 'ERROR' if failed else 'NORMAL'
+            final_class = 'ERROR' if failed else 'UNVERIFIED' if deferred else 'NORMAL'
             for marker in (*autopilot_controller.FAILURE_PREFIXES, _AGENT_UNVERIFIED_PREFIX):
                 if final.lstrip().startswith(marker):
                     final_class = marker.rstrip(':')
@@ -21046,6 +21008,7 @@ def _agent_turn(
                 validation_passed=validated,
                 project_scope=project_scope,
                 pre_model_context_response_observed=pre_model_context_response_observed,
+                **artifact_gate.receipt_fields(artifact_assessment) if not (failed or delegated) else {},
                 **certificate_fields,
             )
         return final
@@ -21089,11 +21052,8 @@ def _agent_turn(
         nonlocal claim_review_policy_refused, claim_review_verified
         tool_name = str(review.get("tool") or "")
         tool_args = review.get("args") or {}
-        # Validate the same host-scoped arguments that dispatch will use.  A
-        # repository model commonly echoes the absolute PROJECT ROOT from its
-        # prompt; checking the raw model arguments first incorrectly rejected
-        # that path even though the host had already authorized and confined
-        # the run to ``project_scope``.
+        # Callback policy checks model intent; repository guards and dispatch
+        # use host-scoped paths so injected authority is not a model bypass.
         policy_tool_args = _project_scope_args(
             tool_name, tool_args, project_scope,
         )
@@ -21106,7 +21066,7 @@ def _agent_turn(
                 % tool_name
             )
         if not policy_error and tool_policy is not None:
-            policy_error = str(tool_policy(tool_name, policy_tool_args) or "")
+            policy_error = str(tool_policy(tool_name, tool_args) or "")
         if not policy_error and cloud:
             policy_error = _cloud_agent_tool_policy_error(tool_name)
         if not policy_error:
@@ -21124,7 +21084,7 @@ def _agent_turn(
             ensure_not_cancelled()
             observation_text = str(_agent_dispatch_observed(
                 tool_name,
-                tool_args,
+                policy_tool_args,
                 allow_web=False,
                 read_only=True,
                 project=project_scope,
@@ -21295,7 +21255,7 @@ def _agent_turn(
                     "HOST REQUIREMENT: use at least one relevant inspection or execution tool before final."
                 )
                 continue
-            if auto_checklist and mutated and not validation_ok and step < max_steps:
+            if auto_checklist and mutated and not _work_validated() and not artifact_gate.assess()["deferred"] and step < max_steps:
                 _agent_checklist_mark(
                     checklist_id, checklist_states, 2, "done", "mutations completed",
                 )
@@ -21304,12 +21264,12 @@ def _agent_turn(
                 )
                 observations.append(
                     "HOST REQUIREMENT: files changed but no grounded validation has passed. "
-                    "Run or retry an exact validator now."
+                    + artifact_gate.guidance()
                 )
                 continue
             if not unsafe and _AGENT_NEGATIVE_CLAIM_RE.search(final):
                 claim_review = _agent_negative_claim_review(
-                    prompt, final, observations, model, cloud=cloud,
+                    prompt, final, observations, model, cloud=cloud, tier=tier_label,
                     cancel_check=cancel_check,
                     cloud_budget_state=cloud_budget_state,
                     session_id=capture_session,
@@ -21389,8 +21349,8 @@ def _agent_turn(
                 _predictor.note_miss()
         _predictor.record_transition(_spec_state, tool_name)
         _last_tool_name = tool_name
-        # Keep policy and dispatch on one canonical, host-confined view of a
-        # repository tool call.  Previously the early read-only check saw raw
+        # Keep repository guards and dispatch on one host-confined view of a
+        # tool call; callback policy sees model args. The read-only check saw raw
         # model paths while dispatch later rebased them under ``project_scope``.
         # Absolute in-project paths were therefore rejected before dispatch,
         # causing fleet workers to exhaust max_steps without any file evidence.
@@ -21417,6 +21377,9 @@ def _agent_turn(
             and call_signature in successful_inspection_results
         )
         prior_identical_failures = failed_call_counts.get(call_signature, 0)
+        from sonder_runtime.domain.agents.policy_refusal_guard import repeated_policy_refusal
+        if refusal := repeated_policy_refusal(observations):
+            return _early_exit("ERROR: host policy refused 3 consecutive calls: " + refusal)
         if prior_identical_failures >= 3:
             if auto_checklist:
                 _agent_checklist_fail(
@@ -21439,7 +21402,7 @@ def _agent_turn(
                 % tool_name
             )
         if not policy_error and tool_policy is not None:
-            policy_error = str(tool_policy(tool_name, policy_tool_args) or "")
+            policy_error = str(tool_policy(tool_name, tool_args) or "")
         if not policy_error and cloud:
             policy_error = _cloud_agent_tool_policy_error(
                 tool_name, unsafe=unsafe,
@@ -21731,6 +21694,8 @@ def _agent_turn(
             tool_dispatched
             and tool_name in _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS
         )
+        if tool_dispatched:
+            artifact_gate.observe(tool_name, policy_tool_args, observation_text, success=tool_ok, mutation=mutation_attempt_may_have_changed, execution=execution_may_have_changed)
         batch_advisory = None
         if tool_dispatched and not (
             mutation_attempt_may_have_changed or execution_may_have_changed
@@ -21941,7 +21906,7 @@ def _agent_turn(
         if not _AGENT_NEGATIVE_CLAIM_RE.search(final):
             break
         claim_review = _agent_negative_claim_review(
-            prompt, final, observations, model, cloud=cloud,
+            prompt, final, observations, model, cloud=cloud, tier=tier_label,
             cancel_check=cancel_check,
             cloud_budget_state=cloud_budget_state,
             session_id=capture_session,
@@ -22025,6 +21990,9 @@ def agent(
     refusal = intents.containment_egress_refusal(prompt)
     if refusal:
         return refusal
+    project, project_error = prepare_writing_project(project)
+    if project_error:
+        return project_error
     nested = activity_tracker.current() is not None
     with activity_tracker.response_span(
         "agent:%s" % (tier or "code"),
@@ -22086,6 +22054,9 @@ def _workbench_agent_escalating(
     prompt, tier, *, max_steps, allow_web, project, allow_location,
     prepared_plan=None, session=None,
 ):
+    project, project_error = prepare_writing_project(project)
+    if project_error:
+        return project_error, tier
     project_scope, _error = _agent_project_scope(project)
     with _standalone_lanes.managed_escalation_scope(
         _application, project=project_scope, max_rungs=tier_escalation.MAX_ESCALATIONS + 1,
@@ -22328,6 +22299,7 @@ def _autopilot_tool_policy(run: dict):
                 "ERROR: HOST POLICY: autonomous runs cannot set "
                 "include_ignored=true."
             )
+        # Preserve the trusted host sentinel for direct, already-scoped callers.
         host_scoped_text_patch = (
             tool_name == "text_patch"
             and bool(project_scope)
@@ -22336,7 +22308,7 @@ def _autopilot_tool_policy(run: dict):
             and args.get("extra_roots") == project_scope
         )
         if (
-            any(args.get(name) for name in ("token", "approval", "extra_roots"))
+            any(name in args for name in ("token", "approval", "extra_roots"))
             and not host_scoped_text_patch
         ):
             return "ERROR: HOST POLICY: autonomous runs cannot use bypass credentials or extra roots."
@@ -22391,7 +22363,7 @@ def _autopilot_json_model(run: dict, role: str, prompt: str, validator) -> dict:
     else:
         tier = run_tier
     model, cloud, _augment, tier_label = _serve_target(tier, False)
-    if model is None or cloud or tier_label not in autopilot_controller.LOCAL_TIERS:
+    if model is None or cloud or _provider_bridge.is_hosted(_bridge_provider_for_tier(tier_label)) or tier_label not in autopilot_controller.LOCAL_TIERS:
         raise RuntimeError("autopilot requires an available local model tier")
     system = _build_system(
         _prompts.render("autopilot_system", role=role),
@@ -22400,7 +22372,7 @@ def _autopilot_json_model(run: dict, role: str, prompt: str, validator) -> dict:
         model=model,
         cloud=False,
     )
-    gen = _make_generate(model, system, 0.05, 1800, 0, cloud=False)
+    gen = _make_tier_generate(tier_label, model, system, 0.05, _agent_generation_budget.json_num_predict(_bridge_provider_for_tier(tier_label)), 0, cloud=False, local_only=True, generation_kind="json")
     correction = ""
     last_error = "invalid JSON"
     for _attempt in range(2):
@@ -22573,6 +22545,9 @@ def _autopilot_work_model(
     run: dict, task: dict, prior: str, *, strategy_memory=None,
 ) -> autopilot_controller.HostTaskResult | str:
     allowed = _autopilot_allowed_tools(run)
+    deferred = validation_deferral(allowed, task, run.get("project", "")) if task.get("kind") == "validate" else None
+    if deferred:
+        return autopilot_controller.HostTaskResult(**deferred, project_scope=run.get("project", ""))
     prompt = _prompts.render(
         "autopilot_worker",
         objective=run.get("objective", ""),
@@ -22634,7 +22609,7 @@ def _autopilot_work_model(
     # expired or was taken over mid-task stops changing anything at the next
     # tool call instead of at the next checkpoint.
     fence = effect_fence.autopilot_fence(run.get("id", ""), run.get("owner_id", ""))
-    with effect_fence.held(fence):
+    with effect_fence.held(fence), _tier_generation.local_only():
         output = _agent_impl(
             prompt,
             tier=run.get("tier", "code"),
@@ -22834,6 +22809,7 @@ def _autopilot_start(
         )
     except (OSError, RuntimeError, ValueError, autopilot_controller.AutopilotError) as exc:
         return "autopilot request failed: %s" % exc
+    run = _application().automation.get_run(run["id"], request_owner=request_owner) or run
     prefix = "autopilot plan started" if plan_only else "autopilot started"
     if not launched:
         prefix = _autopilot_not_launched(run["id"])
@@ -22865,6 +22841,7 @@ def _autopilot_resume(
         launched = _launch_autopilot(run["id"], max_cycles=max_cycles, **launch_kwargs)
     except (OSError, RuntimeError, ValueError, autopilot_controller.AutopilotError) as exc:
         return "autopilot request failed: %s" % exc
+    run = _application().automation.get_run(run["id"], request_owner=request_owner) or run
     return "%s\n%s" % (
         "autopilot resumed" if launched else _autopilot_not_launched(run["id"]),
         autopilot_controller.format_run(run, include_report=False),
@@ -23059,7 +23036,7 @@ def _execution_route_model(
         "router", _RUNTIME_POLICY or _refresh_runtime_policy(), fallback="fast",
     )
     model, cloud, _augment, tier_label = _serve_target(router_tier, False)
-    if model is None or cloud or tier_label not in LOCAL_TIERS:
+    if model is None or cloud or _provider_bridge.is_hosted(_bridge_provider_for_tier(tier_label)) or tier_label not in LOCAL_TIERS:
         raise RuntimeError("local execution router model is unavailable")
     system = _build_system(
         _prompts.render("execution_router_system"),
@@ -23071,7 +23048,7 @@ def _execution_route_model(
     route_prompt = _prompts.render(
         "execution_router", project=project or "default", request=str(prompt or "")[:12000],
     )
-    gen = _make_generate(model, system, 0.0, 240, 4096, cloud=False)
+    gen = _make_tier_generate(tier_label, model, system, 0.0, 240, 4096, cloud=False, local_only=True)
     correction = ""
     last_error = "invalid route decision"
     for _attempt in range(2):
@@ -25019,7 +24996,7 @@ def _ensemble_targets(tiers: str = ""):
         ]
     targets, seen_models, unknown = [], set(), []
     for tier in requested:
-        if _is_cloud_tier(tier):
+        if _is_cloud_tier(tier) or _provider_bridge.is_hosted(_bridge_provider_for_tier(tier)):
             # The implicit default must never silently ship the prompt
             # off-box. A cloud tier the caller NAMED, with cloud enabled, is
             # not silent -- that is consult's cloud leg and the /model
@@ -25037,7 +25014,7 @@ def _ensemble_targets(tiers: str = ""):
         if model in seen_models:
             continue
         seen_models.add(model)
-        targets.append((tier, model))
+        targets.append((label if _bridge_provider_for_tier(label) else tier, model))
     return targets[:ENSEMBLE_MAX_MODELS], unknown
 
 
@@ -25160,10 +25137,10 @@ def ensemble_answer(
         started = time.monotonic()
         try:
             target_num_ctx = poll_num_ctx or (
-                0 if _is_cloud_tier(tier, model) else _auto_model_context(model)
+                0 if _is_cloud_tier(tier, model) or _bridge_provider_for_tier(tier) else _auto_model_context(model)
             )
-            gen = _make_generate(
-                model, "", 0.2, max(64, int(num_predict)), target_num_ctx,
+            gen = _make_tier_generate(
+                tier, model, "", 0.2, max(64, int(num_predict)), target_num_ctx,
             )
             text = (gen(question) or "").strip()
         except ModelCallError as error:
@@ -25178,7 +25155,7 @@ def ensemble_answer(
             # Free the card before loading the next one. Best effort: a failed
             # unload costs VRAM, not correctness. Cloud models hold no local
             # VRAM, so there is nothing to free.
-            if not _is_cloud_tier(tier, model):
+            if not _is_cloud_tier(tier, model) and _bridge_provider_for_tier(tier) is None:
                 try:
                     _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
                 except Exception:
@@ -25229,16 +25206,17 @@ def ensemble_answer(
     if not synth_model or synth_label is None:
         synth_model = answers[-1]["model"]
         synth = answers[-1]["tier"]
+        synth_label = synth
     build_prompt = (
         _ensemble_code_synthesis_prompt if code_mode else _ensemble_synthesis_prompt
     )
     try:
         synth_num_ctx = poll_num_ctx or (
-            0 if _is_cloud_model_name(synth_model)
+            0 if _is_cloud_model_name(synth_model) or _bridge_provider_for_tier(synth_label)
             else _auto_model_context(synth_model)
         )
-        gen = _make_generate(
-            synth_model, "", 0.2, max(256, int(num_predict)),
+        gen = _make_tier_generate(
+            synth_label, synth_model, "", 0.2, max(256, int(num_predict)),
             synth_num_ctx,
         )
         merged = (gen(build_prompt(question, answers)) or "").strip()
@@ -25759,16 +25737,16 @@ def _codegen_critic_generation(prompt: str, *, tier: str, model: str,
                                timeout: int | None = None) -> str:
     """Call the host-resolved critic directly so failures remain exceptions."""
     cloud = _is_cloud_tier(tier, model)
-    gen = _make_generate(
-        model, "", 0.2, max(64, min(int(num_predict), 512)),
-        0 if cloud else num_ctx if num_ctx is not None else _auto_model_context(model),
+    gen = _make_tier_generate(
+        tier, model, "", 0.2, max(64, min(int(num_predict), 512)),
+        0 if cloud or _bridge_provider_for_tier(tier) else num_ctx if num_ctx is not None else _auto_model_context(model),
         cloud=cloud, think=False if single_send else None,
         single_send=single_send, timeout=timeout,
     )
     try:
         return gen(prompt)
     finally:
-        if not cloud:
+        if not cloud and _bridge_provider_for_tier(tier) is None:
             with contextlib.suppress(Exception):
                 _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
 
@@ -25788,15 +25766,16 @@ def _codegen_pinned_generation(prompt: str, *, model: str,
             _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
 
 
-def _codegen_observed_generation(prompt: str, *, model: str,
+def _codegen_observed_generation(prompt: str, *, model: str, tier: str,
                                  num_predict: int, num_ctx: int) -> str:
     """Keep a typed provider result when durable memory refs entered a prompt."""
-    gen = _make_generate(model, "", 0.2, max(64, num_predict), num_ctx)
+    gen = _make_tier_generate(tier, model, "", 0.2, max(64, num_predict), num_ctx)
     try:
         return gen(prompt)
     finally:
-        with contextlib.suppress(Exception):
-            _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
+        if _bridge_provider_for_tier(tier) is None:
+            with contextlib.suppress(Exception):
+                _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
 
 
 @mcp.tool()
@@ -25933,6 +25912,8 @@ def codegen_build_loop(
               for tier, model in explicit_targets[:2])
     canary_route = canary_route and type(num_predict) is int and 1 <= num_predict <= 8192
     active_operation = strategy_rollout.selected(scope_run_id) and canary_route
+    if active_operation and any(_bridge_provider_for_tier(tier) for tier, _model in explicit_targets[:2]):
+        return "codegen canary unavailable: sealed single-send canaries require Ollama-bound tiers"
     # A previous selected operation may have left uncertain project effects.
     # Read its sealed guard even after an operator changes rollout to off.
     try:
@@ -26223,7 +26204,7 @@ def codegen_build_loop(
                     repair_tiers[1] if rotated_this_attempt else
                     repair_tiers[0] if repair_tiers else explicit_targets[0][0]
                 )
-                if not _is_cloud_tier(memory_tier, memory_model):
+                if not _is_cloud_tier(memory_tier, memory_model) and _bridge_provider_for_tier(memory_tier) is None:
                     memory_window = int(_platform_local_model_options(
                         0.2, max(64, num_predict), _auto_model_context(memory_model),
                         native_context=context_policy.native, environ=os.environ,
@@ -26361,7 +26342,7 @@ def codegen_build_loop(
                 if memory_exposed:
                     try:
                         reply = _codegen_observed_generation(
-                            prompt, model=memory_model, num_predict=num_predict,
+                            prompt, model=memory_model, tier=memory_tier, num_predict=num_predict,
                             num_ctx=memory_window,
                         )
                     except ModelCallError as error:

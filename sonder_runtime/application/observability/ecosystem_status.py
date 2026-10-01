@@ -158,11 +158,10 @@ def ecosystem_warnings(
                   *dict(projection.get("tier_providers") or {}).values()]
     if any(name and name != "ollama" for name in generation):
         warnings.append(
-            "provider bindings apply to HTTP chat and A2A; REPL, MCP, autopilot "
-            "and fleet generation still use Ollama, and so do these HTTP chat "
-            "dispatchers: natural-language work intents, ensemble and fanout "
-            "(developer surfaces), exact model pins and the strict sonder "
-            "alias; web research on a tier bound elsewhere is refused with 503"
+            "provider bindings apply to tier-based chat, agents, autopilot, fleet "
+            "and helpers; exact model pins, the strict sonder alias and durable "
+            "fanout remain Ollama routes. Native image/schema requests and sealed "
+            "single-send canaries require Ollama-bound tiers"
         )
     return warnings
 

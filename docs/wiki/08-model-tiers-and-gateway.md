@@ -260,10 +260,14 @@ local Ollama, logged at WARNING and counted. The fallback call never reaches
 a hosted or remote model, whatever the original request allowed. Timeouts and
 server errors never fall back, because the request may already have run, and
 neither do configuration, credential or API-version problems, which a
-fallback cannot fix. Only ModelGateway
-consumers (A2A chat, session summarize/title) follow provider bindings; see
+fallback cannot fix. Chat and agent generation consumers follow provider
+bindings, including A2A chat, session summarize/title, interactive agents,
+workbench, autopilot, master/fleet workers, ensembles, web research and
+audit/helpers. Exact model pins, strict `sonder` aliases and durable fanout
+remain explicitly Ollama; images/schema retain the non-Ollama refusal, and the
+sealed single-send codegen canary refuses a bound non-Ollama provider. See
 [the provider reference](../architecture/sonder-inference-provider.md) for
-which surfaces still use Ollama directly.
+the remaining explicit Ollama boundaries.
 
 The read-only hardware profile also inventories local provider presence for
 Ollama, llama.cpp, vLLM, and TensorRT-LLM using bounded executable/package

@@ -410,7 +410,7 @@ def test_live_context_configured_source_overrides_project_and_global(tmp_path):
     assert "GLOBAL RULE" not in rendered
 
 
-_SELECTION_MARKER = "\nTool schema selection id: "
+_SELECTION_MARKER = "\n\n[tool schema selection id: "
 
 
 def _tool_worker(worker_dir: Path, workspace_parent: Path):
@@ -460,11 +460,8 @@ def _spawn_request(service, store, context, project: Path, command: str, request
 
 
 def _stable_system(request) -> str:
-    """Text before the dynamic per-turn selection id, if it is the tail."""
-    stable, marker, selection_id = request.system.rpartition(_SELECTION_MARKER)
-    if not marker or "\n" in selection_id:
-        return request.system
-    return stable
+    """The complete system prompt, now independent of the per-turn id."""
+    return request.system
 
 
 def _worker_prefix_evidence(worker_dir: Path, project: Path) -> dict:
@@ -491,11 +488,18 @@ def test_turn_selection_id_is_visible_but_outside_reusable_prefix(tmp_path):
     # The per-turn id is dynamic: the reusable key and stable bytes are equal.
     assert first.prefix_manifest.cache_key == second.prefix_manifest.cache_key
     assert second.prefix_cache_observation.result == "hit"
-    first_id = first.system.rpartition(_SELECTION_MARKER)[2]
-    second_id = second.system.rpartition(_SELECTION_MARKER)[2]
-    assert first.system.endswith(_SELECTION_MARKER + first_id)
+    first_id = first.prompt.rpartition(_SELECTION_MARKER)[2].rstrip("]")
+    second_id = second.prompt.rpartition(_SELECTION_MARKER)[2].rstrip("]")
+    assert first.prompt.endswith(_SELECTION_MARKER + first_id + "]")
     assert first_id == lane["attempt_id"] + ":1"
     assert second_id == lane["attempt_id"] + ":2"
+    assert first.system == second.system
+    assert first.prompt != second.prompt
+    assert first.prompt.removesuffix(
+        _SELECTION_MARKER + first_id + "]"
+    ) == second.prompt.removesuffix(
+        _SELECTION_MARKER + second_id + "]"
+    )
     assert "Visible tool schemas" in _stable_system(first)
     assert '"name": "text_search"' in _stable_system(first)
     assert "ALPHA RULE" in _stable_system(first)
@@ -632,7 +636,7 @@ def test_live_request_survives_restart_without_rewriting_stale_project_context(t
     assert original.prefix_manifest is not None
     assert original.replay_manifest is not None
     assert "Visible tool schemas" in original.system
-    assert "Tool schema selection id:" in original.system
+    assert "tool schema selection id:" in original.prompt
     assert "Tool schema selection id:" not in original.prefix_manifest.sections[0].content
     assert persisted["prefix_manifest"]["cache_key"] == original.prefix_manifest.cache_key
     assert persisted["prefix_manifest"]["identity_key"] == original.prefix_manifest.identity_key

@@ -353,6 +353,9 @@ def live_control_plane_inventory(*, additional=None):
         home / "secrets",
         home / "terminal-output",
         home / "locks",
+        # Approved playbook entries are injected into the system prompt, so a
+        # model write here would forge owner-approved instructions.
+        home / "playbooks",
         state("npu-manifests", "SONDER_NPU_MANIFEST_DIR"),
     ], [fleet.parent]
     snapshots = list(_ADDITIONAL.get())

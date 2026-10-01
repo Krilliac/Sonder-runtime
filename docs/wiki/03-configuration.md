@@ -66,7 +66,7 @@ allow_remote = false                # remote-Ollama consent gate
 workers = []
 worker_max_inflight = 1             # coordinator cap per host
 worker_queue_depth = 32             # bounded waiters across the pool
-worker_admission_timeout_ms = 1000
+worker_admission_timeout_ms = 1000  # interactive chat/offload fail-fast bound
 worker_failure_threshold = 3
 worker_cooldown_seconds = 30
 worker_capability_ttl_seconds = 300
@@ -306,7 +306,14 @@ retries on a loopback primary with the model forced onto the CPU, and
 `OLLAMA_MAX_LOADED_MODELS=1` that fallback still evicts the chat model.
 `SONDER_EMBED_KEEP_ALIVE` (for example `24h`, or `-1` for no expiry) sets
 Ollama's `keep_alive` on embedding requests. Use it so a busy remote host does
-not unload the embedder when it is idle.
+not unload the embedder when it is idle. `SONDER_EMBED_NUM_CTX` (for example
+`4096`; values below 256 are ignored) sets `num_ctx` on embedding requests so
+the embedder's runner is not sized to the host's default context (32k on a
+large GPU budget turns a 4 GB embedder into a 10.8 GB runner).
+The doctor's `sonder_inference_gpu` check does not count a remote embedder as
+a GPU contender, and reports ok when `OLLAMA_LLM_LIBRARY=cpu` pins the local
+Ollama daemon to the CPU library (it names what that setting keeps off the
+GPU).
 Loopback-only features (semantic tier routing, `memory_embedding_backfill`,
 the learning-health revision refresh) stay off while the embedder is remote.
 `sonder doctor` reports whether the embedding model is installed where
@@ -382,6 +389,37 @@ procedure: [runbook](../runbooks/sonder-inference.md)):
 | `SONDER_INFERENCE_TIMEOUT_SECONDS` | `300` | per-call ceiling, never beyond the operation deadline |
 | `SONDER_INFERENCE_HEALTH_TTL_SECONDS` | `5` | health-cache lifetime |
 | `SONDER_INFERENCE_FALLBACK` | `none` | `ollama` sends requests Inference never received to local Ollama once |
+
+Provider bindings apply to every model call that selects a tier. This includes
+interactive agents and workbench turns, autopilot planning, task execution,
+validation, adaptive replanning and end reports, plus
+`master_orchestrate`/fleet workers and audit/helper calls. The provider is
+resolved from the tier binding for that call; it is never inferred from the
+model name. A `sonder-inference` binding therefore sends the request to
+`SONDER_INFERENCE_BASE_URL` and cannot silently enter the Ollama pool.
+
+The supported provider values are `sonder-inference`, `openai_compatible`,
+`ollama`, and `openrouter`. Loopback OpenAI-compatible endpoints remain local; remote
+endpoints require the operation's cloud consent and the provider's transport
+policy. OpenRouter requires `SONDER_ALLOW_CLOUD=1`, an API key, and the
+operation's cloud consent. Autopilot
+and other local-only routes refuse a hosted binding rather than silently
+changing providers. Ollama-bound tiers retain the existing request payload
+and route behavior byte-for-byte.
+
+Inference fallback is fail-closed by default. Set
+`SONDER_INFERENCE_FALLBACK=ollama` only when a fallback is explicitly wanted;
+Ollama is then permitted once, and only after the primary provider proves that
+it did not execute the request. Timeouts, partial responses, and an unknown
+execution outcome do not qualify for fallback.
+
+For local agent, autopilot and fleet work, pool admission waits in a bounded
+queue. `SONDER_POOL_ADMISSION_TIMEOUT_SECONDS` controls that wait (default
+`30`, valid range `0..60`) and is capped by the remaining model-call
+deadline. A value of `0` disables the additional queue wait. The queue still
+requires every configured origin to be loopback or literal private/link-local LAN; remote Ollama
+consent and HTTPS rules are unchanged. Interactive chat and ordinary offload
+keep the existing one-second fail-fast admission behavior.
 
 Observatory live export (contract section 11; served by the runtime telemetry
 routes, which the chat-telemetry change adds): `SONDER_OBSERVATORY_EXPORT`

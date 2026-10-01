@@ -18,6 +18,8 @@ from sonder_runtime.platform.runtime_threads import (
 )
 
 import base64
+from contextlib import contextmanager
+import contextvars
 import hashlib
 import hmac
 from concurrent.futures import ThreadPoolExecutor
@@ -60,6 +62,10 @@ _DEFAULT_COOLDOWN_SECONDS = 30.0
 _DEFAULT_MAX_INFLIGHT = 1
 _DEFAULT_QUEUE_DEPTH = 32
 _DEFAULT_ADMISSION_TIMEOUT_SECONDS = 1.0
+# Agent/autopilot/fleet calls are background work.  They should be allowed to
+# join the bounded pool queue long enough for another local request to finish,
+# while the historical one-second interactive default remains unchanged.
+_DEFAULT_LOCAL_ADMISSION_TIMEOUT_SECONDS = 30.0
 _DEFAULT_CAPABILITY_TTL_SECONDS = 300.0
 _DEFAULT_MAX_WORKERS = 16
 _MAX_POOL_WORKERS = 256
@@ -77,6 +83,10 @@ _MAX_MODELS_PER_WORKER = 2048
 _MAX_INFLIGHT_PER_WORKER = 64
 _MAX_QUEUE_DEPTH = 4096
 _MAX_ADMISSION_TIMEOUT_SECONDS = 60.0
+_LOCAL_CALLERS = frozenset({"agent", "autopilot", "fleet", "local"})
+_LOCAL_ADMISSION_SCOPE = contextvars.ContextVar(
+    "sonder_ollama_local_admission", default=None,
+)
 _MAX_FAILURE_THRESHOLD = 100
 _MAX_COOLDOWN_SECONDS = 3600.0
 _MAX_CAPABILITY_TTL_SECONDS = 86_400.0
@@ -138,6 +148,47 @@ def _is_loopback(origin: str) -> bool:
         return False
 
 
+def _is_local_origin(origin: str) -> bool:
+    """Return whether an origin is workstation/local-LAN inference."""
+    host = urlsplit(origin).hostname
+    if not host:
+        return False
+    if host.casefold().rstrip(".") == "localhost" or _is_loopback(origin):
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return address.is_private or address.is_link_local
+
+
+@contextmanager
+def local_agent_admission(
+    *, caller: str = "agent", timeout_seconds: float | None = None,
+):
+    """Mark nested model calls as bounded local agent work.
+
+    Transport wrappers can use this scope without threading a pool-specific
+    keyword through every helper.  The pool still decides whether its origins
+    are local; hosted/public pools retain interactive fail-fast admission.
+    ``timeout_seconds`` is the remaining model-call budget and is capped by
+    the pool's configured local admission limit when the request is admitted.
+    """
+    normalized = str(caller or "").strip().casefold()
+    if normalized not in _LOCAL_CALLERS:
+        raise ValueError("caller must be agent, autopilot, fleet, or local")
+    if timeout_seconds is not None:
+        timeout_seconds = float(timeout_seconds)
+        if not math.isfinite(timeout_seconds) or timeout_seconds < 0:
+            raise ValueError("timeout_seconds must be a finite value >= 0")
+        timeout_seconds = min(timeout_seconds, _MAX_ADMISSION_TIMEOUT_SECONDS)
+    token = _LOCAL_ADMISSION_SCOPE.set((normalized, timeout_seconds))
+    try:
+        yield
+    finally:
+        _LOCAL_ADMISSION_SCOPE.reset(token)
+
+
 def _safe_error(error: BaseException) -> str:
     """Return bounded single-line diagnostics without response bodies."""
     if isinstance(error, urllib.error.HTTPError):
@@ -180,6 +231,24 @@ def _positive_int(
         raise ValueError("%s must be >= 1" % key)
     if value > maximum:
         raise ValueError("%s must be <= %d" % (key, maximum))
+    return value
+
+
+def _bounded_seconds(
+    environment: Mapping[str, str], key: str, default: float, *, maximum: float,
+) -> float:
+    """Read a bounded duration without accepting NaN, infinity, or negatives."""
+    raw = str(environment.get(key, "")).strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as error:
+        raise ValueError("%s must be a number" % key) from error
+    if not math.isfinite(value) or value < 0:
+        raise ValueError("%s must be >= 0" % key)
+    if value > maximum:
+        raise ValueError("%s must be <= %g" % (key, maximum))
     return value
 
 
@@ -566,6 +635,7 @@ class OllamaWorkerPool:
         max_inflight_per_worker: int = _DEFAULT_MAX_INFLIGHT,
         queue_depth: int = _DEFAULT_QUEUE_DEPTH,
         admission_timeout_seconds: float = _DEFAULT_ADMISSION_TIMEOUT_SECONDS,
+        local_admission_timeout_seconds: float = _DEFAULT_LOCAL_ADMISSION_TIMEOUT_SECONDS,
         capability_ttl_seconds: float = _DEFAULT_CAPABILITY_TTL_SECONDS,
         max_workers: int = _DEFAULT_MAX_WORKERS,
         capability_probe_parallelism: int = _DEFAULT_CAPABILITY_PROBE_PARALLELISM,
@@ -591,6 +661,8 @@ class OllamaWorkerPool:
             raise ValueError("queue depth must be within 0..4096")
         if not 0 <= admission_timeout_seconds <= _MAX_ADMISSION_TIMEOUT_SECONDS:
             raise ValueError("admission timeout must be within 0..60 seconds")
+        if not 0 <= local_admission_timeout_seconds <= _MAX_ADMISSION_TIMEOUT_SECONDS:
+            raise ValueError("local admission timeout must be within 0..60 seconds")
         if not 1 <= capability_ttl_seconds <= _MAX_CAPABILITY_TTL_SECONDS:
             raise ValueError("capability TTL must be within 1..86400 seconds")
         if not 1 <= max_workers <= _MAX_POOL_WORKERS:
@@ -638,6 +710,7 @@ class OllamaWorkerPool:
             f"failure_threshold={failure_threshold}, cooldown={cooldown_seconds}s, "
             f"max_inflight={max_inflight_per_worker}, queue_depth={queue_depth}, "
             f"admission_timeout={admission_timeout_seconds}s, capability_ttl={capability_ttl_seconds}s, "
+            f"local_admission_timeout={local_admission_timeout_seconds}s, "
             f"max_workers={max_workers}, probe_parallelism={capability_probe_parallelism}, "
             f"probe_batch_size={capability_probe_batch_size}, status_page_size={status_page_size}"
         )
@@ -647,12 +720,14 @@ class OllamaWorkerPool:
         )
         # Startup authority is independent of the live, drainable roster.
         self._configured_origins = tuple(normalized_origins)
+        self._local_origins = all(_is_local_origin(origin) for origin in normalized_origins)
         self._states = states
         self._failure_threshold = int(failure_threshold)
         self._cooldown_seconds = float(cooldown_seconds)
         self._max_inflight = int(max_inflight_per_worker)
         self._queue_depth = int(queue_depth)
         self._admission_timeout = float(admission_timeout_seconds)
+        self._local_admission_timeout = float(local_admission_timeout_seconds)
         self._capability_ttl = float(capability_ttl_seconds)
         self._max_workers = int(max_workers)
         self._probe_parallelism = int(capability_probe_parallelism)
@@ -1783,6 +1858,7 @@ class OllamaWorkerPool:
         *,
         model: str | None = None,
         admission_timeout_seconds: float | None = None,
+        caller: str | None = None,
         idempotent: bool = False,
         payload=None,
         required_capabilities=None,
@@ -1797,11 +1873,24 @@ class OllamaWorkerPool:
         logger.debug(f"pool.request: model={model!r}, idempotent={idempotent}")
         with self._condition:
             self._metrics["logical_requests"] += 1
-        admission_timeout = (
-            self._admission_timeout
-            if admission_timeout_seconds is None
-            else max(0.0, float(admission_timeout_seconds))
-        )
+        scope = _LOCAL_ADMISSION_SCOPE.get()
+        scoped_caller, scoped_timeout = scope or ("interactive", None)
+        caller = str(caller or scoped_caller).strip().casefold()
+        if caller not in _LOCAL_CALLERS and caller != "interactive":
+            raise ValueError("caller must be interactive, agent, autopilot, fleet, or local")
+        if admission_timeout_seconds is None:
+            if caller in _LOCAL_CALLERS and self._local_origins:
+                requested = scoped_timeout
+                admission_timeout = self._local_admission_timeout if requested is None else min(
+                    requested, self._local_admission_timeout,
+                )
+            else:
+                admission_timeout = self._admission_timeout
+        else:
+            admission_timeout = float(admission_timeout_seconds)
+            if not math.isfinite(admission_timeout) or admission_timeout < 0:
+                raise ValueError("admission timeout must be a finite value >= 0")
+            admission_timeout = min(admission_timeout, _MAX_ADMISSION_TIMEOUT_SECONDS)
         admission_deadline = time.monotonic() + admission_timeout
         if model:
             self._refresh_for_model(model, admission_timeout=admission_timeout)
@@ -2538,6 +2627,12 @@ def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
             maximum=int(_MAX_ADMISSION_TIMEOUT_SECONDS * 1000),
         )
     )
+    local_admission_timeout = _bounded_seconds(
+        env,
+        "SONDER_POOL_ADMISSION_TIMEOUT_SECONDS",
+        _DEFAULT_LOCAL_ADMISSION_TIMEOUT_SECONDS,
+        maximum=_MAX_ADMISSION_TIMEOUT_SECONDS,
+    )
     probe_timeout_ms = (
         typed_probe if use_typed and typed_probe is not None
         else _positive_int(
@@ -2600,6 +2695,7 @@ def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
             )
         ),
         admission_timeout_seconds=admission_ms / 1000.0,
+        local_admission_timeout_seconds=local_admission_timeout,
         capability_ttl_seconds=(
             typed_ttl if use_typed and typed_ttl is not None
             else _positive_int(
@@ -2632,6 +2728,7 @@ __all__ = [
     "configure_typed_pool",
     "from_environment",
     "has_configured_remote_workers",
+    "local_agent_admission",
     "parse_worker_origins",
     "reset_typed_workers",
     "validate_worker_origin",
