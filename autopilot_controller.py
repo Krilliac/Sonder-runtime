@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
+from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.domain.runtime_policy import rules as _policy_rules
 from sonder_runtime.bootstrap.strategy_observers import observe_autopilot_task
 
@@ -41,6 +42,23 @@ MAX_WALL_SECONDS_CEILING = 24 * 60 * 60
 _monotonic = time.monotonic
 
 
+def _infra_retry_limit() -> int:
+    try:
+        return max(0, min(3, int(os.environ.get("SONDER_AUTOPILOT_INFRA_RETRIES", "3"))))
+    except ValueError:
+        return 3
+
+
+def _provider_unavailable(error: ModelCallError) -> bool:
+    """Only classified model transport failures qualify, never tool output."""
+    return error.kind in {
+        "provider_unavailable", "transport", "busy_timeout",
+    } or (
+        error.kind == "http" and error.status == 503
+        and "backend_unavailable" in error.detail.lower()
+    )
+
+
 def max_wall_seconds(value=None) -> float:
     """The wall-clock budget for one invocation, bounded to (0, 24h]."""
     raw = value
@@ -55,6 +73,10 @@ def max_wall_seconds(value=None) -> float:
     return min(seconds, float(MAX_WALL_SECONDS_CEILING))
 MAX_ADAPTIVE_CHECKPOINTS = 6
 MAX_TASK_OUTPUT = 32_000
+VERIFIER_TOOLS = (
+    "test_run", "workspace_run", "script_run", "build_run", "run_code",
+    "lint_run", "typecheck_run",
+)
 FAILURE_PREFIXES = (
     "ERROR:", "VALIDATION_FAILED:", "EVIDENCE_REQUIRED", "CANCELLED",
 )
@@ -62,6 +84,64 @@ FAILURE_PREFIXES = (
 
 class AutopilotError(RuntimeError):
     pass
+
+
+def verifier_gate() -> tuple[str, list[str], list[str]]:
+    """Read the current runtime home's gate without recording or spending approval."""
+    import permission_modes
+
+    decisions = [
+        permission_modes.decide(name, interactive=False, record=False)
+        for name in VERIFIER_TOOLS
+    ]
+    return (
+        decisions[0].mode,
+        [name for name, decision in zip(VERIFIER_TOOLS, decisions, strict=True) if decision.allowed],
+        [name for name, decision in zip(VERIFIER_TOOLS, decisions, strict=True) if not decision.allowed],
+    )
+
+
+def _format_verifiers(mode: str, allowed: list[str], refused: list[str]) -> str:
+    text = "  verifiers: allowed [%s] refused [%s]" % (", ".join(allowed), ", ".join(refused))
+    if not allowed:
+        text += "\n  warning: validate tasks cannot pass unattended in mode %s" % mode
+    return text
+
+
+def verifier_preflight() -> str:
+    """Refuse only when the operator explicitly requires an unattended verifier."""
+    mode, allowed, refused = verifier_gate()
+    if allowed or os.environ.get("SONDER_AUTOPILOT_REQUIRE_VERIFIER", "0") != "1":
+        return ""
+    return (
+        "autopilot not started: no verifier tool is allowed unattended in mode %s; a validate task cannot pass\n%s"
+        % (mode, _format_verifiers(mode, allowed, refused))
+    )
+
+
+def review_json_model(generator_factory, prompt: str, validator, extract_json) -> dict:
+    """Repair once, then retain the host plan when a reviewer cannot follow schema."""
+    generate = generator_factory()
+    correction = ""
+    for attempt in range(2):
+        # Provider errors must retain their identity, rather than looking like
+        # a reviewer verdict or a malformed response.
+        raw = generate(prompt + correction)
+        try:
+            payload = extract_json(raw)
+            validator(payload)
+            return payload
+        except (TypeError, ValueError) as error:
+            _LOG.warning("autopilot reviewer schema error: %s; raw=%s", error, str(raw)[:MAX_TASK_OUTPUT])
+            correction = "\n\nHOST SCHEMA ERROR: %s\nReturn a corrected JSON object only." % error
+            if attempt == 1:
+                payload = {
+                    "decision": "continue", "reason": "host default: reviewer schema repair exhausted",
+                    "tasks": [], "pending_assessment": [],
+                }
+                validator(payload)
+                return payload
+    raise AssertionError("reviewer repair loop exhausted without a result")
 
 
 @dataclass(frozen=True)
@@ -161,6 +241,7 @@ def _task(raw: dict, index: int) -> dict:
         "kind": kind,
         "status": "pending",
         "attempts": 0,
+        "infra_retries": 0,
         "output": "",
         "error": "",
         "history": [],
@@ -321,8 +402,12 @@ def _completion_gate(run: dict) -> tuple[bool, str]:
 
 def _next_pending(plan: list[dict]) -> tuple[int, dict] | tuple[None, None]:
     for index, task in enumerate(plan):
+        # `infra_retry` (provider outage, retried in place) is runnable like
+        # `pending`. The deferred-verification fence applies to both, though only
+        # a pending validate task ever carries it: it is set together with
+        # status=pending and cleared on explicit resume before the task can run.
         if (
-            task.get("status") == "pending"
+            task.get("status") in ("pending", "infra_retry")
             and not task.get("verification_deferred")
         ):
             return index, task
@@ -455,6 +540,7 @@ def format_report(run: dict, review_reason: str = "", error: str = "") -> str:
         "  working in: %s" % run.get("project", ""),
         "  policy/tier: %s / %s" % (run.get("policy", ""), run.get("tier", "")),
         "  cycles/failures: %s/%s" % (run.get("cycles", 0), run.get("failures", 0)),
+        "  infra: %s retries" % run.get("infra_retries", 0),
         "  adaptive/checkpoints/replans: %s / %s / %s/%s" % (
             "on" if run.get("adaptive", True) else "off",
             run.get("checkpoints", 0),
@@ -506,6 +592,7 @@ def format_run(run: dict | None, include_report: bool = True) -> str:
             "on" if run.get("allow_web") else "off",
         ),
         "  tasks: %d passed, %d pending, %d total" % (passed, pending, len(plan)),
+        _format_verifiers(*verifier_gate()),
         "  cycles/failures: %s/%s" % (run.get("cycles", 0), run.get("failures", 0)),
         "  adaptive: %s | checkpoints: %s | replans: %s/%s" % (
             "on" if run.get("adaptive", True) else "off",
@@ -593,6 +680,7 @@ def format_snapshot(data: dict) -> str:
             data.get("total_listed", 0),
         ),
         "  persistence: %s" % data.get("database", ""),
+        _format_verifiers(*verifier_gate()),
     ]
     rows = data.get("runs") or []
     if not rows:
@@ -745,6 +833,8 @@ def execute_run(
             ) or run
 
         invoked_cycles = 0
+        retry_at = 0.0
+        infra_limit = _infra_retry_limit()
         while invoked_cycles < max_cycles:
             flags = autopilot_store.control_flags(run["id"], owner_id)
             if flags.get("lost"):
@@ -770,6 +860,11 @@ def execute_run(
                     ),
                     final_report=format_report(latest),
                 ) or run
+            if retry_at > _monotonic():
+                # Keep cancellation, pause and the wall budget responsive while
+                # the durable task remains infra_retry. No worker/reviewer runs.
+                time.sleep(max(0.0, min(1.0, retry_at - _monotonic(), wall_budget - elapsed)))
+                continue
             run = autopilot_store.get_run(run["id"]) or run
             if int(run.get("cycles") or 0) >= MAX_TOTAL_CYCLES:
                 return autopilot_store.finish_run(
@@ -892,7 +987,45 @@ def execute_run(
             ):
                 fenced = format_steering(steering_notes)
                 prior = "%s\n\n%s" % (prior, fenced) if prior else fenced
-            result = work_fn(run, task, prior)
+            try:
+                result = work_fn(run, task, prior)
+            except ModelCallError as exc:
+                if not _provider_unavailable(exc):
+                    raise
+                flags = autopilot_store.control_flags(run["id"], owner_id)
+                if flags.get("lost"):
+                    raise AutopilotError("autopilot ownership was lost during task execution") from exc
+                if flags.get("cancel"):
+                    return autopilot_store.finish_run(
+                        run["id"], owner_id, "cancelled",
+                        summary="cancelled during provider failure",
+                    ) or run
+                retried = int(task.get("infra_retries") or 0)
+                retry = retried < infra_limit and not flags.get("pause")
+                task["status"] = "infra_retry"
+                task["attempts"] -= 1
+                task["infra_retries"] = int(task.get("infra_retries") or 0) + int(retry)
+                task["error"] = "provider unavailable"
+                plan[task_index] = task
+                saved = autopilot_store.save_progress(
+                    run["id"], owner_id, plan=plan, current_task=-1,
+                    infra_retries_delta=int(retry),
+                    event_kind="infra_retry" if retry else "infra_pause",
+                    event_message="%s: provider unavailable (%s)" % (task["id"], exc.kind),
+                )
+                if saved is None:
+                    # Re-enter the control checkpoint; a refused save must
+                    # never grant permission for another worker call.
+                    continue
+                run = saved
+                if not retry:
+                    return autopilot_store.finish_run(
+                        run["id"], owner_id, "paused", last_error="provider unavailable",
+                        summary="provider unavailable; resume to retry",
+                        final_report=format_report(run),
+                    ) or run
+                retry_at = _monotonic() + min(120, 30 * 2 ** retried)
+                continue
             output = str(
                 result.output if isinstance(result, HostTaskResult) else result or ""
             )[:MAX_TASK_OUTPUT]

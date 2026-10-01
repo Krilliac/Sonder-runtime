@@ -526,6 +526,11 @@ def test_run(
 _LINT_TOOLS = {
     "ruff": {"check": ["ruff", "check"], "fix": ["ruff", "check", "--fix"]},
     "flake8": {"check": ["flake8"], "fix": None},
+    # Runtime-local fallbacks.  Do not resolve these through another venv or
+    # assume a global executable: the interpreter running the harness owns the
+    # import/module lookup.
+    "pyflakes": {"check": [sys.executable, "-m", "pyflakes"], "fix": None},
+    "py_compile": {"check": [sys.executable, "-I", "-m", "compileall", "-q"], "fix": None},
     "pylint": {"check": ["pylint"], "fix": None},
     "eslint": {"check": ["npx", "eslint"], "fix": ["npx", "eslint", "--fix"]},
     "clippy": {"check": ["cargo", "clippy"], "fix": ["cargo", "clippy", "--fix", "--allow-dirty"]},
@@ -548,18 +553,24 @@ _TYPECHECKERS = {
 
 
 def _detect_linter(root):
+    import importlib.util
     root = Path(root)
-    if shutil.which("ruff") and (root / "pyproject.toml").exists():
+    ruff_available = bool(shutil.which("ruff") or importlib.util.find_spec("ruff"))
+    if ruff_available and (root / "pyproject.toml").exists():
         return "ruff"
     if (root / ".eslintrc.js").exists() or (root / ".eslintrc.json").exists() or (root / "eslint.config.js").exists():
         return "eslint"
     if (root / "Cargo.toml").exists():
         return "clippy"
-    if shutil.which("ruff"):
+    if ruff_available:
         return "ruff"
     if shutil.which("flake8"):
         return "flake8"
-    return "ruff"
+    try:
+        import pyflakes  # noqa: F401
+    except ImportError:
+        return "py_compile"
+    return "pyflakes"
 
 
 def _detect_formatter(root):
@@ -602,9 +613,11 @@ def lint_run(root=".", tool="auto", path="", fix=False, timeout=60, extra_roots=
         cmd = list(info["fix"])
     else:
         cmd = list(info["check"])
+    if tool == "ruff" and not shutil.which("ruff"):
+        cmd = [sys.executable, "-I", "-m", "ruff", *cmd[1:]]
     if path:
         cmd.append(path)
-    elif tool in ("ruff", "flake8", "pylint"):
+    elif tool in ("ruff", "flake8", "pylint", "pyflakes", "py_compile"):
         cmd.append(".")
     result = _run(cmd, cwd=root, timeout=timeout)
     result["tool"] = tool
