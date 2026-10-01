@@ -253,6 +253,7 @@ class ShellSidebar extends StatelessWidget {
                   valueListenable: chat,
                   builder: (context, state, _) => _ThreadSection(
                     state: state,
+                    touch: inDrawer,
                     chatShown: current == WorkspaceDestination.chat,
                     now: now(),
                     projectFilter: projectFilter,
@@ -630,6 +631,7 @@ class _MiniBadge extends StatelessWidget {
 class _ThreadSection extends StatelessWidget {
   final SidebarChatState state;
   final bool chatShown;
+  final bool touch;
   final DateTime now;
   final String? projectFilter;
   final ValueChanged<String?> onProjectFilter;
@@ -639,6 +641,7 @@ class _ThreadSection extends StatelessWidget {
   const _ThreadSection({
     required this.state,
     required this.chatShown,
+    required this.touch,
     required this.now,
     required this.projectFilter,
     required this.onProjectFilter,
@@ -698,6 +701,7 @@ class _ThreadSection extends StatelessWidget {
               thread: thread,
               selected: chatShown && thread.id == state.currentThreadId,
               running: thread.id == state.runningThreadId,
+              touch: touch,
               onTap: () => onOpenThread(thread),
               onDelete: state.threads.length <= 1
                   ? null

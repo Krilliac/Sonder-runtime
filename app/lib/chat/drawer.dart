@@ -133,9 +133,10 @@ List<(ThreadAge, List<ChatThread>)> groupThreads(
 }
 
 /// One conversation in the sidebar: its title on one line, a working mark
-/// while its turn streams, and Delete revealed on hover or keyboard focus
-/// (and always on the open conversation, so touch can reach it). Screen
-/// readers get Delete as a custom action on the row.
+/// while its turn streams, and Delete revealed on hover or keyboard focus.
+/// On touch ([touch]) there is no hover: the open conversation shows
+/// Delete, and a long press reveals it on any other. Screen readers get
+/// Delete as a custom action on the row.
 class ThreadRow extends StatefulWidget {
   final ChatThread thread;
   final bool selected;
@@ -145,6 +146,9 @@ class ThreadRow extends StatefulWidget {
   final VoidCallback onTap;
   final VoidCallback? onDelete;
 
+  /// A touch layout (the navigation drawer) rather than a pointer one.
+  final bool touch;
+
   const ThreadRow({
     super.key,
     required this.thread,
@@ -152,6 +156,7 @@ class ThreadRow extends StatefulWidget {
     required this.onTap,
     required this.onDelete,
     this.running = false,
+    this.touch = false,
   });
 
   @override
@@ -161,14 +166,15 @@ class ThreadRow extends StatefulWidget {
 class _ThreadRowState extends State<ThreadRow> {
   bool _hover = false;
   bool _focused = false;
+  bool _revealed = false;
 
   @override
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
     final text = Theme.of(context).textTheme;
     final onDelete = widget.onDelete;
-    final showDelete =
-        onDelete != null && (_hover || _focused || widget.selected);
+    final showDelete = onDelete != null &&
+        (_hover || _focused || _revealed || (widget.touch && widget.selected));
     final title = widget.thread.displayTitle;
     final background = widget.selected
         ? tokens.raised
@@ -194,6 +200,9 @@ class _ThreadRowState extends State<ThreadRow> {
               type: MaterialType.transparency,
               child: InkWell(
                 onTap: widget.onTap,
+                onLongPress: widget.touch && onDelete != null
+                    ? () => setState(() => _revealed = true)
+                    : null,
                 borderRadius: BorderRadius.circular(SonderRadius.row),
                 child: AnimatedContainer(
                   duration: SonderMotion.of(context, SonderMotion.fast),

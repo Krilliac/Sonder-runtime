@@ -372,6 +372,34 @@ void main() {
       await unmountChat(tester);
     });
 
+    testWidgets('resizing between wide and narrow keeps Chat and its draft',
+        (tester) async {
+      await pumpShell(tester, FakeChatBackend(),
+          size: _desk, prefs: _seed(), clock: _clock);
+      await _settle(tester);
+      await tester.enterText(_composer, 'draft survives');
+      final state = tester.state(find.byType(ChatScreen));
+
+      tester.view.physicalSize = _phone;
+      await _settle(tester);
+      expect(find.byKey(const Key('shell-sidebar')), findsNothing);
+      expect(find.byKey(const Key('shell-menu')), findsOneWidget);
+      // With the drawer open, going wide again is fine too.
+      await tester.tap(find.byKey(const Key('shell-menu')));
+      await _settle(tester);
+      expect(find.byType(Drawer), findsOneWidget);
+
+      tester.view.physicalSize = _desk;
+      await _settle(tester);
+      expect(tester.takeException(), isNull);
+      expect(find.byKey(const Key('shell-sidebar')), findsOneWidget);
+      expect(find.byType(Drawer), findsNothing);
+      expect(identical(tester.state(find.byType(ChatScreen)), state), isTrue);
+      expect(tester.widget<TextField>(_composer).controller!.text,
+          'draft survives');
+      await unmountChat(tester);
+    });
+
     testWidgets('starts collapsed when that was remembered', (tester) async {
       await pumpShell(tester, FakeChatBackend(),
           size: _desk, prefs: _seed(), clock: _clock, collapsed: true);
@@ -452,9 +480,9 @@ void main() {
       final row = find.byKey(const ValueKey('b'));
       Finder deleteIn(Finder f) => find.descendant(
           of: f, matching: find.byTooltip('Delete chat'));
-      // Only the open conversation shows Delete before any hover.
+      // Pointer layouts reveal Delete under the pointer only.
       expect(deleteIn(row), findsNothing);
-      expect(deleteIn(find.byKey(const ValueKey('a'))), findsOneWidget);
+      expect(deleteIn(find.byKey(const ValueKey('a'))), findsNothing);
 
       final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
       await mouse.addPointer(location: Offset.zero);
@@ -623,6 +651,28 @@ void main() {
       });
     }
 
+    testWidgets('touch: the open chat shows Delete; long press reveals others',
+        (tester) async {
+      await pumpShell(tester, FakeChatBackend(),
+          size: _phone, prefs: _seed(), clock: _clock);
+      await _settle(tester);
+      await tester.tap(find.byKey(const Key('shell-menu')));
+      await _settle(tester);
+      Finder deleteIn(String id) => find.descendant(
+          of: find.byKey(ValueKey(id)),
+          matching: find.byTooltip('Delete chat'));
+      expect(deleteIn('a'), findsOneWidget);
+      expect(deleteIn('c'), findsNothing);
+      await tester.longPress(find.byKey(const ValueKey('c')));
+      await _settle(tester);
+      expect(deleteIn('c'), findsOneWidget);
+      await tester.tap(deleteIn('c'));
+      await _settle(tester);
+      expect(find.byKey(const ValueKey('c')), findsNothing);
+      expect(find.text('Chat deleted.'), findsOneWidget);
+      await unmountChat(tester);
+    });
+
     testWidgets('a conversation picked in the drawer opens and closes it',
         (tester) async {
       await pumpShell(tester, FakeChatBackend(),
@@ -688,6 +738,25 @@ void main() {
       expect(find.text('Settings page'), findsOneWidget);
       await _ctrl(tester, LogicalKeyboardKey.keyD);
       expect(find.text('Runtime page'), findsOneWidget);
+      await unmountChat(tester);
+    });
+
+    testWidgets('shortcuts keep working after leaving a focused composer',
+        (tester) async {
+      await pumpShell(tester, FakeChatBackend(),
+          size: _desk, prefs: _seed(), clock: _clock, pageBuilder: _standIns());
+      await _settle(tester);
+      await tester.tap(_composer);
+      await tester.pump();
+      await tester.tap(_destination(WorkspaceDestination.settings));
+      await _settle(tester);
+      expect(find.text('Settings page'), findsOneWidget);
+      // The composer's focus went with Chat; the keyboard still reaches
+      // the shell.
+      await _ctrl(tester, LogicalKeyboardKey.digit2);
+      expect(find.text('Agents page'), findsOneWidget);
+      await _ctrl(tester, LogicalKeyboardKey.digit1);
+      expect(find.byType(ChatScreen), findsOneWidget);
       await unmountChat(tester);
     });
 
