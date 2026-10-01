@@ -74,6 +74,46 @@ def test_ollama_payload_converts_to_a_provider_neutral_request():
     assert "model" not in request.options
 
 
+def test_bridge_forwards_sampling_and_reasoning_controls_for_inference():
+    payload = _payload(
+        think=False,
+        reasoning_budget_tokens=123,
+        reasoning_budget_message="keep the answer short",
+    )
+    payload["options"].update({
+        "top_p": 0.95, "top_k": 20, "min_p": 0, "repeat_penalty": 1.1,
+        "seed": 7, "stop": ["DONE"],
+    })
+    request = bridge.model_request_from_ollama_payload(
+        payload, tier="code", provider="sonder_inference",
+    )
+    assert request.options["think"] is False
+    assert request.options["top_p"] == 0.95
+    assert request.options["top_k"] == 20
+    assert request.options["min_p"] == 0.0
+    assert request.options["repeat_penalty"] == 1.1
+    assert request.options["seed"] == 7
+    assert request.options["stop"] == ["DONE"]
+    assert request.options["reasoning_budget_tokens"] == 123
+    assert request.options["reasoning_budget_message"] == "keep the answer short"
+
+
+def test_binding_options_are_cloned_and_explicit_think_wins():
+    defaults = {"think": False, "top_p": 0.95}
+    with bridge.bind_rung("sonder_inference", "code", options=defaults):
+        defaults["think"] = True
+        request = bridge.model_request_from_ollama_payload(
+            _payload(think=True), tier="code", provider="sonder_inference",
+        )
+        assert request.options["think"] is True
+        assert request.options["top_p"] == 0.95
+    with bridge.bind_rung("openrouter", "code", options={"think": False, "top_p": 0.1}):
+        request = bridge.model_request_from_ollama_payload(
+            _payload(), tier="code", provider="openrouter",
+        )
+        assert "top_p" not in request.options
+
+
 @pytest.mark.parametrize("extra", [
     {"format": {"type": "object"}},
     {"format": "json"},
@@ -120,6 +160,15 @@ def test_response_is_shaped_as_the_ollama_reply_legacy_callers_read():
 def test_response_without_usage_omits_counts():
     shaped = bridge.ollama_shape(ModelResponse(text="hi", model="m", tier="general"))
     assert "prompt_eval_count" not in shaped and "eval_count" not in shaped
+
+
+@pytest.mark.parametrize("reason", ["length", "stop"])
+def test_response_shape_preserves_provider_finish_reason(reason):
+    response = SimpleNamespace(
+        model="m", text="", tokens_in=None, tokens_out=None,
+        telemetry=None, finish_reason=reason,
+    )
+    assert bridge.ollama_shape(response)["done_reason"] == reason
 
 
 @pytest.mark.parametrize("error,kind,status", [
@@ -205,3 +254,40 @@ def test_degradations_are_collected_only_inside_a_turn_scope():
         assert bridge.record_degradation("memory_recall_embeddings") is True
         bridge.record_degradation("memory_recall_embeddings")
     assert notes == ["memory_recall_embeddings"]
+
+
+def test_gateway_finish_metadata_shapes_real_model_response():
+    class Gateway:
+        last_response_meta = {"finish_reason": "length"}
+        def generate(self, request, context):
+            return ModelResponse(text="{", model="fake", tier=request.tier)
+    with bridge.bind_rung("sonder_inference", "code"):
+        shaped, _ = bridge.generate_via_gateway(
+            Gateway(), _payload(), tier="code",
+            context=local_owner_context(correlation_id="length"),
+        )
+    assert shaped["done_reason"] == "length"
+
+
+def test_stop_sequences_are_not_silently_dropped_at_bridge():
+    stops = ["a", "b", "c", "d", "e"]
+    payload = _payload()
+    payload["options"] = {"stop": stops, "seed": 0, "top_k": 0}
+    request = bridge.model_request_from_ollama_payload(payload, tier="code", provider="sonder_inference")
+    assert request.options == {"stop": stops, "seed": 0, "top_k": 0}
+
+
+@pytest.mark.parametrize("content", [None, "", "  \n"])
+def test_empty_length_response_retains_transport_repair_signal(content):
+    from sonder_runtime.adapters.inference.openai_compat_gateway import OpenAICompatibleGateway
+    from sonder_runtime.adapters.model_transport import ModelCallError
+    with pytest.raises(ModelCallError) as raised:
+        OpenAICompatibleGateway._extract_text({"choices": [{"finish_reason": "length", "message": {"content": content}}]})
+    assert raised.value.kind == "empty_response"
+    assert '"done_reason": "length"' in raised.value.detail
+
+
+def test_malformed_length_content_is_still_a_protocol_error():
+    from sonder_runtime.adapters.inference.openai_compat_gateway import OpenAICompatibleGateway
+    with pytest.raises(DependencyUnavailable):
+        OpenAICompatibleGateway._extract_text({"choices": [{"finish_reason": "length", "message": {"content": {"bad": "shape"}}}]})

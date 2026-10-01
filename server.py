@@ -20260,7 +20260,7 @@ def _agent_batch_guard_telemetry(event):
 
 _LOCAL_AGENT_NUM_PREDICT = 1200
 _CLOUD_AGENT_WRITE_CHUNK_HINT = 24000
-
+from sonder_runtime.adapters import agent_generation_budget as _agent_generation_budget
 
 
 def _local_agent_brief(project_scope: str = "") -> str:
@@ -20556,8 +20556,9 @@ def _agent_turn(
             system or default_agent_system, False, "", model=model, cloud=False)
     )
     agent_num_predict = (
-        _CLOUD_AGENT_NUM_PREDICT if cloud else _LOCAL_AGENT_NUM_PREDICT
+        _CLOUD_AGENT_NUM_PREDICT if cloud else _agent_generation_budget.decision_num_predict(provider, cloud, True)
     )
+    agent_temperature = _tier_generation.decision_temperature(provider)
     # A host-owned pre-model context producer needs the same resolved window
     # the generator actually uses. Pin it for this turn rather than observing
     # one window and silently dispatching with another after metadata refresh.
@@ -20569,10 +20570,10 @@ def _agent_turn(
         if cloud else None
     )
     gen = _make_tier_generate(
-        tier_label, model, system, 0.1, agent_num_predict, agent_num_ctx, cloud=cloud,
+        tier_label, model, system, agent_temperature, agent_num_predict, agent_num_ctx, cloud=cloud,
         cancel_check=cancel_check,
         accept_native_tool_calls=True,
-        compact_cloud_reasoning=True,
+        compact_cloud_reasoning=True, generation_kind="decision",
     )
     if capture_session is not None:
         gen = wrap_model_generator(
@@ -20582,12 +20583,12 @@ def _agent_turn(
             tier=tier_label or tier,
             system=system,
             options={
-                "temperature": 0.1,
+                "temperature": agent_temperature,
                 "num_predict": agent_num_predict,
                 "num_ctx": 0,
             },
             options_factory=lambda _prompt, _history, raw: _legacy_model_step_options(
-                raw, temperature=0.1, num_predict=agent_num_predict, num_ctx=0,
+                raw, temperature=agent_temperature, num_predict=agent_num_predict, num_ctx=0,
             ),
             first_user_message=prompt,
             failure_code=_legacy_model_failure_code,
@@ -22363,7 +22364,7 @@ def _autopilot_json_model(run: dict, role: str, prompt: str, validator) -> dict:
         model=model,
         cloud=False,
     )
-    gen = _make_tier_generate(tier_label, model, system, 0.05, 1800, 0, cloud=False, local_only=True)
+    gen = _make_tier_generate(tier_label, model, system, 0.05, _agent_generation_budget.json_num_predict(_bridge_provider_for_tier(tier_label)), 0, cloud=False, local_only=True, generation_kind="json")
     correction = ""
     last_error = "invalid JSON"
     for _attempt in range(2):
