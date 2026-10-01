@@ -33,6 +33,8 @@ void main() {
             initialInfo: healthySystemInfo(),
             liveUpdates: false,
             now: runtimeNow,
+            // The Overview page at both widths (a phone opens on the list).
+            initialCategory: RuntimeCategories.overview,
             dataSource: FakeRuntimeData(
               runs: [runningWorkRun()],
               approvalsPage: const ApprovalsPage(supported: true, pending: [

@@ -1,22 +1,21 @@
 part of '../runtime_screen.dart';
 
+String _capitalized(String value) =>
+    value.isEmpty ? value : '${value[0].toUpperCase()}${value.substring(1)}';
+
+/// The shared local runtime policy: which local model each alias names, and
+/// which alias each automatic lane uses. Read-only here; guarded edits go
+/// through `/runtime set`, shown as a command to copy.
 class _RuntimePolicyPanel extends StatelessWidget {
   final RuntimePolicyInfo policy;
 
   const _RuntimePolicyPanel({required this.policy});
 
   static const _tiers = ['fast', 'code', 'general'];
-  static const _lanes = [
-    'router',
-    'workbench',
-    'autopilot',
-    'fleet',
-    'review',
-  ];
+  static const _lanes = ['router', 'workbench', 'autopilot', 'fleet', 'review'];
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
     final warnings = <String>[
       if (policy.error.isNotEmpty) '${policy.error} (safe defaults are active)',
       if (policy.inventoryError.isNotEmpty)
@@ -26,114 +25,71 @@ class _RuntimePolicyPanel extends StatelessWidget {
     ];
     return Column(
       key: const Key('runtime-policy-panel'),
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          crossAxisAlignment: WrapCrossAlignment.center,
+        SettingsSection(
+          title: 'Local model aliases',
+          description: [
+            'Shared policy r${policy.revision}',
+            if (policy.source.isNotEmpty) policy.source,
+          ].join(' · '),
+          trailing: StatusPill(
+              policy.hasWarning ? StatusKind.warn : StatusKind.ok,
+              word: policy.hasWarning ? 'warn' : 'ok',
+              dense: true),
           children: [
-            Chip(
-              avatar: Icon(
-                policy.hasWarning
-                    ? Icons.warning_amber_outlined
-                    : Icons.sync_outlined,
-                size: 18,
-                color: policy.hasWarning ? cs.error : cs.primary,
+            if (warnings.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.all(SonderSpace.lg),
+                child: WorkspaceNotice(
+                  kind: StatusKind.warn,
+                  title: warnings.first,
+                  detail:
+                      warnings.length > 1 ? warnings.skip(1).join('\n') : null,
+                  liveRegion: false,
+                ),
               ),
-              label: Text('Shared policy r${policy.revision}'),
-            ),
-            if (policy.source.isNotEmpty)
-              Chip(
-                avatar: const Icon(Icons.history_outlined, size: 18),
-                label: Text(policy.source),
-              ),
-          ],
-        ),
-        const SizedBox(height: 12),
-        Text(
-          'Local model aliases',
-          style: Theme.of(context).textTheme.labelLarge,
-        ),
-        const SizedBox(height: 6),
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: [
             for (final tier in _tiers)
-              Chip(
-                avatar: Icon(_tierIcon(tier), size: 18),
-                label:
-                    Text('$tier  ${policy.localModels[tier] ?? 'unassigned'}'),
+              ValueRow(
+                key: Key('policy-alias-$tier'),
+                label: _capitalized(tier),
+                value: policy.localModels[tier] ?? 'unassigned',
+                mono: true,
               ),
           ],
         ),
-        const SizedBox(height: 12),
-        Text(
-          'Automatic execution lanes',
-          style: Theme.of(context).textTheme.labelLarge,
-        ),
-        const SizedBox(height: 6),
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
+        SettingsSection(
+          title: 'Execution lanes',
+          description: 'Which alias each automatic lane runs on.',
           children: [
             for (final lane in _lanes)
-              Tooltip(
-                message: policy.modelForLane(lane).isEmpty
-                    ? 'No local model resolved'
-                    : policy.modelForLane(lane),
-                child: Chip(
-                  avatar: const Icon(Icons.route_outlined, size: 18),
-                  label: Text('$lane  ${policy.routing[lane] ?? 'unassigned'}'),
-                ),
+              ValueRow(
+                key: Key('policy-lane-$lane'),
+                label: _capitalized(lane),
+                value: [
+                  policy.routing[lane] ?? 'unassigned',
+                  if (policy.modelForLane(lane).isNotEmpty)
+                    policy.modelForLane(lane),
+                ].join(' · '),
+                mono: true,
+              ),
+            const SettingRow(
+              label: 'Change a lane',
+              description: 'Guarded edits go through the runtime; run this '
+                  'in Chat or the Developer console.',
+              trailing: _CommandLine('/runtime set workbench=general',
+                  label: 'lane command'),
+            ),
+            if (policy.path.isNotEmpty)
+              ValueRow(
+                label: 'Policy file',
+                value: policy.path,
+                mono: true,
+                copyable: true,
               ),
           ],
-        ),
-        if (warnings.isNotEmpty) ...[
-          const SizedBox(height: 12),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: cs.errorContainer,
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(Icons.warning_amber_outlined,
-                    size: 20, color: cs.onErrorContainer),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: SelectableText(
-                    warnings.join('\n'),
-                    style: TextStyle(color: cs.onErrorContainer),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-        if (policy.path.isNotEmpty) ...[
-          const SizedBox(height: 12),
-          SelectableText(
-            'Policy file: ${policy.path}',
-            style: Theme.of(context).textTheme.bodySmall,
-          ),
-        ],
-        const SizedBox(height: 6),
-        Text(
-          'Guarded edits: /runtime set workbench=general',
-          style: Theme.of(context).textTheme.bodySmall,
         ),
       ],
     );
-  }
-
-  IconData _tierIcon(String tier) {
-    if (tier == 'fast') return Icons.bolt_outlined;
-    if (tier == 'code') return Icons.terminal_outlined;
-    return Icons.psychology_outlined;
   }
 }

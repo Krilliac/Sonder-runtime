@@ -122,6 +122,24 @@ class FakeRuntimeData implements RuntimeDataSource {
   int workRunReads = 0;
   int jobReads = 0;
 
+  /// Approval reads, and the limit each asked for.
+  final List<int> approvalReads = [];
+
+  /// `approveCall` answers with [approveAnswer] (or throws [approveError]);
+  /// every call is recorded as (callId, ttl, tool, digest).
+  IssuedApproval? approveAnswer;
+  Object? approveError;
+  final List<(String, Duration, String, String)> approved = [];
+
+  /// When set, approvals wait on it (a slow server).
+  Future<void>? approveGate;
+  final List<String> revoked = [];
+  Object? revokeError;
+
+  /// The permission mode read; null is a server without the route.
+  PermissionMode? mode;
+  Object? modeError;
+
   FakeRuntimeData({
     List<WorkRun>? runs,
     this.runsError,
@@ -155,9 +173,36 @@ class FakeRuntimeData implements RuntimeDataSource {
   }
 
   @override
-  Future<ApprovalsPage> approvals() async {
+  Future<ApprovalsPage> approvals({int limit = 20}) async {
+    approvalReads.add(limit);
     if (approvalsError != null) throw approvalsError!;
     return approvalsPage;
+  }
+
+  @override
+  Future<IssuedApproval> approveCall(String callId,
+      {required Duration ttl, String tool = '', String digest = ''}) async {
+    approved.add((callId, ttl, tool, digest));
+    await approveGate;
+    if (approveError != null) throw approveError!;
+    return approveAnswer ??
+        IssuedApproval(
+            nonce: 'n_c41a',
+            callId: callId,
+            tool: tool,
+            ttlSeconds: ttl.inSeconds);
+  }
+
+  @override
+  Future<void> revokeApproval(String nonce) async {
+    revoked.add(nonce);
+    if (revokeError != null) throw revokeError!;
+  }
+
+  @override
+  Future<PermissionMode?> permissionMode() async {
+    if (modeError != null) throw modeError!;
+    return mode;
   }
 
   @override
