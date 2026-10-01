@@ -17,7 +17,6 @@ import 'chat/permission_mode.dart';
 import 'chat/status_strip.dart';
 import 'chat/transcript.dart';
 import 'models.dart';
-import 'runtime/model_routing.dart';
 import 'settings.dart';
 import 'settings_screen.dart';
 import 'system_screen.dart';
@@ -551,8 +550,6 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     );
   }
 
-  String _modelLabel(String m) => _chat.routing.pickerLabel(m);
-
   TranscriptActions get _transcriptActions => TranscriptActions(
         onStop: _cancelSend,
         onFeedback: (command) => unawaited(_chat.recordFeedback(command)),
@@ -678,16 +675,6 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       tooltip: 'Server conversations',
                       icon: const Icon(Icons.link_outlined),
                       onPressed: _openAppControl),
-                  ConstrainedBox(
-                      constraints:
-                          BoxConstraints(maxWidth: compact ? 100 : 260),
-                      child: _ModelPill(
-                        label: _modelLabel(_chat.model),
-                        models: _chat.models,
-                        current: _chat.model,
-                        routing: _chat.routing,
-                        onSelected: _selectModel,
-                      )),
                   if (compact)
                     PopupMenuButton<String>(
                       tooltip: 'Chat actions',
@@ -814,6 +801,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                           modeChip: _modeChip(),
                           onOpenCommands: _openCommandBrowser,
                           desktop: desktop,
+                          models: _chat.models,
+                          model: _chat.model,
+                          routing: _chat.routing,
+                          onModelChanged: _selectModel,
+                          status: _chat.status,
                         ),
                         ChatStatusStrip(
                           info: _chat.status,
@@ -831,90 +823,6 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           ),
         );
       },
-    );
-  }
-}
-
-/// The model picker as a quiet pill.
-class _ModelPill extends StatelessWidget {
-  final String label;
-  final List<String> models;
-  final String current;
-
-  /// Labels routes with their bound provider. When a route is bound off
-  /// Ollama, exact models are grouped under "Ollama (direct)": they always
-  /// run on Ollama and bypass the binding.
-  final ModelRouting routing;
-  final ValueChanged<String> onSelected;
-
-  const _ModelPill({
-    required this.label,
-    required this.models,
-    required this.current,
-    required this.routing,
-    required this.onSelected,
-  });
-
-  List<PopupMenuEntry<String>> _items(SonderTokens tokens) {
-    PopupMenuItem<String> item(String m, String text) => PopupMenuItem<String>(
-          value: m,
-          child: Row(children: [
-            if (m == current)
-              Icon(Icons.check, size: 16, color: tokens.accent)
-            else
-              const SizedBox(width: 16),
-            const SizedBox(width: 10),
-            Flexible(child: Text(text, style: tokens.mono(13))),
-          ]),
-        );
-    if (!routing.bypassesBinding) {
-      return [for (final m in models) item(m, routing.pickerLabel(m))];
-    }
-    final exact = [for (final m in models) if (!routing.isRoute(m)) m];
-    return [
-      for (final m in models)
-        if (routing.isRoute(m)) item(m, routing.pickerLabel(m)),
-      if (exact.isNotEmpty) ...[
-        const PopupMenuDivider(),
-        PopupMenuItem<String>(
-          key: const Key('model-group-ollama-direct'),
-          enabled: false,
-          height: 32,
-          child: Text(ModelRouting.ollamaDirect,
-              style: tokens.mono(11, color: tokens.muted)),
-        ),
-        for (final m in exact) item(m, m),
-      ],
-    ];
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final tokens = SonderTokens.of(context);
-    return PopupMenuButton<String>(
-      tooltip: 'Choose inference route or model',
-      onSelected: onSelected,
-      position: PopupMenuPosition.under,
-      itemBuilder: (_) => _items(tokens),
-      child: Container(
-        height: 30,
-        constraints: const BoxConstraints(maxWidth: 260),
-        padding: const EdgeInsets.fromLTRB(10, 0, 6, 0),
-        decoration: BoxDecoration(
-          color: tokens.panel,
-          borderRadius: BorderRadius.circular(SonderRadius.row),
-          border: Border.all(color: tokens.hairline),
-        ),
-        child: Row(mainAxisSize: MainAxisSize.min, children: [
-          Flexible(
-            child: Text(label,
-                overflow: TextOverflow.ellipsis,
-                style: tokens.mono(12, weight: FontWeight.w500)),
-          ),
-          const SizedBox(width: 4),
-          Icon(Icons.expand_more, size: 16, color: tokens.muted),
-        ]),
-      ),
     );
   }
 }
