@@ -110,7 +110,12 @@ void main() {
     await _send(tester, 'why does PSO compile stall?');
     final turn = backend.lastTurn;
     expect(find.byKey(const Key('live-line')), findsOneWidget);
-    expect(find.textContaining('◈ working · routing · 0s', findRichText: true),
+    // The ◈ sits in the transcript gutter; the line is the REPL's after it.
+    expect(
+        find.descendant(
+            of: find.byKey(const Key('live-glyph')), matching: find.text('◈')),
+        findsOneWidget);
+    expect(find.textContaining('working · routing · 0s', findRichText: true),
         findsOneWidget);
 
     turn.phase('reading files');
@@ -125,10 +130,19 @@ void main() {
         findsOneWidget);
     expect(find.textContaining('slow local model', findRichText: true),
         findsNothing);
+    expect(find.textContaining('no output for', findRichText: true),
+        findsNothing);
+    // 21 s after the last text: the stall cue and the fast-route hint.
     await tester.pump(const Duration(seconds: 9));
+    await tester.pump(const Duration(milliseconds: 300));
     expect(
         find.textContaining('slow local model? try the fast route',
             findRichText: true),
+        findsOneWidget);
+    expect(find.textContaining('! no output for 21s', findRichText: true),
+        findsOneWidget);
+    // The timer itself never stopped.
+    expect(find.textContaining('reading files · 21s', findRichText: true),
         findsOneWidget);
 
     await tester.tap(find.byKey(const Key('live-stop')));
@@ -166,7 +180,7 @@ void main() {
     await tester.pump();
     expect(
         find.text('done 61.2s · 2 model calls · 2.6k→143 tok'), findsOneWidget);
-    expect(find.text('useful'), findsOneWidget);
+    expect(find.text('Useful'), findsOneWidget);
     // The tier from the receipt reaches the status line.
     expect(_statusLine(tester), startsWith('code · sonder'));
     await unmountChat(tester);
@@ -227,9 +241,9 @@ void main() {
         theme: SonderTheme.dark,
         home: Scaffold(
           body: TranscriptTurn(
-            entry: ChatEntry(
+            entry: const ChatEntry(
               1,
-              const ChatMessage(
+              ChatMessage(
                 role: Role.assistant,
                 content: 'Delegated.',
                 responseMetadata: ChatResponseMetadata(
@@ -285,7 +299,7 @@ void main() {
     expect(find.descendant(of: notice, matching: find.byType(MarkdownBody)),
         findsNothing,
         reason: 'error URLs are not auto-linked');
-    expect(find.text('useful'), findsNothing);
+    expect(find.text('Useful'), findsNothing);
     expect(find.textContaining('failed after'), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('error-retry')));
