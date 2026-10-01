@@ -209,12 +209,37 @@ def test_truncated_generated_candidate_never_reaches_verifier_or_winner(monkeypa
     assert "0/1 passed" in result and "winner code" not in result
 
 
+def test_bridged_tier_length_reply_never_reaches_verifier_or_winner(monkeypatch):
+    # A tier bound to sonder-inference answers through the provider bridge,
+    # which carries the reply's finish reason as done_reason (#616). Without
+    # it the truncation guard has nothing to read and passes the reply.
+    from types import SimpleNamespace
+
+    from sonder_runtime.adapters import legacy_chat_bridge
+    from sonder_runtime.adapters.inference.sonder_inference_gateway import SonderInferenceResponse
+
+    class Gateway:
+        def generate(self, request, _context):
+            return SonderInferenceResponse(
+                text="```python\nprint(1)\n```", model="bridged", tier=request.tier, finish_reason="length",
+            )
+
+    monkeypatch.setattr(server, "_refresh_live_cloud_tiers", lambda: None)
+    monkeypatch.setattr(legacy_chat_bridge, "provider_for_tier", lambda *_args: "sonder_inference")
+    monkeypatch.setattr(server, "_application", lambda: SimpleNamespace(model_gateway=Gateway()))
+    monkeypatch.setattr(server.grounding, "run_code", lambda *a, **k: pytest.fail("truncated generation reached verifier"))
+    result = server.parallel_generate_run("print one", variants=1)
+    assert "[FAIL] candidate-1\nERROR: provider output is truncated" in result
+    assert "0/1 passed" in result and "winner code" not in result
+
+
 def test_configured_verifier_cannot_be_disabled_by_removing_its_receipt():
     evidence = ArtifactReadiness.from_content("worker", "run", "ok", deterministic_verifier="test")
     assert readiness_error(evidence, run_id="run", producer_id="worker", content="ok", require_verifier_receipt=True)
 
 
-def test_shared_generator_completion_metadata_is_bound_to_each_producer(monkeypatch):
+def _race_shared_generator(monkeypatch, build):
+    """Both producers get their reply before either checks completion."""
     import threading
     from sonder_runtime.platform.runtime_threads import Thread
 
@@ -224,7 +249,7 @@ def test_shared_generator_completion_metadata_is_bound_to_each_producer(monkeypa
                 "done_reason": "length" if name == "truncated" else "stop"}, 0
 
     monkeypatch.setattr(server, "_post_model", post)
-    gen = server._make_generate("local", "", 0.0, 10, 4096)
+    gen = build()
     CandidateFanIn.bind_generator(gen)
     barrier = threading.Barrier(2)
     observed = {}
@@ -243,5 +268,20 @@ def test_shared_generator_completion_metadata_is_bound_to_each_producer(monkeypa
         thread.start()
     for thread in threads:
         thread.join(timeout=15)
-    assert observed["complete"] == "ready"
-    assert observed["truncated"] == "provider output is truncated"
+    return observed
+
+
+def test_shared_generator_completion_metadata_is_bound_to_each_producer(monkeypatch):
+    observed = _race_shared_generator(monkeypatch, lambda: server._make_generate("local", "", 0.0, 10, 4096))
+    assert observed == {"complete": "ready", "truncated": "provider output is truncated"}
+
+
+def test_tier_wrapped_shared_generator_keeps_completion_per_producer(monkeypatch):
+    # parallel_generate_run shares the wrapper that _make_tier_generate returns
+    # (#610). The raw closure records each reply's completion, so the per-thread
+    # slot must live on it: bound to the wrapper, the check fell back to the
+    # shared last_response_meta and a truncated sibling passed as complete.
+    observed = _race_shared_generator(monkeypatch, lambda: server._make_tier_generate(
+        "code", server.TIERS.get("code") or "local", "", 0.0, 10, 4096, cloud=False,
+    ))
+    assert observed == {"complete": "ready", "truncated": "provider output is truncated"}

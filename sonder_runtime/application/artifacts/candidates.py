@@ -33,7 +33,10 @@ class CandidateFanIn:
     def bind_generator(generator):
         # parallel_generate_run shares one closure. Its public last-response
         # field is not per-call evidence when sibling threads are returning.
-        generator._response_metadata_local = threading.local()
+        # The tier wrapper (_TierGenerator) forwards reads to ``raw`` but not
+        # writes, and the raw closure is what records each reply, so bind the
+        # slot there; the check below reads it back through the wrapper.
+        getattr(generator, "raw", generator)._response_metadata_local = threading.local()
 
     @staticmethod
     def require_complete_generation(generator):
