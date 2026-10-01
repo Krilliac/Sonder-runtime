@@ -114,11 +114,11 @@ def test_native_catalog_is_bounded_and_deterministic():
         "compute_artifact_fetch", "compute_cancel", "compute_status", "compute_submit",
         "crash_digest", "crash_triage", "data_inspect", "data_query", "debug_run_result", "dependency_inventory",
         "directory_create", "directory_digest", "directory_tree", "edit_file", "fetch_artifact",
-        "file_batch_write", "file_copy", "file_delete", "file_digest", "file_edit",
+        "file_batch_write", "file_check", "file_copy", "file_delete", "file_digest", "file_edit",
         "file_find", "file_move", "file_read", "file_read_range", "file_write", "image_inspect",
         "json_patch", "log_inspect", "make_directory", "output_digest", "process_list", "process_memory_risk_inspect",
         "profile_capture_digest", "profile_digest", "program_search", "project_detect", "read_file", "run_program", "run_script", "script_search", "secret_scan",
-        "test_run", "test_run_result", "text_patch", "text_search", "tool_inventory",
+        "test_run", "test_run_result", "text_patch", "text_search", "tool_help", "tool_inventory",
         "verify_artifact", "vision_analyze", "weather_lookup", "web_fetch", "web_search", "workspace_compare", "workspace_run", "write_file",
     ]
 
@@ -160,7 +160,7 @@ def test_native_catalog_has_exact_packaged_adapter_executor_parity():
     assert developer_tools <= native_names
     canonical_native = native_names - compatibility_aliases - developer_tools - build_tools - {
         "vision_analyze", "compute_submit", "compute_status", "compute_cancel",
-        "compute_artifact_fetch", "agent_lane",
+        "compute_artifact_fetch", "agent_lane", "tool_help", "file_check",
     }
     assert canonical_native == packaged_executor | packaged_inspections
     assert len(canonical_native) == 40

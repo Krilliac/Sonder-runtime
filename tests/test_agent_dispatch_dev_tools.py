@@ -360,6 +360,10 @@ def test_generic_scoped_path_key_names_a_real_parameter_of_every_tool():
         if name in DEDICATED_SCOPE_BRANCH_TOOLS:
             continue
         tool = getattr(server, name, None)
+        if tool is None:
+            # Registrar-defined tools live in MCP rather than server globals.
+            registered = server.mcp._tool_manager.get_tool(name)
+            tool = getattr(registered, "fn", None)
         assert tool is not None, "%s is project-scoped but not defined" % name
         parameters = sorted(inspect.signature(tool).parameters)
         key = server._project_scoped_path_key(name)
