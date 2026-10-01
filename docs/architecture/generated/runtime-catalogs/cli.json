@@ -655,6 +655,12 @@
       "summary": "Transactionally create/overwrite a bounded JSON list of project files."
     },
     {
+      "category": "dev",
+      "name": "/file_check",
+      "risk": "execution",
+      "summary": "Check one source file for syntax and available local diagnostics."
+    },
+    {
       "category": "filesystem",
       "name": "/file_copy",
       "risk": "mutation",
@@ -1825,6 +1831,12 @@
       "summary": "Return the live tool schemas and a deterministic fingerprint of them."
     },
     {
+      "category": "agents",
+      "name": "/tool_help",
+      "risk": "safe",
+      "summary": "Describe one advertised agent tool, or find up to five by query."
+    },
+    {
       "category": "runtime",
       "name": "/tool_inventory",
       "risk": "safe",
@@ -2179,6 +2191,10 @@
       "summary": "Transactionally create or overwrite bounded files"
     },
     {
+      "name": "file_check",
+      "summary": "Check one guarded source file with available local checkers"
+    },
+    {
       "name": "file_copy",
       "summary": "Copy one bounded binary-safe file"
     },
@@ -2293,6 +2309,10 @@
     {
       "name": "text_search",
       "summary": "Search bounded text files under allowed roots"
+    },
+    {
+      "name": "tool_help",
+      "summary": "Describe one advertised tool or find up to five by query"
     },
     {
       "name": "tool_inventory",

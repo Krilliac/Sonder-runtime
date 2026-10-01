@@ -11,6 +11,7 @@ from scripts import package_local_system as package
 
 def test_initial_shadow_registry_is_immutable_and_has_no_drift():
     assert set(capabilities.CAPABILITIES) == {
+        "tool_help", "file_check",
         "environment_status", "toolchain_status", "hardware_profile", "file_policy",
         "workspace_inventory", "directory_tree", "file_find", "file_read",
         "file_read_range", "file_digest", "text_search", "repo_status",
@@ -56,7 +57,8 @@ def _hosted_generate(responses, prompts):
     return generate
 
 
-@pytest.mark.parametrize("tool", sorted(set(capabilities.CAPABILITIES) | {"agent_lane"}))
+@pytest.mark.parametrize("tool", sorted({name for name, item in capabilities.CAPABILITIES.items()
+                                           if item.cloud is capabilities.CloudRequirement.LOCAL_ONLY} | {"agent_lane"}))
 def test_hosted_agent_loop_denies_every_local_only_tool(monkeypatch, tool):
     responses = [
         server.json.dumps({"tool": tool, "args": {}}),
@@ -172,8 +174,9 @@ def test_hosted_tool_manifest_does_not_readvertise_local_only_tools(monkeypatch)
 
     assert not dispatches
     assert len(prompts) == 2
-    for name in capabilities.CAPABILITIES:
-        assert "- %s:" % name not in prompts[1]
+    for name, item in capabilities.CAPABILITIES.items():
+        if item.cloud is capabilities.CloudRequirement.LOCAL_ONLY:
+            assert "- %s:" % name not in prompts[1]
 
 
 def test_local_agent_keeps_host_brief_and_all_twelve_tools(monkeypatch, without_standing):
@@ -202,7 +205,7 @@ def test_local_agent_keeps_host_brief_and_all_twelve_tools(monkeypatch, without_
 
 
 def test_local_read_only_project_dedup_and_autopilot_sets_are_unchanged():
-    names = set(capabilities.CAPABILITIES)
+    names = set(capabilities.CAPABILITIES) - {"tool_help", "file_check"}
     process_tools = {"process_list", "process_memory_risk_inspect"}
     repository_names = names - process_tools
     rootless = {
@@ -280,7 +283,7 @@ def test_diagnostics_exposes_shadow_result_without_startup_enforcement():
     # "ok" is exactly what this validator must never be able to say while it
     # inspects 16 of ~184 advertised tools.  The verdict names the coverage.
     assert report.startswith("partial: ")
-    assert "19 of " in report
+    assert "21 of " in report
     assert "unvalidated" in report
     # Prove diagnostics consumes the shadow report without running its unrelated
     # model, database, NPU, and filesystem checks in this focused unit test.
@@ -404,4 +407,4 @@ def test_diagnostics_reports_shadow_coverage_per_surface():
     assert "tool_capability_coverage_report()" in source
     assert "tool capability coverage" in source
     line = server.tool_capability_coverage_report()
-    assert "direct-mcp 19/" in line
+    assert "direct-mcp 21/" in line

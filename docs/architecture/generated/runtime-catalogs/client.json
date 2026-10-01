@@ -1,5 +1,5 @@
 {
-  "digest": "09a08caeb6580d086a61692ce0bed9ff8ecaed19b492bc7a472503ae4e35d920",
+  "digest": "e2af12fc96d2d0826fbfd2d45e060abaf2023ced9188aa035bc3a26f480f2a3b",
   "events": [
     {
       "name": "approval.denied",
@@ -1194,6 +1194,7 @@
       "edit_file",
       "fetch_artifact",
       "file_batch_write",
+      "file_check",
       "file_copy",
       "file_delete",
       "file_digest",
@@ -1223,6 +1224,7 @@
       "test_run_result",
       "text_patch",
       "text_search",
+      "tool_help",
       "tool_inventory",
       "verify_artifact",
       "vision_analyze",
@@ -1381,6 +1383,11 @@
         "summary": "Transactionally create or overwrite bounded files"
       },
       {
+        "name": "file_check",
+        "schema_available": true,
+        "summary": "Check one guarded source file with available local checkers"
+      },
+      {
         "name": "file_copy",
         "schema_available": true,
         "summary": "Copy one bounded binary-safe file"
@@ -1524,6 +1531,11 @@
         "name": "text_search",
         "schema_available": true,
         "summary": "Search bounded text files under allowed roots"
+      },
+      {
+        "name": "tool_help",
+        "schema_available": true,
+        "summary": "Describe one advertised tool or find up to five by query"
       },
       {
         "name": "tool_inventory",
@@ -2712,6 +2724,34 @@
       "name": "file_batch_write"
     },
     {
+      "description": "Check one guarded source file with available local checkers",
+      "effects": [
+        "execute",
+        "read_files"
+      ],
+      "execution_class": "host",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_items": {
+            "default": 30,
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "file_check"
+    },
+    {
       "description": "Copy one bounded binary-safe file",
       "effects": [
         "write_files"
@@ -3625,6 +3665,36 @@
         "type": "object"
       },
       "name": "text_search"
+    },
+    {
+      "description": "Describe one advertised tool or find up to five by query",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "oneOf": [
+          {
+            "required": [
+              "name"
+            ]
+          },
+          {
+            "required": [
+              "query"
+            ]
+          }
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "tool_help"
     },
     {
       "description": "List developer tools installed on this host (compilers, build systems, test runners, linters, debuggers, package managers, runtimes, containers, VCS, DB clients, media/doc tools, cloud CLIs, editors, shells) with versions; filter by category or name; refresh re-probes with fixed read-only version switches.",

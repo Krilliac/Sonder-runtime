@@ -57,6 +57,21 @@ def test_run_lifecycle_persists_plan_events_and_exact_counts():
     assert any(event["kind"] == "test" for event in autopilot_store.events(run["id"]))
 
 
+def test_infra_retries_are_durable_and_do_not_use_failure_counter():
+    run = autopilot_store.create_run("retry provider availability")
+    assert run["infra_retries"] == 0
+    autopilot_store.claim_run(run["id"], "owner-a", owner_pid=os.getpid())
+
+    saved = autopilot_store.save_progress(
+        run["id"], "owner-a", infra_retries_delta=2,
+        event_kind="infra_retry", event_message="provider unavailable",
+    )
+
+    assert saved["infra_retries"] == 2
+    assert saved["failures"] == 0
+    assert autopilot_store.get_run(run["id"])["infra_retries"] == 2
+
+
 def test_completed_status_requires_durable_host_validation_receipts():
     run = autopilot_store.create_run("do not complete from prose alone")
     owner = "owner-a"
@@ -243,6 +258,7 @@ def test_existing_database_is_migrated_without_losing_runs(isolated_autopilot_db
     assert run["checkpoints"] == 0
     assert run["replans"] == 0
     assert run["max_replans"] == 2
+    assert run["infra_retries"] == 0
 
 
 def test_selector_wildcards_are_literal_not_like_patterns():

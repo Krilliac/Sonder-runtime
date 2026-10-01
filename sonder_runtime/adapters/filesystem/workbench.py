@@ -729,15 +729,18 @@ def _run_program_environment():
 
 
 def _drain_pipe(pipe, sink, state, limit):
+    # Reserve half the byte budget for the final verdict. Keep draining after
+    # filling the window so a verbose child cannot block on its output pipe.
+    head_limit = limit // 2
     try:
         while True:
             block = pipe.read(65536)
             if not block:
                 break
             state["bytes"] += len(block)
-            remaining = max(0, limit - len(sink))
-            if remaining:
-                sink.extend(block[:remaining])
+            sink.extend(block)
+            if len(sink) > limit:
+                del sink[head_limit:len(sink) - (limit - head_limit)]
     finally:
         try:
             pipe.close()

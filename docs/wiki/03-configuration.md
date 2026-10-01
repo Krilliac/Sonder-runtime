@@ -55,6 +55,7 @@ stream_heartbeat_seconds = 15       # SSE keep-alive interval while a streamed t
 home = "/var/lib/sonder"
 workspace_roots = ["/srv/sonder/workspaces"]
 minimum_free_disk_bytes = 5368709120
+auto_workspace = true               # console work with no folder: dated folder under the first usable root (SONDER_AUTO_WORKSPACE)
 
 [ollama]
 url = "http://127.0.0.1:11434"

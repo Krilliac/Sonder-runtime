@@ -5,6 +5,7 @@ values are normalized to [-1.0, 1.0] and rendered into the system prompt so the
 model can adjust warmth, confidence, curiosity, and similar response qualities.
 """
 import json
+import logging
 import os
 import re
 import tempfile
@@ -133,14 +134,29 @@ def default_path():
     return _configured_path() or state_path()
 
 
+_REJECTED_OVERRIDES = set()
+
+
 def active_path():
     """Where the effective vectors are read from.
 
     Read order: the configured override, else the state-home copy when it
-    exists, else the bundled default.
+    exists, else the bundled default. An override the confinement check
+    refuses (say, a deleted worktree left in the environment) is ignored for
+    reading, with one warning: refusing it keeps the file unread either way,
+    and taking every chat turn down over the persona's tone did not protect
+    anything. Writes still refuse it (``default_path`` is validated there).
     """
-    if _configured_path():
-        return _resolve_path()
+    configured = _configured_path()
+    if configured:
+        try:
+            return _resolve_path()
+        except ValueError as error:
+            if configured not in _REJECTED_OVERRIDES:
+                _REJECTED_OVERRIDES.add(configured)
+                logging.getLogger("sonder.emotion_vectors").warning(
+                    "ignoring SONDER_EMOTION_VECTORS for reading: %s", error,
+                )
     state = _resolve_path(state_path())
     if os.path.exists(state):
         return state
