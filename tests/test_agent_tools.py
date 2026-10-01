@@ -5,6 +5,17 @@ import master_orchestrator
 import server
 
 
+@pytest.fixture(autouse=True)
+def _keep_virtual_default_scope(monkeypatch):
+    """Keep tool-accounting fixtures virtual; workspace routing has its own tests.
+
+    These cases assert dispatch and receipt state using mocked tools and paths,
+    so binding an omitted project to a real run workspace would change their
+    fixture boundary rather than exercise the gate under test.
+    """
+    monkeypatch.setattr(server, "prepare_writing_project", lambda project: (project, ""))
+
+
 def test_agent_decision_paths_do_not_call_root_model_error_wrapper():
     import ast
     from pathlib import Path

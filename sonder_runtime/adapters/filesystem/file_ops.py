@@ -9,16 +9,20 @@ from __future__ import annotations
 
 from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
 
+import ast
 import contextlib
 import contextvars
 import fnmatch
 import hashlib
 import json
 import os
+import re
 import secrets
 import stat
 import tempfile
+import textwrap
 import threading
+from bisect import bisect_left
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import sonder_runtime.adapters.git_discovery as git_discovery
@@ -2141,22 +2145,116 @@ def edit_file(
 ) -> dict:
     p = resolve_mutation_path(path, extra_roots=extra_roots, bypass=bypass)
     _require_mutation_access(p, developer_authorized)
+    _require_read_access(p, developer_authorized or bypass)
     if old == "":
         raise ValueError("old text must not be empty")
-    # The mutation guard above already cleared this path, so the same
-    # authorization satisfies the read guard for the read-modify-write cycle.
-    current = read_file(
-        path, extra_roots=extra_roots, bypass=bypass,
-        developer_authorized=developer_authorized,
-    )
-    if current["truncated"]:
+    # Decode without universal-newline translation. Replacing original slices
+    # preserves bytes outside the edited span, including mixed line endings.
+    if not p.exists():
+        raise FileNotFoundError("file not found: %s" % p)
+    if not p.is_file():
+        raise ValueError("path is not a file: %s" % p)
+    if p.stat().st_size > MAX_READ_BYTES:
         raise ValueError("file too large for safe text edit")
-    text = current["text"]
+    try:
+        raw = p.read_bytes()
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("file is not valid UTF-8 text") from exc
+    if len(raw) > MAX_READ_BYTES:
+        raise ValueError("file too large for safe text edit")
     max_count = max(1, min(1000, int(count or 1)))
-    occurrences = text.count(old)
-    if occurrences == 0:
+
+    def normalise(value: str) -> str:
+        return value.replace("\r\n", "\n").replace("\r", "\n")
+
+    normal = normalise(text)
+    wanted = normalise(old)
+    replacement = normalise(new or "")
+    crlf = text.count("\r\n")
+    lf = text.count("\n") - crlf
+    cr = text.count("\r") - crlf
+    eol = "\r\n" if crlf > lf and crlf >= cr else ("\n" if lf >= cr else "\r")
+
+    # Return offsets in the normalized view.  Exact matching is deliberately
+    # tried first; the whitespace tiers are only a fallback and therefore can
+    # never make an otherwise exact edit ambiguous.
+    def exact_matches() -> list[tuple[int, int, int]]:
+        found, cursor = [], 0
+        while True:
+            start = normal.find(wanted, cursor)
+            if start < 0:
+                return found
+            line = normal.count("\n", 0, start) + 1
+            found.append((start, start + len(wanted), line))
+            cursor = start + max(1, len(wanted))
+
+    def line_matches(mode: str) -> list[tuple[int, int, int]]:
+        source_lines = normal.split("\n")
+        old_lines = wanted.split("\n")
+        trailing_newline = wanted.endswith("\n")
+        if trailing_newline:
+            old_lines.pop()
+        starts, cursor = [], 0
+        for line in source_lines:
+            starts.append(cursor)
+            cursor += len(line) + 1
+        transform = (str.rstrip if mode == "rstrip" else str.strip)
+        expected = [transform(line) for line in old_lines]
+        found = []
+        index = 0
+        while index <= len(source_lines) - len(old_lines):
+            block = [transform(line) for line in source_lines[index:index + len(old_lines)]]
+            if block == expected:
+                last = index + len(old_lines) - 1
+                end = starts[last] + len(source_lines[last])
+                if not trailing_newline or last < len(source_lines) - 1:
+                    found.append((starts[index], end + int(trailing_newline), index + 1))
+                    index += len(old_lines)
+                    continue
+            index += 1
+        return found
+
+    matches = exact_matches()
+    tier = "exact"
+    if not matches:
+        matches = line_matches("rstrip")
+        tier = "rstrip"
+    if not matches:
+        matches = line_matches("strip")
+        tier = "strip"
+    if not matches:
         raise ValueError("old text not found")
-    next_text = text.replace(old, new or "", max_count)
+    if len(matches) > max_count:
+        lines = ", ".join(str(item[2]) for item in matches[:8])
+        raise ValueError(
+            "old text matches %d places (lines %s); include more context or set count"
+            % (len(matches), lines)
+        )
+
+    def indent_replacement(value: str, start: int) -> str:
+        if tier == "exact":
+            return value
+        first_line = normal.split("\n")[normal.count("\n", 0, start)]
+        indent = re.match(r"[ \t]*", first_line).group(0)
+        return textwrap.indent(textwrap.dedent(value), indent)
+
+    # Apply from right to left, avoiding offset shifts.  Each replacement uses
+    # the file's dominant EOL while untouched slices retain their originals.
+    next_text = text
+    # Only CRLF changes character offsets. Index those boundaries once rather
+    # than rescanning the complete prefix for every replacement.
+    crlf_offsets = [match.start() - index for index, match in enumerate(re.finditer("\r\n", text))]
+
+    def map_offset(offset: int) -> int:
+        return offset + bisect_left(crlf_offsets, offset)
+
+    changes = [(start, end, line, indent_replacement(replacement, start))
+               for start, end, line in matches]
+    for start, end, _line, value in reversed(changes):
+        raw_start, raw_end = map_offset(start), map_offset(end)
+        value = value.replace("\n", eol)
+        next_text = next_text[:raw_start] + value + next_text[raw_end:]
     result = write_file(
         path,
         next_text,
@@ -2165,12 +2263,39 @@ def edit_file(
         bypass=bypass,
         developer_authorized=developer_authorized,
     )
-    replacements = min(occurrences, max_count)
-    result["replacements"] = min(occurrences, max_count)
+    replacements = min(len(matches), max_count)
+    result["replacements"] = min(len(matches), max_count)
     result["action"] = "edit"
     result["lines_added"] = _line_count(new or "") * replacements
     result["lines_deleted"] = _line_count(old or "") * replacements
     result["lines_edited"] = replacements
+    if tier != "exact":
+        result["note"] = "matched with normalised whitespace"
+    suffix = p.suffix.lower()
+    if suffix == ".py":
+        try:
+            ast.parse(next_text.encode("utf-8"), filename=str(p))
+            result["syntax"] = "ok"
+        except SyntaxError as exc:
+            result["syntax"] = "SyntaxError line %s: %s" % (exc.lineno, exc.msg)
+    elif suffix == ".json":
+        try:
+            json.loads(next_text.encode("utf-8"))
+            result["syntax"] = "ok"
+        except json.JSONDecodeError as exc:
+            result["syntax"] = "JSONDecodeError line %s: %s" % (exc.lineno, exc.msg)
+    lines = normalise(next_text).splitlines()
+    echo_numbers, delta = set(), 0
+    for start, end, line, value in changes:
+        changed_line = line + delta
+        extent = max(1, len(value.splitlines()))
+        echo_numbers.update(range(max(1, changed_line - 3),
+                                  min(len(lines), changed_line + extent - 1 + 3) + 1))
+        delta += value.count("\n") - normal[start:end].count("\n")
+    numbers = sorted(echo_numbers)
+    result["text"] = "\n".join("%6d  %s" % (number, lines[number - 1]) for number in numbers[:60])
+    if len(numbers) > 60:
+        result["echo_truncated"] = True
     return result
 
 
