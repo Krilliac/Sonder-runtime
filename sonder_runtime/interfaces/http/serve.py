@@ -40,7 +40,7 @@ from sonder_runtime.interfaces.http.artifact_transfer import handle_artifact_tra
 from sonder_runtime.interfaces.http.connection_limit import BoundedConnectionsMixin
 from sonder_runtime.interfaces.http.host_policy import (
     HOST_NOT_ALLOWED_REMEDY, HOST_TRUSTED, forwarded_client_ip, host_decision,
-    machine_host_names, normalize_allowed_host, parse_host_header,
+    machine_host_names, normalize_allowed_host, parse_host_header, reflectable_origin,
 )
 from sonder_runtime.interfaces.http.memory_replication import (
     handle_memory_replication,
@@ -4744,7 +4744,7 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _cors(self):
-        origin = self.headers.get("Origin")
+        origin = reflectable_origin(self.headers.get("Origin"))
         if origin is not None and origin in CORS_ORIGINS:
             if not (getattr(self, "_artifact_transfer_request", False) or getattr(self, "_app_control_request", False)):
                 _serve_logger.debug(f"_cors: allowing origin={origin!r}")
