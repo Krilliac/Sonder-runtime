@@ -40,6 +40,12 @@ import calibration
 import server
 
 
+@pytest.fixture(autouse=True)
+def _keep_virtual_default_scope(monkeypatch):
+    """Keep mocked verifier paths independent of run-workspace allocation."""
+    monkeypatch.setattr(server, "prepare_writing_project", lambda project: (project, ""))
+
+
 # Population shapes, expressed as the outcome-signal counts calibration reads.
 UNMEASURED_RECORD: dict = {}                                  # 0 judged outcomes
 POOR_RECORD = {"accepted": 40, "rejected": 60}                # 40% of 100

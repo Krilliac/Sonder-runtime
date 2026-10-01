@@ -16,6 +16,7 @@ import logging
 import os
 import time
 from typing import Callable
+from urllib.parse import urlsplit, urlunsplit
 
 from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.application.chat import provider_bridge
@@ -126,6 +127,47 @@ def operation_context(
     )
 
 
+def _provider_display_url(gateway: object, provider: str) -> str:
+    """Read safe endpoint metadata from the bound gateway, without probing it."""
+    from .provider_dispatch.fallback import PreSendFallbackGateway
+    from .provider_dispatch.gateway import ProviderDispatchGateway
+
+    try:
+        seen: set[int] = set()
+        while id(gateway) not in seen:
+            seen.add(id(gateway))
+            if isinstance(gateway, ProviderDispatchGateway):
+                gateway = gateway._providers.get(provider)
+                continue
+            if isinstance(gateway, PreSendFallbackGateway):
+                # The binding describes the primary; a failed fallback already
+                # retains both causes in the classified error's detail.
+                gateway = gateway.primary
+                continue
+            settings = getattr(gateway, "settings", None)
+            if not callable(settings):
+                settings = getattr(gateway, "_resolved_config", None)
+            if not callable(settings):
+                break
+            config = settings()
+            display = getattr(config, "display_base_url", None)
+            raw = display or getattr(config, "base_url", "")
+            parts = urlsplit(raw)
+            if parts.scheme not in ("http", "https") or not parts.hostname:
+                break
+            host = parts.hostname
+            if ":" in host:
+                host = "[%s]" % host
+            if parts.port is not None:
+                host += ":%d" % parts.port
+            # Provider display properties already apply their path policy.
+            # Generic configs have no such guarantee: show only their origin.
+            return urlunsplit((parts.scheme, host, parts.path if display else "", "", ""))
+    except Exception:  # noqa: BLE001 - display metadata must not mask the provider failure
+        pass
+    return "(endpoint unavailable)"
+
+
 def chat_request(gateway: object, payload: dict, rung, *, context: OperationContext):
     """Serve one local chat step through the gateway for a non-Ollama rung."""
     try:
@@ -134,10 +176,13 @@ def chat_request(gateway: object, payload: dict, rung, *, context: OperationCont
         )
     except SonderError as exc:
         failure = provider_bridge.classify_failure(exc, provider=rung.provider)
-        raise ModelCallError(
+        error = ModelCallError(
             failure.kind, failure.detail, status=failure.status,
             transient=failure.transient, attempts=1, cloud=False,
-        ) from exc
+        )
+        error.provider = rung.provider
+        error.provider_display_url = _provider_display_url(gateway, rung.provider)
+        raise error from exc
     return out, response.text
 
 
