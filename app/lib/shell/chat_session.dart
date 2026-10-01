@@ -19,6 +19,10 @@ abstract interface class ChatPageHandle {
 
   /// Put the keyboard focus in the composer.
   void focusComposer();
+
+  /// Open the permission-mode picker; a raise still goes through the raise
+  /// sheet (UX-CONTRACT), so Runtime's "Change mode" reuses this flow.
+  void openPermissionModePicker();
 }
 
 /// The chat side of the app that outlives any one page: the server client,

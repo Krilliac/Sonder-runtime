@@ -413,6 +413,14 @@ class _AppShellState extends State<AppShell>
     _session.page?.openCommandBrowser();
   }
 
+  /// Runtime's "Change mode": the composer's mode picker owns mode changes
+  /// (and the raise sheet), so go to Chat and open it there.
+  Future<void> _changePermissionMode() async {
+    await _navigate(WorkspaceDestination.chat);
+    if (!mounted || _current != WorkspaceDestination.chat) return;
+    _session.page?.openPermissionModePicker();
+  }
+
   /// Deletes at once; a chat with messages gets an Undo that restores it.
   Future<void> _deleteThread(ChatThread thread) async {
     final hadMessages = thread.messages.isNotEmpty;
@@ -468,8 +476,11 @@ class _AppShellState extends State<AppShell>
           initialProject: _session.chat.project,
           onNavigate: navigate,
         ),
-      WorkspaceDestination.runtime =>
-        SystemScreen(settings: widget.settings, onNavigate: navigate),
+      WorkspaceDestination.runtime => SystemScreen(
+          settings: widget.settings,
+          onNavigate: navigate,
+          onChangePermissionMode: () => unawaited(_changePermissionMode()),
+        ),
       WorkspaceDestination.settings => SettingsScreen(
           settings: widget.settings,
           onChanged: _settingsSaved,
