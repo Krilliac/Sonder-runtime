@@ -142,7 +142,12 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('shell-new-chat')));
       await tester.pumpAndSettle();
-      // The new, empty chat is the open one: its Delete needs no hover.
+      // The new, empty chat is first; its Delete shows under the pointer.
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await mouse.addPointer(location: Offset.zero);
+      addTearDown(mouse.removePointer);
+      await mouse.moveTo(tester.getCenter(find.byType(ThreadRow).first));
+      await tester.pump();
       await tester.tap(find.descendant(
           of: find.byType(ThreadRow).first,
           matching: find.byTooltip('Delete chat')));

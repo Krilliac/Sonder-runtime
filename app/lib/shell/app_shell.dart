@@ -91,6 +91,10 @@ class _AppShellState extends State<AppShell>
   late final AnimationController _chatFade;
 
   final _scaffoldKey = GlobalKey<ScaffoldState>();
+
+  /// The shell's own focus: the keyboard lands here when nothing inside a
+  /// page holds it, so the shortcuts always reach the shell.
+  final _shellFocus = FocusNode(debugLabel: 'shell', skipTraversal: true);
   final _contentKey = GlobalKey(debugLabel: 'shell-content');
   final _chatNavigatorKey = GlobalKey<NavigatorState>();
   GlobalKey<NavigatorState> _pageNavigatorKey = GlobalKey<NavigatorState>();
@@ -186,6 +190,7 @@ class _AppShellState extends State<AppShell>
     _approvals.waiting.removeListener(_updateBadges);
     _approvals.dispose();
     _session.dispose();
+    _shellFocus.dispose();
     _rail.dispose();
     _chatFade.dispose();
     _sidebarChat.dispose();
@@ -279,7 +284,21 @@ class _AppShellState extends State<AppShell>
     }
     _syncChatLayer();
     _updateBadges();
+    _keepKeyboardInShell();
     if (destination == WorkspaceDestination.chat) _focusComposerSoon();
+  }
+
+  /// A page that held the keyboard focus (the composer, a field) may have
+  /// just gone; if focus fell out above the shell, take it, so shortcuts
+  /// keep working. Focus inside a dialog is left alone.
+  void _keepKeyboardInShell() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final primary = FocusManager.instance.primaryFocus;
+      if (primary == null || _shellFocus.ancestors.contains(primary)) {
+        _shellFocus.requestFocus();
+      }
+    });
   }
 
   void _openSection(WorkspaceDestination destination, String section) =>
@@ -543,11 +562,8 @@ class _AppShellState extends State<AppShell>
   Widget build(BuildContext context) {
     final platform = Theme.of(context).platform;
     return LayoutBuilder(builder: (context, constraints) {
-      final wide = constraints.maxWidth >= kShellWideBreakpoint;
-      if (wide != _wide) {
-        _wide = wide;
-        if (wide) _closeDrawer();
-      }
+      // Read by callbacks; the drawer leaves with the narrow layout.
+      final wide = _wide = constraints.maxWidth >= kShellWideBreakpoint;
       final content = KeyedSubtree(key: _contentKey, child: _content());
       return PopScope<Object?>(
         canPop: _current == WorkspaceDestination.chat && !_chatHasRoutes,
@@ -559,8 +575,8 @@ class _AppShellState extends State<AppShell>
           child: Actions(
             actions: _actions,
             child: Focus(
+              focusNode: _shellFocus,
               autofocus: true,
-              skipTraversal: true,
               child: Scaffold(
                 key: _scaffoldKey,
                 drawer: wide
