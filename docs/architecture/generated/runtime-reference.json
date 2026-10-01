@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "9955cd57226643c47b724ca5829564bad3ec18eddb87786c36390abc7427269b",
+    "catalog_digest": "9d082d33d4368f376cb63109ce9ca5a7a4504aff0520409628def435780893c1",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "9955cd57226643c47b724ca5829564bad3ec18eddb87786c36390abc7427269b",
+      "catalog_digest": "9d082d33d4368f376cb63109ce9ca5a7a4504aff0520409628def435780893c1",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -4004,7 +4004,7 @@
           "name": "master_capacity"
         },
         {
-          "description": "Run a master pass inline or with hardware-scheduled delegated agents.\n\n    mode=\"ask\" returns the choice prompt. mode=\"inline\" keeps work in the master\n    lane. mode=\"delegate\" queues bounded subagents across RAM/CPU-safe worker\n    slots, then audits and merges their outputs. mode=\"fleet\" queues the full\n    hardware-derived breadth ceiling in the background and returns immediately.\n    Pass a positive ``agents`` value to set fleet breadth. ``worker_cap`` is a\n    per-run opt-in that may raise concurrent slots above the hardware-derived\n    default, but never above the operator/compiled ceiling. A clear task phrase\n    such as \"use 24 workers\" fills both values when they are omitted.\n    For existing repository work, pass ``project`` as an existing root. Every\n    child and aggregate is confined to that canonical root; missing or\n    conflicting repository scope fails closed instead of inheriting the cwd.\n    Status is visible through master_status().\n    ",
+          "description": "Run a master pass inline or with hardware-scheduled delegated agents.\n\n    mode=\"ask\" returns the choice prompt. mode=\"inline\" keeps work in the master\n    lane. mode=\"delegate\" queues bounded subagents across RAM/CPU-safe worker\n    slots, then audits and merges their outputs. mode=\"fleet\" queues\n    min(max_agents(), max(3, 2 * worker_slots)) agents and returns immediately.\n    Pass a positive ``agents`` value to set fleet breadth. ``worker_cap`` is a\n    per-run opt-in that may raise concurrent slots above the hardware-derived\n    default, but never above the operator/compiled ceiling. A clear task phrase\n    such as \"use 24 workers\" fills both values when they are omitted.\n    For existing repository work, pass ``project`` as an existing root. Every\n    child and aggregate is confined to that canonical root; missing or\n    conflicting repository scope fails closed instead of inheriting the cwd.\n    Status is visible through master_status().\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -18851,7 +18851,7 @@
     "schemas": 4,
     "tools": 227
   },
-  "digest": "ac2b5a669b6ecc8f4dac6d04f2da1e3856478ce92e827f2cff0a2cf2c39ce9f2",
+  "digest": "a35661254f08512af360c370c868365095c54f91bf2fbe489ac949fac7d9590b",
   "events": [
     {
       "name": "session.started",
@@ -21462,9 +21462,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "9955cd57226643c47b724ca5829564bad3ec18eddb87786c36390abc7427269b",
+    "catalog_digest": "9d082d33d4368f376cb63109ce9ca5a7a4504aff0520409628def435780893c1",
     "client": {
-      "digest": "9955cd57226643c47b724ca5829564bad3ec18eddb87786c36390abc7427269b",
+      "digest": "9d082d33d4368f376cb63109ce9ca5a7a4504aff0520409628def435780893c1",
       "events": [
         {
           "name": "approval.denied",
@@ -23419,7 +23419,7 @@
           {
             "name": "master_orchestrate",
             "schema_available": true,
-            "summary": "Run a master pass inline or with hardware-scheduled delegated agents.\n\n    mode=\"ask\" returns the choice prompt. mode=\"inline\" keeps work in the master\n    lane. mode=\"delegate\" queues bounded subagents across RAM/CPU-safe worker\n    slots, then audits and merges their outputs. mode=\"fleet\" queues the full\n    hardware-derived breadth ceiling in the background and returns immediately.\n    Pass a positive ``agents`` value to set fleet breadth. ``worker_cap`` is a\n    per-run opt-in that may raise concurrent slots above the hardware-derived\n    default, but never above the operator/compiled ceiling. A clear task phrase\n    such as \"use 24 workers\" fills both values when they are omitted.\n    For existing repository work, pass ``project`` as an existing root. Every\n    child and aggregate is confined to that canonical root; missing or\n    conflicting repository scope fails closed instead of inheriting the cwd.\n    Status is visible through master_status().\n    "
+            "summary": "Run a master pass inline or with hardware-scheduled delegated agents.\n\n    mode=\"ask\" returns the choice prompt. mode=\"inline\" keeps work in the master\n    lane. mode=\"delegate\" queues bounded subagents across RAM/CPU-safe worker\n    slots, then audits and merges their outputs. mode=\"fleet\" queues\n    min(max_agents(), max(3, 2 * worker_slots)) agents and returns immediately.\n    Pass a positive ``agents`` value to set fleet breadth. ``worker_cap`` is a\n    per-run opt-in that may raise concurrent slots above the hardware-derived\n    default, but never above the operator/compiled ceiling. A clear task phrase\n    such as \"use 24 workers\" fills both values when they are omitted.\n    For existing repository work, pass ``project`` as an existing root. Every\n    child and aggregate is confined to that canonical root; missing or\n    conflicting repository scope fails closed instead of inheriting the cwd.\n    Status is visible through master_status().\n    "
           },
           {
             "name": "master_retry",
@@ -27924,7 +27924,7 @@
           "name": "master_capacity"
         },
         {
-          "description": "Run a master pass inline or with hardware-scheduled delegated agents.\n\n    mode=\"ask\" returns the choice prompt. mode=\"inline\" keeps work in the master\n    lane. mode=\"delegate\" queues bounded subagents across RAM/CPU-safe worker\n    slots, then audits and merges their outputs. mode=\"fleet\" queues the full\n    hardware-derived breadth ceiling in the background and returns immediately.\n    Pass a positive ``agents`` value to set fleet breadth. ``worker_cap`` is a\n    per-run opt-in that may raise concurrent slots above the hardware-derived\n    default, but never above the operator/compiled ceiling. A clear task phrase\n    such as \"use 24 workers\" fills both values when they are omitted.\n    For existing repository work, pass ``project`` as an existing root. Every\n    child and aggregate is confined to that canonical root; missing or\n    conflicting repository scope fails closed instead of inheriting the cwd.\n    Status is visible through master_status().\n    ",
+          "description": "Run a master pass inline or with hardware-scheduled delegated agents.\n\n    mode=\"ask\" returns the choice prompt. mode=\"inline\" keeps work in the master\n    lane. mode=\"delegate\" queues bounded subagents across RAM/CPU-safe worker\n    slots, then audits and merges their outputs. mode=\"fleet\" queues\n    min(max_agents(), max(3, 2 * worker_slots)) agents and returns immediately.\n    Pass a positive ``agents`` value to set fleet breadth. ``worker_cap`` is a\n    per-run opt-in that may raise concurrent slots above the hardware-derived\n    default, but never above the operator/compiled ceiling. A clear task phrase\n    such as \"use 24 workers\" fills both values when they are omitted.\n    For existing repository work, pass ``project`` as an existing root. Every\n    child and aggregate is confined to that canonical root; missing or\n    conflicting repository scope fails closed instead of inheriting the cwd.\n    Status is visible through master_status().\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -36594,7 +36594,7 @@
           "name": "master_capacity"
         },
         {
-          "description": "Run a master pass inline or with hardware-scheduled delegated agents.\n\n    mode=\"ask\" returns the choice prompt. mode=\"inline\" keeps work in the master\n    lane. mode=\"delegate\" queues bounded subagents across RAM/CPU-safe worker\n    slots, then audits and merges their outputs. mode=\"fleet\" queues the full\n    hardware-derived breadth ceiling in the background and returns immediately.\n    Pass a positive ``agents`` value to set fleet breadth. ``worker_cap`` is a\n    per-run opt-in that may raise concurrent slots above the hardware-derived\n    default, but never above the operator/compiled ceiling. A clear task phrase\n    such as \"use 24 workers\" fills both values when they are omitted.\n    For existing repository work, pass ``project`` as an existing root. Every\n    child and aggregate is confined to that canonical root; missing or\n    conflicting repository scope fails closed instead of inheriting the cwd.\n    Status is visible through master_status().\n    ",
+          "description": "Run a master pass inline or with hardware-scheduled delegated agents.\n\n    mode=\"ask\" returns the choice prompt. mode=\"inline\" keeps work in the master\n    lane. mode=\"delegate\" queues bounded subagents across RAM/CPU-safe worker\n    slots, then audits and merges their outputs. mode=\"fleet\" queues\n    min(max_agents(), max(3, 2 * worker_slots)) agents and returns immediately.\n    Pass a positive ``agents`` value to set fleet breadth. ``worker_cap`` is a\n    per-run opt-in that may raise concurrent slots above the hardware-derived\n    default, but never above the operator/compiled ceiling. A clear task phrase\n    such as \"use 24 workers\" fills both values when they are omitted.\n    For existing repository work, pass ``project`` as an existing root. Every\n    child and aggregate is confined to that canonical root; missing or\n    conflicting repository scope fails closed instead of inheriting the cwd.\n    Status is visible through master_status().\n    ",
           "inputSchema": {
             "properties": {
               "agents": {
@@ -44200,7 +44200,7 @@
         },
         {
           "function": {
-            "description": "Run a master pass inline or with hardware-scheduled delegated agents.\n\n    mode=\"ask\" returns the choice prompt. mode=\"inline\" keeps work in the master\n    lane. mode=\"delegate\" queues bounded subagents across RAM/CPU-safe worker\n    slots, then audits and merges their outputs. mode=\"fleet\" queues the full\n    hardware-derived breadth ceiling in the background and returns immediately.\n    Pass a positive ``agents`` value to set fleet breadth. ``worker_cap`` is a\n    per-run opt-in that may raise concurrent slots above the hardware-derived\n    default, but never above the operator/compiled ceiling. A clear task phrase\n    such as \"use 24 workers\" fills both values when they are omitted.\n    For existing repository work, pass ``project`` as an existing root. Every\n    child and aggregate is confined to that canonical root; missing or\n    conflicting repository scope fails closed instead of inheriting the cwd.\n    Status is visible through master_status().\n    ",
+            "description": "Run a master pass inline or with hardware-scheduled delegated agents.\n\n    mode=\"ask\" returns the choice prompt. mode=\"inline\" keeps work in the master\n    lane. mode=\"delegate\" queues bounded subagents across RAM/CPU-safe worker\n    slots, then audits and merges their outputs. mode=\"fleet\" queues\n    min(max_agents(), max(3, 2 * worker_slots)) agents and returns immediately.\n    Pass a positive ``agents`` value to set fleet breadth. ``worker_cap`` is a\n    per-run opt-in that may raise concurrent slots above the hardware-derived\n    default, but never above the operator/compiled ceiling. A clear task phrase\n    such as \"use 24 workers\" fills both values when they are omitted.\n    For existing repository work, pass ``project`` as an existing root. Every\n    child and aggregate is confined to that canonical root; missing or\n    conflicting repository scope fails closed instead of inheriting the cwd.\n    Status is visible through master_status().\n    ",
             "name": "master_orchestrate",
             "parameters": {
               "properties": {
@@ -48127,7 +48127,7 @@
   },
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "7b9c5d35170759b6457cdfa2edd0c4b7e4a9e4f05d3a78a4011b641c9e888204",
+    "server.py": "34a1c59a7c338fe79bebdcdcbfc663cad3ceefa274af6e7dfbd784d321187c45",
     "sonder_runtime/application/tools/generated_catalogs.py": "332f23bad788ee427203c64a35f9e36affa2ec11af0ea08889ac9aaa821b0d89",
     "sonder_runtime/bootstrap/native_mcp.py": "8c778cf8a20121d07f9ed742dc0b1926f53c28126f76fed8c3a358c330ec120e",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
@@ -51838,7 +51838,7 @@
       }
     },
     {
-      "description": "Run a master pass inline or with hardware-scheduled delegated agents.\n\n    mode=\"ask\" returns the choice prompt. mode=\"inline\" keeps work in the master\n    lane. mode=\"delegate\" queues bounded subagents across RAM/CPU-safe worker\n    slots, then audits and merges their outputs. mode=\"fleet\" queues the full\n    hardware-derived breadth ceiling in the background and returns immediately.\n    Pass a positive ``agents`` value to set fleet breadth. ``worker_cap`` is a\n    per-run opt-in that may raise concurrent slots above the hardware-derived\n    default, but never above the operator/compiled ceiling. A clear task phrase\n    such as \"use 24 workers\" fills both values when they are omitted.\n    For existing repository work, pass ``project`` as an existing root. Every\n    child and aggregate is confined to that canonical root; missing or\n    conflicting repository scope fails closed instead of inheriting the cwd.\n    Status is visible through master_status().\n    ",
+      "description": "Run a master pass inline or with hardware-scheduled delegated agents.\n\n    mode=\"ask\" returns the choice prompt. mode=\"inline\" keeps work in the master\n    lane. mode=\"delegate\" queues bounded subagents across RAM/CPU-safe worker\n    slots, then audits and merges their outputs. mode=\"fleet\" queues\n    min(max_agents(), max(3, 2 * worker_slots)) agents and returns immediately.\n    Pass a positive ``agents`` value to set fleet breadth. ``worker_cap`` is a\n    per-run opt-in that may raise concurrent slots above the hardware-derived\n    default, but never above the operator/compiled ceiling. A clear task phrase\n    such as \"use 24 workers\" fills both values when they are omitted.\n    For existing repository work, pass ``project`` as an existing root. Every\n    child and aggregate is confined to that canonical root; missing or\n    conflicting repository scope fails closed instead of inheriting the cwd.\n    Status is visible through master_status().\n    ",
       "name": "master_orchestrate",
       "parameters": {
         "properties": {

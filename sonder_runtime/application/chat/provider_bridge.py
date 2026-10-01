@@ -270,14 +270,18 @@ def model_request_from_ollama_payload(
 
 def ollama_shape(response: ModelResponse) -> dict[str, object]:
     """Shape a ModelResponse as the Ollama reply legacy callers consume."""
-    # No ``done_reason``: the gateway does not report why the provider
-    # stopped, and claiming "stop" would hide a truncation from legacy
-    # consumers that look for "length".  Every consumer treats it as optional.
+    # Preserve a provider-reported finish reason when available; never invent
+    # "stop" for gateways without that evidence (PR #616's budget contract).
     shaped: dict[str, object] = {
         "model": response.model,
         "message": {"role": "assistant", "content": response.text},
         "done": True,
     }
+    reason = getattr(response, "finish_reason", None) or getattr(response, "done_reason", None)
+    if isinstance(reason, str) and reason.strip().lower() in {
+        "stop", "length", "content_filter", "tool_calls", "function_call",
+    }:
+        shaped["done_reason"] = reason.strip().lower()
     if response.tokens_in is not None:
         shaped["prompt_eval_count"] = response.tokens_in
     if response.tokens_out is not None:
