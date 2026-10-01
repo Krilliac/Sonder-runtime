@@ -166,6 +166,25 @@ def test_table_override_and_validation():
             request_tuning.sampling_families({"SONDER_INFERENCE_SAMPLING_TABLE": bad})
 
 
+def test_decision_sampling_profile_is_opt_in_and_has_thinking_rows():
+    thinking = {}
+    assert request_tuning.apply_sampling_defaults(
+        thinking, "qwen3.8:27b", thinking=True, profile="decision",
+    ) == "decision"
+    assert thinking == {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0}
+    non_thinking = {}
+    request_tuning.apply_sampling_defaults(
+        non_thinking, "qwen3.8:27b", thinking=False, profile="decision",
+    )
+    assert non_thinking == {"temperature": 0.7, "top_p": 0.8, "top_k": 20}
+
+
+def test_reasoning_budget_feature_can_be_advertised_as_mapping():
+    assert "reasoning_budget" in request_tuning.advertised_features(
+        {"sonder": {"features": {"reasoning_budget": True}}}
+    )
+
+
 # -- telemetry ---------------------------------------------------------------------
 
 
