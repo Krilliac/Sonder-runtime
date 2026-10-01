@@ -1352,6 +1352,9 @@ def _drive_workspace_repl(monkeypatch, lines, seen):
 
 
 def test_work_request_without_workspace_asks_for_directory(monkeypatch, capsys):
+    # The question is the opt-out path now: by default the console makes a
+    # folder (tests/test_repl_default_workspace.py covers that).
+    monkeypatch.setenv("SONDER_AUTO_WORKSPACE", "0")
     seen = {}
     _drive_workspace_repl(monkeypatch, iter(("create a game and run it", "/exit")), seen)
 
@@ -1378,6 +1381,7 @@ def test_selected_workspace_is_passed_to_workbench_agent(monkeypatch, tmp_path):
 
 
 def test_workspace_create_resumes_queued_work_in_created_directory(monkeypatch, tmp_path):
+    monkeypatch.setenv("SONDER_AUTO_WORKSPACE", "0")  # hold the task for the question
     seen = {}
     workspace = tmp_path / "text-adventure"
     _drive_workspace_repl(
@@ -1405,6 +1409,7 @@ def test_workspace_create_resumes_queued_work_in_created_directory(monkeypatch, 
 
 
 def test_pending_workspace_accepts_explicit_create_path_reply(monkeypatch, tmp_path):
+    monkeypatch.setenv("SONDER_AUTO_WORKSPACE", "0")  # hold the task for the question
     seen = {}
     workspace = tmp_path / "text-adventure"
     _drive_workspace_repl(
@@ -1538,6 +1543,7 @@ def test_embedded_windows_path_selects_workspace_without_ask(monkeypatch, tmp_pa
 def test_explicit_work_without_a_workspace_asks_for_one_then_resumes(monkeypatch, tmp_path, capsys):
     # ``/work`` used to hand the memory project name ("default") to managed
     # work as a directory, which raised PermissionError out of main().
+    monkeypatch.setenv("SONDER_AUTO_WORKSPACE", "0")  # hold the task for the question
     seen = []
     lines = iter(("/work say hi", "/workspace %s" % tmp_path, "/exit"))
 
