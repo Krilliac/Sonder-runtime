@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 388,
+      "file_count": 389,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -85,6 +85,7 @@
         "sonder_runtime/adapters/build/preimages.py",
         "sonder_runtime/adapters/build/source_editor.py",
         "sonder_runtime/adapters/build/tree_reader.py",
+        "sonder_runtime/adapters/chat_file_routing.py",
         "sonder_runtime/adapters/cli_options.py",
         "sonder_runtime/adapters/client_config.py",
         "sonder_runtime/adapters/client_endpoint.py",
@@ -437,7 +438,7 @@
       ]
     },
     {
-      "file_count": 392,
+      "file_count": 394,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -483,9 +484,11 @@
         "sonder_runtime/application/chat/__init__.py",
         "sonder_runtime/application/chat/handle_chat.py",
         "sonder_runtime/application/chat/handoff_receipts.py",
+        "sonder_runtime/application/chat/honesty.py",
         "sonder_runtime/application/chat/lanes.py",
         "sonder_runtime/application/chat/provider_bridge.py",
         "sonder_runtime/application/chat/stream_sink.py",
+        "sonder_runtime/application/chat/tool_intent.py",
         "sonder_runtime/application/command_surface/__init__.py",
         "sonder_runtime/application/command_surface/mcp.py",
         "sonder_runtime/application/compaction.py",
