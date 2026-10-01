@@ -4,9 +4,16 @@ from __future__ import annotations
 import json
 import importlib
 import os
+import codecs
+import io
+import time
+from pathlib import Path
 
 from ..application.context import OperationContext
 from ..application.ports.tool_executor import ToolCall, ToolResult
+from ..domain.agents.file_page_rendering import (
+    normalize_file_page_args, render_file_page,
+)
 
 
 # Native MCP includes rendered output in both content[].text and
@@ -37,6 +44,10 @@ def _authorized_roots(context: OperationContext) -> str:
 
 
 def _format_file_result(title: str, data: dict) -> str:
+    if title == "file range":
+        return render_file_page(_read_page_data(
+            data["path"], data["start_line"], data["end_line"],
+        ), path=_page_display_path(data["path"]))
     lines = [title]
     for key, value in data.items():
         if key != "text":
@@ -44,6 +55,85 @@ def _format_file_result(title: str, data: dict) -> str:
     if "text" in data:
         lines.extend(["", data["text"]])
     return "\n".join(lines)
+
+
+def _page_display_path(path: str) -> str:
+    from .filesystem import file_ops
+
+    target = Path(path)
+    try:
+        return target.relative_to(file_ops.workspace_root()).as_posix()
+    except ValueError:
+        return target.name
+
+
+def _read_page_data(path: str, start: int, end: int) -> dict:
+    """Scan an already authorized path without retaining unrequested lines.
+
+    Count the complete file so the continuation is truthful even when a page
+    fills the observation budget. Chunking also bounds memory for huge lines.
+    """
+    rows = []
+    number, length, prefix, size = 1, 0, "", 0
+    decoder = io.IncrementalNewlineDecoder(
+        codecs.getincrementaldecoder("utf-8")(errors="replace"), translate=True,
+    )
+    end = min(end, start + 399)
+    binary = False
+    with Path(path).open("rb") as stream:
+        while True:
+            chunk = stream.read(64_000)
+            size += len(chunk)
+            binary = binary or b"\x00" in chunk
+            text = decoder.decode(chunk, final=not chunk)
+            pieces = text.split("\n")
+            for index, piece in enumerate(pieces):
+                length += len(piece)
+                if start <= number <= end and len(prefix) < 2000:
+                    prefix += piece[:2000 - len(prefix)]
+                if index < len(pieces) - 1:
+                    if start <= number <= end:
+                        rows.append({"line": number, "text": prefix, "characters": length})
+                    number += 1
+                    length, prefix = 0, ""
+            if not chunk:
+                break
+    if length:
+        if start <= number <= end:
+            rows.append({"line": number, "text": prefix, "characters": length})
+        number += 1
+    return {
+        "path": path, "start_line": start, "end_line": end,
+        "lines": rows, "total_lines": number - 1, "bytes": size, "binary": binary,
+    }
+
+
+def render_agent_file_page(args: dict, *, read, record, activity, reload) -> str:
+    """Keep the native file_read policy/audit path, changing only agent output."""
+    reload()
+    started = time.time()
+    path = args.get("path", "")
+    try:
+        page = normalize_file_page_args(args)
+        path = page["path"]
+        # The typed gateway remains authoritative for roots, credentials,
+        # approvals and sensitive files. Never resolve/read model paths here
+        # before that gateway has returned its authorized canonical path.
+        data = read(
+            "file_read", {"path": path, "max_bytes": 1},
+            token=args.get("token", ""), approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+        page_data = _read_page_data(data["path"], page["start_line"], page["end_line"])
+        output = render_file_page(page_data, path=_page_display_path(data["path"]))
+    except Exception as exc:
+        record("file_read", {"path": path}, ok=False, started=started, summary=str(exc))
+        failure = "ERROR: %s" % exc
+        return failure
+    record("file_read", {"path": path}, ok=not page_data["binary"], started=started,
+           summary="%s bytes" % page_data["bytes"])
+    activity.record_event("file_read", summary="%s bytes" % page_data["bytes"], path=data["path"])
+    return output
 
 
 def _result(
