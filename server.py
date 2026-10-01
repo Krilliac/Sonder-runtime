@@ -172,6 +172,8 @@ from sonder_runtime.adapters.security.permission_policy import (
 import reloadable_mcp
 import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
 import autopilot_controller
+from sonder_runtime.adapters.agent_artifact_gate import AgentArtifactGate, validation_deferral
+from sonder_runtime.adapters.creation_workspace import prepare_loop_project, prepare_writing_project
 from sonder_runtime.adapters.persistence import fanout_store
 import fanout_prompt_vault
 from sonder_runtime.adapters.model_transport import ModelCallError
@@ -20399,15 +20401,7 @@ def _take_agent_model_failure():
 
 
 def _agent_impl(*args, **kwargs) -> str:
-    """One agent turn, with the disk-backed system-prompt parts pinned.
-
-    The agent builds its system prompt at the top of the turn and the
-    negative-claim reviewer builds another at finalization (measured: two
-    builds, two reads of system_profile.md, in one turn). Both are sent to a
-    model, so they must not disagree about the operator's standing
-    instructions. See _stable_system_context; a nested call under an already
-    pinned turn reuses the outer reading.
-    """
+    """Pin system-prompt parts across a turn and its negative-claim review."""
     with _managed_agent_admission_scope(), _stable_system_context(), _standalone_lanes.model_loop_scope():
         controller = _standalone_lanes.current()
         if controller is not None:
@@ -20504,7 +20498,9 @@ def _agent_turn(
     controller = _standalone_lanes.current()
     if controller is not None:
         controller.restrict(read_only=lane_read_only, cloud=cloud)
-    project_scope, project_error = _agent_project_scope(project)
+    project, project_error = prepare_loop_project(project, writing=not (read_only or cloud))
+    project_scope, scope_error = _agent_project_scope(project)
+    project_error = project_error or scope_error
     if project_error:
         if return_host_receipt:
             return autopilot_controller.HostTaskResult(
@@ -20634,6 +20630,7 @@ def _agent_turn(
             _canonical_agent_tool_name(name) for name in tool_allowlist if name
         )
     )
+    artifact_gate = AgentArtifactGate(project_scope, prompt, allowed_tools, enabled=auto_checklist and not (read_only or cloud or unsafe))
     used_tool_names = set()
     successful_web_calls = set()
     successful_inspection_results = {}
@@ -20719,10 +20716,7 @@ def _agent_turn(
         _start_agent_checklist(prompt, project, read_only)
         if auto_checklist else ("", {})
     )
-    # Filesystem scope: a real directory roots file and execution tools there.
-    # A clear bare namespace label such as "default" remains checklist-only;
-    # path-like typos were rejected above rather than failing open to Sonder's
-    # own workspace.
+    # Entry-point and named-default writing runs have a real root; see prepare_loop_project.
     transcript = "Task:\n%s\n\n%s" % (
         prompt,
         # Every gate this run will actually apply, not just the three that
@@ -20807,21 +20801,7 @@ def _agent_turn(
     delegated_verdict = None
 
     def _work_validated():
-        """Was the change actually checked, by either grounded route?
-
-        ``validation_ok`` and ``verification_ok`` answer the same question over
-        disjoint tool sets. Until the developer-workflow tools became
-        dispatchable, the only way to validate a mutation was to shell out
-        through ``workspace_run``; counting a passing, root-covering
-        test_run/build_run/lint_run/typecheck_run as anything less than a
-        validation would fail a run precisely *for reaching for the
-        purpose-built tool*, while the same run's end report called the
-        verification satisfied. This is the one place that contradiction is
-        resolved, so the report, the checklist and the receipt cannot disagree.
-
-        Not a relaxation: the added satisfying condition is a host-observed
-        passing verifier whose root covers every mutated path.
-        """
+        """Current, covering host evidence; delegated work retains its certificate gate."""
         nonlocal delegated_verdict
         controller = _standalone_lanes.current()
         if controller is not None and controller.delegated_work:
@@ -20831,7 +20811,7 @@ def _agent_turn(
             )
             return (delegated_verdict.valid is True
                     and (not parent_effect_dirty or validation_ok or verification_ok))
-        return validation_ok or verification_ok
+        return validation_ok or verification_ok or artifact_gate.assess()["passed"]
 
     def finish_final(final, *, failed=False):
         nonlocal validation_attempted, mutated, parent_effect_dirty, validation_ok, verification_ok
@@ -20892,6 +20872,9 @@ def _agent_turn(
                 final = "EVIDENCE_REQUIRED: original host observations could not be preserved.\n\n" + final
                 failed = True
         validated = False if failed else _work_validated()
+        artifact_assessment = artifact_gate.assess()
+        deferred = not (failed or delegated or validated) and artifact_assessment["deferred"]
+        validation_attempted |= artifact_assessment["attempted"]
         if delegated and delegated_verdict is not None:
             validation_attempted = True
         if auto_checklist:
@@ -20906,7 +20889,7 @@ def _agent_turn(
             _agent_checklist_mark(
                 checklist_id, checklist_states, 3, validation_status,
                 "grounded validation passed" if validated else (
-                    "no mutation required" if not mutated else "validation did not pass"
+                    "no mutation required" if not mutated else "needs approval for execution" if deferred else "validation did not pass"
                 ),
             )
             _agent_checklist_mark(
@@ -20916,12 +20899,12 @@ def _agent_turn(
         # so the activity feed keeps naming the work rather than the standing.
         model_summary = final.splitlines()[0] if final else "agent completed"
 
-        validation_failed = bool(auto_checklist and (mutated or delegated) and not validated)
+        validation_failed = bool(auto_checklist and (mutated or delegated) and not (validated or deferred))
         standing = ""
         # Only where a verifier was actually callable. Elsewhere the sentence
         # names tools the lane is forbidden from using and has no OFF state --
         # see _agent_verifier_reachable.
-        if not validated and not verification_ok and _agent_verifier_reachable(
+        if not deferred and not validated and not verification_ok and _agent_verifier_reachable(
             read_only, allowed_tools,
         ):
             demanded, reason = _agent_verification_standing()
@@ -20965,6 +20948,11 @@ def _agent_turn(
         activity_tracker.set_result_summary(
             _AGENT_VALIDATION_FAILED_LINE if validation_failed else model_summary
         )
+        if deferred:
+            final = "written, not executed: needs %s to verify\n\n%s" % (artifact_assessment["required"], final)
+            activity_tracker.set_response_status("unverified", "written; execution needs approval")
+        elif validated and artifact_assessment["passed"]:
+            final = "Static checks passed; artifact not executed.\n\n" + final
         certificate_fields = {}
         if delegated:
             if delegated_verdict is not None:
@@ -20983,7 +20971,7 @@ def _agent_turn(
             controller.terminal_projected = True
         if controller is not None:
             from sonder_runtime.application.ports.host_final import HostFinalFacts
-            final_class = 'ERROR' if failed else 'NORMAL'
+            final_class = 'ERROR' if failed else 'UNVERIFIED' if deferred else 'NORMAL'
             for marker in (*autopilot_controller.FAILURE_PREFIXES, _AGENT_UNVERIFIED_PREFIX):
                 if final.lstrip().startswith(marker):
                     final_class = marker.rstrip(':')
@@ -21009,6 +20997,7 @@ def _agent_turn(
                 validation_passed=validated,
                 project_scope=project_scope,
                 pre_model_context_response_observed=pre_model_context_response_observed,
+                **artifact_gate.receipt_fields(artifact_assessment) if not (failed or delegated) else {},
                 **certificate_fields,
             )
         return final
@@ -21255,7 +21244,7 @@ def _agent_turn(
                     "HOST REQUIREMENT: use at least one relevant inspection or execution tool before final."
                 )
                 continue
-            if auto_checklist and mutated and not validation_ok and step < max_steps:
+            if auto_checklist and mutated and not _work_validated() and not artifact_gate.assess()["deferred"] and step < max_steps:
                 _agent_checklist_mark(
                     checklist_id, checklist_states, 2, "done", "mutations completed",
                 )
@@ -21264,7 +21253,7 @@ def _agent_turn(
                 )
                 observations.append(
                     "HOST REQUIREMENT: files changed but no grounded validation has passed. "
-                    "Run or retry an exact validator now."
+                    + artifact_gate.guidance()
                 )
                 continue
             if not unsafe and _AGENT_NEGATIVE_CLAIM_RE.search(final):
@@ -21694,6 +21683,8 @@ def _agent_turn(
             tool_dispatched
             and tool_name in _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS
         )
+        if tool_dispatched:
+            artifact_gate.observe(tool_name, policy_tool_args, observation_text, success=tool_ok, mutation=mutation_attempt_may_have_changed, execution=execution_may_have_changed)
         batch_advisory = None
         if tool_dispatched and not (
             mutation_attempt_may_have_changed or execution_may_have_changed
@@ -21988,6 +21979,9 @@ def agent(
     refusal = intents.containment_egress_refusal(prompt)
     if refusal:
         return refusal
+    project, project_error = prepare_writing_project(project)
+    if project_error:
+        return project_error
     nested = activity_tracker.current() is not None
     with activity_tracker.response_span(
         "agent:%s" % (tier or "code"),
@@ -22049,6 +22043,9 @@ def _workbench_agent_escalating(
     prompt, tier, *, max_steps, allow_web, project, allow_location,
     prepared_plan=None, session=None,
 ):
+    project, project_error = prepare_writing_project(project)
+    if project_error:
+        return project_error, tier
     project_scope, _error = _agent_project_scope(project)
     with _standalone_lanes.managed_escalation_scope(
         _application, project=project_scope, max_rungs=tier_escalation.MAX_ESCALATIONS + 1,
@@ -22537,6 +22534,9 @@ def _autopilot_work_model(
     run: dict, task: dict, prior: str, *, strategy_memory=None,
 ) -> autopilot_controller.HostTaskResult | str:
     allowed = _autopilot_allowed_tools(run)
+    deferred = validation_deferral(allowed, task, run.get("project", "")) if task.get("kind") == "validate" else None
+    if deferred:
+        return autopilot_controller.HostTaskResult(**deferred, project_scope=run.get("project", ""))
     prompt = _prompts.render(
         "autopilot_worker",
         objective=run.get("objective", ""),
