@@ -1,6 +1,40 @@
 # Workspace interaction contract
 
-Canonical appearance: DESIGN.md and lib/theme.dart. Shared workspace navigation, notices, read-error classification and Markdown live in lib/workspace_ui.dart. Screens own domain state and routing callbacks, not duplicate versions of these primitives.
+Canonical appearance: DESIGN.md, lib/theme.dart and the component kit (lib/ui/kit.dart). Notices and read-error classification live in lib/workspace_ui.dart; the Markdown renderer lives in lib/chat/markdown.dart (re-exported by workspace_ui.dart). Screens own domain state and routing callbacks, not duplicate versions of these primitives.
+
+## App shell and navigation
+
+- **Destinations.** The app shell (lib/shell/app_shell.dart) owns the four peer destinations: Chat, Agents, Runtime and Settings.
+  - A destination page finds `ShellScope`, and inside the shell it draws no route back to Chat and no workspace menu.
+  - On narrow layouts it shows `ShellMenuButton`, which opens the navigation drawer.
+- **Chat stays mounted** while other destinations are shown, so a streaming turn and the composer draft survive a switch.
+- **Deep links.** A section request (`ShellScope.openSection`, e.g. Settings › connection or account, or an agent lane) opens that page at that section. The `/login`, `/register` and `/admin_login` intercepts open Settings › Account with the username filled in; the password never enters the chat.
+- **Leave guards.** Leaving a page runs its `ShellLeaveGuard` first: Settings' unsaved-changes guard, and Agents' unsent-draft and uncertain-command guard. This applies to the sidebar, the drawer, every shortcut and system back. Each switch asks once.
+- **Shortcuts** (Ctrl, or ⌘ on macOS):
+  - N: new chat; K: command browser; P: chat search; comma: Settings.
+  - 1–4: the destinations; B: collapse the sidebar; D: Runtime.
+  - `/`: the shortcut guide, which lists all of these.
+  - Shift+Tab cycles the permission mode only inside the composer, so reverse focus traversal works everywhere else. Raising the mode still goes through the raise sheet.
+- **Changing the mode from Runtime.** Runtime's Permissions page changes the mode by switching to Chat and opening the composer's mode picker, so there is one mode-change path.
+
+## Settings and Runtime surfaces
+
+- **Settings saves in two ways.** Staged values (connection, account, model, context, privacy) are saved from a sticky "Unsaved changes · Discard · Save" bar that appears only while something is unsaved; the discard guard is unchanged. Appearance applies and saves at once and never carries unsaved values.
+- **Login stores the session at once** in the secure store, but only when its exact origin matches the saved and persisted server; otherwise it waits for Save.
+- **Every Settings network action** (Test connection, Test host control, Login, Register, Sign out, Forget) has its own busy state and shows its result under its own row.
+- **Runtime is one page per category.** Each action (start, stop and restart the server, practice runs, quick commands, approvals) is independent and shows its outcome next to its control.
+- **The Runtime Developer console** keeps the last few outputs, newest first.
+- **Runtime approvals follow the approval rules below:**
+  - re-read the server's queue;
+  - draw the approval sheet from the server's entry;
+  - send one POST bound to the tool and digest.
+  Revoke is offered on issued approvals.
+- **Polling.** Runtime pauses its polls while another destination is in front, as it does when backgrounded or covered.
+
+## Links in conversations
+
+- `http`, `https` and `mailto` links open externally. A link whose visible text names a different site, or whose address carries credentials or look-alike (IDN) characters, shows the real address before opening.
+- Any other link (a path, an app scheme, a relative link) is shown with Copy link and is never opened.
 
 Routed work shows the host acknowledgement as the first assistant reply, then a
 compact live progress block within the existing work-run card. The card polls
@@ -10,7 +44,7 @@ block in the same conversation turn. Progress is server-authored evidence;
 neither the app nor a returned model answer invents validation. Older servers
 without narration fields keep the existing placeholder and completion behavior.
 
-- Chat owns the four peer routes: Chat, Agents, Runtime (System screen), Settings. Runtime controls retain their existing authorization and confirmation behavior. Settings retains its existing unsaved-edit guard.
+- The app shell owns the four peer destinations: Chat, Agents, Runtime (System screen), Settings (see "App shell and navigation" above). Runtime controls retain their existing authorization and confirmation behavior. Settings retains its unsaved-edit guard, now also run by the shell before it switches away.
 - Runtime inference status shows cached aggregate counts. Worker origins and model previews appear only after **Inspect worker page**; **Refresh worker cache** explicitly requests one configured bounded batch. Details are never loaded by polling, are cleared on an access failure or credential/host change, and use an explicit next-page action. Server administrator authorization remains authoritative.
 - Agent search is local to loaded conversations. Until pagination completes it says “Search loaded conversations”; loading more remains available while filtering. Status filters and parent groups use actual returned data. Parent titles are used only when loaded; otherwise the short parent ID opens its full selectable value.
 - Each selected agent has independent transcript, draft and scroll state for the lifetime of the Agent screen. Returning from a narrow transcript to its list preserves drafts. Leaving the screen asks about unsent drafts or uncertain commands. Durable messages, reports and status reload from the server; local drafts are not disk-persisted.
