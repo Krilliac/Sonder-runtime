@@ -17,6 +17,11 @@ dependencies:
   flutter_secure_storage: ^10.3.1
   cupertino_icons: ^1.0.6
   flutter_markdown_plus: ^1.0.12
+  # The Markdown AST types the chat code-block builder reads (already a
+  # dependency of flutter_markdown_plus; named here because it is imported).
+  markdown: ^7.3.1
+  # Opens links in chat answers in the browser or mail app (lib/chat/links.dart).
+  url_launcher: ^6.3.2
 
 dev_dependencies:
   flutter_test:
