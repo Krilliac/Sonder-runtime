@@ -70,7 +70,8 @@ void main() {
         (tester) async {
       final backend = FakeChatBackend()
         ..statusError = SonderException('Cannot reach server: refused');
-      await pumpChat(tester, backend, size: const Size(1440, 900));
+      // The rail is the app shell's sidebar; its footer shows the state.
+      await pumpShell(tester, backend, size: const Size(1440, 900));
       await tester.pump(const Duration(milliseconds: 100));
       final rail = find.byKey(const Key('rail-connection'));
       expect(rail, findsOneWidget);

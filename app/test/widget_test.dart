@@ -79,16 +79,19 @@ void main() {
     await http.runWithClient(() async {
       await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Agents'));
+      // The sidebar stays beside every destination.
+      Finder rail(String name) => find.byKey(Key('shell-destination-$name'));
+      await tester.tap(rail('agents'));
       await tester.pumpAndSettle();
       expect(find.text('Conversations'), findsOneWidget);
-      await tester.tap(find.byTooltip('Workspace navigation'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Settings'));
+      expect(find.byKey(const Key('shell-sidebar')), findsOneWidget);
+      await tester.tap(rail('settings'));
       await tester.pumpAndSettle();
       expect(find.byType(SettingsScreen), findsOneWidget);
-      await tester.tap(find.text('Chat'));
+      expect(find.byKey(const Key('shell-sidebar')), findsOneWidget);
+      await tester.tap(rail('chat'));
       await tester.pumpAndSettle();
+      expect(find.byType(SettingsScreen), findsNothing);
       expect(find.text('New chat'), findsWidgets);
       await tester.pumpWidget(const SizedBox());
     }, () => client);
@@ -150,10 +153,12 @@ void main() {
     await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
     await tester.pumpAndSettle();
 
-    // Wide windows get a persistent rail instead of hiding chat navigation
+    // Wide windows get a persistent sidebar instead of hiding navigation
     // behind the mobile drawer gesture.
-    expect(find.textContaining('Local-first workspace'), findsOneWidget);
-    expect(find.text('Chats'), findsOneWidget);
+    expect(find.byKey(const Key('shell-sidebar')), findsOneWidget);
+    expect(find.text('Sonder'), findsOneWidget);
+    expect(find.text('CHATS'), findsOneWidget);
+    expect(find.byKey(const Key('shell-menu')), findsNothing);
   });
 
   testWidgets(
@@ -165,7 +170,9 @@ void main() {
 
       await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
       await tester.pumpAndSettle();
-      await tester.tap(find.byTooltip('Commands'));
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyK);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
       await tester.pumpAndSettle();
 
       // No server in a widget test, so this is the offline fallback catalog --
@@ -208,7 +215,9 @@ void main() {
 
       await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
       await tester.pumpAndSettle();
-      await tester.tap(find.byTooltip('Commands'));
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyK);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
       await tester.pumpAndSettle();
 
       await tester.tap(find.byKey(const Key('command-category-quick')));
@@ -369,9 +378,8 @@ void main() {
 
     await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Runtime'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
+    // 800 px: the destinations are in the drawer behind the menu button.
+    await _openDrawerDestination(tester, 'runtime');
 
     // Lane D renamed the page title from "System" to "Runtime" (plan P2-10).
     expect(find.text('System'), findsNothing);
@@ -379,8 +387,6 @@ void main() {
         find.descendant(
             of: find.byType(AppBar), matching: find.text('Runtime')),
         findsOneWidget);
-    expect(find.byTooltip('Back to chat'), findsOneWidget);
-    expect(find.text('Chat'), findsOneWidget);
     expect(find.byKey(const Key('system-section-nav')), findsOneWidget);
     expect(
       find.descendant(
@@ -411,12 +417,12 @@ void main() {
       find.textContaining('training runs through PEFT/Hugging Face'),
       findsOneWidget,
     );
-    expect(find.byTooltip('Back to chat'), findsOneWidget);
 
-    await tester.tap(find.byTooltip('Back to chat'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
-
+    // The way back to Chat is the shell's: the drawer's Chat entry.
+    await _openDrawerByEdge(tester);
+    await tester.tap(find.byKey(const Key('shell-destination-chat')));
+    await _pumpFor(tester, const Duration(milliseconds: 400));
+    expect(find.byType(SystemScreen), findsNothing);
     expect(find.text('New chat'), findsOneWidget);
   });
 
@@ -427,9 +433,7 @@ void main() {
 
     await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Runtime'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
+    await _openDrawerDestination(tester, 'runtime');
 
     // The page's own vertical scrollable, not whatever Scrollable happens
     // to be first in the tree (the chat route underneath, or a horizontal
@@ -1111,18 +1115,16 @@ void main() {
 
     await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Settings'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
+    await _openDrawerDestination(tester, 'settings');
+    expect(find.byType(SettingsScreen), findsOneWidget);
 
-    expect(find.text('Settings'), findsOneWidget);
-    expect(find.byTooltip('Back to chat'), findsOneWidget);
-    expect(find.text('Chat'), findsOneWidget);
-
-    await tester.tap(find.text('Chat'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
-
+    // Every destination, Settings included, returns to Chat through the
+    // shell's drawer (narrow) or sidebar (wide).
+    await _openDrawerByEdge(tester);
+    expect(find.byKey(const Key('shell-destination-chat')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('shell-destination-chat')));
+    await tester.pumpAndSettle();
+    expect(find.byType(SettingsScreen), findsNothing);
     expect(find.text('New chat'), findsOneWidget);
   });
 
@@ -1694,4 +1696,29 @@ Map<String, dynamic> _permissionModeBody(
       'dangerous': 'ask',
     },
   };
+}
+
+/// Narrow layouts: open the shell's drawer from Chat's menu button and pick
+/// the destination [name] (`runtime`, `settings`…). Bounded pumps: Runtime
+/// shows an indeterminate progress bar while it loads, so it never settles.
+Future<void> _openDrawerDestination(WidgetTester tester, String name) async {
+  await tester.tap(find.byKey(const Key('shell-menu')));
+  await _pumpFor(tester, const Duration(milliseconds: 400));
+  await tester.tap(find.byKey(Key('shell-destination-$name')));
+  await _pumpFor(tester, const Duration(milliseconds: 400));
+}
+
+/// Open the shell's drawer with the edge swipe, which works whatever the
+/// page draws in its own app bar.
+Future<void> _openDrawerByEdge(WidgetTester tester) async {
+  await tester.dragFrom(const Offset(4, 300), const Offset(320, 0));
+  await _pumpFor(tester, const Duration(milliseconds: 400));
+  expect(find.byType(Drawer), findsOneWidget);
+}
+
+Future<void> _pumpFor(WidgetTester tester, Duration total) async {
+  const step = Duration(milliseconds: 50);
+  for (var t = Duration.zero; t < total; t += step) {
+    await tester.pump(step);
+  }
 }

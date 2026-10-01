@@ -1,12 +1,11 @@
-import 'dart:async';
-
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 
 import '../models.dart';
 import '../theme.dart';
-import '../ui/sonder_mark.dart';
-import '../workspace_ui.dart';
+import '../ui/kit.dart';
+import '../ui/status_vocab.dart';
 import 'connection.dart';
 
 /// Colour for a connection state; always paired with its word.
@@ -20,10 +19,30 @@ Color connectionColor(SonderTokens tokens, ConnState state) => switch (state) {
       ConnState.unreachable => tokens.danger,
     };
 
-/// `✓ 127.0.0.1:11435 connected` / `! mypc.local refused` / `✗ can't reach`.
+/// `✓ connected  127.0.0.1:11435` / `! refused  mypc.local` /
+/// `✗ can't reach  …`: the glyph and word first, then the host. The
+/// sentence ("Can't reach 127.0.0.1:11435") is what a screen reader hears.
 class ConnectionRow extends StatelessWidget {
   final ValueListenable<ConnectionStatus> connection;
-  const ConnectionRow({super.key, required this.connection});
+
+  /// Centre the glyph in a column this wide (the sidebar's icon column);
+  /// null hugs the glyph.
+  final double? glyphWidth;
+
+  /// Space between the glyph column and the word.
+  final double gap;
+
+  /// How visible the word and host are: the collapsed rail fades them out
+  /// and keeps the glyph.
+  final double detailOpacity;
+
+  const ConnectionRow({
+    super.key,
+    required this.connection,
+    this.glyphWidth,
+    this.gap = SonderSpace.sm,
+    this.detailOpacity = 1,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -32,28 +51,39 @@ class ConnectionRow extends StatelessWidget {
       valueListenable: connection,
       builder: (context, c, _) {
         final tone = connectionColor(tokens, c.state);
-        return Tooltip(
-          message: c.sentence,
-          child: Semantics(
-            key: const Key('rail-connection'),
-            label: c.sentence,
-            child: ExcludeSemantics(
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(c.glyph,
-                      style: tokens.mono(11,
-                          color: tone, weight: FontWeight.w600)),
-                  const SizedBox(width: 6),
-                  Flexible(
-                    child: Text(c.host,
-                        overflow: TextOverflow.ellipsis,
-                        style: tokens.mono(11, color: tokens.muted)),
+        final glyph = Text(c.glyph,
+            style: tokens.mono(12, color: tone, weight: FontWeight.w600));
+        return Semantics(
+          key: const Key('rail-connection'),
+          label: c.sentence,
+          child: ExcludeSemantics(
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (glyphWidth == null)
+                  glyph
+                else
+                  SizedBox(width: glyphWidth, child: Center(child: glyph)),
+                SizedBox(width: gap),
+                Flexible(
+                  child: Opacity(
+                    opacity: detailOpacity,
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      Text(c.word,
+                          style: tokens.mono(12,
+                              color: tone, weight: FontWeight.w500)),
+                      const SizedBox(width: SonderSpace.sm),
+                      Flexible(
+                        child: Text(c.host,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            softWrap: false,
+                            style: tokens.mono(12, color: tokens.muted)),
+                      ),
+                    ]),
                   ),
-                  const SizedBox(width: 6),
-                  Text(c.word, style: tokens.mono(11, color: tone)),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
         );
@@ -62,211 +92,56 @@ class ConnectionRow extends StatelessWidget {
   }
 }
 
-class ChatDrawer extends StatelessWidget {
-  final List<ChatThread> threads;
-  final String currentThreadId;
-  final VoidCallback onNew;
-  final ValueChanged<ChatThread> onSelect;
-  final ValueChanged<ChatThread> onDelete;
-  final bool embedded;
-  final ValueListenable<ConnectionStatus>? connection;
-  final ValueChanged<WorkspaceDestination>? onNavigate;
-  final VoidCallback? onOpenCommands;
-  final VoidCallback? onOpenRuntime;
-  final VoidCallback? onOpenSettings;
+/// How long ago a conversation last changed, as the sidebar groups it.
+enum ThreadAge {
+  today('Today'),
+  yesterday('Yesterday'),
+  week('Previous 7 days'),
+  older('Older');
 
-  const ChatDrawer({
-    super.key,
-    required this.threads,
-    required this.currentThreadId,
-    required this.onNew,
-    required this.onSelect,
-    required this.onDelete,
-    this.embedded = false,
-    this.connection,
-    this.onNavigate,
-    this.onOpenCommands,
-    this.onOpenRuntime,
-    this.onOpenSettings,
-  });
+  final String label;
+  const ThreadAge(this.label);
 
-  @override
-  Widget build(BuildContext context) {
-    final tokens = SonderTokens.of(context);
-    final text = Theme.of(context).textTheme;
-    final projects = threads.map((t) => t.project).toSet().toList()..sort();
-    return Drawer(
-      shape:
-          embedded ? Border(right: BorderSide(color: tokens.hairline)) : null,
-      child: SafeArea(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (embedded)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 11, 8, 4),
-                child: Row(
-                  children: [
-                    const SonderMark(),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text('Sonder',
-                              style: text.titleSmall?.copyWith(
-                                  fontWeight: FontWeight.w600, height: 1.1)),
-                          Text('Local-first workspace',
-                              style: tokens.mono(10, color: tokens.muted)),
-                        ],
-                      ),
-                    ),
-                    IconButton(
-                      tooltip: 'New chat',
-                      onPressed: onNew,
-                      icon: const Icon(Icons.add, size: 18),
-                    ),
-                  ],
-                ),
-              )
-            else
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 12, 8, 4),
-                child: Row(
-                  children: [
-                    Expanded(child: Text('Chats', style: text.titleSmall)),
-                    IconButton(
-                      tooltip: 'New chat',
-                      onPressed: () {
-                        unawaited(Navigator.of(context).maybePop());
-                        onNew();
-                      },
-                      icon: const Icon(Icons.add_comment_outlined, size: 18),
-                    ),
-                  ],
-                ),
-              ),
-            if (embedded)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 2),
-                child: Text('Chats', style: text.labelSmall),
-              ),
-            Expanded(
-              child: threads.isEmpty
-                  ? Center(
-                      child: Text('No chats yet',
-                          style: text.bodySmall?.copyWith(color: tokens.muted)),
-                    )
-                  : ListView.builder(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 4),
-                      itemCount: threads.length,
-                      itemBuilder: (_, index) {
-                        final thread = threads[index];
-                        return ThreadRow(
-                          key: ValueKey(thread.id),
-                          thread: thread,
-                          selected: thread.id == currentThreadId,
-                          onTap: () => onSelect(thread),
-                          onDelete: threads.length <= 1
-                              ? null
-                              : () => onDelete(thread),
-                        );
-                      },
-                    ),
-            ),
-            if (onNavigate != null)
-              WorkspaceNavigation(
-                  current: WorkspaceDestination.chat,
-                  onSelected: (destination) {
-                    if (!embedded) Navigator.of(context).pop();
-                    onNavigate!(destination);
-                  }),
-            if (projects.isNotEmpty) ...[
-              Divider(height: 1, color: tokens.hairline),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
-                child: Text('Projects', style: text.labelSmall),
-              ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    for (final project in projects.take(4))
-                      Padding(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 8, vertical: 5),
-                        child: Row(
-                          children: [
-                            Container(
-                              width: 7,
-                              height: 7,
-                              decoration: BoxDecoration(
-                                color: tokens.hairlineStrong,
-                                borderRadius: BorderRadius.circular(4),
-                              ),
-                            ),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Text(project,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: text.bodySmall
-                                      ?.copyWith(color: tokens.text2)),
-                            ),
-                          ],
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            ],
-            if (embedded) ...[
-              Divider(height: 1, color: tokens.hairline),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(8, 6, 12, 8),
-                child: Row(
-                  children: [
-                    if (onNavigate == null)
-                      IconButton(
-                        tooltip: 'Runtime',
-                        onPressed: onOpenRuntime,
-                        icon: const Icon(Icons.dashboard_customize_outlined),
-                      ),
-                    IconButton(
-                      tooltip: 'Commands',
-                      onPressed: onOpenCommands,
-                      icon: const Icon(Icons.bolt_outlined),
-                    ),
-                    if (onNavigate == null)
-                      IconButton(
-                        tooltip: 'Settings',
-                        onPressed: onOpenSettings,
-                        icon: const Icon(Icons.settings_outlined),
-                      ),
-                    const Spacer(),
-                    if (connection != null)
-                      Flexible(
-                        flex: 4,
-                        child: ConnectionRow(connection: connection!),
-                      ),
-                  ],
-                ),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
+  /// The group for a conversation last updated at [updated], seen at [now].
+  /// Calendar days in local time: "Yesterday" is the day before today, not
+  /// the last 24 hours.
+  static ThreadAge of(DateTime updated, DateTime now) {
+    final today = DateTime(now.year, now.month, now.day);
+    final day = DateTime(updated.year, updated.month, updated.day);
+    final days = today.difference(day).inDays;
+    if (days <= 0) return ThreadAge.today;
+    if (days == 1) return ThreadAge.yesterday;
+    if (days <= 7) return ThreadAge.week;
+    return ThreadAge.older;
   }
 }
 
-/// One conversation in the rail: its title and its turn count. Delete
-/// stays behind a real button with a label and a 48 dp target.
-class ThreadRow extends StatelessWidget {
+/// [threads] (newest first) in date groups, in [ThreadAge] order, without
+/// empty groups. Order inside a group is kept.
+List<(ThreadAge, List<ChatThread>)> groupThreads(
+    List<ChatThread> threads, DateTime now) {
+  final groups = <ThreadAge, List<ChatThread>>{};
+  for (final thread in threads) {
+    groups
+        .putIfAbsent(ThreadAge.of(thread.updatedAt, now), () => [])
+        .add(thread);
+  }
+  return [
+    for (final age in ThreadAge.values)
+      if (groups[age] case final list?) (age, list),
+  ];
+}
+
+/// One conversation in the sidebar: its title on one line, a working mark
+/// while its turn streams, and Delete revealed on hover or keyboard focus
+/// (and always on the open conversation, so touch can reach it). Screen
+/// readers get Delete as a custom action on the row.
+class ThreadRow extends StatefulWidget {
   final ChatThread thread;
   final bool selected;
+
+  /// The conversation's turn is streaming (it may not be the open one).
+  final bool running;
   final VoidCallback onTap;
   final VoidCallback? onDelete;
 
@@ -276,51 +151,130 @@ class ThreadRow extends StatelessWidget {
     required this.selected,
     required this.onTap,
     required this.onDelete,
+    this.running = false,
   });
+
+  @override
+  State<ThreadRow> createState() => _ThreadRowState();
+}
+
+class _ThreadRowState extends State<ThreadRow> {
+  bool _hover = false;
+  bool _focused = false;
 
   @override
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
     final text = Theme.of(context).textTheme;
-    final n = thread.messages.length;
+    final onDelete = widget.onDelete;
+    final showDelete =
+        onDelete != null && (_hover || _focused || widget.selected);
+    final title = widget.thread.displayTitle;
+    final background = widget.selected
+        ? tokens.raised
+        : _hover
+            ? tokens.raised.withValues(alpha: 0.6)
+            : Colors.transparent;
     return Semantics(
-      selected: selected,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(SonderRadius.row),
-        child: Container(
-          constraints: const BoxConstraints(minHeight: 48),
-          padding: const EdgeInsets.only(left: 10, right: 0),
-          decoration: BoxDecoration(
-            color: selected ? tokens.raised : null,
-            borderRadius: BorderRadius.circular(SonderRadius.row),
-          ),
-          child: Row(
-            children: [
-              Expanded(
-                child: Text(
-                  thread.displayTitle,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: text.bodySmall?.copyWith(
-                    fontSize: 13,
-                    color: selected ? tokens.text : tokens.text2,
+      container: true,
+      selected: widget.selected,
+      customSemanticsActions: onDelete == null
+          ? null
+          : {const CustomSemanticsAction(label: 'Delete chat'): onDelete},
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _hover = true),
+        onExit: (_) => setState(() => _hover = false),
+        child: Focus(
+          canRequestFocus: false,
+          skipTraversal: true,
+          onFocusChange: (focused) => setState(() => _focused = focused),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 1),
+            child: Material(
+              type: MaterialType.transparency,
+              child: InkWell(
+                onTap: widget.onTap,
+                borderRadius: BorderRadius.circular(SonderRadius.row),
+                child: AnimatedContainer(
+                  duration: SonderMotion.of(context, SonderMotion.fast),
+                  curve: SonderMotion.standard,
+                  constraints: const BoxConstraints(minHeight: 48),
+                  padding: const EdgeInsets.only(left: SonderSpace.md),
+                  decoration: BoxDecoration(
+                    color: background,
+                    borderRadius: BorderRadius.circular(SonderRadius.row),
+                  ),
+                  child: Row(
+                    children: [
+                      if (widget.running) ...[
+                        Tooltip(
+                          message: 'Working',
+                          excludeFromSemantics: true,
+                          child: Semantics(
+                            label: StatusKind.running.word,
+                            child: Text(StatusKind.running.glyph,
+                                style: tokens.mono(12,
+                                    color: tokens.accentText,
+                                    weight: FontWeight.w600)),
+                          ),
+                        ),
+                        const SizedBox(width: SonderSpace.sm),
+                      ],
+                      Expanded(
+                        child: Text(
+                          title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          softWrap: false,
+                          style: text.bodyMedium?.copyWith(
+                            color: widget.selected ? tokens.text : tokens.text2,
+                            fontWeight: widget.selected
+                                ? FontWeight.w500
+                                : FontWeight.w400,
+                          ),
+                        ),
+                      ),
+                      if (showDelete)
+                        IconButton(
+                          tooltip: 'Delete chat',
+                          onPressed: onDelete,
+                          iconSize: 16,
+                          icon: Icon(Icons.close, color: tokens.muted),
+                        )
+                      else
+                        const SizedBox(width: SonderSpace.md),
+                    ],
                   ),
                 ),
               ),
-              const SizedBox(width: 8),
-              Tooltip(
-                message: '$n message${n == 1 ? '' : 's'}',
-                child: Text('$n', style: tokens.mono(11, color: tokens.muted)),
-              ),
-              IconButton(
-                tooltip: 'Delete chat',
-                onPressed: onDelete,
-                icon: Icon(Icons.close, size: 14, color: tokens.muted),
-              ),
-            ],
+            ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// Placeholder rows shaped like conversation titles, while history loads.
+class ThreadRowsSkeleton extends StatelessWidget {
+  final int rows;
+  const ThreadRowsSkeleton({super.key, this.rows = 5});
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      label: 'Loading chats',
+      liveRegion: true,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (var i = 0; i < rows; i++)
+            Padding(
+              padding: const EdgeInsets.symmetric(
+                  horizontal: SonderSpace.md, vertical: SonderSpace.lg),
+              child: Skeleton(width: 120.0 + (i * 37) % 90, height: 12),
+            ),
+        ],
       ),
     );
   }

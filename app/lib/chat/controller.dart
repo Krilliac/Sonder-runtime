@@ -152,6 +152,10 @@ class ChatController extends ChangeNotifier {
   int _userId = 0;
   bool get sending => _turn != null;
 
+  /// The thread whose turn is streaming, or null when none is. It need not
+  /// be the current thread: the person may have switched away mid-turn.
+  String? get turnThreadId => _turn == null ? null : _turnThreadId;
+
   bool verboseErrors = false;
 
   /// The tier of the last reply (`code`, `fast`…), for the status line.
