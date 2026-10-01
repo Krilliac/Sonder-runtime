@@ -75,6 +75,40 @@ def test_unscoped_snapshot_uses_the_published_legacy_port_contract(monkeypatch):
     assert calls == [("snapshot", False, 7), ("events", "run-1", 12)]
 
 
+def test_modern_snapshot_projects_progress_and_forwards_owner(monkeypatch):
+    calls = []
+
+    class ModernAutomation:
+        def snapshot(self, **kwargs):
+            calls.append(("snapshot", kwargs))
+            return {"latest": {"id": "run-1", "status": "running"},
+                    "progress": [{"id": "stale-progress"}]}
+
+        def events(self, selector, **kwargs):
+            calls.append(("events", selector, kwargs))
+            return [{
+                "event_id": "evt-1", "run_id": selector, "kind": "planned",
+                "message": "plan ready", "ts": 1,
+            }]
+
+    monkeypatch.setattr(
+        bootstrap_app, "default_app",
+        lambda: SimpleNamespace(automation=ModernAutomation()),
+    )
+
+    result = autopilot_controller.snapshot(request_owner="acct-opaque")
+
+    assert result["progress"]
+    assert result["progress"][0]["run_id"] == "run-1"
+    assert result["progress"][0]["kind"] == "planned"
+    assert calls == [
+        ("snapshot", {
+            "include_finished": True, "limit": 20, "request_owner": "acct-opaque",
+        }),
+        ("events", "run-1", {"limit": 12, "request_owner": "acct-opaque"}),
+    ]
+
+
 def test_scoped_snapshot_never_drops_the_account_owner(monkeypatch):
     calls = []
 

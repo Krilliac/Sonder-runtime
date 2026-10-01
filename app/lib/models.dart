@@ -43,6 +43,9 @@ class ChatResponseMetadata {
   /// `cancelled`, `budget_exceeded`, `interrupted`, `failed`, `unknown`).
   final String workStatus;
 
+  /// Deterministic acknowledgement shown before a routed work run continues.
+  final String acknowledgement;
+
   /// A permission-gate refusal carried by this turn, or null.
   final ChatRefusal? refusal;
 
@@ -66,6 +69,7 @@ class ChatResponseMetadata {
     this.toolCalls = 0,
     this.workRunId = '',
     this.workStatus = '',
+    this.acknowledgement = '',
     this.refusal,
     this.overflow,
   });
@@ -90,9 +94,11 @@ class ChatResponseMetadata {
         toolCalls: _metadataCount(json['tool_calls']),
         workRunId: _workRunIdOrEmpty(json['work_run_id']),
         workStatus: _boundedMetadataText(json['work_status'], 32),
+        acknowledgement: _boundedMetadataText(json['acknowledgement'], 2000),
         refusal: json['refusal'] is Map
             ? ChatRefusal.fromJson(
-                Map<String, dynamic>.from(json['refusal'] as Map))
+                Map<String, dynamic>.from(json['refusal'] as Map),
+              )
             : null,
         overflow: RouteOverflow.fromJson(json['overflow']),
       );
@@ -115,6 +121,7 @@ class ChatResponseMetadata {
         toolCalls: toolCalls,
         workRunId: workRunId ?? this.workRunId,
         workStatus: workStatus ?? this.workStatus,
+        acknowledgement: acknowledgement,
         refusal: refusal,
         overflow: overflow,
       );
@@ -135,6 +142,7 @@ class ChatResponseMetadata {
       toolCalls == 0 &&
       workRunId.isEmpty &&
       workStatus.isEmpty &&
+      acknowledgement.isEmpty &&
       refusal == null &&
       overflow == null;
 
@@ -154,6 +162,7 @@ class ChatResponseMetadata {
         'tool_calls': toolCalls,
         if (workRunId.isNotEmpty) 'work_run_id': workRunId,
         if (workStatus.isNotEmpty) 'work_status': workStatus,
+        if (acknowledgement.isNotEmpty) 'acknowledgement': acknowledgement,
         if (refusal != null) 'refusal': refusal!.toJson(),
         if (overflow != null) 'overflow': overflow!.toJson(),
       };

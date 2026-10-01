@@ -22,6 +22,38 @@ const workRunStatuses = {
   'failed',
 };
 
+/// One concise server-authored narration line for a routed work run.
+class WorkRunProgress {
+  final String id;
+  final String runId;
+  final String text;
+  final String kind;
+  final double at;
+  final bool finalLine;
+
+  const WorkRunProgress({
+    required this.id,
+    required this.runId,
+    required this.text,
+    required this.kind,
+    required this.at,
+    required this.finalLine,
+  });
+
+  factory WorkRunProgress.fromJson(Map<String, dynamic> json) {
+    final rawAt = json['at'];
+    final at = rawAt is num ? rawAt.toDouble() : double.tryParse('$rawAt') ?? 0;
+    return WorkRunProgress(
+      id: boundedResponseMetadata(json['id'], 128),
+      runId: boundedResponseMetadata(json['run_id'], 64),
+      text: boundedResponseMetadata(json['text'], 2000),
+      kind: boundedResponseMetadata(json['kind'], 64),
+      at: at.isFinite && at >= 0 ? at : 0,
+      finalLine: json['final'] == true,
+    );
+  }
+}
+
 final RegExp _runId = RegExp(r'^wr-[0-9a-f]{32}$');
 
 /// Whether [id] has the server's work-run id shape.
@@ -39,6 +71,9 @@ class WorkRun {
   /// The persisted answer. Empty in list results and while running.
   final String output;
   final bool outputTruncated;
+  final List<WorkRunProgress> progress;
+  final bool progressComplete;
+  final String finalSummary;
 
   const WorkRun({
     required this.id,
@@ -49,12 +84,18 @@ class WorkRun {
     this.cancelRequested = false,
     this.output = '',
     this.outputTruncated = false,
+    this.progress = const [],
+    this.progressComplete = true,
+    this.finalSummary = '',
   });
 
   bool get isRunning => status == 'running';
 
   /// True once the run will not change again.
   bool get isTerminal => !isRunning;
+
+  /// A terminal status can still have child fleet/autopilot work in flight.
+  bool get narrationComplete => progressComplete;
 
   /// True when [output] is the answer the chat turn was waiting for.
   bool get hasAnswer => status == 'returned' && output.isNotEmpty;
@@ -86,6 +127,18 @@ class WorkRun {
   factory WorkRun.fromJson(Map<String, dynamic> json) {
     final status = json['status']?.toString() ?? '';
     final output = json['output'] is String ? json['output'] as String : '';
+    final rawProgress = json['progress'];
+    final progress = rawProgress is List
+        ? rawProgress
+            .whereType<Map>()
+            .take(64)
+            .map(
+              (item) =>
+                  WorkRunProgress.fromJson(Map<String, dynamic>.from(item)),
+            )
+            .where((item) => item.text.isNotEmpty)
+            .toList(growable: false)
+        : const <WorkRunProgress>[];
     return WorkRun(
       id: boundedResponseMetadata(json['id'], 64),
       status: workRunStatuses.contains(status) ? status : 'unknown',
@@ -98,6 +151,11 @@ class WorkRun {
       output: output.length <= 200000 ? output : output.substring(0, 200000),
       outputTruncated:
           json['output_truncated'] == true || output.length > 200000,
+      progress: progress,
+      progressComplete: json.containsKey('progress_complete')
+          ? json['progress_complete'] == true
+          : true,
+      finalSummary: boundedResponseMetadata(json['final_summary'], 4000),
     );
   }
 }

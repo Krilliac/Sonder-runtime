@@ -391,6 +391,8 @@ def create_run(prompt: str, models, *, request_owner: str = "", request_role: st
                          [(run_id, model, now) for model in clean_models])
         _event(conn, run_id, "created", "fanout receipt created for %d models" % len(clean_models), now)
         row = conn.execute("SELECT * FROM fanout_runs WHERE id=?", (run_id,)).fetchone()
+    from sonder_runtime.application.ports.work_narration import link
+    link("fanout", run_id)
     return _row(row)
 
 
