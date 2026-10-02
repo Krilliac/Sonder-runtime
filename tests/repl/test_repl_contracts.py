@@ -11,11 +11,14 @@ the Windows VT decision.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import builtins
 import json
 import os
 import subprocess
 import sys
+import threading
 import types
 
 import pytest
@@ -232,10 +235,225 @@ def _assert_private_history(path):
     assert sids == {user_sid, "S-1-5-18", "S-1-5-32-544"}
 
 
-def test_history_file_is_private_capped_and_credential_free(tmp_path):
+@pytest.fixture
+def history_save_diagnostic(monkeypatch):
+    """Temporary, test-local CI probe; delegate every production call unchanged."""
+    @contextmanager
+    def observe(path):
+        report = {
+            "windows": os.name == "nt", "operations": [], "owner": {},
+            "operations_truncated": False,
+        }
+        if os.name != "nt":
+            yield report
+            return
+
+        observed_thread = threading.get_ident()
+
+        def is_observed_thread():
+            return threading.get_ident() == observed_thread
+
+        def record(event):
+            if len(report["operations"]) < 64:
+                report["operations"].append(event)
+            else:
+                report["operations_truncated"] = True
+
+        def error_codes(error):
+            errno = getattr(error, "errno", None)
+            winerror = getattr(error, "winerror", None)
+            if winerror is None and type(error).__module__ == "pywintypes":
+                winerror = error.args[0] if error.args else None
+            return {
+                "ok": False,
+                "errno": errno if isinstance(errno, int) else None,
+                "winerror": winerror if isinstance(winerror, int) else None,
+            }
+
+        def owner_snapshot():
+            # PySID copies own their SID buffers. Its equality calls EqualSid;
+            # validate both operands first and keep tokens alive through reads.
+            import win32api
+            import win32con
+            import win32security
+
+            snapshot = report["owner"]
+            handles = []
+
+            def probe(tag, function, *args):
+                try:
+                    value = function(*args)
+                except Exception as error:
+                    record({"tag": tag, **error_codes(error)})
+                    raise
+                record({"tag": tag, "ok": True})
+                return value
+
+            def compare(tag, left, right):
+                if left.IsValid() and right.IsValid():
+                    snapshot[tag] = bool(left == right)
+
+            try:
+                security = probe(
+                    "probe_owner_read", win32security.GetFileSecurity,
+                    path, win32security.OWNER_SECURITY_INFORMATION,
+                )
+                owner = security.GetSecurityDescriptorOwner()
+                snapshot["owner_valid"] = owner is not None and bool(owner.IsValid())
+                process = probe(
+                    "probe_process_token_open", win32security.OpenProcessToken,
+                    win32api.GetCurrentProcess(), win32con.TOKEN_QUERY,
+                )
+                handles.append(process)
+                user = probe(
+                    "probe_process_user_read", win32security.GetTokenInformation,
+                    process, win32security.TokenUser,
+                )[0]
+                default_owner = probe(
+                    "probe_process_owner_read", win32security.GetTokenInformation,
+                    process, win32security.TokenOwner,
+                )
+                snapshot["process_user_valid"] = bool(user.IsValid())
+                snapshot["process_owner_valid"] = bool(default_owner.IsValid())
+                if snapshot["owner_valid"]:
+                    compare("owner_equals_process_user", owner, user)
+                    compare("owner_equals_process_owner", owner, default_owner)
+                compare("process_owner_equals_user", default_owner, user)
+
+                try:
+                    thread = probe(
+                        "probe_thread_token_open", win32security.OpenThreadToken,
+                        win32api.GetCurrentThread(), win32con.TOKEN_QUERY, True,
+                    )
+                except Exception as error:
+                    # ERROR_NO_TOKEN establishes absence; other errors do not.
+                    if error_codes(error)["winerror"] == 1008:
+                        snapshot["thread_token_present"] = False
+                    return
+                handles.append(thread)
+                snapshot["thread_token_present"] = True
+                thread_user = probe(
+                    "probe_thread_user_read", win32security.GetTokenInformation,
+                    thread, win32security.TokenUser,
+                )[0]
+                thread_owner = probe(
+                    "probe_thread_owner_read", win32security.GetTokenInformation,
+                    thread, win32security.TokenOwner,
+                )
+                snapshot["thread_user_valid"] = bool(thread_user.IsValid())
+                snapshot["thread_owner_valid"] = bool(thread_owner.IsValid())
+                if snapshot["owner_valid"]:
+                    compare("owner_equals_thread_user", owner, thread_user)
+                    compare("owner_equals_thread_owner", owner, thread_owner)
+                compare("thread_user_equals_process_user", thread_user, user)
+            except Exception:
+                # Diagnostic failure cannot change a delegated call's outcome.
+                snapshot["probe_incomplete"] = True
+            finally:
+                for handle in reversed(handles):
+                    try:
+                        probe("probe_token_close", handle.Close)
+                    except Exception:
+                        snapshot["probe_close_failed"] = True
+
+        def trace(tag, function, *, boolean=False, snapshot=False):
+            def delegated(*args, **kwargs):
+                if not is_observed_thread():
+                    return function(*args, **kwargs)
+                try:
+                    result = function(*args, **kwargs)
+                except Exception as error:
+                    record({"tag": tag, **error_codes(error)})
+                    raise
+                event = {"tag": tag, "ok": True}
+                if boolean:
+                    event["result"] = bool(result)
+                record(event)
+                if snapshot:
+                    try:
+                        owner_snapshot()
+                    except Exception as error:
+                        record({
+                            "tag": "probe_setup", **error_codes(error),
+                        })
+                return result
+            return delegated
+
+        class OsProbe:
+            def __init__(self, delegate):
+                self._delegate = delegate
+                self._descriptors = {}
+
+            def __getattr__(self, name):
+                function = getattr(self._delegate, name)
+                if name == "open":
+                    def delegated_open(*args, **kwargs):
+                        if not is_observed_thread():
+                            return function(*args, **kwargs)
+                        flags = args[1] if len(args) > 1 else kwargs["flags"]
+                        phase = "create" if flags & os.O_EXCL else "write"
+                        descriptor = trace(phase + "_open", function)(*args, **kwargs)
+                        self._descriptors[descriptor] = phase
+                        return descriptor
+                    return delegated_open
+                if name == "close":
+                    def delegated_close(*args, **kwargs):
+                        if not is_observed_thread():
+                            return function(*args, **kwargs)
+                        descriptor = args[0] if args else kwargs.get("fd")
+                        phase = self._descriptors.get(descriptor, "other")
+                        try:
+                            return trace(phase + "_close", function)(*args, **kwargs)
+                        finally:
+                            self._descriptors.pop(descriptor, None)
+                    return delegated_close
+                if name in {"write", "fchmod", "lstat"}:
+                    return trace(name, function)
+                return function
+
+        private_files = sonder_repl.private_files
+        with monkeypatch.context() as scoped:
+            # Rebind module attributes, never mutate shared os or ctypes APIs.
+            scoped.setattr(sonder_repl, "os", OsProbe(sonder_repl.os))
+            scoped.setattr(private_files, "os", OsProbe(private_files.os))
+            for name, tag, boolean, snapshot in (
+                ("_is_regular", "regular", True, False),
+                ("_is_reparse_point", "reparse", True, False),
+                ("_windows_sddl", "owner_read", False, False),
+                ("_windows_user_sid", "process_user_read", False, False),
+                ("_windows_owned_by_me", "owner_guard", True, True),
+                ("_windows_set_sddl", "acl_set", False, False),
+                ("_windows_restrict", "acl_guard", True, False),
+                ("restrict_private_file_acl", "private_file_guard", True, False),
+            ):
+                scoped.setattr(private_files, name, trace(
+                    tag, getattr(private_files, name),
+                    boolean=boolean, snapshot=snapshot,
+                ))
+            original_api = private_files._windows_api
+
+            def api_probe():
+                if not is_observed_thread():
+                    return original_api()
+                result = trace("api_load", original_api)()
+                report["api_available"] = result is not None
+                return result
+
+            scoped.setattr(private_files, "_windows_api", api_probe)
+            scoped.setattr(sonder_repl, "_prepare_windows_history_file", trace(
+                "history_prepare", sonder_repl._prepare_windows_history_file,
+                boolean=True,
+            ))
+            yield report
+    return observe
+
+
+def test_history_file_is_private_capped_and_credential_free(tmp_path, history_save_diagnostic):
     path = str(tmp_path / "repl_history")
     entries = ["/cmd %d" % i for i in range(250)] + ["/login a b", "token=abc", "multi\nline"]
-    assert sonder_repl._save_history(entries, path)
+    with history_save_diagnostic(path) as diagnostic:
+        saved = sonder_repl._save_history(entries, path)
+    assert saved, diagnostic
     _assert_private_history(path)
     loaded = sonder_repl._load_history(path)
     assert len(loaded) == sonder_repl.REPL_HISTORY_LIMIT
