@@ -41,7 +41,10 @@ def isolated_home(tmp_path, monkeypatch):
 
 
 @pytest.fixture()
-def backup_dir(isolated_home, tmp_path, capsys) -> Path:
+def backup_dir(isolated_home, isolated_default_runtime, tmp_path, capsys) -> Path:
+    # ``backup create`` composes the process-default runtime from its config,
+    # as the real CLI process would; isolated_default_runtime confines that
+    # runtime to the test using this fixture.
     assert main(["migrate", "--store", "operations"]) == 0
     capsys.readouterr()
     target = tmp_path / "backups"

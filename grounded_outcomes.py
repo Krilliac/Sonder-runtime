@@ -124,7 +124,9 @@ _STATS = {
 # Where ``_format_run_result``'s header block ends and the child's own output
 # begins. Everything after one of these lines is text the verified program
 # chose, so nothing after them may be read as a report about the verifier.
-_RENDERED_OUTPUT_HEADERS = ("stdout:", "stderr:")
+# The ``digest:`` block is that same text, distilled (its summary, FAILED/ERROR
+# and file:line lines), and it is rendered before the streams.
+_RENDERED_OUTPUT_HEADERS = ("digest:", "stdout:", "stderr:")
 
 # Every verdict line this codebase actually emits, keyed by the field name and
 # mapping its two rendered values to a pass/fail. Derived by reading the
@@ -263,12 +265,13 @@ def rendered_infrastructure_error(observation) -> str:
 
     Read strictly, and only from the header block. ``_format_run_result``
     emits its ``ok:``/``returncode:``/``timed_out:``/``error:`` lines first and
-    then the child's own ``stdout:``/``stderr:`` blocks, and a failing test
-    suite prints whatever it likes -- including lines that look exactly like an
-    infrastructure report. Reading past the first header would let a genuine
-    failure disguise itself as "nothing was measured", and a lost negative is
-    the worse mistake here: the caller-judged population is short of failures
-    already. So parsing stops at the first output header.
+    then the child's own output (a ``digest:`` of it, then its ``stdout:``/
+    ``stderr:`` blocks), and a failing test suite prints whatever it likes --
+    including lines that look exactly like an infrastructure report. Reading
+    past the first such header would let a genuine failure disguise itself as
+    "nothing was measured", and a lost negative is the worse mistake here: the
+    caller-judged population is short of failures already. So parsing stops at
+    the first output header.
 
     ``test_the_two_predicates_agree`` pins this against
     ``evaluation_infrastructure_error`` over the same measured result dicts, so

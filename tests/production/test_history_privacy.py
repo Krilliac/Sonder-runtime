@@ -322,6 +322,79 @@ def test_git_inventory_timeout_fails_closed(tmp_path, monkeypatch):
         module.inspect(repo)
 
 
+def test_inventory_capture_leaves_the_file_position_alone_while_git_writes(
+    tmp_path, monkeypatch,
+):
+    """Git writes the inventory through a handle sharing the capture's position.
+
+    On Windows ``tell()`` goes through SetFilePointerEx, which is not atomic
+    against git's writes to the same file object: a chunk git writes in
+    between can be rewound and overwritten, and the inventory loses 4 KiB.
+    Polling ``tell()`` damaged 12 of 80 captures of this repository's history:
+    8 failed as "malformed", and 4 parsed, so the gate would have passed
+    without ever seeing the lost entries. Only after git exits may the capture
+    be positioned or read.
+    """
+    module = _module()
+    repo = _repo(tmp_path)
+    real_popen = module.subprocess.Popen
+    real_temporary_file = module.tempfile.TemporaryFile
+    started = []
+    touched_while_running = []
+
+    class RunningForThreePolls(real_popen):
+        """A real git process that first reports itself running, so the
+        capture loop always polls at least once however fast git is."""
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._pending_polls = 3
+            started.append(self)
+
+        def poll(self):
+            if self._pending_polls:
+                self._pending_polls -= 1
+                return None
+            return super().poll()
+
+    class Watched:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def _note(self, name):
+            if any(process.returncode is None for process in started):
+                touched_while_running.append(name)
+
+        def tell(self):
+            self._note("tell")
+            return self._inner.tell()
+
+        def seek(self, *args):
+            self._note("seek")
+            return self._inner.seek(*args)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return self._inner.__exit__(*exc)
+
+    monkeypatch.setattr(module.subprocess, "Popen", RunningForThreePolls)
+    monkeypatch.setattr(
+        module.tempfile, "TemporaryFile",
+        lambda *args, **kwargs: Watched(real_temporary_file(*args, **kwargs)),
+    )
+
+    objects = module._git_objects(repo)
+
+    assert len(started) == 4  # three rev-parse probes and the log inventory
+    assert [path for _object_id, path in objects] == ["README.md"]
+    assert touched_while_running == []
+
+
 def test_text_diagnostic_escapes_control_paths(monkeypatch, capsys):
     module = _module()
     control_path = "private\x1b[31m/.env"
