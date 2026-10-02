@@ -4708,7 +4708,7 @@ def main(*, machine_output=False):
                                 "fanout",
                             ):
                                 mode = requested_mode
-                                task = parts[1] if len(parts) > 1 else ""
+                                task = text if parts[0].lower() in ("fleet", "swarm", "fanout") else (parts[1] if len(parts) > 1 else "")
                         _emit(server.master_orchestrate(task=task, mode=mode))
                     elif cmd == "/lessons":
                         _print_lessons()

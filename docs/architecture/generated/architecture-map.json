@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 393,
+      "file_count": 397,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -171,6 +171,10 @@
         "sonder_runtime/adapters/filesystem/workbench.py",
         "sonder_runtime/adapters/filesystem/workflow_store.py",
         "sonder_runtime/adapters/filesystem/workspace_manifest.py",
+        "sonder_runtime/adapters/fleet_aggregation.py",
+        "sonder_runtime/adapters/fleet_creations.py",
+        "sonder_runtime/adapters/fleet_synthesis.py",
+        "sonder_runtime/adapters/fleet_workers.py",
         "sonder_runtime/adapters/gateway_generation.py",
         "sonder_runtime/adapters/git/__init__.py",
         "sonder_runtime/adapters/git_discovery.py",
@@ -912,7 +916,7 @@
       ]
     },
     {
-      "file_count": 272,
+      "file_count": 274,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1053,6 +1057,8 @@
         "sonder_runtime/domain/fanout_redaction.py",
         "sonder_runtime/domain/fanout_residency.py",
         "sonder_runtime/domain/fanout_worker_identity.py",
+        "sonder_runtime/domain/fleet_briefing.py",
+        "sonder_runtime/domain/fleet_intent.py",
         "sonder_runtime/domain/fleet_pressure.py",
         "sonder_runtime/domain/health_formatting.py",
         "sonder_runtime/domain/host_tools/__init__.py",
