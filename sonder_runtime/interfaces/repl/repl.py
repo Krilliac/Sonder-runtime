@@ -500,10 +500,9 @@ def _load_history(path=None):
 
 def _prepare_windows_history_file(path):
     # Establish confidentiality and refuse an existing link before the
-    # writer can truncate it. O_EXCL precreates only a missing empty file.
+    # writer can truncate it. CREATE_NEW precreates only a missing private file.
     try:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        os.close(os.open(path, flags, 0o600))
+        private_files.create_private_windows_file(path)
     except FileExistsError:
         pass
     except OSError:

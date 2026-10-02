@@ -237,6 +237,66 @@ def _windows_restrict(path: str, *, directory: bool, label: bool) -> bool:
     return True
 
 
+def create_private_windows_file(path: str | os.PathLike[str]) -> None:
+    """Create one missing, empty Windows file owned by this process's user.
+
+    Its protected DACL grants only that user, SYSTEM and Administrators.
+    Raise FileExistsError for an existing path; callers must still apply
+    their regular-file, reparse, owner and ACL guards before writing.
+    """
+    api = _windows_api()
+    if api is None:
+        raise OSError("Windows private-file creation is unavailable")
+    ctypes, wintypes, advapi32, kernel32 = api
+
+    class SecurityAttributes(ctypes.Structure):
+        _fields_ = [
+            ("nLength", wintypes.DWORD),
+            ("lpSecurityDescriptor", ctypes.c_void_p),
+            ("bInheritHandle", wintypes.BOOL),
+        ]
+
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+        ctypes.POINTER(SecurityAttributes), wintypes.DWORD,
+        wintypes.DWORD, wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    user = _windows_user_sid()
+    sddl = "O:%sD:P(A;;FA;;;%s)(A;;FA;;;SY)(A;;FA;;;BA)" % (user, user)
+    descriptor = ctypes.c_void_p()
+    invalid_handle = ctypes.c_void_p(-1).value
+    handle = invalid_handle
+    try:
+        if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl, _SDDL_REVISION_1, ctypes.byref(descriptor), None,
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        attributes = SecurityAttributes(
+            ctypes.sizeof(SecurityAttributes), descriptor.value, False,
+        )
+        # GENERIC_WRITE, no sharing, CREATE_NEW, FILE_ATTRIBUTE_NORMAL.
+        handle = create_file(os.fspath(path), 0x40000000, 0,
+                             ctypes.byref(attributes), 1, 0x80, None)
+        if handle is None or handle == invalid_handle:
+            code = ctypes.get_last_error()
+            error = ctypes.WinError(code)
+            if code in (80, 183):
+                raise FileExistsError(error.errno, error.strerror, os.fspath(path)) from error
+            raise error
+    finally:
+        try:
+            if handle is not None and handle != invalid_handle:
+                if not kernel32.CloseHandle(handle):
+                    raise ctypes.WinError(ctypes.get_last_error())
+        finally:
+            if descriptor.value:
+                kernel32.LocalFree(descriptor)
+
+
 def restrict_private_file_acl(path: str | os.PathLike[str]) -> bool:
     """Protect an owned regular Windows file for user, SYSTEM and Administrators.
 
@@ -556,6 +616,7 @@ __all__ = [
     "PRIVATE_FILE_MODE",
     "TRAVERSE_DIR_MODE",
     "SQLITE_SIDECAR_SUFFIXES",
+    "create_private_windows_file",
     "ensure_private_dir",
     "low_integrity_readable",
     "low_integrity_readable_state_files",
