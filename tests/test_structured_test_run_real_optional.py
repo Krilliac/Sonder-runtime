@@ -1,8 +1,11 @@
 """Real cargo and go runs (offline, no dependencies), skipped per tool."""
 from __future__ import annotations
 
+import os
 import shutil
+import subprocess
 import time
+from pathlib import Path
 
 import pytest
 
@@ -22,9 +25,32 @@ def _finish(stack, job_id, limit=240.0):
     raise AssertionError("run did not finish")
 
 
+def _use_bundled_msvc_linker(monkeypatch):
+    if os.name != "nt":
+        return
+    compiler = shutil.which("rustc")
+    assert compiler is not None, "Cargo integration requires its Rust compiler"
+    options = {"check": True, "capture_output": True, "text": True,
+               "encoding": "utf-8", "timeout": 10}
+    version = subprocess.run([compiler, "-vV"], **options).stdout
+    host = next(line.removeprefix("host: ") for line in version.splitlines()
+                if line.startswith("host: "))
+    if not host.endswith("-windows-msvc"):
+        return
+    sysroot = Path(subprocess.run([compiler, "--print", "sysroot"], **options).stdout.strip())
+    linker = sysroot / "lib" / "rustlib" / host / "bin" / "rust-lld.exe"
+    assert linker.is_file(), "The MSVC Rust distribution must include its LLVM linker"
+    # MSVC link.exe may leave a telemetry child after this failing crate exits.
+    # Keep this parser fixture self-contained; forced descendant cleanup must
+    # still cancel real jobs rather than masquerade as ordinary test failure.
+    key = "CARGO_TARGET_" + host.replace("-", "_").upper() + "_LINKER"
+    monkeypatch.setenv(key, str(linker))
+
+
 @pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo not installed")
 def test_cargo_libtest_totals(stack, monkeypatch):
     monkeypatch.setenv("CARGO_NET_OFFLINE", "true")
+    _use_bundled_msvc_linker(monkeypatch)
     crate = stack.allowed / "crate"
     (crate / "src").mkdir(parents=True)
     (crate / "Cargo.toml").write_text('[package]\nname = "crate1"\nversion = "0.1.0"\nedition = "2021"\n')

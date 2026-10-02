@@ -346,6 +346,7 @@ def test_start_registers_process_identity_and_posix_group_for_cleanup():
     assert started.process_id == 77
     assert started.process_group_id == 77
     assert launch["kwargs"]["start_new_session"] is True
+    assert launch["kwargs"]["encoding"] == "utf-8"
     assert launch["kwargs"]["env"]["SONDER_TEST"] == "1"
     assert launch["kwargs"]["cwd"] == str(Path("C:/workspace"))
 

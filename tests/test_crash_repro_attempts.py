@@ -8,6 +8,7 @@ fake services and checks what was recorded.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -27,7 +28,8 @@ from tests.test_debug_crash_fix import MAPPED, TestFailure, _report
 
 pytestmark = pytest.mark.unit
 
-PROJECT = "/w/game"
+# The REPL records the project spelling carried by its Path context.
+PROJECT = str(Path("/w/game"))
 
 
 @dataclass(frozen=True)
