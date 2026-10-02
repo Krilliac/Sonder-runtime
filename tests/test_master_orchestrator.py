@@ -980,7 +980,13 @@ def test_cancel_master_skips_queued_workers_and_discards_running_result(monkeypa
         snap = master_orchestrator.snapshot(include_finished=False, limit=20)
         master_id = next(row["id"] for row in snap["agents"] if row["role"] == "master")
 
+        assert master_orchestrator.reserved_slot_count() == 5
         canceled = master_orchestrator.request_cancel(master_id)
+        # Only the running worker and coordinator still own capacity.
+        assert master_orchestrator.reserved_slot_count() == 2
+        repeated = master_orchestrator.request_cancel(master_id)
+        assert repeated["queued"] == 0
+        assert master_orchestrator.reserved_slot_count() == 2
     finally:
         # Keep the worker/coordinator inside the test even if an assertion
         # fails, before fixture teardown or interpreter shutdown can race it.
@@ -998,6 +1004,7 @@ def test_cancel_master_skips_queued_workers_and_discards_running_result(monkeypa
     final = master_orchestrator.snapshot(limit=20)
     assert final["active_agents"] == 0
     assert {row["status"] for row in final["agents"]} == {"cancelled"}
+    assert master_orchestrator.reserved_slot_count() == 0
 
 
 def test_cancelled_queued_worker_cannot_transition_to_running():

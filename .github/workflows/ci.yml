@@ -253,6 +253,8 @@ jobs:
           tests/test_curriculum_store_durability.py
           tests/test_fleet_store.py
           tests/test_adaptive_concurrency.py
+          tests/test_master_orchestrator.py
+          tests/test_fleet_reservations.py
           tests/test_tool_gateway_effect_crash_matrix.py
           tests/test_autopilot_controller.py
           tests/test_codegen_build_loop_server.py
