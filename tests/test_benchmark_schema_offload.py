@@ -508,11 +508,12 @@ def test_a_key_outside_the_schema_is_ignored_rather_than_penalised():
 
 
 def test_recording_refuses_until_an_outcome_row_can_carry_its_provenance():
-    # calibration.measure aggregates by signal name alone, and
-    # calibration.should_verify gates runtime behaviour off the result -- so an
-    # unmarked benchmark row moves the control loop this harness measures. A
-    # disclosure in the writer's output never reaches the reader who quotes the
-    # number, so the refusal is the mechanism and the prose is not.
+    # Recorded provenance (#62) keeps a benchmark row out of the caller-judged
+    # population calibration.should_verify reads, but no source names a
+    # benchmark, so a recorded row would count as the runtime's own verdict on
+    # real work. A disclosure in the writer's output never reaches the reader
+    # who quotes the number, so the refusal is the mechanism and the prose is
+    # not.
     assert bench.PROVENANCE_AVAILABLE is False
     with pytest.raises(bench.SchemaBenchmarkError) as excinfo:
         bench.run_live(record=True)

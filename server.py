@@ -5691,7 +5691,7 @@ def _require_schema_match(text, schema):
 
 
 def _file_schema_rejection(interaction_id):
-    """File a schema violation as a caller-judged `rejected` outcome.
+    """File a schema violation as a machine-graded `rejected` outcome.
 
     A schema failure is the rare thing the outcome store is starved of: a
     negative verdict on delegated work, produced without anyone having to
@@ -5702,18 +5702,27 @@ def _file_schema_rejection(interaction_id):
     a *plausible* generation from a time-bounded ledger; here the failing
     interaction id is known exactly, and guessing would be strictly worse.
 
-    `rejected` and not `failed`: `failed` is the machine-graded bucket that the
-    self-generated curriculum floods by more than an order of magnitude, where
-    a real caller-facing rejection is invisible to the only quality figure
-    worth trusting. A conforming response deliberately files nothing -- matching
-    a shape is not evidence that the answer was good, and recording `accepted`
-    for it would raise the reviewed rate on something that never measured
-    quality.
+    Provenance `machine`, for the reason the code gate's `failed` is: the host
+    checked THIS interaction's own output against the caller's schema, so the
+    link is exact, but nobody judged anything. This was written before
+    `outcomes.source` existed, to land in the caller-judged population by its
+    signal name; under recorded provenance that population is caller verdicts
+    only (#62), so this counts as autograded. It is still never buried in the
+    self-generated curriculum: `outcomes_by_source` keeps `machine` apart from
+    `self_curriculum`. It was briefly filed as `attributed` -- the heuristic
+    label this docstring rules out -- which also exempted it from the lesson
+    eviction gate that every exact machine verdict feeds.
+
+    A conforming response deliberately files nothing -- matching a shape is not
+    evidence that the answer was good, and recording `accepted` for it would
+    raise a pass rate on something that never measured quality.
     """
     if not interaction_id:
         return
     try:
-        _record_outcome_signal(interaction_id, "rejected")
+        _record_outcome_signal(
+            interaction_id, "rejected", source=reward_rules.OUTCOME_SOURCE_MACHINE,
+        )
     except Exception:
         # Bookkeeping must never mask the schema failure it is describing.
         pass
@@ -11061,8 +11070,16 @@ def _record_file_activity(
 _INTERACTION_ID_RE = re.compile(r"\[interaction_id:\s*([0-9A-Za-z_-]+)\]")
 
 
-def _record_outcome_signal(interaction_id: str, signal: str) -> None:
-    """Write one machine-attributed outcome, crediting the lesson that was used.
+def _record_outcome_signal(
+    interaction_id: str, signal: str, *,
+    source: str = reward_rules.OUTCOME_SOURCE_ATTRIBUTED,
+) -> None:
+    """Write one host-observed outcome, crediting the lesson that was used.
+
+    ``source`` defaults to ``attributed`` because the main caller,
+    ``_feed_grounded_outcome``, matches a later verification back to a
+    generation heuristically. A caller that knows the interaction id exactly --
+    the schema gate -- passes ``machine``.
 
     #62 unblocked this. It used to call ``record_outcome_row`` directly and so
     skipped three things the model-facing wrapper does. Two are now safe to
@@ -11075,11 +11092,12 @@ def _record_outcome_signal(interaction_id: str, signal: str) -> None:
       ``lesson_usage_stats`` aggregates reward with no provenance filter and
       feeds ``retriever.lesson_quarantine``, so crediting here would have let
       machine verdicts evict live lessons from retrieval. The credit now
-      carries ``outcome_source='machine'`` and the eviction gate excludes that
-      one source (``memory_rules.EVICTION_INELIGIBLE_OUTCOME_SOURCES``), so the
-      evidence is recorded and visible without reaching the gate. That
-      de-blends the metric instead of blending it, which is what the original
-      objection asked for.
+      carries this row's ``source``, and the eviction gate excludes exactly
+      ``attributed`` (``memory_rules.EVICTION_INELIGIBLE_OUTCOME_SOURCES``):
+      a heuristic match is recorded and visible without reaching the gate,
+      while an exact ``machine`` verdict drives it as the code gate's does.
+      That de-blends the metric instead of blending it, which is what the
+      original objection asked for.
     * **Still refused -- the distillation claim/cancel.** Not a provenance
       problem, a liveness one. This runs inside ``_feed_grounded_outcome`` on
       the tool-observation path, which has no way to *finish* a distillation:
@@ -11091,7 +11109,7 @@ def _record_outcome_signal(interaction_id: str, signal: str) -> None:
     try:
         memory_store.record_outcome_and_claim_lesson_distillation(
             conn, interaction_id, signal, reward_rules.reward_score(signal),
-            source=reward_rules.OUTCOME_SOURCE_ATTRIBUTED,
+            source=source,
             claim_distillation=False,
         )
     finally:
@@ -17851,9 +17869,13 @@ def _agent_generate_decision(
         getattr(gen, "last_response_meta", {}).get("done_reason") == "length"
     )
     error = None
+    from sonder_runtime.domain.agents.tool_args import normalize_decision_aliases
+
     for attempt in range(repair_limit + 1):
         try:
-            decision = _extract_agent_json(raw)
+            # A8: canonicalize the alternate {"name", "arguments"} envelope
+            # before the structural checks below read "tool"/"args".
+            decision = normalize_decision_aliases(_extract_agent_json(raw))
             if not isinstance(decision, dict):
                 raise ValueError("agent decision must be a JSON object")
             if require_final and "final" not in decision:
