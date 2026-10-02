@@ -15,6 +15,11 @@ import server
 
 def _agent_with(monkeypatch, responses, observation):
     prompts, dispatches = [], []
+    # These canaries count model-selected web calls. A predictor warmed by an
+    # earlier test can also predispatch an unrelated read-only inspection.
+    # Speculative dispatch has its own integration tests; keep this guard's
+    # dispatch accounting independent of that process-shared predictor.
+    monkeypatch.setenv("SONDER_SPECULATION", "0")
 
     def generate(prompt, history=None):
         prompts.append(prompt)
