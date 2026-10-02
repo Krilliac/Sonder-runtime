@@ -149,7 +149,9 @@ def classify_file_intent(text: str) -> dict[str, Any] | None:
     if _CREATIVE_TEXT.search(value) and not has_explicit_file:
         return None
 
-    mutation = bool(_MUTATION_REQUEST.search(value))
+    # Quoted examples cannot supply an action cue. Keep their text available
+    # below so a quoted filename in a real request still identifies a target.
+    mutation = bool(_MUTATION_REQUEST.search(_QUOTED.sub(" ", value)))
     mutation_target = bool(_MUTATION_TARGET.search(value) or _EXPLICIT_FILE.search(value))
     inspection = bool(_INSPECTION.search(value) and _LOCAL_TARGET.search(value))
 

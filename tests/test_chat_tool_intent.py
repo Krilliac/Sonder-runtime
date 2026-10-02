@@ -59,6 +59,34 @@ def test_explicit_file_mutations_use_workbench(prompt):
     assert result["actions"] == ["write"]
 
 
+@pytest.mark.parametrize("delimiter", ["'", '"', "`"])
+def test_quoted_mutation_example_keeps_read_request_in_inspection(delimiter):
+    prompt = (
+        "list the examples in README.md, including "
+        f"{delimiter}and write fake.py{delimiter}"
+    )
+    for classify in (classify_file_intent, intents.classify_execution):
+        result = classify(prompt)
+        assert result["mode"] == "inspection"
+        assert result["actions"] == ["read"]
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "write a note to 'summary.txt'",
+        "list the examples in README.md, including 'and write fake.py', "
+        "then write a summary to 'summary.txt'",
+        "How many files are here, and save the count to 'count.txt'",
+        "/delegate write a report to 'notes.md'",
+    ],
+)
+def test_unquoted_mutation_with_quoted_filename_still_uses_workbench(prompt):
+    result = classify_file_intent(prompt)
+    assert result["mode"] == "workbench"
+    assert result["actions"] == ["write"]
+
+
 @pytest.mark.parametrize(
     "prompt",
     [
