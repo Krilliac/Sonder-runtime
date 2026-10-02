@@ -44,6 +44,9 @@ Outcome classes, one per invocation:
     timeout        the watchdog fired -- a defect or a missing bound
     skipped        the surface cannot express the call (a multi-line argument)
 
+The in-process watchdog requires POSIX ``SIGALRM``/``setitimer``; on
+Windows, run this instrument under WSL.
+
 Usage::
 
     python scripts/surface_sweep.py --out eval_runs/sweep [--mode manual|auto|plan]
@@ -331,9 +334,17 @@ def classify(text: str, *, exception: BaseException | None = None,
 # --- watchdog ---------------------------------------------------------------------
 
 
+def _require_posix_watchdog():
+    if not all(hasattr(signal, name) for name in ("SIGALRM", "setitimer", "ITIMER_REAL")):
+        raise RuntimeError(
+            "surface sweep requires POSIX SIGALRM/setitimer; run it under WSL on Windows"
+        )
+
+
 @contextlib.contextmanager
 def watchdog(seconds: float):
     """Raise ``SweepTimeout`` in the main thread after ``seconds``."""
+    _require_posix_watchdog()
     if threading.current_thread() is not threading.main_thread() or seconds <= 0:
         yield
         return
@@ -549,6 +560,7 @@ class Sweep:
             )(server.control_command(line)))
 
     def sweep_console(self) -> None:
+        _require_posix_watchdog()
         import builtins
         import sonder_runtime.interfaces.repl.repl as sonder_repl
 
@@ -1015,6 +1027,10 @@ def main(argv=None) -> int:
     unknown = [s for s in surfaces if s not in SURFACES]
     if unknown:
         parser.error("unknown surfaces: %s" % ", ".join(unknown))
+    try:
+        _require_posix_watchdog()
+    except RuntimeError as exc:
+        parser.error(str(exc))
     sweep = Sweep(out_dir=args.out, mode=args.mode, surfaces=surfaces, only=tuple(args.only),
                   timeout=args.timeout, live_model=args.live_model,
                   live_network=args.live_network)

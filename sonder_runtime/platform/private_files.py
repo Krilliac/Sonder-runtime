@@ -237,6 +237,18 @@ def _windows_restrict(path: str, *, directory: bool, label: bool) -> bool:
     return True
 
 
+def restrict_private_file_acl(path: str | os.PathLike[str]) -> bool:
+    """Protect an owned regular Windows file for user, SYSTEM and Administrators.
+
+    Return False for unsupported hosts, links, foreign owners or failed ACLs.
+    Call before writing private contents; unrelated store behavior is unchanged.
+    """
+    if os.name != "nt":
+        return False
+    text = os.fspath(path)
+    return _is_regular(text) and _windows_restrict(text, directory=False, label=False)
+
+
 def low_integrity_readable(path: str | os.PathLike[str]) -> bool:
     """Whether a low-integrity process of this user could read *path*.
 
@@ -550,6 +562,7 @@ __all__ = [
     "prepare_private_file",
     "protect_state_from_low_integrity",
     "prepare_private_sqlite",
+    "restrict_private_file_acl",
     "restrict_to_owner",
     "state_secret_files",
     "supported",
