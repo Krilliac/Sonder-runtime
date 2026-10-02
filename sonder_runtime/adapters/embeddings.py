@@ -193,7 +193,13 @@ def local_manifest_revision(model=None, models_root=None):
         configured = os.environ.get("OLLAMA_MODELS", "").strip()
         if configured:
             roots.append(Path(configured))
-        roots.append(Path.home() / ".ollama" / "models")
+        try:
+            roots.append(Path.home() / ".ollama" / "models")
+        except (OSError, RuntimeError):
+            # A service or hermetic child may have no user profile. An
+            # unavailable optional manifest cannot prevent startup; an
+            # explicit OLLAMA_MODELS root still takes precedence.
+            pass
     for root in roots:
         manifest = root.joinpath(
             "manifests", "registry.ollama.ai", *parts, tag,
