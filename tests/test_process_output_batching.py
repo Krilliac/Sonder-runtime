@@ -51,6 +51,9 @@ def _identity(job_id: str) -> JobIdentity:
 def _request(job_id: str, code: str, *args: str) -> ProcessJobRequest:
     return ProcessJobRequest(
         _identity(job_id), (sys.executable, "-c", code, *args), max_descendants=4,
+        # Only a retained Windows Job Object can prove tree cleanup;
+        # the taskkill fallback truthfully keeps cancellation pending.
+        require_job_scope=os.name == "nt",
     )
 
 
