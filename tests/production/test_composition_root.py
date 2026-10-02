@@ -48,6 +48,7 @@ def test_build_application_retains_exact_typed_config_and_uses_its_profile():
     assert application.profile == "server-private"
 
 
+@pytest.mark.usefixtures("isolated_default_runtime")
 def test_default_app_passes_typed_config_to_the_lazy_lifecycle():
     config = SonderConfig(profile="server-private")
     bootstrap_app.reset_for_tests()

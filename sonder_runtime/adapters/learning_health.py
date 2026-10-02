@@ -56,19 +56,20 @@ def _lesson_sources(conn) -> tuple[dict[str, int], int, int]:
     return dict(sorted(sources.items())), grounded, orphaned
 
 
-# Signals a machine produced by running the code, versus signals something
-# with judgement recorded after looking at the answer. They measure different
-# things and must not be averaged into one number: the autograded population is
+# Verdicts a machine produced, versus verdicts something with judgement
+# recorded after looking at the answer. They measure different things and must
+# not be averaged into one number: the autograded population is dominated by
 # self-generated curriculum/ladder work (curriculum_run.py, game_ladder.py)
 # that the runtime both sets and marks, and it outnumbers reviewed outcomes by
 # more than an order of magnitude. A blended "positive percent" therefore
 # reports how often the runtime passes its own exams, while reading like how
 # often the model is right on a caller's real task.
-_AUTOGRADED_SIGNALS = frozenset({"tests_passed", "failed", "compiled"})
-
-# `outcomes.source` (#62) replaced the signal-name proxy above for the reviewed
-# split. The proxy was the best reading available of an unrecorded fact, and it
-# was wrong in both directions: `accepted` is written by artifact_verify and
+#
+# `outcomes.source` (#62) replaced a signal-name proxy for this split
+# (`tests_passed`/`failed`/`compiled` meant autograded; the constant is gone
+# because nothing read it but a test that therefore checked nothing). The
+# proxy was the best reading available of an unrecorded fact, and it was wrong
+# in both directions: `accepted` is written by artifact_verify and
 # ground_artifact with nobody reviewing anything, and a caller who ran the tests
 # themselves and honestly reported `tests_passed` was filed as autograded.
 # Provenance is now recorded by the writer, so the split is read, not inferred.
@@ -928,16 +929,14 @@ def format_report(report: dict) -> str:
             report.get("autograded_positive_percent", 0),
         ),
         *_reviewed_by_tier_lines(report),
-        # State the method's limit next to the number it produces. The split is
-        # inferred from the SIGNAL NAME -- there is no recorded source -- so a
-        # caller who ran the tests and recorded tests_passed lands in the
-        # autograded bucket and drops out of the reviewed rate entirely.
-        # Measured: 63 autograded outcomes carry a real chat session_id, under
-        # 1% of that population, so the reviewed rate is not materially skewed
-        # today. The mechanism is unbounded, though, so it is worth watching.
-        "    (split inferred from signal name, not a recorded source: "
-        "record_outcome callers who use tests_passed/failed/compiled land in "
-        "the autograded bucket)",
+        # State the method's limit next to the number it produces. The split
+        # is read from recorded provenance (`outcomes.source`, #62), so the
+        # limit is no longer the method but the rows it cannot place: those
+        # with no recorded source sit in NEITHER bucket. Without this line
+        # reviewed + autograded silently stops adding up to the outcome total,
+        # and a reviewed 0 reads as "unjudged" when it may be "unclassifiable".
+        "    legacy/unknown provenance (no recorded source; in neither "
+        "bucket): %s" % report.get("unknown_source_outcomes", 0),
         *_calibration_lines(report),
         "  lessons: %s | interaction-grounded: %s | synthetic: %s | orphaned: %s"
         % (
