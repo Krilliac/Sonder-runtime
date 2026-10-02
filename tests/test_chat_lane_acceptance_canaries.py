@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -229,6 +231,7 @@ def test_one_model_bound_to_general_and_code_keeps_chat_and_work_lanes_distinct(
 def test_admitted_work_receipt_records_the_lane_and_its_reason(tmp_path, monkeypatch):
     database = tmp_path / "canary-work.sqlite"
     repository = SQLiteSessionRepository(database)
+    monkeypatch.setenv("SONDER_HTTP_WORK_RUNS_DB", str(tmp_path / "work-runs.sqlite"))
     monkeypatch.setattr(
         bootstrap_app, "default_app",
         lambda: SimpleNamespace(session_repository=lambda: repository),
@@ -241,15 +244,32 @@ def test_admitted_work_receipt_records_the_lane_and_its_reason(tmp_path, monkeyp
         return "autopilot started"
 
     monkeypatch.setattr(server, "route_work_request", lane)
+    context = {"mode": "local-open"}
     result = serve._handle_work_intent(
         objective, project="demo", authorized=True,
-        context={"mode": "local-open"}, session_id="canary-session",
+        context=context, session_id="canary-session",
         session_ref="canary-session", correlation_id="corr-canary",
         with_receipt=True,
     )
 
+    acknowledgement = result.public_receipt()
+    assert acknowledgement["status"] == "running"
+    assert acknowledgement["acknowledgement"] == result.text
+    assert "autopilot" in result.text
+    assert result.work_run_id in result.text
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        record = serve._WORK_RUNNER.get(result.work_run_id, serve._state_principal(context))
+        if record and record["status"] != "running":
+            break
+        threading.Event().wait(0.05)
+    else:
+        pytest.fail("admitted work did not finish")
     assert dispatched == ["autopilot"]
-    receipt = result.public_receipt()
+    assert record["status"] == "returned"
+    assert record["output"] == "autopilot started"
+    receipt = record["result_receipt"]
+    assert receipt["work_run_id"] == result.work_run_id
     assert receipt["status"] == "returned"
     assert receipt["requested_mode"] == "autopilot"
     assert receipt["routing_reason"] == "explicit autonomous or end-to-end request"
