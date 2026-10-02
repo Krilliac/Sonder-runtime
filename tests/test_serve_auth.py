@@ -13,6 +13,13 @@ import sonder_runtime.platform.config as runtime_config
 import sonder_health
 
 
+@pytest.fixture(autouse=True)
+def _isolate_http_model_discovery(monkeypatch, _configure_http_legacy_boundary):
+    # Contract tests supply their own model fakes. Default discovery must not
+    # contact a host Ollama worker or depend on a prior request's live cache.
+    monkeypatch.setattr(ts.server, "discovered_model_records", lambda: [])
+
+
 @pytest.mark.parametrize("mode,role,key,allowed", [
     ("local-open", None, False, True), ("api-key", None, True, True),
     ("account", "user", False, False), ("account", "developer", False, False),
@@ -986,6 +993,10 @@ def _http_server(monkeypatch):
     warm_operations = getattr(ts.sonder_lifecycle.get(), "operations", None)
     if callable(warm_operations):  # some tests install a minimal fake lifecycle
         warm_operations()
+    # Build both real catalogs before the client's five-second deadline.
+    # Slash dispatch and permission lookup must not rely on a worker's history.
+    ts.command_catalog.http_slash_tools()
+    ts.command_catalog.catalog()
     httpd = ts.ThreadingHTTPServer(("127.0.0.1", 0), ts.Handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()

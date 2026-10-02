@@ -244,6 +244,9 @@ jobs:
           tests/test_control_plane_deleted_paths.py
           tests/test_process_wait_hardening.py
           tests/test_job004_process_provider.py
+          tests/test_process_output_batching.py
+          tests/test_crash_repro_attempts.py
+          tests/test_structured_test_run_real_optional.py::test_cargo_libtest_totals
           tests/test_process_cancellation_reaping.py
           tests/test_process_completion_race.py
           tests/test_process_group_absence.py

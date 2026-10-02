@@ -265,6 +265,9 @@ class SubprocessJobProvider:
             "stdout": subprocess.PIPE,
             "stderr": subprocess.PIPE,
             "text": True,
+            # Decode process output as UTF-8 consistently across hosts;
+            # the Windows locale must not reinterpret child bytes.
+            "encoding": "utf-8",
         }
         process_group_id: int | None = None
         if self._platform == "posix":
