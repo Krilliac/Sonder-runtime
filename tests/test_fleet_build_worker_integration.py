@@ -13,7 +13,7 @@ import permission_modes as pm
 from sonder_runtime.adapters import fleet_creations, fleet_workers
 
 
-def _worker(monkeypatch, project, responses, *, tools=None):
+def _worker(monkeypatch, project, responses, *, tools=None, build=True):
     import server
 
     queue = iter(responses)
@@ -28,7 +28,7 @@ def _worker(monkeypatch, project, responses, *, tools=None):
         lambda *args, **kwargs: lambda prompt, history=None: next(queue),
     )
     return fleet_workers.repository_worker(
-        "code", "", len(responses), build=True, orchestrator=server.master_orchestrator,
+        "code", "" if build else str(project), len(responses), build=build, orchestrator=server.master_orchestrator,
         activity=server.activity_tracker, agent_impl=server._agent_impl,
         project_tools=set(server._PROJECT_BOUND_AGENT_TOOLS if tools is None else tools),
         unsafe_active=server.unsafe_lab.active,
@@ -104,6 +104,62 @@ def test_build_worker_refuses_unsafe_mode_changed_at_agent_entry(monkeypatch, tm
     monkeypatch.setattr(server.unsafe_lab, "active", lambda: True)
     with pytest.raises(RuntimeError, match="normal project and permission gates"):
         worker("create an app", str(project))
+    assert list(project.iterdir()) == []
+
+
+@pytest.mark.parametrize(("cloud", "provider"), [(True, None), (False, "openrouter")])
+def test_build_worker_refuses_hosted_target_before_generation(monkeypatch, tmp_path, cloud, provider):
+    import server
+
+    workspace = fleet_creations.create_workspace("integration-hosted", 1, state_home=tmp_path)
+    project = workspace.workers[0]
+    worker = _worker(monkeypatch, project, ['{"final":"benign stub"}'])
+    monkeypatch.setattr(server, "_serve_target", lambda *a, **k: ("fake-model", cloud, "", "code"))
+    monkeypatch.setattr(server, "_bridge_provider_for_tier", lambda *a, **k: provider)
+    generations, dispatches = [], []
+
+    def make_generate(*args, **kwargs):
+        generations.append(True)
+        return lambda *a, **k: '{"final":"benign stub"}'
+
+    def dispatch(*args, **kwargs):
+        dispatches.append(True)
+        return "benign stub"
+
+    monkeypatch.setattr(server, "_make_tier_generate", make_generate)
+    monkeypatch.setattr(server, "_agent_dispatch", dispatch)
+    with pytest.raises(RuntimeError) as denied:
+        worker("create a benign app", str(project))
+    assert generations == []
+    assert dispatches == []
+    assert str(denied.value) == "build fleet requires a local model tier"
+    assert list(project.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("build", "cloud", "provider"),
+    [(True, False, None), (False, True, None), (False, False, "openrouter")],
+)
+def test_worker_admits_local_build_and_hosted_read_only_controls(monkeypatch, tmp_path, build, cloud, provider):
+    import server
+
+    workspace = fleet_creations.create_workspace("integration-hosted-control", 1, state_home=tmp_path)
+    project = workspace.workers[0]
+    worker = _worker(monkeypatch, project, ['{"final":"benign stub"}'], build=build)
+    monkeypatch.setattr(server, "_serve_target", lambda *a, **k: ("fake-model", cloud, "", "code"))
+    monkeypatch.setattr(server, "_bridge_provider_for_tier", lambda *a, **k: provider)
+    generations = []
+
+    def make_generate(*args, **kwargs):
+        generations.append(True)
+        return lambda *a, **k: '{"final":"benign stub"}'
+
+    monkeypatch.setattr(server, "_make_tier_generate", make_generate)
+    # The benign final deliberately supplies no host-observed file evidence.
+    # Admission must still reach generation while the later receipt gate holds.
+    with pytest.raises(RuntimeError, match="^repository worker produced no host-observed file evidence$"):
+        worker("review a benign app", str(project))
+    assert generations == [True]
     assert list(project.iterdir()) == []
 
 
