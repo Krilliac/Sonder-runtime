@@ -427,6 +427,7 @@ def test_new_windows_history_file_has_private_owner_and_acl_before_writing(tmp_p
     private_files.create_private_windows_file(path)
     assert path.read_bytes() == b""
     _assert_private_history(str(path))
+    assert private_files._windows_owned_by_me(str(path))
     with pytest.raises(FileExistsError):
         private_files.create_private_windows_file(path)
     assert path.read_bytes() == b""

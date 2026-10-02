@@ -235,6 +235,7 @@ jobs:
           tests/test_application_lifecycle_adapter.py
           tests/test_repl_turn_interrupt.py
           tests/repl/test_repl_contracts.py
+          tests/test_private_files_windows_owner.py
           tests/test_surface_sweep_harness.py
           tests/test_shared_model_request_admission.py
           tests/test_host_model_request_admission.py

@@ -126,6 +126,12 @@ def _windows_api():
         wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
         ctypes.POINTER(wintypes.DWORD),
     ]
+    advapi32.GetSecurityDescriptorOwner.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.BOOL),
+    ]
+    advapi32.GetSecurityDescriptorOwner.restype = wintypes.BOOL
+    advapi32.IsValidSid.argtypes = [ctypes.c_void_p]
+    advapi32.IsValidSid.restype = wintypes.BOOL
     advapi32.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
     kernel32.GetCurrentProcess.restype = wintypes.HANDLE
     kernel32.LocalFree.argtypes = [ctypes.c_void_p]
@@ -197,10 +203,46 @@ def _windows_user_sid() -> str:
         kernel32.CloseHandle(token)
 
 
+def _windows_owner_sid(path: str) -> str:
+    """Canonical numeric owner SID from the original binary descriptor."""
+    api = _windows_api()
+    if api is None:
+        raise OSError("Windows file ownership is unavailable")
+    ctypes, wintypes, advapi32, kernel32 = api
+    needed = wintypes.DWORD(0)
+    advapi32.GetFileSecurityW(path, _OWNER_SECURITY_INFORMATION, None, 0, ctypes.byref(needed))
+    if not needed.value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    descriptor = ctypes.create_string_buffer(needed.value)
+    if not advapi32.GetFileSecurityW(
+        path, _OWNER_SECURITY_INFORMATION, descriptor, needed, ctypes.byref(needed),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    owner = ctypes.c_void_p()
+    defaulted = wintypes.BOOL()
+    if not advapi32.GetSecurityDescriptorOwner(
+        descriptor, ctypes.byref(owner), ctypes.byref(defaulted),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if not owner.value or not advapi32.IsValidSid(owner):
+        raise OSError("Windows file owner SID is unavailable or invalid")
+    # The owner pointer borrows descriptor memory; keep it alive through
+    # validation and conversion. Only the allocated string is freed here.
+    text = wintypes.LPWSTR()
+    if not advapi32.ConvertSidToStringSidW(owner, ctypes.byref(text)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        if not text.value:
+            raise OSError("Windows file owner SID conversion is unavailable")
+        return text.value
+    finally:
+        kernel32.LocalFree(text)
+
+
 def _windows_owned_by_me(path: str) -> bool:
     try:
-        owner = _windows_sddl(path, _OWNER_SECURITY_INFORMATION)
-        return owner.startswith("O:") and owner[2:] == _windows_user_sid()
+        # SDDL may abbreviate an owner; compare numeric SID identities.
+        return _windows_owner_sid(path) == _windows_user_sid()
     except OSError:
         return False
 
