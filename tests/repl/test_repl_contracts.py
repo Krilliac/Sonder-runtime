@@ -453,7 +453,7 @@ def test_history_file_is_private_capped_and_credential_free(tmp_path, history_sa
     entries = ["/cmd %d" % i for i in range(250)] + ["/login a b", "token=abc", "multi\nline"]
     with history_save_diagnostic(path) as diagnostic:
         saved = sonder_repl._save_history(entries, path)
-    assert saved, diagnostic
+    assert saved, json.dumps(diagnostic, sort_keys=True)
     _assert_private_history(path)
     loaded = sonder_repl._load_history(path)
     assert len(loaded) == sonder_repl.REPL_HISTORY_LIMIT
