@@ -50,6 +50,7 @@ def test_private_ollama_certificate_requires_supplied_ca_bundle(monkeypatch):
         # Host stores may contain different certificates with the same subject.
         # Establish an untrusted baseline without loading any ambient trust.
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         try:
             with context.wrap_socket(raw, server_hostname="10.77.0.2"):
                 pytest.fail("private worker certificate was trusted without a supplied CA bundle")
@@ -165,6 +166,7 @@ def private_worker_tls(tmp_path, monkeypatch):
         monkeypatch.setitem(globals(), "ssl", SimpleNamespace(
             SSLContext=ssl.SSLContext,
             PROTOCOL_TLS_CLIENT=ssl.PROTOCOL_TLS_CLIENT,
+            TLSVersion=ssl.TLSVersion,
             SSLCertVerificationError=ssl.SSLCertVerificationError,
             create_default_context=ambient_context,
         ))
