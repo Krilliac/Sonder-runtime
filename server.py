@@ -17878,9 +17878,13 @@ def _agent_generate_decision(
         getattr(gen, "last_response_meta", {}).get("done_reason") == "length"
     )
     error = None
+    from sonder_runtime.domain.agents.tool_args import normalize_decision_aliases
+
     for attempt in range(repair_limit + 1):
         try:
-            decision = _extract_agent_json(raw)
+            # A8: canonicalize the alternate {"name", "arguments"} envelope
+            # before the structural checks below read "tool"/"args".
+            decision = normalize_decision_aliases(_extract_agent_json(raw))
             if not isinstance(decision, dict):
                 raise ValueError("agent decision must be a JSON object")
             if require_final and "final" not in decision:
