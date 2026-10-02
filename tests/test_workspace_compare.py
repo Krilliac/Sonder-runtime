@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -110,7 +111,11 @@ def test_scan_caps_fail_closed(workspace, kwargs, error):
         workspace_compare.compare_workspaces(left, right, **kwargs)
 
 
-def test_output_and_detail_caps_preserve_exact_summary(workspace):
+def test_output_and_detail_caps_preserve_exact_summary(workspace, monkeypatch):
+    # Output bounds are independent of filesystem latency; deadline tests use real time.
+    monkeypatch.setattr(
+        workspace_compare, "time", SimpleNamespace(monotonic=lambda: 0.0),
+    )
     left = workspace / "left"
     right = workspace / "right"
     left.mkdir()
@@ -126,6 +131,19 @@ def test_output_and_detail_caps_preserve_exact_summary(workspace):
     assert len(report["added"]) < 80
     assert len(output) <= 1024
     assert report["output_bytes"] == len(output)
+
+
+def test_inventory_honors_default_timeout_ceiling(workspace, monkeypatch):
+    left = workspace / "left"
+    right = workspace / "right"
+    left.mkdir()
+    right.mkdir()
+    ticks = iter((0.0, 5.0))
+    monkeypatch.setattr(
+        workspace_compare, "time", SimpleNamespace(monotonic=lambda: next(ticks)),
+    )
+    with pytest.raises(workspace_compare.WorkspaceCompareError, match="timeout ceiling"):
+        workspace_compare.compare_workspaces(left, right)
 
 
 def test_output_fitting_uses_logarithmic_serialization_and_deadline(monkeypatch):
