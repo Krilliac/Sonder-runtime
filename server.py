@@ -20514,6 +20514,8 @@ def _agent_turn(
         return "`sonder:latest` Ollama alias not found."
     provider = _bridge_provider_for_tier(tier_label)
     cloud = cloud or _provider_bridge.is_hosted(provider)
+    if require_guarded_project and cloud:
+        raise RuntimeError("build fleet requires a local model tier")
     controller = _standalone_lanes.current()
     if controller is not None:
         controller.restrict(read_only=lane_read_only, cloud=cloud)
