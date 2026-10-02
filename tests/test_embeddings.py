@@ -370,3 +370,22 @@ def test_embed_leaves_short_prompt_untouched(monkeypatch):
     e.embed("short prompt", base="http://127.0.0.1:11434", model="nomic-embed-text")
 
     assert sent["body"]["prompt"] == "short prompt"
+
+
+def test_local_manifest_revision_without_user_home_uses_only_configured_models(monkeypatch, tmp_path):
+    from pathlib import Path
+
+    def no_home():
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(Path, "home", no_home)
+    monkeypatch.delenv("OLLAMA_MODELS", raising=False)
+    assert e.local_manifest_revision("nomic-embed-text") == ""
+
+    manifest = tmp_path / "manifests" / "registry.ollama.ai" / "library" / "nomic-embed-text" / "latest"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_bytes(b'{"config":"sha256:configured"}')
+    monkeypatch.setenv("OLLAMA_MODELS", str(tmp_path))
+    expected = e.local_manifest_revision("nomic-embed-text", tmp_path)
+    assert expected.startswith("ollama-manifest-sha256:")
+    assert e.local_manifest_revision("nomic-embed-text") == expected

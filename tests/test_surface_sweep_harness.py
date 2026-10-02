@@ -12,6 +12,7 @@ from __future__ import annotations
 import importlib.util
 import os
 from pathlib import Path
+import signal
 from types import SimpleNamespace
 
 import pytest
@@ -19,6 +20,10 @@ import pytest
 pytestmark = pytest.mark.unit
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+posix_watchdog = pytest.mark.skipif(
+    not all(hasattr(signal, name) for name in ("SIGALRM", "setitimer", "ITIMER_REAL")),
+    reason="in-process surface sweep requires POSIX SIGALRM/setitimer; use WSL on Windows",
+)
 
 
 def _load_sweep():
@@ -71,6 +76,7 @@ def test_the_cli_flag_reaches_the_environment(tmp_path, restored_environ, monkey
             seen["live_network"] = self.live_network
             self._catalog = []
 
+    monkeypatch.setattr(sweep, "_require_posix_watchdog", lambda: None)
     monkeypatch.setattr(sweep, "Sweep", Probe)
     out = tmp_path / "out"
     assert sweep.main(["--out", str(out), "--surfaces", "control"]) == 0
@@ -94,6 +100,7 @@ def _bare_sweep(module, catalog):
     return sweep
 
 
+@posix_watchdog
 def test_a_console_exception_is_a_crash_and_the_sweep_carries_on(monkeypatch):
     import sonder_runtime.interfaces.repl.repl as sonder_repl
 
@@ -125,6 +132,7 @@ def test_a_console_exception_is_a_crash_and_the_sweep_carries_on(monkeypatch):
     assert [row["command"] for row in sweep.records].count("/boom") == 1
 
 
+@posix_watchdog
 def test_a_console_loop_that_fails_before_reading_is_recorded_once(monkeypatch):
     import sonder_runtime.interfaces.repl.repl as sonder_repl
 
@@ -152,6 +160,7 @@ def test_a_console_loop_that_fails_before_reading_is_recorded_once(monkeypatch):
     assert all(r["note"] == "console loop could not restart" for r in skipped)
 
 
+@posix_watchdog
 def test_commands_after_a_loop_that_cannot_restart_are_reported_as_skipped(monkeypatch):
     import sonder_runtime.interfaces.repl.repl as sonder_repl
 
@@ -184,3 +193,40 @@ def test_commands_after_a_loop_that_cannot_restart_are_reported_as_skipped(monke
         assert rows[name]["class"] == "skipped"
         assert rows[name]["invocation"] == name
         assert rows[name]["note"] == "console loop could not restart"
+
+
+@pytest.mark.parametrize("seconds", [0, 1])
+def test_watchdog_reports_missing_posix_alarm(monkeypatch, seconds):
+    module = _load_sweep()
+    monkeypatch.delattr(module.signal, "SIGALRM", raising=False)
+    with pytest.raises(RuntimeError, match="POSIX SIGALRM/setitimer"):
+        with module.watchdog(seconds):
+            pytest.fail("an unsupported watchdog must not execute a command")
+
+
+def test_console_reports_missing_posix_alarm_before_mutating_runtime(monkeypatch):
+    import sonder_runtime.interfaces.repl.repl as sonder_repl
+
+    module = _load_sweep()
+    sweep = _bare_sweep(module, [_command("/alpha")])
+    previous = sonder_repl._read_input
+    monkeypatch.delattr(module.signal, "SIGALRM", raising=False)
+    with pytest.raises(RuntimeError, match="POSIX SIGALRM/setitimer"):
+        sweep.sweep_console()
+    assert sonder_repl._read_input is previous
+    assert sweep.records == []
+
+
+def test_cli_rejects_missing_posix_alarm_before_preparing_state(monkeypatch, tmp_path, capsys):
+    module = _load_sweep()
+    monkeypatch.delattr(module.signal, "SIGALRM", raising=False)
+    monkeypatch.setattr(
+        module, "_prepare_environment",
+        lambda *_args, **_kwargs: pytest.fail("an unsupported sweep must not prepare runtime state"),
+    )
+    out = tmp_path / "out"
+    with pytest.raises(SystemExit) as stopped:
+        module.main(["--out", str(out), "--surfaces", "console"])
+    assert stopped.value.code == 2
+    assert "POSIX SIGALRM/setitimer" in capsys.readouterr().err
+    assert not out.exists()

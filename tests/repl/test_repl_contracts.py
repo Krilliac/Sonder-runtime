@@ -48,7 +48,7 @@ def _run(fake, tmp_path, stdin, *args, **env):
 
 @pytest.mark.integration
 def test_piped_stdout_carries_no_prompt_status_or_banner(fake, tmp_path):
-    result = _run(fake, tmp_path, "/model\n/nosuch\n")
+    result = _run(fake, tmp_path, "/model\n/nosuch\n", SONDER_GLYPHS="unicode")
     assert result.returncode == 0, result.stderr
     out = result.stdout.decode("utf-8")
     for line in out.splitlines():
@@ -200,11 +200,49 @@ def test_key_escapes_never_reach_the_model(raw, expected):
     assert sonder_repl._normalize_input_line(raw) == expected
 
 
+def _assert_private_history(path):
+    if os.name != "nt":
+        assert (os.stat(path).st_mode & 0o777) == 0o600
+        return
+    import win32api
+    import win32con
+    import ntsecuritycon
+    import win32security
+
+    information = win32security.OWNER_SECURITY_INFORMATION | win32security.DACL_SECURITY_INFORMATION
+    security = win32security.GetFileSecurity(path, information)
+    owner = security.GetSecurityDescriptorOwner()
+    assert owner.IsValid()
+    control, _revision = security.GetSecurityDescriptorControl()
+    assert control & win32security.SE_DACL_PROTECTED
+    dacl = security.GetSecurityDescriptorDacl()
+    assert dacl is not None
+    aces = [dacl.GetAce(index) for index in range(dacl.GetAceCount())]
+    assert all(
+        ace[0][0] == win32security.ACCESS_ALLOWED_ACE_TYPE
+        and ace[1] == ntsecuritycon.FILE_ALL_ACCESS for ace in aces
+    )
+    sids = {
+        win32security.ConvertSidToStringSid(ace[-1]) for ace in aces
+    }
+    token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32con.TOKEN_QUERY)
+    try:
+        user = win32security.GetTokenInformation(token, win32security.TokenUser)[0]
+        assert user.IsValid()
+        owner_matches_user = owner == user
+        assert owner_matches_user
+        user_sid = win32security.ConvertSidToStringSid(user)
+    finally:
+        token.Close()
+    acl_matches_expected_identities = sids == {user_sid, "S-1-5-18", "S-1-5-32-544"}
+    assert acl_matches_expected_identities
+
+
 def test_history_file_is_private_capped_and_credential_free(tmp_path):
     path = str(tmp_path / "repl_history")
     entries = ["/cmd %d" % i for i in range(250)] + ["/login a b", "token=abc", "multi\nline"]
     assert sonder_repl._save_history(entries, path)
-    assert (os.stat(path).st_mode & 0o777) == 0o600
+    _assert_private_history(path)
     loaded = sonder_repl._load_history(path)
     assert len(loaded) == sonder_repl.REPL_HISTORY_LIMIT
     assert loaded[-1] == "/cmd 249"
@@ -215,7 +253,12 @@ def test_history_refuses_to_follow_a_planted_symlink(tmp_path):
     target = tmp_path / "elsewhere"
     target.write_text("keep\n")
     link = tmp_path / "repl_history"
-    link.symlink_to(target)
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows runner lacks the privilege to create test symlinks")
+        raise
     assert sonder_repl._save_history(["/help"], str(link)) is False
     assert target.read_text() == "keep\n"
 
@@ -314,3 +357,120 @@ def test_pty_screen_dependencies_are_pinned_and_kept_out_of_the_piped_contracts(
             elif isinstance(node, ast.ImportFrom) and node.module:
                 imported.add(node.module)
         assert not imported & {"pexpect", "pyte", "tests.repl.pty_harness"}, name
+
+
+@pytest.mark.parametrize("platform_name", ["nt", "posix"])
+def test_repl_child_uses_only_its_disposable_home(monkeypatch, tmp_path, platform_name):
+    from tests.repl import repl_env
+
+    monkeypatch.setattr(repl_env, "os", types.SimpleNamespace(
+        name=platform_name,
+        environ={"PATH": "/test/bin", "SYSTEMROOT": "C:/Windows", "USERPROFILE": "real-profile"},
+    ))
+    home = tmp_path / "home"
+    environment = repl_env.base_env(home, "http://127.0.0.1:1")
+    assert environment["HOME"] == environment["SONDER_HOME"] == str(home)
+    if platform_name == "nt":
+        assert environment["USERPROFILE"] == str(home)
+        assert environment["SYSTEMROOT"] == "C:/Windows"
+    else:
+        assert "USERPROFILE" not in environment
+        assert "SYSTEMROOT" not in environment
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows reparse handling")
+def test_history_reparse_refusal_preserves_existing_contents(monkeypatch, tmp_path):
+    from sonder_runtime.platform import private_files
+
+    path = tmp_path / "repl_history"
+    path.write_text("keep\n", encoding="utf-8")
+    monkeypatch.setattr(private_files, "_is_reparse_point", lambda _path: True)
+    assert sonder_repl._save_history(["/help"], str(path)) is False
+    assert path.read_text(encoding="utf-8") == "keep\n"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows private file ownership")
+def test_history_foreign_owner_refusal_preserves_existing_contents(monkeypatch, tmp_path):
+    from sonder_runtime.platform import private_files
+
+    path = tmp_path / "repl_history"
+    path.write_text("keep\n", encoding="utf-8")
+    monkeypatch.setattr(private_files, "_windows_owned_by_me", lambda _path: False)
+    assert sonder_repl._save_history(["/help"], str(path)) is False
+    assert path.read_text(encoding="utf-8") == "keep\n"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows private file ACL failure")
+def test_history_acl_failure_preserves_existing_contents(monkeypatch, tmp_path):
+    from sonder_runtime.platform import private_files
+
+    path = tmp_path / "repl_history"
+    assert sonder_repl._save_history(["keep"], str(path))
+    calls = 0
+
+    def unavailable_acl(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise OSError("test ACL write unavailable")
+
+    monkeypatch.setattr(private_files, "_windows_set_sddl", unavailable_acl)
+    assert sonder_repl._save_history(["/help"], str(path)) is False
+    assert calls == 1
+    assert path.read_text(encoding="utf-8") == "keep\n"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows private file creation")
+def test_new_windows_history_file_has_private_owner_and_acl_before_writing(tmp_path):
+    from sonder_runtime.platform import private_files
+
+    path = tmp_path / "repl_history"
+    private_files.create_private_windows_file(path)
+    assert path.read_bytes() == b""
+    _assert_private_history(str(path))
+    assert private_files._windows_owned_by_me(str(path))
+    with pytest.raises(FileExistsError):
+        private_files.create_private_windows_file(path)
+    assert path.read_bytes() == b""
+    _assert_private_history(str(path))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows default-token file ownership")
+def test_history_refuses_existing_nonuser_default_owner_without_changing_security(tmp_path):
+    import win32api
+    import win32con
+    import win32security
+
+    path = tmp_path / "repl_history"
+    path.write_bytes(b"keep\n")
+    information = win32security.OWNER_SECURITY_INFORMATION | win32security.DACL_SECURITY_INFORMATION
+    security = win32security.GetFileSecurity(str(path), information)
+    owner = security.GetSecurityDescriptorOwner()
+    assert owner.IsValid()
+    token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32con.TOKEN_QUERY)
+    try:
+        user = win32security.GetTokenInformation(token, win32security.TokenUser)[0]
+        assert user.IsValid()
+        default_owner = win32security.GetTokenInformation(token, win32security.TokenOwner)
+        assert default_owner.IsValid()
+        owner_matches_user = owner == user
+        owner_matches_default = owner == default_owner
+    finally:
+        token.Close()
+    if owner_matches_user:
+        pytest.skip("This token creates ordinary files owned by its user")
+    assert owner_matches_default
+    before_dacl = win32security.ConvertSecurityDescriptorToStringSecurityDescriptor(
+        security, win32security.SDDL_REVISION_1, win32security.DACL_SECURITY_INFORMATION,
+    )
+    assert sonder_repl._save_history(["/help"], str(path)) is False
+    assert path.read_bytes() == b"keep\n"
+    after = win32security.GetFileSecurity(str(path), information)
+    after_owner = after.GetSecurityDescriptorOwner()
+    assert after_owner.IsValid()
+    owner_unchanged = after_owner == owner
+    assert owner_unchanged
+    after_dacl = win32security.ConvertSecurityDescriptorToStringSecurityDescriptor(
+        after, win32security.SDDL_REVISION_1, win32security.DACL_SECURITY_INFORMATION,
+    )
+    dacl_unchanged = after_dacl == before_dacl
+    assert dacl_unchanged

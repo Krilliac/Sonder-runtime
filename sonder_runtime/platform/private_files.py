@@ -126,6 +126,12 @@ def _windows_api():
         wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
         ctypes.POINTER(wintypes.DWORD),
     ]
+    advapi32.GetSecurityDescriptorOwner.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.BOOL),
+    ]
+    advapi32.GetSecurityDescriptorOwner.restype = wintypes.BOOL
+    advapi32.IsValidSid.argtypes = [ctypes.c_void_p]
+    advapi32.IsValidSid.restype = wintypes.BOOL
     advapi32.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
     kernel32.GetCurrentProcess.restype = wintypes.HANDLE
     kernel32.LocalFree.argtypes = [ctypes.c_void_p]
@@ -197,10 +203,46 @@ def _windows_user_sid() -> str:
         kernel32.CloseHandle(token)
 
 
+def _windows_owner_sid(path: str) -> str:
+    """Canonical numeric owner SID from the original binary descriptor."""
+    api = _windows_api()
+    if api is None:
+        raise OSError("Windows file ownership is unavailable")
+    ctypes, wintypes, advapi32, kernel32 = api
+    needed = wintypes.DWORD(0)
+    advapi32.GetFileSecurityW(path, _OWNER_SECURITY_INFORMATION, None, 0, ctypes.byref(needed))
+    if not needed.value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    descriptor = ctypes.create_string_buffer(needed.value)
+    if not advapi32.GetFileSecurityW(
+        path, _OWNER_SECURITY_INFORMATION, descriptor, needed, ctypes.byref(needed),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    owner = ctypes.c_void_p()
+    defaulted = wintypes.BOOL()
+    if not advapi32.GetSecurityDescriptorOwner(
+        descriptor, ctypes.byref(owner), ctypes.byref(defaulted),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if not owner.value or not advapi32.IsValidSid(owner):
+        raise OSError("Windows file owner SID is unavailable or invalid")
+    # The owner pointer borrows descriptor memory; keep it alive through
+    # validation and conversion. Only the allocated string is freed here.
+    text = wintypes.LPWSTR()
+    if not advapi32.ConvertSidToStringSidW(owner, ctypes.byref(text)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        if not text.value:
+            raise OSError("Windows file owner SID conversion is unavailable")
+        return text.value
+    finally:
+        kernel32.LocalFree(text)
+
+
 def _windows_owned_by_me(path: str) -> bool:
     try:
-        owner = _windows_sddl(path, _OWNER_SECURITY_INFORMATION)
-        return owner.startswith("O:") and owner[2:] == _windows_user_sid()
+        # SDDL may abbreviate an owner; compare numeric SID identities.
+        return _windows_owner_sid(path) == _windows_user_sid()
     except OSError:
         return False
 
@@ -235,6 +277,78 @@ def _windows_restrict(path: str, *, directory: bool, label: bool) -> bool:
         _logger.debug("could not restrict private path ACL: %s", type(error).__name__)
         return False
     return True
+
+
+def create_private_windows_file(path: str | os.PathLike[str]) -> None:
+    """Create one missing, empty Windows file owned by this process's user.
+
+    Its protected DACL grants only that user, SYSTEM and Administrators.
+    Raise FileExistsError for an existing path; callers must still apply
+    their regular-file, reparse, owner and ACL guards before writing.
+    """
+    api = _windows_api()
+    if api is None:
+        raise OSError("Windows private-file creation is unavailable")
+    ctypes, wintypes, advapi32, kernel32 = api
+
+    class SecurityAttributes(ctypes.Structure):
+        _fields_ = [
+            ("nLength", wintypes.DWORD),
+            ("lpSecurityDescriptor", ctypes.c_void_p),
+            ("bInheritHandle", wintypes.BOOL),
+        ]
+
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+        ctypes.POINTER(SecurityAttributes), wintypes.DWORD,
+        wintypes.DWORD, wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    user = _windows_user_sid()
+    sddl = "O:%sD:P(A;;FA;;;%s)(A;;FA;;;SY)(A;;FA;;;BA)" % (user, user)
+    descriptor = ctypes.c_void_p()
+    invalid_handle = ctypes.c_void_p(-1).value
+    handle = invalid_handle
+    try:
+        if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl, _SDDL_REVISION_1, ctypes.byref(descriptor), None,
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        attributes = SecurityAttributes(
+            ctypes.sizeof(SecurityAttributes), descriptor.value, False,
+        )
+        # GENERIC_WRITE, no sharing, CREATE_NEW, FILE_ATTRIBUTE_NORMAL.
+        handle = create_file(os.fspath(path), 0x40000000, 0,
+                             ctypes.byref(attributes), 1, 0x80, None)
+        if handle is None or handle == invalid_handle:
+            code = ctypes.get_last_error()
+            error = ctypes.WinError(code)
+            if code in (80, 183):
+                raise FileExistsError(error.errno, error.strerror, os.fspath(path)) from error
+            raise error
+    finally:
+        try:
+            if handle is not None and handle != invalid_handle:
+                if not kernel32.CloseHandle(handle):
+                    raise ctypes.WinError(ctypes.get_last_error())
+        finally:
+            if descriptor.value:
+                kernel32.LocalFree(descriptor)
+
+
+def restrict_private_file_acl(path: str | os.PathLike[str]) -> bool:
+    """Protect an owned regular Windows file for user, SYSTEM and Administrators.
+
+    Return False for unsupported hosts, links, foreign owners or failed ACLs.
+    Call before writing private contents; unrelated store behavior is unchanged.
+    """
+    if os.name != "nt":
+        return False
+    text = os.fspath(path)
+    return _is_regular(text) and _windows_restrict(text, directory=False, label=False)
 
 
 def low_integrity_readable(path: str | os.PathLike[str]) -> bool:
@@ -544,12 +658,14 @@ __all__ = [
     "PRIVATE_FILE_MODE",
     "TRAVERSE_DIR_MODE",
     "SQLITE_SIDECAR_SUFFIXES",
+    "create_private_windows_file",
     "ensure_private_dir",
     "low_integrity_readable",
     "low_integrity_readable_state_files",
     "prepare_private_file",
     "protect_state_from_low_integrity",
     "prepare_private_sqlite",
+    "restrict_private_file_acl",
     "restrict_to_owner",
     "state_secret_files",
     "supported",

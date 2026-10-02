@@ -281,6 +281,12 @@ automated test coverage, since tests never touch a model.
 
 ## Surface sweep
 
+The in-process sweep requires POSIX `SIGALRM`/`setitimer` to interrupt a
+stuck command before continuing. Run it under WSL on Windows. Native
+Windows invocation exits with a platform explanation before preparing
+its temporary state; a background thread cannot safely preempt these
+handlers and restore their process-wide runtime state.
+
 `scripts/surface_sweep.py` is the instrument next to the evaluation lane: it
 drives every catalogued command on every surface (console loop, control
 chain, legacy and native MCP, served API, agent dispatch), the

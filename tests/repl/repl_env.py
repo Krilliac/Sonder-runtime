@@ -36,6 +36,12 @@ def base_env(home, fake_url, **extra):
         "TERM": "xterm-256color",
         "SONDER_REPL_HISTORY": "0",
     }
+    if os.name == "nt":
+        # Path.home() uses USERPROFILE on Windows, not HOME. Keep both
+        # bound to the disposable test home rather than the real profile.
+        env["USERPROFILE"] = str(home)
+        if os.environ.get("SYSTEMROOT"):
+            env["SYSTEMROOT"] = os.environ["SYSTEMROOT"]
     for key in ("SONDER_TEST_DB_ROOT", "TMPDIR"):
         if os.environ.get(key):
             env[key] = os.environ[key]
