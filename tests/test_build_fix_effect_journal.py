@@ -102,6 +102,17 @@ def sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def write_exact(path: Path, text: str) -> None:
+    """Write exactly the UTF-8 bytes ``sha(text)`` hashes.
+
+    ``Path.write_text`` turns line feeds into CRLF on Windows, so a file
+    written that way never matched its own ``sha()`` there, and the
+    verifier (which hashes raw bytes, as production must) correctly found
+    no proof.
+    """
+    path.write_bytes(text.encode("utf-8"))
+
+
 class DiskFiles:
     """The fake editor's ``files`` mapping, backed by real files under ``root``."""
 
@@ -541,13 +552,13 @@ def test_the_verifier_proves_from_the_current_digest_only(tmp_path):
     (root / "src").mkdir(parents=True)
     path = root / "src" / "a.cpp"
     verifier = BuildFixEditVerifier()
-    path.write_text("after\n")
+    write_exact(path, "after\n")
     proof = verifier.verify(_intent(root, "src/a.cpp", sha("before\n"), sha("after\n")))
     assert proof.state is EffectState.COMPLETED and proof.external_reference.startswith("applied:")
-    path.write_text("before\n")
+    write_exact(path, "before\n")
     proof = verifier.verify(_intent(root, "src/a.cpp", sha("before\n"), sha("after\n")))
     assert proof.state is EffectState.FAILED and proof.external_reference.startswith("not-applied:")
-    path.write_text("neither\n")
+    write_exact(path, "neither\n")
     assert verifier.verify(_intent(root, "src/a.cpp", sha("before\n"), sha("after\n"))) is None
     # Missing file: no proof.
     assert verifier.verify(_intent(root, "src/b.cpp", sha("before\n"), sha("after\n"))) is None
@@ -558,7 +569,7 @@ def test_the_verifier_refuses_links_escapes_oversize_and_tampered_rows(tmp_path)
     (root / "src").mkdir(parents=True)
     outside = tmp_path / "outside"
     outside.mkdir()
-    (outside / "x.cpp").write_text("after\n")
+    write_exact(outside / "x.cpp", "after\n")
     verifier = BuildFixEditVerifier()
     before, after = sha("before\n"), sha("after\n")
     # A final link is never followed.
@@ -569,10 +580,10 @@ def test_the_verifier_refuses_links_escapes_oversize_and_tampered_rows(tmp_path)
     assert verifier.verify(_intent(root, "esc/x.cpp", before, after)) is None
     # Oversized files are not read.
     big = "a" * (MAX_FILE_BYTES + 1)
-    (root / "src" / "big.cpp").write_text(big)
+    write_exact(root / "src" / "big.cpp", big)
     assert verifier.verify(_intent(root, "src/big.cpp", before, sha(big))) is None
     # Rows that do not round-trip are not build-fix edits.
-    (root / "src" / "a.cpp").write_text("after\n")
+    write_exact(root / "src" / "a.cpp", "after\n")
     good = _intent(root, "src/a.cpp", before, after)
     assert verifier.verify(good) is not None
     for changes in (

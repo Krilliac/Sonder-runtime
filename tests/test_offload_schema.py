@@ -26,7 +26,6 @@ import json
 import pytest
 
 import json_schema_verifier
-import learning_health
 import server
 from sonder_runtime.domain.memory import rules as reward_rules
 
@@ -212,25 +211,35 @@ def test_a_non_object_schema_argument_is_refused(monkeypatch):
     assert seen["payloads"] == []
 
 
-# --- a rejection is filed as caller-judged evidence ---------------------------
+# --- a rejection is filed as machine-graded evidence --------------------------
+
+MACHINE = reward_rules.OUTCOME_SOURCE_MACHINE
+
 
 def _outcomes(monkeypatch):
-    """Capture the outcome rows the offload path files."""
+    """Capture the outcome rows the offload path files, with their provenance."""
     rows = []
     monkeypatch.setattr(
         server, "_record_outcome_signal",
-        lambda interaction_id, signal: rows.append((interaction_id, signal)),
+        lambda interaction_id, signal, source=None: rows.append(
+            (interaction_id, signal, source)
+        ),
     )
     return rows
 
 
-def test_rejected_lands_in_the_caller_judged_population(monkeypatch):
-    # The point of filing this at all: `failed` would bury a real caller-facing
-    # rejection in the self-graded curriculum's thousands of autograded rows,
-    # where the only quality figure anyone should trust cannot see it.
+def test_a_schema_rejection_is_exact_machine_evidence(monkeypatch):
+    # Written to reach the caller-judged population by its signal name. Under
+    # recorded provenance that population is caller verdicts only (#62), and
+    # the host checking this interaction's own output against the caller's
+    # schema is an exact link that nobody judged -- `machine`, as the code
+    # gate's `failed` is. That keeps it out of the reviewed rate, apart from
+    # the self-generated curriculum in outcomes_by_source, and inside the
+    # lesson eviction gate, which excludes only heuristic `attributed` matches.
     assert "rejected" in reward_rules.VALID_SIGNALS
-    assert "rejected" not in learning_health._AUTOGRADED_SIGNALS
     assert not reward_rules.reward_is_good("rejected")
+    assert MACHINE not in reward_rules.CALLER_JUDGED_OUTCOME_SOURCES
+    assert MACHINE not in reward_rules.EVICTION_INELIGIBLE_OUTCOME_SOURCES
 
 
 def test_a_schema_violation_is_filed_as_a_rejected_outcome(monkeypatch):
@@ -241,7 +250,7 @@ def test_a_schema_violation_is_filed_as_a_rejected_outcome(monkeypatch):
         "describe ada", tier="code", learn=True, schema=json.dumps(SCHEMA),
     )
     assert out.startswith("ERROR:")
-    assert rows == [("iid-violation", "rejected")]
+    assert rows == [("iid-violation", "rejected", MACHINE)]
 
 
 def test_an_unparseable_response_is_filed_as_rejected_too(monkeypatch):
@@ -251,7 +260,7 @@ def test_an_unparseable_response_is_filed_as_rejected_too(monkeypatch):
     server.offload(
         "describe ada", tier="code", learn=True, schema=json.dumps(SCHEMA),
     )
-    assert rows == [("iid-garbage", "rejected")]
+    assert rows == [("iid-garbage", "rejected", MACHINE)]
 
 
 def test_a_conforming_response_files_nothing(monkeypatch):
@@ -288,7 +297,7 @@ def test_the_non_learning_path_has_no_interaction_to_judge(monkeypatch):
 
 
 def test_a_failed_outcome_write_never_masks_the_schema_failure(monkeypatch):
-    def boom(interaction_id, signal):
+    def boom(interaction_id, signal, source=None):
         raise RuntimeError("outcome store unavailable")
 
     monkeypatch.setattr(server, "_record_outcome_signal", boom)
@@ -372,7 +381,7 @@ def test_an_unexpected_check_failure_still_files_a_rejection(monkeypatch):
         server.offload(
             "describe ada", tier="code", learn=True, schema=json.dumps(SCHEMA),
         )
-    assert rows == [("iid-unforeseen", "rejected")]
+    assert rows == [("iid-unforeseen", "rejected", MACHINE)]
 
 
 # --- I1: coverage is derived from what the verifier actually traversed --------
