@@ -168,9 +168,10 @@ def main() -> int:
             for line in pipe:
                 output.write(line)
                 output.flush()
-                if line.startswith("TLS_CI_DIAGNOSTIC "):
+                _, marker, payload = line.partition("TLS_CI_DIAGNOSTIC ")
+                if marker:
                     try:
-                        event = json.loads(line.removeprefix("TLS_CI_DIAGNOSTIC "))
+                        event = json.loads(payload)
                     except json.JSONDecodeError:
                         continue
                     # Keep arbitrary traceback/stdout in the artifact; stream diagnostic JSON only.
@@ -180,7 +181,8 @@ def main() -> int:
                         "target_worker", "collected", "xdist_numprocesses", "exitstatus", "diagnostic_only",
                         "started", "unfinished_started", "observed_workers",
                     }
-                    if isinstance(event, dict):
+                    kinds = {"failure", "collection_failure", "cap", "session_start", "session_finish", "worker_collection"}
+                    if isinstance(event, dict) and event.get("kind") in kinds:
                         print("TLS_CI_DIAGNOSTIC " + json.dumps(
                             {key: value for key, value in event.items() if key in allowed},
                             sort_keys=True), flush=True)

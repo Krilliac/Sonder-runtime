@@ -12,12 +12,13 @@ import subprocess
 import sys
 import tempfile
 import time
+import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parent
 CANDIDATE = ROOT
 EXPECTED = {
     "tls_ci_diagnostic_plugin.py": "8bbc3eb0133f626e56a601fde35d1b3082dcde48caba9ba1fc5d5c9959753bd6",
-    "tls_ci_diagnostic_runner.py": "6761721d08262c2614bc3a0d0f5e297a320bbebb978cdeb22f189cc25189d3f5",
+    "tls_ci_diagnostic_runner.py": "f6269d016ce66e1fe755c846e607ded20b5a29b2c62e6ec1300ba4890be11378",
 }
 for name, expected in EXPECTED.items():
     assert hashlib.sha256((CANDIDATE / name).read_bytes()).hexdigest() == expected
@@ -91,7 +92,7 @@ with tempfile.TemporaryDirectory(prefix="tls-ci-fake-smoke-") as temporary:
     sha = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
     cases = [
         ("cap", "import pytest\n@pytest.mark.parametrize('value', range(8))\ndef test_fake_pass(value):\n    assert value >= 0\n", 5, False, sha, 4),
-        ("failures", "import pytest\n@pytest.mark.parametrize('value', range(8))\ndef test_fake_fail(value):\n    assert value < 0\n", 50, False, sha, 1),
+        ("failures", "import pytest\n@pytest.mark.parametrize('value', range(8))\ndef test_fake_fail(value):\n    assert value < 0\n", 50, False, sha, 2),
         ("preflight", "def test_fake_unused():\n    assert True\n", 5, False, "0" * 40, 125),
         ("launch", "def test_fake_unused():\n    assert True\n", 5, True, sha, 125),
         ("tree", "import json, os, subprocess, sys, time\nfrom pathlib import Path\n"
@@ -124,7 +125,16 @@ with tempfile.TemporaryDirectory(prefix="tls-ci-fake-smoke-") as temporary:
             assert (evidence / "pytest-report.xml").is_file()
         if name == "failures":
             assert len(failures) >= 5 and all(item["nodeid"].startswith("tests/test_fake.py::test_fake_fail") for item in failures)
-            assert '"kind": "failure"' in (case / "outer.txt").read_text()
+            assert all(item["phase"] == "call" for item in failures)
+            assert "xdist.dsession.Interrupted: stopping after 5 failures" in (evidence / "pytest-output.txt").read_text()
+            junit = ET.parse(evidence / "pytest-report.xml").getroot()
+            testcases = list(junit.iter("testcase"))
+            assert not list(junit.iter("error")) and not list(junit.iter("skipped"))
+            assert len(testcases) == len(failures) and all(item.find("failure") is not None for item in testcases)
+            assert {item.attrib["name"] for item in testcases} == {item["nodeid"].rsplit("::", 1)[-1] for item in failures}
+            live = [json.loads(line.removeprefix("TLS_CI_DIAGNOSTIC ")) for line in (case / "outer.txt").read_text().splitlines()
+                    if line.startswith("TLS_CI_DIAGNOSTIC ")]
+            assert {item["nodeid"] for item in live if item["kind"] == "failure"} == {item["nodeid"] for item in failures}
         if name in {"preflight", "launch"}:
             assert receipt["infrastructure_error"] in {"RuntimeError", "FileNotFoundError"}
         if name == "tree":
