@@ -241,8 +241,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           uv pip install -r requirements-dev.txt --python "$env:RUNNER_TEMP\sonder-ci-venv\Scripts\python.exe"
       - name: Exercise managed owner, artifact verifier, and lifecycle regressions
+        id: windows-lifecycle-regressions
+        env:
+          PYTEST_MANAGED_OWNER_DIAGNOSTIC_DIR: ${{ runner.temp }}/sonder-owner-diagnostics
         run: >-
           & "$env:RUNNER_TEMP\sonder-ci-venv\Scripts\python.exe" -m pytest -q
+          -p tests.fleet_stall_diagnostics
+          --fleet-stall-evidence-dir "$env:RUNNER_TEMP/sonder-fleet-diagnostics"
           tests/test_managed_runtime_payload.py
           tests/test_managed_runtime_owner.py
           tests/test_artifact_fetch.py
@@ -254,6 +259,9 @@ jobs:
           tests/test_runtime_lifecycle_graceful_drain_bridge.py
           tests/test_application_lifecycle_adapter.py
           tests/test_repl_turn_interrupt.py
+          tests/repl/test_repl_contracts.py
+          tests/test_private_files_windows_owner.py
+          tests/test_surface_sweep_harness.py
           tests/test_shared_model_request_admission.py
           tests/test_host_model_request_admission.py
           tests/test_openai_host_model_admission.py
@@ -261,6 +269,9 @@ jobs:
           tests/test_control_plane_deleted_paths.py
           tests/test_process_wait_hardening.py
           tests/test_job004_process_provider.py
+          tests/test_process_output_batching.py
+          tests/test_crash_repro_attempts.py
+          tests/test_structured_test_run_real_optional.py::test_cargo_libtest_totals
           tests/test_process_cancellation_reaping.py
           tests/test_process_completion_race.py
           tests/test_process_group_absence.py
@@ -273,6 +284,9 @@ jobs:
           tests/test_curriculum_store_durability.py
           tests/test_fleet_store.py
           tests/test_adaptive_concurrency.py
+          tests/test_fleet_stall_diagnostics.py
+          tests/test_master_orchestrator.py
+          tests/test_fleet_reservations.py
           tests/test_tool_gateway_effect_crash_matrix.py
           tests/test_autopilot_controller.py
           tests/test_codegen_build_loop_server.py
@@ -284,6 +298,22 @@ jobs:
           tests/test_data006_epoch_qualification.py
           tests/test_data007_artifact_consumer_qualification.py
           tests/test_ops006_telemetry_qualification.py
+      - name: Retain managed owner failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: managed-owner-failure-diagnostics
+          path: ${{ runner.temp }}/sonder-owner-diagnostics/owner-diagnostic.json
+          if-no-files-found: ignore
+          retention-days: 3
+      - name: Retain fleet stall failure diagnostics
+        if: ${{ !cancelled() && steps.windows-lifecycle-regressions.outcome == 'failure' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: fleet-stall-failure-diagnostics
+          path: ${{ runner.temp }}/sonder-fleet-diagnostics/stall-*.json
+          if-no-files-found: ignore
+          retention-days: 3
       - name: Exercise Windows release smoke script
         if: ${{ !cancelled() && steps.install-focused-venv.outcome == 'success' }}
         env:
