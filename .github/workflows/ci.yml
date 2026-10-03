@@ -98,13 +98,33 @@ jobs:
         run: >-
           python eval_harness.py run --suite tool_policy_gates --check-baseline
           --no-record-history --out eval_runs/ci/tool_policy_gates
+      - name: Record full-suite source and runner resources
+        run: |
+          python - <<'PY'
+          import importlib.metadata as metadata
+          import json, os, shutil, subprocess, sys
+          from pathlib import Path
+          head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True, timeout=10).strip()
+          tls_blob = subprocess.check_output(["git", "hash-object", "tests/test_ollama_endpoint_tls.py"], text=True, timeout=10).strip()
+          mem = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines())
+          available_mib = int(mem["MemAvailable"].split()[0]) // 1024
+          print(json.dumps({"source_head": head, "tls_blob": tls_blob,
+                            "python": sys.version, "pytest": metadata.version("pytest"),
+                            "pytest_xdist": metadata.version("pytest-xdist"),
+                            "cpu_count": os.cpu_count(), "affinity_count": len(os.sched_getaffinity(0)),
+                            "available_mib": available_mib, "disk_free_mib": shutil.disk_usage(".").free // 1048576}), flush=True)
+          if available_mib < 3000:
+              raise SystemExit("full-suite runner requires at least 3000 MiB MemAvailable")
+          PY
       - name: Run test suite
         # network/model-marked tests are skipped unless --run-network /
         # --run-model is passed (see conftest.py); CI intentionally does not
         # opt in, since those require a live Ollama/hosted model or network
         # access this runner doesn't have.
+        env:
+          PYTHONUNBUFFERED: "1"
         run: >-
-          python -m pytest -q -n auto --dist load --durations=25
+          python -m pytest -v -n auto --dist load --durations=25
           --junitxml=pytest-report.xml
       # The SPEC-4 TUF update-trust path needs requirements-update.txt, which
       # the runtime and dev requirements deliberately leave out, so the full
