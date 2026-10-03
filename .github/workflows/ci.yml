@@ -222,7 +222,7 @@ jobs:
           uv pip install -r requirements-dev.txt --python "$env:RUNNER_TEMP\sonder-ci-venv\Scripts\python.exe"
       - name: Exercise managed owner, artifact verifier, and lifecycle regressions
         env:
-          SONDER_OWNER_DIAGNOSTIC_DIR: ${{ runner.temp }}/sonder-owner-diagnostics
+          PYTEST_MANAGED_OWNER_DIAGNOSTIC_DIR: ${{ runner.temp }}/sonder-owner-diagnostics
         run: >-
           & "$env:RUNNER_TEMP\sonder-ci-venv\Scripts\python.exe" -m pytest -q
           tests/test_managed_runtime_payload.py

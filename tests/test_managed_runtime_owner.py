@@ -79,7 +79,7 @@ def _capture_managed_owner_failure(owner, output_path, *, iteration, phase,
     # Publish only this bounded, redacted failure receipt. Do not collect
     # environment/configuration files or the private runtime directory.
     try:
-        destination = os.environ.get("SONDER_OWNER_DIAGNOSTIC_DIR")
+        destination = os.environ.get("PYTEST_MANAGED_OWNER_DIAGNOSTIC_DIR")
         if destination:
             directory = Path(destination)
             directory.mkdir(parents=True, exist_ok=True)
