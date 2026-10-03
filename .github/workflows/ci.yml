@@ -98,13 +98,33 @@ jobs:
         run: >-
           python eval_harness.py run --suite tool_policy_gates --check-baseline
           --no-record-history --out eval_runs/ci/tool_policy_gates
+      - name: Record full-suite source and runner resources
+        run: |
+          python - <<'PY'
+          import importlib.metadata as metadata
+          import json, os, shutil, subprocess, sys
+          from pathlib import Path
+          head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True, timeout=10).strip()
+          tls_blob = subprocess.check_output(["git", "hash-object", "tests/test_ollama_endpoint_tls.py"], text=True, timeout=10).strip()
+          mem = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines())
+          available_mib = int(mem["MemAvailable"].split()[0]) // 1024
+          print(json.dumps({"source_head": head, "tls_blob": tls_blob,
+                            "python": sys.version, "pytest": metadata.version("pytest"),
+                            "pytest_xdist": metadata.version("pytest-xdist"),
+                            "cpu_count": os.cpu_count(), "affinity_count": len(os.sched_getaffinity(0)),
+                            "available_mib": available_mib, "disk_free_mib": shutil.disk_usage(".").free // 1048576}), flush=True)
+          if available_mib < 3000:
+              raise SystemExit("full-suite runner requires at least 3000 MiB MemAvailable")
+          PY
       - name: Run test suite
         # network/model-marked tests are skipped unless --run-network /
         # --run-model is passed (see conftest.py); CI intentionally does not
         # opt in, since those require a live Ollama/hosted model or network
         # access this runner doesn't have.
+        env:
+          PYTHONUNBUFFERED: "1"
         run: >-
-          python -m pytest -q -n auto --dist load --durations=25
+          python -m pytest -v -n auto --dist load --durations=25
           --junitxml=pytest-report.xml
       # The SPEC-4 TUF update-trust path needs requirements-update.txt, which
       # the runtime and dev requirements deliberately leave out, so the full
@@ -221,10 +241,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           uv pip install -r requirements-dev.txt --python "$env:RUNNER_TEMP\sonder-ci-venv\Scripts\python.exe"
       - name: Exercise managed owner, artifact verifier, and lifecycle regressions
+        id: windows-lifecycle-regressions
         env:
           PYTEST_MANAGED_OWNER_DIAGNOSTIC_DIR: ${{ runner.temp }}/sonder-owner-diagnostics
         run: >-
           & "$env:RUNNER_TEMP\sonder-ci-venv\Scripts\python.exe" -m pytest -q
+          -p tests.fleet_stall_diagnostics
+          --fleet-stall-evidence-dir "$env:RUNNER_TEMP/sonder-fleet-diagnostics"
           tests/test_managed_runtime_payload.py
           tests/test_managed_runtime_owner.py
           tests/test_artifact_fetch.py
@@ -261,6 +284,7 @@ jobs:
           tests/test_curriculum_store_durability.py
           tests/test_fleet_store.py
           tests/test_adaptive_concurrency.py
+          tests/test_fleet_stall_diagnostics.py
           tests/test_master_orchestrator.py
           tests/test_fleet_reservations.py
           tests/test_tool_gateway_effect_crash_matrix.py
@@ -280,6 +304,14 @@ jobs:
         with:
           name: managed-owner-failure-diagnostics
           path: ${{ runner.temp }}/sonder-owner-diagnostics/owner-diagnostic.json
+          if-no-files-found: ignore
+          retention-days: 3
+      - name: Retain fleet stall failure diagnostics
+        if: ${{ !cancelled() && steps.windows-lifecycle-regressions.outcome == 'failure' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: fleet-stall-failure-diagnostics
+          path: ${{ runner.temp }}/sonder-fleet-diagnostics/stall-*.json
           if-no-files-found: ignore
           retention-days: 3
       - name: Exercise Windows release smoke script
