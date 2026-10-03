@@ -839,13 +839,29 @@ def test_natural_language_worker_cap_rejects_negation_and_ambiguity():
 
 
 def test_delegated_fleet_limits_actual_concurrency(monkeypatch):
+    # run_delegated calls capacity() even when worker slots are pinned. Keep
+    # its cold model-size and hardware probes outside this scheduling test.
+    _fake_hardware(monkeypatch)
     monkeypatch.setattr(master_orchestrator, "parallel_worker_slots", lambda requested: 2)
     lock = threading.Lock()
     first_two_active = threading.Event()
+    initial_batch_submitted = threading.Event()
     third_worker_entered = threading.Event()
     release = threading.Event()
     current = {"active": 0, "maximum": 0}
     observation = {}
+    original_wait = master_orchestrator.wait
+
+    def observe_dispatch_wait(futures, **kwargs):
+        # The dispatcher reaches wait only after submitting its admitted
+        # batch. Observe that boundary without changing its execution: the
+        # first two real workers stay blocked until the batch is inspected.
+        if not initial_batch_submitted.is_set():
+            observation["initial_in_flight"] = len(futures)
+            initial_batch_submitted.set()
+        return original_wait(futures, **kwargs)
+
+    monkeypatch.setattr(master_orchestrator, "wait", observe_dispatch_wait)
 
     def worker(prompt):
         with lock:
@@ -856,21 +872,24 @@ def test_delegated_fleet_limits_actual_concurrency(monkeypatch):
             elif current["active"] > 2:
                 third_worker_entered.set()
         try:
-            # Hold the first two workers until an incorrectly admitted third
-            # worker has had a chance to make the cap violation observable.
-            assert release.wait(5)
+            # Release is an explicit handshake. The timeout only bounds a
+            # broken test; it never creates the concurrency observation.
+            assert release.wait(30)
         finally:
             with lock:
                 current["active"] -= 1
         return "ok"
 
     def observe_and_release():
-        observation["two_workers_started"] = first_two_active.wait(5)
-        if observation["two_workers_started"]:
-            observation["over_capacity"] = third_worker_entered.wait(1)
-        release.set()
+        try:
+            observation["two_workers_started"] = first_two_active.wait(10)
+            observation["batch_submitted"] = initial_batch_submitted.wait(10)
+            with lock:
+                observation["held_active"] = current["active"]
+        finally:
+            release.set()
 
-    controller = threading.Thread(target=observe_and_release)
+    controller = Thread(target=observe_and_release)
     controller.start()
     try:
         result = master_orchestrator.run_delegated(
@@ -878,14 +897,18 @@ def test_delegated_fleet_limits_actual_concurrency(monkeypatch):
         )
     finally:
         release.set()
-        controller.join(5)
+        controller.join(10)
 
     assert not controller.is_alive()
     assert observation["two_workers_started"]
+    assert observation["batch_submitted"]
+    assert observation["initial_in_flight"] == 2
+    assert observation["held_active"] == 2
     assert len(result["agents"]) == 6
     assert result["worker_slots"] == 2
-    assert not observation["over_capacity"]
+    assert not third_worker_entered.is_set()
     assert current["maximum"] == 2
+    assert current["active"] == 0
 
 
 def test_start_delegated_returns_before_background_workers_finish(monkeypatch):
@@ -937,7 +960,9 @@ def test_cancel_master_skips_queued_workers_and_discards_running_result(monkeypa
     def worker(prompt):
         calls.append(prompt)
         started.set()
-        assert release.wait(2)
+        # Stay blocked until cancellation and its queued-state assertions
+        # have run. This timeout is only a guard against broken cleanup.
+        assert release.wait(30)
         return "late result"
 
     def run():
@@ -951,16 +976,22 @@ def test_cancel_master_skips_queued_workers_and_discards_running_result(monkeypa
     thread = Thread(target=run)
     thread.start()
     try:
-        assert started.wait(2)
+        assert started.wait(10)
         snap = master_orchestrator.snapshot(include_finished=False, limit=20)
         master_id = next(row["id"] for row in snap["agents"] if row["role"] == "master")
 
+        assert master_orchestrator.reserved_slot_count() == 5
         canceled = master_orchestrator.request_cancel(master_id)
+        # Only the running worker and coordinator still own capacity.
+        assert master_orchestrator.reserved_slot_count() == 2
+        repeated = master_orchestrator.request_cancel(master_id)
+        assert repeated["queued"] == 0
+        assert master_orchestrator.reserved_slot_count() == 2
     finally:
         # Keep the worker/coordinator inside the test even if an assertion
         # fails, before fixture teardown or interpreter shutdown can race it.
         release.set()
-        thread.join(3)
+        thread.join(10)
 
     assert not thread.is_alive()
     assert canceled["matched"] == 5
@@ -973,6 +1004,7 @@ def test_cancel_master_skips_queued_workers_and_discards_running_result(monkeypa
     final = master_orchestrator.snapshot(limit=20)
     assert final["active_agents"] == 0
     assert {row["status"] for row in final["agents"]} == {"cancelled"}
+    assert master_orchestrator.reserved_slot_count() == 0
 
 
 def test_cancelled_queued_worker_cannot_transition_to_running():

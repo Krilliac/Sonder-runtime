@@ -10,7 +10,6 @@ import json
 import logging
 import os
 import re
-import sqlite3
 import subprocess
 import threading
 import time
@@ -21,6 +20,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 import sonder_runtime.adapters.execution.effect_fence as effect_fence
+import sonder_runtime.adapters.execution.fleet_reservations as fleet_reservations
 import sonder_runtime.adapters.persistence.fleet_store as fleet_store
 import sonder_runtime.domain.adaptive_concurrency as adaptive_concurrency
 import sonder_runtime.domain.events as events
@@ -74,6 +74,8 @@ if "_OWNER_ID" not in globals():
     _HEARTBEAT_STOP = threading.Event()
     _STORE_ERROR = ""
     _ATEXIT_REGISTERED = False
+_reservation_state = fleet_reservations.ReservationLedger(globals())
+_RESERVED_AGENT_IDS = globals()["_RESERVED_AGENT_IDS"]  # Same set for legacy reset/tests.
 if "_PRINCIPAL_ID" not in globals():
     _PRINCIPAL_ID = ""
     _PRINCIPAL_SECRET = ""
@@ -1104,9 +1106,6 @@ def _new_agent(
 ) -> str:
     _ensure_owner()
     metadata = dict(metadata or {})
-    with _LOCK:
-        global _RESERVED_SLOTS
-        _RESERVED_SLOTS += 1
     agent_id = "%s-%s" % (role, uuid.uuid4().hex[:12])
     now = _now()
     row = {
@@ -1148,19 +1147,12 @@ def _new_agent(
         "task_drift": False,
         "drift_metrics": {},
     }
-    try:
-        if _PRINCIPAL_ID:
-            stored = fleet_store.create_agent(
-                row, _OWNER_ID, os.getpid(), principal_id=_PRINCIPAL_ID,
-                principal_secret=_PRINCIPAL_SECRET,
-            )
-        else:
-            stored = fleet_store.create_agent(row, _OWNER_ID, os.getpid())
-    except sqlite3.IntegrityError:
-        # A 48-bit suffix collision is exceptionally unlikely; fail closed rather
-        # than risk attaching work to another process's row.
-        raise RuntimeError("fleet agent ID collision; retry orchestration")
+    stored = _reservation_state.create(
+        agent_id, fleet_store.create_agent, row, _OWNER_ID, os.getpid(),
+        _PRINCIPAL_ID, _PRINCIPAL_SECRET,
+    )
     _sync_local(stored)
+    _reservation_state.release_cancelled(stored)
     if stored.get("cancel_requested"):
         _event(agent_id, "cancelled with parent before start")
     else:
@@ -1193,6 +1185,11 @@ def _start_agent(agent_id: str, activity: str, **changes) -> bool:
         tier=str(changes.get("tier") or ""),
     )
     if not stored:
+        # A failed start may be a duplicate live invocation or a foreign row.
+        # Release only a proved local queued cancellation, including one
+        # requested by another process. An unreadable ledger retains capacity.
+        with contextlib.suppress(Exception):
+            _reservation_state.release_cancelled(fleet_store.get_agent(agent_id))
         return False
     _sync_local(stored)
     _event(agent_id, activity)
@@ -1222,6 +1219,7 @@ def request_cancel(selector: str) -> dict:
     result = fleet_store.cancel_agents(selector)
     for row in result.get("agents") or []:
         _sync_local(row)
+        _reservation_state.release_cancelled(row)
         _event(row["id"], row.get("activity") or "cancellation requested")
     return result
 
@@ -1354,9 +1352,7 @@ def _finish(
         drift_metrics=drift_metrics,
     )
     _sync_local(stored)
-    with _LOCK:
-        global _RESERVED_SLOTS
-        _RESERVED_SLOTS = max(0, _RESERVED_SLOTS - 1)
+    _reservation_state.release(agent_id)
     if stored:
         _event(agent_id, stored.get("activity") or "finished")
         if stored.get("role") == "master":
@@ -2296,9 +2292,7 @@ def run_delegated(
         try:
             _finish(agent_id, error="fleet dispatch could not complete this lane")
         except Exception:
-            with _LOCK:
-                global _RESERVED_SLOTS
-                _RESERVED_SLOTS = max(0, _RESERVED_SLOTS - 1)
+            _reservation_state.release(agent_id)
             raise
 
     try:
@@ -3017,10 +3011,12 @@ def format_snapshot(data: dict) -> str:
 
 
 def reset_for_tests() -> None:
-    global _OWNER_REGISTERED, _STORE_ERROR
+    global _OWNER_REGISTERED, _STORE_ERROR, _RESERVED_SLOTS
     with _LOCK:
         _AGENTS.clear()
         _EVENTS.clear()
+        _RESERVED_AGENT_IDS.clear()
+        _RESERVED_SLOTS = 0
     fleet_store.clear_all()
     _OWNER_REGISTERED = False
     _STORE_ERROR = ""
