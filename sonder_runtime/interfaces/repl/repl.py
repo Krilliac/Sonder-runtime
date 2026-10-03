@@ -26,6 +26,7 @@ from sonder_runtime.domain.runtime_model_configuration import OPTIONAL_LOCAL_TIE
 from sonder_runtime.adapters import creation_workspace
 from sonder_runtime.adapters.filesystem import file_ops
 from sonder_runtime.platform import paths as server_paths
+from sonder_runtime.platform import private_files
 from sonder_runtime.platform.config_environment import env_bool_from_env
 import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
 from sonder_runtime.adapters.observability.repl_formatting import (
@@ -497,10 +498,24 @@ def _load_history(path=None):
     return [line for line in lines if _history_safe(line)][-REPL_HISTORY_LIMIT:]
 
 
+def _prepare_windows_history_file(path):
+    # Establish confidentiality and refuse an existing link before the
+    # writer can truncate it. CREATE_NEW precreates only a missing private file.
+    try:
+        private_files.create_private_windows_file(path)
+    except FileExistsError:
+        pass
+    except OSError:
+        return False
+    return private_files.restrict_private_file_acl(path)
+
+
 def _save_history(entries, path=None):
-    """Write history 0600, newest ``REPL_HISTORY_LIMIT`` single-line entries."""
+    """Write owner-private history, newest ``REPL_HISTORY_LIMIT`` single-line entries."""
     path = path if path is not None else _history_path()
     if not path:
+        return False
+    if os.name == "nt" and not _prepare_windows_history_file(path):
         return False
     keep = [e for e in entries if _history_safe(e) and "\n" not in e][-REPL_HISTORY_LIMIT:]
     try:
