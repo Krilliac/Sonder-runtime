@@ -1367,15 +1367,15 @@ def _finish(
             (stored.get("finished_ts") or 0) - (stored.get("started_ts") or 0)
             if stored else 0
         )
-        if error:
+        if stored and stored.get("status") in ("failed", "task_drift"):
             events.emit(
                 events.FLEET_AGENT_FAILED, "fleet", agent_id,
-                {"error": str(error)},
+                {"error": str(stored.get("error") or "")},
             )
-        else:
+        elif stored:
             events.emit(
                 events.FLEET_AGENT_DONE, "fleet", agent_id,
-                {"result": (output or "")[:500], "duration": _duration},
+                {"result": (stored.get("output") or "")[:500], "duration": _duration},
             )
     return final
 
@@ -1631,11 +1631,13 @@ def run_inline(
             master_id, "calling model for provenance-validated inline task",
             tool_calls=1,
         ):
+            _finish(master_id)
             return {"mode": "inline", "master_id": master_id, "output": "CANCELLED"}
     else:
         if not _begin_model_call(
             master_id, "running inline as master", tool_calls=1,
         ):
+            _finish(master_id)
             return {"mode": "inline", "master_id": master_id, "output": "CANCELLED"}
     with _bind_worker_agent(master_id):
         try:
