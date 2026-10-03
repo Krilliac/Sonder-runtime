@@ -57,7 +57,7 @@ def test_blocked_coordinator_stack_is_useful_without_private_values(tmp_path):
         "    secret_local = sentinel\n"
         "    private_local = private_directory\n"
         "    entered.set()\n"
-        "    release.wait(5)\n",
+        "    release.wait()\n",
         str(external_file), "exec",
     ), namespace)
     thread = threading.Thread(target=namespace["held_coordinator"])
