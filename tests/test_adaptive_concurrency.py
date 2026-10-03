@@ -8,10 +8,12 @@ pure policy and through the live ``master_orchestrator`` dispatch seam.
 from __future__ import annotations
 
 import threading
+import time
 
 import pytest
 
 import master_orchestrator
+from tests.fleet_stall_diagnostics import write_stall_diagnostic
 from sonder_runtime.domain import adaptive_concurrency as ac
 from sonder_runtime.domain.adaptive_concurrency import (
     ConcurrencyPolicy,
@@ -486,7 +488,9 @@ def test_dispatch_lanes_surfaces_stalled_lane_without_waiting_for_executor_shutd
     assert "fleet lanes stalled" in caplog.text and "hung" in caplog.text
 
 
-def test_run_delegated_stall_is_uncertain_and_retains_child_capacity(monkeypatch):
+def test_run_delegated_stall_is_uncertain_and_retains_child_capacity(
+    monkeypatch, request, tmp_path,
+):
     monkeypatch.setenv("SONDER_FLEET_PROGRESS_DEADLINE_SECONDS", "0.1")
     # The worker hangs inside its model call, and a lane in a model call is
     # live until the call's own timeout plus a margin (finding 39).  Shrink
@@ -500,10 +504,13 @@ def test_run_delegated_stall_is_uncertain_and_retains_child_capacity(monkeypatch
     entered = threading.Event()
     audited = threading.Event()
     result_box = {}
+    checkpoints = {"test_started_ns": time.monotonic_ns()}
 
     def worker(_prompt):
+        checkpoints["worker_entered_ns"] = time.monotonic_ns()
         entered.set()
         release.wait(5)
+        checkpoints["worker_returned_ns"] = time.monotonic_ns()
         return "late"
 
     def audit(_prompt):
@@ -518,16 +525,32 @@ def test_run_delegated_stall_is_uncertain_and_retains_child_capacity(monkeypatch
         ),
     )
     thread.start()
+    phase = "worker-entry"
     try:
         assert entered.wait(5)
+        phase = "coordinator-join"
+        checkpoints["join_started_ns"] = time.monotonic_ns()
         thread.join(5)
+        checkpoints["join_finished_ns"] = time.monotonic_ns()
         assert not thread.is_alive()
+        phase = "stalled-result"
         result = result_box["result"]
         assert result["stalled"] is True
         assert result["uncertain"] is True
         assert result["output"].startswith("STALLED:")
         assert not audited.is_set()
+        phase = "capacity-retained"
         assert master_orchestrator.reserved_slot_count() == 1
+    except AssertionError:
+        try:
+            directory = request.config.getoption("fleet_stall_evidence_dir", default=None)
+            write_stall_diagnostic(
+                directory or tmp_path / "fleet-stall-diagnostics", phase=phase,
+                coordinator_id=thread.ident, checkpoints=checkpoints,
+            )
+        except Exception:
+            pass  # Observation must preserve the original assertion.
+        raise
     finally:
         release.set()
     for _ in range(50):
