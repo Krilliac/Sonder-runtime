@@ -221,10 +221,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           uv pip install -r requirements-dev.txt --python "$env:RUNNER_TEMP\sonder-ci-venv\Scripts\python.exe"
       - name: Exercise managed owner, artifact verifier, and lifecycle regressions
+        id: windows-lifecycle-regressions
         env:
           PYTEST_MANAGED_OWNER_DIAGNOSTIC_DIR: ${{ runner.temp }}/sonder-owner-diagnostics
         run: >-
           & "$env:RUNNER_TEMP\sonder-ci-venv\Scripts\python.exe" -m pytest -q
+          -p tests.fleet_stall_diagnostics
+          --fleet-stall-evidence-dir "$env:RUNNER_TEMP/sonder-fleet-diagnostics"
           tests/test_managed_runtime_payload.py
           tests/test_managed_runtime_owner.py
           tests/test_artifact_fetch.py
@@ -261,6 +264,7 @@ jobs:
           tests/test_curriculum_store_durability.py
           tests/test_fleet_store.py
           tests/test_adaptive_concurrency.py
+          tests/test_fleet_stall_diagnostics.py
           tests/test_master_orchestrator.py
           tests/test_fleet_reservations.py
           tests/test_tool_gateway_effect_crash_matrix.py
@@ -280,6 +284,14 @@ jobs:
         with:
           name: managed-owner-failure-diagnostics
           path: ${{ runner.temp }}/sonder-owner-diagnostics/owner-diagnostic.json
+          if-no-files-found: ignore
+          retention-days: 3
+      - name: Retain fleet stall failure diagnostics
+        if: ${{ !cancelled() && steps.windows-lifecycle-regressions.outcome == 'failure' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: fleet-stall-failure-diagnostics
+          path: ${{ runner.temp }}/sonder-fleet-diagnostics/stall-*.json
           if-no-files-found: ignore
           retention-days: 3
       - name: Exercise Windows release smoke script
