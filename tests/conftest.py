@@ -229,7 +229,7 @@ def _isolate_legacy_server_graph():
 
 @pytest.fixture(autouse=True)
 def _isolate_typed_ollama_endpoint(monkeypatch):
-    """Restore the process-global typed Ollama endpoint around each test.
+    """Restore process-global typed Ollama transport bindings around each test.
 
     ``bootstrap.app`` pins the typed endpoint (``configure_typed_endpoint``)
     when it composes an application from a config, and from then on the
@@ -239,9 +239,10 @@ def _isolate_typed_ollama_endpoint(monkeypatch):
     host -- ``test_promotion_eval``'s loopback rejections failed only when
     scheduled after a composing test on the same xdist worker. Save/restore
     rather than unconditional reset, so a test that legitimately configures
-    the endpoint still sees its own value while it runs.
+    the endpoint still sees its own value while it runs. CA trust and typed
+    worker configuration are part of that same process-local boundary.
     """
-    from sonder_runtime.adapters.inference import ollama_endpoint
+    from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool
     from sonder_runtime.adapters import embeddings as embeddings
     import weakref
 
@@ -251,6 +252,31 @@ def _isolate_typed_ollama_endpoint(monkeypatch):
 
     with ollama_endpoint._configuration_lock:
         before = ollama_endpoint._configured_endpoint
+        before_ca_bundle = ollama_endpoint._configured_ca_bundle
+    # These are exactly the bindings written by configure_typed_workers and
+    # configure_typed_pool. Preserve the pool binding identity; do not mutate
+    # an application-owned pool's admission, draining or capability state.
+    pool_configuration_names = (
+        "_configured_workers",
+        "_configured_allow_remote",
+        "_configured_trusted_origins",
+        "_configured_failure_threshold",
+        "_configured_cooldown_seconds",
+        "_configured_admission_timeout_ms",
+        "_configured_capability_ttl_seconds",
+        "_configured_probe_timeout_ms",
+        "_configured_max_inflight",
+        "_configured_queue_depth",
+        "_configured_max_workers",
+        "_configured_probe_parallelism",
+        "_configured_probe_batch_size",
+        "_configured_status_page_size",
+        "_configured_pool",
+    )
+    with ollama_pool._configuration_lock:
+        before_pool_configuration = {
+            name: getattr(ollama_pool, name) for name in pool_configuration_names
+        }
     before_base = embeddings.BASE
     before_netloc = embeddings.OLLAMA_HOST
     before_embedding = (
@@ -273,6 +299,14 @@ def _isolate_typed_ollama_endpoint(monkeypatch):
         embeddings.EMBED_REVISION,
         embeddings.EXPECTED_DIMENSION,
     ) = before_embedding
+    # Assign the saved CA identity under the same lock as the setter. Calling
+    # the setter here would revalidate a path its owner may already have
+    # removed, although restoration should reproduce the previous state.
+    with ollama_endpoint._configuration_lock:
+        ollama_endpoint._configured_ca_bundle = before_ca_bundle
+    with ollama_pool._configuration_lock:
+        for name, value in before_pool_configuration.items():
+            setattr(ollama_pool, name, value)
 
 
 @pytest.fixture(autouse=True)
