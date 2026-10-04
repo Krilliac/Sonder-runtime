@@ -19,6 +19,21 @@ def test_benign_command_is_inspectable():
 
 
 @requires_powershell
+@pytest.mark.parametrize("source", ["Get-`Date", "& 'custom`command'"])
+def test_escaped_command_names_require_inspection(source):
+    result = inspect_powershell(source)
+    assert not result.inspectable
+    assert result.reason == "escaped command name requires inspection"
+
+
+@requires_powershell
+@pytest.mark.parametrize("source", ["Write-Output 'literal`argument'", "& { Write-Output 'literal`argument' }"])
+def test_literal_escapes_in_arguments_preserve_inspectability(source):
+    result = inspect_powershell(source)
+    assert result.inspectable, result.reason
+
+
+@requires_powershell
 def test_unsafe_constructs_raise():
     for source in (
         "pwsh -EncodedCommand QQ==", "iex $x", "& $command", ". $script", "Add-Type 'x'",

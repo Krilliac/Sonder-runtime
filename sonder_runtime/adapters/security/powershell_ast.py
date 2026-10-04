@@ -66,6 +66,10 @@ try {
     foreach ($node in @($root.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true))) {
       $elements = @($node.CommandElements)
       if (!$elements.Count) { continue }
+      # Escaped command-name spellings are not a canonical command identity.
+      # Inspect arguments normally; uncertain command heads require approval.
+      if ($elements[0] -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+          $elements[0].Extent.Text.Contains([char]96)) { throw 'escaped command name requires inspection' }
       $name = Text $elements[0]
       if ($null -eq $name) {
         if ($node.InvocationOperator -match 'Ampersand|Dot' -and

@@ -126,3 +126,36 @@ dispatch context as a default-branch cache risk, even after dependency caching
 was removed. Historical comparisons therefore run only in the pull-request
 context, opt-in by the `tls-diagnostic` label. There is no privileged manual
 dispatch event or shared dependency cache. Required `ci.yml` stays unchanged.
+
+## Hosted qualification repairs
+
+The final application source of local revision `88598a500c7b4a68f1d38605fa28842321fb134b`
+passed **25,353 tests, 407 skips, four subtests** in 661.42 seconds. Workflow and
+evidence changes produced revision `7bf7d734b2ff6ee5abd4695b5a9197accad7b81f`;
+all three CodeQL analyses and the aggregate passed there. Premerge interoperability
+on that head, Inference `ff883402` and Observatory main `9ea5f788` passed all
+**30 gates in 79.3 seconds**, including Chromium/Flutter, shutdown/fallback,
+fourteen process-group cleanup and unchanged Git/home paths.
+
+The hosted full run on `7bf7d734` found **two failures, 25,442 passes, 309 skips,
+four passing subtests** in 1,094.09 seconds. Its 64 native PowerShell cases
+executed without skips: 63 passed and one classification case failed. The
+native helper now treats escaped literal command heads as requiring inspection,
+preserving ordinary literal escapes in arguments and nested scriptblock data.
+It continues to use only `Parser.ParseInput` with JSON stdin and never executes
+candidate text. Four new controls use benign command/data spellings; no
+decoding or evaluation path was added.
+
+The other failure was the two-service resume test's stale refusal whitelist.
+The existing revision fence correctly refused a contender after its sibling
+committed revision 8. The test now admits only the exact existing typed refusal,
+retains one winner/one loser/one runner and exact ambiguous-claim reconciliation,
+and deterministically orders a losing contender after the winner enters.
+Production revision fences and effect recovery are unchanged. The old whitelist
+failed that deterministic control; the corrected durable-resume cohort passed
+**29 tests**. The combined native parser, permission/generated/surface and
+durable-resume cohort passed **269 tests with no skips** using official MIT
+PowerShell 7.5.3, whose archive SHA256 matches its pinned release asset digest.
+The parser tool is outside the repositories. Independent review found no
+blocking regression. Fresh full-suite and exact-head protected hosted checks
+remain merge gates for this repair revision.
