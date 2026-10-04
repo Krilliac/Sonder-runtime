@@ -103,6 +103,10 @@ Windows); override with the `SONDER_HOME` environment variable.
 Schedule both with your platform scheduler (cron/Task Scheduler); the
 server-private systemd timers in `packaging/systemd/` are the reference.
 
+For nightly learning and selfmod candidate branches on Windows, follow the
+[scheduled-task deployment guide](nightly-selfmod-windows.md). Its account
+and isolation requirements differ from a backup-only task.
+
 ## 5. Before proposing a release tag
 
 Run [release-smoke-check](release-smoke-check.md)

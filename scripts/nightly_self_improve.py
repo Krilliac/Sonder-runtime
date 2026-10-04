@@ -25,10 +25,10 @@ rather than one wave and eight idle hours. A lock file makes overlapping
 invocations exit immediately, so extra scheduled triggers are a redundancy
 rather than a collision.
 
-Deliberately absent, because this runs with nobody watching: it never edits
-a source file, never commits or pushes, and never starts an autopilot run
-with workspace policy. It exercises the model, records outcomes, grooms the
-stores, and queues proposals for a human to read in the morning.
+The selfmod stage also creates and tests a candidate in a separate worktree.
+Passing candidates are committed to local ``selfmod/<run-id>`` branches for
+human review. It never merges, pushes, or installs those changes into the
+stable checkout, and never starts an autopilot run with workspace policy.
 
 Every stage is fail-soft and bounded; a down Ollama skips the model-bound
 stages and still grooms what it can. Output goes to stdout and to
@@ -39,10 +39,9 @@ Usage (repo root, runtime venv):
     python scripts/nightly_self_improve.py
     python scripts/nightly_self_improve.py --campaign-total 12 --skip-campaign
 
-Register as a daily task (run from an elevated or normal prompt):
-
-    schtasks /create /tn SonderNightly /sc daily /st 03:30 /tr
-      "<venv>\\python.exe <repo>\\scripts\\nightly_self_improve.py"
+Windows deployment, account credentials and promotion limits are documented
+in ``docs/runbooks/nightly-selfmod-windows.md``. The synchronous scheduled-task
+entrypoint is ``scripts/run-nightly.ps1``.
 """
 from __future__ import annotations
 
