@@ -109,7 +109,9 @@ def test_ledgered_migration_applies_and_verifies_on_a_legacy_copy(tmp_path):
     assert "0003_fact_validity" in status.applied
     assert status.current
     again = sonder_migrations.migrate_store("memory", str(db))
-    assert again.applied == ()
+    # The public migration receipt lists all applied ledger entries on replay.
+    assert again.applied == status.applied
+    assert again.current and again.pending == ()
     rows, count = _legacy_recall(db, "alpha")
     assert count == 3 and [r["id"] for r in rows] == ["f4", "f1", "f2"]
 

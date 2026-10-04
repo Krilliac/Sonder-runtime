@@ -16828,7 +16828,7 @@ def session_export(session: str = "", limit: int = 50, format: str = "") -> str:
         from sonder_runtime.adapters import session_atif_export as atif_export
         export_format = atif_export.normalize_session_export_format(format)
         if export_format is None:
-            return "ERROR: unknown session_export format %r (use 'text' or 'atif')." % format
+            raise InvalidInput("unknown session_export format (use 'text' or 'atif')")
     session_id = _resolve_session(session)
     if not session_id:
         return "ERROR: session='none' has no stored transcript."

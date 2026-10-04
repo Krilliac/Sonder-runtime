@@ -30,6 +30,7 @@ same resource serialize on the database lock: exactly one wins.
 from __future__ import annotations
 
 import json
+from contextlib import suppress
 import logging
 import os
 import secrets
@@ -124,6 +125,7 @@ class SqliteResourceLeaseRegistry:
 
         class _Txn:
             def __enter__(self_inner):
+                conn = None
                 try:
                     conn = sqlite_connect(registry._path, timeout=10.0, busy_timeout_ms=10000)
                     conn.isolation_level = None
@@ -132,6 +134,11 @@ class SqliteResourceLeaseRegistry:
                         registry._schema_ready = True
                     conn.execute("BEGIN IMMEDIATE")
                 except sqlite3.Error as exc:
+                    # A failed __enter__ never reaches __exit__. Release the
+                    # connection immediately, including ordinary busy errors.
+                    if conn is not None:
+                        with suppress(sqlite3.Error):
+                            conn.close()
                     raise DependencyUnavailable("resource lease store unavailable: %s" % exc) from None
                 self_inner.conn = conn
                 return conn
@@ -233,8 +240,9 @@ class SqliteResourceLeaseRegistry:
                 metadata: Mapping | None = None) -> ResourceLease:
         """Hold ``kind:key`` for ``owner_id``; raises ``RESOURCE_LEASE_BUSY`` when held.
 
-        Re-acquiring a lease the same owner already holds renews it. A lease
-        held by someone else is reclaimed only under the domain rule.
+        Re-acquiring a lease the same owner already holds renews it. Its
+        process evidence stays pinned: a restarted worker needs an explicit
+        release or a fresh owner id and the normal cleanup/reclaim rule.
         """
         kind, key = validate_kind(kind), validate_text("key", key)
         owner_id = validate_text("owner_id", owner_id)
@@ -247,6 +255,10 @@ class SqliteResourceLeaseRegistry:
         with self._connection() as conn:
             held = self._row(conn, kind, key)
             if held is not None and held.owner_id == owner_id:
+                if ((owner_pid is not None and owner_pid != held.owner_pid)
+                        or (owner_identity is not None and owner_identity != held.owner_identity)):
+                    raise lease_error(RESOURCE_LEASE_NOT_OWNER,
+                                      "resource lease owner process changed; release before reacquiring")
                 renewed = self._renewed(held, ttl, meta or None, now=self._clock())
                 self._put(conn, renewed)
                 return renewed

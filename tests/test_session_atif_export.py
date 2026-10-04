@@ -384,7 +384,10 @@ def test_mcp_session_export_atif_from_interactions(tmp_path, monkeypatch):
     assert parity.SECRET not in text and parity.PASSWORD not in text
     tail = json.loads(server.session_export("S-parity", limit=1, format="ATIF"))
     assert [s["message"] for s in tail["steps"]][0] == "second"
-    assert server.session_export("S-parity", format="xml").startswith("ERROR: unknown")
+    from sonder_runtime.domain.common.errors import InvalidInput
+
+    with pytest.raises(InvalidInput, match="unknown session_export format"):
+        server.session_export("S-parity", format="xml")
     assert server.session_export("S-parity", format="text") == server.session_export("S-parity")
 
 
