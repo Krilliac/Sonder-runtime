@@ -463,6 +463,12 @@
       "summary": "Developer/admin inspection bundle without hidden chain-of-thought."
     },
     {
+      "category": "agents",
+      "name": "/delegate",
+      "risk": "execution",
+      "summary": "Start an agent conversation: /delegate <task>. Uses the selected project or a creations folder."
+    },
+    {
       "category": "filesystem",
       "name": "/delete",
       "risk": "safe",
@@ -994,7 +1000,7 @@
       "category": "agents",
       "name": "/master",
       "risk": "ask",
-      "summary": "Run inline or delegated master/subagent orchestration."
+      "summary": "Run a master pass inline or with hardware-scheduled delegated agents."
     },
     {
       "category": "agents",

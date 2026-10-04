@@ -2361,9 +2361,12 @@ def test_mcp_runtime_format_never_echoes_injected_paths_or_credentials():
 def test_master_orchestrate_asks_for_execution_mode():
     out = server.master_orchestrate("build a parser", mode="ask", agents=2)
 
-    assert "Choose execution mode" in out
-    assert "inline" in out
-    assert "delegate" in out
+    assert "I can do this inline, with 2 agents" in out
+    assert "which?" in out
+    assert "Call master_orchestrate" not in out
+    assert out.receipt_fields["orchestration"]["choices"][1]["command"] == (
+        "/master_orchestrate delegate 2 build a parser"
+    )
 
 
 def test_master_orchestrate_ask_reports_widened_agent_cap(monkeypatch):
@@ -2371,8 +2374,9 @@ def test_master_orchestrate_ask_reports_widened_agent_cap(monkeypatch):
 
     out = server.master_orchestrate("build a parser", mode="ask", agents=99)
 
-    assert "queue 16 agent(s)" in out
-    assert "safe worker slot(s)" in out
+    assert "fleet of 16 agents" in out
+    assert "worker slots" in out
+    assert out.receipt_fields["orchestration"]["fleet_agents"] == 16
 
 
 def test_master_capacity_and_cancel_tools(monkeypatch):

@@ -1,22 +1,37 @@
-/// "What is running now": the one health summary at the top of Runtime
-/// (plan P1-5, §2.4). Every row is `<glyph> <word>  <label>  <value>`, so
-/// colour never carries status alone; off-by-design reads `– off`, not red.
+/// "What is running now": the Overview page of Runtime (plan P1-5, §2.4).
+/// Every tile leads with a glyph and a word, so colour never carries status
+/// alone; off-by-design reads `– off`, not red. Tiles open the page that
+/// owns them.
 library;
 
 import 'package:flutter/material.dart';
 
 import '../api.dart';
 import '../theme.dart';
-import 'runtime_data.dart';
+import '../ui/kit.dart';
 import '../ui/status_row.dart';
+import 'runtime_data.dart';
 import 'status_word.dart';
 
-/// One overview row, computed from the snapshots the screen already holds.
+/// One overview fact, computed from the snapshots the screen already holds.
 class OverviewRow {
   final StatusKind status;
   final String? word;
   final String label;
+
+  /// The whole fact on one line (what a screen reader hears).
   final String value;
+
+  /// The tile's big figure ("3 running") and the line under it.
+  final String headline;
+  final String detail;
+
+  /// The Runtime category that owns this fact.
+  final String category;
+
+  /// 0..1 for facts that read as a meter (context use), with its label.
+  final double? meter;
+  final String? meterLabel;
   final String? actionLabel;
   final VoidCallback? onAction;
 
@@ -24,10 +39,16 @@ class OverviewRow {
     required this.status,
     required this.label,
     required this.value,
+    String? headline,
+    String? detail,
+    this.category = 'overview',
     this.word,
+    this.meter,
+    this.meterLabel,
     this.actionLabel,
     this.onAction,
-  });
+  })  : headline = headline ?? value,
+        detail = detail ?? '';
 }
 
 /// One line of the recent-activity list.
@@ -54,13 +75,25 @@ String compactDuration(Duration duration) {
   return rest == 0 ? '${hours}h' : '${hours}h ${rest}m';
 }
 
+/// `2.1k`, `812`, `1.2M`: token counts for tiles and meters.
+String compactCount(num value) {
+  if (value.abs() < 1000) return value.round().toString();
+  if (value.abs() < 1000000) {
+    final k = value / 1000;
+    return '${k.toStringAsFixed(k >= 100 ? 0 : 1)}k';
+  }
+  final m = value / 1000000;
+  return '${m.toStringAsFixed(m >= 100 ? 0 : 1)}M';
+}
+
 String serverLabel(String serverUrl) {
   final uri = Uri.tryParse(serverUrl.trim());
   if (uri == null || uri.host.isEmpty) return serverUrl.trim();
   return uri.hasPort ? '${uri.host}:${uri.port}' : uri.host;
 }
 
-StatusKind _eventStatus(ExecutionFeedEvent event) {
+/// The status of one execution-feed event, from its outcome or its phase.
+StatusKind executionEventStatus(ExecutionFeedEvent event) {
   if (event.ok == true) return StatusKind.ok;
   if (event.ok == false) return StatusKind.fail;
   final state = '${event.phase} ${event.responseStatus}'.toLowerCase();
@@ -83,7 +116,8 @@ StatusKind _eventStatus(ExecutionFeedEvent event) {
   return StatusKind.note;
 }
 
-String _eventWord(StatusKind status) => switch (status) {
+/// The word for an execution event's status: `done` for a finished one.
+String executionEventWord(StatusKind status) => switch (status) {
       StatusKind.ok => 'done',
       StatusKind.skipped => 'cancelled',
       _ => status.runtimeWord,
@@ -96,23 +130,26 @@ List<ActivityLine> recentActivity(ExecutionFeed? feed, {int limit = 5}) {
   return [
     for (final event in events.take(limit))
       () {
-        final status = _eventStatus(event);
+        final status = executionEventStatus(event);
         final parts = <String>[
           event.summary.isNotEmpty ? event.summary : event.kind,
           if (event.elapsedMs > 0)
             '${(event.elapsedMs / 1000).toStringAsFixed(1)}s',
         ];
         return ActivityLine(
-          event.timestamp == null ? '--:--' : clockLabel(event.timestamp!),
+          event.timestamp == null
+              ? '--:--'
+              : clockLabel(event.timestamp!.toLocal()),
           status,
-          _eventWord(status),
+          executionEventWord(status),
           parts.join(' · '),
         );
       }(),
   ];
 }
 
-/// Builds the overview rows. Pure, so the table is testable without pumping.
+/// Builds the overview facts. Pure, so the table is testable without
+/// pumping. Facts that need a status snapshot appear only once there is one.
 List<OverviewRow> overviewRows({
   required String serverUrl,
   required SystemInfo? info,
@@ -122,6 +159,7 @@ List<OverviewRow> overviewRows({
   List<WorkRun>? workRuns,
   Object? workRunsError,
   ApprovalsPage? approvals,
+  Object? approvalsError,
   DateTime? now,
   VoidCallback? onOpenWorkRuns,
   VoidCallback? onReviewApprovals,
@@ -132,26 +170,43 @@ List<OverviewRow> overviewRows({
 
   if (offline) {
     rows.add(OverviewRow(
-        status: StatusKind.fail, label: 'Server', value: "Can't reach $host"));
+        status: StatusKind.fail,
+        label: 'Server',
+        value: "Can't reach $host",
+        headline: 'Offline',
+        detail: "Can't reach $host",
+        category: 'server'));
   } else if (info == null && serverError != null && serverError.isNotEmpty) {
     rows.add(OverviewRow(
-        status: StatusKind.fail, label: 'Server', value: serverError));
+        status: StatusKind.fail,
+        label: 'Server',
+        value: serverError,
+        headline: 'Error',
+        detail: serverError,
+        category: 'server'));
   } else if (info == null) {
     rows.add(OverviewRow(
         status: StatusKind.unknown,
         word: loading ? 'checking' : null,
         label: 'Server',
-        value: loading ? 'Connecting to $host…' : 'No status from $host yet'));
+        value: loading ? 'Connecting to $host…' : 'No status from $host yet',
+        headline: loading ? 'Connecting…' : 'No status',
+        detail: host,
+        category: 'server'));
   } else {
     final summary = info.status.split('\n').first.trim();
     rows.add(OverviewRow(
         status: StatusKind.ok,
         label: 'Server',
-        value: [host, if (summary.isNotEmpty) summary].join(' · ')));
+        value: [host, if (summary.isNotEmpty) summary].join(' · '),
+        headline: 'Connected',
+        detail: [host, if (summary.isNotEmpty) summary].join(' · '),
+        category: 'server'));
   }
 
   if (info != null) {
-    final models = info.models.map((m) => m.id).where((id) => id.isNotEmpty);
+    final models =
+        info.models.map((m) => m.id).where((id) => id.isNotEmpty).toList();
     final caps = info.operationalCapabilities;
     final pool = caps != null && caps.workerCount > 0
         ? 'pool ${caps.healthyWorkerCount} of ${caps.workerCount} workers'
@@ -171,22 +226,74 @@ List<OverviewRow> overviewRows({
                 ? StatusKind.warn
                 : StatusKind.ok,
         label: 'Models',
-        value: [modelText, if (pool.isNotEmpty) pool].join(' · ')));
+        value: [modelText, if (pool.isNotEmpty) pool].join(' · '),
+        headline: models.isEmpty
+            ? 'None reported'
+            : '${models.length} model${models.length == 1 ? '' : 's'}',
+        detail: [modelText, if (pool.isNotEmpty) pool].join(' · '),
+        category: 'models'));
+
+    final context = info.context;
+    if (context != null && context.contextLimit > 0) {
+      final status = context.status;
+      rows.add(OverviewRow(
+          status: status == 'hot' || status == 'warm'
+              ? StatusKind.warn
+              : StatusKind.ok,
+          word: status == 'hot' ? 'needs you' : null,
+          label: 'Context',
+          value: '${compactCount(context.estimatedTokens)} of '
+              '${compactCount(context.contextLimit)} tokens',
+          headline: '${compactCount(context.estimatedTokens)} / '
+              '${compactCount(context.contextLimit)}',
+          detail: context.title.isNotEmpty
+              ? context.title
+              : (context.session.isNotEmpty ? context.session : 'this session'),
+          meter: (context.contextPercent / 100).clamp(0.0, 1.0),
+          meterLabel: '${context.contextPercent.round()}%',
+          category: 'models'));
+    }
   }
 
-  if (approvals != null) {
+  if (approvalsError is SonderException &&
+      const {401, 403}.contains(approvalsError.httpStatus)) {
+    rows.add(const OverviewRow(
+        status: StatusKind.skipped,
+        word: 'n/a',
+        label: 'Approvals',
+        value: 'need a developer or admin account',
+        headline: 'Not available',
+        detail: 'Needs a developer or admin account',
+        category: 'permissions'));
+  } else if (approvals != null) {
     if (!approvals.supported) {
       rows.add(const OverviewRow(
           status: StatusKind.skipped,
           word: 'n/a',
           label: 'Approvals',
-          value: 'approve from the console (/approvals)'));
+          value: 'approve from the console (/approvals)',
+          headline: 'Console only',
+          detail: 'approve from the console (/approvals)',
+          category: 'permissions'));
     } else if (approvals.pending.isNotEmpty) {
       final n = approvals.pending.length;
+      final tools = {
+        for (final item in approvals.pending)
+          if (item.tool.isNotEmpty) item.tool,
+      }.toList();
       rows.add(OverviewRow(
           status: StatusKind.warn,
+          word: 'needs you',
           label: 'Approvals',
           value: '$n call${n == 1 ? '' : 's'} waiting',
+          headline: '$n waiting',
+          detail: tools.isEmpty
+              ? 'Refused calls to review'
+              : [
+                  ...tools.take(3),
+                  if (tools.length > 3) '+${tools.length - 3}',
+                ].join(' · '),
+          category: 'permissions',
           actionLabel: 'Review',
           onAction: onReviewApprovals));
     } else {
@@ -196,6 +303,11 @@ List<OverviewRow> overviewRows({
           value: approvals.open.isEmpty
               ? 'none waiting'
               : 'none waiting · ${approvals.open.length} open',
+          headline: 'None waiting',
+          detail: approvals.open.isEmpty
+              ? 'Nothing to review'
+              : '${approvals.open.length} approved once',
+          category: 'permissions',
           actionLabel: approvals.open.isEmpty ? null : 'Review',
           onAction: approvals.open.isEmpty ? null : onReviewApprovals));
     }
@@ -206,7 +318,10 @@ List<OverviewRow> overviewRows({
         status: StatusKind.skipped,
         word: 'n/a',
         label: 'Work runs',
-        value: 'need a developer or admin account'));
+        value: 'need a developer or admin account',
+        headline: 'Not available',
+        detail: 'Needs a developer or admin account',
+        category: 'activity'));
   } else if (workRuns != null) {
     final running = workRuns.where((run) => run.isRunning).toList();
     if (running.isEmpty) {
@@ -216,15 +331,27 @@ List<OverviewRow> overviewRows({
           value: workRuns.isEmpty
               ? 'No work runs'
               : 'none running · ${workRuns.length} recent',
+          headline: 'None running',
+          detail: workRuns.isEmpty
+              ? 'Hand work off from Chat'
+              : '${workRuns.length} recent',
+          category: 'activity',
           actionLabel: workRuns.isEmpty ? null : 'Open',
           onAction: workRuns.isEmpty ? null : onOpenWorkRuns));
     } else {
       final first = running.first;
+      final elapsed = compactDuration(first.elapsed(clock) ?? Duration.zero);
+      final budget = first.budget;
       rows.add(OverviewRow(
           status: StatusKind.running,
           label: 'Work runs',
-          value: '${running.length} running · ${first.shortId} '
-              '${compactDuration(first.elapsed(clock) ?? Duration.zero)}',
+          value: '${running.length} running · ${first.shortId} $elapsed',
+          headline: '${running.length} running',
+          detail: [
+            first.shortId,
+            budget == null ? elapsed : '$elapsed of ${compactDuration(budget)}',
+          ].join(' · '),
+          category: 'activity',
           actionLabel: 'Open',
           onAction: onOpenWorkRuns));
     }
@@ -232,13 +359,17 @@ List<OverviewRow> overviewRows({
     rows.add(const OverviewRow(
         status: StatusKind.unknown,
         label: 'Work runs',
-        value: 'could not load'));
+        value: 'could not load',
+        headline: 'Unknown',
+        detail: 'Could not load work runs',
+        category: 'activity'));
   }
 
   if (info != null) {
     final autopilot = info.autopilot;
     final active = autopilot?.activeRuns ?? 0;
     final resumable = autopilot?.resumableRuns ?? 0;
+    final objective = autopilot?.latest?.objective ?? '';
     rows.add(OverviewRow(
         status: active > 0
             ? StatusKind.running
@@ -250,11 +381,23 @@ List<OverviewRow> overviewRows({
             ? '$active running'
             : resumable > 0
                 ? '$resumable paused, resumable'
-                : 'off'));
+                : 'off',
+        headline: active > 0
+            ? '$active running'
+            : resumable > 0
+                ? '$resumable paused'
+                : 'Off',
+        detail: objective.isNotEmpty
+            ? objective
+            : resumable > 0
+                ? 'Resume from Activity'
+                : 'No goal running',
+        category: 'activity'));
 
     final agents = info.agents;
     final activeAgents = agents?.activeAgents ?? 0;
     final interrupted = agents?.interruptedAgents ?? 0;
+    final slots = agents?.capacity?.workerSlots ?? 0;
     rows.add(OverviewRow(
         status: activeAgents > 0
             ? StatusKind.running
@@ -266,127 +409,274 @@ List<OverviewRow> overviewRows({
             ? '$activeAgents running'
             : interrupted > 0
                 ? '$interrupted interrupted'
-                : 'none running'));
+                : 'none running',
+        headline: activeAgents > 0
+            ? '$activeAgents running'
+            : interrupted > 0
+                ? '$interrupted interrupted'
+                : 'None running',
+        detail: interrupted > 0 && activeAgents == 0
+            ? 'Retry from Activity'
+            : [
+                if (slots > 0) '$slots worker slots',
+                if ((agents?.totalAgents ?? 0) > 0)
+                  '${agents!.totalAgents} total',
+              ].join(' · '),
+        category: 'activity'));
+
+    final learning = info.learningHealth;
+    if (learning != null) {
+      final status = learning.status;
+      rows.add(OverviewRow(
+          status: status == 'healthy'
+              ? StatusKind.ok
+              : status == 'attention'
+                  ? StatusKind.warn
+                  : status == 'watch'
+                      ? StatusKind.warn
+                      : StatusKind.note,
+          word: status == 'attention' ? 'needs you' : null,
+          label: 'Learning',
+          value: '${learning.lessons} lessons · '
+              '${learning.outcomeCoveragePercent.toStringAsFixed(0)}% grounded',
+          headline: '${learning.lessons} lessons',
+          detail:
+              '${learning.outcomeCoveragePercent.toStringAsFixed(0)}% grounded'
+              '${learning.reviewedOutcomes > 0 ? ' · ${learning.reviewedPositivePercent.toStringAsFixed(0)}% judged good by callers' : ''}',
+          category: 'memory'));
+    }
   }
   return rows;
 }
 
-/// The Overview block: rows, then the last five feed events.
+/// The overview tiles, in a fixed order so the grid never reflows as facts
+/// arrive. A fact with no data yet reads "—", without a status.
+const overviewTileOrder = <(String, IconData, String)>[
+  ('Server', Icons.dns_outlined, 'server'),
+  ('Models', Icons.memory_outlined, 'models'),
+  ('Context', Icons.data_usage_outlined, 'models'),
+  ('Approvals', Icons.fact_check_outlined, 'permissions'),
+  ('Work runs', Icons.pending_actions_outlined, 'activity'),
+  ('Agents', Icons.hub_outlined, 'activity'),
+  ('Autopilot', Icons.route_outlined, 'activity'),
+  ('Learning', Icons.school_outlined, 'memory'),
+];
+
+/// The Overview page: status tiles that open their page, then the newest
+/// execution events.
 class RuntimeOverview extends StatelessWidget {
   final List<OverviewRow> rows;
   final List<ActivityLine> activity;
 
-  /// When offline, the last loaded values stay, dimmed, "as of 12:40".
-  final DateTime? staleSince;
-  final VoidCallback? onRetry;
-  final VoidCallback? onAllActivity;
+  /// Whether the facts are still arriving (tiles without data shimmer).
+  final bool loading;
+
+  /// Opens a category ("activity", "permissions").
+  final ValueChanged<String>? onOpen;
 
   const RuntimeOverview({
     super.key,
     required this.rows,
     this.activity = const [],
-    this.staleSince,
-    this.onRetry,
-    this.onAllActivity,
+    this.loading = false,
+    this.onOpen,
   });
+
+  @override
+  Widget build(BuildContext context) {
+    final byLabel = {for (final row in rows) row.label: row};
+    final tiles = <Widget>[];
+    for (final (label, icon, category) in overviewTileOrder) {
+      final row = byLabel[label];
+      if (row == null) {
+        tiles.add(_PlaceholderTile(
+            label: label,
+            icon: icon,
+            loading: loading,
+            onTap: onOpen == null ? null : () => onOpen!(category)));
+        continue;
+      }
+      tiles.add(StatTile(
+        key: Key('overview-tile-${label.toLowerCase().replaceAll(' ', '-')}'),
+        label: label,
+        icon: icon,
+        kind: row.status,
+        word: row.word ?? row.status.runtimeWord,
+        value: row.headline,
+        detail: row.detail.isEmpty ? null : row.detail,
+        meter: row.meter == null
+            ? null
+            : Meter(
+                value: row.meter!,
+                label: 'Used',
+                valueLabel: row.meterLabel ?? ''),
+        onTap: onOpen == null ? null : () => onOpen!(row.category),
+      ));
+    }
+    return Column(
+      key: const Key('runtime-overview'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        StatGrid(minTileWidth: 188, children: tiles),
+        RecentActivityCard(
+          lines: activity,
+          onAll: onOpen == null ? null : () => onOpen!('activity'),
+        ),
+      ],
+    );
+  }
+}
+
+class _PlaceholderTile extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final bool loading;
+  final VoidCallback? onTap;
+
+  const _PlaceholderTile({
+    required this.label,
+    required this.icon,
+    required this.loading,
+    this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (!loading) {
+      return StatTile(
+        label: label,
+        icon: icon,
+        value: '—',
+        detail: 'Not reported',
+        onTap: onTap,
+      );
+    }
+    final tokens = SonderTokens.of(context);
+    final text = Theme.of(context).textTheme;
+    return Semantics(
+      label: '$label: loading',
+      child: Container(
+        decoration: BoxDecoration(
+          color: tokens.panel,
+          borderRadius: BorderRadius.circular(SonderRadius.card),
+          border: Border.all(color: tokens.hairline),
+        ),
+        padding: const EdgeInsets.all(SonderSpace.lg),
+        child: ExcludeSemantics(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(children: [
+                Icon(icon, size: 16, color: tokens.text2),
+                const SizedBox(width: SonderSpace.sm),
+                Text(label, style: text.labelMedium),
+              ]),
+              const SizedBox(height: SonderSpace.md),
+              const Skeleton(width: 96, height: 20),
+              const SizedBox(height: SonderSpace.sm),
+              const Skeleton(width: 140, height: 12),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The newest execution events: time, status word and what happened.
+class RecentActivityCard extends StatelessWidget {
+  final List<ActivityLine> lines;
+  final VoidCallback? onAll;
+
+  const RecentActivityCard({super.key, required this.lines, this.onAll});
+
+  @override
+  Widget build(BuildContext context) {
+    return SettingsSection(
+      title: 'Recent activity',
+      trailing: onAll == null || lines.isEmpty
+          ? null
+          : TextButton(onPressed: onAll, child: const Text('All')),
+      children: lines.isEmpty
+          ? const [
+              _ActivityRowEmpty(),
+            ]
+          : [for (final line in lines) _ActivityRow(line)],
+    );
+  }
+}
+
+class _ActivityRowEmpty extends StatelessWidget {
+  const _ActivityRowEmpty();
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = SonderTokens.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+          horizontal: SonderSpace.lg, vertical: SonderSpace.md),
+      child: Row(children: [
+        const RuntimeStatusWord(StatusKind.note, width: 104),
+        Expanded(
+          child: Text('No recent activity',
+              style: Theme.of(context)
+                  .textTheme
+                  .bodyMedium
+                  ?.copyWith(color: tokens.text2)),
+        ),
+      ]),
+    );
+  }
+}
+
+class _ActivityRow extends StatelessWidget {
+  final ActivityLine line;
+  const _ActivityRow(this.line);
 
   @override
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
     final text = Theme.of(context).textTheme;
-    return LayoutBuilder(builder: (context, constraints) {
-      final narrow = constraints.maxWidth < 560;
-      final body = Column(
-        key: const Key('runtime-overview'),
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          for (final row in rows) _OverviewRowView(row: row, narrow: narrow),
-          if (staleSince != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 4, bottom: 4),
-              child: Wrap(
-                crossAxisAlignment: WrapCrossAlignment.center,
-                spacing: 8,
-                children: [
-                  Text('as of ${clockLabel(staleSince!)}',
-                      style: tokens.mono(12, color: tokens.muted)),
-                  if (onRetry != null)
-                    TextButton(onPressed: onRetry, child: const Text('Retry')),
-                ],
-              ),
-            ),
-          const SizedBox(height: 16),
-          Row(children: [
-            Expanded(child: Text('Recent activity', style: text.labelSmall)),
-            if (onAllActivity != null && activity.isNotEmpty)
-              TextButton(onPressed: onAllActivity, child: const Text('All')),
-          ]),
-          const SizedBox(height: 4),
-          if (activity.isEmpty)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 6),
-              child: Row(children: [
-                const RuntimeStatusWord(StatusKind.note),
-                Expanded(
-                    child: Text('No recent activity',
-                        style: text.bodyMedium?.copyWith(color: tokens.text2))),
-              ]),
-            ),
-          for (final line in activity)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 4),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  SizedBox(
-                      width: 48,
-                      child: Text(line.time,
-                          style: tokens.mono(12, color: tokens.muted))),
-                  RuntimeStatusWord(line.status,
-                      word: line.word, width: narrow ? 92 : 110),
-                  Expanded(
-                    child: Text(line.text,
-                        maxLines: narrow ? 2 : 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: tokens.mono(12, color: tokens.text2)),
-                  ),
-                ],
-              ),
-            ),
-        ],
-      );
-      if (staleSince == null) return body;
-      return Opacity(opacity: 0.62, child: body);
-    });
-  }
-}
-
-/// One overview row on lane B's [StatusRow]: `✓ ok  Server  value [Open]`,
-/// the value stacking under the label on narrow widths.
-class _OverviewRowView extends StatelessWidget {
-  final OverviewRow row;
-  final bool narrow;
-  const _OverviewRowView({required this.row, required this.narrow});
-
-  @override
-  Widget build(BuildContext context) {
-    final action = row.actionLabel == null
-        ? null
-        : TextButton(
-            onPressed: row.onAction,
-            style: TextButton.styleFrom(
-                minimumSize: const Size(48, 48),
-                tapTargetSize: MaterialTapTargetSize.padded),
-            child: Text(row.actionLabel!),
+    final time = Text(line.time, style: tokens.mono(12, color: tokens.muted));
+    final mark = StatusMark(line.status, word: line.word, size: 12);
+    final body = Text(line.text,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: text.bodyMedium?.copyWith(color: tokens.text));
+    return Semantics(
+      container: true,
+      label: '${line.time}, ${line.word}, ${line.text}',
+      excludeSemantics: true,
+      child: Container(
+        constraints: const BoxConstraints(minHeight: 44),
+        padding: const EdgeInsets.symmetric(
+            horizontal: SonderSpace.lg, vertical: SonderSpace.md),
+        child: LayoutBuilder(builder: (context, constraints) {
+          if (constraints.maxWidth < 420) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(children: [
+                  SizedBox(width: 52, child: time),
+                  Flexible(child: mark),
+                ]),
+                const SizedBox(height: SonderSpace.xxs),
+                body,
+              ],
+            );
+          }
+          return Row(
+            crossAxisAlignment: CrossAxisAlignment.baseline,
+            textBaseline: TextBaseline.alphabetic,
+            children: [
+              SizedBox(width: 52, child: time),
+              SizedBox(width: 104, child: mark),
+              Expanded(child: body),
+            ],
           );
-    return StatusRow(
-      kind: row.status,
-      word: row.word ?? row.status.runtimeWord,
-      label: row.label,
-      value: row.value,
-      trailing: action,
-      // The overview decides narrow/wide from its own width.
-      stackBelow: narrow ? double.infinity : 0,
+        }),
+      ),
     );
   }
 }

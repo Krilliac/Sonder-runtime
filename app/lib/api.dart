@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 
 import 'account_session.dart';
 import 'agent_lanes.dart';
+import 'background_work.dart';
 import 'api/approvals.dart';
 import 'api/chat.dart';
 import 'api/port.dart';
@@ -759,10 +760,68 @@ class SonderApi implements SonderApiPort {
           query: {
             'cursor': '$cursor',
             'limit': '50',
+            'order': 'newest',
             if (parentSessionId != null) 'parent_session_id': parentSessionId,
           },
         ),
       );
+  Future<BackgroundWork> backgroundWork({String project = ''}) async {
+    final uri = _uri('/v1/background-work').replace(
+      queryParameters: {
+        if (project.isNotEmpty) 'project': project,
+        'limit': '100',
+      },
+    );
+    final response = await requestGet(
+      uri,
+      headers: _headers(),
+      timeout: const Duration(seconds: 20),
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw responseException(response, 'Could not load background work.');
+    }
+    return BackgroundWork.fromJson(
+      jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>,
+    );
+  }
+
+  /// Requests cancellation through the existing permission-gated chat
+  /// commands.  The aggregate endpoint is read-only; cancellation must keep
+  /// the command's owner and approval policy rather than inventing a second
+  /// HTTP mutation surface.
+  Future<void> cancelBackground(
+    String kind,
+    String id, {
+    String project = '',
+  }) async {
+    final normalizedKind = kind.trim().toLowerCase();
+    final normalizedId = id.trim();
+    if (!RegExp(r'^[A-Za-z0-9_-]{1,160}$').hasMatch(normalizedId) ||
+        const {'all', 'latest'}.contains(normalizedId.toLowerCase()) ||
+        !const {'fleet', 'autopilot'}.contains(normalizedKind)) {
+      throw ArgumentError('Background work kind and id are required.');
+    }
+    final command = normalizedKind == 'fleet'
+        ? '/agentcancel $normalizedId'
+        : '/autopilot cancel $normalizedId';
+    final reply = await chatDetailed(
+      [ChatMessage(role: Role.user, content: command)],
+      model: 'sonder',
+      project: project,
+    );
+    if (reply.refusal != null ||
+        RegExp(
+          r'^\s*(?:refused|error|could not|usage:)',
+          caseSensitive: false,
+        ).hasMatch(reply.text)) {
+      throw SonderException(
+        reply.refusal?.reason.isNotEmpty == true
+            ? reply.refusal!.reason
+            : 'The server did not accept the cancellation request.',
+      );
+    }
+  }
+
   Future<AgentSnapshot> agentInspect(
     String id, {
     int cursor = 0,

@@ -42,8 +42,12 @@ def dispatch_agent_lane_route(service, method, path, payload, query, context):
         bounds = dict(cursor=int(q("cursor", 0)), limit=int(q("limit", 50)))
         if not parts:
             if method == "GET":
+                order = q("order", "oldest")
+                if order not in {"oldest", "newest"}:
+                    raise ValueError("order must be oldest or newest")
                 result = service.list(
-                    context, parent_session_id=q("parent_session_id"), **bounds
+                    context, parent_session_id=q("parent_session_id"), **bounds,
+                    **({"newest_first": True} if order == "newest" else {}),
                 )
             elif method == "POST":
                 result = service.spawn(context=context, author="user", **payload)

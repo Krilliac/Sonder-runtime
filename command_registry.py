@@ -254,7 +254,13 @@ COMMANDS = [
         "name": "/master",
         "category": "agents",
         "risk": "ask",
-        "summary": "Run inline or delegated master/subagent orchestration.",
+        "summary": "Choose inline, delegate or fleet work: /master [mode] [N] <task>; 0 means auto.",
+    },
+    {
+        "name": "/delegate",
+        "category": "agents",
+        "risk": "execution",
+        "summary": "Start an agent conversation: /delegate <task>. Uses the selected project or a creations folder.",
     },
     {
         "name": "/agents",
