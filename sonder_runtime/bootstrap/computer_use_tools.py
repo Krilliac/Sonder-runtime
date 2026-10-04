@@ -90,7 +90,13 @@ def _state_dir() -> Path:
 def controller() -> SessionController:
     global _CONTROLLER
     if _CONTROLLER is None:
-        _CONTROLLER = SessionController(_state_dir())
+        from ..adapters.resource_leases import SqliteResourceLeaseRegistry
+
+        state = _state_dir()
+        # The durable desktop lease stops a second Sonder worker process from
+        # driving the same desktop; a single worker always acquires it.
+        _CONTROLLER = SessionController(
+            state, leases=SqliteResourceLeaseRegistry(state.parent / "resource_leases.sqlite3"))
     return _CONTROLLER
 
 

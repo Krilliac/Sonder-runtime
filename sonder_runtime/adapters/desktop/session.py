@@ -14,6 +14,7 @@ was approved on and ends the session, rather than acting, when any part fails:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 import subprocess
@@ -23,13 +24,23 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ...domain.common.errors import SonderError
 from ...domain.computer_use.rules import ActionBudget, app_allowed
+from ...domain.resource_leases import KIND_DESKTOP_SESSION, RESOURCE_LEASE_BUSY
+from ..process_liveness import process_identity
 from .windows import idle_ticks, window
+
+logger = logging.getLogger(__name__)
 
 _READY_TIMEOUT_SECONDS = 8.0
 # Input the user makes within this many ms after Sonder's own is attributed to
 # Sonder (SendInput stamps its events a little after the call returns).
 _INPUT_GRACE_MS = 150
+# One interactive desktop per host: every Sonder process drives the same one.
+DESKTOP_LEASE_KEY = "console"
+# The lease outlives the approval TTL by this much, so it is never reclaimed
+# on TTL while the session it guards may still be acting.
+_LEASE_GRACE_SECONDS = 30
 
 
 class SessionRefused(RuntimeError):
@@ -59,6 +70,7 @@ class DrivingSession:
     # ref -> RefEntry from the last UI Automation control table read in this
     # session (domain/computer_use/controls.py); refs never outlive the session.
     control_refs: dict = field(default_factory=dict)
+    lease_owner: str = ""
 
 
 def _launch_indicator(stop_file: Path, ready_file: Path, label: str):
@@ -80,7 +92,7 @@ class _RealDesktop:
 
 class SessionController:
     def __init__(self, state_dir: Path, *, desktop=None,
-                 launcher=_launch_indicator, clock=time.time):
+                 launcher=_launch_indicator, clock=time.time, leases=None):
         self._dir = Path(state_dir)
         # The real desktop is these two readers; tests pass a stand-in.
         self._desktop = desktop or _RealDesktop
@@ -88,6 +100,10 @@ class SessionController:
         self._clock = clock
         self._session: DrivingSession | None = None
         self._ended = ""
+        # Optional cross-process guard (``SqliteResourceLeaseRegistry``): the
+        # in-process lock below cannot stop a second Sonder worker process
+        # from driving the same desktop at the same time.
+        self._leases = leases
         # Held for the whole of every action so two callers never interleave
         # input into one window.
         self.lock = threading.RLock()
@@ -106,24 +122,72 @@ class SessionController:
                 raise SessionRefused(f"{info.app or 'that window'} is not in [computer_use].allowed_apps")
             self._dir.mkdir(parents=True, exist_ok=True)
             sid = secrets.token_hex(8)
+            lease_owner = self._acquire_desktop(sid, ttl_seconds, None)
             stop_file = self._dir / f"{sid}.stop"
             ready_file = self._dir / f"{sid}.ready"
-            helper = self._launcher(stop_file, ready_file, f"{info.app} ({info.title[:40]})")
+            try:
+                helper = self._launcher(stop_file, ready_file, f"{info.app} ({info.title[:40]})")
+            except BaseException:
+                self._release_desktop(lease_owner)
+                raise
             ready = self._await_ready(helper, ready_file)
             if not ready.get("ok"):
                 self._kill(helper)
+                self._release_desktop(lease_owner)
                 raise SessionRefused("the driving indicator did not start: %s"
                                      % ready.get("error", "no response"))
+            # Record the indicator pid: once it has exited, a crashed holder's
+            # lease has the cleanup evidence another worker needs to reclaim it.
+            try:
+                self._acquire_desktop(sid, ttl_seconds, getattr(helper, "pid", None))
+            except SessionRefused:
+                self._kill(helper)
+                raise
             now = self._clock()
             ticks_now, _ = self._desktop.idle_ticks()
             self._session = DrivingSession(
                 id=sid, hwnd=info.hwnd, app=info.app, pid=info.pid, title=info.title,
                 started=now, expires=now + ttl_seconds,
                 budget=ActionBudget(per_minute, per_session), helper=helper,
-                stop_file=stop_file, last_input_mark=ticks_now,
+                stop_file=stop_file, last_input_mark=ticks_now, lease_owner=lease_owner,
             )
             self._ended = ""
             return self._session
+
+    def _acquire_desktop(self, sid: str, ttl_seconds: int, indicator_pid) -> str:
+        """Hold the host's desktop lease for this session; "" when no registry is wired."""
+        if self._leases is None:
+            return ""
+        owner = "pid-%d:%s" % (os.getpid(), sid)
+        meta = {"session": sid}
+        if isinstance(indicator_pid, int) and not isinstance(indicator_pid, bool):
+            meta["pid"] = indicator_pid
+            # With the creation-time fingerprint, a recycled pid is not mistaken
+            # for the indicator (which would keep a crashed holder's lease forever).
+            indicator_identity = process_identity(indicator_pid)
+            if indicator_identity:
+                meta["pid_identity"] = indicator_identity
+        try:
+            self._leases.acquire(
+                KIND_DESKTOP_SESSION, DESKTOP_LEASE_KEY, owner,
+                ttl_seconds=max(1, int(ttl_seconds)) + _LEASE_GRACE_SECONDS,
+                owner_pid=os.getpid(), owner_identity=process_identity(os.getpid()),
+                metadata=meta)
+        except SonderError as exc:
+            if indicator_pid is not None:
+                self._release_desktop(owner)
+            if getattr(exc, "code", "") == RESOURCE_LEASE_BUSY:
+                raise SessionRefused("another Sonder worker is driving this desktop: %s" % exc) from None
+            raise SessionRefused("the desktop lease could not be taken: %s" % exc) from None
+        return owner
+
+    def _release_desktop(self, owner: str) -> None:
+        if self._leases is None or not owner:
+            return
+        try:
+            self._leases.release(KIND_DESKTOP_SESSION, DESKTOP_LEASE_KEY, owner)
+        except Exception:  # stopping must never fail; the lease then ages out on its TTL
+            logger.warning("could not release the desktop lease %s", owner, exc_info=True)
 
     def _await_ready(self, helper, ready_file: Path) -> dict:
         deadline = time.monotonic() + _READY_TIMEOUT_SECONDS
@@ -159,6 +223,7 @@ class SessionController:
             except OSError:
                 pass
             self._kill(session.helper)
+            self._release_desktop(session.lease_owner)
             for path in (session.stop_file, session.stop_file.with_suffix(".ready")):
                 try:
                     path.unlink()
