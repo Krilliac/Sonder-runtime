@@ -18,6 +18,8 @@ fences the run.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 
 class SelfmodStageNotApplied(RuntimeError):
     """A legacy selfmod stage refused before it mutated source or run state.
@@ -29,4 +31,17 @@ class SelfmodStageNotApplied(RuntimeError):
     """
 
 
-__all__ = ["SelfmodStageNotApplied"]
+def require_atomic_checkout_promotion(changed_files: Sequence[str]) -> None:
+    """Refuse a checkout-wide sequence before any live file is replaced.
+
+    One file's replacement is atomic. Coupled changes need an immutable
+    staged release and one release-pointer switch, not sequential copies.
+    """
+    if len(changed_files) != 1:
+        raise SelfmodStageNotApplied(
+            "checkout selfmod deployment supports exactly one changed file; "
+            "use staged managed release activation for multi-file changes"
+        )
+
+
+__all__ = ["SelfmodStageNotApplied", "require_atomic_checkout_promotion"]
