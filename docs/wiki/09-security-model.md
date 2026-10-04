@@ -100,6 +100,17 @@ of the model — an uncensored or "abliterated" model changes what it will
 - **Guarded file tools** operate only inside configured roots
   (`SONDER_FILE_ROOTS`); path canonicalization blocks traversal and
   symlink escape. Deletes are dry-run unless an explicit confirm matches.
+- **Managed console work** is granted `[state].workspace_roots` plus, by a
+  deliberate policy addition, exactly one more tree: the app-owned default
+  workspace root (`%USERPROFILE%\Sonder\workspaces`, `~/Sonder/workspaces`,
+  or `[state].default_workspace_root`), where the console creates folders
+  for work started without one. Sonder creates that root itself, and grants
+  it only while it exists, is not a link or junction, is outside every Sonder
+  source checkout and overlaps no private control state; otherwise it is left
+  out. The overlap rule for configured roots is unchanged: a configured root
+  that overlaps private control state still refuses every managed request
+  (`bootstrap/repl_managed.py`). The grant does not add the root to the
+  global file roots above.
 - **Credential stores are denied by default, even inside a root.** The direct
   read tools (`file_read`, `file_read_range`, `data_inspect`, `image_inspect`,
   and the source of `file_copy`/`file_move`) refuse `.ssh`, `.aws`, `.azure`,

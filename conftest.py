@@ -13,6 +13,10 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parent
 _TEST_STATE_ROOT = Path(tempfile.mkdtemp(prefix="sonder-pytest-")).resolve()
+# Work started without a project goes to ~/Sonder/workspaces by default; a test
+# must never create folders in the developer's real home.  Kept apart from the
+# state root because the default workspace root may not overlap the state home.
+_TEST_WORKSPACE_PARENT = Path(tempfile.mkdtemp(prefix="sonder-pytest-workspaces-")).resolve()
 _cleanup_complete = False
 
 _LIVE_PROVIDER_VARIABLES = (
@@ -64,6 +68,7 @@ _clear_ambient_deployment_variables()
 os.environ.update(
     {
         "SONDER_HOME": str(_TEST_STATE_ROOT),
+        "SONDER_DEFAULT_WORKSPACE_ROOT": str(_TEST_WORKSPACE_PARENT / "workspaces"),
         "SONDER_DB": str(_TEST_STATE_ROOT / "memory.db"),
         "SONDER_FLEET_DB": str(_TEST_STATE_ROOT / "fleet.db"),
         "SONDER_FLEET_HEARTBEAT": "0",
@@ -130,13 +135,14 @@ def _cleanup_test_state() -> None:
     if _cleanup_complete:
         return
     _cleanup_complete = True
-    try:
-        temp_root = Path(tempfile.gettempdir()).resolve()
-        _TEST_STATE_ROOT.relative_to(temp_root)
-    except (ValueError, NotImplementedError):
-        return
-    if _TEST_STATE_ROOT.name.startswith("sonder-pytest-"):
-        shutil.rmtree(_TEST_STATE_ROOT, ignore_errors=True)
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    for root in (_TEST_STATE_ROOT, _TEST_WORKSPACE_PARENT):
+        try:
+            root.relative_to(temp_root)
+        except (ValueError, NotImplementedError):
+            continue
+        if root.name.startswith("sonder-pytest-"):
+            shutil.rmtree(root, ignore_errors=True)
 
 
 atexit.register(_cleanup_test_state)
