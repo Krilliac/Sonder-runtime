@@ -30,6 +30,19 @@ is needed. Atomic file visibility is not atomicity of filesystem, Git and
 SQLite metadata together, or a claim of power-loss durability on every platform.
 
 Multi-file checkout promotion is **unsupported and refused before live writes**.
+
+An approved backup scope may contain unchanged siblings. Production rollback
+selects only the durable deployed-file inventory, or the persisted tested
+write set if interruption preceded inventory publication, from the verified
+sealed backup. Missing write-set/backup evidence refuses before restoration.
+Unchanged approved paths are never rewritten merely because they were backed
+up. Git deployment and rollback commits include only their changed paths;
+unrelated staged user edits stay staged. Deployment admission still refuses
+preexisting changes; path-scoped commits also preserve edits staged after
+admission. Ordinary Git/snapshot and fresh-process regressions
+verify preservation of a later annotation to an approved, undeployed sibling,
+including restart recovery before deployed inventory publication.
+
 Keep the candidate and its evidence for review; reject it or use the existing
 [managed signed release workflow](../../runbooks/publish-release.md) when a
 coupled change must be installed. Do not split coupled changes into separately
@@ -77,6 +90,12 @@ recovery/admission regressions and 84 bridge/journal/health tests: 101 distinct
 tests in total, with one existing health case deselected from that focused run.
 All seven repository gates pass, including the unchanged legacy module-size
 ratchet. The final combined full-suite/hosted gate belongs to integration.
+
+The rollback-scope follow-up passes 95 tests across the atomic-promotion,
+ordinary selfmod, deployment-health, guarded-stage-effect and legacy-integration
+cohorts. Its sibling-preservation and post-admission staged-edit cases fail
+before the fix. All six documented contributor gates pass; Git history has
+only its seven already-baselined privacy entries and no new debt.
 
 This establishes the original atomic-deploy criterion **for supported one-file
 checkout evolution** with a verified rollback point and explicit refusal of
