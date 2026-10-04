@@ -77,21 +77,16 @@ def test_session_export_redacts_response_secrets(monkeypatch, tmp_path, stored, 
     assert "USER: what is it?" in out
 
 
-# Shapes the shared redaction policy (domain.security.redaction.PATTERNS, kept
-# in lockstep with platform.logging) does not recognise yet. session_export
-# deliberately reuses that one policy rather than growing a private variant, so
-# these stay visible here: strict xfail flips to a failure the moment the
-# shared policy learns them, prompting removal of the marker.
-KNOWN_POLICY_GAPS = [
+# Former gaps now covered by the shared domain/logging redaction policy.
+LABEL_POLICY_CASES = [
     ("db creds pwd: s3cretPass!", "s3cretPass!"),
     ("aws_secret_access_key=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
      "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"),
 ]
 
 
-@pytest.mark.xfail(strict=True, reason="not in the shared redaction policy yet")
-@pytest.mark.parametrize("stored, secret", KNOWN_POLICY_GAPS)
-def test_session_export_known_policy_gaps(monkeypatch, tmp_path, stored, secret):
+@pytest.mark.parametrize("stored, secret", LABEL_POLICY_CASES)
+def test_session_export_redacts_password_and_cloud_labels(monkeypatch, tmp_path, stored, secret):
     _seed(monkeypatch, tmp_path, [(stored, "ok")])
     assert secret not in server.session_export("S1")
 
