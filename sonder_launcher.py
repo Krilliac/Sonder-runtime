@@ -2414,12 +2414,11 @@ def serve(
     key="",
     allow_insecure_http_for_development=False,
 ):
-    validate_configuration(
-        host, token, cert, key, allow_insecure_http_for_development
-    )
+    validate_configuration(host, token, cert, key, allow_insecure_http_for_development)
     context = None
     if cert:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.load_cert_chain(cert, key)
     server = LauncherServer(
         (host, int(port)), LauncherHandler,

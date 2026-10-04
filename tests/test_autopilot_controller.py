@@ -62,7 +62,8 @@ def _task_evidence(task):
 def infra_clock(monkeypatch):
     now = [0.0]
     monkeypatch.setattr(autopilot_controller, "_monotonic", lambda: now[0])
-    monkeypatch.setattr(autopilot_controller.time, "sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
+    # Keep the retry clock private: Git subprocess polling uses real time.sleep.
+    monkeypatch.setattr(autopilot_controller, "_sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
     return now
 
 
@@ -154,7 +155,7 @@ def test_infra_backoff_observes_operator_controls_and_wall_budget(monkeypatch, i
         elif action == "cancel":
             autopilot_store.request_cancel(run["id"])
 
-    monkeypatch.setattr(autopilot_controller.time, "sleep", sleep)
+    monkeypatch.setattr(autopilot_controller, "_sleep", sleep)
 
     def work(*_):
         calls.append(1)

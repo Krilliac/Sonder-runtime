@@ -62,9 +62,15 @@ _C_TYPE = re.compile(
     r"(?:class\s+)?([A-Za-z_]\w*)\b"
 )
 _C_MACRO = re.compile(r"^\s*#\s*define\s+([A-Za-z_]\w*)\b")
+# The return type is a run of `name<args>? ` parts, and at most one part needs
+# its own `<...>`: a single `<[^;{}()]*>` already spans from the first part's
+# `<` to the last part's `>`.  Letting every part carry one gave the same text
+# exponentially many splits to retry (CodeQL py/redos) without matching any
+# more lines; the matched lines and captured names are unchanged.
 _C_FUNCTION = re.compile(
     r"^\s*(?:template\s*<[^;{}]*>\s*)?"
-    r"(?:[A-Za-z_]\w*(?:::\w+)*(?:\s*<[^;{}()]*>)?[\s*&]+)+"
+    r"(?:[A-Za-z_]\w*(?:::\w+)*[\s*&]+)*[A-Za-z_]\w*(?:::\w+)*"
+    r"(?:\s*<[^;{}()]*>[\s*&]+(?:[A-Za-z_]\w*(?:::\w+)*[\s*&]+)*|[\s*&]+)"
     r"([~A-Za-z_]\w*(?:::\w+)*)\s*\([^;{}]*\)\s*"
     r"(?:const\s*)?(?:noexcept(?:\([^)]*\))?\s*)?(?:->\s*[^;{]+\s*)?[;{]\s*$"
 )

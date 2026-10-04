@@ -155,6 +155,8 @@ class RestoreResult:
     status: RestoreStatus
     checkpoint: RuntimeCheckpoint | None = None
     detail: str = ""
+    # Request-only recovery context. Never part of the sealed checkpoint/prefix.
+    resume_delta: tuple[Mapping[str, Any], ...] = ()
 
 
 class RuntimeCheckpointRepository(Protocol):

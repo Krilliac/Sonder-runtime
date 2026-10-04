@@ -26,6 +26,7 @@ from .effect_journal import (
     JournalBinding,
     RecoveryDecision,
 )
+from .resume_reality import require_mutation_allowed
 
 
 T = TypeVar("T")
@@ -309,6 +310,7 @@ def journaled_effect(
     checkpoint_state: Callable[[T], Any] | Any | None = None,
 ) -> T:
     """Record one direct worker mutation around its real invocation."""
+    require_mutation_allowed()
     binding = context.binding()
     intent = binding.begin_request(
         operation_id=operation_id,

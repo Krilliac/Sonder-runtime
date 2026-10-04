@@ -3,6 +3,7 @@ import json
 import os
 import socket
 import sqlite3
+import ssl
 import subprocess
 import sys
 import threading
@@ -649,6 +650,40 @@ def test_invalid_remote_transport_is_rejected_before_socket_construction(monkeyp
             key="missing-key.pem",
         )
     assert constructed == []
+
+
+def test_launcher_sets_tls12_minimum_before_wrapping_server_socket(monkeypatch):
+    wrapped = []
+
+    class FakeContext:
+        minimum_version = None
+
+        def __init__(self, protocol):
+            assert protocol == ssl.PROTOCOL_TLS_SERVER
+
+        def load_cert_chain(self, cert, key):
+            assert (cert, key) == ("cert.pem", "key.pem")
+
+        def wrap_socket(self, sock, *, server_side):
+            assert self.minimum_version == ssl.TLSVersion.TLSv1_2
+            assert server_side is True
+            wrapped.append(sock)
+            raise RuntimeError("stop before serving")
+
+    server_socket = object()
+    monkeypatch.setattr(sonder_launcher.ssl, "SSLContext", FakeContext)
+    monkeypatch.setattr(
+        sonder_launcher, "LauncherServer",
+        lambda *args, **kwargs: type("FakeServer", (), {"socket": server_socket})(),
+    )
+
+    with pytest.raises(RuntimeError, match="stop before serving"):
+        sonder_launcher.serve(
+            "127.0.0.1", 11436, "", controller=object(),
+            cert="cert.pem", key="key.pem",
+        )
+
+    assert wrapped == [server_socket]
 
 
 def test_main_forwards_explicit_insecure_development_override(monkeypatch):

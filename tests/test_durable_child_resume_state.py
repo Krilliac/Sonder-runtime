@@ -148,26 +148,35 @@ def test_stale_or_missing_resume_claim_changes_nothing(tmp_path):
     assert repository.get("child-1") == before
 
 
-def test_two_services_claim_one_resumed_worker(tmp_path):
+@pytest.mark.parametrize("interleaving", ["free-race", "winner-before-parent-read"])
+def test_two_services_claim_one_resumed_worker(tmp_path, interleaving):
     database = tmp_path / "children.db"
     seed_repository = SQLiteDurableContinuationRepository(database)
     _seed(seed_repository)
     readers = Barrier(2)
+    entered, release = Event(), Event()
 
     class SynchronizedRepository(SQLiteDurableContinuationRepository):
-        def __init__(self, path):
+        def __init__(self, path, *, hold_parent_read=False):
             super().__init__(path)
             self.first_read = True
+            self.hold_parent_read = hold_parent_read
 
         def get(self, child_id):
+            if self.hold_parent_read and child_id == "parent":
+                # Both contenders validated revision 7. Hold the loser's
+                # parent read until the winner has committed revision 8 and
+                # entered its runner, so _start must reject the stale revision.
+                assert entered.wait(3), "winning runner did not enter"
             record = super().get(child_id)
             if self.first_read:
                 self.first_read = False
                 readers.wait(timeout=3)
             return record
 
-    services = [DurableContinuationService(SynchronizedRepository(database)) for _ in range(2)]
-    entered, release = Event(), Event()
+    services = [DurableContinuationService(SynchronizedRepository(
+        database, hold_parent_read=interleaving == "winner-before-parent-read" and index == 1,
+    )) for index in range(2)]
     calls = []
 
     def runner(state, save, control):
@@ -193,10 +202,10 @@ def test_two_services_claim_one_resumed_worker(tmp_path):
                     assert error.prepared.payload == b'{"expected_revision":7}'
                     outcomes.append(error)
                 except (RuntimeError, InvalidSubagentRequest) as error:
-                    assert type(error) in (RuntimeError, InvalidSubagentRequest)
-                    assert str(error) in {
-                        "child session is not recoverable",
-                        "child session state changed before launch",
+                    assert (type(error), str(error)) in {
+                        (InvalidSubagentRequest, "child session is not recoverable"),
+                        (RuntimeError, "child session state changed before launch"),
+                        (InvalidSubagentRequest, "child session changed after resume validation"),
                     }
                     outcomes.append(error)
         assert entered.wait(3)
@@ -204,8 +213,13 @@ def test_two_services_claim_one_resumed_worker(tmp_path):
         errors = [value for value in outcomes if isinstance(value, Exception)]
         assert len(handles) == 1
         assert len(errors) == 1
+        if interleaving == "winner-before-parent-read":
+            assert type(errors[0]) is InvalidSubagentRequest
+            assert str(errors[0]) == "child session changed after resume validation"
         assert calls == [{"step": 2}]
-        assert seed_repository.get("child-1").status is SubagentStatus.RUNNING
+        active = seed_repository.get("child-1")
+        assert active.status is SubagentStatus.RUNNING
+        assert active.revision == 8
         for error in errors:
             if isinstance(error, ContinuationCommitAmbiguous):
                 receipt = seed_repository.reconcile(error.prepared)

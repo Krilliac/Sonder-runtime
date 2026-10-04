@@ -46,8 +46,22 @@ class MemoryRepositoryAdapter:
         self._authoritative_fact_source = authoritative_fact_source
         self._begin_authoritative_transaction = begin_authoritative_transaction
 
-    def add_fact(self, fact_id: str, project: str, text: str, embedding=None, *, metadata=None) -> None:
+    def add_fact(
+        self, fact_id: str, project: str, text: str, embedding=None, *,
+        metadata=None, validity=None,
+    ) -> None:
+        """Store one fact.
+
+        ``validity`` (a ``domain.memory.fact_validity.FactValidity``) carries
+        validity-only inputs.  The legacy store records the interval and
+        closes a named ``supersedes`` predecessor; a configured authoritative
+        source receives exactly the metadata it always received for them.
+        """
+        if metadata is not None and validity is not None:
+            raise ValueError("pass authoritative metadata or validity, not both")
         if self._authoritative_fact_source is not None:
+            if validity is not None:
+                metadata = validity.authoritative_metadata()
             if self._begin_authoritative_transaction is not None:
                 self._begin_authoritative_transaction()
             self._authoritative_fact_source.add_fact(
@@ -59,7 +73,7 @@ class MemoryRepositoryAdapter:
         if metadata is not None:
             raise ValueError("authoritative metadata requires the configured fact source")
 
-        memory_store.add_fact(self._conn, fact_id, project, text, embedding)
+        memory_store.add_fact(self._conn, fact_id, project, text, embedding, validity=validity)
 
     def delete_fact(self, fact_id: str, project: str) -> bool:
         if self._authoritative_fact_source is not None:
@@ -72,19 +86,24 @@ class MemoryRepositoryAdapter:
 
         return memory_store.delete_fact(self._conn, fact_id, project)
 
-    def facts_for_project(self, project: str) -> list:
+    def facts_for_project(self, project: str, *, include_history: bool = False) -> list:
+        """Current facts (expired ones excluded); ``include_history`` for all."""
         if self._authoritative_fact_source is not None:
             _require_authoritative_project(self._authoritative_fact_source, project)
         import sonder_runtime.adapters.memory_store as memory_store
 
-        return memory_store.facts_for_project(self._conn, project)
+        return memory_store.facts_for_project(
+            self._conn, project, include_history=include_history,
+        )
 
-    def count_facts(self, project: str) -> int:
+    def count_facts(self, project: str, *, include_history: bool = False) -> int:
         if self._authoritative_fact_source is not None:
             _require_authoritative_project(self._authoritative_fact_source, project)
         import sonder_runtime.adapters.memory_store as memory_store
 
-        return memory_store.count_facts(self._conn, project)
+        return memory_store.count_facts(
+            self._conn, project, include_history=include_history,
+        )
 
     def entities_for_project(self, project: str, *, entity_id: str | None = None, now: str | None = None, offset: int = 0) -> list[dict]:
         if self._authoritative_fact_source is not None:

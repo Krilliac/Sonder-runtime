@@ -1,4 +1,5 @@
 import socket
+import ssl
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -113,6 +114,30 @@ class _FakeSocket:
 
     def close(self):
         self.closed = True
+
+
+def test_https_probe_sets_tls12_minimum_before_handshake(monkeypatch):
+    fake = _FakeSocket(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+
+    class FakeContext:
+        minimum_version = None
+
+        def wrap_socket(self, sock, *, server_hostname):
+            assert self.minimum_version == ssl.TLSVersion.TLSv1_2
+            assert server_hostname == "127.0.0.1"
+            return sock
+
+    monkeypatch.setattr(probe.ssl, "create_default_context", FakeContext)
+    monkeypatch.setattr(probe.socket, "socket", lambda *args, **kwargs: fake)
+    parsed, addresses = probe._validate_target("https://127.0.0.1:8443/health")
+
+    status, _headers, body, truncated = probe._request_once(
+        parsed, addresses, "GET", 1.0,
+    )
+
+    assert (status, body, truncated) == (200, b"ok", False)
+    assert fake.connected == ("127.0.0.1", 8443)
+    assert fake.closed is True
 
 
 def test_direct_transport_ignores_proxy_env_and_sends_no_auth_or_cookies(

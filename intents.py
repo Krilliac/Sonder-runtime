@@ -192,9 +192,13 @@ _EXECUTION_PLAN_ONLY_RE = re.compile(
     r"\b(?:plan only|planning only|make (?:me )?a plan(?: only)?|"
     r"plan (?:it|this) but (?:do not|don't) execute|do not execute(?: it)? yet)\b"
 )
+# The optional verb owns the blanks after it.  As `\s+(?:start|run|use)?\s*`,
+# a blank run with no verb could be split between the two quantifiers in every
+# way before `background` failed: quadratic in the run (CodeQL
+# py/polynomial-redos).  It accepts exactly the same text.
 _EXECUTION_NO_BACKGROUND_RE = re.compile(
     r"\b(?:foreground|one[- ]shot|single pass|quick pass|"
-    r"do not|don't)\s+(?:start|run|use)?\s*(?:it\s+)?(?:in\s+)?background\b|"
+    r"do not|don't)\s+(?:(?:start|run|use)\s*)?(?:it\s+)?(?:in\s+)?background\b|"
     r"\b(?:do it now|handle it inline|foreground only)\b"
 )
 _EXECUTION_FLEET_RE = re.compile(
@@ -219,12 +223,17 @@ _EXECUTION_SEQUENCE_RE = re.compile(
 # delimiter.  In particular, it does not scan quoted/retrieved material for a
 # fragment such as "compiler-feedback retries" and it does not turn a request
 # to *explain* the workflow into execution.
+#
+# The task only has to be non-blank, so the pattern ends at its first non-blank
+# character.  The old `(.+?)\s*[.!]?\s*$` tail asked the same question with
+# three quantifiers that could all take the same blanks: cubic on the raw
+# prompt `server.route_work_request` passes in (CodeQL py/polynomial-redos).
 _ENSEMBLE_COMPILER_RETRY_RE = re.compile(
     r"^\s*(?:(?:please\s+)?(?:use|run|start|enable)\s+)?(?:an?\s+)?"
     r"ensemble\s*(?:\(\s*)?code\s*(?:and|\+|plus)\s*reasoning\s*(?:\)\s*)?"
     r"with\s+compiler(?:[-\s]+)feedback\s+retries(?:\s+enabled)?\s+"
-    r"(?:to|for|on)\s+(.+?)\s*[.!]?\s*$",
-    re.IGNORECASE | re.DOTALL,
+    r"(?:to|for|on)\s+\S",
+    re.IGNORECASE,
 )
 
 
@@ -237,8 +246,7 @@ def requests_ensemble_compiler_retries(text):
     upgrading ordinary/retrieved prose into an execution request.
     """
     value = str(text or "")
-    match = _ENSEMBLE_COMPILER_RETRY_RE.match(value)
-    return bool(match and match.group(1).strip())
+    return bool(_ENSEMBLE_COMPILER_RETRY_RE.match(value))
 
 
 def classify(text):
