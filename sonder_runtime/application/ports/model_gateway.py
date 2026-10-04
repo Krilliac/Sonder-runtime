@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from typing import Protocol, Sequence
 
 from ..context import OperationContext
-from ...domain.common.errors import DependencyUnavailable
+from ...domain.common.errors import DependencyUnavailable, SonderError
 from ..security.prompt_provenance import (
     ContextPacket,
     ModelRequestProvenance,
@@ -118,6 +118,22 @@ class ModelResponse:
 
 
 @dataclass(frozen=True)
+class ModelBatchOutcome:
+    """One input-ordered completion or domain error; no implicit replay."""
+
+    response: ModelResponse | None = None
+    error: SonderError | None = None
+
+    def __post_init__(self) -> None:
+        if (self.response is None) == (self.error is None):
+            raise ValueError("batch outcome requires exactly one response or error")
+        if self.response is not None and not isinstance(self.response, ModelResponse):
+            raise TypeError("batch response must be a ModelResponse")
+        if self.error is not None and not isinstance(self.error, SonderError):
+            raise TypeError("batch error must be a SonderError")
+
+
+@dataclass(frozen=True)
 class Embedding:
     vector: tuple[float, ...]
     model: str
@@ -180,3 +196,12 @@ class ModelGateway(Protocol):
     def embed(
         self, texts: Sequence[str], context: OperationContext
     ) -> Sequence[Embedding]: ...
+
+
+class BatchModelGateway(ModelGateway, Protocol):
+    """Optional additive capability for bounded independent completions."""
+
+    def generate_batch(
+        self, requests: Sequence[ModelRequest], context: OperationContext,
+        *, max_workers: int = 2,
+    ) -> tuple[ModelBatchOutcome, ...]: ...

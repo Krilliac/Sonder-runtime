@@ -58,9 +58,11 @@ from typing import Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 from ...application.context import OperationContext
+from ...application.model_batching import generate_batch as batch_generate
 from ...application.ports.model_gateway import (
     Embedding,
     InferenceTelemetry,
+    ModelBatchOutcome,
     ModelRequest,
     ModelResponse,
     optional_token_count,
@@ -804,6 +806,27 @@ class OpenRouterGateway(OpenAICompatibleGateway):
         data = self._post("/v1/chat/completions", payload, self._cfg(settings, model), timeout, context=context)
         self._check_liveness(context, phase="during model call")
         return self._finish(data, request, model, started)
+
+    def generate_batch(
+        self, requests: Sequence[ModelRequest], context: OperationContext,
+        *, max_workers: int = 2,
+    ) -> tuple[ModelBatchOutcome, ...]:
+        """Up to 64 independent completions, ordered by input; never retried.
+
+        Validate model/options for every item before admitting the first send.
+        Each admitted item still traverses generate's per-call consent,
+        physical rate admission, deadline, error mapping and accounting.
+        """
+        def validate(request: ModelRequest) -> None:
+            try:
+                settings = self.settings()
+                model = self.select_model(request, settings)
+                self.build_payload(request, settings, model, stream=False)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise InvalidInput("invalid OpenRouter batch request configuration") from exc
+
+        return batch_generate(self, requests, context, max_workers=max_workers,
+                              validate_request=validate)
 
     # -- stream ------------------------------------------------------------
 
