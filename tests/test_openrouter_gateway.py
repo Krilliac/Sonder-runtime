@@ -247,7 +247,9 @@ def test_provider_preferences_reject_unknown_keys_and_values():
     assert dict(SAFE_PROVIDER_DEFAULTS) == {"data_collection": "deny", "zdr": True, "allow_fallbacks": True}
 
 
-def test_streaming_yields_deltas_then_final_usage(fake):
+def test_streaming_yields_deltas_then_final_usage(fake, monkeypatch):
+    usage = []
+    monkeypatch.setattr("sonder_runtime.adapters.inference.openrouter_gateway.record_usage", usage.append)
     fake.stream_events = [
         ": OPENROUTER PROCESSING",
         'data: {"id":"g","model":"%s","provider":"Fireworks","choices":[{"delta":{"content":"Hel"}}]}' % MODEL,
@@ -263,6 +265,48 @@ def test_streaming_yields_deltas_then_final_usage(fake):
     assert fake.chat_requests()[0]["body"]["stream"] is True
     assert fake.chat_requests()[0]["body"]["provider"]["zdr"] is True
     assert gateway.last_usage["upstream_provider"] == "Fireworks"
+    assert len(usage) == 1
+    assert usage[0]["cost_usd"] == pytest.approx(0.0001)
+
+
+def test_returned_accounting_redacts_labels_and_rejects_invalid_counts(fake, monkeypatch, caplog):
+    from sonder_runtime.adapters.inference.openrouter_gateway import DETAIL_LIMIT
+
+    key = "synthetic-accounting-secret-" + "k" * 300
+    gateway = _gateway(fake, OPENROUTER_API_KEY=key)
+    data = _chat(model=key, provider="prefix-" + key)
+    data["usage"] = {"cost": float("nan"), "prompt_tokens": True,
+                     "completion_tokens": 1_000_000_001,
+                     "prompt_tokens_details": {"cached_tokens": -1}}
+    usage = []
+    monkeypatch.setattr("sonder_runtime.adapters.inference.openrouter_gateway.record_usage", usage.append)
+    gateway._raw_post = lambda *_args: data
+    with pytest.raises(SonderError):
+        gateway.generate(_request(), _context())
+    assert len(usage) == 1
+    facts = usage[0]
+    assert facts["model"] == "[REDACTED]"
+    assert facts["upstream_provider"] == "prefix-[REDACTED]"
+    assert all(facts[field] is None for field in ("cost_usd", "prompt_tokens", "completion_tokens", "cached_tokens"))
+    assert key not in json.dumps(dict(gateway.last_usage)) + caplog.text
+    assert all(len(facts[field]) <= DETAIL_LIMIT for field in ("model", "upstream_provider"))
+
+
+def test_completed_response_accounts_once_when_dispatch_capture_fails(fake, monkeypatch):
+    usage = []
+    monkeypatch.setattr("sonder_runtime.adapters.inference.openrouter_gateway.record_usage", usage.append)
+
+    def dispatch(_provider, _path, _payload, send):
+        send()
+        raise DependencyUnavailable("synthetic post-response evidence failure")
+
+    monkeypatch.setattr("sonder_runtime.adapters.inference.openai_compat_gateway.dispatch_provider", dispatch)
+    gateway = _gateway(fake)
+    with pytest.raises(DependencyUnavailable, match="evidence failure"):
+        gateway.generate(_request(), _context())
+    assert len(fake.chat_requests()) == len(usage) == 1
+    assert usage[0]["cost_usd"] == pytest.approx(0.00042)
+    assert gateway.last_usage == usage[0]
 
 
 def test_stream_error_maps_like_generate(fake):
