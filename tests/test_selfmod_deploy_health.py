@@ -99,7 +99,7 @@ def scratch(monkeypatch, tmp_path):
     return root
 
 
-def _approved_run(root, *, changes, files):
+def _approved_run(root, *, changes, files, reproducer=None):
     """Drive a --maintenance run to `approved` with every pre-deploy check green."""
     run = selfmod.create_plan(
         "publish a selfmod version marker", root,
@@ -116,11 +116,12 @@ def _approved_run(root, *, changes, files):
     selfmod.create_backup(run_id)
     selfmod.prepare_workspace(run_id)
     selfmod.apply_candidate_changes(run_id, changes)
-    selfmod.record_reproducer_before(run_id, _reproducer())
+    reproducer = _reproducer() if reproducer is None else reproducer
+    selfmod.record_reproducer_before(run_id, reproducer)
     selfmod.begin_testing(run_id)
     checks = {
         "syntax": [sys.executable, "-m", "py_compile", "selfmod.py", "selfmod_recover.py"],
-        "targeted": _reproducer(),
+        "targeted": reproducer,
         "regression": [sys.executable, "-c", "import sys; sys.path.insert(0, '.'); import server; print(server.status())"],
         "smoke": [sys.executable, "-c", "import sys; sys.path.insert(0, '.'); import selfmod_recover; print(selfmod_recover.restore)"],
         "security": [sys.executable, "-c", "print('no new network or credential surface')"],
@@ -182,16 +183,34 @@ def test_deploy_verifies_rollback_when_no_health_command_is_supplied(scratch):
 
 
 def test_deploy_refuses_when_the_out_of_tree_recovery_entry_point_is_broken(scratch):
-    """`selfmod_recover.py` is the last line of defence and is deployable too."""
+    """Retain the recovery health check through a single-file promotion."""
+    reproducer = [
+        sys.executable, "-c",
+        "import sys; sys.path.insert(0, '.'); import selfmod_recover; "
+        "raise SystemExit(0 if getattr(selfmod_recover, 'SELFMOD_NOTE', '') == 'v2' else 1)",
+    ]
     changes = {
-        "selfmod.py": _sound_selfmod(scratch),
-        "selfmod_recover.py": _mutate(scratch / "selfmod_recover.py", RECOVER_GOOD, RECOVER_BROKEN),
+        "selfmod_recover.py": _mutate(scratch / "selfmod_recover.py", RECOVER_GOOD, RECOVER_BROKEN) + NOTE_MARKER,
     }
-    run_id = _approved_run(scratch, changes=changes, files=["selfmod.py", "selfmod_recover.py"])
+    run_id = _approved_run(scratch, changes=changes, files=["selfmod_recover.py"], reproducer=reproducer)
     with pytest.raises(RuntimeError) as caught:
         selfmod.deploy(run_id, health_command=_old_health_command(), commit=False)
     assert "rollback" in str(caught.value).lower()
     assert selfmod.get_run(run_id)["phase"] == "restored"
+
+
+def test_twofile_maintenance_promotion_refuses_before_live_deployment(scratch):
+    """Maintenance approval does not make a checkout-wide switch atomic."""
+    originals = {name: (scratch / name).read_bytes() for name in ("selfmod.py", "selfmod_recover.py")}
+    changes = {
+        "selfmod.py": _sound_selfmod(scratch),
+        "selfmod_recover.py": (scratch / "selfmod_recover.py").read_text(encoding="utf-8") + "\n# Reviewed recovery annotation\n",
+    }
+    run_id = _approved_run(scratch, changes=changes, files=["selfmod.py", "selfmod_recover.py"])
+    with pytest.raises(selfmod.SelfmodStageNotApplied, match="exactly one changed file"):
+        selfmod.deploy(run_id, health_command=_old_health_command(), commit=False)
+    assert selfmod.get_run(run_id)["phase"] == "approved"
+    assert {name: (scratch / name).read_bytes() for name in originals} == originals
 
 
 def test_a_refused_deploy_leaves_the_original_bytes_in_place(scratch):

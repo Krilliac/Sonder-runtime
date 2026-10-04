@@ -4,9 +4,11 @@
 
 The original twelve-section backlog has its implemented runtime primitives and
 bounded qualification. The final original-scope gaps were lossless prose
-continuation, recoverable summary references, and measured rule TDD. They are
+continuation, recoverable summary references, measured rule TDD, and atomic
+checkout promotion admission. They are
 covered by [context continuation evidence](evidence/ISSUE-510-CONTEXT-CONTINUATION-2026-10-04.md)
 and [rule TDD evidence](evidence/ISSUE-510-RULE-TDD-2026-10-04.md), together with
+[atomic promotion evidence](evidence/ISSUE-510-ATOMIC-PROMOTION-2026-10-04.md),
 [durable effect recovery](REMAINING-AGENT-515-EFFECT-JOURNAL.md) and the existing
 worker, guard, learning, retrieval and isolation evidence below.
 
@@ -15,6 +17,9 @@ reopen the original backlog's bounded implementation contract. They remain
 future qualification; this closeout does not claim universal model quality,
 production strategy ablations or permission to replay unknown effects. Final
 integration checks gate merging. No master-spec checkboxes change.
+Checkout selfmod supports one changed file and refuses multi-file promotion
+before live writes; coupled changes require the managed staged release path.
+Atomic rollback-point publication alone is not atomic multi-file deployment.
 
 Updated 2026-09-27. This is an implementation and verification work ledger for
 [#510](https://github.com/Krilliac/Sonder-runtime/issues/510), including the
