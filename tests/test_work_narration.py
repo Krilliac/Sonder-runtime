@@ -1,3 +1,8 @@
+import random
+import re
+import time
+
+from sonder_runtime.domain import work_narration
 from sonder_runtime.domain.work_narration import (
     acknowledgement, activity_progress, autopilot_progress, fanout_progress,
     fleet_progress, progress,
@@ -142,6 +147,61 @@ def test_progress_redacts_credentials_in_durable_event_text():
     assert "Bearer xyz" not in rows[0]["text"]
     assert "u:p@" not in rows[0]["text"]
     assert "<redacted>" in rows[0]["text"]
+
+
+def test_progress_redacts_a_credential_nested_in_another_assignment():
+    # The shape a value-consuming rewrite of the credential pattern leaks:
+    # `x=` is not a credential, but its value holds one.
+    rows = autopilot_progress({"run": {"id": "auto-nested", "status": "running"},
+                               "events": [{"event_id": 1, "ts": 1, "kind": "retry",
+                                            "message": "env x=password=hunter2 secret_key=k1 pwd2: p3"}]})
+    text = rows[0]["text"]
+    assert "hunter2" not in text and "k1" not in text and "p3" not in text
+    assert "x=password=<redacted>" in text
+
+
+def test_redaction_stays_linear_on_inputs_that_made_it_quadratic():
+    # ~30k chars each. The single-regex credential pattern rescanned a run
+    # from every position inside it and took seconds on each of these
+    # (CodeQL py/polynomial-redos); a linear pass takes milliseconds, so the
+    # bound separates the two by orders of magnitude, not by a hair.
+    for payload in ("-" * 30_000, "pwd" * 10_000, "eyJ-" * 7_500):
+        started = time.perf_counter()
+        work_narration._text(payload, 240)
+        assert time.perf_counter() - started < 2.0, payload[:8]
+
+
+def test_assignment_redaction_matches_the_pattern_it_replaced():
+    # The pattern used to begin with \s*; that whitespace is now skipped in
+    # Python. str.isspace is the test re's \s applies, so nothing redacted
+    # changes: compare against the old pattern on edge cases and random text.
+    old = re.compile(r"\s*[=:]\s*([^\s,;]+)")
+
+    def reference(text):
+        parts, cursor = [], 0
+        for name in work_narration._NAME.finditer(text):
+            if name.start() < cursor or not work_narration._CREDENTIAL_NAME.search(name.group()):
+                continue
+            value = old.match(text, name.end())
+            if value is None:
+                continue
+            parts += [text[cursor:value.start(1)], "<redacted>"]
+            cursor = value.end(1)
+        return "".join(parts) + text[cursor:]
+
+    cases = ["password = x", "token\t:\u00a0abc", "pwd \u2003= v1, secret: v2; api-key=v3",
+             "x=password=secret", "password", "password   ", "secret :", "token\u200b= z",
+             "credential\u3000\u3000:\u3000value", "pwd\n=\nv"]
+    rng = random.Random(627)
+    tokens = ["password", "pwd", "token", "x", "-", "_", "=", ":", " ", "\t", "\u00a0",
+              "\u2003", "\u200b", ",", ";", "v1", "eyJ"]
+    cases += ["".join(rng.choice(tokens) for _ in range(rng.randint(1, 12))) for _ in range(3000)]
+    for case in cases:
+        assert work_narration._redact_assignments(case) == reference(case), repr(case)
+    # A credential name followed by a long run of whitespace and no separator.
+    started = time.perf_counter()
+    work_narration._redact_assignments(("password" + " " * 20_000) * 5)
+    assert time.perf_counter() - started < 2.0
 
 
 def test_progress_is_bounded_and_rate_limits_nonterminal_events():

@@ -72,13 +72,13 @@ def run_scoped(run_id, link_run, acknowledgement, activity_id, function):
 
 
 def deferred_post(function):
+    @functools.wraps(function)
     def wrapped(self):
         with response_scope() as deferred:
             try:
                 return function(self)
             finally:
                 deferred.flush()
-    wrapped.__name__ = getattr(function, "__name__", "do_POST")
     return wrapped
 
 
