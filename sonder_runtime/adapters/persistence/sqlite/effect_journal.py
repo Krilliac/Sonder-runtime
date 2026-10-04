@@ -16,9 +16,13 @@ from typing import Mapping
 from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
 
 from sonder_runtime.adapters.persistence.owned_sqlite import transaction as owned_sqlite_transaction
+from sonder_runtime.adapters.persistence.sqlite import effect_journal_chain as chain
 from sonder_runtime.application.execution.effect_journal import (
-    EffectIntent, EffectJournalError, EffectJournalPage, EffectOutcome,
+    NO_RESPONSE, EffectIntent, EffectJournalError, EffectJournalPage, EffectOutcome,
     EffectState, ReconciliationProof, RecoveryDecision,
+)
+from sonder_runtime.application.execution.effect_replay import (
+    ChainVerification, RecordedResponseRow, ToolResponseReplay, build_tool_response_replay,
 )
 
 
@@ -76,9 +80,20 @@ class SQLiteEffectJournal:
     def __init__(
         self, db_path: str | Path, *, max_detail: int = 4096,
         reconciliation_verifiers: Mapping[str, object] | None = None,
+        record_response_content: bool = False,
+        max_response_bytes: int = 256 * 1024,
     ) -> None:
         if type(max_detail) is not int or not 1 <= max_detail <= 1 << 20:
             raise ValueError("max_detail must be within 1..1048576")
+        if type(record_response_content) is not bool:
+            raise ValueError("record_response_content must be boolean")
+        if type(max_response_bytes) is not int or not 1 <= max_response_bytes <= 16 << 20:
+            raise ValueError("max_response_bytes must be within 1..16777216")
+        # Response digests are always kept when a caller supplies a response;
+        # full content only when the host opts in (it may be large or
+        # sensitive, and the journal never stored response payloads before).
+        self._record_response_content = record_response_content
+        self._max_response_bytes = max_response_bytes
         self._path = Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._max_detail = max_detail
@@ -114,6 +129,14 @@ class SQLiteEffectJournal:
                 connection.execute(
                     "ALTER TABLE effect_owner ADD COLUMN recovery_required INTEGER NOT NULL DEFAULT 0"
                 )
+        with self._connect() as connection:
+            # Additive migration: new tables only.  Rows that predate the
+            # chain are read once and pinned by its anchor, never rewritten.
+            # An already-chained journal only reads here, so reopening never
+            # takes the write lock a peer process may be holding.
+            if not chain.is_initialised(connection):
+                connection.execute("BEGIN IMMEDIATE")
+                chain.ensure_chain(connection)
 
     @property
     def database_path(self) -> Path:
@@ -181,6 +204,7 @@ class SQLiteEffectJournal:
                      intent.scope, intent.owner_epoch, intent.idempotency_key,
                      intent.request_digest, intent.reconciliation, sequence, EffectState.INTENT.value),
                 )
+                chain.append_row(connection, intent.intent_id)
                 return self._row(connection.execute(
                     "SELECT intent_id,run_id,worker_id,operation_id,scope,owner_epoch,"
                     "idempotency_key,request_digest,reconciliation,sequence,state,"
@@ -368,6 +392,7 @@ class SQLiteEffectJournal:
             ).rowcount
             if changed != 1:
                 raise EffectJournalError("reconciliation lost its effect race")
+            chain.append_row(connection, current.intent_id)
             unresolved = connection.execute(
                 "SELECT 1 FROM effect_journal WHERE run_id=? AND state IN (?,?) LIMIT 1",
                 (current.run_id, EffectState.INTENT.value, EffectState.UNCERTAIN.value),
@@ -398,11 +423,34 @@ class SQLiteEffectJournal:
                 (intent_id,),
             ).fetchone())
 
+    def _encode_response(self, outcome: EffectOutcome):
+        response = getattr(outcome, "response", NO_RESPONSE)
+        if response is NO_RESPONSE:
+            return None
+        return chain.encode_response(
+            response, keep_content=self._record_response_content,
+            max_bytes=self._max_response_bytes,
+        )
+
+    def _write_outcome_in_transaction(
+        self, connection, outcome: EffectOutcome, current: EffectIntent, encoded,
+    ) -> None:
+        connection.execute(
+            "UPDATE effect_journal SET state=?,outcome_digest=?,receipt_key=?,detail=? "
+            "WHERE intent_id=? AND state=?",
+            (outcome.state.value, outcome.outcome_digest, outcome.receipt_key,
+             outcome.detail[:self._max_detail], outcome.intent_id, current.state.value),
+        )
+        if encoded is not None:
+            chain.record_response(connection, outcome.intent_id, encoded)
+        chain.append_row(connection, outcome.intent_id)
+
     def outcome(self, outcome: EffectOutcome) -> EffectIntent:
         if not isinstance(outcome, EffectOutcome):
             raise TypeError("outcome must be an EffectOutcome")
         if len(outcome.detail) > self._max_detail:
             raise EffectJournalError("outcome detail exceeds bound")
+        encoded = self._encode_response(outcome)
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             current = self._row(connection.execute(
@@ -427,12 +475,7 @@ class SQLiteEffectJournal:
                 raise EffectJournalError(
                     "uncertain effect requires explicit reconciliation; late receipt refused"
                 )
-            connection.execute(
-                "UPDATE effect_journal SET state=?,outcome_digest=?,receipt_key=?,detail=? "
-                "WHERE intent_id=? AND state=?",
-                (outcome.state.value, outcome.outcome_digest, outcome.receipt_key,
-                 outcome.detail[:self._max_detail], outcome.intent_id, current.state.value),
-            )
+            self._write_outcome_in_transaction(connection, outcome, current, encoded)
             result = self._row(connection.execute(
                 "SELECT intent_id,run_id,worker_id,operation_id,scope,owner_epoch,"
                 "idempotency_key,request_digest,reconciliation,sequence,state,"
@@ -461,7 +504,9 @@ class SQLiteEffectJournal:
         connection.commit()
         self._live_latches.discard(run_id)
 
-    def _apply_outcome_in_transaction(self, connection, outcome: EffectOutcome) -> EffectIntent:
+    def _apply_outcome_in_transaction(
+        self, connection, outcome: EffectOutcome, encoded=None,
+    ) -> EffectIntent:
         current = self._row(connection.execute(
             "SELECT intent_id,run_id,worker_id,operation_id,scope,owner_epoch,"
             "idempotency_key,request_digest,reconciliation,sequence,state,"
@@ -485,12 +530,7 @@ class SQLiteEffectJournal:
             raise EffectJournalError(
                 "uncertain effect requires explicit reconciliation; late receipt refused"
             )
-        connection.execute(
-            "UPDATE effect_journal SET state=?,outcome_digest=?,receipt_key=?,detail=? "
-            "WHERE intent_id=? AND state=?",
-            (outcome.state.value, outcome.outcome_digest, outcome.receipt_key,
-             outcome.detail[:self._max_detail], outcome.intent_id, current.state.value),
-        )
+        self._write_outcome_in_transaction(connection, outcome, current, encoded)
         return self._row(connection.execute(
             "SELECT intent_id,run_id,worker_id,operation_id,scope,owner_epoch,"
             "idempotency_key,request_digest,reconciliation,sequence,state,"
@@ -561,6 +601,7 @@ class SQLiteEffectJournal:
                     "UPDATE effect_journal SET state=?,detail=? WHERE intent_id=?",
                     (EffectState.UNCERTAIN.value, detail[:self._max_detail], intent_id),
                 )
+                chain.append_row(connection, intent_id)
                 connection.execute(
                     "UPDATE effect_owner SET recovery_required=1 WHERE run_id=?",
                     (current.run_id,),
@@ -753,9 +794,10 @@ class SQLiteEffectJournal:
         if len(outcome.detail) > self._max_detail:
             raise EffectJournalError("outcome detail exceeds bound")
         encoded = self._encode_state(state)
+        encoded_response = self._encode_response(outcome)
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            stored = self._apply_outcome_in_transaction(connection, outcome)
+            stored = self._apply_outcome_in_transaction(connection, outcome, encoded_response)
             self._require_current_owner_in_transaction(
                 connection, stored.run_id, outcome.worker_id, int(outcome.owner_epoch),
             )
@@ -897,12 +939,13 @@ class SQLiteEffectJournal:
                 or live_workers.get(str(row[1])) != int(row[2])
             )
             for intent_id in orphaned:
-                connection.execute(
+                if connection.execute(
                     "UPDATE effect_journal SET state=?,detail=? WHERE intent_id=? "
                     "AND state IN (?,?)",
                     (EffectState.UNCERTAIN.value, "effect requires reconciliation after restart", intent_id,
                      EffectState.INTENT.value, EffectState.UNCERTAIN.value),
-                )
+                ).rowcount:
+                    chain.append_row(connection, intent_id)
             if orphaned:
                 self._live_latches.add(run_id)
                 connection.execute(
@@ -923,6 +966,52 @@ class SQLiteEffectJournal:
             ).fetchone()[0])
             return RecoveryDecision(run_id, action, attached + orphaned,
                                     high_water, detail)
+
+    # -- tamper evidence and mock replay (read-only) -------------------------
+
+    def verify_chain(self) -> ChainVerification:
+        """Walk the hash chain and report the first broken link, if any."""
+        with self._connect() as connection:
+            connection.execute("BEGIN")
+            return chain.verify(connection)
+
+    def chain_head(self) -> tuple[int, str]:
+        """Return ``(chain_seq, row_hash)`` of the newest chain record."""
+        with self._connect() as connection:
+            return chain.chain_head(connection)
+
+    def recorded_responses(
+        self, run_id: str, *, after_sequence: int = 0, limit: int = 100,
+    ) -> tuple[tuple[RecordedResponseRow, ...], bool]:
+        """Return one run's journal rows with their captured responses, in order."""
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise EffectJournalError("run_id is required")
+        if type(after_sequence) is not int or after_sequence < 0:
+            raise EffectJournalError("after_sequence must be a non-negative integer")
+        if type(limit) is not int or not 1 <= limit <= 10_000:
+            raise EffectJournalError("limit must be within 1..10000")
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT j.intent_id,j.run_id,j.worker_id,j.operation_id,j.scope,j.owner_epoch,"
+                "j.idempotency_key,j.request_digest,j.reconciliation,j.sequence,j.state,"
+                "j.outcome_digest,j.receipt_key,j.detail,"
+                "COALESCE(r.response_digest,''),r.response_json,COALESCE(r.response_bytes,0) "
+                "FROM effect_journal j LEFT JOIN effect_tool_response r ON r.intent_id=j.intent_id "
+                "WHERE j.run_id=? AND j.sequence>? ORDER BY j.sequence LIMIT ?",
+                (run_id, after_sequence, limit + 1),
+            ).fetchall()
+        records = tuple(
+            RecordedResponseRow(
+                self._row(row[:14]), str(row[14]),
+                None if row[15] is None else str(row[15]), int(row[16]),
+            )
+            for row in rows[:limit]
+        )
+        return records, len(rows) > limit
+
+    def tool_response_replay(self, run_id: str, *, page_size: int = 500) -> ToolResponseReplay:
+        """Recorded tool responses of ``run_id`` in order, with missing ones named."""
+        return build_tool_response_replay(self, run_id, page_size=page_size)
 
 
 __all__ = ["SQLiteEffectJournal"]

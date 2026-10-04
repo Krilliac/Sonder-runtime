@@ -83,11 +83,13 @@ def test_prewarm_releases_inflight_marker_when_worker_is_refused(monkeypatch):
         lambda tier, strict: ("prewarm-probe-model", False, False, "general"),
     )
     monkeypatch.setattr(server, "_bridge_provider_for_tier", lambda tier: None)
+    monkeypatch.setattr(server, "_auto_model_context", lambda model: 8192)
     posts = []
     monkeypatch.setattr(server, "_post", lambda *a, **k: posts.append(a))
     _refuse_after(monkeypatch, server, 0)
 
     assert server.prewarm_model("general") is False
+    assert posts == []
     # Capacity frees up: the next prewarm must be able to run, not be
     # refused forever because the first attempt stayed marked in flight.
     started = []
@@ -104,6 +106,9 @@ def test_prewarm_releases_inflight_marker_when_worker_is_refused(monkeypatch):
     assert server.prewarm_model("general") is True
     assert started == [True]
     assert len(posts) == 1
+    assert posts[0][0] == "/api/chat"
+    assert posts[0][1]["options"]["num_ctx"] == 8192
+    assert posts[0][1]["options"]["num_predict"] == 1
 
 
 def test_selfmod_lease_is_released_when_heartbeat_is_refused(monkeypatch):

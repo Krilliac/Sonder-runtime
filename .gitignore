@@ -54,3 +54,6 @@ examples/codegen-arena-shooter/FpsGame_Skeleton/
 # local diagnostic output, never source. The checked-in fixtures live in
 # eval_scenarios/ instead.
 /eval_runs/
+# The AST measurement corpus is a reproducible local artifact and can be large
+# (~835 KB). Keep the compact .summary.json report trackable beside it.
+/docs/architecture/powershell-ast-corpus.jsonl

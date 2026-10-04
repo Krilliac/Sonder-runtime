@@ -1056,9 +1056,12 @@ def build_application(
     def get_session_http_facade() -> HttpSessionFacade:
         nonlocal session_http
         if session_http is None:
+            from ..platform.version import runtime_version
+
             session_http = HttpSessionFacade(
                 get_session_repository(), max_replay_events=1_000,
                 continuity=get_session_continuity_service(),
+                agent_version=runtime_version(),
             )
         return session_http
 
@@ -1421,6 +1424,7 @@ def build_application(
             strategy_memory = try_compose_strategy_memory(
                 strategy_trace, lambda: memory_unit_of_work,
             )
+            from ..adapters.workspace_reality import GitWorkspaceReality
             interactive_lanes = AgentLaneService(
                 lane_store, sessions, gateway, lane_tools,
                 authorize_grant=authorize_lane_grant,
@@ -1435,6 +1439,7 @@ def build_application(
                     strategy_trace, strategy_memory, strategy_rollout, lane_store,
                 ),
                 prompts=prompt_store.render,
+                workspace_reality=GitWorkspaceReality(),
             )
         return interactive_lanes
 
@@ -1474,11 +1479,13 @@ def build_application(
                         worker_owner_epoch,
                     )
 
+                from ..adapters.workspace_reality import GitWorkspaceReality
                 continuation_service = DurableContinuationService(
                     continuation_repository,
                     checkpoint_provenance=JournalProvenanceStamp(
                         provenance_journal, child_provenance_binding,
                     ),
+                    workspace_reality=GitWorkspaceReality(),
                 )
                 from ..application.worker_registry.continuation import (
                     ContinuationWorkerRegistry,

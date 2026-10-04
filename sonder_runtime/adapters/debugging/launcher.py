@@ -93,18 +93,6 @@ def _safe_relative(rel: str) -> PurePosixPath:
     return path
 
 
-def _write_private(path: Path, data: bytes) -> None:
-    tmp = path.with_name(path.name + ".tmp-%s" % secrets.token_hex(4))
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) \
-        | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-    fd = os.open(tmp, flags, 0o600)
-    try:
-        os.write(fd, data)
-    finally:
-        os.close(fd)
-    os.replace(tmp, path)
-
-
 class _Run:
     __slots__ = ("run_id", "principal_id", "plan", "rundir", "nonce", "done", "cancel_requested",
                  "cancel_reason", "current_job", "step_status", "exit_codes", "output_limit",
@@ -151,6 +139,16 @@ class ProcessDebugLauncher:
         self._registry_getter = registry_getter
         self._guard = executable_guard
         self._root = Path(run_root)
+        # A run path must be inside the root as configured (lexically) and as
+        # resolved here (links followed), so a root or run directory later
+        # swapped for a link is refused instead of followed.
+        self._root_abs = os.path.normcase(os.path.abspath(os.path.normpath(self._root)))
+        try:
+            self._root_real = self._root.resolve(strict=False)
+        except (OSError, RuntimeError):
+            # Composition must not fail on the filesystem (a link loop): every
+            # later resolution then fails or differs, which refuses the run.
+            self._root_real = Path(os.path.abspath(self._root))
         self._source = source
         self._clock = clock
         self._max_retained = max(2, int(max_retained))
@@ -166,7 +164,47 @@ class ProcessDebugLauncher:
             raise KeyError(run_id)
         return self._root / run_id
 
+    def _write_private(self, path: Path, data: bytes) -> None:
+        normalized = os.path.normcase(os.path.abspath(os.path.normpath(path)))
+        root = self._root_abs
+        if not normalized.startswith(root + os.sep):
+            raise PermissionError("debug run path is outside its run directory")
+        run_id = Path(normalized).relative_to(root).parts[0]
+        if not _RUN_ID.fullmatch(run_id):
+            raise PermissionError("debug run path is outside its run directory")
+        try:
+            resolved = os.path.normcase(str(Path(normalized).resolve(strict=False)))
+        except (OSError, RuntimeError) as exc:
+            raise PermissionError("debug run path is outside its run directory") from exc
+        expected = os.path.normcase(str(self._root_real / run_id))
+        if not resolved.startswith(expected + os.sep):
+            raise PermissionError("debug run path is outside its run directory")
+        tmp = os.path.normcase(os.path.abspath(os.path.normpath(
+            normalized + ".tmp-%s" % secrets.token_hex(4))))
+        if not tmp.startswith(root + os.sep):
+            raise PermissionError("debug run path is outside its run directory")
+        try:
+            tmp_resolved = os.path.normcase(str(Path(tmp).resolve(strict=False)))
+        except (OSError, RuntimeError) as exc:
+            raise PermissionError("debug run path is outside its run directory") from exc
+        if not tmp_resolved.startswith(expected + os.sep):
+            raise PermissionError("debug run path is outside its run directory")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) \
+            | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        fd = os.open(tmp, flags, 0o600)
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+        os.replace(tmp, normalized)
+
     def _prepare(self, run_id: str, plan: DebugPlan) -> Path:
+        try:
+            resolved = os.path.normcase(str(Path(self._root_abs).resolve(strict=False)))
+        except (OSError, RuntimeError) as exc:
+            raise PermissionError("debug run root is a symlink") from exc
+        if resolved != os.path.normcase(str(self._root_real)) or _is_reparse(self._root):
+            raise PermissionError("debug run root is a symlink")
         ensure_private_dir(self._root)
         if _is_reparse(self._root):
             raise PermissionError("debug run root is a symlink")
@@ -183,6 +221,12 @@ class ProcessDebugLauncher:
         return rundir
 
     def _prune(self) -> None:
+        try:
+            resolved = os.path.normcase(str(Path(self._root_abs).resolve(strict=False)))
+        except (OSError, RuntimeError):
+            return
+        if resolved != os.path.normcase(str(self._root_real)):
+            return
         try:
             with os.scandir(self._root) as iterator:
                 entries = [entry for index, entry in enumerate(iterator) if index < 4096]
@@ -204,12 +248,35 @@ class ProcessDebugLauncher:
             self._scrub(Path(entry.path), keep_step_outputs=True)
         excess = len(candidates) - (self._max_retained - 1)
         for _, path in sorted(candidates)[: max(0, excess)]:
-            shutil.rmtree(path, ignore_errors=True)
+            normalized = os.path.normcase(os.path.abspath(os.path.normpath(path)))
+            root = self._root_abs
+            if not normalized.startswith(root + os.sep):
+                continue
+            try:
+                resolved = os.path.normcase(str(Path(normalized).resolve(strict=False)))
+            except (OSError, RuntimeError):
+                continue
+            expected = os.path.normcase(str(self._root_real / Path(normalized).name))
+            if resolved != expected:
+                continue
+            shutil.rmtree(normalized, ignore_errors=True)
 
-    @staticmethod
-    def _scrub(rundir: Path, *, keep_step_outputs: bool) -> None:
+    def _scrub(self, rundir: Path, *, keep_step_outputs: bool) -> None:
+        normalized = os.path.normcase(os.path.abspath(os.path.normpath(rundir)))
+        root = self._root_abs
+        if not normalized.startswith(root + os.sep):
+            return
+        run_id = Path(normalized).name
+        if not _RUN_ID.fullmatch(run_id):
+            return
         try:
-            with os.scandir(rundir) as iterator:
+            resolved = os.path.normcase(str(Path(normalized).resolve(strict=False)))
+        except (OSError, RuntimeError):
+            return
+        if resolved != os.path.normcase(str(self._root_real / run_id)):
+            return
+        try:
+            with os.scandir(normalized) as iterator:
                 entries = list(iterator)[:256]
         except OSError:
             return
@@ -420,7 +487,7 @@ class ProcessDebugLauncher:
             if text is not None:
                 run.step_outputs[index] = text
                 try:
-                    _write_private(run.rundir / ("step-%d.out" % index), text.encode("utf-8"))
+                    self._write_private(run.rundir / ("step-%d.out" % index), text.encode("utf-8"))
                 except OSError:
                     pass
         if status in ("cancelled", "timed_out", "output_limit"):
@@ -454,17 +521,37 @@ class ProcessDebugLauncher:
             target = run.rundir.joinpath(*_safe_relative(rel).parts)
         except PermissionError:
             return None
+        root = os.path.normcase(os.path.abspath(os.path.normpath(run.rundir)))
+        expected = os.path.normcase(str(self._root_real / run.run_id))
+        normalized = os.path.normcase(os.path.abspath(os.path.normpath(target)))
+        if not normalized.startswith(root + os.sep):
+            return None
+        try:
+            resolved = os.path.normcase(str(Path(normalized).resolve(strict=False)))
+        except (OSError, RuntimeError):
+            return None
+        if not resolved.startswith(expected + os.sep):
+            return None
         if kind == "dir":
             try:
-                names = sorted(name for name in os.listdir(target) if name.lower().endswith(".csv"))
+                names = sorted(name for name in os.listdir(normalized) if name.lower().endswith(".csv"))
             except OSError:
                 return None
             if not names:
                 return None
             target = target / names[0]
+            normalized = os.path.normcase(os.path.abspath(os.path.normpath(target)))
+            if not normalized.startswith(root + os.sep):
+                return None
+            try:
+                resolved = os.path.normcase(str(Path(normalized).resolve(strict=False)))
+            except (OSError, RuntimeError):
+                return None
+            if not resolved.startswith(expected + os.sep):
+                return None
         try:
             flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-            fd = os.open(target, flags)
+            fd = os.open(normalized, flags)
         except OSError:
             return None
         try:
@@ -618,13 +705,26 @@ class ProcessDebugLauncher:
 
     def _write_json(self, path: Path, payload: Mapping) -> None:
         data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
-        _write_private(path, data.encode("utf-8"))
+        self._write_private(path, data.encode("utf-8"))
 
-    @staticmethod
-    def _read_bounded(path: Path) -> bytes | None:
+    def _read_bounded(self, path: Path) -> bytes | None:
+        normalized = os.path.normcase(os.path.abspath(os.path.normpath(path)))
+        root = self._root_abs
+        if not normalized.startswith(root + os.sep):
+            return None
+        run_id = Path(normalized).relative_to(root).parts[0]
+        if not _RUN_ID.fullmatch(run_id):
+            return None
+        try:
+            resolved = os.path.normcase(str(Path(normalized).resolve(strict=False)))
+        except (OSError, RuntimeError):
+            return None
+        expected = os.path.normcase(str(self._root_real / run_id))
+        if not resolved.startswith(expected + os.sep):
+            return None
         flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
         try:
-            fd = os.open(path, flags)
+            fd = os.open(normalized, flags)
         except OSError:
             return None
         try:
@@ -639,14 +739,33 @@ class ProcessDebugLauncher:
         if name not in _JSON_NAMES:
             raise ValueError("unknown run record %r" % name)
         rundir = self._rundir(run_id)
-        if not rundir.is_dir() or _is_reparse(rundir):
+        normalized = os.path.normcase(os.path.abspath(os.path.normpath(rundir)))
+        root = self._root_abs
+        if not normalized.startswith(root + os.sep):
             raise OSError("debug run directory is gone")
-        self._write_json(rundir / name, payload)
+        try:
+            resolved = os.path.normcase(str(Path(normalized).resolve(strict=False)))
+        except (OSError, RuntimeError) as exc:
+            raise OSError("debug run directory is gone") from exc
+        if resolved != os.path.normcase(str(self._root_real / run_id)):
+            raise OSError("debug run directory is gone")
+        if not Path(normalized).is_dir() or _is_reparse(Path(normalized)):
+            raise OSError("debug run directory is gone")
+        self._write_json(Path(normalized) / name, payload)
         if name == "result.json":
             # The result is final: drop the assembly inputs, keep identity records.
             for extra in ("context.json",):
                 with contextlib.suppress(OSError):
-                    (rundir / extra).unlink()
+                    target = os.path.normcase(os.path.abspath(os.path.normpath(Path(normalized) / extra)))
+                    if not target.startswith(normalized + os.sep):
+                        continue
+                    try:
+                        resolved = os.path.normcase(str(Path(target).parent.resolve(strict=False)))
+                    except (OSError, RuntimeError):
+                        continue
+                    if resolved != os.path.normcase(str(self._root_real / run_id)):
+                        continue
+                    Path(target).unlink()
             self._scrub(rundir, keep_step_outputs=False)
 
     def load_json(self, run_id: str, name: str) -> Mapping | None:

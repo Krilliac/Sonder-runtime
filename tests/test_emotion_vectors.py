@@ -92,7 +92,8 @@ def test_build_system_includes_emotion_vectors(monkeypatch, tmp_path):
     server.emotion_vectors.update_vectors({"warmth": 0.7}, mode="replace")
     out = server._build_system("Base system", False, "")
     assert "warmth=+0.70" in out
-    assert out.index("warmth=+0.70") < out.index("Base system")
+    # local-system/3 keeps the request before volatile emotion/goal sections.
+    assert out.index("Base system") < out.index("warmth=+0.70")
 
 
 def test_update_emotion_vectors_tool(monkeypatch, tmp_path):

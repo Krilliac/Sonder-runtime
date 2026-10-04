@@ -97,8 +97,8 @@ from sonder_runtime.domain.model_usage import usage_count as _model_usage_count
 from sonder_runtime.domain.model_usage import (
     merge_reasoning_response_usage as _merge_reasoning_response_usage,
 )
-from sonder_runtime.domain.memory.authoritative_fact_metadata import (
-    fact_metadata_from_inputs as _surface_fact_metadata,
+from sonder_runtime.domain.memory.fact_validity import (
+    fact_write_inputs as _surface_fact_metadata,
 )
 from sonder_runtime.domain.model_usage_formatting import (
     usage_source as _model_usage_source,
@@ -236,6 +236,7 @@ from sonder_runtime.domain.interaction_footer import (
 from sonder_runtime.domain.campaign_environment import (
     environment_failure as _campaign_environment_failure,
 )
+from sonder_runtime.adapters.security import powershell_gate as _powershell_gate
 from sonder_runtime.domain.learning_tier import (
     canonical_learn_tier as _canonical_learn_tier,
     should_learn as _should_learn_policy,
@@ -528,6 +529,7 @@ from sonder_runtime.domain.execution_route_formatting import (
 from sonder_runtime.adapters.inference import served_tier_models as _served_models
 from sonder_runtime.adapters.inference import overflow_route as _overflow_route
 from sonder_runtime.adapters.inference import gpu_residency as _gpu_residency
+from sonder_runtime.adapters.inference import prefix_cache as _prefix_cache
 from sonder_runtime.domain.agent_observation_quality import (
     observation_ok as _agent_observation_ok,
 )
@@ -2500,10 +2502,10 @@ def _build_system(system, trace, persona, model="", cloud=False, provider=None):
     values = parts or _read_system_context()
     profile, emotions, goal_block = values[:3]
     playbook_index = values[3] if len(values) > 3 else ""
-    return _join_system_parts(
-        _runtime_identity_block(model, cloud, provider), profile, emotions,
-        playbook_context.frame_owner_notes(playbook_index), goal_block,
+    return _prefix_cache.compose_local_system(  # stable first, volatile last
+        _runtime_identity_block(model, cloud, provider), profile, emotions, goal_block,
         effective_system,
+        playbook=playbook_context.frame_owner_notes(playbook_index),
     )
 
 
@@ -3692,7 +3694,7 @@ def control_command(prompt: str, history=None, session="", project="",
         return "refused %s: %s" % (cmd, exc)
     chain_tools = command_catalog.narrow_branch_tools(cmd, arg, chain_tools)
     refusal = _control_tool_refusal(
-        chain_tools, cmd, operator_approved=bool(operator_approved),
+        chain_tools, cmd, operator_approved=bool(operator_approved), arguments=_powershell_gate.runnable_powershell(_latest_runnable_block(history)) if cmd == "/run" else None,
     )
     if refusal:
         return refusal
@@ -4207,6 +4209,7 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
             task_embedding_dim=embedding_provenance.get("dimension"),
         )
         playbook_context.record_usage(conn, playbook_selection, iid)
+        _prefix_cache.observe_chat_turn(effective_system, model=model, cloud=cloud, bridged=_provider_bridge.active_rung, response_meta=getattr(gen, "last_response_meta", None))
         _capture_preferences(
             conn, prompt, source_interaction=iid,
             scope="project:%s" % project if project else "global",
@@ -4223,6 +4226,7 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
         task_embedding_dim=embedding_provenance.get("dimension"),
     )
     playbook_context.record_usage(conn, playbook_selection, iid)
+    _prefix_cache.observe_chat_turn(effective_system, model=model, cloud=cloud, bridged=_provider_bridge.active_rung, response_meta=getattr(gen, "last_response_meta", None))
     _capture_preferences(
         conn, prompt, source_interaction=iid,
         scope="project:%s" % project if project else "global",
@@ -5535,11 +5539,13 @@ def prewarm_model(tier: str = "") -> bool:
 
     def _load():
         try:
-            # Empty prompt with keep_alive loads weights without generating.
-            prewarm_gate.run_as_prewarm(lambda: _post(
-                "/api/generate", {"model": model, "keep_alive": _keep_alive_for(model)},
-                timeout=_PREWARM_LOAD_TIMEOUT,
-            ))
+            # Prefill the stable system prefix (1 token) with the options the turn
+            # sends, so Ollama keeps the runner and its KV; else load weights only.
+            path, body = _prefix_cache.prewarm_request(model, _keep_alive_for(model), lambda: (
+                _build_system("", False, "", model=model, cloud=False),
+                _platform_local_model_options(0.2, 1, _auto_model_context(model),
+                    native_context=context_policy.native, environ=os.environ)))
+            prewarm_gate.run_as_prewarm(lambda: _post(path, body, timeout=_PREWARM_LOAD_TIMEOUT))
         except Exception:
             pass
         finally:
@@ -7746,8 +7752,8 @@ def parallel_generate_run_languages(
                     "output": "no %s code block returned" % lang,
                     "seconds": 0,
                 }
-            ok, out = grounding.run_language_code(
-                code,
+            ok, out = _powershell_gate.run_generated_code(
+                grounding.run_language_code, code,
                 language=lang,
                 extra=check,
                 timeout=timeout,
@@ -7787,7 +7793,7 @@ def parallel_generate_run_languages(
         % (passed, len(results), elapsed, tier, max_workers)
     ]
     for r in results:
-        status = "PASS" if r.get("ok") else "FAIL"
+        status = "PASS" if r.get("ok") else "SKIP" if isinstance(r.get("output"), _powershell_gate.ApprovalRequired) else "FAIL"
         lines.append("[%s] %s [%s]" % (status, r.get("name"), r.get("language")))
         out = (r.get("output") or "").strip()
         if out:
@@ -7915,8 +7921,8 @@ def campaign_generate_compile_execute_record(
                 ok = False
                 out = "no %s code block returned" % lang
             else:
-                ok, out = grounding.run_language_code(
-                    code,
+                ok, out = _powershell_gate.run_generated_code(
+                    grounding.run_language_code, code,
                     language=lang,
                     timeout=timeout,
                     execute=True,
@@ -7928,11 +7934,12 @@ def campaign_generate_compile_execute_record(
             record_msg = ""
             pitfall_note = ""
             env_failure = (not ok) and _campaign_environment_failure(out)
+            approval_required = isinstance(out, _powershell_gate.ApprovalRequired)
             if ok and iid:
                 with _CAMPAIGN_LEARN_LOCK:
                     record_msg = record_outcome(iid, "tests_passed")
-            elif env_failure:
-                # Host toolchain breakage: the model was never judged, so no
+            elif env_failure or approval_required:
+                # Toolchain or approval skip: the model was never judged, so no
                 # outcome and no pitfall are recorded against it.
                 pass
             elif attempt == repair_rounds and record_failures and iid:
@@ -7955,8 +7962,9 @@ def campaign_generate_compile_execute_record(
                 "record": record_msg,
                 "pitfall_error": pitfall_note,
                 "env_skipped": env_failure,
+                "approval_required": approval_required,
             })
-            if ok or env_failure:
+            if ok or env_failure or approval_required:
                 break
             last_note = (out or "unknown failure")[:1200]
         final = attempts[-1]
@@ -8033,7 +8041,7 @@ def campaign_generate_compile_execute_record(
     if drain["drained"]:
         lines.append(_drain_summary_text(drain))
     for r in results:
-        status = "PASS" if r["ok"] else "FAIL"
+        status = "PASS" if r["ok"] else "SKIP" if r["attempts"][-1].get("approval_required") else "FAIL"
         lines.append("[%s] %s attempts=%d iid=%s" % (
             status, r["name"], len(r["attempts"]), r.get("iid") or "-"))
         final_out = (r["attempts"][-1].get("output") or "").strip()
@@ -14439,13 +14447,17 @@ def sonder_remember_fact(
     model carries itself (toolchain, conventions, key paths, gotchas). No `project`
     stores it under the "default" project. Use sonder(..., project="<name>") to
     scope which facts apply to a call.
+
+    Optional ``valid_from``/``valid_until`` (ISO-8601 with timezone) bound when
+    the fact is true; expired facts are no longer recalled. ``supersedes=<id>``
+    closes that earlier fact's interval as this one is stored (replace a fact).
     """
     _maybe_live_reload()
     text = (text or "").strip()
     if not text:
         return "ERROR: empty fact."
     try:
-        metadata = _surface_fact_metadata(
+        metadata, validity = _surface_fact_metadata(
             entities_json, decision_json, valid_from, valid_until,
             supersedes, provenance_json,
         )
@@ -14476,7 +14488,9 @@ def sonder_remember_fact(
                 "replaced." % (project_id, n, duplicate.get("id"))
             )
         try:
-            uow.memory.add_fact(fact_id, project_id, text, blob, metadata=metadata)
+            uow.memory.add_fact(
+                fact_id, project_id, text, blob, metadata=metadata, validity=validity,
+            )
         except ValueError as exc:
             # A configured authoritative source owns one exact project scope.
             # Keep the external tool boundary stable while refusing a scope
@@ -15227,7 +15241,7 @@ _LOOP_ACTION_TYPES = (
 
 
 
-def _loop_permission_refusal(action_type):
+def _loop_permission_refusal(action_type, arguments=None):
     """Gate a model-authored `loop`/`workflow_run` action, or None to proceed.
 
     `_loop_dispatch` is the third place a *model* chooses what runs -- the
@@ -15245,7 +15259,7 @@ def _loop_permission_refusal(action_type):
     if str(action_type or "").strip().lower() not in _LOOP_ACTION_TYPES:
         return None
     tool = _loop_action_tool(action_type)
-    decision = permission_modes.decide(tool, interactive=False, surface="loop")
+    decision = permission_modes.decide(tool, interactive=False, surface="loop", arguments=_powershell_gate.loop_gate_arguments(tool, arguments))
     if decision.allowed:
         return None
     return {
@@ -15267,7 +15281,7 @@ def _loop_dispatch(action):
         k: v for k, v in (action or {}).items()
         if k not in {"code", "content", "files"}
     }
-    refusal = _loop_permission_refusal(action_type)
+    refusal = _loop_permission_refusal(action_type, action)
     if refusal is not None:
         # A refused action never entered the queue.  Recording it as a normal
         # successful tool call made activity consumers report it as completed
@@ -16650,10 +16664,11 @@ def memory_search(query: str, limit: int = 10) -> str:
             text = memory_store.get_lesson_text(conn, lesson_id)
             if text:
                 lessons.append({"id": lesson_id, "text": text})
+        current, instants = memory_store.current_fact_params()  # expired facts stay out
         facts = [dict(r) for r in conn.execute(
-            "SELECT id, project, text FROM facts WHERE text LIKE ? ESCAPE '\\' "
-            "ORDER BY ts DESC, rowid DESC LIMIT ?",
-            (like, limit),
+            "SELECT id, project, text FROM facts WHERE text LIKE ? ESCAPE '\\' AND "
+            + current + " ORDER BY ts DESC, rowid DESC LIMIT ?",
+            (like, *instants, limit),
         ).fetchall()]
         preferences = [dict(r) for r in conn.execute(
             "SELECT id, scope, key, text, confidence, evidence_count FROM preferences "
@@ -16806,9 +16821,15 @@ def memory_export(limit: int = 50, include_interactions: bool = False) -> str:
 
 
 @mcp.tool()
-def session_export(session: str = "", limit: int = 50) -> str:
-    """Export a remembered conversation session as readable transcript text."""
+def session_export(session: str = "", limit: int = 50, format: str = "") -> str:
+    """Export a remembered conversation session as readable transcript text (format="atif": ATIF-v1.7 JSON)."""
     _maybe_live_reload()
+    export_format = "text"
+    if str(format or "").strip():  # the default text path stays import-free
+        from sonder_runtime.adapters import session_atif_export as atif_export
+        export_format = atif_export.normalize_session_export_format(format)
+        if export_format is None:
+            raise InvalidInput("unknown session_export format (use 'text' or 'atif')")
     session_id = _resolve_session(session)
     if not session_id:
         return "ERROR: session='none' has no stored transcript."
@@ -16823,6 +16844,8 @@ def session_export(session: str = "", limit: int = 50) -> str:
                 sess = memory_store.get_session(conn, session_id)
         if sess is None:
             return "ERROR: no session '%s'." % session
+        if export_format == "atif":
+            return atif_export.interaction_session_atif(conn, session_id, sess, limit=limit)
         turns = memory_store.session_turns(conn, session_id)[-limit:]
     finally:
         conn.close()

@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "d1d664e317eed929974a9a6979533e75297df2296fa2c2957573e6e3b2f3a12c",
+    "catalog_digest": "ca5df2b0d92014b8cc8f5e34ededf1f753baa8b42fab80d0e5dfc7adfc5e37e1",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "d1d664e317eed929974a9a6979533e75297df2296fa2c2957573e6e3b2f3a12c",
+      "catalog_digest": "ca5df2b0d92014b8cc8f5e34ededf1f753baa8b42fab80d0e5dfc7adfc5e37e1",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -6125,11 +6125,16 @@
           "name": "self_heal_repair"
         },
         {
-          "description": "Export a remembered conversation session as readable transcript text.",
+          "description": "Export a remembered conversation session as readable transcript text (format=\"atif\": ATIF-v1.7 JSON).",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
             "properties": {
+              "format": {
+                "default": "",
+                "title": "Format",
+                "type": "string"
+              },
               "limit": {
                 "default": 50,
                 "title": "Limit",
@@ -6321,7 +6326,7 @@
           "name": "sonder_forget_fact"
         },
         {
-          "description": "Store a durable fact sonder should ALWAYS know for a project.\n\n    Unlike lessons (earned from good outcomes), facts are asserted directly and are\n    injected into every sonder call for that project \u2014 a mini project brief the\n    model carries itself (toolchain, conventions, key paths, gotchas). No `project`\n    stores it under the \"default\" project. Use sonder(..., project=\"<name>\") to\n    scope which facts apply to a call.\n    ",
+          "description": "Store a durable fact sonder should ALWAYS know for a project.\n\n    Unlike lessons (earned from good outcomes), facts are asserted directly and are\n    injected into every sonder call for that project \u2014 a mini project brief the\n    model carries itself (toolchain, conventions, key paths, gotchas). No `project`\n    stores it under the \"default\" project. Use sonder(..., project=\"<name>\") to\n    scope which facts apply to a call.\n\n    Optional ``valid_from``/``valid_until`` (ISO-8601 with timezone) bound when\n    the fact is true; expired facts are no longer recalled. ``supersedes=<id>``\n    closes that earlier fact's interval as this one is stored (replace a fact).\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -15395,10 +15400,16 @@
           "name": "limit",
           "required": false,
           "type": "int"
+        },
+        {
+          "default": "",
+          "name": "format",
+          "required": false,
+          "type": "str"
         }
       ],
       "risk": "ask",
-      "summary": "Export a remembered conversation session as readable transcript text.",
+      "summary": "Export a remembered conversation session as readable transcript text (format=\"atif\": ATIF-v1.7 JSON).",
       "tool": "session_export"
     },
     {
@@ -19014,7 +19025,7 @@
     "schemas": 4,
     "tools": 229
   },
-  "digest": "50149cccf3c7b93303e5b6c0b141572b5edb26e157ebda08af78483639d0f7aa",
+  "digest": "904058dee7aa0691326b0aff5f30d9630b84ce33fdfd1630ed9b7460be72175f",
   "events": [
     {
       "name": "session.started",
@@ -21676,9 +21687,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "d1d664e317eed929974a9a6979533e75297df2296fa2c2957573e6e3b2f3a12c",
+    "catalog_digest": "ca5df2b0d92014b8cc8f5e34ededf1f753baa8b42fab80d0e5dfc7adfc5e37e1",
     "client": {
-      "digest": "d1d664e317eed929974a9a6979533e75297df2296fa2c2957573e6e3b2f3a12c",
+      "digest": "ca5df2b0d92014b8cc8f5e34ededf1f753baa8b42fab80d0e5dfc7adfc5e37e1",
       "events": [
         {
           "name": "approval.denied",
@@ -23975,7 +23986,7 @@
           {
             "name": "session_export",
             "schema_available": true,
-            "summary": "Export a remembered conversation session as readable transcript text."
+            "summary": "Export a remembered conversation session as readable transcript text (format=\"atif\": ATIF-v1.7 JSON)."
           },
           {
             "name": "set_context_size",
@@ -24000,7 +24011,7 @@
           {
             "name": "sonder_remember_fact",
             "schema_available": true,
-            "summary": "Store a durable fact sonder should ALWAYS know for a project.\n\n    Unlike lessons (earned from good outcomes), facts are asserted directly and are\n    injected into every sonder call for that project \u2014 a mini project brief the\n    model carries itself (toolchain, conventions, key paths, gotchas). No `project`\n    stores it under the \"default\" project. Use sonder(..., project=\"<name>\") to\n    scope which facts apply to a call.\n    "
+            "summary": "Store a durable fact sonder should ALWAYS know for a project.\n\n    Unlike lessons (earned from good outcomes), facts are asserted directly and are\n    injected into every sonder call for that project \u2014 a mini project brief the\n    model carries itself (toolchain, conventions, key paths, gotchas). No `project`\n    stores it under the \"default\" project. Use sonder(..., project=\"<name>\") to\n    scope which facts apply to a call.\n\n    Optional ``valid_from``/``valid_until`` (ISO-8601 with timezone) bound when\n    the fact is true; expired facts are no longer recalled. ``supersedes=<id>``\n    closes that earlier fact's interval as this one is stored (replace a fact).\n    "
           },
           {
             "name": "sonder_sessions",
@@ -30271,11 +30282,16 @@
           "name": "self_heal_repair"
         },
         {
-          "description": "Export a remembered conversation session as readable transcript text.",
+          "description": "Export a remembered conversation session as readable transcript text (format=\"atif\": ATIF-v1.7 JSON).",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
             "properties": {
+              "format": {
+                "default": "",
+                "title": "Format",
+                "type": "string"
+              },
               "limit": {
                 "default": 50,
                 "title": "Limit",
@@ -30467,7 +30483,7 @@
           "name": "sonder_forget_fact"
         },
         {
-          "description": "Store a durable fact sonder should ALWAYS know for a project.\n\n    Unlike lessons (earned from good outcomes), facts are asserted directly and are\n    injected into every sonder call for that project \u2014 a mini project brief the\n    model carries itself (toolchain, conventions, key paths, gotchas). No `project`\n    stores it under the \"default\" project. Use sonder(..., project=\"<name>\") to\n    scope which facts apply to a call.\n    ",
+          "description": "Store a durable fact sonder should ALWAYS know for a project.\n\n    Unlike lessons (earned from good outcomes), facts are asserted directly and are\n    injected into every sonder call for that project \u2014 a mini project brief the\n    model carries itself (toolchain, conventions, key paths, gotchas). No `project`\n    stores it under the \"default\" project. Use sonder(..., project=\"<name>\") to\n    scope which facts apply to a call.\n\n    Optional ``valid_from``/``valid_until`` (ISO-8601 with timezone) bound when\n    the fact is true; expired facts are no longer recalled. ``supersedes=<id>``\n    closes that earlier fact's interval as this one is stored (replace a fact).\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -38851,9 +38867,14 @@
           "name": "self_heal_repair"
         },
         {
-          "description": "Export a remembered conversation session as readable transcript text.",
+          "description": "Export a remembered conversation session as readable transcript text (format=\"atif\": ATIF-v1.7 JSON).",
           "inputSchema": {
             "properties": {
+              "format": {
+                "default": "",
+                "title": "Format",
+                "type": "string"
+              },
               "limit": {
                 "default": 50,
                 "title": "Limit",
@@ -39037,7 +39058,7 @@
           "name": "sonder_forget_fact"
         },
         {
-          "description": "Store a durable fact sonder should ALWAYS know for a project.\n\n    Unlike lessons (earned from good outcomes), facts are asserted directly and are\n    injected into every sonder call for that project \u2014 a mini project brief the\n    model carries itself (toolchain, conventions, key paths, gotchas). No `project`\n    stores it under the \"default\" project. Use sonder(..., project=\"<name>\") to\n    scope which facts apply to a call.\n    ",
+          "description": "Store a durable fact sonder should ALWAYS know for a project.\n\n    Unlike lessons (earned from good outcomes), facts are asserted directly and are\n    injected into every sonder call for that project \u2014 a mini project brief the\n    model carries itself (toolchain, conventions, key paths, gotchas). No `project`\n    stores it under the \"default\" project. Use sonder(..., project=\"<name>\") to\n    scope which facts apply to a call.\n\n    Optional ``valid_from``/``valid_until`` (ISO-8601 with timezone) bound when\n    the fact is true; expired facts are no longer recalled. ``supersedes=<id>``\n    closes that earlier fact's interval as this one is stored (replace a fact).\n    ",
           "inputSchema": {
             "properties": {
               "decision_json": {
@@ -46703,10 +46724,15 @@
         },
         {
           "function": {
-            "description": "Export a remembered conversation session as readable transcript text.",
+            "description": "Export a remembered conversation session as readable transcript text (format=\"atif\": ATIF-v1.7 JSON).",
             "name": "session_export",
             "parameters": {
               "properties": {
+                "format": {
+                  "default": "",
+                  "title": "Format",
+                  "type": "string"
+                },
                 "limit": {
                   "default": 50,
                   "title": "Limit",
@@ -46904,7 +46930,7 @@
         },
         {
           "function": {
-            "description": "Store a durable fact sonder should ALWAYS know for a project.\n\n    Unlike lessons (earned from good outcomes), facts are asserted directly and are\n    injected into every sonder call for that project \u2014 a mini project brief the\n    model carries itself (toolchain, conventions, key paths, gotchas). No `project`\n    stores it under the \"default\" project. Use sonder(..., project=\"<name>\") to\n    scope which facts apply to a call.\n    ",
+            "description": "Store a durable fact sonder should ALWAYS know for a project.\n\n    Unlike lessons (earned from good outcomes), facts are asserted directly and are\n    injected into every sonder call for that project \u2014 a mini project brief the\n    model carries itself (toolchain, conventions, key paths, gotchas). No `project`\n    stores it under the \"default\" project. Use sonder(..., project=\"<name>\") to\n    scope which facts apply to a call.\n\n    Optional ``valid_from``/``valid_until`` (ISO-8601 with timezone) bound when\n    the fact is true; expired facts are no longer recalled. ``supersedes=<id>``\n    closes that earlier fact's interval as this one is stored (replace a fact).\n    ",
             "name": "sonder_remember_fact",
             "parameters": {
               "properties": {
@@ -48489,7 +48515,7 @@
   },
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "ba985782cd4646ddc9476c1c57ff338347c3509c34d54d8aee0647f696f96234",
+    "server.py": "e740eb332a6c468f834ec72a3de517720425dc63a9ff858f9b22596dd16d11c4",
     "sonder_runtime/application/tools/generated_catalogs.py": "332f23bad788ee427203c64a35f9e36affa2ec11af0ea08889ac9aaa821b0d89",
     "sonder_runtime/bootstrap/native_mcp.py": "2cbf4a0a006084aeb19c6615d04fffee9af89b1fdc8ee7d1fd582e1a9616c9f8",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
@@ -54185,10 +54211,15 @@
       }
     },
     {
-      "description": "Export a remembered conversation session as readable transcript text.",
+      "description": "Export a remembered conversation session as readable transcript text (format=\"atif\": ATIF-v1.7 JSON).",
       "name": "session_export",
       "parameters": {
         "properties": {
+          "format": {
+            "default": "",
+            "title": "Format",
+            "type": "string"
+          },
           "limit": {
             "default": 50,
             "title": "Limit",
@@ -54371,7 +54402,7 @@
       }
     },
     {
-      "description": "Store a durable fact sonder should ALWAYS know for a project.\n\n    Unlike lessons (earned from good outcomes), facts are asserted directly and are\n    injected into every sonder call for that project \u2014 a mini project brief the\n    model carries itself (toolchain, conventions, key paths, gotchas). No `project`\n    stores it under the \"default\" project. Use sonder(..., project=\"<name>\") to\n    scope which facts apply to a call.\n    ",
+      "description": "Store a durable fact sonder should ALWAYS know for a project.\n\n    Unlike lessons (earned from good outcomes), facts are asserted directly and are\n    injected into every sonder call for that project \u2014 a mini project brief the\n    model carries itself (toolchain, conventions, key paths, gotchas). No `project`\n    stores it under the \"default\" project. Use sonder(..., project=\"<name>\") to\n    scope which facts apply to a call.\n\n    Optional ``valid_from``/``valid_until`` (ISO-8601 with timezone) bound when\n    the fact is true; expired facts are no longer recalled. ``supersedes=<id>``\n    closes that earlier fact's interval as this one is stored (replace a fact).\n    ",
       "name": "sonder_remember_fact",
       "parameters": {
         "properties": {

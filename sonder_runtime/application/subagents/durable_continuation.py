@@ -16,6 +16,7 @@ from threading import Event, Lock, Thread
 from time import monotonic, sleep
 import os
 import platform
+import json
 from typing import Protocol
 from uuid import uuid4
 from ..ports.continuation_mutations import (
@@ -24,6 +25,13 @@ from ..ports.continuation_mutations import (
 )
 
 from ..context import OperationContext
+from ..execution.resume_reality import (
+    RESUME_REALITY_CONTEXT_KEY,
+    RESUME_REALITY_HOST_KEY,
+    ResumeBarrier,
+    bound as bound_resume_barrier,
+)
+from ..ports.workspace_reality import WorkspaceRealityPort, scope_intersects
 from ..ports.subagents import (
     InvalidSubagentRequest, SubagentBudget, SubagentError, SubagentHandle,
     SubagentRequest, SubagentResult, SubagentSnapshot, SubagentStatus,
@@ -115,7 +123,8 @@ class DurableContinuationService:
     """Worker supervision over a repository-backed child-session record."""
 
     def __init__(self, repository: DurableContinuationRepository, *,
-                 checkpoint_provenance: CheckpointProvenanceHook | None = None) -> None:
+                 checkpoint_provenance: CheckpointProvenanceHook | None = None,
+                 workspace_reality: WorkspaceRealityPort | None = None) -> None:
         if checkpoint_provenance is not None and not callable(checkpoint_provenance):
             raise TypeError("checkpoint provenance hook must be callable")
         self._repository = repository
@@ -124,6 +133,7 @@ class DurableContinuationService:
         # before the child compare-and-set.  Without a hook every checkpoint
         # is stored provenance-absent and cannot authorize resume-from-state.
         self._checkpoint_provenance = checkpoint_provenance
+        self._workspace_reality = workspace_reality
         self._controls: dict[str, DurableCancellation] = {}
         self._threads: dict[str, Thread] = {}
         self._lock = Lock()
@@ -416,7 +426,8 @@ class DurableContinuationService:
             validate_child_budget(budget, parent.request.budget)
 
     def _start(self, child_id: str, context: OperationContext, runner: Runner, *,
-               resuming: bool = False, expected_revision: int | None = None) -> SubagentHandle:
+               resuming: bool = False, expected_revision: int | None = None,
+               resume_barrier: ResumeBarrier | None = None) -> SubagentHandle:
         self._require_storage_settled(child_id)
         record = self._require(child_id)
         if expected_revision is not None and record.revision != expected_revision:
@@ -460,7 +471,7 @@ class DurableContinuationService:
         )
         with self._lock:
             self._controls[child_id] = control
-            thread = owned_runtime_thread(target=self._run, args=(child_id, context, runner, control, started_at), daemon=True)
+            thread = owned_runtime_thread(target=self._run, args=(child_id, context, runner, control, started_at, resume_barrier), daemon=True)
             self._threads[child_id] = thread
         with self._lock:
             self._contexts[child_id] = context
@@ -499,9 +510,9 @@ class DurableContinuationService:
             getattr(context, "cancellation", None), "cancelled", False
         )
 
-    def _run(self, child_id, context, runner, control, started_at):
+    def _run(self, child_id, context, runner, control, started_at, barrier=None):
         try:
-            self._run_body(child_id, context, runner, control, started_at)
+            self._run_body(child_id, context, runner, control, started_at, barrier)
         except ContinuationStorageFailure as error:
             self._storage_failures[child_id] = error
             control._event.set()
@@ -510,7 +521,8 @@ class DurableContinuationService:
                 self._contexts.pop(child_id, None)
 
     def _run_body(self, child_id: str, context: OperationContext, runner: Runner,
-                  control: DurableCancellation, started_at: float) -> None:
+                  control: DurableCancellation, started_at: float,
+                  barrier: ResumeBarrier | None = None) -> None:
         record = self._require(child_id)
         checkpoint = record.checkpoint
         expected = checkpoint.sequence if checkpoint else -1
@@ -537,8 +549,15 @@ class DurableContinuationService:
             nonlocal expected, state
             if child_id in self._storage_failures:
                 raise self._storage_failures[child_id]
+            checkpoint_state = dict(next_state)
+            checkpoint_state.pop(RESUME_REALITY_CONTEXT_KEY, None)
+            checkpoint_state = self._stamp_workspace_state(checkpoint_state, context)
+            if barrier is not None and barrier.blocked:
+                host = dict(checkpoint_state.get(RESUME_REALITY_HOST_KEY, {}))
+                host["pending_delta"] = dict(barrier.delta or {})
+                checkpoint_state[RESUME_REALITY_HOST_KEY] = host
             candidate = self._stamp_checkpoint(
-                ContinuableCheckpoint(child_id, expected + 1, next_state, cursor)
+                ContinuableCheckpoint(child_id, expected + 1, checkpoint_state, cursor)
             )
             try:
                 saved = self._write("save_checkpoint", candidate, expected_sequence=expected)
@@ -558,7 +577,11 @@ class DurableContinuationService:
                 raise TimeoutError("operation deadline expired")
             if control.cancelled or context.cancellation.cancelled:
                 raise _Cancelled(control.reason)
-            output = runner(state, save, control)
+            if barrier is not None:
+                if barrier.delta is not None:
+                    state[RESUME_REALITY_CONTEXT_KEY] = barrier.delta
+            with bound_resume_barrier(barrier):
+                output = runner(state, save, control)
             if child_id in self._storage_failures:
                 raise self._storage_failures[child_id]
             if control.cancelled or context.cancellation.cancelled:
@@ -635,6 +658,92 @@ class DurableContinuationService:
             raise CheckpointProvenanceError("checkpoint provenance hook returned a foreign record")
         return stamped
 
+    def _stamp_workspace_state(self, state: Mapping[str, object], context: OperationContext) -> dict[str, object]:
+        """Capture host workspace identity before provenance hashes the state."""
+        stamped = dict(state)
+        stamped.pop(RESUME_REALITY_HOST_KEY, None)
+        if self._workspace_reality is None:
+            return stamped
+        roots: dict[str, object] = {}
+        deadline = min(monotonic() + 10.0, context.deadline_monotonic or float("inf"))
+        for root in getattr(context, "workspace_roots", ()):
+            try:
+                snapshot = self._workspace_reality.capture(str(root), deadline_monotonic=deadline)
+            except Exception as exc:  # noqa: BLE001 - revalidation must degrade, never block resume
+                snapshot = {"status": "unavailable", "reason": type(exc).__name__}
+            if snapshot is not None:
+                roots[str(root)] = snapshot
+        if roots:
+            stamped[RESUME_REALITY_HOST_KEY] = {"roots": roots}
+        else:
+            stamped.pop(RESUME_REALITY_HOST_KEY, None)
+        return stamped
+
+    def _resume_reality(self, record: DurableChildSession, context: OperationContext) -> dict[str, object] | None:
+        if self._workspace_reality is None:
+            return None
+        checkpoint = record.checkpoint
+        host = dict(checkpoint.state).get(RESUME_REALITY_HOST_KEY, {}) if checkpoint else {}
+        roots = host.get("roots", {}) if isinstance(host, Mapping) else {}
+        if not isinstance(roots, Mapping):
+            roots = {}
+        pending = host.get("pending_delta") if isinstance(host, Mapping) else None
+        metadata = self._metadata(record.request)
+        owned_raw = metadata.get("owned_paths") or metadata.get("owned_files") or ""
+        try:
+            parsed = json.loads(owned_raw) if owned_raw else ()
+            owned_paths = tuple(str(item) for item in parsed) if isinstance(parsed, list) else tuple(item for item in owned_raw.split("|") if item)
+        except (TypeError, ValueError):  # noqa: B902 - malformed metadata is conservatively bounded
+            owned_paths = tuple(item for item in owned_raw.split("|") if item)
+        deltas: list[Mapping[str, object]] = []
+        deadline = min(monotonic() + 10.0, context.deadline_monotonic or float("inf"))
+        for root in getattr(context, "workspace_roots", ()):
+            snapshot = roots.get(str(root))
+            if snapshot is None:
+                # ``None`` from capture denotes a non-Git workspace.  Probe it
+                # on resume so legacy Git checkpoints remain fail-closed while
+                # non-Git workers retain their historical behavior.
+                try:
+                    current = self._workspace_reality.capture(str(root), deadline_monotonic=deadline)
+                except Exception as exc:  # noqa: BLE001 - bounded fail-closed delta
+                    deltas.append({"status": "delta_unavailable", "requires_reinspection": True, "requires_replan": True, "reason": type(exc).__name__, "files": []})
+                    continue
+                if current is None:
+                    continue
+                deltas.append({"status": "unknown", "requires_reinspection": True, "requires_replan": True, "files": []})
+                continue
+            try:
+                delta = self._workspace_reality.revalidate(str(root), snapshot, owned_paths,
+                                                             deadline_monotonic=deadline)
+            except Exception as exc:  # noqa: BLE001 - adapter failures degrade to reinspection
+                delta = {"status": "delta_unavailable", "requires_reinspection": True, "requires_replan": True, "reason": type(exc).__name__, "files": []}
+            else:
+                if delta is not None and delta.get("status") not in {"unchanged", "same"} and (
+                    bool(delta.get("history_rewritten"))
+                    or scope_intersects(owned_paths, delta.get("files", ()), str(root))
+                ):
+                    delta = dict(delta)
+                    delta["requires_replan"] = True
+            if delta:
+                deltas.append({"workspace_root": str(root), **delta})
+        if not deltas:
+            return dict(pending) if isinstance(pending, Mapping) else None
+        result = {
+            "status": "changed" if any(d.get("status") == "changed" for d in deltas) else deltas[0].get("status", "unknown"),
+            "requires_reinspection": any(bool(d.get("requires_reinspection")) for d in deltas),
+            "requires_replan": any(bool(d.get("requires_replan")) for d in deltas),
+            "history_rewritten": any(bool(d.get("history_rewritten")) for d in deltas),
+            "files": [item for d in deltas for item in d.get("files", ())][:400],
+            "commits": [item for d in deltas for item in d.get("commits", ())][:25],
+            "reason": next((d.get("reason") for d in deltas if d.get("reason")), ""),
+            "workspaces": [{key: value for key, value in d.items() if key != "snapshot"}
+                           for d in deltas[:16]],
+        }
+        if isinstance(pending, Mapping):
+            result["requires_reinspection"] = True
+            result["requires_replan"] = bool(pending.get("requires_replan")) or result["requires_replan"]
+        return result
+
     def resume(self, child_id: str, context: OperationContext, runner: Runner, *,
                expected_revision: int | None = None) -> SubagentHandle:
         """Claim a recoverable child and start ``runner`` from its checkpoint.
@@ -644,10 +753,13 @@ class DurableContinuationService:
         between validation and the claim.
         """
         record = self._require(child_id)
+        if expected_revision is not None and record.revision != expected_revision:
+            raise InvalidSubagentRequest("child session changed before resume reality validation")
         parent = self._repository.get(record.request.parent_id)
         self._admit(record.request, record.lineage, parent)
+        delta = self._resume_reality(record, context)
         return self._start(child_id, context, runner, resuming=True,
-                           expected_revision=expected_revision)
+                           expected_revision=record.revision, resume_barrier=ResumeBarrier(delta))
 
     def record(self, child_id: str) -> DurableChildSession | None:
         """Return the durable child record, or ``None`` when it does not exist."""

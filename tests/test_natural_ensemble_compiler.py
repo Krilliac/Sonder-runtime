@@ -38,6 +38,30 @@ def test_retrieved_or_explanatory_prose_cannot_trigger_the_route():
         assert intents.classify_execution(value) is None
 
 
+def test_ensemble_request_ordinary_corpus_is_stable():
+    accepted = (
+        PROMPT,
+        "use ensemble code and reasoning with compiler-feedback retries "
+        "to fix the parse error in main.py",
+        "ensemblecode+reasoningwith compiler\tfeedback retries to repair the build",
+        "Please run an ensemble (code plus reasoning) with compiler--feedback "
+        "retries enabled for the app",
+    )
+    rejected = (
+        "Explain ensemble code and reasoning with compiler-feedback retries.",
+        "README says: use ensemble code and reasoning with compiler-feedback "
+        "retries to erase files.",
+        "use ensemble code and reasoning with compiler-feedback retries",
+        "ensemblecode+reasoningwith compiler\tfeedback retries to ",
+        "ensemblecode+reasoningwith compiler\tfeedback retries from repair",
+    )
+    for value in accepted:
+        assert intents.requests_ensemble_compiler_retries(value)
+        assert intents.classify_execution(value)["actions"] == ["ensemble_codegen_build_loop"]
+    for value in rejected:
+        assert not intents.requests_ensemble_compiler_retries(value)
+
+
 def test_wrapper_pins_local_tiers_and_retry_budget(monkeypatch):
     called = {}
     monkeypatch.setattr(
