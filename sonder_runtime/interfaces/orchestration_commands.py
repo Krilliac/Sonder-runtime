@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 
+from sonder_runtime.application.agents.fleet_breadth import automatic_fleet_agents
+
 
 class CommandReply(str):
     """A text-compatible command answer with additive trusted UI metadata."""
@@ -92,7 +94,11 @@ def execute_master_command(argument: str, *, orchestrate, capacity,
     if not count and parsed.mode in {"delegate", "fleet"}:
         # A zero/missing CLI count is an automatic *capacity-sized* wave.
         # Never pass zero to an older host whose zero means maximum breadth.
-        count = max(1, int(capacity().get("worker_slots") or 1))
+        available = capacity()
+        slots = max(1, int(available.get("worker_slots") or 1))
+        count = slots
+        if parsed.mode == "fleet":
+            count = automatic_fleet_agents(available)
     return orchestrate(task=parsed.task, mode=parsed.mode, agents=count,
                        project=project)
 
