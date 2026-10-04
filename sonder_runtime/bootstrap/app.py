@@ -1398,13 +1398,15 @@ def build_application(
             def authorize_lane_grant(lane, context):
                 from ..adapters.filesystem.file_ops import allowed_roots
                 from ..application.context import LOCAL_OWNER
+                from ..application.agents.delegation import is_creation_workspace
                 if lane_test_catalog is not None:
                     lane_test_catalog.require_current()
                 if context.principal_id != LOCAL_OWNER:
                     raise PermissionError("account lanes require a configured live account authorizer")
                 root = Path(lane['workspace_root']).resolve()
-                if not any(root == current.resolve() or current.resolve() in root.parents
-                           for current in allowed_roots()):
+                if not (any(root == current.resolve() or current.resolve() in root.parents
+                            for current in allowed_roots()) or is_creation_workspace(
+                                lane, context, effective_config.state.home or Path(state_path("creations")).parent)):
                     raise PermissionError("configured workspace grant was removed")
             from ..adapters import prompt_store
             from .strategy import (

@@ -4,6 +4,7 @@ import '../account_session.dart';
 import '../api.dart';
 import '../models.dart';
 import '../settings.dart';
+import 'turn_progress.dart';
 
 /// Everything the chat workspace needs from a server, behind one seam.
 ///
@@ -87,7 +88,10 @@ sealed class TurnEvent {
   const TurnEvent();
 }
 
-/// The server reported what it is doing (`routing`, `reading files`, …).
+/// What the turn is doing now (`routing`, `thinking`, a tool name,
+/// `model call 2`, `writing`). Sent when the phase changes, and again when
+/// the server records new activity under the same phase, so a listener can
+/// tell progress from silence.
 class TurnPhase extends TurnEvent {
   final String phase;
   final int? tokensIn;
@@ -151,8 +155,18 @@ class ApprovalOutcome {
 ///    final reply); a server that answers with plain JSON still yields one
 ///    [TurnDone].
 ///  * Work runs and approvals use lane A's [WorkRunsApi] / [ApprovalsApi].
+///  * Live progress: the stream's own milestones (headers, first text) and
+///    the activity in each status reading the controller already polls
+///    during a turn become [TurnPhase]s ([TurnProgress]).
 class SonderApiChatBackend implements ChatBackend {
   final SonderApiPort api;
+
+  /// Turns still streaming; status readings report progress to them.
+  final List<_ApiTurn> _open = <_ApiTurn>[];
+
+  /// Activity spans running at the last status reading with no turn open:
+  /// they belong to other work, never to the next turn.
+  Set<String> _runningBefore = const <String>{};
 
   SonderApiChatBackend.withApi(this.api);
 
@@ -177,7 +191,13 @@ class SonderApiChatBackend implements ChatBackend {
   String get serverUrl => api.baseUrl;
 
   @override
-  ChatTurn startTurn(TurnRequest request) => _ApiTurn(api, request);
+  ChatTurn startTurn(TurnRequest request) {
+    late final _ApiTurn turn;
+    turn = _ApiTurn(api, request,
+        runningBefore: _runningBefore, onClosed: () => _open.remove(turn));
+    _open.add(turn);
+    return turn;
+  }
 
   @override
   Future<void> recordFeedback(String command, TurnRequest context) =>
@@ -190,7 +210,20 @@ class SonderApiChatBackend implements ChatBackend {
       );
 
   @override
-  Future<SystemInfo> systemInfo() => api.systemInfo();
+  Future<SystemInfo> systemInfo() async {
+    final info = await api.systemInfo();
+    final activity = info.activity;
+    if (_open.isEmpty) {
+      _runningBefore = {
+        for (final span in activity?.active ?? const <ActivityResponse>[])
+          span.id,
+      };
+    }
+    for (final turn in List<_ApiTurn>.of(_open)) {
+      turn.observe(activity);
+    }
+    return info;
+  }
 
   @override
   Future<List<String>> listModels() => api.listModels();
@@ -318,9 +351,25 @@ SonderException normalizeModeError(SonderException e) {
 class _ApiTurn implements ChatTurn {
   final CancelToken _cancel = CancelToken();
   final _controller = StreamController<TurnEvent>();
+  final TurnProgress _progress;
+  final void Function()? _onClosed;
 
-  _ApiTurn(SonderApiPort api, TurnRequest request) {
+  _ApiTurn(SonderApiPort api, TurnRequest request,
+      {Set<String> runningBefore = const <String>{}, void Function()? onClosed})
+      : _progress =
+            TurnProgress(model: request.model, preexisting: runningBefore),
+        _onClosed = onClosed {
     unawaited(_run(api, request));
+  }
+
+  void _phase() {
+    if (_controller.isClosed || _cancel.isCancelled) return;
+    _controller.add(TurnPhase(_progress.phase));
+  }
+
+  /// A status reading arrived while this turn streams.
+  void observe(ActivityStatus? activity) {
+    if (_progress.observe(activity)) _phase();
   }
 
   Future<void> _run(SonderApiPort api, TurnRequest r) async {
@@ -337,17 +386,26 @@ class _ApiTurn implements ChatTurn {
       )) {
         if (_cancel.isCancelled) break;
         switch (event) {
+          case ChatStreamOpened():
+            // Headers arrive early for a model turn the server committed
+            // to; routed work and slash commands send them with the answer.
+            if (_progress.opened()) _phase();
+          case ChatStreamKeepAlive():
+            // Proves the link is alive, not that the turn progressed.
+            break;
           case ChatStreamDelta(:final text):
-            if (text.isNotEmpty) _controller.add(TurnDelta(text));
+            if (text.isNotEmpty) {
+              if (_progress.wrote()) _phase();
+              _controller.add(TurnDelta(text));
+            }
           case ChatStreamDone(:final reply):
             _controller.add(TurnDone(reply));
-          case ChatStreamOpened() || ChatStreamKeepAlive():
-            break;
         }
       }
     } catch (e, st) {
       if (!_cancel.isCancelled) _controller.addError(e, st);
     } finally {
+      _onClosed?.call();
       if (!_controller.isClosed) await _controller.close();
     }
   }

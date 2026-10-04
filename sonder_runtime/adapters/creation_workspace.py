@@ -1,16 +1,22 @@
-"""Run-scoped workspaces for writing agents.
+"""Run-scoped workspaces for work started without a project.
 
-Writing agents with no explicitly selected project must never inherit the
-runtime server's current directory.  Their artifacts live below the state
-home in a directory dedicated to the run.  This adapter owns the small amount
-of path validation needed at that boundary and has no server-module import.
-
-The console's default session folder uses the same rules under a configured
-workspace root instead (see :func:`plan_session_workspace` for why).
+Work with no explicitly selected project must never inherit the runtime
+server's current directory.  It gets a folder of its own under the app-owned
+default workspace root: ``%USERPROFILE%\\Sonder\\workspaces`` on Windows,
+``~/Sonder/workspaces`` elsewhere, or ``[state].default_workspace_root``.  Like
+Codex's and Claude's managed workspaces the root is per user, visible, and
+outside Sonder's state home, so the console and the app put creations in one
+place.  Managed console work grants that root by design
+(``bootstrap/repl_managed.py``), so it must pass every check below.  When it
+cannot be used (no user home, or a service account whose home is the state
+home), project-less writing runs fall back to ``<state-home>/creations``.
+This adapter owns the path validation at that boundary and has no
+server-module import.
 """
 from __future__ import annotations
 
 import datetime
+import logging
 import os
 import secrets
 import unicodedata
@@ -21,6 +27,8 @@ from pathlib import Path
 from sonder_runtime.platform import paths
 
 
+_LOG = logging.getLogger(__name__)
+_ROOT_LABEL = "default workspace root"
 _DEFAULT_PROJECTS = frozenset({"", "default"})
 _SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 # A session folder name keeps a few words of the request that opened it.
@@ -106,12 +114,15 @@ def _creation_target(
     state_home: str | Path | None,
     source_root: str | Path | None,
     home_label: str = "state home",
+    folder: str = "creations",
 ) -> tuple[Path, Path, Path]:
-    """Check ``<home>/creations/<run-id>`` and return its parts, creating nothing.
+    """Check ``<home>/<folder>/<run-id>`` and return its parts, creating nothing.
 
-    Returns ``(resolved home, creations, target)``.  Callers that must ask
-    permission first (the console's default folder) run this before the gate,
-    and :func:`_establish` runs it again before it creates anything.
+    Returns ``(resolved home, folder, target)``.  The default workspace root
+    uses its parent as *home* and its own name as *folder*, so the root gets
+    the link check a creations folder gets.  Callers that must ask permission
+    first (the console's default folder) run this before the gate, and
+    :func:`_establish` runs it again before it creates anything.
     """
     identifier = _validate_run_id(run_id)
     home = Path(state_home).expanduser() if state_home is not None else paths.default_home()
@@ -123,7 +134,7 @@ def _creation_target(
     if _under_source_checkout(home_resolved, source):
         raise CreationWorkspaceError("%s cannot be inside a Sonder source checkout" % home_label)
 
-    creations = home_resolved / "creations"
+    creations = home_resolved / folder
     target = creations / identifier
     try:
         # Check before creating anything: ``mkdir(exist_ok=True)`` would
@@ -153,10 +164,12 @@ def _establish(
     state_home: str | Path | None,
     source_root: str | Path | None,
     home_label: str = "state home",
+    folder: str = "creations",
 ) -> Path:
-    """Create ``<home>/creations/<run-id>`` and re-check where it landed."""
+    """Create ``<home>/<folder>/<run-id>`` and re-check where it landed."""
     home_resolved, creations, target = _creation_target(
         run_id, state_home=state_home, source_root=source_root, home_label=home_label,
+        folder=folder,
     )
     try:
         home_resolved.mkdir(parents=True, exist_ok=True)
@@ -175,24 +188,137 @@ def _establish(
     return resolved_target
 
 
+def default_workspace_root(
+    configured: str | Path | None = "",
+    *,
+    source_root: str | Path | None = None,
+    inventory=None,
+) -> Path:
+    """Resolve and check the app-owned default workspace root, creating nothing.
+
+    *configured* is ``[state].default_workspace_root``; empty means
+    :func:`paths.default_workspace_root` (``SONDER_DEFAULT_WORKSPACE_ROOT``,
+    else ``%USERPROFILE%\\Sonder\\workspaces`` or ``~/Sonder/workspaces``).
+    Managed console work grants this root without it being listed in
+    ``[state].workspace_roots``, so it must be an absolute folder that is not a
+    link, not inside a Sonder source checkout, and clear of all private
+    control state: the state home, its stores, and the running checkout.
+    *inventory* is the caller's control-plane snapshot (the admission passes
+    its own, which includes constructor-owned paths).  Raises
+    ``CreationWorkspaceError`` naming the check that failed.
+    """
+    text = str(configured or "").strip()
+    try:
+        raw = Path(text).expanduser() if text else paths.default_workspace_root()
+    except RuntimeError:
+        raw = None
+    if raw is None:
+        raise CreationWorkspaceError(
+            "no user home is known to hold it; set [state].default_workspace_root"
+        )
+    if not raw.is_absolute() or not raw.name:
+        raise CreationWorkspaceError("%s must be an absolute folder path: %s" % (_ROOT_LABEL, raw))
+    is_junction = getattr(os.path, "isjunction", lambda value: False)
+    try:
+        if raw.is_symlink() or is_junction(str(raw)):
+            raise CreationWorkspaceError("%s is a link: %s" % (_ROOT_LABEL, raw))
+        resolved = raw.resolve(strict=False)
+    except CreationWorkspaceError:
+        raise
+    except OSError as exc:
+        raise CreationWorkspaceError("%s cannot be resolved: %s" % (_ROOT_LABEL, raw)) from exc
+    if _under_source_checkout(resolved, Path(source_root) if source_root else None):
+        raise CreationWorkspaceError(
+            "%s cannot be inside a Sonder source checkout: %s" % (_ROOT_LABEL, resolved)
+        )
+    try:
+        if inventory is None:
+            from sonder_runtime.adapters.security.control_plane_paths import (
+                live_control_plane_inventory,
+            )
+
+            inventory = live_control_plane_inventory()
+        inventory.require_disjoint((resolved,))
+    except (OSError, PermissionError, TypeError, ValueError) as exc:
+        raise CreationWorkspaceError(
+            "%s overlaps Sonder's private control state (the state home, its stores, "
+            "or the running source checkout): %s" % (_ROOT_LABEL, resolved)
+        ) from exc
+    return resolved
+
+
+def default_workspace_grant(configured: object, inventory, *, source_root=None) -> Path | None:
+    """The default workspace root managed work may grant, or None.
+
+    None when the root does not exist yet or fails any check in
+    :func:`default_workspace_root`; it is then simply not granted, so a bad
+    default root never refuses work in a configured root.
+    """
+    try:
+        root = default_workspace_root(configured, source_root=source_root, inventory=inventory)
+    except CreationWorkspaceError:
+        return None
+    return root if root.is_dir() else None
+
+
+def _plan_default_folder(name_for, *, configured, source_root) -> Path:
+    root = default_workspace_root(configured, source_root=source_root)
+    for _attempt in range(8):
+        _home, _root, target = _creation_target(
+            name_for(), state_home=root.parent, source_root=source_root,
+            home_label=_ROOT_LABEL, folder=root.name,
+        )
+        if not os.path.lexists(target):
+            return target
+    raise CreationWorkspaceError("no unused folder name in %s" % root)
+
+
+def _create_default_folder(target: Path, *, configured, source_root) -> Path:
+    root = default_workspace_root(configured, source_root=source_root)
+    if Path(target).parent != root:
+        raise CreationWorkspaceError("planned folder is not in the %s" % _ROOT_LABEL)
+    created = _establish(
+        Path(target).name, state_home=root.parent, source_root=source_root,
+        home_label=_ROOT_LABEL, folder=root.name,
+    )
+    # The root may not have existed when it was checked; check what is there.
+    default_workspace_root(configured, source_root=source_root)
+    return created
+
+
 def resolve_writing_workspace(
     project: object,
     run_id: object,
     *,
     state_home: str | Path | None = None,
     source_root: str | Path | None = None,
+    task: object = "",
 ) -> Path:
     """Resolve a writing agent's project without inheriting the server cwd.
 
     An explicit project selector is returned unchanged as a ``Path``.  A
-    default, empty, or unresolved selector gets a new
-    ``<state-home>/creations/<run-id>`` directory.  The generated path is
-    resolved and checked against the state home after creation so existing
-    symlinks cannot redirect artifacts outside the state home.
+    default, empty, or unresolved selector gets a new folder in the default
+    workspace root, named from *task* like a console session's folder (or
+    after *run_id* when there is no task).  When that root is unusable, or
+    *state_home* is given, it gets ``<state-home>/creations/<run-id>`` as
+    before.  Generated paths are resolved and re-checked after creation so
+    existing links cannot redirect artifacts elsewhere.
     """
     if not _is_default_project(project):
         return Path(str(project)).expanduser()
-    return _establish(run_id, state_home=state_home, source_root=source_root)
+    identifier = _validate_run_id(run_id)
+    if state_home is None:
+        def name_for():
+            return session_workspace_name(task) if str(task or "").strip() else identifier
+
+        try:
+            target = _plan_default_folder(name_for, configured="", source_root=source_root)
+            return _create_default_folder(target, configured="", source_root=source_root)
+        except CreationWorkspaceError as exc:
+            # A service account whose home is the state home (the packaged
+            # Linux unit) has no usable default root; keep working there.
+            _LOG.warning("default workspace root unusable, using the state home: %s", exc)
+    return _establish(identifier, state_home=state_home, source_root=source_root)
 
 
 def session_workspace_name(
@@ -224,59 +350,33 @@ def session_workspace_name(
 
 def plan_session_workspace(
     task: object,
-    roots: tuple[str, ...] | list[str],
     *,
+    configured: str | Path | None = "",
     today: datetime.date | None = None,
     source_root: str | Path | None = None,
 ) -> Path:
-    """Choose ``<root>/creations/<name>`` for a console session, creating nothing.
+    """Choose ``<default root>/<YYYY-MM-DD>-<slug>-<4 hex>``, creating nothing.
 
-    The console runs work through managed REPL work, which grants only
-    ``[state].workspace_roots`` and refuses any root that overlaps private
-    control state.  The state home holds that state, so a folder under
-    ``<state-home>/creations`` is refused there whatever the configuration.
-    The first configured root that exists and passes the creation checks
-    (no link, not inside a Sonder source checkout) holds the folder instead.
-    A name already on disk gets a new random suffix, so a new session never
-    reuses an earlier session's folder.  Raises ``CreationWorkspaceError``
-    naming why no root qualified.
+    The console plans the folder first so the ``/workspace-create`` gate is
+    asked about the exact path before anything exists.  A name already on
+    disk gets a new suffix, so a new session never reuses an earlier
+    session's folder.  Raises ``CreationWorkspaceError`` naming why the
+    default root cannot hold it.
     """
-    reasons = []
-    for raw in roots:
-        text = str(raw or "").strip()
-        if not text:
-            continue
-        root = Path(text).expanduser()
-        if not root.is_absolute() or not root.is_dir():
-            reasons.append("%s: not an existing directory" % text)
-            continue
-        for _attempt in range(8):
-            try:
-                _home, _creations, target = _creation_target(
-                    session_workspace_name(task, today=today),
-                    state_home=root, source_root=source_root, home_label="workspace root",
-                )
-            except CreationWorkspaceError as exc:
-                reasons.append("%s: %s" % (text, exc))
-                break
-            if not os.path.lexists(target):
-                return target
-        else:
-            reasons.append("%s: no unused folder name" % text)
-    if not reasons:
-        raise CreationWorkspaceError(
-            "no workspace root is configured; add one to [state].workspace_roots in sonder.toml"
-        )
-    raise CreationWorkspaceError("no configured workspace root can hold one (%s)" % "; ".join(reasons))
-
-
-def create_session_workspace(target: str | Path, *, source_root: str | Path | None = None) -> Path:
-    """Create a folder chosen by :func:`plan_session_workspace`, checking it again."""
-    planned = Path(target)
-    return _establish(
-        planned.name, state_home=planned.parent.parent, source_root=source_root,
-        home_label="workspace root",
+    return _plan_default_folder(
+        lambda: session_workspace_name(task, today=today),
+        configured=configured, source_root=source_root,
     )
+
+
+def create_session_workspace(
+    target: str | Path,
+    *,
+    configured: str | Path | None = "",
+    source_root: str | Path | None = None,
+) -> Path:
+    """Create a folder chosen by :func:`plan_session_workspace`, checking it again."""
+    return _create_default_folder(Path(target), configured=configured, source_root=source_root)
 
 
 def writing_project(
@@ -285,6 +385,7 @@ def writing_project(
     *,
     state_home: str | Path | None = None,
     source_root: str | Path | None = None,
+    task: object = "",
 ) -> str:
     """Return the project value to persist for a writing run.
 
@@ -300,19 +401,20 @@ def writing_project(
             run_id,
             state_home=state_home,
             source_root=source_root,
+            task=task,
         )
     )
 
 
-def prepare_writing_project(project: object) -> tuple[str, str]:
+def prepare_writing_project(project: object, task: object = "") -> tuple[str, str]:
     """Bind one default workspace before a standalone agent opens its lanes."""
     try:
-        return writing_project(project, "agent-" + uuid.uuid4().hex[:12]), ""
+        return writing_project(project, "agent-" + uuid.uuid4().hex[:12], task=task), ""
     except (OSError, ValueError) as exc:
         return "", "workspace request failed: %s" % exc
 
 
-def prepare_loop_project(project: object, *, writing: bool) -> tuple[object, str]:
+def prepare_loop_project(project: object, *, writing: bool, task: object = "") -> tuple[object, str]:
     """Inside the agent loop, upgrade only a *named* project that names no directory.
 
     The entrypoints (``agent``, the workbench, autopilot start) already map an
@@ -326,12 +428,13 @@ def prepare_loop_project(project: object, *, writing: bool) -> tuple[object, str
     upgraded so it can never fall back to the server's working directory.
     """
     if writing and str(project or "").strip():
-        return prepare_writing_project(project)
+        return prepare_writing_project(project, task)
     return project, ""
 
 
 __all__ = [
     "CreationWorkspaceError", "resolve_writing_workspace", "writing_project",
     "prepare_writing_project", "prepare_loop_project", "session_workspace_name",
+    "default_workspace_root", "default_workspace_grant",
     "plan_session_workspace", "create_session_workspace",
 ]

@@ -500,6 +500,9 @@ _UNREGISTERED_BRANCH_WORK = {
     # The scoped console facade gates the immutable prepared command itself.
     # Declare its work here even though static discovery cannot follow it.
     "/lanes": "agent_lane",
+    "/delegate": "agent_lane",
+    "/master": "master_orchestrate",
+    "/master_orchestrate": "master_orchestrate",
     "/recover": "workspace_run",
     # This command formats an injected deployment-status projection only.  It
     # does not acquire ownership, contact a peer, or start a model turn, but it
@@ -1707,11 +1710,17 @@ def catalog() -> tuple[CatalogCommand, ...]:
         # which is the canonical spelling in every branch in both chains
         # ("/todo", "/task", "/tasks" -- not the shortest, "/task").
         canonical = next((n for n in group if n in legacy), group[0])
-        aliases = tuple(n for n in group if n != canonical)
         stem = canonical.lstrip("/")
         tool = next(
             (n.lstrip("/") for n in group if n.lstrip("/") in tools_by_name), "",
         )
+        # Explicit branch-work mappings describe a native command backed by a
+        # separately reachable tool (like /test -> /test_run). Even when the
+        # dispatcher shares a branch, that tool spelling belongs to its own
+        # MCP row. Retain the binding/schema for native key=value invocations.
+        if tool and _UNREGISTERED_BRANCH_WORK.get(canonical) == tool:
+            group = tuple(n for n in group if n == canonical or n != "/" + tool)
+        aliases = tuple(n for n in group if n != canonical)
         row = tools_by_name.get(tool)
         hit = next((legacy[n] for n in group if n in legacy), None)
         category = _CATEGORY_BY_SLASH.get(canonical)
@@ -1742,8 +1751,6 @@ def catalog() -> tuple[CatalogCommand, ...]:
             native=True,
         ))
         claimed.update(group)
-        if tool:
-            claimed.add("/" + tool)
 
     # 2. Every remaining MCP tool, reachable as /<tool_name>.
     for row in tools:

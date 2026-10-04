@@ -1,136 +1,74 @@
 part of '../runtime_screen.dart';
 
+/// The distributed capability surface: what this runtime can place, move
+/// and replicate across PCs, each with the runtime's own reason. Unavailable
+/// reads `– off` (off by design), never red. The inference pool lives on
+/// Models.
 class _OperationalCapabilitiesPanel extends StatelessWidget {
   final OperationalCapabilitiesInfo info;
-  final SonderApi api;
 
   /// False when the Deployment panel already shows takeover and failback, so
   /// the page never lists the same capability twice (plan P2-10).
   final bool showRecoveryRows;
 
   const _OperationalCapabilitiesPanel(
-      {super.key,
-      required this.info,
-      required this.api,
-      this.showRecoveryRows = true});
-
-  String _capabilityValue(OperationalCapabilityInfo capability) {
-    if (capability.available) {
-      return capability.reason.isEmpty
-          ? 'Available'
-          : 'Available — ${capability.reason}';
-    }
-    return capability.reason.isEmpty
-        ? 'Unavailable'
-        : 'Unavailable — ${capability.reason}';
-  }
-
-  String _automaticAvailabilityValue(bool available, String action) {
-    return available
-        ? 'Available'
-        : 'Unavailable — automatic $action is not available.';
-  }
+      {super.key, required this.info, this.showRecoveryRows = true});
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      key: const Key('operational-capabilities-panel-content'),
-      crossAxisAlignment: CrossAxisAlignment.start,
+    CapabilityRow row(String label, OperationalCapabilityInfo capability) =>
+        CapabilityRow(
+            label: label,
+            available: capability.available,
+            reason: capability.reason);
+    return SettingsSection(
+      title: 'Distributed capabilities',
+      description:
+          'What this runtime can place, move and replicate across PCs.',
       children: [
         if (info.localNode.isNotEmpty)
-          _StatusRow(label: 'Compute node', value: info.localNode, ok: true),
-        _StatusRow(
-          label: 'Compute peers',
-          value: '${info.configuredPeerCount}',
-          ok: true,
-        ),
-        _StatusRow(
-          label: 'Managed app work',
-          value: _capabilityValue(info.managedAppWork),
-          ok: info.managedAppWork.available,
-          off: true,
-        ),
-        _StatusRow(
-          label: 'Inference pool',
-          value:
-              '${info.workerSummary}; ${_capabilityValue(info.requestLevelPooling)}',
-          ok: info.requestLevelPooling.available,
-          off: true,
-        ),
-        if (info.poolSchemaVersion == 2)
-          _StatusRow(
-              label: 'Cached capacity',
-              value: info.poolCapacitySummary,
-              ok: true),
-        OllamaPoolDetails(api: api),
-        _StatusRow(
-          label: 'Whole-job placement',
-          value: _capabilityValue(info.wholeJobPlacement),
-          ok: info.wholeJobPlacement.available,
-          off: true,
-        ),
-        _StatusRow(
-          label: 'Model sharding',
-          value: _capabilityValue(info.modelSharding),
-          ok: info.modelSharding.available,
-          off: true,
-        ),
-        _StatusRow(
-          label: 'Memory replication',
-          value: _capabilityValue(info.memoryReplicationTransport),
-          ok: info.memoryReplicationTransport.available,
-          off: true,
-        ),
+          ValueRow(label: 'Compute node', value: info.localNode, mono: true),
+        ValueRow(label: 'Compute peers', value: '${info.configuredPeerCount}'),
+        row('Managed app work', info.managedAppWork),
+        row('Whole-job placement', info.wholeJobPlacement),
+        row('Model sharding', info.modelSharding),
+        row('Memory replication', info.memoryReplicationTransport),
         if (showRecoveryRows) ...[
-          _StatusRow(
+          CapabilityRow(
             label: 'Automatic takeover',
-            value: _automaticAvailabilityValue(
-              info.automaticTakeoverAvailable,
-              'takeover',
-            ),
-            ok: info.automaticTakeoverAvailable,
-            off: true,
+            available: info.automaticTakeoverAvailable,
+            reason: info.automaticTakeoverAvailable
+                ? ''
+                : 'Automatic takeover is not available.',
           ),
-          _StatusRow(
+          CapabilityRow(
             label: 'Automatic failback',
-            value: _automaticAvailabilityValue(
-              info.automaticFailbackAvailable,
-              'failback',
-            ),
-            ok: info.automaticFailbackAvailable,
-            off: true,
+            available: info.automaticFailbackAvailable,
+            reason: info.automaticFailbackAvailable
+                ? ''
+                : 'Automatic failback is not available.',
           ),
         ],
-        _StatusRow(
-          label: 'Artifact transfer',
-          value: _capabilityValue(info.artifactTransferTransport),
-          ok: info.artifactTransferTransport.available,
-          off: true,
-        ),
-        _StatusRow(
-          label: 'Automatic memory migration',
-          value: _capabilityValue(info.automaticMemoryMigration),
-          ok: info.automaticMemoryMigration.available,
-          off: true,
-        ),
-        _StatusRow(
-          label: 'Automatic artifact migration',
-          value: _capabilityValue(info.automaticArtifactMigration),
-          ok: info.automaticArtifactMigration.available,
-          off: true,
-        ),
-        _StatusRow(
-          label: 'Indefinite scale',
-          value: _capabilityValue(info.indefiniteScale),
-          ok: info.indefiniteScale.available,
-          off: true,
-        ),
+        row('Artifact transfer', info.artifactTransferTransport),
+        row('Automatic memory migration', info.automaticMemoryMigration),
+        row('Automatic artifact migration', info.automaticArtifactMigration),
+        row('Indefinite scale', info.indefiniteScale),
       ],
     );
   }
 }
 
-/// Administrative details are fetched only by an explicit operator action.
+StatusKind _workerKind(String state) => switch (state.toLowerCase()) {
+      'ready' || 'healthy' || 'available' => StatusKind.ok,
+      'degraded' || 'stale' || 'busy' => StatusKind.warn,
+      'error' || 'unreachable' || 'failed' || 'unhealthy' => StatusKind.fail,
+      _ => StatusKind.unknown,
+    };
+
+/// Administrative worker details, fetched only by an explicit operator
+/// action: **Inspect worker page** reads one bounded page of the cached
+/// pool, **Refresh worker cache** asks for one configured batch, and **Next
+/// worker page** follows the server's cursor. Nothing here is polled.
 class OllamaPoolDetails extends StatefulWidget {
   final SonderApi api;
   const OllamaPoolDetails({super.key, required this.api});
@@ -187,29 +125,62 @@ class _OllamaPoolDetailsState extends State<OllamaPoolDetails> {
   @override
   Widget build(BuildContext context) {
     final page = _page;
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Wrap(spacing: 8, children: [
-        OutlinedButton(
-            onPressed: _busy ? null : () => _load(),
-            child: const Text('Inspect worker page')),
-        OutlinedButton(
-            onPressed: _busy ? null : () => _load(refresh: true),
-            child: const Text('Refresh worker cache')),
-        if (page != null && !page.complete && page.nextCursor.isNotEmpty)
-          OutlinedButton(
-              onPressed: _busy ? null : () => _load(cursor: page.nextCursor),
-              child: const Text('Next worker page')),
-      ]),
-      if (_busy)
-        const LinearProgressIndicator(semanticsLabel: 'Loading worker page'),
-      if (_error != null) Text(_error!, semanticsLabel: _error),
-      if (page != null) ...[
-        Text(
-            '${page.workers.length} of ${page.workerCount} workers on this page; ${page.omittedWorkerCount} remaining'),
-        for (final worker in page.workers)
-          SelectableText(
-              '${worker.origin}: ${worker.state}; ${worker.modelCount} models; ${worker.errorCategory}\n${worker.modelPreview.join(', ')}'),
+    final hasNext =
+        page != null && !page.complete && page.nextCursor.isNotEmpty;
+    return Column(
+      key: const Key('pool-worker-details'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+              SonderSpace.lg, SonderSpace.md, SonderSpace.lg, SonderSpace.md),
+          child: Wrap(
+            spacing: SonderSpace.sm,
+            runSpacing: SonderSpace.sm,
+            children: [
+              OutlinedButton(
+                  onPressed: _busy ? null : () => _load(),
+                  child: const Text('Inspect worker page')),
+              OutlinedButton(
+                  onPressed: _busy ? null : () => _load(refresh: true),
+                  child: const Text('Refresh worker cache')),
+              if (hasNext)
+                OutlinedButton(
+                    onPressed:
+                        _busy ? null : () => _load(cursor: page.nextCursor),
+                    child: const Text('Next worker page')),
+            ],
+          ),
+        ),
+        if (_busy)
+          const SkeletonRows(rows: 2, semanticLabel: 'Loading worker page'),
+        if (_error != null)
+          RuntimePanelNote(status: StatusKind.fail, text: _error!),
+        if (page != null) ...[
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+                SonderSpace.lg, 0, SonderSpace.lg, SonderSpace.xs),
+            child: Text(
+                '${page.workers.length} of ${page.workerCount} workers on this '
+                'page; ${page.omittedWorkerCount} remaining',
+                style: Theme.of(context).textTheme.bodySmall),
+          ),
+          for (final worker in page.workers)
+            RuntimeRow(
+              dense: true,
+              kind: _workerKind(worker.state),
+              word: worker.state.isEmpty ? null : worker.state,
+              title: RuntimeRowTitle(worker.origin, mono: true, maxLines: 1),
+              subtitle: RuntimeRowDetail([
+                '${worker.modelCount} model${worker.modelCount == 1 ? '' : 's'}',
+                if (worker.errorCategory != 'none') worker.errorCategory,
+                if (worker.modelPreview.isNotEmpty)
+                  worker.modelPreview.join(', '),
+              ].join(' · ')),
+            ),
+          const SizedBox(height: SonderSpace.sm),
+        ],
       ],
-    ]);
+    );
   }
 }

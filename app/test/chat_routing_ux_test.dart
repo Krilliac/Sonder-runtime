@@ -1,3 +1,4 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sonder_runtime/api.dart';
@@ -28,8 +29,14 @@ void main() {
       await pumpChat(tester, backend);
       await tester.pump();
 
-      expect(find.text('sonder · Sonder Inference (qwen3:14b)'),
-          findsOneWidget); // the pill
+      // The composer's picker names what will answer; its accessible name
+      // carries the full binding.
+      final semantics = tester.ensureSemantics();
+      expect(find.text('sonder · qwen3:14b'), findsOneWidget);
+      expect(
+          find.bySemanticsLabel('Model: sonder · Sonder Inference (qwen3:14b)'),
+          findsOneWidget);
+      semantics.dispose();
       await _openPicker(tester);
       expect(
           find.text('general · Sonder Inference (qwen3:14b)'), findsOneWidget);
@@ -98,22 +105,30 @@ void main() {
     });
   });
 
+  // The conversation list lives in the app shell's sidebar.
   group('delete chat', () {
     testWidgets('deleting a chat with messages offers Undo that restores it',
         (tester) async {
       final backend = FakeChatBackend()..autoReply = 'hello back';
-      await pumpChat(tester, backend, size: const Size(1440, 900));
+      await pumpShell(tester, backend, size: const Size(1440, 900));
       await tester.enterText(find.byType(TextField), 'first message');
       await tester.testTextInput.receiveAction(TextInputAction.send);
       await tester.pumpAndSettle();
       expect(find.text('hello back', findRichText: true), findsWidgets);
 
-      await tester.tap(find.byTooltip('New chat').first);
+      await tester.tap(find.byKey(const Key('shell-new-chat')));
       await tester.pumpAndSettle();
-      final deletes = find.byTooltip('Delete chat');
-      expect(deletes, findsNWidgets(2));
-      // The older chat (with messages) is second in the rail.
-      await tester.tap(deletes.last);
+      final rows = find.byType(ThreadRow);
+      expect(rows, findsNWidgets(2));
+      // The older chat (with messages) is second in the list; its Delete
+      // shows under the pointer.
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await mouse.addPointer(location: Offset.zero);
+      addTearDown(mouse.removePointer);
+      await mouse.moveTo(tester.getCenter(rows.last));
+      await tester.pump();
+      await tester.tap(find.descendant(
+          of: rows.last, matching: find.byTooltip('Delete chat')));
       await tester.pumpAndSettle();
       expect(find.byType(ThreadRow), findsOneWidget);
       expect(find.text('Chat deleted.'), findsOneWidget);
@@ -126,12 +141,24 @@ void main() {
     });
 
     testWidgets('deleting an empty chat needs no undo', (tester) async {
-      final backend = FakeChatBackend();
-      await pumpChat(tester, backend, size: const Size(1440, 900));
-      await tester.tap(find.byTooltip('New chat').first);
+      final backend = FakeChatBackend()..autoReply = 'hi';
+      await pumpShell(tester, backend, size: const Size(1440, 900));
+      await tester.enterText(find.byType(TextField), 'first message');
+      await tester.testTextInput.receiveAction(TextInputAction.send);
       await tester.pumpAndSettle();
-      await tester.tap(find.byTooltip('Delete chat').first);
+      await tester.tap(find.byKey(const Key('shell-new-chat')));
+      await tester.pumpAndSettle();
+      // The new, empty chat is first; its Delete shows under the pointer.
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await mouse.addPointer(location: Offset.zero);
+      addTearDown(mouse.removePointer);
+      await mouse.moveTo(tester.getCenter(find.byType(ThreadRow).first));
       await tester.pump();
+      await tester.tap(find.descendant(
+          of: find.byType(ThreadRow).first,
+          matching: find.byTooltip('Delete chat')));
+      await tester.pump();
+      expect(find.byType(ThreadRow), findsOneWidget);
       expect(find.text('Chat deleted.'), findsNothing);
       await unmountChat(tester);
     });

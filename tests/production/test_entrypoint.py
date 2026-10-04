@@ -157,6 +157,22 @@ def test_exported_runtime_environment_carries_auto_workspace(
     assert os.environ["SONDER_AUTO_WORKSPACE"] == exported
 
 
+def test_exported_runtime_environment_carries_the_default_workspace_root(
+    restored_process_environment, tmp_path,
+):
+    """The console, managed work and writing runs read the root through this export."""
+    from sonder_runtime.__main__ import _export_runtime_environment
+    from sonder_runtime.platform.config import SonderConfig, StateConfig
+
+    root = str(tmp_path / "Sonder" / "workspaces")
+    _export_runtime_environment(SonderConfig(state=StateConfig(default_workspace_root=root)))
+    assert os.environ["SONDER_DEFAULT_WORKSPACE_ROOT"] == root
+    # Unset means "the per-user default"; it never clears a value already set
+    # (the loader would have read that value into the config in the first place).
+    _export_runtime_environment(SonderConfig())
+    assert os.environ["SONDER_DEFAULT_WORKSPACE_ROOT"] == root
+
+
 def test_the_environment_snapshot_actually_restores_what_the_export_changed():
     """The guard above must be proven, not assumed.
 

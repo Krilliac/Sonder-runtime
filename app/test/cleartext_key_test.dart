@@ -8,8 +8,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sonder_runtime/api.dart';
 import 'package:sonder_runtime/runtime/runtime_data.dart';
 import 'package:sonder_runtime/settings.dart';
+import 'package:sonder_runtime/settings_screen.dart' show SettingsCategory;
 
-import 'settings_connect_test.dart' show FakeConnection, pumpSettings;
+import 'settings_connect_test.dart'
+    show FakeConnection, pumpSettings, saveSettings, settingsField;
 
 Future<String?> _authSentBy(Future<void> Function() call) async {
   String? auth = 'no request';
@@ -76,14 +78,16 @@ void main() {
       (tester) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
     await pumpSettings(tester,
-        connection: FakeConnection(), serverUrl: 'http://192.168.1.20:11435');
+        connection: FakeConnection(),
+        serverUrl: 'http://192.168.1.20:11435',
+        category: SettingsCategory.connection);
     final allow = find.byKey(const Key('settings-cleartext-key-allow'));
     // No key typed: nothing to warn about.
     expect(allow, findsNothing);
 
-    await tester.enterText(
-        find.widgetWithText(TextField, 'API key (optional)'), 'secret-key');
-    await tester.pump();
+    await tester.enterText(settingsField('api-key'), 'secret-key');
+    // The warning and the choice slide open under the field.
+    await tester.pumpAndSettle();
     expect(find.byKey(const Key('settings-cleartext-key-warning')),
         findsOneWidget);
     expect(find.textContaining('is not sent to 192.168.1.20:11435'),
@@ -97,9 +101,7 @@ void main() {
     // Not applied until saved.
     expect(CleartextKeyPolicy.allows('http://192.168.1.20:11435'), isFalse);
 
-    await tester.ensureVisible(find.text('Save'));
-    await tester.tap(find.text('Save'));
-    await tester.pumpAndSettle();
+    await saveSettings(tester);
     final preferences = await SharedPreferences.getInstance();
     expect(preferences.getStringList('sonder_cleartext_key_hosts'),
         ['192.168.1.20:11435']);

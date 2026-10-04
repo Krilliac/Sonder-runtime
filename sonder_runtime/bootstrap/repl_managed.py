@@ -8,6 +8,7 @@ import uuid
 from dataclasses import dataclass
 from types import SimpleNamespace
 
+from ..adapters.creation_workspace import default_workspace_grant
 from ..adapters.filesystem.file_ops import managed_root_scope
 from ..adapters.host_terminal_projection import TerminalProjectionCodec
 from ..adapters.persistence.terminal_output import SQLiteTerminalOutputStore
@@ -44,6 +45,26 @@ class ReplRecoveryResult:
     output: str = ''
 
 
+def _overlap_refusal(root, inventory, config):
+    """Name the configured root that overlaps private state and where it is set.
+
+    The rule itself is unchanged; the generic refusal just gave an operator
+    nothing to act on when ``[state].workspace_roots`` listed the state home
+    or the running checkout, which refuses every managed console request.
+    """
+    private = next((
+        path for path in inventory.admission_directories
+        if root == path or root in path.parents or path in root.parents
+    ), None)
+    toml = next((str(source) for source in getattr(config, 'sources', ())
+                 if str(source).lower().endswith('.toml')), 'sonder.toml')
+    return (
+        'configured workspace root %s overlaps Sonder\'s private control state%s; remove it '
+        'from [state].workspace_roots in %s (or from SONDER_FILE_ROOTS if it is set there)'
+        % (root, ' at %s' % private if private is not None else '', toml)
+    )
+
+
 def run_managed_repl_work(*, application, session_id, project, get_session,
                           run, permission_engine, additional_paths, ledger=None,
                           recovery_cursor=None, recovery_request=None, verifier_factory=None,
@@ -73,12 +94,37 @@ def run_managed_repl_work(*, application, session_id, project, get_session,
     if selected is None or not selected.is_dir():
         raise PermissionError('select an existing project before managed work')
 
-    def model_roots():
-        configured = tuple(Path(value).resolve()
-                           for value in application.config.state.workspace_roots)
-        if not 1 <= len(configured) <= 256 or any(not root.is_dir() for root in configured):
+    def configured_roots():
+        return tuple(Path(value).resolve()
+                     for value in application.config.state.workspace_roots)
+
+    def snapshot():
+        # Scope adds constructor provenance while shared resolvers remain live.
+        with control_plane_scope(additional_paths()), control_plane_scope(output_paths):
+            return live_control_plane_inventory()
+
+    def granted_roots(current):
+        """Configured roots plus, by design, the app-owned default workspace root.
+
+        The default root (``[state].default_workspace_root``, normally
+        ``~/Sonder/workspaces``) holds the folders the console creates for work
+        started without one, so it is granted without being listed in
+        ``[state].workspace_roots``.  This is the only root granted that way,
+        and only while it exists, is not a link, is outside every Sonder
+        source checkout and is disjoint from *current*'s private control
+        state.  Otherwise it is left out, never failing configured work.
+        """
+        configured = configured_roots()
+        default = default_workspace_grant(
+            getattr(application.config.state, 'default_workspace_root', ''), current)
+        granted = configured + tuple(
+            root for root in (default,) if root is not None and root not in configured)
+        if not 1 <= len(granted) <= 256 or any(not root.is_dir() for root in granted):
             raise PermissionError('complete live model workspace inventory unavailable')
-        return configured
+        return granted
+
+    def model_roots():
+        return granted_roots(snapshot())
 
     def _granted(selected_path, root):
         """True when selected is the root, inside it, or contains it.
@@ -115,8 +161,8 @@ def run_managed_repl_work(*, application, session_id, project, get_session,
             allowed = ", ".join(str(root) for root in configured) or "(none)"
             raise PermissionError(
                 "selected project has no bounded current workspace grant: %s "
-                "(configured workspace_roots: %s). Pick a path under a configured "
-                "root, or add it to [state].workspace_roots in sonder.toml."
+                "(granted workspace roots: %s). Pick a path under one of them, "
+                "or add it to [state].workspace_roots in sonder.toml."
                 % (selected, allowed)
             )
         return result
@@ -125,10 +171,16 @@ def run_managed_repl_work(*, application, session_id, project, get_session,
     output_paths = ControlPlanePaths(owned_directories=(output_root,))
 
     def inventory():
-        # Scope adds constructor provenance while shared resolvers remain live.
-        with control_plane_scope(additional_paths()), control_plane_scope(output_paths):
-            result = live_control_plane_inventory()
-        result.require_disjoint(model_roots())
+        result = snapshot()
+        # Unchanged by the default-root grant: every configured root must stay
+        # clear of private control state, or no managed work is admitted.
+        for root in configured_roots():
+            try:
+                result.require_disjoint((root,))
+            except PermissionError:
+                raise PermissionError(
+                    _overlap_refusal(root, result, application.config)) from None
+        result.require_disjoint(granted_roots(result))
         return result
 
     inventory()  # Must precede output-directory and lane-store initialization.

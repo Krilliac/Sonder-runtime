@@ -49,8 +49,11 @@ void main() {
             onChanged: (_) {},
             onNavigate: (value) => destination = value)));
     await tester.pumpAndSettle();
+    // The default 800 x 600 surface is narrow: the list, then the page.
+    await tester.tap(find.byKey(const Key('category-connection')));
+    await tester.pumpAndSettle();
     await tester.enterText(
-        find.byType(TextField).first, 'http://127.0.0.1:1234');
+        find.byKey(const Key('settings-server-url')), 'http://127.0.0.1:1234');
     await tester.tap(find.byTooltip('Workspace navigation'));
     await tester.pumpAndSettle();
     await tester.tap(

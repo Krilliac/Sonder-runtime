@@ -1,5 +1,8 @@
 part of '../runtime_screen.dart';
 
+/// Context health of the current session: how full the context is, how many
+/// turns stay live, and how much memory backs it, as meters (the console's
+/// ASCII bars said the same thing twice and are gone).
 class _ContextHealthPanel extends StatelessWidget {
   final ContextHealth health;
 
@@ -8,85 +11,64 @@ class _ContextHealthPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final status = health.status.isEmpty ? 'unknown' : health.status;
-    final sessionTitle = health.title.isEmpty ? health.session : health.title;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    final kind = switch (status) {
+      'healthy' => StatusKind.ok,
+      'warm' => StatusKind.warn,
+      'hot' => StatusKind.warn,
+      _ => StatusKind.unknown,
+    };
+    final session = health.title.isEmpty ? health.session : health.title;
+    final ratio = (health.contextPercent / 100).clamp(0.0, 1.0);
+    return SettingsSection(
+      key: const Key('context-health-panel'),
+      title: 'Context',
+      description: [
+        if (session.isNotEmpty) session,
+        if (health.project.isNotEmpty) 'project ${health.project}',
+      ].join(' · '),
+      trailing: StatusPill(kind,
+          word: status == 'hot' ? 'needs you' : kind.runtimeWord, dense: true),
       children: [
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          crossAxisAlignment: WrapCrossAlignment.center,
-          children: [
-            Chip(
-              avatar: Icon(
-                _statusIcon(status),
-                size: 18,
-                color: _statusColor(context, status),
+        RuntimeCardBody(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Meter(
+                value: ratio,
+                label: 'Context',
+                valueLabel: '~${compactCount(health.estimatedTokens)} / '
+                    '${compactCount(health.contextLimit)}',
               ),
-              label: Text('Context $status'),
-            ),
-            Chip(
-              avatar: const Icon(Icons.forum_outlined, size: 18),
-              label: Text('Session: $sessionTitle'),
-            ),
-            Chip(
-              avatar: const Icon(Icons.folder_copy_outlined, size: 18),
-              label: Text('Project: ${health.project}'),
-            ),
-            Chip(
-              avatar: const Icon(Icons.view_week_outlined, size: 18),
-              label: Text(
-                  '${health.contextMode}: native ${health.nativeContextLimit}'),
-            ),
-          ],
-        ),
-        const SizedBox(height: 12),
-        _MeterBar(
-          label: 'Context',
-          percent: health.contextPercent,
-          detail:
-              '~${health.estimatedTokens}/${health.contextLimit} virtual tokens',
-          color: _statusColor(context, status),
-        ),
-        const SizedBox(height: 10),
-        _MeterBar(
-          label: 'Live turns',
-          percent: health.turnPercent,
-          detail:
-              '${health.liveTurns}/${health.maxLiveTurns} kept live, ${health.totalTurns} total',
-        ),
-        const SizedBox(height: 10),
-        _MeterBar(
-          label: 'Memory',
-          percent: health.memoryPercent,
-          detail:
-              '${health.lessons} lessons, ${health.facts} facts, ${health.interactions} interactions',
-        ),
-        const SizedBox(height: 12),
-        _OutputCard(text: health.consoleText()),
-        if (health.updatedTs.isNotEmpty) ...[
-          const SizedBox(height: 8),
-          Text(
-            'Last updated ${health.updatedTs}',
-            style: Theme.of(context).textTheme.bodySmall,
+              const _MeterCaption('Tokens of context this session holds'),
+              const SizedBox(height: SonderSpace.lg),
+              Meter(
+                value: (health.turnPercent / 100).clamp(0.0, 1.0),
+                label: 'Live turns',
+                valueLabel: '${health.liveTurns} / ${health.maxLiveTurns}',
+              ),
+              _MeterCaption('Turns kept in full, of ${health.totalTurns} in '
+                  'total; older turns are summarized'),
+              const SizedBox(height: SonderSpace.lg),
+              Meter(
+                value: (health.memoryPercent / 100).clamp(0.0, 1.0),
+                label: 'Memory',
+                valueLabel: '${health.memoryPercent.round()}%',
+                warnAt: 1.1,
+                dangerAt: 1.1,
+              ),
+              _MeterCaption('${health.lessons} lessons · ${health.facts} '
+                  'facts · ${health.interactions} interactions'),
+            ],
           ),
-        ],
+        ),
+        ValueRow(
+          label: 'Mode',
+          value: '${health.contextMode} · native '
+              '${compactCount(health.nativeContextLimit)}',
+        ),
+        if (health.updatedTs.isNotEmpty)
+          ValueRow(label: 'Last updated', value: health.updatedTs),
       ],
     );
-  }
-
-  IconData _statusIcon(String status) {
-    if (status == 'hot') return Icons.warning_amber_outlined;
-    if (status == 'warm') return Icons.thermostat_outlined;
-    if (status == 'healthy') return Icons.check_circle_outline;
-    return Icons.info_outline;
-  }
-
-  Color _statusColor(BuildContext context, String status) {
-    final cs = Theme.of(context).colorScheme;
-    if (status == 'hot') return cs.error;
-    if (status == 'warm') return Colors.amber.shade800;
-    if (status == 'healthy') return cs.primary;
-    return cs.outline;
   }
 }

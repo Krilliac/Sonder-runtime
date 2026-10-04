@@ -43,12 +43,18 @@ class ChatResponseMetadata {
   /// `cancelled`, `budget_exceeded`, `interrupted`, `failed`, `unknown`).
   final String workStatus;
 
+  /// Deterministic acknowledgement shown before a routed work run continues.
+  final String acknowledgement;
+
   /// A permission-gate refusal carried by this turn, or null.
   final ChatRefusal? refusal;
 
   /// `sonder_receipt.overflow`: the long-context overflow decision for this
   /// turn (switched to the overflow model, or stayed), or null.
   final RouteOverflow? overflow;
+
+  final AgentLaneReceipt? agentLane;
+  final OrchestrationReceipt? orchestration;
 
   const ChatResponseMetadata({
     this.completionId = '',
@@ -66,8 +72,11 @@ class ChatResponseMetadata {
     this.toolCalls = 0,
     this.workRunId = '',
     this.workStatus = '',
+    this.acknowledgement = '',
     this.refusal,
     this.overflow,
+    this.agentLane,
+    this.orchestration,
   });
 
   /// True while the answer is still being produced by a work run.
@@ -90,11 +99,23 @@ class ChatResponseMetadata {
         toolCalls: _metadataCount(json['tool_calls']),
         workRunId: _workRunIdOrEmpty(json['work_run_id']),
         workStatus: _boundedMetadataText(json['work_status'], 32),
+        acknowledgement: _boundedMetadataText(json['acknowledgement'], 2000),
         refusal: json['refusal'] is Map
             ? ChatRefusal.fromJson(
-                Map<String, dynamic>.from(json['refusal'] as Map))
+                Map<String, dynamic>.from(json['refusal'] as Map),
+              )
             : null,
         overflow: RouteOverflow.fromJson(json['overflow']),
+      agentLane: json['agent_lane'] is Map
+            ? AgentLaneReceipt.fromJson(
+                Map<String, dynamic>.from(json['agent_lane'] as Map),
+              )
+            : null,
+        orchestration: json['orchestration'] is Map
+            ? OrchestrationReceipt.fromJson(
+                Map<String, dynamic>.from(json['orchestration'] as Map),
+              )
+            : null,
       );
 
   /// A copy with the work-run fields replaced (after a refresh or cancel).
@@ -115,8 +136,11 @@ class ChatResponseMetadata {
         toolCalls: toolCalls,
         workRunId: workRunId ?? this.workRunId,
         workStatus: workStatus ?? this.workStatus,
+        acknowledgement: acknowledgement,
         refusal: refusal,
         overflow: overflow,
+      agentLane: agentLane,
+        orchestration: orchestration,
       );
 
   bool get isEmpty =>
@@ -135,8 +159,11 @@ class ChatResponseMetadata {
       toolCalls == 0 &&
       workRunId.isEmpty &&
       workStatus.isEmpty &&
+      acknowledgement.isEmpty &&
       refusal == null &&
-      overflow == null;
+      overflow == null &&
+      agentLane == null &&
+      orchestration == null;
 
   Map<String, Object> toJson() => {
         'completion_id': completionId,
@@ -154,8 +181,11 @@ class ChatResponseMetadata {
         'tool_calls': toolCalls,
         if (workRunId.isNotEmpty) 'work_run_id': workRunId,
         if (workStatus.isNotEmpty) 'work_status': workStatus,
+        if (acknowledgement.isNotEmpty) 'acknowledgement': acknowledgement,
         if (refusal != null) 'refusal': refusal!.toJson(),
         if (overflow != null) 'overflow': overflow!.toJson(),
+        if (agentLane != null) 'agent_lane': agentLane!.toJson(),
+        if (orchestration != null) 'orchestration': orchestration!.toJson(),
       };
 
   /// Compact, content-free evidence suitable for a collapsed diagnostics row.
@@ -190,6 +220,80 @@ class ChatResponseMetadata {
     if (overflow != null) lines.add(overflow!.notice);
     return lines.join('\n');
   }
+}
+
+class AgentLaneReceipt {
+  final String laneId;
+  final String folder;
+  final String status;
+  const AgentLaneReceipt({
+    required this.laneId,
+    required this.folder,
+    this.status = '',
+  });
+  factory AgentLaneReceipt.fromJson(Map<String, dynamic> json) =>
+      AgentLaneReceipt(
+        laneId: _boundedMetadataText(json['lane_id'], 128),
+        folder: _boundedMetadataText(json['folder'], 1024),
+        status: _boundedMetadataText(json['status'], 32),
+      );
+  Map<String, Object> toJson() => {
+        'lane_id': laneId,
+        'folder': folder,
+        if (status.isNotEmpty) 'status': status,
+      };
+}
+
+class OrchestrationChoice {
+  final String label;
+  final String command;
+  const OrchestrationChoice({required this.label, required this.command});
+  factory OrchestrationChoice.fromJson(Map<String, dynamic> json) =>
+      OrchestrationChoice(
+        label: _boundedMetadataText(json['label'], 128),
+        // A command is actionable data. Never turn a truncated task into a
+        // different request; omit oversized actions instead.
+        command: json['command'] is String && (json['command'] as String).length <= 32768
+            ? json['command'] as String : '',
+      );
+  Map<String, Object> toJson() => {'label': label, 'command': command};
+}
+
+class OrchestrationReceipt {
+  final String task;
+  final int workerSlots;
+  final int fleetAgents;
+  final int delegateAgents;
+  final List<OrchestrationChoice> choices;
+  const OrchestrationReceipt({
+    this.task = '',
+    this.workerSlots = 0,
+    this.fleetAgents = 0,
+    this.delegateAgents = 0,
+    this.choices = const [],
+  });
+  factory OrchestrationReceipt.fromJson(Map<String, dynamic> json) =>
+      OrchestrationReceipt(
+        task: _boundedMetadataText(json['task'], 1024),
+        workerSlots: _metadataCount(json['worker_slots']),
+        fleetAgents: _metadataCount(json['fleet_agents']),
+        delegateAgents: _metadataCount(json['delegate_agents']),
+        choices: (json['choices'] as List? ?? const [])
+            .whereType<Map>()
+            .map(
+              (e) => OrchestrationChoice.fromJson(Map<String, dynamic>.from(e)),
+            )
+            .where((e) => e.command.isNotEmpty)
+            .take(8)
+            .toList(growable: false),
+      );
+  Map<String, Object> toJson() => {
+        'task': task,
+        'worker_slots': workerSlots,
+        'fleet_agents': fleetAgents,
+        'delegate_agents': delegateAgents,
+        'choices': choices.map((e) => e.toJson()).toList(),
+      };
 }
 
 /// The long-context overflow decision the server made for one turn.

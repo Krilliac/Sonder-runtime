@@ -2,6 +2,32 @@
 
 Three layers of increasing autonomy, all built on a guarded tool loop.
 
+## Delegate from Chat and follow background work
+
+`/delegate <task>` starts a durable, tool-capable agent conversation. The
+selected Chat project is its workspace. Without a selected project, the local
+operator gets an isolated `<state-home>/creations/<lane-id>/` folder, named in
+the acknowledgement. **Open in Agents** opens that lane. Finished lanes remain
+available for inspection and follow-up. Current permission mode still applies:
+for example, manual mode can leave a file write awaiting approval/input.
+Creating a folder does not bypass the tool permission gate or grant access to
+other runtime state. Existing exclusive workspace and lane-budget limits apply.
+
+The Agents tab also lists fleet masters with their children and autopilot runs,
+newest first. Fleet counts include completed, running and queued children and
+the actual worker-slot count; autopilot shows phase, current task and plan counts.
+Details and cancellation use the existing run controls. Background status refreshes
+every ten seconds while the app is active, pauses after a read failure, and offers
+explicit retry. A bounded snapshot says when older rows or children are omitted.
+
+`/master [inline|delegate|fleet] [N] <task>` and `/master_orchestrate` share
+the same argument parser. For these positional chat commands, zero or an omitted
+count selects a capacity-sized wave, never the maximum agent ceiling. With no
+mode, the reply offers inline, delegated and fleet choices; the app sends the
+complete command when a choice is tapped. Existing JSON/key-value tool syntax
+remains available. Explicit slash commands use the runtime control route even
+when Chat has a concrete model selected; ordinary chat retains that model.
+
 ## The agent tool loop (`workbench_agent`)
 
 A Claude-style local loop: the model chooses one JSON tool call at a time,
@@ -70,21 +96,26 @@ Control: `/autopilot status|resume|cancel`, or the master orchestrator
 tools. See [autopilot-interruption](../runbooks/autopilot-interruption.md).
 
 Writing runs without an explicit project (`default`, empty, or an unresolved
-project name) use `<state-home>/creations/<run-id>/`. Autopilot persists this
-folder in its project field, shown by the app and by `working in:` in start,
-status, and report text. Standalone writing agents also allocate a creations
+project name) get a new folder in the app-owned default workspace root, the
+same place the console puts its folders: `%USERPROFILE%\Sonder\workspaces` on
+Windows, `~/Sonder/workspaces` elsewhere, or `[state].default_workspace_root`
+(env `SONDER_DEFAULT_WORKSPACE_ROOT`). The folder is named from the request,
+`<YYYY-MM-DD>-<a few words>-<4 hex>`. When that root is unusable (no user
+home, a link, inside a Sonder source checkout, or overlapping private control
+state, as for the packaged Linux service whose home is the state home), the
+run uses `<state-home>/creations/<run-id>/` instead and logs why. Autopilot
+persists the folder in its project field, shown by the app and by `working in:`
+in start, status, and report text. Standalone writing agents also allocate a
 folder before opening their lanes. Inside the agent loop only a named project
 that resolves to no directory is upgraded; an omitted project stays unbound for
 host-owned callers that keep their own root (the selfmod editor's candidate
 workspace, the web research agent, unsafe lab). Existing project directories keep their
 selected scope; read-only observe runs keep their existing behavior. A default
 state home inside a Sonder Git checkout is refused instead of writing artifacts
-into the Runtime source. Configured workspace grants still apply to delegation.
-
-The console is the exception: its managed work grants only
-`[state].workspace_roots` and refuses roots that overlap the state home, so
-its default folder goes under the first usable workspace root instead (see
-[workspace scope](20-terminal-ui-conventions.md#workspace-scope-for-file-commands)).
+into the Runtime source. Configured workspace grants still apply to delegation
+(lane control outside managed console work still needs a configured root).
+Managed console work grants the default root by design; see
+[workspace scope](20-terminal-ui-conventions.md#workspace-scope-for-file-commands).
 
 When unattended execution verifiers are refused (for example in `acceptEdits`),
 an implementation may pass using successful read-back of every changed file
@@ -116,6 +147,64 @@ they need steering.
 ## Fleet
 
 Parallel worker execution (`fleet.db`, `fleet_store.py`) for fan-out work.
+For `fleet`, `swarm`, and `fanout`, an omitted or nonpositive agent count
+(including `0`) queues `min(max_agents(), max(3, 2 * worker_slots))` agents:
+three at one available slot, eight at four slots, bounded by the configured
+agent ceiling. Explicit positive agent counts retain the existing clamp;
+`worker_cap` and the `use N workers` directive retain their per-run behavior.
+The ordinary `delegate` mode still defaults to three agents.
+
+The master strips one leading routing prefix before creating task digests or
+delegating: optional `/master` or `master`, then `fleet`/`swarm`/`fanout`, then
+an optional bare integer. For example, `fleet 0 make me something cool`
+delegates `make me something cool`; `master swarm 6 compare ideas` requests
+six agents. A positive API `agents` argument takes precedence over the prefix
+count. Words and numbers inside the remaining sentence are unchanged.
+
+Ordinary multi-agent briefs start with the exact authoritative task and then
+include a deterministic `Angle k/N` suggestion (deliverable plus audience,
+constraint, or technique). The task remains authoritative. Single-worker
+briefs and protected `[objective:...]` contracts retain their original bytes
+and do not receive angles. Angles encourage diversity; they do not guarantee
+different model outputs or grant tools.
+
+The start response shows queued agents, worker slots, and the stripped task.
+When agents outnumber slots, the estimated worker time is
+`agents / worker_slots * 30 seconds`, explicitly labelled as a default estimate;
+audit time is extra and later resource pressure can extend it.
+
+Delegated/fleet requests with explicit creation or implementation intent
+(`make me something cool`, `build an app`, `write a script`) use build workers.
+Without a project, the host allocates fresh folders under
+`<state-home>/creations/<master-id>/worker-01/`, `worker-02/`, and so on.
+Each worker uses the existing project-bound agent loop rooted at its own
+folder, with file read/write/edit tools and the bounded execution tools that
+already have project-scope contracts (`workspace_run` and `script_run` on this
+version). Tools without such contracts are not added. Normal permission modes,
+approval gates, inspection-before-mutation, and validation checks still apply;
+plan mode refuses writes. Build fleets refuse unsafe-lab mode. Tool availability
+does not authorize a mutation or execution, or add web/hosted-model access.
+
+The start response names the output workspace. The aggregate lists every worker
+folder, host-observed files, and check results, including missing receipts. Its
+deterministic candidate ranking prefers passing checks, then untested candidates,
+then failed/unverified checks; file count and worker order break ties. Empty
+folders are never recommended. The audit explains the recommendation and risks.
+Existing project-bound behavior is unchanged when `project` is supplied.
+
+Questions, reviews, designs, comparisons, quoted commands, and uncertain intent
+stay advisory. Those greenfield workers return proposals with no filesystem or
+shell tools; the plan points to `/autopilot` for building within a project.
+Inline grounded creative-build routes retain their existing behavior.
+
+Master worker/audit synthesis and multi-model ensemble synthesis preserve
+Ollama output budgets. Bridged `sonder_inference` calls reserve 2,048 additional
+tokens for hidden thinking, capped at 16,384 total (the master's historical
+1,400 becomes 3,448). Provider `done_reason`/`finish_reason` values of `length`
+append `(summary truncated at the output limit)`. The local-only durable fanout
+synthesis keeps its budget and also discloses a length stop. This is a bounded
+budget, not a guarantee that every model will finish its summary.
+
 The default worker width remains hardware-derived (CPU, available RAM, VRAM,
 and Ollama batch width). AI harness/research/data runs can opt into a wider
 single run with `master_orchestrate(..., agents=24, worker_cap=24)` or the clear

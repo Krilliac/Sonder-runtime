@@ -100,15 +100,19 @@ void main() {
     expect(
         find.text('No fallback: requests fail while Sonder Inference is down.'),
         findsOneWidget);
-    // Bindings: default, embedding and one chip per tier.
-    expect(find.byKey(const Key('ecosystem-tier-code')), findsOneWidget);
-    expect(find.text('code · Sonder Inference'), findsOneWidget);
+    // Bindings: default, embedding and one row per tier.
+    final code = find.byKey(const Key('ecosystem-tier-code'));
+    expect(code, findsOneWidget);
+    expect(
+        find.descendant(of: code, matching: find.text('code')), findsOneWidget);
+    expect(find.descendant(of: code, matching: find.text('Sonder Inference')),
+        findsOneWidget);
     // Export on, with its counters.
     final export = find.byKey(const Key('ecosystem-export'));
     expect(
         find.descendant(of: export, matching: find.text('ok')), findsOneWidget);
     expect(
-        find.text('1 subscribers · 1204 emitted · 0 dropped · 512/4096 '
+        find.text('1 subscriber · 1204 emitted · 0 dropped · 512/4096 '
             'retained'),
         findsOneWidget);
     // The full digest is what gets copied.
@@ -334,9 +338,13 @@ void main() {
         reading: _reading(ecosystemReadySynthetic()),
         launches: launches,
         canStartProcesses: false);
+    await tester.ensureVisible(find.text('Get Observatory link'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Get Observatory link'));
     await tester.pumpAndSettle();
     expect(find.text(link), findsOneWidget);
+    await tester.ensureVisible(find.byKey(const Key('ecosystem-copy-link')));
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('ecosystem-copy-link')));
     await tester.pump();
     expect(copied.single, link);

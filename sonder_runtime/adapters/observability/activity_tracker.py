@@ -450,7 +450,7 @@ def response_span(
     Nested spans reuse the outer response so helpers can be composed safely.
     """
     existing = getattr(_LOCAL, "response_id", None)
-    if existing:
+    if existing and _current() is not None:
         yield _current()
         return
     response_id = "r%06d" % next(_IDS)
@@ -495,6 +495,8 @@ def response_span(
                     _ACTIVE.pop(key, None)
     _LOCAL.response_id = response_id
     try:
+        from sonder_runtime.application.ports.work_narration import bind_activity
+        bind_activity(response_id)
         record_event("response_start", summary=_short(prompt, 180))
         yield response
         # A host policy can downgrade a model's apparent success (for example,
@@ -1121,6 +1123,7 @@ def public_snapshot(source=None, *, include_detail=None):
         ) if projected is not None
     ]
     latest = _public_response(source.get("latest"), include_detail=detail)
+    from sonder_runtime.domain.work_narration import progress
     return {
         "active_count": max(0, int(source.get("active_count") or 0)),
         "active": active,
@@ -1128,6 +1131,7 @@ def public_snapshot(source=None, *, include_detail=None):
         "total_tool_calls": max(0, int(source.get("total_tool_calls") or 0)),
         "projected": True,
         "detail_enabled": detail,
+        "progress": progress(activity={"active": active, "latest": latest}),
     }
 
 

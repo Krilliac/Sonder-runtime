@@ -1,275 +1,371 @@
 part of '../runtime_screen.dart';
 
-class _AutopilotPanel extends StatelessWidget {
-  final AutopilotStatus status;
-  final ValueChanged<AutopilotRun> onResume;
-  final ValueChanged<AutopilotRun> onPause;
-  final ValueChanged<AutopilotRun> onCancel;
+/// An autopilot run or task status as a vocabulary kind.
+StatusKind autopilotStatusKind(String value) {
+  if (value == 'completed' || value == 'passed') return StatusKind.ok;
+  if (value == 'failed' || value == 'blocked') return StatusKind.fail;
+  if (value == 'running' || value == 'planning' || value == 'in_progress') {
+    return StatusKind.running;
+  }
+  if (value == 'cancelled' || value == 'superseded') return StatusKind.skipped;
+  if (value == 'paused' || value == 'ready' || value == 'interrupted') {
+    return StatusKind.warn;
+  }
+  return StatusKind.note;
+}
 
-  const _AutopilotPanel({
-    required this.status,
-    required this.onResume,
-    required this.onPause,
-    required this.onCancel,
-  });
+String _humanStatus(String value) =>
+    value.isEmpty ? 'unknown' : value.replaceAll('_', ' ');
+
+/// Start a goal: what to do, how far it may reach, and Plan only / Run goal.
+class _AutopilotComposer extends StatelessWidget {
+  final _RuntimeScreenState s;
+  const _AutopilotComposer(this.s);
 
   @override
   Widget build(BuildContext context) {
-    final run = status.latest;
-    final colors = Theme.of(context).colorScheme;
-    if (run == null) {
-      return const _OutputText(
-        'No autonomous goals yet. Planning creates a restart-persistent run.',
-      );
-    }
-    final passed = run.tasks.where((task) => task.status == 'passed').length;
-    final superseded =
-        run.tasks.where((task) => task.status == 'superseded').length;
-    final complete = passed + superseded;
-    final progress = run.tasks.isEmpty ? 0.0 : complete / run.tasks.length;
-    final color = _runColor(colors, run.status);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    final tokens = SonderTokens.of(context);
+    final text = Theme.of(context).textTheme;
+    final busy = s._busy('autopilot');
+    final action = s._autopilotAction;
+    final outcome = _trackedView(s, 'autopilot');
+    return SettingsSection(
+      title: 'Autopilot',
+      description: 'Give it an outcome. It plans a checklist, works one '
+          'guarded task at a time, and pauses at a budget or a decision.',
       children: [
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: [
-            Chip(
-              avatar: Icon(_runIcon(run.status), size: 18, color: color),
-              label: Text(run.status.replaceAll('_', ' ')),
-            ),
-            Chip(
-              avatar: const Icon(Icons.layers_outlined, size: 18),
-              label: Text('${status.activeRuns} active'),
-            ),
-            Chip(
-              avatar: const Icon(Icons.pause_circle_outline, size: 18),
-              label: Text('${status.resumableRuns} resumable'),
-            ),
-            Chip(
-              avatar: Icon(
-                run.policy == 'observe'
-                    ? Icons.visibility_outlined
-                    : Icons.edit_note_outlined,
-                size: 18,
-              ),
-              label: Text(run.policy),
-            ),
-            Chip(
-              avatar: const Icon(Icons.memory_outlined, size: 18),
-              label: Text(run.tier.isEmpty ? 'local' : 'local ${run.tier}'),
-            ),
-            Chip(
-              avatar: Icon(
-                run.allowWeb
-                    ? Icons.public_outlined
-                    : Icons.public_off_outlined,
-                size: 18,
-              ),
-              label: Text(run.allowWeb ? 'web on' : 'web off'),
-            ),
-            Chip(
-              avatar: Icon(
-                run.adaptive ? Icons.route_outlined : Icons.linear_scale,
-                size: 18,
-              ),
-              label: Text(run.adaptive ? 'adaptive' : 'static plan'),
-            ),
-          ],
-        ),
-        const SizedBox(height: 12),
-        Text(
-          run.objective,
-          style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                fontWeight: FontWeight.w700,
-              ),
-        ),
-        const SizedBox(height: 4),
-        SelectableText(
-          '${run.id} • ${run.phase} • ${run.project.isEmpty ? 'default project' : run.project}',
-          style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: colors.onSurfaceVariant,
-                fontFamily: SonderTheme.mono,
-              ),
-        ),
-        const SizedBox(height: 10),
-        LinearProgressIndicator(
-          value: progress.clamp(0.0, 1.0),
-          minHeight: 7,
-          borderRadius: BorderRadius.circular(99),
-          color: color,
-        ),
-        const SizedBox(height: 6),
-        Text(
-          '$complete/${run.tasks.length} tasks settled • '
-          '${run.cycles} cycles • ${run.failures}/${run.maxFailures} failures • '
-          '${run.checkpoints} checkpoint${run.checkpoints == 1 ? '' : 's'} • '
-          '${run.replans}/${run.maxReplans} replans',
-          style: Theme.of(context).textTheme.bodySmall,
-        ),
-        if (run.summary.isNotEmpty) ...[
-          const SizedBox(height: 10),
-          Text(run.summary),
-        ],
-        if (run.lastError.isNotEmpty) ...[
-          const SizedBox(height: 8),
-          Text(
-            run.lastError,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: colors.error,
-                  fontWeight: FontWeight.w600,
-                ),
-          ),
-        ],
-        const SizedBox(height: 10),
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: [
-            if (run.isResumable)
-              FilledButton.tonalIcon(
-                onPressed: () => onResume(run),
-                icon: const Icon(Icons.play_arrow_outlined),
-                label: const Text('Resume'),
-              ),
-            if (run.isActive)
-              OutlinedButton.icon(
-                onPressed: () => onPause(run),
-                icon: const Icon(Icons.pause_outlined),
-                label: const Text('Pause'),
-              ),
-            if (!run.isTerminal)
-              TextButton.icon(
-                onPressed: () => onCancel(run),
-                icon: const Icon(Icons.close_outlined),
-                label: const Text('Cancel'),
-              ),
-          ],
-        ),
-        if (run.criteria.isNotEmpty) ...[
-          const SizedBox(height: 14),
-          Text('Success gates', style: Theme.of(context).textTheme.labelLarge),
-          const SizedBox(height: 6),
-          ...run.criteria.map(
-            (criterion) => Padding(
-              padding: const EdgeInsets.only(bottom: 4),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Icon(Icons.flag_outlined, size: 16, color: colors.primary),
-                  const SizedBox(width: 7),
-                  Expanded(child: Text(criterion)),
-                ],
-              ),
+        RuntimeCardBody(
+          child: TextField(
+            key: const Key('autopilot-goal'),
+            controller: s._autopilotGoal,
+            minLines: 2,
+            maxLines: 4,
+            onChanged: (_) => s._clearGoalError(),
+            decoration: InputDecoration(
+              labelText: 'Goal',
+              hintText: 'Inspect this project, implement the missing '
+                  'feature, and run its tests',
+              alignLabelWithHint: true,
+              errorText: s._autopilotGoalError,
             ),
           ),
-        ],
-        if (run.tasks.isNotEmpty) ...[
-          const SizedBox(height: 14),
-          Text('Persistent checklist',
-              style: Theme.of(context).textTheme.labelLarge),
-          const SizedBox(height: 7),
-          ...run.tasks.map(
-            (task) => Container(
-              width: double.infinity,
-              margin: const EdgeInsets.only(bottom: 7),
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: colors.surfaceContainerHighest,
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: colors.outlineVariant),
-              ),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Icon(
-                    _taskIcon(task.status),
-                    size: 19,
-                    color: _runColor(colors, task.status),
-                  ),
-                  const SizedBox(width: 9),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          '${task.id} • ${task.kind} • ${task.title}',
-                          style: Theme.of(context).textTheme.labelLarge,
-                        ),
-                        const SizedBox(height: 3),
-                        Text(
-                          task.error.isNotEmpty ? task.error : task.instruction,
-                          maxLines: 3,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.bodySmall,
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    task.status.replaceAll('_', ' '),
-                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                          color: _runColor(colors, task.status),
-                        ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ],
-        if (status.events.isNotEmpty) ...[
-          const SizedBox(height: 8),
-          ExpansionTile(
-            tilePadding: EdgeInsets.zero,
-            childrenPadding: const EdgeInsets.only(bottom: 8),
-            title: const Text('Run events'),
-            subtitle: Text('${status.events.length} persisted checkpoints'),
+        ),
+        SwitchRow(
+          switchKey: const Key('autopilot-observe'),
+          label: 'Observe only',
+          description: s._autopilotObserve
+              ? 'Reads the project; nothing is changed.'
+              : 'Off: works in the workspace and may edit files, with the '
+                  'usual approvals.',
+          value: s._autopilotObserve,
+          onChanged: s._setAutopilotObserve,
+        ),
+        SwitchRow(
+          label: 'Public web',
+          description: 'Tasks may search and read public pages.',
+          value: s._autopilotWeb,
+          onChanged: s._setAutopilotWeb,
+        ),
+        SwitchRow(
+          label: 'Adaptive review',
+          description: 'Re-plans when a task result calls for it.',
+          value: s._autopilotAdaptive,
+          onChanged: s._setAutopilotAdaptive,
+        ),
+        RuntimeCardBody(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              _OutputCard(
-                text: status.events
-                    .map((event) => '${event.kind}: ${event.message}')
-                    .join('\n'),
+              Wrap(
+                spacing: SonderSpace.sm,
+                runSpacing: SonderSpace.sm,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  AsyncActionButton(
+                    buttonKey: const Key('autopilot-run'),
+                    label: 'Run goal',
+                    icon: Icons.rocket_launch_outlined,
+                    busyLabel: 'Starting…',
+                    doneLabel: null,
+                    style: ActionButtonStyle.filled,
+                    busy: busy && action == 'run',
+                    onPressed: busy && action != 'run'
+                        ? null
+                        : () => s._autopilotRequest('run'),
+                    onError: (_, __) {},
+                  ),
+                  AsyncActionButton(
+                    buttonKey: const Key('autopilot-plan'),
+                    label: 'Plan only',
+                    icon: Icons.account_tree_outlined,
+                    busyLabel: 'Planning…',
+                    doneLabel: null,
+                    busy: busy && action == 'plan',
+                    onPressed: busy && action != 'plan'
+                        ? null
+                        : () => s._autopilotRequest('plan'),
+                    onError: (_, __) {},
+                  ),
+                  AsyncActionButton(
+                    label: 'Check status',
+                    busyLabel: 'Checking…',
+                    doneLabel: null,
+                    style: ActionButtonStyle.text,
+                    busy: busy && action == 'status',
+                    onPressed: busy && action != 'status'
+                        ? null
+                        : () => s._autopilotRequest('status'),
+                    onError: (_, __) {},
+                  ),
+                ],
               ),
+              const SizedBox(height: SonderSpace.md),
+              Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Padding(
+                  padding: const EdgeInsets.only(top: SonderSpace.xxs),
+                  child: Icon(Icons.shield_outlined,
+                      size: 16, color: tokens.muted),
+                ),
+                const SizedBox(width: SonderSpace.sm),
+                Expanded(
+                  child: Text(
+                    'Autopilot never gets location consent, cloud tiers, '
+                    'delete, account, permission or fleet controls.',
+                    style: text.bodySmall,
+                  ),
+                ),
+              ]),
+              if (outcome != null) ...[
+                const SizedBox(height: SonderSpace.md),
+                outcome,
+              ],
             ],
           ),
-        ],
-        if (run.finalReport.isNotEmpty) ...[
-          ExpansionTile(
-            tilePadding: EdgeInsets.zero,
-            childrenPadding: const EdgeInsets.only(bottom: 8),
-            title: const Text('End report'),
-            subtitle: const Text('Evidence-backed task ledger'),
-            children: [_OutputCard(text: run.finalReport)],
-          ),
-        ],
+        ),
       ],
     );
   }
+}
 
-  static IconData _runIcon(String value) {
-    if (value == 'completed' || value == 'passed') {
-      return Icons.check_circle_outline;
-    }
-    if (value == 'running' || value == 'planning' || value == 'in_progress') {
-      return Icons.sync;
-    }
-    if (value == 'failed' || value == 'blocked') return Icons.error_outline;
-    if (value == 'cancelled' || value == 'superseded') {
-      return Icons.remove_circle_outline;
-    }
-    return Icons.pause_circle_outline;
-  }
+/// The latest autonomous run: objective, progress, counts and controls,
+/// then its success gates and checklist; events and the end report stay
+/// raw, behind disclosures.
+class _AutopilotRunCard extends StatelessWidget {
+  final _RuntimeScreenState s;
+  final AutopilotStatus status;
 
-  static IconData _taskIcon(String value) => _runIcon(value);
+  const _AutopilotRunCard({required this.s, required this.status});
 
-  static Color _runColor(ColorScheme colors, String value) {
-    if (value == 'completed' || value == 'passed') return colors.primary;
-    if (value == 'failed' || value == 'blocked') return colors.error;
-    if (value == 'running' || value == 'planning' || value == 'in_progress') {
-      return Colors.amber.shade800;
-    }
-    return colors.outline;
+  @override
+  Widget build(BuildContext context) {
+    final run = status.latest!;
+    final tokens = SonderTokens.of(context);
+    final text = Theme.of(context).textTheme;
+    final passed = run.tasks.where((task) => task.status == 'passed').length;
+    final superseded =
+        run.tasks.where((task) => task.status == 'superseded').length;
+    final settled = passed + superseded;
+    final progress = run.tasks.isEmpty ? 0.0 : settled / run.tasks.length;
+    final kind = autopilotStatusKind(run.status);
+    final controlBusy = s._busy('autopilot-control');
+    final outcome = _trackedView(s, 'autopilot-control');
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SettingsSection(
+          key: const Key('autopilot-run-card'),
+          title: run.isActive || run.isResumable ? 'Current run' : 'Latest run',
+          description: [
+            if (status.activeRuns > 0) '${status.activeRuns} active',
+            if (status.resumableRuns > 0) '${status.resumableRuns} resumable',
+            if (status.totalRuns > 0) '${status.totalRuns} in total',
+          ].join(' · '),
+          trailing: StatusPill(kind, word: _humanStatus(run.status)),
+          children: [
+            RuntimeCardBody(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(run.objective,
+                      style: text.titleSmall
+                          ?.copyWith(fontWeight: FontWeight.w600)),
+                  const SizedBox(height: SonderSpace.xs),
+                  SelectableText(
+                    [
+                      run.id,
+                      _humanStatus(run.phase),
+                      run.project.isEmpty ? 'default project' : run.project,
+                      run.policy.isEmpty ? null : run.policy,
+                      run.tier.isEmpty ? 'local' : 'local ${run.tier}',
+                      run.allowWeb ? 'web on' : 'web off',
+                      run.adaptive ? 'adaptive' : 'static plan',
+                    ].whereType<String>().join(' · '),
+                    style: tokens.mono(12, color: tokens.text2),
+                  ),
+                  const SizedBox(height: SonderSpace.lg),
+                  Meter(
+                    value: progress,
+                    label: 'Tasks settled',
+                    valueLabel: '$settled of ${run.tasks.length}',
+                    higherIsBetter: true,
+                    warnAt: 1.1,
+                    dangerAt: 1.1,
+                  ),
+                ],
+              ),
+            ),
+            RuntimeStatStrip([
+              RuntimeStat('Cycles', '${run.cycles}'),
+              RuntimeStat('Failures', '${run.failures} of ${run.maxFailures}'),
+              RuntimeStat('Checkpoints', '${run.checkpoints}'),
+              RuntimeStat('Replans', '${run.replans} of ${run.maxReplans}'),
+            ]),
+            if (run.summary.isNotEmpty || run.lastError.isNotEmpty)
+              RuntimeCardBody(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (run.summary.isNotEmpty)
+                      Text(run.summary, style: text.bodyMedium),
+                    if (run.lastError.isNotEmpty) ...[
+                      if (run.summary.isNotEmpty)
+                        const SizedBox(height: SonderSpace.md),
+                      WorkspaceNotice(
+                        kind: StatusKind.fail,
+                        title: run.lastError,
+                        framed: false,
+                        liveRegion: false,
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            if (!run.isTerminal || outcome != null)
+              RuntimeCardBody(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (!run.isTerminal)
+                      Wrap(
+                        spacing: SonderSpace.sm,
+                        runSpacing: SonderSpace.sm,
+                        children: [
+                          if (run.isResumable)
+                            AsyncActionButton(
+                              label: 'Resume',
+                              icon: Icons.play_arrow_outlined,
+                              busyLabel: 'Resuming…',
+                              doneLabel: null,
+                              style: ActionButtonStyle.filled,
+                              busy: controlBusy,
+                              onPressed: () =>
+                                  s._controlAutopilot('resume', run),
+                              onError: (_, __) {},
+                            ),
+                          if (run.isActive)
+                            AsyncActionButton(
+                              label: 'Pause',
+                              icon: Icons.pause_outlined,
+                              busyLabel: 'Pausing…',
+                              doneLabel: null,
+                              busy: controlBusy,
+                              onPressed: () =>
+                                  s._controlAutopilot('pause', run),
+                              onError: (_, __) {},
+                            ),
+                          AsyncActionButton(
+                            label: 'Cancel run',
+                            busyLabel: 'Cancelling…',
+                            doneLabel: null,
+                            style: ActionButtonStyle.text,
+                            busy: controlBusy,
+                            confirm: () => s._confirmCancelAutopilot(run),
+                            onPressed: () => s._controlAutopilot('cancel', run),
+                            onError: (_, __) {},
+                          ),
+                        ],
+                      ),
+                    if (outcome != null) ...[
+                      if (!run.isTerminal)
+                        const SizedBox(height: SonderSpace.md),
+                      outcome,
+                    ],
+                  ],
+                ),
+              ),
+          ],
+        ),
+        if (run.criteria.isNotEmpty ||
+            run.tasks.isNotEmpty ||
+            status.events.isNotEmpty ||
+            run.finalReport.isNotEmpty)
+          SettingsSection(
+            title: 'Plan',
+            description: run.tasks.isEmpty
+                ? null
+                : '$settled of ${run.tasks.length} tasks settled',
+            children: [
+              if (run.criteria.isNotEmpty)
+                RuntimeCardBody(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Success gates', style: text.labelMedium),
+                      const SizedBox(height: SonderSpace.sm),
+                      for (final criterion in run.criteria)
+                        Padding(
+                          padding:
+                              const EdgeInsets.only(bottom: SonderSpace.xs),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Padding(
+                                padding:
+                                    const EdgeInsets.only(top: SonderSpace.xxs),
+                                child: Icon(Icons.flag_outlined,
+                                    size: 16, color: tokens.text2),
+                              ),
+                              const SizedBox(width: SonderSpace.sm),
+                              Expanded(
+                                  child:
+                                      Text(criterion, style: text.bodyMedium)),
+                            ],
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              for (final task in run.tasks)
+                RuntimeRow(
+                  key: Key('autopilot-task-${task.id}'),
+                  kind: autopilotStatusKind(task.status),
+                  word: _humanStatus(task.status),
+                  title: RuntimeRowTitle(
+                      task.title.isEmpty ? task.id : task.title),
+                  subtitle: RuntimeRowDetail(
+                      [
+                        [task.id, task.kind]
+                            .where((part) => part.isNotEmpty)
+                            .join(' · '),
+                        if (task.error.isNotEmpty)
+                          task.error
+                        else if (task.instruction.isNotEmpty)
+                          task.instruction,
+                      ].join('\n'),
+                      maxLines: 3),
+                ),
+              if (status.events.isNotEmpty)
+                RawDisclosure(
+                  title: 'Run events (${status.events.length})',
+                  text: status.events
+                      .map((event) => '${event.kind}: ${event.message}')
+                      .join('\n'),
+                ),
+              if (run.finalReport.isNotEmpty)
+                RawDisclosure(title: 'End report', text: run.finalReport),
+            ],
+          ),
+      ],
+    );
   }
 }

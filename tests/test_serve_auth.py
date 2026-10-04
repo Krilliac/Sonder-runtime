@@ -1790,6 +1790,9 @@ def test_http_developer_fanout_uses_authorized_internal_path(monkeypatch):
     assert status == 200
     assert calls == [("summarize this", "local")]
     assert json.loads(body)["choices"][0]["message"]["content"].startswith('{"models_answered": 1}')
+    payload = json.loads(body)
+    assert json.loads(payload["choices"][0]["message"]["content"]) == {"models_answered": 1}
+    assert not payload.get("sonder_receipt", {}).get("chat_work")
 
 
 def test_http_explicit_model_suppresses_natural_fanout_routing(monkeypatch):
