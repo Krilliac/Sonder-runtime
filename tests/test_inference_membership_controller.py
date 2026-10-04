@@ -353,7 +353,9 @@ def test_refresh_and_close_timeout_retain_one_blocked_runtime_thread():
     try:
         with pytest.raises(TimeoutError):
             control.refresh(timeout_seconds=.02)
-        assert entered.is_set()
+        # The caller's deadline may expire before the runtime thread starts
+        # on a busy host. Establish the blocked source before testing close.
+        assert entered.wait(2)
         with pytest.raises(RuntimeError, match="already running"):
             control.refresh(timeout_seconds=.02)
         assert not control.close(timeout=.02)

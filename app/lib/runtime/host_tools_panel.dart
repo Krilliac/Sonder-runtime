@@ -1,7 +1,7 @@
 /// Read-only host developer-tool inventory (`GET /v1/tools/inventory`).
 ///
-/// Like the jobs views, the list loads only when its "Details" disclosure
-/// opens. 401/403 and 404 read as off-by-design (`– n/a`); the server's
+/// Like the jobs views, the list loads only when its disclosure opens.
+/// 401/403 and 404 read as off-by-design (`– n/a`); the server's
 /// two-request admission limit (429) reads as a `! warn` note with Retry.
 /// "Rediscover" asks the server to probe the host again
 /// (`POST /v1/tools/inventory/refresh`); it never runs anything the server's
@@ -12,10 +12,14 @@ import 'package:flutter/material.dart';
 
 import '../api.dart';
 import '../theme.dart';
+import '../ui/kit.dart';
 import 'overview.dart';
 import 'runtime_data.dart';
+import 'runtime_rows.dart';
 import 'status_word.dart';
-import 'work_runs_panel.dart';
+
+/// The disclosure title that opens (and first loads) the inventory.
+const hostToolsDisclosureTitle = 'Installed tools';
 
 /// The row status for one discovered tool: the tool is present; the mark
 /// says what its version probe reported.
@@ -191,35 +195,50 @@ class _HostToolsPanelState extends State<HostToolsPanel> {
                 category,
           ];
     return Padding(
-      padding: const EdgeInsets.only(bottom: 6),
+      padding: const EdgeInsets.fromLTRB(
+          SonderSpace.lg, SonderSpace.sm, SonderSpace.sm, SonderSpace.sm),
       child: Wrap(
-        spacing: 12,
-        runSpacing: 4,
+        spacing: SonderSpace.md,
+        runSpacing: SonderSpace.sm,
         crossAxisAlignment: WrapCrossAlignment.center,
         children: [
-          DropdownButton<String?>(
-            key: const Key('host-tools-category'),
-            value: _category,
-            isDense: true,
-            style: tokens.mono(12, color: tokens.text2),
-            onChanged: _busy ? null : _pickCategory,
-            items: [
-              const DropdownMenuItem<String?>(
-                  value: null, child: Text('All categories')),
-              for (final category in present)
-                DropdownMenuItem<String?>(
-                  value: category,
-                  child: Text(inventory == null
-                      ? hostToolCategoryLabel(category)
-                      : '${hostToolCategoryLabel(category)} '
-                          '(${inventory.counts[category] ?? 0})'),
-                ),
-            ],
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: SonderSpace.md),
+            decoration: BoxDecoration(
+              border: Border.all(color: tokens.hairlineStrong),
+              borderRadius: BorderRadius.circular(SonderRadius.row),
+            ),
+            child: DropdownButton<String?>(
+              key: const Key('host-tools-category'),
+              value: _category,
+              isDense: true,
+              underline: const SizedBox.shrink(),
+              borderRadius: BorderRadius.circular(SonderRadius.row),
+              style: Theme.of(context).textTheme.bodyMedium,
+              onChanged: _busy ? null : _pickCategory,
+              items: [
+                const DropdownMenuItem<String?>(
+                    value: null, child: Text('All categories')),
+                for (final category in present)
+                  DropdownMenuItem<String?>(
+                    value: category,
+                    child: Text(inventory == null
+                        ? hostToolCategoryLabel(category)
+                        : '${hostToolCategoryLabel(category)} '
+                            '(${inventory.counts[category] ?? 0})'),
+                  ),
+              ],
+            ),
           ),
           TextButton.icon(
             key: const Key('host-tools-rediscover'),
             onPressed: _busy || _forbidden || _missing ? null : _rediscover,
-            icon: const Icon(Icons.manage_search, size: 18),
+            icon: _rediscovering
+                ? const SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.manage_search, size: 18),
             label: Text(_rediscovering ? 'Rediscovering…' : 'Rediscover'),
           ),
         ],
@@ -231,7 +250,8 @@ class _HostToolsPanelState extends State<HostToolsPanel> {
     final tokens = SonderTokens.of(context);
     final total = inventory.total;
     return Padding(
-      padding: const EdgeInsets.only(bottom: 4),
+      padding: const EdgeInsets.fromLTRB(
+          SonderSpace.lg, SonderSpace.xs, SonderSpace.lg, SonderSpace.xs),
       child: Text(
         [
           if (inventory.os.isNotEmpty) inventory.os,
@@ -247,14 +267,24 @@ class _HostToolsPanelState extends State<HostToolsPanel> {
   Widget _body() {
     final inventory = _inventory;
     final error = _error;
+    final tokens = SonderTokens.of(context);
+    final divider = Divider(
+        height: 1,
+        thickness: 1,
+        indent: SonderSpace.lg,
+        endIndent: SonderSpace.lg,
+        color: tokens.hairline);
     if (error == null && inventory == null) {
-      return const RuntimePanelNote(
-          status: StatusKind.unknown, word: 'checking', text: 'Loading…');
+      return Column(children: [
+        divider,
+        const SkeletonRows(rows: 3, semanticLabel: 'Loading host tools'),
+      ]);
     }
     final showControls = !_forbidden && !_missing;
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        divider,
         if (showControls) _controls(inventory),
         if (error != null) _errorNote(error),
         if (error == null && inventory != null) ...[
@@ -279,6 +309,7 @@ class _HostToolsPanelState extends State<HostToolsPanel> {
                 text: 'The server listed only part of the inventory.'),
           for (final note in inventory.notes)
             RuntimePanelNote(status: StatusKind.note, text: note),
+          const SizedBox(height: SonderSpace.sm),
         ],
       ],
     );
@@ -286,29 +317,31 @@ class _HostToolsPanelState extends State<HostToolsPanel> {
 
   @override
   Widget build(BuildContext context) {
-    return Theme(
-      data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
-      child: ExpansionTile(
-        key: const Key('host-tools-details'),
-        initiallyExpanded: widget.initiallyExpanded,
-        tilePadding: EdgeInsets.zero,
-        childrenPadding: const EdgeInsets.only(bottom: 8),
-        expandedCrossAxisAlignment: CrossAxisAlignment.start,
-        title: Text('Host tools · Details',
-            style: Theme.of(context).textTheme.labelLarge),
-        trailing: _inventory != null || _error != null
-            ? IconButton(
-                tooltip: 'Refresh host tools',
-                onPressed: _busy ? null : _load,
-                icon: const Icon(Icons.refresh, size: 18),
-              )
-            : null,
-        onExpansionChanged: (open) {
-          _expanded = open;
-          if (open && _inventory == null && !_busy) _load();
-        },
-        children: [_body()],
-      ),
+    final loaded = _inventory != null || _error != null;
+    return SettingsSection(
+      title: 'Host developer tools',
+      description:
+          "Compilers, build systems and runtimes found on the server's host.",
+      children: [
+        Disclosure(
+          key: const Key('host-tools-details'),
+          title: hostToolsDisclosureTitle,
+          subtitle: loaded ? null : 'Loads when opened',
+          initiallyOpen: widget.initiallyExpanded,
+          trailing: loaded
+              ? IconButton(
+                  tooltip: 'Refresh host tools',
+                  onPressed: _busy ? null : _load,
+                  icon: const Icon(Icons.refresh, size: 18),
+                )
+              : null,
+          onChanged: (open) {
+            _expanded = open;
+            if (open && _inventory == null && !_busy) _load();
+          },
+          child: _body(),
+        ),
+      ],
     );
   }
 }
@@ -320,23 +353,20 @@ class _CategoryGroup extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final tokens = SonderTokens.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(top: 8),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Semantics(
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+              SonderSpace.lg, SonderSpace.md, SonderSpace.lg, SonderSpace.xs),
+          child: Semantics(
             header: true,
             child: Text('${hostToolCategoryLabel(category)} · ${tools.length}',
-                style: Theme.of(context)
-                    .textTheme
-                    .labelMedium
-                    ?.copyWith(color: tokens.muted)),
+                style: Theme.of(context).textTheme.labelMedium),
           ),
-          for (final tool in tools) _ToolRow(tool: tool),
-        ],
-      ),
+        ),
+        for (final tool in tools) _ToolRow(tool: tool),
+      ],
     );
   }
 }
@@ -347,7 +377,6 @@ class _ToolRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final tokens = SonderTokens.of(context);
     final status = tool.versionStatus;
     final version = status.hasVersion && tool.version.isNotEmpty
         ? '${tool.name} ${tool.version}'
@@ -360,27 +389,13 @@ class _ToolRow extends StatelessWidget {
           : hostToolSourceLabel(tool.source),
       if (others > 0) '+$others other install${others == 1 ? '' : 's'}',
     ].where((part) => part.isNotEmpty).join(' · ');
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 3),
-      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        RuntimeStatusWord(hostToolStatus(tool), width: 116),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(line,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: tokens.mono(12, color: tokens.text2)),
-              if (tool.path.isNotEmpty)
-                Text(tool.path,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: tokens.mono(11, color: tokens.muted)),
-            ],
-          ),
-        ),
-      ]),
+    return RuntimeRow(
+      dense: true,
+      kind: hostToolStatus(tool),
+      title: RuntimeRowTitle(line, mono: true),
+      subtitle: tool.path.isEmpty
+          ? null
+          : RuntimeRowDetail(tool.path, mono: true, maxLines: 1),
     );
   }
 }

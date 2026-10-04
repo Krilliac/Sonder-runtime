@@ -101,6 +101,9 @@ class Settings {
 
   static const defaultModel = 'sonder';
 
+  /// The server a fresh install talks to: the local runtime on loopback.
+  static const defaultServerUrl = 'http://127.0.0.1:11435';
+
   String serverUrl;
   String apiKey;
   AccountSession? accountSession;
@@ -133,7 +136,7 @@ class Settings {
   List<String> cleartextKeyHosts;
 
   Settings({
-    this.serverUrl = 'http://127.0.0.1:11435',
+    this.serverUrl = defaultServerUrl,
     this.apiKey = '',
     this.accountSession,
     this.themeMode = 'dark',
@@ -150,6 +153,46 @@ class Settings {
   });
 
   bool get isConfigured => serverUrl.trim().isNotEmpty;
+
+  /// A copy with the given fields replaced. A null [accountSession] keeps
+  /// the current one; [withoutAccountSession] drops it (sign out, forget).
+  Settings copyWith({
+    String? serverUrl,
+    String? apiKey,
+    AccountSession? accountSession,
+    bool withoutAccountSession = false,
+    String? themeMode,
+    String? model,
+    bool? allowHosted,
+    String? contextSize,
+    bool? keepServerRunning,
+    bool? allowApproximateLocation,
+    String? launcherUrl,
+    String? launcherToken,
+    String? observatoryExecutable,
+    String? observatoryWebUrl,
+    List<String>? cleartextKeyHosts,
+  }) =>
+      Settings(
+        serverUrl: serverUrl ?? this.serverUrl,
+        apiKey: apiKey ?? this.apiKey,
+        accountSession: withoutAccountSession
+            ? null
+            : accountSession ?? this.accountSession,
+        themeMode: themeMode ?? this.themeMode,
+        model: model ?? this.model,
+        allowHosted: allowHosted ?? this.allowHosted,
+        contextSize: contextSize ?? this.contextSize,
+        keepServerRunning: keepServerRunning ?? this.keepServerRunning,
+        allowApproximateLocation:
+            allowApproximateLocation ?? this.allowApproximateLocation,
+        launcherUrl: launcherUrl ?? this.launcherUrl,
+        launcherToken: launcherToken ?? this.launcherToken,
+        observatoryExecutable:
+            observatoryExecutable ?? this.observatoryExecutable,
+        observatoryWebUrl: observatoryWebUrl ?? this.observatoryWebUrl,
+        cleartextKeyHosts: [...cleartextKeyHosts ?? this.cleartextKeyHosts],
+      );
 
   static const themeModes = ['dark', 'light', 'system'];
 
@@ -229,7 +272,7 @@ class Settings {
     return Settings(
       cleartextKeyHosts: cleartextKeyHosts,
       accountSession: account,
-      serverUrl: p.getString(_kServer) ?? 'http://127.0.0.1:11435',
+      serverUrl: p.getString(_kServer) ?? defaultServerUrl,
       apiKey: apiKey,
       themeMode: _themeModeFrom(p),
       model: p.getString(_kModel) ?? defaultModel,
@@ -348,6 +391,56 @@ class Settings {
       credentialsStored: stored || !needed,
       memoryOnly: memoryOnly && needed,
     );
+  }
+
+  /// Persists only the theme. Appearance applies at once and carries no
+  /// credentials, so it never writes (or waits for) staged settings.
+  static Future<void> saveThemeMode(String themeMode) async {
+    final mode = themeModes.contains(themeMode) ? themeMode : 'dark';
+    final p = await SharedPreferences.getInstance();
+    await p.setString(_kThemeMode, mode);
+    // Kept for builds that still read the boolean.
+    await p.setBool(_kDark, mode != 'light');
+  }
+
+  /// Stores a freshly signed-in [session] in the secure store, so a login
+  /// needs no second Save.
+  ///
+  /// The session must belong to [serverUrl], the server the caller has
+  /// saved, and to the server URL actually persisted (the default when none
+  /// is): a stored session always matches the stored server, the invariant
+  /// [save] enforces. Anything else throws [StateError] and stores nothing.
+  /// Like [save], the record goes only to the credential store; the web
+  /// keeps it in memory, and a keyring failure is reported, not hidden.
+  static Future<SettingsSaveResult> storeAccountSession(
+    AccountSession session, {
+    required String serverUrl,
+    CredentialStore? credentialStore,
+  }) async {
+    final p = await SharedPreferences.getInstance();
+    final storedServer = p.getString(_kServer) ?? defaultServerUrl;
+    if (!session.matches(serverUrl) || !session.matches(storedServer)) {
+      throw StateError('The session belongs to a server that is not saved');
+    }
+    final credentials =
+        credentialStore ?? testingCredentialStore ?? _credentials;
+    if (memoryOnlyCredentials) {
+      // Nothing at rest: drop any copy an older build left behind.
+      await p.remove(_kAccount);
+      try {
+        await credentials.delete(_kAccount);
+      } catch (_) {}
+      return const SettingsSaveResult(
+          credentialsStored: false, memoryOnly: true);
+    }
+    try {
+      await credentials.write(_kAccount,
+          jsonEncode({'token': session.token, 'origin': session.origin}));
+    } catch (_) {
+      return const SettingsSaveResult(credentialsStored: false);
+    }
+    await p.remove(_kAccount);
+    return const SettingsSaveResult();
   }
 
   static Future<void> clearAccountSession({CredentialStore? credentialStore}) =>

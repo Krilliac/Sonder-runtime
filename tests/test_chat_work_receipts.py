@@ -2,9 +2,8 @@
 from __future__ import annotations
 
 import json
+import threading
 from types import SimpleNamespace
-
-import pytest
 
 import server
 from sonder_runtime.adapters.persistence.session_repository import (
@@ -36,6 +35,16 @@ def _work(*, session_id, session_ref, context=None, idempotency_key=""):
     )
 
 
+def _wait_for_work(result, context):
+    principal = serve._state_principal(context)
+    for _ in range(200):
+        record = serve._WORK_RUNNER.get(result.work_run_id, principal)
+        if record and record["status"] != "running":
+            return record
+        threading.Event().wait(0.05)
+    raise AssertionError("work run did not finish")
+
+
 def test_work_handoff_uses_verified_previous_chat_event_and_returns_durable_receipt(
     tmp_path, monkeypatch,
 ):
@@ -57,8 +66,10 @@ def test_work_handoff_uses_verified_previous_chat_event_and_returns_durable_rece
     monkeypatch.setattr(server, "route_work_request", routed)
     result = _work(session_id="session-owned", session_ref="session-owned")
 
-    assert result.status == "returned"
-    assert result.text == "bounded lane returned"
+    assert result.status == "running"
+    assert result.acknowledgement
+    assert result.work_run_id in result.text
+    final_receipt = _wait_for_work(result, {"mode": "local-open"})["result_receipt"]
     assert seen[0][0] == "  Build the Flutter app.  "
     assert seen[0][1] == "project-name"
     assert seen[0][2].objective == seen[0][0]
@@ -69,8 +80,8 @@ def test_work_handoff_uses_verified_previous_chat_event_and_returns_durable_rece
     assert admission.event_type == "chat.work.admitted"
     assert finished.event_type == "chat.work.returned"
     assert finished.payload["admission_event_id"] == admission.event_id
-    assert result.public_receipt()["source_event_id"] == prior.event_id
-    assert result.public_receipt()["return_event_id"] == finished.event_id
+    assert final_receipt["source_event_id"] == prior.event_id
+    assert final_receipt["return_event_id"] == finished.event_id
     assert result.public_receipt()["session_ref"] == "session-owned"
     assert "previous private" not in json.dumps([admission.payload, finished.payload])
     assert "Build the Flutter app" not in json.dumps([admission.payload, finished.payload])
@@ -81,8 +92,8 @@ def test_unknown_lane_outcome_and_exception_preserve_uncertainty(tmp_path, monke
     _database, repository = _store(monkeypatch, tmp_path)
     monkeypatch.setattr(server, "route_work_request", lambda *args, **kwargs: None)
     result = _work(session_id="unknown", session_ref="unknown")
-    assert result.status == "unknown"
-    assert result.text == ""
+    assert result.status == "running"
+    _wait_for_work(result, {"mode": "local-open"})
     assert [e.event_type for e in repository.read_complete("unknown")] == [
         "chat.work.admitted", "chat.work.unknown",
     ]
@@ -91,8 +102,9 @@ def test_unknown_lane_outcome_and_exception_preserve_uncertainty(tmp_path, monke
         raise RuntimeError("lane may have started")
 
     monkeypatch.setattr(server, "route_work_request", failed)
-    with pytest.raises(RuntimeError, match="lane may have started"):
-        _work(session_id="failed", session_ref="failed")
+    result = _work(session_id="failed", session_ref="failed")
+    assert result.status == "running"
+    _wait_for_work(result, {"mode": "local-open"})
     assert [e.event_type for e in repository.read_complete("failed")] == [
         "chat.work.admitted", "chat.work.unknown",
     ]
@@ -115,11 +127,14 @@ def test_account_namespace_cannot_select_another_accounts_prior_chat(tmp_path, m
         lambda *args, **kwargs: seen.append(kwargs["_admitted_decision"].handoff) or "returned",
     )
     bob_result = _work(session_id=bob_id, session_ref="shared-name", context=bob)
-    assert bob_result.status == "returned"
+    assert bob_result.status == "running"
+    _wait_for_work(bob_result, bob)
     assert "source_event_id" not in bob_result.public_receipt()
     assert seen[0].durable_context_refs == ()
     alice_result = _work(session_id=alice_id, session_ref="shared-name", context=alice)
-    assert alice_result.public_receipt()["source_event_id"]
+    assert alice_result.status == "running"
+    alice_final = _wait_for_work(alice_result, alice)["result_receipt"]
+    assert alice_final["source_event_id"]
     assert len(seen[1].durable_context_refs) == 1
 
 
@@ -147,6 +162,8 @@ def test_replayed_idempotent_work_does_not_claim_a_second_lane_return(tmp_path, 
             idempotency_key="one-action",
         )
         assert first == cached
+        assert first.status == "running"
+        _wait_for_work(first, context)
         assert calls == ["lane"]
         assert len(repository.read_complete("owned-id")) == 2
         # The same key for another session is a different request: refused,
@@ -163,9 +180,11 @@ def test_replayed_idempotent_work_does_not_claim_a_second_lane_return(tmp_path, 
             session_id="other-owned-id", session_ref="other-client-name", context=context,
             idempotency_key="another-action",
         )
-        assert other_session.status == "returned"
+        assert other_session.status == "running"
         assert other_session.session_ref == "other-client-name"
-        assert other_session.admission_event_id != first.admission_event_id
+        other_final = _wait_for_work(other_session, context)["result_receipt"]
+        first_final = _wait_for_work(first, context)["result_receipt"]
+        assert other_final["admission_event_id"] != first_final["admission_event_id"]
         assert calls == ["lane", "lane"]
         assert len(repository.read_complete("other-owned-id")) == 2
 

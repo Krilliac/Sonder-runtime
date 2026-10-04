@@ -9,7 +9,8 @@ terminal outcome; an exception leaves the intent explicitly uncertain.
 
 The SQLite journal is append-oriented. Repeating an identical intent returns
 its original sequence to the journal caller, while the live tool gateway
-refuses that replay before invoking the tool. Any change to the full admitted
+consumes an exactly proven retained terminal output or refuses the replay
+before invoking the tool. Any change to the full admitted
 identity conflicts. Terminal outcomes require the admitted worker and epoch,
 cannot be replaced, and a receipt arriving after restart recovery has marked an
 intent uncertain is refused as a late receipt. Recovery returns a bounded
@@ -566,6 +567,62 @@ What is not qualified:
   reconciliation is unchanged.
 - No master-spec checkbox changes. LOOP-008, AGENT-006 and SESSION-007 stay
   unverified.
+
+## Settled typed-tool output consumption (2026-10-04)
+
+Supersedes the limit above that the gateway cannot reconstruct a settled
+output and that reading the durable tool audit is not wired.
+
+The production typed gateway now consumes a deterministic child call's
+settled output from `DurableToolAuditRepository.read_receipt`. Current schema,
+permissions, approval, cancellation and deadline checks still run first. The
+gateway then requires the terminal journal intent, exact request digest,
+idempotency key, run, worker and scope; the retained audit record must match
+the original receipt key, output digest, tool, arguments, effects, principal,
+workspace roots, source, auth level, session, project, execution world and
+schema selection. A failed effect returns its recorded failed result, never
+a manufactured success.
+
+Lookup verifies each retained audit chain and is bounded by the repository's
+existing per-file and aggregate retention limits. Ordinary audit appends now
+flush and `fsync` before the journal can commit its terminal outcome. The
+recovered receipt carries the current request id and `evidence.replayed_from`
+names the original receipt. That consumption is audited and published like
+an ordinary result; it creates no new effect intent and never enters the
+tool invoker.
+
+If retention has pruned the original result, or the audit cannot supply its
+exact terminal record, the gateway blocks and halts the runner's sequence.
+The runner cannot swallow the missing-output failure, checkpoint past that
+call, or continue with another mutating call. Unresolved effects keep the
+existing reconciliation fence. Gateways without the durable lookup port
+retain the explicit `SettledEffectReplay` contract.
+
+Qualification:
+
+- `tests/test_settled_tool_output_replay.py` reopens the file-backed journal
+  and audit and consumes both successful and failed results, including
+  results in naturally rotated chains. It checks exact output, failure
+  information, original receipt identity, one invocation and unchanged
+  effect history. Natural retention pruning blocks replay and later calls.
+- The ordinary hard-crash cases in
+  `tests/test_wiring_journal_child_gateway_calls.py` now return the recovered
+  production gateway output to the runner, without catching
+  `SettledEffectReplay`. A killed child after receipt publication resumes
+  without a second append, then performs one new append; a checkpointed
+  ordinal consumes the second call unchanged. An in-flight call with no
+  receipt stays uncertain and does not start another runner.
+
+Issue #515's original target is durable intent/outcome recording, checkpoint
+binding, bounded reconciliation and refusal of duplicate or unresolved work
+at real execution boundaries. It does not require automatic reconciliation
+for an operation whose host cannot prove the outcome. Its original crash-cut
+coverage is described above for the gateway and direct worker families.
+Broader continuation work still has separate limits: the composed
+conversational child calls the model gateway, not arbitrary mutating tools;
+selfmod families declare manual reconciliation; and a PostgreSQL child owner
+killed without clean handover remains blocked pending reviewed cleanup.
+Those limits do not authorize blind replay. No master-spec checkbox changes.
 
 ## Production wiring: startup reconciliation, stamped checkpoints and child resume (2026-09-25)
 

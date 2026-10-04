@@ -34,6 +34,7 @@ from ...domain.model_routing import is_cloud_model_name
 from ..session.capture import CapturedRequest, SessionCaptureService, _snapshot_payload
 from ..session.archive import ArchiveReference, SessionContextArchiveService
 from ..compaction import SessionCompactionError, SessionCompactionService
+from ..compaction.session_service import _json_value
 from ..tools.gateway_contract import ToolGatewayRequest, ToolScope, ToolPermission
 from ..execution.effect_journal import JournalBinding, bound as bound_effect_journal
 from ..ports.tool_registry import ToolSchemaSelection
@@ -902,6 +903,7 @@ class AgentLaneService:
         task,
         workspace_root,
         context,
+        lane_id=None,
         parent_lane_id=None,
         title=None,
         tier="code",
@@ -913,6 +915,12 @@ class AgentLaneService:
         command_id = _text(command_id, "command_id", 160)
         parent_session_id = _text(parent_session_id, "parent_session_id", 160)
         task = _text(task, "task")
+        if lane_id is not None:
+            lane_id = _text(lane_id, "lane_id", 160)
+            if len(lane_id) != 37 or not lane_id.startswith("lane-") or any(
+                c not in "0123456789abcdef" for c in lane_id[5:]
+            ):
+                raise ValueError("lane_id must be a canonical lane identifier")
         if author not in {"parent", "user"}:
             raise ValueError("invalid instruction author")
         tier = _text(tier, "tier", 80)
@@ -953,6 +961,8 @@ class AgentLaneService:
             max_wall_seconds=max_wall_seconds,
             author=author,
         )
+        if lane_id is not None:
+            args["lane_id"] = lane_id
         digest = _digest(args)
         # A resolver may consult a live model catalog. Perform root admission
         # and replay lookup before that I/O, outside the writer transaction.
@@ -1030,7 +1040,7 @@ class AgentLaneService:
                         "workspace overlaps another retained lane; use an isolated worktree or directory"
                     )
             lane = dict(
-                id="lane-" + uuid.uuid4().hex,
+                id=lane_id or "lane-" + uuid.uuid4().hex,
                 session_id="lane-session-" + uuid.uuid4().hex,
                 parent_lane_id=parent_lane_id,
                 parent_session_id=parent_session_id,
@@ -1086,7 +1096,7 @@ class AgentLaneService:
         self._schedule(lane["id"], context)
         return receipt
 
-    def list(self, context, *, parent_session_id=None, cursor=0, limit=50):
+    def list(self, context, *, parent_session_id=None, cursor=0, limit=50, newest_first=False):
         _bounds(cursor, limit)
         self.store.flush()
         with self._transaction(context) as tx:
@@ -1094,8 +1104,9 @@ class AgentLaneService:
                 from .lane_continuation import require_root_admission
 
                 require_root_admission(tx, self.store, parent_session_id, context)
-            rows = tx.lanes(context.principal_id, parent_session_id, cursor, limit + 1)
-            lanes = [self._public(l, tx) for _, l in rows[:limit]]
+            rows = tx.lanes(context.principal_id, parent_session_id, cursor, limit + 1,
+                            newest_first=newest_first)
+            lanes = [{**self._public(l, tx), "created_order": position} for position, l in rows[:limit]]
         return dict(
             lanes=lanes,
             next_cursor=rows[min(limit, len(rows)) - 1][0] if rows else cursor,
@@ -1488,7 +1499,7 @@ class AgentLaneService:
             for modality in summary.modalities:
                 lines.append(
                     "Modality " + modality.event_type + ": "
-                    + json.dumps(dict(modality.payload), ensure_ascii=False, sort_keys=True)
+                    + json.dumps(_json_value(modality.payload), ensure_ascii=False, sort_keys=True)
                 )
             replacements[start] = {
                 "role": "user",
@@ -1735,6 +1746,42 @@ class AgentLaneService:
             None,
         )
         if match is None:
+            # Summary pointers name their source event rather than a separate
+            # context.archive.created id. Recover only a pointer re-derived
+            # from an authentic summary in this already-authorized session.
+            events = tuple(self.sessions.read_complete(lane["session_id"], max_events=10_000))
+            by_sequence = {event.sequence: event for event in events}
+            for event in events:
+                if event.event_type != "compaction.completed":
+                    continue
+                stored_summary = event.payload.get("summary")
+                modalities = stored_summary.get("modalities", ()) if isinstance(stored_summary, Mapping) else ()
+                if not any(
+                    isinstance(item, Mapping) and isinstance(item.get("payload"), Mapping)
+                    and item["payload"].get("reference_event_id") == archive_id
+                    for item in modalities
+                ):
+                    continue
+                source = event.payload.get("source_range")
+                if not isinstance(source, Mapping):
+                    raise SessionCompactionError("persisted compaction source range is malformed")
+                start, end = source.get("start_sequence"), source.get("end_sequence")
+                if (type(start) is not int or type(end) is not int
+                        or start < 1 or end < start or end - start + 1 > 1_000):
+                    raise SessionCompactionError("persisted compaction source range is invalid")
+                source_events = tuple(by_sequence.get(sequence) for sequence in range(start, end + 1))
+                if any(item is None for item in source_events):
+                    raise SessionCompactionError("persisted compaction source range is incomplete")
+                summary = self._compaction.validate_persisted_event(event, source_events)
+                for modality in summary.modalities:
+                    if modality.payload.get("reference_event_id") == archive_id:
+                        return {
+                            "archive_id": archive_id,
+                            "project_id": lane["workspace_root"],
+                            "payload": _json_value(self._compaction.retrieve_reference(
+                                lane["session_id"], modality.payload,
+                            )),
+                        }
             raise ValueError("archive reference is unavailable for this lane")
         payload = match.payload
         reference = ArchiveReference(

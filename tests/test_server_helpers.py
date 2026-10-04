@@ -163,7 +163,10 @@ def test_answer_with_history_augment_opt_out_cannot_be_reenabled_by_tier(monkeyp
     assert captured["augment"] is False
 
 
-def test_answer_with_history_explicit_model_bypasses_control_routing(monkeypatch):
+@pytest.mark.parametrize("tier,cloud", [
+    ("cloud-general", True), ("general", False), ("fixture-model:latest", False),
+])
+def test_answer_with_history_explicit_model_bypasses_control_routing(monkeypatch, tier, cloud):
     """A caller-selected model must not be diverted into a local control route."""
     seen = {}
 
@@ -175,7 +178,7 @@ def test_answer_with_history_explicit_model_bypasses_control_routing(monkeypatch
     monkeypatch.setattr(
         server,
         "_serve_target",
-        lambda tier, _strict: ("cloud-answer:latest", True, False, tier),
+        lambda tier, _strict: ("selected-answer:latest", cloud, False, tier),
     )
     monkeypatch.setattr(server, "_should_learn", lambda *_args: False)
     monkeypatch.setattr(server, "_build_system", lambda *_args, **_kwargs: "system")
@@ -187,13 +190,54 @@ def test_answer_with_history_explicit_model_bypasses_control_routing(monkeypatch
     monkeypatch.setattr(server, "_make_generate", fake_generate)
 
     assert server._answer_with_history_impl(
-        "please inspect the project", [], tier="cloud-general"
+        "please inspect the project", [], tier=tier
     ) == "answer"
     assert seen == {
-        "model": "cloud-answer:latest",
+        "model": "selected-answer:latest",
         "system": "system",
-        "cloud": True,
+        "cloud": cloud,
     }
+
+
+@pytest.mark.parametrize("tier", [None, "sonder", "local"])
+@pytest.mark.parametrize("prompt,cloud,guidance", [
+    ("Hello!", False, False),
+    ("How do I read a file in Python?", False, False),
+    ("Read README.md without tools", False, False),
+    ("How many files are in this folder?", False, True),
+    ("Create a file named primes.py", False, True),
+    ("How many files are in this folder?", True, False),
+])
+def test_answer_with_history_guidance_only_for_unrouted_local_file_turns(
+    monkeypatch, tier, prompt, cloud, guidance,
+):
+    seen = {}
+    monkeypatch.setattr(server, "control_command", lambda *_a, **_kw: None)
+    monkeypatch.setattr(server, "_serve_target", lambda *_a: ("fixture-model", cloud, False, "general"))
+    monkeypatch.setattr(server, "_default_route_plan", lambda _p, rung: server.tier_escalation.single(rung))
+    monkeypatch.setattr(server, "_bridge_provider_for_tier", lambda *_a: None)
+    monkeypatch.setattr(server, "_should_learn", lambda *_a: False)
+    monkeypatch.setattr(server, "_build_system", lambda *_a, **_kw: "system\nexact bytes")
+
+    def generate(_model, system, *_args, **_kwargs):
+        seen["system"] = system
+        return lambda *_a: "answer"
+
+    monkeypatch.setattr(server, "_make_generate", generate)
+    assert server._answer_with_history_impl(prompt, [], tier=tier, context_size="4k") == "answer"
+    if guidance:
+        assert seen["system"].startswith("system\nexact bytes\n\n")
+        assert "workspace_inventory" in seen["system"]
+    else:
+        assert seen["system"] == "system\nexact bytes"
+
+
+def test_answer_with_history_routed_file_turn_skips_guidance_and_generation(monkeypatch):
+    monkeypatch.setattr(server, "control_command", lambda *_a, **_kw: "file tool result")
+    monkeypatch.setattr(server, "_append_activity", lambda result: result)
+    monkeypatch.setattr(server, "_build_system", lambda *_a, **_kw: pytest.fail("already routed"))
+    monkeypatch.setattr(server, "_serve_target", lambda *_a: pytest.fail("already routed"))
+    assert server._answer_with_history_impl("Read README.md", []) == "file tool result"
 
 
 def test_sonder_explicit_model_bypasses_control_routing(monkeypatch):
@@ -2361,9 +2405,12 @@ def test_mcp_runtime_format_never_echoes_injected_paths_or_credentials():
 def test_master_orchestrate_asks_for_execution_mode():
     out = server.master_orchestrate("build a parser", mode="ask", agents=2)
 
-    assert "Choose execution mode" in out
-    assert "inline" in out
-    assert "delegate" in out
+    assert "I can do this inline, with 2 agents" in out
+    assert "which?" in out
+    assert "Call master_orchestrate" not in out
+    assert out.receipt_fields["orchestration"]["choices"][1]["command"] == (
+        "/master_orchestrate delegate 2 build a parser"
+    )
 
 
 def test_master_orchestrate_ask_reports_widened_agent_cap(monkeypatch):
@@ -2371,8 +2418,9 @@ def test_master_orchestrate_ask_reports_widened_agent_cap(monkeypatch):
 
     out = server.master_orchestrate("build a parser", mode="ask", agents=99)
 
-    assert "queue 16 agent(s)" in out
-    assert "safe worker slot(s)" in out
+    assert "fleet of 16 agents" in out
+    assert "worker slots" in out
+    assert out.receipt_fields["orchestration"]["fleet_agents"] == 16
 
 
 def test_master_capacity_and_cancel_tools(monkeypatch):
@@ -2761,9 +2809,10 @@ def test_master_orchestrate_auto_fleet_preserves_explicit_agent_count(monkeypatc
     assert calls[0][1]["metadata"]["mode"] == "fleet"
 
 
-def test_master_orchestrate_fleet_without_agent_count_uses_ceiling(monkeypatch):
+def test_master_orchestrate_fleet_without_agent_count_uses_capacity(monkeypatch):
     calls = []
     monkeypatch.setattr(server.master_orchestrator, "max_agents", lambda: 12)
+    monkeypatch.setattr(server.master_orchestrator, "capacity", lambda: {"worker_slots": 2})
     monkeypatch.setattr(
         server.master_orchestrator,
         "start_delegated",
@@ -2778,8 +2827,8 @@ def test_master_orchestrate_fleet_without_agent_count_uses_ceiling(monkeypatch):
 
     out = server.master_orchestrate("inspect risks", mode="fleet")
 
-    assert "agents=12" in out
-    assert calls[0][1]["agents"] == 12
+    assert "agents=4" in out
+    assert calls[0][1]["agents"] == 4
 
 
 def test_master_orchestrate_fleet_persists_explicit_agent_count(monkeypatch):
@@ -2827,14 +2876,19 @@ def test_master_orchestrate_schema_marks_zero_as_automatic_agent_count():
     assert schema["properties"]["project"]["default"] == ""
 
 
-def test_master_routes_explicit_game_build_to_grounded_forge(monkeypatch):
+def test_master_routes_explicit_delegated_game_build_to_workspace_workers(monkeypatch):
     calls = []
+    workers = []
     monkeypatch.setattr(
-        server,
-        "_master_grounded_build",
-        lambda task, mode, tier, intent, retry_of="": (
-            calls.append((task, mode, tier, intent, retry_of)) or "grounded game"
-        ),
+        server, "_orchestrator_agent_worker",
+        lambda tier, project, **kwargs: workers.append((tier, project, kwargs)) or (lambda p, root: "unused"),
+    )
+    monkeypatch.setattr(
+        server.master_orchestrator, "run_delegated",
+        lambda task, **kwargs: calls.append((task, kwargs)) or {
+            "master_id": "master-game", "agents": ["agent-1"], "worker_slots": 1,
+            "output": "host build receipt",
+        },
     )
 
     out = server.master_orchestrate(
@@ -2842,11 +2896,10 @@ def test_master_routes_explicit_game_build_to_grounded_forge(monkeypatch):
         mode="delegate",
     )
 
-    assert out == "grounded game"
-    assert calls[0][1:3] == ("delegate", "code")
-    assert calls[0][3]["kind"] == "game"
-    assert calls[0][3]["language"] == "cpp"
-    assert calls[0][3]["dimension"] == "2.5d"
+    assert "host build receipt" in out
+    assert calls[0][1]["build_workspace"] is True
+    assert calls[0][0] == "Create a C++ 2.5D isometric RPG game with in-house assets."
+    assert workers == [("code", "", {"build": True})]
 
 
 def test_master_grounded_game_build_creates_verified_output(monkeypatch):

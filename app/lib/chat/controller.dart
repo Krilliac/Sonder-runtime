@@ -152,6 +152,10 @@ class ChatController extends ChangeNotifier {
   int _userId = 0;
   bool get sending => _turn != null;
 
+  /// The thread whose turn is streaming, or null when none is. It need not
+  /// be the current thread: the person may have switched away mid-turn.
+  String? get turnThreadId => _turn == null ? null : _turnThreadId;
+
   bool verboseErrors = false;
 
   /// The tier of the last reply (`code`, `fast`…), for the status line.
@@ -690,6 +694,13 @@ class ChatController extends ChangeNotifier {
 
   int _indexOf(int id) => _entries.indexWhere((e) => e.id == id);
 
+  // Control commands must use the runtime control route even when the
+  // person selected a concrete chat model. Ordinary prose keeps that choice.
+  static bool _isControlCommand(String text) => RegExp(
+        r'^/(?:delegate|master|master_orchestrate)(?:\s|$)',
+        caseSensitive: false,
+      ).hasMatch(text.trim());
+
   void _replace(int id, ChatEntry Function(ChatEntry) update) {
     final i = _indexOf(id);
     if (i >= 0) _entries[i] = update(_entries[i]);
@@ -720,7 +731,8 @@ class ChatController extends ChangeNotifier {
     _add(const ChatMessage(role: Role.assistant, content: '', pending: true));
     _pendingId = _entries.last.id;
     _turnThreadId = _currentThreadId;
-    live.value = LiveTurn(startedAt: DateTime.now(), model: _model);
+    final requestModel = _isControlCommand(trimmed) ? 'sonder' : _model;
+    live.value = LiveTurn(startedAt: DateTime.now(), model: requestModel);
     _liveTimer?.cancel();
     _liveTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       final current = live.value;
@@ -732,7 +744,7 @@ class ChatController extends ChangeNotifier {
 
     final request = TurnRequest(
       history: history,
-      model: _model,
+      model: requestModel,
       contextSize: contextSize,
       sessionId: sessionFor(_currentThreadId),
       project: _project,
@@ -975,13 +987,20 @@ class ChatController extends ChangeNotifier {
     switch (run.status) {
       case 'returned':
       case 'refused':
+        final acknowledgement = old.responseMetadata?.acknowledgement ?? '';
+        final parts = <String>[
+          if (acknowledgement.isNotEmpty) acknowledgement,
+          if (run.finalSummary.isNotEmpty) run.finalSummary,
+          if (run.output.isNotEmpty) run.output,
+        ];
         next = ChatMessage(
           role: Role.assistant,
-          content: run.output.isEmpty ? '(empty response)' : run.output,
+          content: parts.isEmpty ? '(empty response)' : parts.join('\n\n'),
           // The run is settled: keep the receipt, but it no longer marks a
           // running work run (workRunOf reads it first).
-          responseMetadata:
-              old.responseMetadata?.withWork(workStatus: run.status),
+          responseMetadata: old.responseMetadata?.withWork(
+            workStatus: run.status,
+          ),
         );
       default:
         final label = switch (run.status) {
@@ -991,10 +1010,16 @@ class ChatController extends ChangeNotifier {
           'failed' => 'failed',
           _ => 'ended with an unknown outcome',
         };
+        final acknowledgement = old.responseMetadata?.acknowledgement ?? '';
+        final details = <String>[
+          if (acknowledgement.isNotEmpty) acknowledgement,
+          if (run.finalSummary.isNotEmpty) run.finalSummary,
+          if (run.output.isNotEmpty) run.output,
+        ];
         next = ChatMessage(
           role: Role.assistant,
           content: 'Work run ${run.id} $label.'
-              '${run.output.isEmpty ? '' : '\n\n${run.output}'}',
+              '${details.isEmpty ? '' : '\n\n${details.join('\n\n')}'}',
           error: true,
           diagnostic: 'work run: ${run.id}\nstatus: ${run.status}',
         );

@@ -19,6 +19,7 @@ after ``retention_seconds()`` and the table keeps at most ``row_limit()`` rows
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import sqlite3
 import threading
@@ -48,7 +49,8 @@ CREATE TABLE IF NOT EXISTS http_work_runs (
     deadline_ts REAL NOT NULL,
     cancel_requested INTEGER NOT NULL DEFAULT 0,
     output TEXT NOT NULL DEFAULT '',
-    output_truncated INTEGER NOT NULL DEFAULT 0
+    output_truncated INTEGER NOT NULL DEFAULT 0,
+    narration TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS http_work_runs_owner ON http_work_runs(owner_scope, created_ts);
 """ % ", ".join("'%s'" % status for status in STATUSES)
@@ -82,6 +84,8 @@ def _connect() -> sqlite3.Connection:
             try:
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.executescript(_SCHEMA)
+                # Additive migration for databases created before narration.
+                _ensure_narration_column(conn)
                 conn.commit()
             finally:
                 conn.close()
@@ -95,7 +99,19 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+def _ensure_narration_column(conn) -> None:
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(http_work_runs)").fetchall()}
+    if "narration" not in columns:
+        conn.execute("ALTER TABLE http_work_runs ADD COLUMN narration TEXT NOT NULL DEFAULT '{}'")
+
+
 def _public(row) -> dict:
+    try:
+        narration = json.loads(row["narration"] or "{}")
+    except (TypeError, ValueError):
+        narration = {}
+    if not isinstance(narration, dict):
+        narration = {}
     return {
         "id": row["run_id"],
         "status": row["status"],
@@ -105,6 +121,9 @@ def _public(row) -> dict:
         "cancel_requested": bool(row["cancel_requested"]),
         "output": row["output"],
         "output_truncated": bool(row["output_truncated"]),
+        "narration": narration,
+        "acknowledgement": narration.get("acknowledgement", ""),
+        "result_receipt": narration.get("result_receipt", {}),
     }
 
 
@@ -161,6 +180,71 @@ def finish(run_id: str, status: str, output: str = "", *, now: float | None = No
         conn.commit()
     finally:
         conn.close()
+
+
+def _update_narration(run_id: str, mutate) -> None:
+    """Apply a bounded narration update without exposing another store."""
+    conn = _connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT narration FROM http_work_runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        if row is None:
+            conn.rollback()
+            return
+        try:
+            value = json.loads(row[0] or "{}")
+        except (TypeError, ValueError):
+            value = {}
+        value = mutate(value if isinstance(value, dict) else {})
+        if not isinstance(value, dict):
+            raise ValueError("narration mutation must return a mapping")
+        conn.execute(
+            "UPDATE http_work_runs SET narration = ?, updated_ts = ? WHERE run_id = ?",
+            (json.dumps(value, separators=(",", ":"), ensure_ascii=True), time.time(), run_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_narration(run_id: str, *, acknowledgement: str = "", activity_id: str = "", result_receipt=None) -> None:
+    """Persist the owner-visible acknowledgement and optional activity id."""
+    acknowledgement = str(acknowledgement or "")[:2000]
+    activity_id = str(activity_id or "")[:256]
+
+    def mutate(value):
+        if acknowledgement:
+            value["acknowledgement"] = acknowledgement
+        if activity_id:
+            value["activity_id"] = activity_id
+        if isinstance(result_receipt, dict):
+            allowed = {"status", "work_run_id", "requested_mode", "routing_reason", "session_ref",
+                       "admission_event_id", "return_event_id", "source_event_id", "get_url", "cancel_url"}
+            value["result_receipt"] = {key: str(item)[:512] for key, item in result_receipt.items() if key in allowed}
+        return value
+
+    _update_narration(run_id, mutate)
+
+
+def link_run(run_id: str, kind: str, child_id: str) -> None:
+    """Attach at most sixteen opaque child ids to an owner-scoped run."""
+    kind, child_id = str(kind or "")[:80], str(child_id or "")[:256]
+    if not kind or not child_id:
+        return
+
+    def mutate(value):
+        links = value.get("links", [])
+        if not isinstance(links, list):
+            links = []
+        entry = {"kind": kind, "id": child_id}
+        if entry not in links:
+            links.append(entry)
+        value["links"] = links[-16:]
+        return value
+
+    _update_narration(run_id, mutate)
 
 
 def request_cancel(run_id: str, *, owner_scope: str) -> dict | None:
@@ -252,4 +336,5 @@ __all__ = [
     "MAX_OUTPUT_CHARS", "STATUSES", "TERMINAL_STATUSES", "cancel_requested",
     "database_path", "finish", "get", "recent", "reconcile", "request_cancel",
     "reset_for_tests", "retention_seconds", "row_limit", "start",
+    "set_narration", "link_run",
 ]

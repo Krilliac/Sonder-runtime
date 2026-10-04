@@ -69,7 +69,10 @@ ChatResponseMetadata chatMetadataFrom(
     'tool_calls': activity['tool_calls'],
     'work_run_id': work['work_run_id'],
     'work_status': work['status'],
+    'acknowledgement': work['acknowledgement'],
     'overflow': receipt['overflow'],
+    'agent_lane': receipt['agent_lane'],
+    'orchestration': receipt['orchestration'],
     if (refusalJson != null) 'refusal': refusalJson,
   });
 }
@@ -90,8 +93,11 @@ ChatReply chatReplyFrom({
     finishReason: finishReason,
     content: reply,
   );
-  final text =
-      metadata.workRunning ? workRunPlaceholder(metadata.workRunId) : reply;
+  final text = metadata.workRunning
+      ? (metadata.acknowledgement.isNotEmpty
+          ? metadata.acknowledgement
+          : workRunPlaceholder(metadata.workRunId))
+      : reply;
   return ChatReply(
     text: warning.isEmpty ? text : '$warning\n\n$text',
     reasoning: reasoning,

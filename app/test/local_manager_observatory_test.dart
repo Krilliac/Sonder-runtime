@@ -481,9 +481,10 @@ void main() {
         home: SettingsScreen(settings: Settings(), onChanged: saved.add),
       ));
       await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('category-observatory')));
+      await tester.pumpAndSettle();
       final webField = find.byKey(const Key('settings-observatory-web-url'));
-      await tester.scrollUntilVisible(webField, 300,
-          scrollable: find.byType(Scrollable).first);
+      expect(webField, findsOneWidget);
       // Desktop test hosts can start processes: the executable field shows.
       expect(find.byKey(const Key('settings-observatory-executable')),
           findsOneWidget);
@@ -495,7 +496,7 @@ void main() {
       await tester.tap(find.byKey(const Key('settings-save')));
       await tester.pumpAndSettle();
       expect(saved, isEmpty);
-      // The refusal is also a snack bar; let it go before saving again.
+      // The refusal also reads in the unsaved-changes bar, until an edit.
       expect(find.text('A non-loopback Observatory web URL requires HTTPS.'),
           findsNWidgets(2));
       await tester.pump(const Duration(seconds: 5));

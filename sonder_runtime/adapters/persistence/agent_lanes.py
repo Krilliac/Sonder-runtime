@@ -287,14 +287,17 @@ class LaneTransaction:
             raise KeyError("agent lane not found")
         return json.loads(row[0])
 
-    def lanes(self, principal, parent_session=None, cursor=0, limit=100):
-        sql = "SELECT position,data FROM agent_lanes WHERE principal=? AND position>?"
-        args = [principal, cursor]
+    def lanes(self, principal, parent_session=None, cursor=0, limit=100, *, newest_first=False):
+        sql = "SELECT position,data FROM agent_lanes WHERE principal=?"
+        args = [principal]
+        if not newest_first or cursor:
+            sql += " AND position" + ("<?" if newest_first else ">?")
+            args.append(cursor)
         if parent_session is not None:
             sql += " AND parent_session=?"
             args.append(parent_session)
         rows = self.conn.execute(
-            sql + " ORDER BY position LIMIT ?", (*args, limit)
+            sql + " ORDER BY position" + (" DESC" if newest_first else "") + " LIMIT ?", (*args, limit)
         ).fetchall()
         return [(r[0], json.loads(r[1])) for r in rows]
 

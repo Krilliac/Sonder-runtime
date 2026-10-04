@@ -11,7 +11,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 _CHAT_LANE = "chat"
-_EXECUTION_MODES = frozenset({"workbench", "autopilot", "fleet", "decide"})
+_EXECUTION_MODES = frozenset({"inspection", "workbench", "autopilot", "fleet", "decide"})
 _MAX_OBJECTIVE_CHARS = 12_000
 _MAX_PROJECT_CHARS = 512
 _MAX_ITEMS = 8

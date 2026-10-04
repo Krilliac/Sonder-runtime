@@ -171,6 +171,59 @@ Upstream labels are bounded (lowercase slugs, at most 32 distinct values per
 process, then `other`). Watch spend with `openrouter account`, and set a
 spending limit on the key at openrouter.ai.
 
+## Bounded batch completions
+
+Python callers can explicitly submit independent, non-streaming requests:
+
+```python
+from sonder_runtime.adapters.inference.openrouter_gateway import OpenRouterGateway
+from sonder_runtime.application.ports.model_gateway import ModelRequest
+
+gateway = OpenRouterGateway()
+outcomes = gateway.generate_batch(
+    [ModelRequest("Explain this function", "code"),
+     ModelRequest("Suggest a name for this function", "code")],
+    context,  # the caller's existing OperationContext, with cloud_allowed=True
+    max_workers=2,
+)
+for outcome in outcomes:
+    if outcome.response is not None:
+        print(outcome.response.text)
+    else:
+        print(outcome.error.code)
+```
+
+The batch accepts a finite sequence of at most **64** `ModelRequest` values
+and **1–8** workers (default **2**); an empty batch returns an empty tuple.
+Every request must have a nonempty prompt and `stream=False`. Shape, model
+selection, supported options and finite JSON encoding are validated for the
+entire batch before the first send. Invalid batch inputs raise `InvalidInput`
+without dispatch.
+Keep request options and host configuration stable while a batch executes.
+
+Each dispatched item sends one ordinary chat completion with its own messages, model
+selection and privacy preferences. There is no combined prompt or native
+provider batch job, and each send has ordinary per-call cost and rate
+admission. Existing cloud opt-in, API-key and context controls still apply.
+The optional `BatchModelGateway` protocol and `ModelBatchOutcome` result
+type extend the existing model port without requiring other providers to
+implement batching.
+
+Outcomes are returned in **input order**, each containing either its
+`ModelResponse` or a domain error. Failed items do not discard successful
+siblings or retry any request. Cancellation or the shared deadline stops
+admission of pending items and gives each a `Cancelled` or `DeadlineExceeded`
+outcome. Already admitted calls finish through the gateway's existing
+cancellation and timeout checks; executor workers are drained before return.
+Thread context is copied independently for each admitted request so capture
+and request provenance follow the caller. Use each returned response for
+token accounting; `gateway.last_usage` is only the most recently completed
+physical response and is not a per-item batch result. Returned usage is
+sanitized and recorded exactly once even when cancellation, deadline expiry
+or evidence persistence prevents publishing that completed response.
+Host worker ownership/capacity refusal produces content-free domain errors
+without dispatching requests.
+
 ## Errors
 
 | HTTP | Sonder error | What to do |

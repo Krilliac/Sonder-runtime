@@ -374,6 +374,29 @@ def test_auto_workspace_defaults_on_and_follows_toml_env_and_overrides(tmp_path)
     assert "[state].auto_workspace must be a boolean" in excinfo.value.errors
 
 
+def test_default_workspace_root_is_typed_and_must_be_absolute(tmp_path):
+    # Empty means the per-user default (~/Sonder/workspaces), resolved at use.
+    assert load_config(env=_CLEAN_ENV).state.default_workspace_root == ""
+    toml = tmp_path / "sonder.toml"
+    toml.write_text(
+        "[state]\ndefault_workspace_root = '%s'\n" % (tmp_path / "toml"), encoding="utf-8",
+    )
+    assert load_config(toml, env=_CLEAN_ENV).state.default_workspace_root == str(tmp_path / "toml")
+    from_env = load_config(toml, env={"SONDER_DEFAULT_WORKSPACE_ROOT": str(tmp_path / "env")})
+    assert from_env.state.default_workspace_root == str(tmp_path / "env")
+    from_cli = load_config(
+        env=_CLEAN_ENV, overrides={"state.default_workspace_root": str(tmp_path / "cli")},
+    )
+    assert from_cli.state.default_workspace_root == str(tmp_path / "cli")
+    toml.write_text("[state]\ndefault_workspace_root = 'relative/workspaces'\n", encoding="utf-8")
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(toml, env=_CLEAN_ENV)
+    assert any(
+        "[state].default_workspace_root must be an absolute path" in error
+        for error in excinfo.value.errors
+    )
+
+
 def test_historical_state_home_alias_is_supported_and_canonical_home_wins(tmp_path):
     historical = tmp_path / "historical"
     canonical = tmp_path / "canonical"
