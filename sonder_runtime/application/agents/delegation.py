@@ -8,6 +8,7 @@ of truth.
 
 from __future__ import annotations
 
+import os
 import uuid
 from pathlib import Path
 
@@ -23,6 +24,19 @@ def _text(value: object, name: str, maximum: int) -> str:
 
 def _inside(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
+
+
+def _granted_prefixes(workspace_roots) -> tuple[str, ...]:
+    """Each granted root as a case-normalized, separator-terminated prefix.
+
+    Both the lexical and the resolved spelling are kept, so a root reached
+    through a link still admits the paths a caller writes beneath it.
+    """
+    prefixes = set()
+    for granted in workspace_roots or ():
+        for spelling in (os.path.abspath(granted), os.path.realpath(granted)):
+            prefixes.add(os.path.join(os.path.normcase(spelling), ""))
+    return tuple(prefixes)
 
 
 def is_creation_workspace(lane, context, state_home) -> bool:
@@ -99,20 +113,32 @@ class DelegationService:
         if selected and workspace_root is not None:
             raise ValueError("project and workspace_root are mutually exclusive")
         if selected:
-            root = Path(selected).expanduser().resolve()
+            requested = selected
             folder_kind = "project"
         elif workspace_root is not None:
-            root = Path(workspace_root).expanduser().resolve()
+            requested = os.fspath(workspace_root)
             folder_kind = folder_kind or "creation"
         else:
             raise ValueError("workspace_root is required for delegated work")
-        if not root.is_dir():
-            raise ValueError("delegation workspace must be an existing directory")
-        if not context.workspace_roots or not any(
+        # Containment is decided on the normalized text BEFORE the filesystem
+        # is touched. Resolving and probing a caller-named path first made the
+        # two refusals below an existence oracle for any folder on the machine
+        # ("must be an existing directory" vs "outside caller workspace"). The
+        # resolved path is checked again so a link inside the workspace cannot
+        # lead out of it.
+        lexical = os.path.join(
+            os.path.normcase(os.path.abspath(os.path.expanduser(requested))), "",
+        )
+        if not lexical.startswith(_granted_prefixes(context.workspace_roots)):
+            raise PermissionError("delegation workspace is outside caller workspace")
+        root = Path(lexical).resolve()
+        if not any(
             _inside(root, Path(candidate).resolve())
             for candidate in context.workspace_roots
         ):
             raise PermissionError("delegation workspace is outside caller workspace")
+        if not root.is_dir():
+            raise ValueError("delegation workspace must be an existing directory")
         effective_context = context
 
         receipt = self.lanes.spawn(
