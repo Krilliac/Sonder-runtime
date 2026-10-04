@@ -37,7 +37,11 @@ def _exercise_failure_capture(failure_phase, tmp_path, monkeypatch, artifact):
     output = "cleanup detail\nAuthorization: Bearer " + sensitive + "\n" + opaque
     calls = []
     close_observations = []
-    refusal = subject.OwnerRefused("synthetic first-launch readiness refusal")
+    migrated = failure_phase.startswith("migrated-stop")
+    job_id = "migrated-launch" if migrated else "launch0"
+    refusal = subject.OwnerRefused("synthetic migrated-stop refusal" if migrated
+                                   else "synthetic first-launch readiness refusal")
+    executed = []
 
     class Registry:
         def view(self, job):
@@ -57,18 +61,29 @@ def _exercise_failure_capture(failure_phase, tmp_path, monkeypatch, artifact):
             self.path.mkdir()
             self._process = NS(registry=Registry())
             self._launch_id = None
+            self._selection = NS(path=self.path / "children.sqlite", identity="source")
+            self._activation_pending = False
             self.journal = NS(complete=lambda command, result, state: None)
             terminal = {"phase": "STARTING" if failure_phase == "launch" else "UNCLEAN",
                         "components": [{"component": "workers", "state": "UNRESOLVED", "evidence": output}]}
-            (self.path / "runtime-launch0.json").write_text(json.dumps(terminal), encoding="utf-8")
+            (self.path / ("runtime-" + job_id + ".json")).write_text(json.dumps(terminal), encoding="utf-8")
 
         def register_configuration(self, **kwargs):
             return "configuration"
 
         def prepare(self, operation_id, action, payload):
+            if operation_id in {"bypass", "unsafe-launch"}:
+                raise subject.OwnerRefused("migration admission remains fenced")
             return NS(operation_id=operation_id, action=action)
 
+        def prepare_activation(self, operation_id, bundle, target, reference):
+            self._activation_pending = True
+            self._activation_bundle = bundle
+            self._activation_target = target
+            return NS(operation_id=operation_id, action="activate")
+
         def execute(self, command):
+            executed.append(command.operation_id)
             if command.action == "select":
                 return {"state": "SELECTED"}
             if command.action == "launch":
@@ -76,14 +91,25 @@ def _exercise_failure_capture(failure_phase, tmp_path, monkeypatch, artifact):
                 if failure_phase == "launch":
                     raise refusal
                 return {"state": "RUNNING"}
+            if command.action == "activate":
+                self._activation_bundle.record_phase("COMPLETE", {})
+                self._selection = self._activation_target
+                self._activation_pending = False
+                return {"state": "STOPPED_CLEAN"}
             assert command.action == "stop"
-            receipt = {"state": "STOPPED_UNCLEAN"}
+            if command.operation_id == "migrated-stop" and failure_phase == "migrated-stop-refusal":
+                raise refusal
+            state = "STOPPED_CLEAN" if migrated and command.operation_id != "migrated-stop" else "STOPPED_UNCLEAN"
+            receipt = {"state": state}
             self.journal.complete(command, receipt, receipt["state"])
+            self._launch_id = None
             return receipt
 
         @property
         def selected_store(self):
-            raise subject.OwnerRefused("running child owns the selected store")
+            if self._launch_id is not None or self._activation_pending:
+                raise subject.OwnerRefused("running child owns the selected store")
+            return self._selection
 
         def _config(self, reference):
             return {"port": 8765}
@@ -103,26 +129,55 @@ def _exercise_failure_capture(failure_phase, tmp_path, monkeypatch, artifact):
             return False
 
     owner = Owner()
+    if migrated:
+        from sonder_runtime.adapters.persistence import child_migration as storage
+        from sonder_runtime.adapters.filesystem import child_migration_bundle as bundles
+        from sonder_runtime.application.subagents import child_migration as migration
+
+        class Bundle:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def record_phase(self, phase, manifest):
+                return None
+
+        monkeypatch.setattr(storage, "SQLiteChildMigrationStore",
+                            lambda path: NS(path=path, identity="target"))
+        monkeypatch.setattr(bundles, "ChildMigrationBundle", lambda *args, **kwargs: Bundle())
+        monkeypatch.setattr(migration, "export_snapshot", lambda *args, **kwargs: None)
+        monkeypatch.setattr(migration, "stage_snapshot", lambda *args, **kwargs: None)
     monkeypatch.setattr(subject, "ManagedRuntimeOwner", lambda *args, **kwargs: owner)
     monkeypatch.setattr(subject, "require_bounded_real_runtime_closure", lambda: None)
     monkeypatch.setattr(subject, "port", lambda: 8765)
     monkeypatch.setattr(subject.urllib.request, "urlopen", lambda *args, **kwargs: Response())
-    expected_error = subject.OwnerRefused if failure_phase == "launch" else AssertionError
+    expected_error = subject.OwnerRefused if failure_phase in {"launch", "migrated-stop-refusal"} else AssertionError
     with pytest.raises(expected_error) as caught:
         subject.test_full_manifest_owned_http_and_relaunch(tmp_path, monkeypatch)
-    if failure_phase == "launch":
+    if failure_phase in {"launch", "migrated-stop-refusal"}:
         assert caught.value is refusal
-    assert calls == [("view", "launch0"),
-                     ("stream", "launch0", {"max_events": 256, "max_bytes": 65536})]
+    if migrated:
+        assert executed == ["select", "launch0", "stop0", "stop0", "stop0",
+                            "launch1", "stop1", "stop1", "activate", "activate",
+                            "migrated-launch", "migrated-stop"]
+    assert calls == [("view", job_id),
+                     ("stream", job_id, {"max_events": 256, "max_bytes": 65536})]
     assert close_observations == [True], "capture did not reach the uploader path before owner cleanup"
     assert not (tmp_path / "owner-diagnostic.json").exists()
     raw = artifact.read_text(encoding="utf-8")
     diagnostic = json.loads(raw)
     assert sensitive not in raw and opaque not in raw
     assert "cleanup detail" in raw
-    assert diagnostic["iteration"] == 0 and diagnostic["launch_job_id"] == "launch0"
-    assert diagnostic["phase"] == ("launch" if failure_phase == "launch" else "assert-clean-stop")
-    assert diagnostic["stop_receipt"] == (None if failure_phase == "launch" else {"state": "STOPPED_UNCLEAN"})
+    assert diagnostic["iteration"] == ("migrated" if migrated else 0)
+    assert diagnostic["launch_job_id"] == job_id
+    expected_phase = {"launch": "launch", "stop": "assert-clean-stop",
+                      "migrated-stop": "migrated-assert-clean-stop",
+                      "migrated-stop-refusal": "migrated-stop"}[failure_phase]
+    assert diagnostic["phase"] == expected_phase
+    assert diagnostic["stop_receipt"] == (None if failure_phase in {"launch", "migrated-stop-refusal"}
+                                           else {"state": "STOPPED_UNCLEAN"})
     assert diagnostic["injected_completion_reached"] is (failure_phase == "stop")
     assert diagnostic["original_exception"]["type"] == expected_error.__name__
     assert diagnostic["original_exception"]["message"] == str(caught.value)
@@ -132,7 +187,7 @@ def _exercise_failure_capture(failure_phase, tmp_path, monkeypatch, artifact):
     assert diagnostic["retained_output"]["truncated"] is False
 
 
-@pytest.mark.parametrize("failure_phase", ["launch", "stop"])
+@pytest.mark.parametrize("failure_phase", ["launch", "stop", "migrated-stop", "migrated-stop-refusal"])
 def test_failure_capture_survives_pytest_initialization(failure_phase, tmp_path, monkeypatch):
     if os.environ.get("PYTEST_MANAGED_OWNER_CAPTURE_PROBE") == failure_phase:
         artifact = Path(os.environ["PYTEST_MANAGED_OWNER_PROBE_ARTIFACT"])

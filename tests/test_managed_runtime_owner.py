@@ -171,7 +171,10 @@ def test_full_manifest_owned_http_and_relaunch(tmp_path, monkeypatch):
             launch = owner.prepare("migrated-launch", "launch", {})
             launch_job_id = launch.operation_id
             assert owner.execute(launch)["state"] == "RUNNING"
-            assert owner.execute(owner.prepare("migrated-stop", "stop", {}))["state"] == "STOPPED_CLEAN"
+            phase = "migrated-stop"
+            receipt = owner.execute(owner.prepare("migrated-stop", "stop", {}))
+            phase = "migrated-assert-clean-stop"
+            assert receipt["state"] == "STOPPED_CLEAN"
         with pytest.raises(OwnerUnsupported):
             ManagedRuntimeOwner(owner.path, writable_roots=lambda: ())
     except BaseException as error:
