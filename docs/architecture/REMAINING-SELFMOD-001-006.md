@@ -102,7 +102,8 @@ the wrong phase (`approve` needs `reviewing`, `deploy` `approved`, `rollback`
   for the refusals it makes before writing anything:
   - `deploy`: the phase check, the deployment lock held by another
     deployer, the source tree changed since the proposal, a failed backup
-    verification, a diff outside the approved scope, a missing tested-bytes
+    verification, a diff outside the approved scope or containing anything
+    other than exactly one changed checkout file, a missing tested-bytes
     record, and candidate bytes that differ from the tested bytes;
   - `rollback`: the phase check, the deployment lock, and "rollback
     conflict: deployed files changed after deployment".
