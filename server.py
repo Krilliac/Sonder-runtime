@@ -5543,7 +5543,8 @@ def prewarm_model(tier: str = "") -> bool:
             # sends, so Ollama keeps the runner and its KV; else load weights only.
             path, body = _prefix_cache.prewarm_request(model, _keep_alive_for(model), lambda: (
                 _build_system("", False, "", model=model, cloud=False),
-                _local_model_options(0.2, 1, _auto_model_context(model))))
+                _platform_local_model_options(0.2, 1, _auto_model_context(model),
+                    native_context=context_policy.native, environ=os.environ)))
             prewarm_gate.run_as_prewarm(lambda: _post(path, body, timeout=_PREWARM_LOAD_TIMEOUT))
         except Exception:
             pass

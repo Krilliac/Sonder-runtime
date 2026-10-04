@@ -44,6 +44,7 @@ MAX_TOTAL_CYCLES = 50
 DEFAULT_MAX_WALL_SECONDS = 3600
 MAX_WALL_SECONDS_CEILING = 24 * 60 * 60
 _monotonic = time.monotonic
+_sleep = time.sleep
 
 
 def _infra_retry_limit() -> int:
@@ -934,7 +935,7 @@ def execute_run(
             if retry_at > _monotonic():
                 # Keep cancellation, pause and the wall budget responsive while
                 # the durable task remains infra_retry. No worker/reviewer runs.
-                time.sleep(max(0.0, min(1.0, retry_at - _monotonic(), wall_budget - elapsed)))
+                _sleep(max(0.0, min(1.0, retry_at - _monotonic(), wall_budget - elapsed)))
                 continue
             run = autopilot_store.get_run(run["id"]) or run
             if int(run.get("cycles") or 0) >= MAX_TOTAL_CYCLES:

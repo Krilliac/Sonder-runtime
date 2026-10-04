@@ -98,7 +98,7 @@ def test_a_natural_phrase_resolution_still_passes_the_permission_gate():
     original_gate = sonder_repl._permission_gate
     original_tool = server.repo_status
     sonder_repl._permission_gate = (
-        lambda tool: (False, "refused /%s: permission rule deny" % tool)
+        lambda tool, powershell_arguments=None: (False, "refused /%s: permission rule deny" % tool)
     )
     server.repo_status = _never_runs
     try:

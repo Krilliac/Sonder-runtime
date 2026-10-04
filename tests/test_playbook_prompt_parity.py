@@ -1,8 +1,9 @@
 """Prompt parity: with no approved playbook the system prompt is unchanged.
 
-``LEGACY_BUILD_SYSTEM`` is ``server._build_system`` exactly as it stood before
-playbooks existed (frozen from ``origin/main`` at ``da0fdab8``; re-derive it
-with ``git show <base>:server.py``).  The current function is extracted from
+``LEGACY_BUILD_SYSTEM`` freezes the intended prefix feature's local section
+order (``3be563c4``) independently using join_system_parts; local-system/3
+adds the framed owner playbook section,
+with current main's hosted-provider fence retained. The current function is extracted from
 ``server.py`` by AST and run against the same stubs, so no model, disk state or
 git ref is involved and the result cannot depend on which checkout ran it.
 
@@ -18,6 +19,7 @@ import pytest
 from sonder_runtime.adapters.playbook_store import PlaybookStore
 from sonder_runtime.application.memory.playbook_context import PlaybookContext, frame_owner_notes
 from sonder_runtime.domain.prompt_composition import join_system_parts
+from sonder_runtime.application.prefix_cache_report import compose_local_system
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -57,8 +59,8 @@ def _build_system(system, trace, persona, model="", cloud=False, provider=None):
     parts = getattr(_SYSTEM_CONTEXT, "parts", None)
     profile, emotions, goal_block = parts or _read_system_context()
     return _join_system_parts(
-        _runtime_identity_block(model, cloud, provider), profile, emotions, goal_block,
-        effective_system,
+        _runtime_identity_block(model, cloud, provider), profile, effective_system,
+        emotions, goal_block,
     )
 '''
 
@@ -78,6 +80,7 @@ def _load(function, parts):
         "personas": SimpleNamespace(get=lambda name: "PERSONA:" + name),
         "_provider_bridge": SimpleNamespace(is_hosted=lambda provider: provider == "hosted"),
         "playbook_context": SimpleNamespace(frame_owner_notes=frame_owner_notes),
+        "_prefix_cache": SimpleNamespace(compose_local_system=compose_local_system),
     }
     exec(compile(ast.Module(body=[function], type_ignores=[]), "<prompt composition>", "exec"), namespace)
     return namespace["_build_system"]
@@ -111,7 +114,7 @@ def test_index_precedes_volatile_system_and_is_omitted_on_hosted_rungs(sources):
     index = "- [Builds](builds.md) — procedure — open when: build\n"
     build = _load(sources[1], ("PROFILE", "EMOTIONS", "GOAL", index))
     rendered = build("VOLATILE", False, "", model="local")
-    assert rendered.index("PROFILE") < rendered.index("OWNER PLAYBOOK NOTES") < rendered.index("GOAL") < rendered.index("VOLATILE")
+    assert rendered.index("PROFILE") < rendered.index("OWNER PLAYBOOK NOTES") < rendered.index("VOLATILE") < rendered.index("GOAL")
     assert "OWNER PLAYBOOK NOTES" not in build("VOLATILE", False, "", provider="hosted")
 
 

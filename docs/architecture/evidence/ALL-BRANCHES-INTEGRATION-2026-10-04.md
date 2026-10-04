@@ -94,8 +94,29 @@ Focused executions overlap and are not a unique-test total:
   checks pass; history privacy retains seven acknowledged baseline debts and
   introduces none. No ratchet limits were increased.
 
-The coordinator owns final local-branch ancestry reconciliation, the complete
-Python suite and required hosted/platform checks before publication/cleanup.
+The coordinator folded all twenty-four original local branch tips after mapping
+their current implementations to merged receipts; the eighteen additional
+non-ancestor tips were folded without changing this semantic source tree. All
+forty-three original local/remote tip refs are actual ancestors of the union.
+
+The first complete four-worker native run exposed **43 failures, 25,310 passes,
+407 skips**. All failure groups were addressed without dropping feature code or
+relaxing gates. Retry tests had replaced shared stdlib `time.sleep`, so the new
+Git snapshot subprocess polluted their simulated retry clock; a private
+controller sleep seam retains fresh snapshots and resume enforcement. The
+prefix feature intentionally uses versioned local-system/3 ordering (identity,
+profile, framed owner playbooks, request, emotions, goal); existing parity and
+emotion controls now check that explicit layout, with independent expected
+joining and the current hosted-context fence. The prewarm ownership control
+isolates model-context discovery and verifies refusal produces zero requests,
+then recovery makes exactly one one-token prefill with the expected context.
+Production prewarm uses the platform option policy directly. The REPL refusal
+double accepts the new PowerShell argument context; diagnostic pins retain the
+same immutable SHAs with their existing main's human-readable v7 labels.
+
+Those seven failure groups plus prefix-cache and resume permission controls
+pass **211 tests, one platform skip**. Final complete-suite, process-contention,
+interoperability and protected hosted checks remain coordinator merge gates.
 Native Windows PowerShell, real model/GPU performance and external services are
 not demonstrated by this Linux functional qualification. Mock/provider fixtures
 make no model-quality or throughput claim.
