@@ -64,8 +64,13 @@ const observatoryTokenNote =
     'The Observatory will ask for a token; telemetry is admin-only outside '
     'local-open mode.';
 
-/// Sonder Inference and Observatory status on the Runtime page
-/// (`GET /v1/sonder/ecosystem`), with Open Observatory and Copy connect URLs.
+/// The two halves of the ecosystem status: providers (Runtime → Models) and
+/// the Observatory live export (Runtime → Observatory).
+enum EcosystemPart { inference, observatory }
+
+/// Sonder Inference and Observatory status (`GET /v1/sonder/ecosystem`),
+/// with Open Observatory and Copy connect URLs. Runtime shows each part on
+/// its own page ([parts]); alone it shows both.
 ///
 /// Every state is spoken as a word as well as a colour: ready, degraded,
 /// unavailable, unknown, not configured; export on or off.
@@ -85,6 +90,7 @@ class EcosystemPanel extends StatefulWidget {
   /// True when the app sends an API key or account token. The launched
   /// Observatory gets neither, so it will ask for its own.
   final bool usesCredential;
+  final Set<EcosystemPart> parts;
 
   const EcosystemPanel({
     super.key,
@@ -95,6 +101,7 @@ class EcosystemPanel extends StatefulWidget {
     this.loading = false,
     this.canStartProcesses = true,
     this.usesCredential = false,
+    this.parts = const {EcosystemPart.inference, EcosystemPart.observatory},
   });
 
   @override
@@ -125,9 +132,14 @@ class _EcosystemPanelState extends State<EcosystemPanel> {
     }
   }
 
-  Future<void> _copy(String text, String what) async {
+  Future<void> _copyNoted(String text, String what) async {
     await Clipboard.setData(ClipboardData(text: text));
     if (mounted) setState(() => _copied = 'Copied $what.');
+  }
+
+  Future<void> _copyToast(String text, String what) async {
+    await Clipboard.setData(ClipboardData(text: text));
+    if (mounted) showSonderToast(context, 'Copied $what.');
   }
 
   Future<void> _open(List<String> urls) async {
@@ -153,29 +165,39 @@ class _EcosystemPanelState extends State<EcosystemPanel> {
     });
   }
 
+  bool get _both => widget.parts.length > 1;
+
+  String get _stateTitle {
+    if (_both) return 'Sonder Inference and Observatory';
+    return widget.parts.single == EcosystemPart.inference
+        ? 'Providers'
+        : 'Live export';
+  }
+
   @override
   Widget build(BuildContext context) {
     final reading = widget.reading;
     final error = widget.error;
-    final children = <Widget>[
-      if (error != null) ...[_errorNotice(error), const SizedBox(height: 12)],
+    final children = <Widget>[];
+    final notes = <Widget>[
+      if (error != null) _errorNotice(error),
     ];
     if (reading == null) {
       if (error == null) {
-        children.add(widget.loading
-            ? const StatusRow(
+        notes.add(widget.loading
+            ? const StatusValueRow(
                 key: Key('ecosystem-loading'),
                 kind: StatusKind.running,
                 label: 'Ecosystem',
                 value: 'Reading Sonder Inference and Observatory status…',
               )
-            : const Text('No ecosystem status loaded yet.',
-                key: Key('ecosystem-empty')));
+            : const RuntimeEmptyRow('No ecosystem status loaded yet.',
+                key: Key('ecosystem-empty'), icon: Icons.cloud_off_outlined));
       }
     } else {
       switch (reading.availability) {
         case EcosystemAvailability.unsupportedRuntime:
-          children.add(const WorkspaceNotice(
+          notes.add(const WorkspaceNotice(
             key: Key('ecosystem-unsupported'),
             kind: StatusKind.skipped,
             word: 'off',
@@ -186,10 +208,11 @@ class _EcosystemPanelState extends State<EcosystemPanel> {
                 'available.',
             hint: 'update Sonder Runtime, or turn on '
                 'SONDER_OBSERVATORY_EXPORT=1',
+            framed: false,
             liveRegion: false,
           ));
         case EcosystemAvailability.unsupportedSchema:
-          children.add(WorkspaceNotice(
+          notes.add(WorkspaceNotice(
             key: const Key('ecosystem-unsupported-schema'),
             kind: StatusKind.warn,
             title: 'Unsupported ecosystem status format.',
@@ -199,10 +222,17 @@ class _EcosystemPanelState extends State<EcosystemPanel> {
                 : "The runtime sent '${reading.schema}'; this app reads "
                     '$ecosystemSchema.',
             hint: 'update the app to match the runtime',
+            framed: false,
             liveRegion: false,
           ));
         case EcosystemAvailability.available:
-          children.addAll(_status(context, reading.status!));
+          final status = reading.status!;
+          if (widget.parts.contains(EcosystemPart.inference)) {
+            children.addAll(_inferenceSections(context, status));
+          }
+          if (widget.parts.contains(EcosystemPart.observatory)) {
+            children.add(_observatory(context, status));
+          }
       }
     }
     return Semantics(
@@ -212,7 +242,22 @@ class _EcosystemPanelState extends State<EcosystemPanel> {
       child: Column(
         key: const Key('ecosystem-panel'),
         crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: children,
+        children: [
+          if (notes.isNotEmpty)
+            SettingsSection(
+              title: _stateTitle,
+              children: [
+                for (final note in notes)
+                  note is WorkspaceNotice
+                      ? Padding(
+                          padding: const EdgeInsets.all(SonderSpace.lg),
+                          child: note,
+                        )
+                      : note,
+              ],
+            ),
+          ...children,
+        ],
       ),
     );
   }
@@ -227,6 +272,7 @@ class _EcosystemPanelState extends State<EcosystemPanel> {
         detail: 'Sonder Inference and Observatory status is admin-only.',
         hint: 'use the deployment API key in Settings, or local-open mode on '
             'the runtime host',
+        framed: false,
         liveRegion: false,
       );
     }
@@ -235,86 +281,83 @@ class _EcosystemPanelState extends State<EcosystemPanel> {
       kind: StatusKind.fail,
       title: 'Could not load Sonder Inference and Observatory status.',
       detail: error is SonderException ? error.message : error.toString(),
+      framed: false,
       liveRegion: false,
     );
   }
 
-  List<Widget> _status(BuildContext context, EcosystemStatus status) {
+  List<Widget> _inferenceSections(
+      BuildContext context, EcosystemStatus status) {
     return [
-      _Section(title: 'Provider bindings', child: _bindings(context, status)),
-      const SizedBox(height: 12),
-      _Section(title: 'Sonder Inference', child: _inference(context, status)),
-      if (status.providers.keys.any((id) => id != sonderInferenceProvider)) ...[
-        const SizedBox(height: 12),
-        _Section(
+      _bindings(context, status),
+      _inference(context, status),
+      if (status.providers.keys.any((id) => id != sonderInferenceProvider))
+        SettingsSection(
           title: 'Other providers',
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              for (final entry in status.providers.entries)
-                if (entry.key != sonderInferenceProvider)
-                  StatusRow(
-                    key: Key('ecosystem-provider-${entry.key}'),
-                    kind: _providerKind(entry.value.state),
-                    word: entry.value.state.name,
-                    label: providerLabel(entry.key),
-                    value: entry.value.baseUrl == null &&
-                            entry.value.detail == null
-                        ? 'no status reported'
-                        : [
-                            if (entry.value.baseUrl != null)
-                              entry.value.baseUrl!,
-                            if (entry.value.detail != null) entry.value.detail!,
-                          ].join(' · '),
-                  ),
-            ],
-          ),
+          children: [
+            for (final entry in status.providers.entries)
+              if (entry.key != sonderInferenceProvider)
+                StatusValueRow(
+                  key: Key('ecosystem-provider-${entry.key}'),
+                  kind: _providerKind(entry.value.state),
+                  word: entry.value.state.name,
+                  label: providerLabel(entry.key),
+                  value: entry.value.baseUrl == null &&
+                          entry.value.detail == null
+                      ? 'no status reported'
+                      : [
+                          if (entry.value.baseUrl != null) entry.value.baseUrl!,
+                          if (entry.value.detail != null) entry.value.detail!,
+                        ].join(' · '),
+                ),
+          ],
         ),
-      ],
-      const SizedBox(height: 12),
-      _Section(title: 'Observatory', child: _observatory(context, status)),
     ];
   }
 
   Widget _bindings(BuildContext context, EcosystemStatus status) {
     final tokens = SonderTokens.of(context);
+    final text = Theme.of(context).textTheme;
     String name(String? id) => id == null ? 'not reported' : providerLabel(id);
-    return Column(
+    Widget binding(String label, String provider, {bool mono = false}) =>
+        RuntimeRow(
+          dense: true,
+          title: Text(label,
+              style: mono
+                  ? tokens.mono(13, weight: FontWeight.w500)
+                  : text.bodyMedium?.copyWith(fontWeight: FontWeight.w500)),
+          actions: [
+            Text(provider,
+                style: text.bodyMedium?.copyWith(color: tokens.text2)),
+          ],
+        );
+    return SettingsSection(
       key: const Key('ecosystem-bindings'),
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+      title: 'Provider bindings',
+      description: 'Which provider serves each route.',
+      dividers: false,
+      contentPadding: const EdgeInsets.symmetric(vertical: SonderSpace.sm),
       children: [
-        _EcosystemField(
-          label: 'Default',
-          value: name(status.defaultGenerationProvider),
-          indent: false,
-        ),
-        _EcosystemField(
-          label: 'Embedding',
-          value: name(status.embeddingProvider),
-          indent: false,
-        ),
-        if (status.tierProviders.isNotEmpty) ...[
-          const SizedBox(height: 6),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              for (final entry in status.tierProviders.entries)
-                Semantics(
-                  label: 'Tier ${entry.key} uses ${providerLabel(entry.value)}',
-                  excludeSemantics: true,
-                  child: Chip(
-                    key: Key('ecosystem-tier-${entry.key}'),
-                    label: Text('${entry.key} · ${providerLabel(entry.value)}',
-                        style: tokens.mono(12)),
-                  ),
-                ),
-            ],
+        binding('Default', name(status.defaultGenerationProvider)),
+        binding('Embedding', name(status.embeddingProvider)),
+        for (final entry in status.tierProviders.entries)
+          Semantics(
+            key: Key('ecosystem-tier-${entry.key}'),
+            container: true,
+            label: 'Tier ${entry.key} uses ${providerLabel(entry.value)}',
+            excludeSemantics: true,
+            child: binding(entry.key, providerLabel(entry.value), mono: true),
           ),
-        ],
       ],
     );
   }
+
+  Widget _digestCopy(String name, String digest) => IconButton(
+        tooltip: 'Copy $name digest',
+        iconSize: 16,
+        icon: const Icon(Icons.copy_outlined),
+        onPressed: () => _copyToast(digest, 'the $name digest'),
+      );
 
   Widget _inference(BuildContext context, EcosystemStatus status) {
     final tokens = SonderTokens.of(context);
@@ -322,20 +365,28 @@ class _EcosystemPanelState extends State<EcosystemPanel> {
     final state = status.inferenceState;
     final entry = status.inference;
     if (state == InferenceState.notConfigured) {
-      return Column(
+      return SettingsSection(
         key: const Key('ecosystem-inference'),
-        crossAxisAlignment: CrossAxisAlignment.stretch,
+        title: 'Sonder Inference',
         children: [
-          StatusRow(
+          StatusValueRow(
             kind: StatusKind.skipped,
             word: state.word,
             label: 'Sonder Inference',
             value: inferenceNotConfiguredText(status),
           ),
-          const SizedBox(height: 4),
-          SelectableText(inferenceEnvHint,
-              key: const Key('ecosystem-inference-hint'),
-              style: tokens.mono(12, color: tokens.text2)),
+          RuntimeCardBody(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('To use it', style: text.labelMedium),
+                const SizedBox(height: SonderSpace.xs),
+                SelectableText(inferenceEnvHint,
+                    key: const Key('ecosystem-inference-hint'),
+                    style: tokens.mono(12, color: tokens.text2)),
+              ],
+            ),
+          ),
         ],
       );
     }
@@ -346,44 +397,21 @@ class _EcosystemPanelState extends State<EcosystemPanel> {
       if (entry?.detail == null && entry?.baseUrl != null) entry!.baseUrl!,
       if (entry == null) 'Bound, but the runtime reported no status for it.',
     ].join(' · ');
-    return Column(
+    return SettingsSection(
       key: const Key('ecosystem-inference'),
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+      title: 'Sonder Inference',
+      trailing: entry?.synthetic == true ? const _SyntheticTag() : null,
       children: [
-        Row(children: [
-          Expanded(
-            child: StatusRow(
-              key: const Key('ecosystem-inference-state'),
-              kind: _inferenceKind(state),
-              word: state.word,
-              label: 'Sonder Inference',
-              value: value,
-            ),
-          ),
-          if (entry?.synthetic == true) ...[
-            const SizedBox(width: 8),
-            Tooltip(
-              message: 'Mock backend: synthetic output, not a quality or '
-                  'performance signal.',
-              child: Semantics(
-                label: 'Synthetic: mock backend output, not a quality or '
-                    'performance signal',
-                excludeSemantics: true,
-                child: Chip(
-                  key: const Key('ecosystem-synthetic'),
-                  avatar: Icon(Icons.science_outlined,
-                      size: 16, color: tokens.warn),
-                  label: Text('SYNTHETIC',
-                      style: tokens.mono(12,
-                          color: tokens.warn, weight: FontWeight.w600)),
-                ),
-              ),
-            ),
-          ],
-        ]),
+        StatusValueRow(
+          key: const Key('ecosystem-inference-state'),
+          kind: _inferenceKind(state),
+          word: state.word,
+          label: 'Sonder Inference',
+          value: value,
+        ),
         if (entry != null) ...[
           if (entry.version != null || entry.apiVersion != null)
-            _EcosystemField(
+            ValueRow(
               label: 'Version',
               value: [
                 if (entry.version != null) entry.version!,
@@ -391,14 +419,21 @@ class _EcosystemPanelState extends State<EcosystemPanel> {
               ].join(' · '),
             ),
           if (entry.baseUrl != null)
-            _EcosystemField(
+            ValueRow(
               label: 'Base URL',
               value: entry.baseUrl!,
-              onCopy: () => _copy(entry.baseUrl!, 'the base URL'),
+              mono: true,
+              trailing: IconButton(
+                tooltip: 'Copy Base URL',
+                iconSize: 16,
+                icon: const Icon(Icons.copy_outlined),
+                onPressed: () => _copyToast(entry.baseUrl!, 'the base URL'),
+              ),
             ),
           if (entry.models.isNotEmpty)
-            _EcosystemField(label: 'Models', value: entry.models.join(', ')),
-          _EcosystemField(
+            ValueRow(
+                label: 'Models', value: entry.models.join(', '), mono: true),
+          ValueRow(
             key: const Key('ecosystem-identity'),
             label: 'Identity',
             value: identity == null || identity.summary.isEmpty
@@ -407,27 +442,29 @@ class _EcosystemPanelState extends State<EcosystemPanel> {
           ),
           if (identity != null)
             for (final (name, digest) in identity.digests)
-              _EcosystemField(
+              ValueRow(
                 key: Key('ecosystem-digest-$name'),
-                label: '$name digest',
+                label: '${_capitalized(name)} digest',
                 value: InferenceIdentity.shortDigest(digest),
-                onCopy: () => _copy(digest, 'the $name digest'),
+                mono: true,
+                trailing: _digestCopy(name, digest),
               ),
           if (entry.checkedAt != null)
-            _EcosystemField(
+            ValueRow(
               label: 'Checked',
               value: ecosystemTimestamp(entry.checkedAt!),
             ),
         ],
-        const SizedBox(height: 6),
-        Text(
-          fallback == null
-              ? 'No fallback: requests fail while Sonder Inference is down.'
-              : '${providerLabel(fallback)} fallback: ${providerLabel(fallback)} '
-                  'serves only requests that never reached Sonder Inference'
-                  '${entry != null && entry.fallbackCount > 0 ? ' (used ${entry.fallbackCount} ${entry.fallbackCount == 1 ? 'time' : 'times'})' : ''}.',
-          key: const Key('ecosystem-fallback'),
-          style: text.bodyMedium,
+        RuntimeCardBody(
+          child: Text(
+            fallback == null
+                ? 'No fallback: requests fail while Sonder Inference is down.'
+                : '${providerLabel(fallback)} fallback: ${providerLabel(fallback)} '
+                    'serves only requests that never reached Sonder Inference'
+                    '${entry != null && entry.fallbackCount > 0 ? ' (used ${entry.fallbackCount} ${entry.fallbackCount == 1 ? 'time' : 'times'})' : ''}.',
+            key: const Key('ecosystem-fallback'),
+            style: text.bodyMedium?.copyWith(color: tokens.text2),
+          ),
         ),
       ],
     );
@@ -435,6 +472,7 @@ class _EcosystemPanelState extends State<EcosystemPanel> {
 
   Widget _observatory(BuildContext context, EcosystemStatus status) {
     final tokens = SonderTokens.of(context);
+    final text = Theme.of(context).textTheme;
     final export = status.observatory;
     final urls = observatoryConnectUrls(export?.connectUrls ?? const []);
     final remote = !isLoopbackUrl(widget.runtimeUrl);
@@ -443,18 +481,27 @@ class _EcosystemPanelState extends State<EcosystemPanel> {
     final stats = export == null
         ? 'The runtime reported no Observatory section.'
         : export.exportEnabled
-            ? '${count(export.subscribers)} subscribers · '
+            ? '${count(export.subscribers)} '
+                'subscriber${export.subscribers == 1 ? '' : 's'} · '
                 '${count(export.emittedEvents)} emitted · '
                 '${count(export.droppedEvents)} dropped · '
                 '${count(export.retainedEvents)}/${count(export.bufferCapacity)} '
                 'retained'
             : 'Runtime live export is off (SONDER_OBSERVATORY_EXPORT=0).';
     final canOpen = urls.isNotEmpty && !remote && !_launching;
-    return Column(
+    final note = remote
+        ? Text(observatoryRemoteExplanation,
+            key: const Key('ecosystem-remote'), style: text.bodySmall)
+        : urls.isEmpty
+            ? Text('The runtime reported no telemetry URLs to connect to.',
+                key: const Key('ecosystem-no-urls'), style: text.bodySmall)
+            : null;
+    return SettingsSection(
       key: const Key('ecosystem-observatory'),
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+      title: 'Live export',
+      description: 'What the runtime streams to the Sonder Observatory.',
       children: [
-        StatusRow(
+        StatusValueRow(
           key: const Key('ecosystem-export'),
           kind: export?.exportEnabled == true
               ? ((export!.droppedEvents ?? 0) > 0
@@ -466,162 +513,139 @@ class _EcosystemPanelState extends State<EcosystemPanel> {
           value: stats,
         ),
         if (export != null && export.exportEnabled)
-          _EcosystemField(
+          ValueRow(
             label: 'Allowed origins',
             value: export.corsOrigins.isEmpty
                 ? 'none: browsers on other origins cannot read the stream'
                 : export.corsOrigins.join(', '),
+            mono: export.corsOrigins.isNotEmpty,
           ),
-        for (final warning in export?.warnings ?? const <String>[]) ...[
-          const SizedBox(height: 6),
-          WorkspaceNotice(
-            kind: StatusKind.warn,
-            title: warning,
-            liveRegion: false,
+        for (final warning in export?.warnings ?? const <String>[])
+          Padding(
+            padding: const EdgeInsets.all(SonderSpace.lg),
+            child: WorkspaceNotice(
+              kind: StatusKind.warn,
+              title: warning,
+              framed: false,
+              liveRegion: false,
+            ),
           ),
-        ],
-        if (urls.isNotEmpty) ...[
-          const SizedBox(height: 8),
-          Text('Connect URLs', style: Theme.of(context).textTheme.labelLarge),
-          const SizedBox(height: 4),
-          SelectableText(urls.join('\n'),
-              key: const Key('ecosystem-connect-urls'),
-              style: tokens.mono(12, color: tokens.text2)),
-        ],
-        const SizedBox(height: 10),
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: [
-            FilledButton.icon(
-              key: const Key('ecosystem-open-observatory'),
-              onPressed: canOpen ? () => _open(urls) : null,
-              icon: _launching
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2))
-                  : const Icon(Icons.insights_outlined),
-              label: Text(widget.canStartProcesses
-                  ? 'Open Observatory'
-                  : 'Get Observatory link'),
-            ),
-            OutlinedButton.icon(
-              key: const Key('ecosystem-copy-urls'),
-              onPressed: urls.isEmpty
-                  ? null
-                  : () => _copy(urls.join('\n'), 'the connect URLs'),
-              icon: const Icon(Icons.copy, size: 18),
-              label: const Text('Copy connect URLs'),
-            ),
-          ],
-        ),
-        if (widget.usesCredential && !remote && urls.isNotEmpty) ...[
-          const SizedBox(height: 8),
-          Text(observatoryTokenNote,
-              key: const Key('ecosystem-token-note'),
-              style: Theme.of(context).textTheme.bodySmall),
-        ],
-        if (remote) ...[
-          const SizedBox(height: 8),
-          Text(observatoryRemoteExplanation,
-              key: const Key('ecosystem-remote'),
-              style: Theme.of(context).textTheme.bodySmall),
-        ] else if (urls.isEmpty) ...[
-          const SizedBox(height: 8),
-          Text('The runtime reported no telemetry URLs to connect to.',
-              key: const Key('ecosystem-no-urls'),
-              style: Theme.of(context).textTheme.bodySmall),
-        ],
-        if (launch != null) ...[
-          const SizedBox(height: 10),
-          WorkspaceNotice(
-            key: const Key('ecosystem-launch-result'),
-            kind: launch.ok ? StatusKind.ok : StatusKind.warn,
-            word: launch.ok ? 'done' : null,
-            title: launch.message,
-            detail: launch.url.isEmpty ? null : launch.url,
-            actions: [
-              if (launch.url.isNotEmpty)
-                OutlinedButton.icon(
-                  key: const Key('ecosystem-copy-link'),
-                  onPressed: () => _copy(launch.url, 'the Observatory link'),
-                  icon: const Icon(Icons.copy, size: 18),
-                  label: const Text('Copy link'),
+        RuntimeCardBody(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (urls.isNotEmpty) ...[
+                Text('Connect URLs', style: text.labelMedium),
+                const SizedBox(height: SonderSpace.xs),
+                SelectableText(urls.join('\n'),
+                    key: const Key('ecosystem-connect-urls'),
+                    style: tokens.mono(12.5, color: tokens.text)),
+                const SizedBox(height: SonderSpace.md),
+              ],
+              Wrap(
+                spacing: SonderSpace.sm,
+                runSpacing: SonderSpace.sm,
+                children: [
+                  FilledButton.icon(
+                    key: const Key('ecosystem-open-observatory'),
+                    onPressed: canOpen ? () => _open(urls) : null,
+                    icon: _launching
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2))
+                        : const Icon(Icons.insights_outlined, size: 18),
+                    label: Text(widget.canStartProcesses
+                        ? 'Open Observatory'
+                        : 'Get Observatory link'),
+                  ),
+                  OutlinedButton.icon(
+                    key: const Key('ecosystem-copy-urls'),
+                    onPressed: urls.isEmpty
+                        ? null
+                        : () => _copyNoted(urls.join('\n'), 'the connect URLs'),
+                    icon: const Icon(Icons.copy_outlined, size: 18),
+                    label: const Text('Copy connect URLs'),
+                  ),
+                ],
+              ),
+              if (widget.usesCredential && !remote && urls.isNotEmpty) ...[
+                const SizedBox(height: SonderSpace.sm),
+                Text(observatoryTokenNote,
+                    key: const Key('ecosystem-token-note'),
+                    style: text.bodySmall),
+              ],
+              if (note != null) ...[
+                const SizedBox(height: SonderSpace.sm),
+                note,
+              ],
+              if (launch != null) ...[
+                const SizedBox(height: SonderSpace.md),
+                WorkspaceNotice(
+                  key: const Key('ecosystem-launch-result'),
+                  kind: launch.ok ? StatusKind.ok : StatusKind.warn,
+                  word: launch.ok ? 'done' : null,
+                  title: launch.message,
+                  detail: launch.url.isEmpty ? null : launch.url,
+                  framed: false,
+                  actions: [
+                    if (launch.url.isNotEmpty)
+                      OutlinedButton.icon(
+                        key: const Key('ecosystem-copy-link'),
+                        onPressed: () =>
+                            _copyNoted(launch.url, 'the Observatory link'),
+                        icon: const Icon(Icons.copy_outlined, size: 18),
+                        label: const Text('Copy link'),
+                      ),
+                  ],
                 ),
+              ],
+              if (_copied != null) ...[
+                const SizedBox(height: SonderSpace.sm),
+                Semantics(
+                  liveRegion: true,
+                  child: Text('${StatusKind.ok.glyph} $_copied',
+                      key: const Key('ecosystem-copied'),
+                      style: text.bodySmall?.copyWith(color: tokens.ok)),
+                ),
+              ],
             ],
           ),
-        ],
-        if (_copied != null) ...[
-          const SizedBox(height: 6),
-          Semantics(
-            liveRegion: true,
-            child: Text(_copied!,
-                key: const Key('ecosystem-copied'),
-                style: Theme.of(context).textTheme.bodySmall),
-          ),
-        ],
+        ),
       ],
     );
   }
 }
 
-/// A label/value line under a status row, with an optional copy button.
-class _EcosystemField extends StatelessWidget {
-  final String label;
-  final String value;
-  final VoidCallback? onCopy;
-
-  /// Line the label up with the labels of the status rows above.
-  final bool indent;
-
-  const _EcosystemField(
-      {super.key,
-      required this.label,
-      required this.value,
-      this.onCopy,
-      this.indent = true});
+/// The mock backend's tag: its output is not a quality or speed signal.
+class _SyntheticTag extends StatelessWidget {
+  const _SyntheticTag();
 
   @override
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
-    final text = Theme.of(context).textTheme;
-    final labelText = Text(label,
-        style: text.bodyMedium
-            ?.copyWith(color: tokens.text2, fontWeight: FontWeight.w500));
-    final valueText = SelectableText(value, style: tokens.mono(12));
-    // Every line is at least as tall as its copy button, so rows with and
-    // without one keep an even rhythm.
-    return Padding(
-      padding:
-          EdgeInsets.only(left: indent ? StatusRow.markWidth : 0, bottom: 2),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: 40),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: [
-            Expanded(
-              child: LayoutBuilder(builder: (context, constraints) {
-                if (constraints.maxWidth < 360) {
-                  return Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [labelText, valueText],
-                  );
-                }
-                return Row(children: [
-                  SizedBox(width: StatusRow.labelWidth, child: labelText),
-                  Expanded(child: valueText),
-                ]);
-              }),
-            ),
-            if (onCopy != null)
-              IconButton(
-                tooltip: 'Copy $label',
-                onPressed: onCopy,
-                visualDensity: VisualDensity.compact,
-                icon: const Icon(Icons.copy, size: 16),
-              ),
-          ],
+    return Tooltip(
+      message:
+          'Mock backend: synthetic output, not a quality or performance signal.',
+      child: Semantics(
+        label: 'Synthetic: mock backend output, not a quality or '
+            'performance signal',
+        excludeSemantics: true,
+        child: Container(
+          key: const Key('ecosystem-synthetic'),
+          padding: const EdgeInsets.symmetric(
+              horizontal: SonderSpace.sm, vertical: SonderSpace.xxs),
+          decoration: BoxDecoration(
+            color: tokens.warn.withValues(alpha: 0.12),
+            borderRadius: BorderRadius.circular(SonderRadius.pill),
+          ),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(Icons.science_outlined, size: 14, color: tokens.warn),
+            const SizedBox(width: SonderSpace.xs),
+            Text('SYNTHETIC',
+                style: tokens.mono(11.5,
+                    color: tokens.warn, weight: FontWeight.w600)),
+          ]),
         ),
       ),
     );

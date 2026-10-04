@@ -1,38 +1,62 @@
 part of '../runtime_screen.dart';
 
+/// Safe self-improvement: whether it is on, its mode, active runs and
+/// rollback points, the recent runs, and a status read on demand.
 class _SelfmodPanel extends StatelessWidget {
+  final _RuntimeScreenState s;
   final SelfmodInfo info;
 
-  const _SelfmodPanel({required this.info});
+  const _SelfmodPanel({required this.s, required this.info});
 
   @override
   Widget build(BuildContext context) {
-    return Column(
+    return SettingsSection(
       key: const Key('selfmod-panel'),
-      crossAxisAlignment: CrossAxisAlignment.start,
+      title: 'Safe self-improvement',
+      description: 'Changes the runtime proposes to its own code, tested '
+          'and reversible.',
+      trailing: StatusPill(info.enabled ? StatusKind.ok : StatusKind.skipped,
+          word: info.enabled ? 'on' : 'off', dense: true),
       children: [
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: [
-            Chip(label: Text(info.enabled ? 'Enabled' : 'Disabled')),
-            Chip(label: Text('Mode: ${info.mode}')),
-            Chip(label: Text('${info.active} active')),
-            Chip(label: Text('${info.rollbackPoints} rollback points')),
-          ],
-        ),
-        const SizedBox(height: 8),
-        Text('Backups: ${info.backupRoot}'),
-        if (info.runs.isNotEmpty) ...[
-          const SizedBox(height: 8),
-          ...info.runs.take(5).map((run) => Text(
-                '${run['id']}  ${run['phase']}  ${run['risk']}\n${run['objective']}',
-              )),
-        ],
-        const SizedBox(height: 8),
-        const Text(
-          'Inspect: /selfmod status · /selfmod diff <id> · '
-          '/selfmod tests <id> · /selfmod rollback <id>',
+        RuntimeStatStrip([
+          RuntimeStat('Mode', info.mode),
+          RuntimeStat('Active', '${info.active}'),
+          RuntimeStat('Deployed', '${info.deployed}'),
+          RuntimeStat('Rollback points', '${info.rollbackPoints}'),
+        ]),
+        if (info.backupRoot.isNotEmpty)
+          ValueRow(
+            label: 'Backups',
+            value: info.backupRoot,
+            mono: true,
+            copyable: true,
+          ),
+        for (final run in info.runs.take(5))
+          RuntimeRow(
+            kind: autopilotStatusKind('${run['phase'] ?? ''}'),
+            word: '${run['phase'] ?? 'unknown'}',
+            title: RuntimeRowTitle('${run['objective'] ?? run['id'] ?? ''}'),
+            subtitle: RuntimeRowDetail(
+                [
+                  '${run['id'] ?? ''}',
+                  if ('${run['risk'] ?? ''}'.isNotEmpty) 'risk ${run['risk']}',
+                ].where((part) => part.isNotEmpty).join(' · '),
+                mono: true),
+          ),
+        SettingRow(
+          label: 'Status report',
+          description: 'Diffs, tests and rollbacks stay in the console: '
+              '/selfmod diff, /selfmod tests, /selfmod rollback.',
+          trailing: AsyncActionButton(
+            label: 'Read status',
+            busyLabel: 'Reading…',
+            doneLabel: null,
+            busy: s._busy('selfmod'),
+            onPressed: () => s._trackCommand('selfmod', '/selfmod status',
+                title: 'Self-improvement status'),
+            onError: (_, __) {},
+          ),
+          below: _trackedView(s, 'selfmod'),
         ),
       ],
     );

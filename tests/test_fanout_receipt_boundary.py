@@ -38,6 +38,7 @@ def _rows():
 def _stage(monkeypatch):
     monkeypatch.setattr(fanout_store, "get_run", lambda run_id: _run() if run_id == "fan-1" else None)
     monkeypatch.setattr(fanout_store, "list_results", lambda _run_id: _rows())
+    monkeypatch.setattr(fanout_store, "events", lambda _run_id, **kwargs: [])
 
 
 def test_root_delegate_matches_the_packaged_receipt(monkeypatch):

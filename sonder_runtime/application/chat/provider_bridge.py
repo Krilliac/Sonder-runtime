@@ -325,17 +325,25 @@ def model_request_from_ollama_payload(
 
 def ollama_shape(response: ModelResponse, *, finish_reason=None) -> dict[str, object]:
     """Shape a ModelResponse as the Ollama reply legacy callers consume."""
-    finish_reason = getattr(response, "finish_reason", None) or finish_reason
-    if finish_reason is None:
+    # Preserve a provider-reported finish reason when available; never invent
+    # "stop" for gateways without that evidence (PR #616's budget contract).
+    reason = (
+        getattr(response, "finish_reason", None)
+        or getattr(response, "done_reason", None)
+        or finish_reason
+    )
+    if reason is None:
         telemetry = getattr(response, "telemetry", None)
-        finish_reason = getattr(telemetry, "finish_reason", None)
+        reason = getattr(telemetry, "finish_reason", None)
     shaped: dict[str, object] = {
         "model": response.model,
         "message": {"role": "assistant", "content": response.text},
         "done": True,
     }
-    if finish_reason in {"length", "stop"}:
-        shaped["done_reason"] = finish_reason
+    if isinstance(reason, str) and reason.strip().lower() in {
+        "stop", "length", "content_filter", "tool_calls", "function_call",
+    }:
+        shaped["done_reason"] = reason.strip().lower()
     if response.tokens_in is not None:
         shaped["prompt_eval_count"] = response.tokens_in
     if response.tokens_out is not None:

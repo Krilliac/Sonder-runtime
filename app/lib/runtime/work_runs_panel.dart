@@ -1,14 +1,18 @@
 /// Work runs on Runtime (plan P1-4): "is my long job still going", from the
 /// phone. Lists `GET /v1/work-runs` with status, age and budget used, and a
-/// Stop per running row behind a confirmation.
+/// Stop per running row behind a confirmation. Each row carries its own
+/// progress and outcome; nothing else on the page waits for it.
 library;
 
 import 'package:flutter/material.dart';
 
 import '../api.dart';
-import '../theme.dart';
+import '../ui/kit.dart';
 import 'overview.dart';
+import 'runtime_rows.dart';
 import 'status_word.dart';
+
+export 'runtime_rows.dart' show RuntimePanelNote;
 
 StatusKind workRunStatus(WorkRun run) => switch (run.status) {
       'running' => StatusKind.running,
@@ -43,6 +47,19 @@ String workRunDetail(WorkRun run, DateTime now) {
       : '${compactDuration(now.difference(settled))} ago';
 }
 
+/// `1 running · 3 recent`, or null before the first read.
+String? workRunsSummary(List<WorkRun>? runs) {
+  if (runs == null) return null;
+  if (runs.isEmpty) return 'None yet';
+  final running = runs.where((run) => run.isRunning).length;
+  return [
+    if (running > 0) '$running running',
+    '${runs.length} recent',
+  ].join(' · ');
+}
+
+/// The Work runs card: one row per run, Stop behind a confirmation, and the
+/// result of a Stop under its own row.
 class WorkRunsPanel extends StatelessWidget {
   final List<WorkRun>? runs;
   final Object? error;
@@ -53,6 +70,14 @@ class WorkRunsPanel extends StatelessWidget {
   /// Called after the person confirmed. The screen reloads afterwards.
   final Future<void> Function(WorkRun run)? onStop;
 
+  /// Runs whose Stop request is in flight: their button reads "Stopping…"
+  /// and takes no second press.
+  final Set<String> stopping;
+
+  /// The outcome of the last Stop per run id.
+  final Map<String, ActionOutcome> outcomes;
+  final ValueChanged<String>? onDismissOutcome;
+
   const WorkRunsPanel({
     super.key,
     required this.runs,
@@ -61,136 +86,117 @@ class WorkRunsPanel extends StatelessWidget {
     this.now,
     this.onRefresh,
     this.onStop,
+    this.stopping = const {},
+    this.outcomes = const {},
+    this.onDismissOutcome,
   });
 
-  Future<void> _confirmStop(BuildContext context, WorkRun run) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text('Stop work run ${run.shortId}?'),
-        content: const Text(
-          'File changes, programs and destructive tools stop at their next '
-          'step. A model step already running finishes first.',
+  Future<bool?> _confirmStop(BuildContext context, WorkRun run) =>
+      showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text('Stop work run ${run.shortId}?'),
+          content: const Text(
+            'File changes, programs and destructive tools stop at their next '
+            'step. A model step already running finishes first.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Keep running'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Stop run'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Keep running'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Stop run'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed == true) await onStop?.call(run);
-  }
+      );
 
   @override
   Widget build(BuildContext context) {
-    final tokens = SonderTokens.of(context);
     final clock = now ?? DateTime.now();
     final failure = error;
+    final rows = <Widget>[];
     if (failure is SonderException && failure.httpStatus == 403) {
-      return const RuntimePanelNote(
+      rows.add(const RuntimePanelNote(
         status: StatusKind.skipped,
         word: 'n/a',
         text: 'Work runs need a developer or admin account.',
-      );
-    }
-    final children = <Widget>[];
-    if (failure != null) {
-      children.add(RuntimePanelNote(
-        status: StatusKind.fail,
-        text: failure is SonderException
-            ? failure.message
-            : 'Could not load work runs.',
-        action: onRefresh == null
-            ? null
-            : TextButton(onPressed: onRefresh, child: const Text('Retry')),
       ));
+    } else {
+      if (failure != null) {
+        rows.add(RuntimePanelNote(
+          status: StatusKind.fail,
+          text: failure is SonderException
+              ? failure.message
+              : 'Could not load work runs.',
+          action: onRefresh == null
+              ? null
+              : TextButton(onPressed: onRefresh, child: const Text('Retry')),
+        ));
+      }
+      final list = runs;
+      if (list == null && failure == null) {
+        rows.add(loading
+            ? const SkeletonRows(rows: 2, semanticLabel: 'Loading work runs')
+            : const RuntimePanelNote(
+                status: StatusKind.unknown, text: 'Not loaded yet.'));
+      } else if (list != null && list.isEmpty) {
+        rows.add(const RuntimeEmptyRow('No work runs',
+            icon: Icons.pending_actions_outlined));
+      }
+      for (final run in list ?? const <WorkRun>[]) {
+        rows.add(_row(context, run, clock));
+      }
     }
-    final list = runs;
-    if (list == null && failure == null) {
-      children.add(RuntimePanelNote(
-          status: StatusKind.unknown,
-          word: loading ? 'checking' : null,
-          text: loading ? 'Loading work runs…' : 'Not loaded yet.'));
-    } else if (list != null && list.isEmpty) {
-      children.add(const RuntimePanelNote(
-          status: StatusKind.note, text: 'No work runs'));
-    }
-    for (final run in list ?? const <WorkRun>[]) {
-      final detail = workRunDetail(run, clock);
-      children.add(Semantics(
-        container: true,
-        label: 'Work run ${run.id}, ${workRunWord(run)}',
-        child: Padding(
-          key: Key('work-run-${run.id}'),
-          padding: const EdgeInsets.symmetric(vertical: 2),
-          child: Row(children: [
-            RuntimeStatusWord(workRunStatus(run),
-                word: workRunWord(run), width: 116),
-            Expanded(
-              child: Text.rich(
-                TextSpan(children: [
-                  TextSpan(text: run.shortId, style: tokens.mono(12.5)),
-                  if (detail.isNotEmpty)
-                    TextSpan(
-                        text: '  $detail',
-                        style: tokens.mono(12, color: tokens.text2)),
-                ]),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            if (run.isRunning && !run.cancelRequested && onStop != null)
-              TextButton(
-                onPressed: () => _confirmStop(context, run),
-                style: TextButton.styleFrom(minimumSize: const Size(48, 48)),
-                child: const Text('Stop…'),
-              ),
-          ]),
-        ),
-      ));
-    }
-    return Column(
+    return SettingsSection(
       key: const Key('work-runs-panel'),
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: children,
+      title: 'Work runs',
+      description: workRunsSummary(runs),
+      trailing: onRefresh == null
+          ? null
+          : IconButton(
+              tooltip: 'Refresh work runs',
+              onPressed: loading ? null : onRefresh,
+              icon: const Icon(Icons.refresh, size: 18),
+            ),
+      children: rows,
     );
   }
-}
 
-/// A one-line `<glyph> <word>  text` note inside a Runtime detail panel.
-class RuntimePanelNote extends StatelessWidget {
-  final StatusKind status;
-  final String? word;
-  final String text;
-  final Widget? action;
-  const RuntimePanelNote(
-      {super.key,
-      required this.status,
-      required this.text,
-      this.word,
-      this.action});
-
-  @override
-  Widget build(BuildContext context) {
-    final tokens = SonderTokens.of(context);
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6),
-      child: Row(children: [
-        RuntimeStatusWord(status, word: word, width: 116),
-        Expanded(
-            child: Text(text,
-                style: Theme.of(context)
-                    .textTheme
-                    .bodyMedium
-                    ?.copyWith(color: tokens.text2))),
-        if (action != null) action!,
-      ]),
+  Widget _row(BuildContext context, WorkRun run, DateTime clock) {
+    final detail = workRunDetail(run, clock);
+    final outcome = outcomes[run.id];
+    final canStop = run.isRunning && !run.cancelRequested && onStop != null;
+    final busy = stopping.contains(run.id);
+    return RuntimeRow(
+      key: Key('work-run-${run.id}'),
+      kind: workRunStatus(run),
+      word: workRunWord(run),
+      semanticLabel: 'Work run ${run.id}, ${workRunWord(run)}'
+          '${detail.isEmpty ? '' : ', $detail'}',
+      title: RuntimeRowTitle(run.shortId, mono: true, maxLines: 1),
+      subtitle: detail.isEmpty ? null : RuntimeRowDetail(detail),
+      actions: [
+        if (canStop || busy)
+          AsyncActionButton(
+            label: 'Stop…',
+            busyLabel: 'Stopping…',
+            doneLabel: null,
+            style: ActionButtonStyle.text,
+            busy: busy,
+            confirm: () => _confirmStop(context, run),
+            onPressed: () async => onStop?.call(run),
+            onError: (_, __) {},
+          ),
+      ],
+      below: outcome == null
+          ? null
+          : OutcomeView(outcome,
+              onDismiss: onDismissOutcome == null
+                  ? null
+                  : () => onDismissOutcome!(run.id)),
     );
   }
 }

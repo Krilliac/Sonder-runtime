@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Mapping
 
 from sonder_runtime.application.ports.subagents import SubagentBudget, SubagentRequest
 from sonder_runtime.application.ports.worker_registry import (
     WorkerLaunch, WorkerRecord, WorkerRegistry, WorkerStatus,
+    default_scoped_contract,
 )
+from .continuation import _contract_from_metadata
 
 
 def _metadata(request: SubagentRequest) -> dict[str, str]:
@@ -29,10 +32,21 @@ class WorkerRegistryService:
         scope = tuple(filter(None, metadata.get("scope", metadata.get("workspace_read_roots", "")).split("|")))
         tools = tuple(filter(None, metadata.get("allowed_tools", "").split("|")))
         resume_key = metadata.get("resume_key", request.child_id or "")
+        execution_contract = _contract_from_metadata(metadata)
+        if execution_contract.context_policy.value == "unspecified":
+            default_contract = default_scoped_contract(
+                metadata.get("role", metadata.get("worker_role", "worker")), request.prompt,
+                tuple(filter(None, metadata.get("evidence_tags", "").split("|"))),
+            )
+            if default_contract is not None:
+                execution_contract = replace(
+                    execution_contract, context_policy=default_contract.context_policy,
+                    context_inputs=default_contract.context_inputs,
+                )
         return WorkerLaunch(
             worker_id=request.child_id or resume_key,
             parent_id=request.parent_id,
-            role=metadata.get("role", "worker"),
+            role=metadata.get("role", metadata.get("worker_role", "worker")),
             model=metadata.get("model", metadata.get("tier", "unknown")),
             backend=metadata.get("backend", "durable-child"),
             effort=metadata.get("effort", "default"),
@@ -45,6 +59,7 @@ class WorkerRegistryService:
             prompt=request.prompt,
             owner_id=metadata.get("owner_id", ""),
             metadata=tuple(request.metadata),
+            execution_contract=execution_contract,
         )
 
     def admit(self, request: SubagentRequest) -> WorkerRecord:

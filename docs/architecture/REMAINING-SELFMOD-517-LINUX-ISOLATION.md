@@ -574,11 +574,15 @@ passes there.
 4. **Atomic job memory.** Job memory is sampled RSS, not a cgroup v2
    `memory.max`. A burst shorter than the 100 ms sampling interval can
    briefly exceed it. The per-process `RLIMIT_AS` still applies.
-5. **Windows deployment documentation.** The Windows low-integrity baseline
-   gaps recorded in
+5. **Windows deployment and qualification.** The scheduled-task account,
+   credential, path, logging and promotion requirements are documented in
+   [the Windows nightly deployment runbook](../runbooks/nightly-selfmod-windows.md).
+   The Windows low-integrity baseline gaps recorded in
    [SELFMOD-002 low-integrity baseline](evidence/SELFMOD-002-LOW-INTEGRITY-BASELINE-2026-09-23.md)
-   (MSYS2 runtime denial, Job memory limit for the QLoRA stack) and the
-   operator deployment guide for the Windows path are still open.
+   still require qualification on Windows. The QLoRA partition now has a
+   6 GiB process/8 GiB job budget; that implemented budget does not establish
+   a passing current baseline within the 900-second per-gate cap. MSYS2 tests
+   remain unevaluated, and no confidential Windows oracle exists.
 6. **Full-baseline run on Linux.** The nightly parent-scored gate now accepts
    the `linux-uid` attestation (see "Nightly production path"). A dry nightly
    cycle runs end to end under the supervisor against a small real checkout.
@@ -631,6 +635,15 @@ passes there.
      operator calls against the nightly driver on the same run.
    - The item 8 CI job does not run
      `tests/test_selfmod_operator_isolation.py`'s root-only cases.
+10. **Crash-atomic promotion and rollback.** `selfmod.create_backup` verifies
+    a scoped backup bundle before publishing its lifecycle phase, and
+    deployment/rollback hold the process-safe deployment lock. `_atomic_copy`
+    fsyncs and replaces each file individually. This is not a crash-atomic
+    multi-file release switch: interruption between replacements can leave
+    partial installation and an uncertain stage requiring reconciliation.
+    The issue's atomic rollback/promotion acceptance still needs an explicit
+    crash-consistency contract and native qualification before unattended
+    deployment can be called verified.
 
 ## Verification commands
 

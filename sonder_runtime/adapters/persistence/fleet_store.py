@@ -816,6 +816,9 @@ def create_agent(
         stored = conn.execute(
             "SELECT * FROM fleet_agents WHERE id=?", (row["id"],)
         ).fetchone()
+    if not parent_id:
+        from sonder_runtime.application.ports.work_narration import link
+        link("fleet", row["id"])
     return _row_dict(stored)
 
 
@@ -1599,6 +1602,25 @@ def list_agent_messages(
         conn.close()
 
 
+def events_for_agents(agent_ids, limit: int = 80) -> list[dict]:
+    """Bounded retained events for an already-authorized set of exact ids."""
+    identities = sorted({str(value) for value in agent_ids if value})[:201]
+    if not identities:
+        return []
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT event_id, ts AS recorded_ts, stamp AS ts, agent_id, message, "
+            "master_task_digest, delegated_task_digest, objective_ids_json, task_drift "
+            "FROM fleet_events WHERE agent_id IN (%s) ORDER BY event_id DESC LIMIT ?"
+            % ",".join("?" for _ in identities),
+            (*identities, max(1, min(int(limit), 200))),
+        ).fetchall()
+        return [_event_dict(row) for row in reversed(rows)]
+    finally:
+        conn.close()
+
+
 def add_event(agent_id: str, owner_id: str, stamp: str, message: str) -> None:
     with _write_transaction() as conn:
         agent = conn.execute(
@@ -1670,7 +1692,7 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
         ).fetchone()
         events = conn.execute(
             """
-            SELECT stamp AS ts, agent_id, message, master_task_digest,
+            SELECT event_id, ts AS recorded_ts, stamp AS ts, agent_id, message, master_task_digest,
                    delegated_task_digest, objective_ids_json, task_drift
             FROM fleet_events ORDER BY event_id DESC LIMIT 80
             """
@@ -1697,7 +1719,7 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
                     row.get("id"), row.get("stalled_reason"),
                     row.get("activity", ""), float(row.get("updated_ts") or 0),
                 )
-        return {
+        data = {
             "active_agents": int(totals["active_agents"] or 0),
             "running_agents": int(totals["running_agents"] or 0),
             "queued_agents": int(totals["queued_agents"] or 0),
@@ -1727,6 +1749,9 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
             "reconcile": reconcile,
             "database": database_path(),
         }
+        from sonder_runtime.domain.work_narration import progress
+        data["progress"] = progress(fleet=data)
+        return data
     finally:
         conn.close()
 

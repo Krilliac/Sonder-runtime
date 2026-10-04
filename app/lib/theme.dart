@@ -80,6 +80,38 @@ abstract final class SonderTheme {
       splashFactory: InkSparkle.splashFactory,
       visualDensity: VisualDensity.standard,
       extensions: <ThemeExtension<dynamic>>[tokens],
+      pageTransitionsTheme: const PageTransitionsTheme(builders: {
+        TargetPlatform.android: SonderPageTransitionsBuilder(),
+        TargetPlatform.iOS: SonderPageTransitionsBuilder(),
+        TargetPlatform.macOS: SonderPageTransitionsBuilder(),
+        TargetPlatform.windows: SonderPageTransitionsBuilder(),
+        TargetPlatform.linux: SonderPageTransitionsBuilder(),
+        TargetPlatform.fuchsia: SonderPageTransitionsBuilder(),
+      }),
+      hoverColor: tokens.raised.withValues(alpha: dark ? 0.7 : 0.9),
+      focusColor: tokens.accentDim,
+      segmentedButtonTheme: SegmentedButtonThemeData(
+        style: SegmentedButton.styleFrom(
+          foregroundColor: tokens.text2,
+          selectedForegroundColor: tokens.text,
+          selectedBackgroundColor: tokens.accentDim,
+          side: BorderSide(color: tokens.hairlineStrong),
+          textStyle: text.labelLarge,
+          minimumSize: const Size(0, 36),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(SonderRadius.row),
+          ),
+        ),
+      ),
+      sliderTheme: SliderThemeData(
+        activeTrackColor: tokens.accent,
+        inactiveTrackColor: tokens.hairlineStrong,
+        thumbColor: tokens.accent,
+        overlayColor: tokens.accentDim,
+        valueIndicatorColor: tokens.raised,
+        valueIndicatorTextStyle: text.labelLarge?.copyWith(color: tokens.text),
+        trackHeight: 4,
+      ),
       appBarTheme: AppBarTheme(
         backgroundColor: tokens.canvas,
         foregroundColor: tokens.text,
@@ -312,12 +344,104 @@ abstract final class SonderTheme {
   }
 }
 
-/// The corner radii, by role: controls 4, rows and code 8, sheets 12, pills.
+/// The corner radii, by role: controls 4, rows and code 8, sheets and cards
+/// 12, pills.
 abstract final class SonderRadius {
   static const control = 4.0;
   static const row = 8.0;
   static const sheet = 12.0;
+  static const card = 12.0;
   static const pill = 999.0;
+}
+
+/// The spacing scale: a 4-point grid. Layout gaps and padding come from here
+/// rather than one-off literals (7, 9, 11...), so rhythm stays consistent.
+abstract final class SonderSpace {
+  static const xxs = 2.0;
+  static const xs = 4.0;
+  static const sm = 8.0;
+  static const md = 12.0;
+  static const lg = 16.0;
+  static const xl = 20.0;
+  static const xxl = 24.0;
+  static const x3 = 32.0;
+  static const x4 = 40.0;
+}
+
+/// Motion: short, purposeful, and never decorative. Entrances decelerate,
+/// exits accelerate, state changes use the standard curve (Material 3 easing).
+///
+/// Durations pass through [SonderMotion.of], which returns zero when the
+/// platform asks for reduced motion. Only decoration is removed: progress,
+/// timers and live status keep updating either way.
+abstract final class SonderMotion {
+  /// Hover, press, small state flips.
+  static const fast = Duration(milliseconds: 150);
+
+  /// Panels, category switches, expanding sections.
+  static const medium = Duration(milliseconds: 220);
+
+  /// Page transitions and larger layout moves.
+  static const slow = Duration(milliseconds: 320);
+
+  /// Material 3 emphasized decelerate: things arriving.
+  static const enter = Cubic(0.05, 0.7, 0.1, 1.0);
+
+  /// Material 3 emphasized accelerate: things leaving.
+  static const exit = Cubic(0.3, 0.0, 0.8, 0.15);
+
+  /// Material 3 standard: things changing in place.
+  static const standard = Cubic(0.2, 0.0, 0.0, 1.0);
+
+  /// [duration], or zero when the platform requests reduced motion.
+  static Duration of(BuildContext context, Duration duration) =>
+      MediaQuery.maybeDisableAnimationsOf(context) == true
+          ? Duration.zero
+          : duration;
+}
+
+/// Route transition shared by every pushed page: a short fade-through with a
+/// slight scale, so moving between surfaces feels continuous instead of a
+/// hard cut (Settings used to have none) or a full-screen slide.
+class SonderPageTransitionsBuilder extends PageTransitionsBuilder {
+  const SonderPageTransitionsBuilder();
+
+  @override
+  Duration get transitionDuration => SonderMotion.slow;
+
+  @override
+  Duration get reverseTransitionDuration => SonderMotion.medium;
+
+  @override
+  Widget buildTransitions<T>(
+    PageRoute<T> route,
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) {
+    if (MediaQuery.maybeDisableAnimationsOf(context) == true) return child;
+    final enter = CurvedAnimation(
+      parent: animation,
+      curve: SonderMotion.enter,
+      reverseCurve: SonderMotion.exit,
+    );
+    // The page underneath fades back a little while the new one arrives.
+    final under = CurvedAnimation(
+      parent: secondaryAnimation,
+      curve: SonderMotion.standard,
+    );
+    return FadeTransition(
+      opacity: Tween<double>(begin: 1, end: 0.6).animate(under),
+      child: FadeTransition(
+        opacity: enter,
+        child: ScaleTransition(
+          scale: Tween<double>(begin: 0.985, end: 1).animate(enter),
+          child: child,
+        ),
+      ),
+    );
+  }
 }
 
 /// The colour tokens of one theme. Read them with `SonderTokens.of(context)`.

@@ -17,10 +17,10 @@ possible evidence the loop was finding things and dropping them on the floor.
 This module closes that gap: it drives one full lifecycle per night.
 
 WHAT IT WILL NOT DO
-  - It never bypasses the configured mode. Under `propose` (the default) a
-    candidate stops at `reviewing` and waits for a human `/selfmod approve`.
-    Only `auto-low-risk` lets this stage approve and deploy unattended, and
-    that is the operator's switch to flip, not this script's.
+  - It never bypasses the configured mode. The default branch path commits
+    passing candidates locally for human review. The non-branch path stops
+    at review even under `auto-low-risk`: the medium-integrity regression
+    partition is always unevaluated and prevents unattended deployment.
   - It refuses to start on a dirty tree. selfmod's own deploy path declines to
     commit when the run began with uncommitted changes, so a run started dirty
     could only ever produce an uncommitted edit -- worse than nothing, because
@@ -1482,9 +1482,9 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0,
 
     branch=True commits a verified candidate to its own selfmod/<run-id>
     branch from inside the worktree and never writes the main tree; that
-    is the continuous-run mode. branch=False follows the configured
-    selfmod mode instead, which under auto-low-risk deploys into the
-    working tree.
+    is the continuous-run mode. branch=False leaves the candidate ready for
+    human review. The unevaluated medium-integrity partition blocks automatic
+    approval and deployment under every configured mode.
 
     ``stages`` is the selfmod stage journal (a ``GuardedLegacySelfmodService``
     with a composed effect binding).  When omitted the production graph's

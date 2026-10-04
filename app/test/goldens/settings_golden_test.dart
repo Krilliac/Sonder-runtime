@@ -44,6 +44,9 @@ void main() {
             settings: Settings(serverUrl: 'http://mypc.local:11435'),
             onChanged: (_) {},
             connection: const _RefusingConnection(),
+            // The connect card lives on the Connection page; a deep link
+            // opens it on a phone too (otherwise the list comes first).
+            initialCategory: SettingsCategory.connection,
           ),
         ));
         await tester.pumpAndSettle();

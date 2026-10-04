@@ -1385,6 +1385,9 @@ def test_fanout_synthesis_uses_nested_tag_capability_without_show(monkeypatch):
 
 
 def test_fanout_synthesis_source_bound_fails_without_dropping_answers(monkeypatch):
+    from sonder_runtime.application.artifacts.fanin import encode_readiness
+    from sonder_runtime.application.artifacts.readiness import ArtifactReadiness
+
     run = {"id": "fan-test", "status": "completed"}
     rows = [
         {"model": "a", "status": "answered", "answer": "one", "answer_truncation_known": 1,
@@ -1392,6 +1395,10 @@ def test_fanout_synthesis_source_bound_fails_without_dropping_answers(monkeypatc
         {"model": "b", "status": "answered", "answer": "two", "answer_truncation_known": 1,
          "answer_truncated": 0, "elapsed_ms": 1, "answer_chars": 3, "thinking_chars": 0, "done_reason": "stop"},
     ]
+    for row in rows:
+        row["readiness_json"] = encode_readiness(ArtifactReadiness.from_content(
+            row["model"], run["id"], row["answer"],
+        ))
     monkeypatch.setattr(server.fanout_store, "list_results", lambda _run_id: rows)
     monkeypatch.setattr(server.fanout_store, "execution_prompt_ciphertext", lambda _run_id: "sealed")
     monkeypatch.setattr(server.fanout_prompt_vault, "decrypt_prompt", lambda _sealed: "question")

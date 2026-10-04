@@ -257,6 +257,32 @@ autopilot) runs as a **work run** with id `wr-…`:
 - A run left `running` by a stopped process is reported `interrupted` after
   restart.
 
+## Agent delegation and background status
+
+`POST /v1/agent-lanes/delegate` accepts `task`, optional `project`,
+`parent_session_id`, and `command_id`, plus the existing bounded lane options.
+It returns the usual lane receipt with additive `delegation` metadata containing
+`lane_id`, `folder`, and an `open` target for the Agents surface. A stable command
+ID replays the same request; changing its task or project is rejected. The chat
+spelling `/delegate <task>` puts the navigation data in `sonder_receipt.agent_lane`.
+Creation folders require host administrator authorization, and all lane execution
+retains the existing principal/grant/permission checks.
+
+`GET /v1/background-work?limit=100` is an authenticated read projection with
+`groups.lanes`, `groups.fleets`, and `groups.autopilot`, plus truncation flags.
+Fleet rows contain bounded child previews and complete child status counts.
+The limit counts masters, so a fleet's children cannot hide its master. Legacy
+fleets are administrator-visible; autopilot uses the same account owner namespace
+as its existing status/cancel commands. Local operator requests include locally
+started runs. This projection does not start work or reconcile process leases.
+
+`GET /v1/agent-lanes?order=newest` adds descending creation-order pagination.
+The default order and cursor behavior remain unchanged for existing clients.
+Cancel remains `POST /v1/agent-lanes/<id>/cancel`, `/agentcancel <id>`
+(`master_cancel`), or `/autopilot cancel <id>`; the aggregate has no mutation route.
+Orchestration choices are trusted data in `sonder_receipt.orchestration.choices`,
+available in both JSON replies and the final SSE receipt.
+
 ## One-shot approvals over HTTP
 
 When the permission gate refuses a file change, host program or destructive

@@ -3,7 +3,12 @@ class AgentLane {
   final String id, sessionId, parentSessionId, title, task, status, attemptId;
   final String? parentLaneId;
   final String workspaceRoot, tier, error;
-  final int revision, unreadReports;
+  final int revision, unreadReports, createdOrder;
+
+  /// When the server last changed this lane, only if it said so. Lane
+  /// persistence exposes an insertion order, not a timestamp, so this is
+  /// usually null and the list then shows no time at all.
+  final DateTime? updatedAt;
   AgentLane.fromJson(Map<String, dynamic> j)
       : id = j['id']?.toString() ?? '',
         sessionId = j['session_id']?.toString() ?? '',
@@ -17,7 +22,9 @@ class AgentLane {
         tier = j['tier']?.toString() ?? '',
         error = j['error']?.toString() ?? '',
         revision = (j['revision'] as num?)?.toInt() ?? 0,
-        unreadReports = (j['unread_reports'] as num?)?.toInt() ?? 0;
+        createdOrder = (j['created_order'] as num?)?.toInt() ?? 0,
+        unreadReports = (j['unread_reports'] as num?)?.toInt() ?? 0,
+        updatedAt = serverTime(j['updated_at'] ?? j['updated_ts']);
   String get displayTitle =>
       title.isEmpty ? (task.isEmpty ? 'Agent conversation' : task) : title;
   String get statusLabel => switch (status) {
@@ -90,13 +97,30 @@ class AgentEvent {
   final int sequence;
   final String id, type;
   final Map<String, dynamic> payload;
+
+  /// When the server recorded the event, only if the response carries it.
+  final DateTime? occurredAt;
   AgentEvent.fromJson(Map<String, dynamic> j)
       : sequence = (j['sequence'] as num?)?.toInt() ?? 0,
         id = j['event_id']?.toString() ?? '',
         type = j['event_type']?.toString() ?? '',
         payload = j['payload'] is Map
             ? Map<String, dynamic>.from(j['payload'] as Map)
-            : {};
+            : {},
+        occurredAt = serverTime(j['occurred_at']);
+}
+
+/// A server timestamp: an ISO-8601 string or epoch seconds. Anything else,
+/// including 0, is "not provided" (null); nothing is ever made up.
+DateTime? serverTime(Object? value) {
+  if (value is num) {
+    return value > 0
+        ? DateTime.fromMillisecondsSinceEpoch((value * 1000).round(),
+            isUtc: true)
+        : null;
+  }
+  if (value is String && value.isNotEmpty) return DateTime.tryParse(value);
+  return null;
 }
 
 class AgentSnapshot {

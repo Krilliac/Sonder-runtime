@@ -2,12 +2,15 @@ import importlib
 import sys
 import threading
 import time
+from dataclasses import replace
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
 
 import master_orchestrator
 import server
+from sonder_runtime.application.artifacts.master_fanin import validate_master_slots_for_run
 from sonder_runtime.platform.runtime_threads import Thread
 
 
@@ -225,6 +228,144 @@ def test_run_delegated_tracks_children_and_audit():
     assert "  task: compare options\nmerged" in formatted
 
 
+def test_delegated_valid_readiness_preserves_child_bytes_in_audit_input(monkeypatch):
+    prompts = []
+
+    def audit(prompt):
+        prompts.append(prompt)
+        return "merged"
+
+    result = master_orchestrator.run_delegated(
+        "compare options", worker_fn=lambda prompt: "byte exact child",
+        audit_fn=audit, agents=1,
+    )
+    master_orchestrator.run_delegated(
+        "compare options", worker_fn=lambda prompt: "byte exact child",
+        audit_fn=audit, agents=1,
+    )
+
+    assert result["output"] == "merged"
+    assert "byte exact child" in prompts[0]
+    assert "ARTIFACT REJECTED" not in prompts[0]
+    # Child IDs are run-local; every other synthesis byte must be identical.
+    strip_headers = lambda value: "\n".join(
+        line for line in value.splitlines() if not line.startswith("--- agent-")
+    )
+    assert strip_headers(prompts[0]) == strip_headers(prompts[1])
+
+
+def _partial_readiness_worker(original, calls):
+    def fake_worker(*args, **kwargs):
+        calls.append(args[0])
+        if len(calls) > 1:
+            return original(*args, **kwargs)
+        agent_id, _prompt = args[:2]
+        run_id = args[8]
+        evidence = master_orchestrator.ArtifactReadiness.from_content(
+            agent_id, run_id, "truncated output",
+            source_revision="0" * 64,
+        )
+        return master_orchestrator.ReadyWorkerOutput(
+            output="truncated output",
+            readiness=replace(evidence, completion_marker="partial"),
+        )
+    return fake_worker
+
+
+def test_delegated_invalid_readiness_is_reported_and_withheld(monkeypatch):
+    prompts = []
+    calls = []
+    monkeypatch.setattr(master_orchestrator, "parallel_worker_slots", lambda _requested: 1)
+    monkeypatch.setattr(
+        master_orchestrator, "_run_worker",
+        _partial_readiness_worker(master_orchestrator._run_worker, calls),
+    )
+    result = master_orchestrator.run_delegated(
+        "compare options", worker_fn=lambda prompt: "complete sibling output",
+        audit_fn=lambda prompt: prompts.append(prompt) or "merged", agents=2,
+    )
+
+    assert result["output"] == "merged"
+    assert "ARTIFACT REJECTED" in prompts[0]
+    assert "output withheld from synthesis" in prompts[0]
+    assert "truncated output" not in prompts[0]
+    assert "complete sibling output" in prompts[0]
+
+
+def test_delegated_fanin_with_no_validated_child_refuses_synthesis(monkeypatch):
+    prompts = []
+    monkeypatch.setattr(
+        master_orchestrator, "_run_worker",
+        _partial_readiness_worker(master_orchestrator._run_worker, []),
+    )
+    result = master_orchestrator.run_delegated(
+        "compare options", worker_fn=lambda prompt: "unused",
+        audit_fn=lambda prompt: prompts.append(prompt) or "merged", agents=1,
+    )
+
+    assert prompts == []
+    assert result["output"].startswith("ERROR: artifact readiness barrier rejected fan-in")
+
+
+def test_delegated_failed_worker_is_omitted_from_synthesis_as_before(monkeypatch):
+    """A failed child publishes no output; the audit prompt matches pre-barrier behaviour."""
+    original = master_orchestrator._run_worker
+    prompts = []
+    calls = []
+    monkeypatch.setattr(master_orchestrator, "parallel_worker_slots", lambda _requested: 1)
+
+    def incomplete_worker(*args, **kwargs):
+        calls.append(args[0])
+        if len(calls) == 2:
+            return master_orchestrator._WORKER_FAILED  # no producer publication
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(master_orchestrator, "_run_worker", incomplete_worker)
+    result = master_orchestrator.run_delegated(
+        "compare options", worker_fn=lambda _prompt: "complete worker output",
+        audit_fn=lambda prompt: prompts.append(prompt) or "merged", agents=2,
+    )
+    assert result["output"] == "merged"
+    assert "complete worker output" in prompts[0]
+    assert "--- %s ---" % calls[0] in prompts[0]
+    assert "--- %s ---" % calls[1] not in prompts[0]
+    assert "ARTIFACT REJECTED" not in prompts[0]
+
+
+def test_master_fanin_rejects_tampered_receipt_against_trusted_host_value():
+    artifact = master_orchestrator.ArtifactReadiness.from_content(
+        "worker", "run", "answer", source_revision="0" * 64,
+        verifier_receipt="2" * 64,
+    )
+    errors = validate_master_slots_for_run(
+        run_id="run", expected_producers=("worker",),
+        readiness_by_producer={"worker": artifact},
+        content_by_producer={"worker": "answer"},
+        source_revisions={"worker": "0" * 64},
+        require_verifier_receipt={"worker": True},
+        expected_verifier_receipts={"worker": "1" * 64},
+        max_age=timedelta(hours=1),
+    )
+    assert "worker" in errors
+
+
+def test_master_fanin_rejects_configured_verifier_without_independent_receipt():
+    artifact = master_orchestrator.ArtifactReadiness.from_content(
+        "worker", "run", "answer", source_revision="0" * 64,
+        verifier_receipt="1" * 64,
+    )
+    errors = validate_master_slots_for_run(
+        run_id="run", expected_producers=("worker",),
+        readiness_by_producer={"worker": artifact},
+        content_by_producer={"worker": "answer"},
+        source_revisions={"worker": "0" * 64},
+        require_verifier_receipt={"worker": True},
+        expected_verifier_receipts={},
+        max_age=timedelta(hours=1),
+    )
+    assert "worker" in errors
+
+
 def test_status_labels_prior_result_while_an_unrelated_fleet_is_active():
     completed = master_orchestrator.run_inline(
         "Summarize the previous Spark font audit.",
@@ -354,6 +495,33 @@ def test_repository_fleet_propagates_exact_project_and_scopes_aggregation(
     assert "This is repository work, not greenfield design" in audit_prompts[0]
     assert result["output"].startswith("=== HOST AGGREGATION SCOPE ===")
     assert "project=%s" % expected in result["output"]
+
+
+def test_repository_aggregation_header_lists_only_accepted_children(monkeypatch, tmp_path):
+    monkeypatch.setattr(master_orchestrator, "parallel_worker_slots", lambda count: 1)
+    calls = []
+    monkeypatch.setattr(
+        master_orchestrator, "_run_worker",
+        _partial_readiness_worker(master_orchestrator._run_worker, calls),
+    )
+
+    def worker(_prompt, project):
+        return master_orchestrator.repository_worker_result(
+            _repository_receipt(project), project,
+        )
+
+    result = master_orchestrator.run_delegated(
+        "Audit current source files.",
+        worker_fn=worker,
+        audit_fn=lambda prompt: "scoped merge",
+        agents=2,
+        project=str(tmp_path),
+    )
+
+    header = result["output"].split("\n\n", 1)[0]
+    assert header.startswith("=== HOST AGGREGATION SCOPE ===")
+    assert "children=%s" % calls[1] in header.splitlines()
+    assert calls[0] not in header
 
 
 def test_repository_fleet_rejects_scope_receipt_from_another_project(tmp_path):
