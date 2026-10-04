@@ -9,7 +9,8 @@ terminal outcome; an exception leaves the intent explicitly uncertain.
 
 The SQLite journal is append-oriented. Repeating an identical intent returns
 its original sequence to the journal caller, while the live tool gateway
-refuses that replay before invoking the tool. Any change to the full admitted
+consumes an exactly proven retained terminal output or refuses the replay
+before invoking the tool. Any change to the full admitted
 identity conflicts. Terminal outcomes require the admitted worker and epoch,
 cannot be replaced, and a receipt arriving after restart recovery has marked an
 intent uncertain is refused as a late receipt. Recovery returns a bounded

@@ -2,14 +2,24 @@
 
 ## Status
 
-Implemented, **not verified** as a SELFMOD-002 or SELFMOD-003 requirement.
-This slice adds an OS-enforced Linux boundary for unattended self-modification
-candidate checks and an evaluator-held independent oracle that grades
-candidates against expected values the candidate uid cannot read. It does not
-close #517, and no master-spec checkbox changes. The former
-`_UNATTENDED_ORACLE_INDEPENDENT = False` switch in `selfmod.py` is replaced by
-a per-run check of an oracle receipt plus a fixed floor of unattended gates; see "When automatic promotion may
-be enabled" below. The nightly driver still never promotes unattended.
+The original issue #517 isolation and rollback-point contract is implemented
+for the supported Linux uid supervisor. Hosted qualification on integration
+commit `ee428fc2` passed **48 tests with zero skips**, including independent
+oracle advancement and automatic host-approval gating:
+[Linux isolation job](https://github.com/Krilliac/Sonder-runtime/actions/runs/37189810118/job/111399458798).
+Final integration CI remains the release gate.
+
+The evaluator holds expected values outside the candidate uid's read authority.
+A verified, sealed backup bundle is published before candidate evaluation can
+start. Automatic approval requires the independent oracle receipt and the
+fixed gate floor. Operators must provision private cases and a dedicated uid;
+missing configuration blocks unattended promotion. Windows independent
+promotion is unsupported and its scheduled-task deployment requirements are
+[documented](../runbooks/nightly-selfmod-windows.md). The nightly driver still
+blocks unattended promotion because `regression_medium` is not evaluated.
+The limits below describe the supported operating envelope and future work;
+they do not claim universal host support or crash-atomic multi-file deployment.
+No master-spec checkbox changes.
 
 ## What exists
 
@@ -509,7 +519,7 @@ passes there.
     receipt`. The receipt with only `syntax` and the grades stops with
     `unattended gates not passed: held_out, regression, regression_heavy`.
 
-## What remains (do not claim #517 closed)
+## Operating limits and further qualification
 
 1. **Independent oracle: remaining limits.** The oracle described above is
    wired. What it does not cover:
@@ -604,14 +614,12 @@ passes there.
    it can reach. A full allow-list would have to cover every syscall used by
    the Python test stack under evaluation, so it is not a small change and
    is not attempted here.
-8. **CI qualification (wired; hosted run pending).** The
-   `linux-selfmod-isolation` job in `.github/workflows/ci.yml` runs both root
-   suites under `sudo` and refuses skips, and the required `tests` context
-   depends on it. It has not yet been observed passing on a GitHub-hosted
-   runner. Until it has, the evidence above is root-container evidence only.
-   The job assumes that the runner's `/tmp` honours setuid (the canary's
-   control run fails loudly if it does not) and that the toolcache
-   interpreter can be read by an arbitrary uid.
+8. **CI qualification.** The `linux-selfmod-isolation` job in
+   `.github/workflows/ci.yml` runs both root suites under `sudo`, refuses skips,
+   and is a dependency of the required `tests` context. The hosted run linked
+   above passed all 48 cases on the integrated source. The job assumes that
+   the runner's `/tmp` honours setuid and that the toolcache interpreter is
+   readable by an arbitrary uid; its canaries check these prerequisites.
 9. **Operator-driven selfmod: residual limits.** The operator path now
    selects isolation and uses the stage journal (see "Operator-driven path").
    These limits remain:
