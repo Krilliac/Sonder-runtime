@@ -41,7 +41,7 @@ from sonder_runtime.application.selfmod.independent_oracle import (
     ledger_output as oracle_ledger_output,
     payload_nonce,
 )
-from sonder_runtime.application.selfmod.stage_refusal import SelfmodStageNotApplied
+from sonder_runtime.application.selfmod.stage_refusal import SelfmodStageNotApplied, require_atomic_checkout_promotion
 
 
 MODES = ("observe", "propose", "auto-low-risk")
@@ -2066,11 +2066,10 @@ def _digest_mismatches(workspace: Path, changed_files, expected_digests) -> list
 
 
 def deploy(run_id, *, health_command=None, commit=True, expected_digests=None):
-    """Install an approved candidate.
+    """Install an approved single-file candidate.
 
-    Promotion is bound to the bytes that were tested: the tested-bytes
-    record written by begin_testing() is required, and the SHA-256 of every
-    changed file is re-checked immediately before any copy and again on the
+    The tested-bytes record from begin_testing() is required, and every
+    changed file's SHA-256 is checked before copying and again on the
     installed bytes. ``expected_digests`` (optional) must equal that record.
     This applies to every caller, including a human approval deployed later.
     """
@@ -2089,6 +2088,7 @@ def deploy(run_id, *, health_command=None, commit=True, expected_digests=None):
             if not ok:
                 raise SelfmodStageNotApplied(conflict)
             diff = inspect_diff(run_id)
+            require_atomic_checkout_promotion(diff["changed_files"])
             _renew_deployment_lock(deployment_owner)
             if set(diff["changed_files"]) - set(run["files"]):
                 raise SelfmodStageNotApplied("candidate diff no longer matches approved scope")
