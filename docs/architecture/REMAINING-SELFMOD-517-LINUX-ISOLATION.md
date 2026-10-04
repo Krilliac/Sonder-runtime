@@ -646,13 +646,18 @@ passes there.
 10. **Deployment crash-consistency limit.** `selfmod.create_backup` verifies
     a scoped backup bundle before publishing its lifecycle phase, and
     deployment/rollback hold the process-safe deployment lock. `_atomic_copy`
-    fsyncs and replaces each file individually. This is not a crash-atomic
-    multi-file release switch: interruption between replacements can leave
-    partial installation and an uncertain stage requiring reconciliation.
+    fsyncs and replaces the supported single changed file atomically.
+    Checkout deployment now refuses an empty or multi-file diff before live
+    writes, including for maintenance and human-approved runs. A crash after
+    the file replacement can still leave metadata or its stage receipt
+    uncertain and require reconciliation. Coupled multi-file changes need the
+    managed staged release/pointer workflow.
     The complete verified backup is sealed before `backed_up` is published,
     and candidate execution requires that phase. This establishes #517's
-    atomic rollback point. A crash-atomic multi-file release switch is a
-    separate operational improvement, not an additional #517 criterion.
+    atomic rollback point. Original #510 separately requires atomic deployment;
+    its [supported promotion boundary](evidence/ISSUE-510-ATOMIC-PROMOTION-2026-10-04.md)
+    qualifies single-file checkout deployment and explicitly refuses unsupported
+    multi-file promotion.
 
 ## Verification commands
 
