@@ -119,6 +119,8 @@ DISCOVERY_TIMEOUT_SECONDS = 20.0
 MODELS_BODY_LIMIT = 16 * 1024 * 1024
 ACCOUNT_BODY_LIMIT = 65_536
 _STREAM_LINE_LIMIT = 1024 * 1024
+_STREAM_BUFFER_CHUNKS = 64
+_STREAM_POLL_SECONDS = 0.025
 MAX_COOLDOWN_SECONDS = 600.0
 DETAIL_LIMIT = 240
 
@@ -861,40 +863,46 @@ class OpenRouterGateway(OpenAICompatibleGateway):
         final: dict[str, object] = {}
         finish_reason = None
         headers = {**headers, "Accept": "text/event-stream"}
-        for raw in self._raw_stream(url, payload, headers, timeout):
-            if stop is not None and stop.is_set():
-                raise Cancelled("OpenRouter stream abandoned by its consumer")
-            line = raw.decode("utf-8", "replace").strip() if isinstance(raw, bytes) else str(raw).strip()
-            if not line or line.startswith(":") or not line.startswith("data:"):
-                continue  # blank separators and ": OPENROUTER PROCESSING" keep-alives
-            data = line[5:].strip()
-            if data == "[DONE]":
-                break
-            try:
-                event = json.loads(data)
-            except ValueError as exc:
-                raise DependencyUnavailable("OpenRouter sent a malformed stream event") from exc
-            if not isinstance(event, dict):
-                continue
-            if isinstance(event.get("error"), dict):
-                message, _kind = _error_fields(json.dumps({"error": event["error"]}).encode())
-                raise DependencyUnavailable(
-                    "OpenRouter stream failed mid-response%s"
-                    % (": %s" % self._redacted(message) if message else "")
-                )
-            for key in ("id", "model", "provider", "usage"):
-                if key in event:
-                    final[key] = event[key]
-            choices = event.get("choices")
-            if isinstance(choices, list) and choices and isinstance(choices[0], dict):
-                delta = choices[0].get("delta") if isinstance(choices[0].get("delta"), dict) else {}
-                text = delta.get("content")
-                if isinstance(text, str) and text:
-                    parts.append(text)
-                    if sink is not None:
-                        sink(GenerationChunk(text=text))
-                if isinstance(choices[0].get("finish_reason"), str):
-                    finish_reason = choices[0]["finish_reason"]
+        raw_stream = self._raw_stream(url, payload, headers, timeout)
+        try:
+            for raw in raw_stream:
+                if stop is not None and stop.is_set():
+                    raise Cancelled("OpenRouter stream abandoned by its consumer")
+                line = raw.decode("utf-8", "replace").strip() if isinstance(raw, bytes) else str(raw).strip()
+                if not line or line.startswith(":") or not line.startswith("data:"):
+                    continue  # blank separators and ": OPENROUTER PROCESSING" keep-alives
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    event = json.loads(data)
+                except ValueError as exc:
+                    raise DependencyUnavailable("OpenRouter sent a malformed stream event") from exc
+                if not isinstance(event, dict):
+                    continue
+                if isinstance(event.get("error"), dict):
+                    message, _kind = _error_fields(json.dumps({"error": event["error"]}).encode())
+                    raise DependencyUnavailable(
+                        "OpenRouter stream failed mid-response%s"
+                        % (": %s" % self._redacted(message) if message else "")
+                    )
+                for key in ("id", "model", "provider", "usage"):
+                    if key in event:
+                        final[key] = event[key]
+                choices = event.get("choices")
+                if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+                    delta = choices[0].get("delta") if isinstance(choices[0].get("delta"), dict) else {}
+                    text = delta.get("content")
+                    if isinstance(text, str) and text:
+                        parts.append(text)
+                        if sink is not None:
+                            sink(GenerationChunk(text=text))
+                    if isinstance(choices[0].get("finish_reason"), str):
+                        finish_reason = choices[0]["finish_reason"]
+        finally:
+            close = getattr(raw_stream, "close", None)
+            if callable(close):
+                close()
         final.update({
             "object": "chat.completion",
             "choices": [{"index": 0, "finish_reason": finish_reason,
@@ -911,22 +919,43 @@ class OpenRouterGateway(OpenAICompatibleGateway):
         """
         settings, model, payload = self._prepare(request, context, stream=True)
         timeout = self._call_timeout(settings, context)
-        events: queue.Queue = queue.Queue()
+        events: queue.Queue = queue.Queue(maxsize=_STREAM_BUFFER_CHUNKS)
         stop = threading.Event()
+        finished = threading.Event()
+        terminal: list[tuple[str, object]] = []
+
+        def publish(chunk: GenerationChunk) -> None:
+            # A slow consumer must backpressure SSE reads without trapping a
+            # worker forever when the full iterator is closed or cancelled.
+            while True:
+                if stop.is_set():
+                    raise Cancelled("OpenRouter stream abandoned by its consumer")
+                self._check_liveness(context, phase="during model stream")
+                try:
+                    events.put(chunk, timeout=_STREAM_POLL_SECONDS)
+                    return
+                except queue.Full:
+                    continue
 
         def worker() -> None:
             self._call.settings = settings
-            self._call.sink = lambda chunk: events.put(("chunk", chunk))
+            self._call.sink = publish
             self._call.stop = stop
             try:
                 data = self._post("/v1/chat/completions", payload, self._cfg(settings, model),
                                   timeout, context=context)
-                events.put(("done", data))
+                terminal.append(("done", data))
             except BaseException as exc:  # noqa: BLE001 - re-raised on the consumer thread
-                events.put(("error", exc))
+                terminal.append(("error", exc))
             finally:
                 self._call.sink = None
                 self._call.stop = None
+                # Terminal state must never compete with chunks for capacity.
+                finished.set()
+                try:
+                    events.put_nowait(None)  # wake an idle consumer, never wait
+                except queue.Full:
+                    pass  # the consumer discovers terminal state after drain
 
         started = time.monotonic()
         thread = owned_runtime_thread(
@@ -936,14 +965,29 @@ class OpenRouterGateway(OpenAICompatibleGateway):
         thread.start()
         try:
             while True:
+                self._check_liveness(context, phase="during model stream")
                 try:
-                    kind, value = events.get(timeout=0.25)
+                    chunk = events.get(timeout=0 if finished.is_set() else _STREAM_POLL_SECONDS)
                 except queue.Empty:
-                    self._check_liveness(context, phase="during model stream")
-                    continue
-                if kind == "chunk":
-                    yield value
-                elif kind == "error":
+                    if not finished.is_set():
+                        continue
+                    # A producer can publish between get() timing out and
+                    # signalling completion. Drain that chunk before terminal.
+                    try:
+                        chunk = events.get_nowait()
+                    except queue.Empty:
+                        kind, value = terminal[0]
+                    else:
+                        if chunk is not None:
+                            yield chunk
+                            continue
+                        kind, value = terminal[0]
+                else:
+                    if chunk is not None:
+                        yield chunk
+                        continue
+                    kind, value = terminal[0]
+                if kind == "error":
                     raise value
                 else:
                     response = self._finish(value, request, model, started)
@@ -955,6 +999,10 @@ class OpenRouterGateway(OpenAICompatibleGateway):
                     return
         finally:
             stop.set()
+            # Queue-blocked workers drain promptly. A transport blocked in a
+            # socket read remains subject to its existing per-call timeout;
+            # closing an iterator must not wait that entire timeout itself.
+            thread.join(timeout=0.25)
 
     # -- embed -------------------------------------------------------------
 
