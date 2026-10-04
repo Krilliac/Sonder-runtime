@@ -4,6 +4,7 @@ import threading
 import pytest
 
 from scripts.benchmark_openrouter_batch import benchmark
+from scripts import benchmark_openrouter_batch as harness
 
 
 def test_loopback_stress_preserves_every_ordered_outcome_and_drains():
@@ -26,3 +27,42 @@ def test_unbounded_workload_refused_before_starting_peer(options):
     with pytest.raises(ValueError):
         benchmark(**options)
     assert set(threading.enumerate()) == before
+
+
+def test_peer_listens_with_the_configured_backlog(monkeypatch):
+    backlogs = []
+    activate = harness.ThreadingHTTPServer.server_activate
+
+    def capture_activation(server):
+        backlogs.append(server.request_queue_size)
+        return activate(server)
+
+    monkeypatch.setattr(harness.ThreadingHTTPServer, "server_activate", capture_activation)
+    benchmark(batch_size=2, rounds=1, workers=(2,), delay_ms=0, failure_every=0)
+    assert backlogs == [16]
+
+
+def test_usage_accounts_only_successful_responses(monkeypatch):
+    usage = []
+    monkeypatch.setattr(
+        "sonder_runtime.adapters.inference.openrouter_gateway.record_usage", usage.append,
+    )
+    report = benchmark(batch_size=4, rounds=2, workers=(1, 2), delay_ms=0, failure_every=2)
+    assert len(usage) == sum(row["successes"] for row in report["scenarios"]) == 8
+    assert all(item["cost_usd"] == 0 for item in usage)
+    assert sum(item["prompt_tokens"] for item in usage) == 8
+    assert sum(item["completion_tokens"] for item in usage) == 8
+
+
+def test_peer_and_workers_drain_when_a_completed_batch_fails_validation(monkeypatch):
+    before = set(threading.enumerate())
+    generate = harness.OpenRouterGateway.generate_batch
+
+    def complete_then_fail(*args, **kwargs):
+        generate(*args, **kwargs)
+        raise RuntimeError("ordinary benchmark validation failure")
+
+    monkeypatch.setattr(harness.OpenRouterGateway, "generate_batch", complete_then_fail)
+    with pytest.raises(RuntimeError, match="ordinary benchmark validation failure"):
+        benchmark(batch_size=4, rounds=1, workers=(2,), delay_ms=1, failure_every=2)
+    assert set(threading.enumerate()) <= before
