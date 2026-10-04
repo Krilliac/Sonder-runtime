@@ -446,7 +446,7 @@
       ]
     },
     {
-      "file_count": 402,
+      "file_count": 403,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -613,6 +613,7 @@
         "sonder_runtime/application/memory/replication.py",
         "sonder_runtime/application/memory/retrieval_evaluation.py",
         "sonder_runtime/application/memory/strategy_memory.py",
+        "sonder_runtime/application/model_batching.py",
         "sonder_runtime/application/model_gateway/__init__.py",
         "sonder_runtime/application/model_gateway/escalation.py",
         "sonder_runtime/application/model_gateway/facade.py",
