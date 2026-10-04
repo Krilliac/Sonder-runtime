@@ -11,7 +11,6 @@ import base64
 import binascii
 import hashlib
 import json
-import re
 from dataclasses import replace
 from collections.abc import Mapping
 from typing import Any
@@ -23,6 +22,7 @@ from ..ports.session_repository import (
 )
 from ..ports.telemetry_sink import TelemetryRedactor
 from ...domain.common.events import DomainEvent
+from ...domain.security import redaction as _redaction
 
 
 class QueryExportError(ValueError):
@@ -30,18 +30,10 @@ class QueryExportError(ValueError):
 
 
 class DefaultExportRedactor:
-    """Small fail-closed default redactor owned by the application boundary."""
-
-    _PATTERNS = (
-        re.compile(r"(?i)([\"']?(?:api[-_]?key|auth[-_]?secret|secret|token|password|passwd|credential)[\"']?\s*[:=]\s*)([\"']?[^\s\"',;}{]{4,}[\"']?)"),
-        re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)([^/@\s:]+:[^/@\s]+)@"),
-        re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL),
-    )
+    """Use the canonical credential-shape policy at the export boundary."""
 
     def redact(self, text: str) -> str:
-        for pattern in self._PATTERNS:
-            text = pattern.sub(lambda match: match.group(1) + "[REDACTED]" if match.groups else "[REDACTED]", text)
-        return text
+        return _redaction.redact_text(text)
 
 
 def _positive(name: str, value: int, maximum: int) -> int:
