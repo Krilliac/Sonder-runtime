@@ -173,6 +173,12 @@ class GatewayCallSequence:
         with self._lock:
             return self._halted
 
+    def halt(self, error: BaseException) -> None:
+        """Refuse continuation when a settled call's output cannot be consumed."""
+        with self._lock:
+            if self._halted is None:
+                self._halted = type(error).__name__
+
     def identity(self, ordinal: int, *, tool_name: str, arguments: Mapping[str, Any],
                  effects: Iterable[str]) -> GatewayCallIdentity:
         """The journal identity of a request at ``ordinal``; pure, consumes nothing."""
