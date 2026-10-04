@@ -29,7 +29,7 @@ WORKSPACE_LABEL = "[WORKSPACE]"
 PATTERNS: tuple[re.Pattern, ...] = (
     # A prior pass replaced the complete credential with this single marker.
     # Repeated redaction must not consume the ordinary word following it.
-    re.compile(r"(?i)\b(authorization\s*[:=]\s*)(\[REDACTED\]|\S+(?:\s+\S+)?)"),
+    re.compile(r"(?i)\b(authorization\s*[:=]\s*)(\[REDACTED\](?=\s|$)|\S+(?:\s+\S+)?)"),
     re.compile(r"(?i)\b((?:set-)?cookie\s*:\s*)([^\r\n]+)"),
     re.compile(r"(?i)\b(bearer\s+)([a-z0-9._~+/=-]{8,})"),
     re.compile(
