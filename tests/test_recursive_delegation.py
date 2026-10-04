@@ -85,10 +85,10 @@ def _setup(tmp_path, *, host_root=False, hold_child=None):
     return repo, service, registry, delegation, request, context, root_budget
 
 
-def _proposal(parent_result, workspace, *, budget=None):
+def _proposal(parent_result, workspace, *, budget=None, preset="researcher"):
     budget = budget or SubagentBudget(max_steps=3, max_output_tokens=400, max_wall_seconds=20)
     specialists = tuple(SpecialistRequest(
-        child_id=f"hyp-{index}", preset="researcher", prompt=f"test hypothesis {index}",
+        child_id=f"hyp-{index}", preset=preset, prompt=f"test hypothesis {index}",
         workspace=workspace, budget=budget,
         contract=WorkerExecutionContract(task_scope="compare-answer", speculative_lane=True),
         hypothesis_digest=_digest(f"test hypothesis {index}"), speculative_lane_id=f"lane-{index}",
@@ -176,6 +176,23 @@ def test_proposal_rejects_forged_parent_budget_workspace_and_duplicate_hypothese
             task_scope="compare-answer", speculative_lane=True,
             owned_files=(str(tmp_path / "repo" / "file.py"),)))
     assert registry.get("hyp-1") is None
+
+
+@pytest.mark.parametrize("preset", ["researcher", "reviewer", "build-test"])
+def test_fan_in_accepts_scoped_role_specialists(tmp_path, preset):
+    """Reviewer/verifier presets get a defaulted SCOPED contract at dispatch;
+    fan-in must compare against that effective contract, not the raw proposal."""
+    _, _, registry, delegation, request, context, _ = _setup(tmp_path)
+    parent = _parent(delegation, request, context)
+    proposal = _proposal(parent, request.workspace, preset=preset)
+    dispatched = delegation.dispatch_proposal(request, parent, proposal, context=context)
+    for child in dispatched:
+        delegation.integrate(child.request, child.handle.result(timeout=3))
+    assert delegation.fan_in_hypotheses(proposal, dispatched).winning_child_id is None
+    readiness = _verified_readiness(proposal, dispatched, registry)
+    decision = delegation.fan_in_hypotheses(
+        proposal, dispatched, artifact_readiness=readiness, verify_artifact=_host_verifier)
+    assert set(decision.ranking) == {"hyp-1", "hyp-2"}
 
 
 def test_fan_in_rejects_partial_stale_or_unauthenticated_artifacts(tmp_path):

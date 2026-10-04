@@ -16,6 +16,7 @@ from sonder_runtime.application.agents.lineage_delegation import (
     LineageRecord,
     ResultEvidence,
     delegation_digest,
+    effective_execution_contract,
 )
 from sonder_runtime.application.agents.presets import resolve_preset
 from sonder_runtime.application.agents.recursive_delegation import (
@@ -51,6 +52,7 @@ from sonder_runtime.application.ports.worker_registry import (
 )
 
 logger = logging.getLogger(__name__)
+_RECURSIVE_SPECIALIST_TAGS = ("recursive-specialist",)
 
 
 @runtime_checkable
@@ -144,7 +146,11 @@ class DelegationService:
         """Spawn one child only when its assignment fits the parent context."""
         logger.debug(f"DelegationService.dispatch: delegation_id={request.delegation_id!r}, preset={request.preset.name!r}, role={request.preset.role.value!r}")
         assignment = request.workspace.guard()
-        if request.execution_contract.requested and self._worker_registry is None:
+        if (
+            request.execution_contract.requested
+            and self._worker_registry is None
+            and not getattr(request, "context_policy_defaulted", False)
+        ):
             raise IntegrationError(
                 "execution contract requires a durable worker registry"
             )
@@ -439,7 +445,7 @@ class DelegationService:
             validated.append(DelegationRequest(
                 f"{proposal.proposal_id}:delegation:{sequence}", lineage,
                 specialist.prompt, preset, specialist.workspace,
-                ("recursive-specialist",), specialist.contract, requested,
+                _RECURSIVE_SPECIALIST_TAGS, specialist.contract, requested,
                 specialist.hypothesis_digest, specialist.speculative_lane_id,
             ))
         launched: list[DescendantDispatch] = []
@@ -494,6 +500,18 @@ class DelegationService:
             child_id = launched.request.lineage.child_id
             item = expected[child_id]
             sequence = sequences[child_id]
+            try:
+                item_role = resolve_preset(item.preset).role.value
+            except KeyError as error:
+                raise IntegrationError(
+                    "hypothesis lacks matching persisted lineage or integrated evidence"
+                ) from error
+            # dispatch_proposal built the request through DelegationRequest,
+            # which defaults reviewer/critic/verifier roles to SCOPED context;
+            # compare against that effective contract, not the raw proposal.
+            expected_contract = effective_execution_contract(
+                item.contract, item_role, item.prompt, _RECURSIVE_SPECIALIST_TAGS,
+            )
             record, result = registry.get(child_id), registry.terminal_result(child_id)
             if record is None or result is None:
                 raise IntegrationError("hypothesis worker has no durable terminal result")
@@ -524,13 +542,13 @@ class DelegationService:
                     and getattr(launched.request.resource_budget, field) != getattr(item.budget, field)
                     for field in ("max_children", "max_depth", "max_concurrency")
                 )
-                or launched.request.execution_contract != item.contract
+                or launched.request.execution_contract != expected_contract
                 or launched.request.hypothesis_digest != item.hypothesis_digest
                 or launched.request.speculative_lane_id != item.speculative_lane_id
                 or persisted.get("request_digest") != delegation_digest(launched.request)
                 or persisted.get("hypothesis_digest") != item.hypothesis_digest
                 or persisted.get("speculative_lane_id") != item.speculative_lane_id
-                or record.launch.execution_contract != item.contract
+                or record.launch.execution_contract != expected_contract
                 or proof.get("status") != ("succeeded" if result.status is SubagentStatus.SUCCEEDED else "failed")
                 or proof.get("terminal_status") != result.status.value
                 or proof.get("output_digest") != digest
@@ -643,7 +661,11 @@ class DelegationService:
         if result.child_id != request.lineage.child_id or result.parent_id != request.lineage.parent_id:
             raise IntegrationError("provider result does not match delegation lineage")
         contract_requested = request.execution_contract.requested
-        if contract_requested and self._worker_registry is None:
+        if (
+            contract_requested
+            and self._worker_registry is None
+            and not getattr(request, "context_policy_defaulted", False)
+        ):
             raise IntegrationError(
                 "execution contract requires a durable worker registry"
             )

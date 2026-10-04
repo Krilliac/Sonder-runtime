@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 398,
+      "file_count": 399,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -159,6 +159,7 @@
         "sonder_runtime/adapters/fanout_failures.py",
         "sonder_runtime/adapters/fanout_health.py",
         "sonder_runtime/adapters/fanout_receipt.py",
+        "sonder_runtime/adapters/fanout_synthesis.py",
         "sonder_runtime/adapters/filesystem/__init__.py",
         "sonder_runtime/adapters/filesystem/atomic_json.py",
         "sonder_runtime/adapters/filesystem/child_migration_bundle.py",
@@ -442,7 +443,7 @@
       ]
     },
     {
-      "file_count": 392,
+      "file_count": 395,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -462,7 +463,10 @@
         "sonder_runtime/application/agents/workflow_integration.py",
         "sonder_runtime/application/architecture/ownership_catalog.py",
         "sonder_runtime/application/artifacts/__init__.py",
+        "sonder_runtime/application/artifacts/candidates.py",
+        "sonder_runtime/application/artifacts/fanin.py",
         "sonder_runtime/application/artifacts/immutable_manifest.py",
+        "sonder_runtime/application/artifacts/master_fanin.py",
         "sonder_runtime/application/artifacts/mobility.py",
         "sonder_runtime/application/artifacts/mobility_source.py",
         "sonder_runtime/application/artifacts/readiness.py",

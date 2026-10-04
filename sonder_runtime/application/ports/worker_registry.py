@@ -67,6 +67,14 @@ class WorkerContextPolicy(str, Enum):
     CLEAN = "clean"
 
 
+SCOPED_CONTEXT_ROLES = frozenset(("critic", "reviewer", "verifier"))
+
+
+def role_requires_scoped_context(role: str) -> bool:
+    """Return whether a role receives the default evidence scoped context."""
+    return isinstance(role, str) and role.strip().lower() in SCOPED_CONTEXT_ROLES
+
+
 _MAX_CONTRACT_ITEMS = 64
 
 
@@ -127,6 +135,36 @@ class WorkerContextInput:
             raise WorkerRegistryError("context input reference exceeds its bound")
         object.__setattr__(self, "reference", reference)
         object.__setattr__(self, "sha256", _sha256_hex(self.sha256, "context input sha256"))
+
+
+def default_scoped_contract(
+    role: str,
+    prompt: str,
+    evidence_tags: tuple[str, ...] = (),
+) -> "WorkerExecutionContract | None":
+    """Build the role default without exposing parent or implementer history.
+
+    The references are content digests rather than copied transcripts.  The
+    request prompt is the task/spec envelope; its caller supplied evidence
+    tags bind the diff/artifact and test-evidence envelopes.  A caller that
+    supplies any explicit context policy retains it unchanged.
+    """
+    if not role_requires_scoped_context(role):
+        return None
+    import hashlib
+
+    def digest(value: str) -> str:
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    tags = "\x1f".join(sorted(str(item) for item in evidence_tags))
+    return WorkerExecutionContract(
+        context_policy=WorkerContextPolicy.SCOPED,
+        context_inputs=(
+            WorkerContextInput("task/spec", digest(prompt)),
+            WorkerContextInput("diff/artifacts", digest(tags)),
+            WorkerContextInput("test evidence", digest(tags)),
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,6 +352,7 @@ class WorkerRegistry(Protocol):
 
 __all__ = [
     "ACTIVE_WORKER_STATUSES", "DuplicateWorkerError", "WorkerContextInput", "WorkerContextPolicy",
+    "SCOPED_CONTEXT_ROLES", "default_scoped_contract", "role_requires_scoped_context",
     "WorkerExecutionContract", "WorkerLaunch", "WorkerRecord", "WorkerRegistry", "WorkerRegistryError",
     "WorkerStatus", "owned_paths_overlap",
 ]
