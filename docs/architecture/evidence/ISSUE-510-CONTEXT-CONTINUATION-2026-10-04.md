@@ -30,8 +30,8 @@ summary and exact source range in the authorized lane session.
 an accepted sqlite decision and its failed JSON rationale, preserved failure
 history, conservative refusal, authentic schema-2 recovery, and SQLite lane
 restart with a nested failed receipt and retrieval of the complete bulky output.
-All four tests fail against the unchanged `ee428fc2` source. They pass with this
-change. The focused compaction/context cohort passes 145 tests, including the
+All six regressions fail against the unchanged `ee428fc2` source. They pass with this
+change. The focused compaction/context cohort passes 147 tests, including the
 unchanged schema-2 golden and the new schema-3 golden. The restart assertion
 checks the actual model request and archive tool response, not a fabricated
 summary score. Canonical source payloads and persisted old summaries stay intact.
@@ -57,12 +57,10 @@ gates, runtime guards/canaries, learning provenance/demotion, checkpoint state,
 hybrid retrieval, or isolated evolution. Their existing tests and platform
 qualification are separate evidence, not inferred from this context cohort.
 
-Original section 9 explicitly asks for a pressure scenario without a significant
-skill/rule, its recorded failure, the same scenario after adding the skill,
-improvement, and regression probes. Held-out publication/promotion contracts
-alone do not provide that before/after measurement. That narrowly scoped
-qualification remains distinct from later strategy ablations and broader live
-routing research. The original cross-cutting promotion criteria likewise apply
-to the particular promoted behavior and its measured quality/cost boundary;
-a passing suite or bounded fleet breadth alone is not universal task-quality
-proof.
+Original section 9 asks for a pressure scenario without a significant
+skill/rule, its recorded failure, the same scenario after adding the rule,
+improvement, and regression probes. The [bounded file-reading rule comparison](ISSUE-510-RULE-TDD-2026-10-04.md)
+now records that cycle through the real agent loop and filesystem tools.
+The original cross-cutting promotion criteria apply to the particular promoted
+behavior and its measured quality/cost boundary. These records do not establish
+universal task quality, live routing research or later strategy ablations.
