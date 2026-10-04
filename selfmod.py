@@ -43,6 +43,7 @@ from sonder_runtime.application.selfmod.independent_oracle import (
 )
 from sonder_runtime.application.selfmod.stage_refusal import SelfmodStageNotApplied, require_atomic_checkout_promotion
 from sonder_runtime.application.selfmod.rollback_scope import rollback_manifest
+from sonder_runtime.application.evaluation import integrity as _integrity
 
 
 MODES = ("observe", "propose", "auto-low-risk")
@@ -82,9 +83,10 @@ SENSITIVE_PREFIXES = (
     "scripts/selfmod_low_integrity.py",
     "scripts/selfmod_linux_isolation.py", "tests/test_linux_candidate_isolation",
     "tests/test_517_linux_uid_separated_candidate_evaluator",
-    # The independent oracle: its channel, store and comparison rules.
-    "scripts/selfmod_oracle.py", "scripts/selfmod_host_grader.py",
+    # The independent oracle and the evaluation-integrity checks (cheat trials, protected writes).
+    "scripts/selfmod_oracle.py", "scripts/selfmod_host_grader.py", "scripts/selfmod_cheat_trials.py",
     "sonder_runtime/application/selfmod/", "tests/test_selfmod_independent_oracle",
+    "sonder_runtime/application/evaluation/integrity.py", "sonder_runtime/application/evaluation/cheat_trials.py", "sonder_runtime/adapters/cheat_trial_runner.py",
 )
 SENSITIVE_PARTS = (
     ".env", "credential", "secret", "token", "account", "migration",
@@ -921,6 +923,8 @@ def _record_command(
         os.environ.get("SELFMOD_LOW_INTEGRITY") == "1"
         if low_integrity is None else bool(low_integrity)
     )
+    # Instruction/memory/conftest/task-test files are digested around each candidate check.
+    watch = None if kind == "reproducer_before" else _integrity.ProtectedWriteWatch.start(run.get("workspace_path") or cwd_path)
     if use_low_integrity:
         started = time.monotonic()
         expected = "low"
@@ -999,6 +1003,9 @@ def _record_command(
             "  expected: %s"
             % (output, str(kind).upper(), code, receipt)
         )[:100_000]
+    writes = watch.finish() if watch is not None else ()
+    if writes:
+        passed, output = False, (output + _integrity.protected_write_note(kind, writes))[-100_000:]
     stored_command, stored_output = list(command), output
     if kind == ORACLE_PROBE_KIND:
         # The challenge names the held inputs and a passing output is the
@@ -1012,6 +1019,8 @@ def _record_command(
             (run_id, str(kind)[:80], _json(stored_command), code, duration, stored_output, int(passed), time.time(), attestation),
         )
         test_id = getattr(cursor, "lastrowid", None)
+        if writes:  # a failing row that names the writes; review refuses the run
+            conn.execute(*_integrity.protected_write_row(run_id, test_id, kind, writes, attestation, time.time()))
         _event(conn, run_id, "test", "%s exit=%s expected=%s duration_ms=%s" % (kind, code, "failure" if expect_failure else "success", duration))
     return {"kind": kind, "command": list(command), "exit_code": code,
             "duration_ms": duration, "output": output, "passed": passed,
@@ -1164,10 +1173,8 @@ def record_test(
     run = get_run(run_id)
     if run["phase"] != "testing":
         raise RuntimeError("tests may run only in testing phase")
-    if kind == "host_grade":
-        raise PermissionError("host grade can only be recorded by the parent scorer")
-    if kind == "oracle_grade":
-        raise PermissionError("oracle grade can only be recorded by the parent scorer")
+    if kind in ("host_grade", "oracle_grade", *_integrity.LEDGER_KINDS):
+        raise PermissionError("%s can only be recorded by the parent scorer" % kind.replace("_", " "))
     workspace = candidate_path(run_id)
     cwd_path = workspace if cwd is None else (workspace / _rel(workspace, cwd)).parent
     seconds = min(int(timeout or run["budgets"]["max_test_seconds"]), run["budgets"]["max_test_seconds"])
@@ -1472,19 +1479,11 @@ def _smoke_receipt(workspace: Path, present, absent) -> str:
 def record_smoke(run_id, *, timeout=None, protected_paths=(), low_integrity=None, isolation=None):
     """Run the candidate, and require proof that it was the candidate that ran.
 
-    `review()` will not approve a self-modification without a passing check of
-    kind `smoke`. That check used to be
-
-        python -c "import pathlib; assert pathlib.Path('.').is_dir(); ..."
-
-    executed with the candidate workspace as its working directory -- so the
-    assertion was a constant and the required gate could not fail. It never
-    imported, ran or read one byte of what it was gating. A required gate that
-    cannot fail is worse than no gate: it manufactures the appearance of review.
-
-    What runs instead is bounded and offline -- a stdlib child process, no
-    network, no model, no operator -- and it writes nothing, so a failure cannot
-    leave state behind. It fails by naming the module and the exception.
+    `review()` requires a passing ``smoke`` check.  It once only asserted that
+    the workspace directory existed: a required gate that could not fail.
+    What runs instead is bounded and offline (a stdlib child process: no
+    network, model or operator) and writes nothing; it fails by naming the
+    module and the exception.
 
     ``low_integrity``, ``protected_paths`` and ``isolation`` select the
     candidate supervisor exactly as for ``record_test``: the probe imports the
@@ -1568,6 +1567,7 @@ def review(run_id, *, require_kinds=None, unevaluated=()):
         failures.append("missing passing checks: %s" % ", ".join(sorted(required - seen)))
     if any(not row["passed"] for row in results):
         failures.append("one or more recorded checks failed")
+    failures.extend(_integrity.review_refusals(results))  # name cheat trials / protected writes
     # Only demand a demonstrated pre-existing failure when the caller's
     # require_kinds actually asks for one. This check sat OUTSIDE the
     # `required` filter, so passing require_kinds could not waive it -- which
