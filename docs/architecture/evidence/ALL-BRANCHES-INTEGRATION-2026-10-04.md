@@ -10,7 +10,7 @@ no PRs for the eight new feature tips, four defensive tips or diagnostic tip.
 
 | Branch | Audited tip | Integration decision |
 | --- | --- | --- |
-| `codex/tls-ci-timeout-diagnostic-20261002` | `625380e840c9399536ea9a045495b081d26cc8b2` | Retained harness; separate manual workflow, preserving required CI. |
+| `codex/tls-ci-timeout-diagnostic-20261002` | `625380e840c9399536ea9a045495b081d26cc8b2` | Retained harness; separate opt-in PR workflow, preserving required CI. |
 | `feat/atif-trajectory-export` | `815b803f0bd3213c0e8ed1b25c7666cf802fb9b8` | Additional bounded ATIF-v1.7 export; default formats retain current privacy behavior. |
 | `feat/effect-journal-hash-chain` | `fc9d1d06b753cee2332aa2c03635493e37e92fba` | Additive hash-chain evidence and optional recorded-response replay; content capture remains opt-in. |
 | `feat/evaluator-cheat-trials` | `d6804d3238310aac818ba355aaf4d1cf32103813` | Protected-write and evaluation-integrity evidence; atomic promotion and rollback remain intact. |
@@ -60,7 +60,7 @@ leases, not an authentication boundary for arbitrary in-process code.
 
 The historical diagnostic branch replaced `ci.yml` and explicitly disclaimed
 use as required product gates. Its workflow is retained separately as
-`.github/workflows/tls-ci-timeout-diagnostic.yml`, manual-dispatch only, with
+`.github/workflows/tls-ci-timeout-diagnostic.yml`, PR-label opt-in only (tls-diagnostic), with
 its historical pinned comparison revisions. Required `ci.yml` is byte-identical
 to baseline. No required context is renamed or relaxed.
 
@@ -120,3 +120,9 @@ interoperability and protected hosted checks remain coordinator merge gates.
 Native Windows PowerShell, real model/GPU performance and external services are
 not demonstrated by this Linux functional qualification. Mock/provider fixtures
 make no model-quality or throughput claim.
+
+Hosted qualification flagged historical-code execution in a privileged manual
+dispatch context as a default-branch cache risk, even after dependency caching
+was removed. Historical comparisons therefore run only in the pull-request
+context, opt-in by the `tls-diagnostic` label. There is no privileged manual
+dispatch event or shared dependency cache. Required `ci.yml` stays unchanged.

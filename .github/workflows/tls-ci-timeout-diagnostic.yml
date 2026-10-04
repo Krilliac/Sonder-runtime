@@ -1,15 +1,17 @@
-# Diagnostic branch only; never a replacement for required product gates.
-# Older comparison checkouts execute with no shared dependency cache.
+# Opt-in PR diagnostic: apply tls-diagnostic; never a required product gate.
+# Historical comparison code runs only in the PR context, with no shared cache.
 name: TLS early-suite diagnosis
 
 on:
-  workflow_dispatch:
+  pull_request:
+    types: [labeled, synchronize, reopened]
 
 permissions:
   contents: read
 
 jobs:
   harness-smoke:
+    if: contains(github.event.pull_request.labels.*.name, 'tls-diagnostic')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
