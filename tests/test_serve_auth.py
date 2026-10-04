@@ -989,7 +989,7 @@ def _http_server(monkeypatch):
     # pay it inside the handler (a cold app-graph import is ~5 s and the
     # operations store is migrated on first use; together they outlasted this
     # client's 5 s timeout under load).
-    ts._live_telemetry_application()
+    ts._live_telemetry_application(build=True)
     warm_operations = getattr(ts.sonder_lifecycle.get(), "operations", None)
     if callable(warm_operations):  # some tests install a minimal fake lifecycle
         warm_operations()
@@ -3546,7 +3546,21 @@ def test_unusable_idempotency_key_is_rejected_not_silently_ignored(monkeypatch, 
     assert applied == []
 
 
-def test_bounded_idempotency_key_still_replays(monkeypatch):
+@pytest.mark.parametrize("configured_lifecycle", [False, True],
+                         ids=["cold-default", "cold-after-typed-configuration"])
+def test_bounded_idempotency_key_still_replays(
+    monkeypatch, isolated_default_runtime, configured_lifecycle,
+):
+    # A worker can inherit typed lifecycle settings while the compatibility
+    # application graph is still cold. Build it before serving either request:
+    # composing it inside the first response would replace the replay cache.
+    bootstrap = isolated_default_runtime
+    monkeypatch.setattr(ts.server, "_APP_GRAPH", None)
+    monkeypatch.setattr(ts.sonder_lifecycle, "_instance", None)
+    monkeypatch.setattr(ts.sonder_lifecycle, "_configured_config", None)
+    if configured_lifecycle:
+        ts.sonder_lifecycle.configure(runtime_config.SonderConfig())
+    assert bootstrap.built_default_app() is None
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
@@ -3556,11 +3570,14 @@ def test_bounded_idempotency_key_still_replays(monkeypatch):
     applied = []
     monkeypatch.setattr(ts.permission_policy, "set_mode", lambda mode: applied.append(mode))
     headers = {"Content-Type": "application/json", "Idempotency-Key": "b" * 512}
-    with _http_server(monkeypatch) as port:
-        for _ in range(2):
-            status, _, payload = _request(port, "POST", "/v1/permission-mode",
-                                          body='{"mode":"plan"}', headers=headers)
-            assert status == 200, payload
+    try:
+        with _http_server(monkeypatch) as port:
+            for _ in range(2):
+                status, _, payload = _request(port, "POST", "/v1/permission-mode",
+                                              body='{"mode":"plan"}', headers=headers)
+                assert status == 200, payload
+    finally:
+        bootstrap.close_default_runtime_resources(timeout=5)
     assert applied == ["plan"]
 
 
