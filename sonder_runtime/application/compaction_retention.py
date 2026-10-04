@@ -12,8 +12,10 @@ represent them:
   stderr, either at the top level or exactly one level inside
   ``result``/``output``/``receipt``/``response`` (the shapes lane receipts and
   session capture store);
+* conversation prose -- preserved verbatim because accepted decisions and
+  user constraints need not carry a structured tag;
 * constraints and requirements -- ``constraints``/``requirements`` payload
-  fields, including on plain text messages that are otherwise collapsed;
+  fields;
 * decisions, facts, unresolved tasks, artifacts, and tool outcomes -- the
   structured summary fields.
 
@@ -57,7 +59,7 @@ from .ports.compaction import CompactionSummary, SessionHistoryEvent
 # add a new golden in ``tests/test_compaction_summary_schema_golden.py``
 # (never edit an existing golden to make it pass).
 # ---------------------------------------------------------------------------
-SUMMARY_SCHEMA_VERSION = 2
+SUMMARY_SCHEMA_VERSION = 3
 """Top-level ``summary_schema`` of compaction events written by this engine."""
 
 INLINE_TOOL_OUTPUT_BYTES = 2 * 1024
@@ -263,14 +265,21 @@ def reference_payload(event: SessionHistoryEvent) -> dict[str, object]:
     return retained
 
 
-def summarized_modality(event: SessionHistoryEvent) -> SessionHistoryEvent | None:
-    """Return the typed modality a v2 summary carries for ``event``.
+def summarized_modality(
+    event: SessionHistoryEvent, *, preserve_messages: bool = True,
+) -> SessionHistoryEvent | None:
+    """Return the typed modality carried by the current summary.
 
-    ``None`` means the event is plain live conversation text with no critical
-    content; its words stay recoverable through the bound source range.
+    Conversation prose may contain an untagged constraint or decision, so
+    schema 3 preserves it verbatim. ``preserve_messages=False`` recreates the
+    immutable schema-2 projection when verifying an existing summary.
     """
     if event.event_type in MESSAGE_TYPES and event.modality == "text":
-        if not is_critical(event):
+        has_conversation = any(
+            isinstance(event.payload.get(key), str) and event.payload[key]
+            for key in ("text", "content")
+        )
+        if not is_critical(event) and not (preserve_messages and has_conversation):
             return None
         return event
     if event.event_type in TOOL_OUTPUT_TYPES:
@@ -293,10 +302,11 @@ def _strings(value: object) -> tuple[str, ...]:
 
 def critical_retention_problems(
     events: Iterable[SessionHistoryEvent], summary: CompactionSummary,
+    *, preserve_messages: bool = True,
 ) -> tuple[str, ...]:
     """List every critical source item the summary fails to carry.
 
-    An empty tuple means every structured value, failure, constraint, and
+    An empty tuple means every conversation text, structured value, failure, constraint, and
     requirement in ``events`` is represented in ``summary`` (directly or by a
     digest-bound reference whose critical values are kept verbatim or visibly
     truncated).
@@ -304,6 +314,13 @@ def critical_retention_problems(
     problems: list[str] = []
     modalities = {item.event_id: item for item in summary.modalities}
     for event in events:
+        if preserve_messages and event.event_type in MESSAGE_TYPES and any(
+            isinstance(event.payload.get(key), str) and event.payload[key]
+            for key in ("text", "content")
+        ):
+            retained = modalities.get(event.event_id)
+            if retained is None or _plain(retained.payload) != _plain(event.payload):
+                problems.append(f"{event.event_id}: conversation text omitted or changed")
         for field in STRUCTURED_FIELDS:
             carried = set(getattr(summary, field))
             for value in _strings(event.payload.get(field)):

@@ -34,6 +34,7 @@ from ...domain.model_routing import is_cloud_model_name
 from ..session.capture import CapturedRequest, SessionCaptureService, _snapshot_payload
 from ..session.archive import ArchiveReference, SessionContextArchiveService
 from ..compaction import SessionCompactionError, SessionCompactionService
+from ..compaction.session_service import _json_value
 from ..tools.gateway_contract import ToolGatewayRequest, ToolScope, ToolPermission
 from ..execution.effect_journal import JournalBinding, bound as bound_effect_journal
 from ..ports.tool_registry import ToolSchemaSelection
@@ -1498,7 +1499,7 @@ class AgentLaneService:
             for modality in summary.modalities:
                 lines.append(
                     "Modality " + modality.event_type + ": "
-                    + json.dumps(dict(modality.payload), ensure_ascii=False, sort_keys=True)
+                    + json.dumps(_json_value(modality.payload), ensure_ascii=False, sort_keys=True)
                 )
             replacements[start] = {
                 "role": "user",
@@ -1745,6 +1746,42 @@ class AgentLaneService:
             None,
         )
         if match is None:
+            # Summary pointers name their source event rather than a separate
+            # context.archive.created id. Recover only a pointer re-derived
+            # from an authentic summary in this already-authorized session.
+            events = tuple(self.sessions.read_complete(lane["session_id"], max_events=10_000))
+            by_sequence = {event.sequence: event for event in events}
+            for event in events:
+                if event.event_type != "compaction.completed":
+                    continue
+                stored_summary = event.payload.get("summary")
+                modalities = stored_summary.get("modalities", ()) if isinstance(stored_summary, Mapping) else ()
+                if not any(
+                    isinstance(item, Mapping) and isinstance(item.get("payload"), Mapping)
+                    and item["payload"].get("reference_event_id") == archive_id
+                    for item in modalities
+                ):
+                    continue
+                source = event.payload.get("source_range")
+                if not isinstance(source, Mapping):
+                    raise SessionCompactionError("persisted compaction source range is malformed")
+                start, end = source.get("start_sequence"), source.get("end_sequence")
+                if (type(start) is not int or type(end) is not int
+                        or start < 1 or end < start or end - start + 1 > 1_000):
+                    raise SessionCompactionError("persisted compaction source range is invalid")
+                source_events = tuple(by_sequence.get(sequence) for sequence in range(start, end + 1))
+                if any(item is None for item in source_events):
+                    raise SessionCompactionError("persisted compaction source range is incomplete")
+                summary = self._compaction.validate_persisted_event(event, source_events)
+                for modality in summary.modalities:
+                    if modality.payload.get("reference_event_id") == archive_id:
+                        return {
+                            "archive_id": archive_id,
+                            "project_id": lane["workspace_root"],
+                            "payload": _json_value(self._compaction.retrieve_reference(
+                                lane["session_id"], modality.payload,
+                            )),
+                        }
             raise ValueError("archive reference is unavailable for this lane")
         payload = match.payload
         reference = ArchiveReference(

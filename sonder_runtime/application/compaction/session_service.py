@@ -358,7 +358,7 @@ class SessionCompactionService:
                     "persisted compaction requires the deterministic engine"
                 )
             schema = payload.get("summary_schema", 1)
-            if isinstance(schema, bool) or schema not in (1, SUMMARY_SCHEMA_VERSION):
+            if isinstance(schema, bool) or schema not in (1, 2, SUMMARY_SCHEMA_VERSION):
                 raise SessionCompactionError("persisted compaction summary schema is unsupported")
             canonical = canonical_summary(request, schema=schema)
 
@@ -381,12 +381,13 @@ class SessionCompactionService:
                     "persisted compaction summary differs from canonical source summary"
                 )
             problems = critical_retention_problems(request.history, summary)
-            if problems and schema == 1:
-                # An authentic summary written before critical retention (it
-                # matched the schema-1 canonical projection above) may have
-                # collapsed a constrained message.  The persisted event is only
-                # a marker binding the range; replay the lossless schema-2
-                # projection re-derived from the same original events instead.
+            if problems and schema < SUMMARY_SCHEMA_VERSION:
+                # An authentic older summary matched its original canonical
+                # projection above, but may have collapsed a constrained
+                # message. The persisted event is only
+                # a marker binding the range; replay the lossless current
+                # projection re-derived from the same original events instead,
+                # including unstructured conversation text in schema 3.
                 # No re-compaction is needed (and a second summary over the
                 # same range would be rejected by lane replay as an overlap).
                 summary = canonical_summary(request, schema=SUMMARY_SCHEMA_VERSION)

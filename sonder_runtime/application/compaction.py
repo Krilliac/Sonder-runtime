@@ -70,10 +70,9 @@ def _summary_from(
                     "confidence must be a number between 0 and 1"
                 )
             confidence_values.append(float(confidence))
-        # Plain conversation text collapses into the bound source range.  Any
-        # event carrying a failure, constraint, or requirement is retained as
-        # a typed modality, and bulky tool output becomes a digest-bound
-        # reference before any live reasoning is compressed.
+        # Schema 3 retains conversation prose: untagged words may be a user
+        # constraint or accepted decision. Bulky tool output becomes a
+        # digest-bound reference before any live reasoning is compressed.
         if schema == 1:
             # Legacy (pre-#510) projection, kept only so persisted summaries
             # written before critical retention can still be re-derived and
@@ -81,7 +80,7 @@ def _summary_from(
             if event.modality != "text" or event.event_type not in {"message.received", "message.sent"}:
                 modalities.append(event)
             continue
-        modality = summarized_modality(event)
+        modality = summarized_modality(event, preserve_messages=schema >= 3)
         if modality is not None:
             modalities.append(modality)
 
@@ -112,7 +111,7 @@ def canonical_summary(
     request: CompactionRequest, *, schema: int = SUMMARY_SCHEMA_VERSION,
 ) -> CompactionSummary:
     """Re-derive the deterministic summary of ``request`` for ``schema``."""
-    if schema not in (1, SUMMARY_SCHEMA_VERSION):
+    if schema not in (1, 2, SUMMARY_SCHEMA_VERSION):
         raise CompactionValidationError("unsupported compaction summary schema")
     return _summary_from(_source_events(request), request.max_summary_tokens, schema=schema)
 
