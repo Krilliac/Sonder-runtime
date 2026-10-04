@@ -18937,19 +18937,25 @@
       "field": "auto_workspace",
       "section": "state",
       "type": "bool"
+    },
+    {
+      "default": "",
+      "field": "default_workspace_root",
+      "section": "state",
+      "type": "str"
     }
   ],
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES plus sonder_runtime.platform.memory_replication_config",
   "counts": {
     "capabilities": 229,
     "commands": 346,
-    "configuration": 248,
+    "configuration": 249,
     "events": 43,
     "native_tools": 68,
     "schemas": 4,
     "tools": 229
   },
-  "digest": "3761f57c09f79945590ad5270b9b17ac8d6834a1da583716e3fbe3243a4258c9",
+  "digest": "be6b9c0c9d13982d4eed594566db1c8135182a1df18fd3b2993f5ee084ad3492",
   "events": [
     {
       "name": "session.started",
@@ -48424,13 +48430,13 @@
   },
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "a50976ea6dee5b3e5c40e0d2382ab3705c8f724802ccfbdabef851e9b382ab51",
+    "server.py": "ec3a377cb6c4c6c2640b6a057f0422ae50fbf8fa507b33a0b202c2ba9adecb41",
     "sonder_runtime/application/tools/generated_catalogs.py": "332f23bad788ee427203c64a35f9e36affa2ec11af0ea08889ac9aaa821b0d89",
     "sonder_runtime/bootstrap/native_mcp.py": "2cbf4a0a006084aeb19c6615d04fffee9af89b1fdc8ee7d1fd582e1a9616c9f8",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/domain/operational_capabilities.py": "6f8f2083343ac1b0de076cd4d545b5f99602a9916c185bd15d965ffa0c405fe6",
     "sonder_runtime/interfaces/sdk/discovery.py": "db8aeca8dd84d06cbbf834495db30b211956393375676f23899a28685aea015b",
-    "sonder_runtime/platform/config.py": "2a4fad94314517500c7a4495e0d6d2d59904ac3cbd61fc1ca1ec731576bb13bd",
+    "sonder_runtime/platform/config.py": "eab251d2de938a06d46d3ab71f772ef48576d452bf2195944836ba8fa521a5e1",
     "sonder_runtime/platform/memory_replication_config.py": "f9fc0a642812bdc456ac082f0f8c52f051822f0160e16882b634895feb0cea61"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",

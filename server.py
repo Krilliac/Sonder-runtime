@@ -20523,7 +20523,7 @@ def _agent_turn(
     controller = _standalone_lanes.current()
     if controller is not None:
         controller.restrict(read_only=lane_read_only, cloud=cloud)
-    project, project_error = prepare_loop_project(project, writing=not (read_only or cloud))
+    project, project_error = prepare_loop_project(project, writing=not (read_only or cloud), task=prompt)
     project_scope, scope_error = _agent_project_scope(project)
     project_error = project_error or scope_error
     if project_error:
@@ -22002,7 +22002,7 @@ def agent(
     refusal = intents.containment_egress_refusal(prompt)
     if refusal:
         return refusal
-    project, project_error = prepare_writing_project(project)
+    project, project_error = prepare_writing_project(project, prompt)
     if project_error:
         return project_error
     nested = activity_tracker.current() is not None
@@ -22066,7 +22066,7 @@ def _workbench_agent_escalating(
     prompt, tier, *, max_steps, allow_web, project, allow_location,
     prepared_plan=None, session=None,
 ):
-    project, project_error = prepare_writing_project(project)
+    project, project_error = prepare_writing_project(project, prompt)
     if project_error:
         return project_error, tier
     project_scope, _error = _agent_project_scope(project)

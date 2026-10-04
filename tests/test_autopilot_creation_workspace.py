@@ -1,6 +1,8 @@
 """The durable run, worker, status text and app payload share one safe root."""
 import json
+import logging
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -11,11 +13,17 @@ from sonder_runtime.adapters.persistence import autopilot_store
 from sonder_runtime.platform import paths
 
 
+def _workspaces():
+    return Path(os.environ["SONDER_DEFAULT_WORKSPACE_ROOT"])
+
+
 @pytest.fixture
 def isolated(monkeypatch, tmp_path):
     home = tmp_path / "state"
     monkeypatch.setenv("SONDER_HOME", str(home))
     monkeypatch.setenv("SONDER_AUTOPILOT_DB", str(home / "autopilot.db"))
+    # The app-owned default root (normally ~/Sonder/workspaces), per test.
+    monkeypatch.setenv("SONDER_DEFAULT_WORKSPACE_ROOT", str(tmp_path / "Sonder" / "workspaces"))
     paths.reset_home()
     autopilot_store.reset_schema_cache_for_tests()
     monkeypatch.setattr(server, "_launch_autopilot", lambda *a, **k: True)
@@ -31,9 +39,12 @@ def test_start_persists_and_displays_created_workspace(monkeypatch, tmp_path, is
     monkeypatch.chdir(source)
     output = server._autopilot_start("create a self-contained page", project=project)
     run = autopilot_store.get_run()
-    expected = (isolated / "creations" / run["id"]).resolve()
+    expected = Path(run["project"])
+    # Where the console puts its folders too, named from the objective.
+    assert expected.parent == _workspaces().resolve()
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}-self-contained-page-[0-9a-f]{4}", expected.name)
     assert expected.is_dir()
-    assert Path(run["project"]) == expected
+    assert not (isolated / "creations").exists()
     assert not expected.is_relative_to(source)
     assert "working in: " + str(expected) in output
     assert "working in: " + str(expected) in server._autopilot_status(run["id"])
@@ -58,12 +69,14 @@ def test_explicit_project_unchanged_and_worker_uses_saved_root(monkeypatch, tmp_
     server._autopilot_work_model(run, {"id": "t1", "kind": "implement"}, "")
     assert captured["project"] == str(project)
     assert not (isolated / "creations").exists()
+    assert not _workspaces().exists()
 
 
 def test_observe_namespace_and_existing_project_are_unchanged(isolated):
     run = autopilot_store.create_run("inspect only", project="demo", policy="observe")
     assert run["project"] == "demo"
     assert not (isolated / "creations").exists()
+    assert not _workspaces().exists()
 
 
 def test_default_workspace_survives_store_reload(isolated):
@@ -97,18 +110,18 @@ def test_project_less_internal_loop_keeps_its_own_root(monkeypatch, tmp_path, is
     )
     assert dispatched == [("file_read", {"path": target})]
     assert not (isolated / "creations").exists()
+    assert not _workspaces().exists()
 
 
 # Windows refuses to create a directory whose path is 248 characters or longer
 # (MAX_PATH minus room for an 8.3 name) unless the host sets LongPathsEnabled.
 # Node1 does not, and pytest's temp base there is already ~90 characters, so a
-# fixed 168-character nesting overflowed (WinError 3 at the home's mkdir). The
-# test only needs a project path over 200 characters: size the nesting to land
-# it at _PROJECT_LENGTH under any base. Where the base itself leaves no room,
-# fall back to the original nesting on hosts that can create it, else skip.
+# fixed 168-character nesting overflowed (WinError 3 at mkdir). The test only
+# needs a project path over 200 characters: size the nesting to land it at
+# _PROJECT_LENGTH under any base. Where the base itself leaves no room, fall
+# back to the original nesting on hosts that can create it, else skip.
 _PROJECT_LENGTH = 225
 _WINDOWS_DIRECTORY_LIMIT = 247
-_RUN_TAIL = len(os.sep + "creations" + os.sep) + len("auto-") + 12  # <home>/creations/<run-id>
 
 
 def _long_paths_supported() -> bool:
@@ -126,7 +139,7 @@ def _long_paths_supported() -> bool:
 
 
 def _nested_home(base: Path, tail: int) -> tuple[Path, bool]:
-    """``base`` plus nesting so that the home and a ``tail`` suffix total _PROJECT_LENGTH."""
+    """``base`` plus nesting so that the root and a ``tail`` suffix total _PROJECT_LENGTH."""
     base = base.resolve()
     room = _PROJECT_LENGTH - tail - len(str(base)) - 1
     if room < 1:
@@ -142,9 +155,13 @@ def _nested_home(base: Path, tail: int) -> tuple[Path, bool]:
     return base.joinpath(*("n" * (width + (index < extra)) for index in range(count))), True
 
 
-def test_long_default_workspace_is_not_truncated(monkeypatch, isolated):
-    home, sized = _nested_home(isolated, _RUN_TAIL)
-    monkeypatch.setattr(paths, "default_home", lambda: home)
+def test_long_default_workspace_is_not_truncated(monkeypatch, tmp_path, isolated):
+    from sonder_runtime.adapters import creation_workspace
+
+    # <root>/<date>-<slug>-<hex>; the name's length is fixed for a given task.
+    tail = len(os.sep + creation_workspace.session_workspace_name("write an artifact"))
+    root, sized = _nested_home(tmp_path / "workspaces", tail)
+    monkeypatch.setenv("SONDER_DEFAULT_WORKSPACE_ROOT", str(root))
     run = autopilot_store.create_run("write an artifact")
     assert len(run["project"]) > 200
     if sized:
@@ -152,5 +169,22 @@ def test_long_default_workspace_is_not_truncated(monkeypatch, isolated):
         # Linux, where nothing else would notice the path creeping past the
         # limit (a larger _PROJECT_LENGTH, or a longer run id or folder name).
         assert len(run["project"]) == _PROJECT_LENGTH <= _WINDOWS_DIRECTORY_LIMIT
-    assert Path(run["project"]) == (home / "creations" / run["id"]).resolve()
+    assert Path(run["project"]).parent == root.resolve()
     assert Path(run["project"]).is_dir()
+
+
+def test_unusable_default_root_falls_back_to_the_state_home(monkeypatch, isolated, caplog):
+    """A service account whose home is the state home has no usable default root.
+
+    The packaged Linux unit creates ``sonder`` with ``--home /var/lib/sonder``,
+    so ``~/Sonder/workspaces`` lands inside the state home and is refused.
+    Writing runs then keep #624's ``<state-home>/creations/<run-id>`` folder,
+    and say why in the log, instead of failing.
+    """
+    monkeypatch.setenv("SONDER_DEFAULT_WORKSPACE_ROOT", str(isolated / "Sonder" / "workspaces"))
+    with caplog.at_level(logging.WARNING, logger="sonder_runtime.adapters.creation_workspace"):
+        run = autopilot_store.create_run("write an artifact")
+    assert Path(run["project"]) == (isolated / "creations" / run["id"]).resolve()
+    assert Path(run["project"]).is_dir()
+    assert not (isolated / "Sonder").exists()
+    assert "overlaps Sonder's private control state" in caplog.text
