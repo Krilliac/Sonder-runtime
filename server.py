@@ -84,6 +84,7 @@ import memory_quality
 import learning_health
 import domain_grounding
 import master_orchestrator
+from sonder_runtime.adapters import fleet_synthesis as _fleet_synthesis
 from sonder_runtime.domain.execution import status as execution_status
 from sonder_runtime.domain.model_routing import (
     is_cloud_model_name as _is_cloud_model_name,
@@ -1940,7 +1941,7 @@ def _make_generate(
                         "prompt_eval_duration",
                         "eval_count", "eval_duration",
                         "load_state", "cold_start",
-                        "reasoning_segments",
+                        "reasoning_segments", "finish_reason",
                     )
                     if key in out
                 },
@@ -5729,14 +5730,14 @@ def _file_schema_rejection(interaction_id):
 
 def _offload_impl(prompt, tier="fast", system="", temperature=0.2, num_predict=1024,
                   num_ctx=0, learn=True, timeout=TIMEOUT, cancel_check=None,
-                  schema=None, session=None):
+                  schema=None, session=None, fleet_synthesis=False):
     with _tier_generation.scope(
         tier, graph=_APP_GRAPH, timeout=_bound_request_timeout(timeout, TIMEOUT),
         cancel_check=cancel_check,
         consent=lambda: (_cloud_allowed_policy(os.environ), not _ollama_endpoint_is_local()),
     ):
         return _offload_tier_impl(prompt, tier, system, temperature, num_predict,
-                                 num_ctx, learn, timeout, cancel_check, schema, session)
+                                 num_ctx, learn, timeout, cancel_check, schema, session, fleet_synthesis)
 
 
 def _offload_tier_impl(
@@ -5751,6 +5752,7 @@ def _offload_tier_impl(
     cancel_check=None,
     schema=None,
     session: str | None = None,
+    fleet_synthesis: bool = False,
 ) -> str:
     """Internal offload path; model failures stay typed for orchestrators."""
     schema = _parse_schema_arg(schema)
@@ -5767,6 +5769,8 @@ def _offload_tier_impl(
             "unknown tier '%s'. Valid tiers: %s." % (tier, _valid_tier_names()),
         )
     provider = _bridge_provider_for_tier(tier)
+    if fleet_synthesis:
+        num_predict = _fleet_synthesis.json_num_predict(num_predict, bridged=provider == "sonder_inference")
     cloud = provider is None and _is_cloud_tier(tier, model)
     if cloud and not _cloud_allowed_policy(os.environ):
         raise ModelCallError(
@@ -5854,7 +5858,7 @@ def _offload_tier_impl(
                 "tokens_out": int(tokens_out or 0),
                 "token_source": source,
             }
-            return msg
+            return _fleet_synthesis.append_truncation_marker(msg, generator=out) if fleet_synthesis else msg
 
         try:
             msg = run_model_step(
@@ -5969,6 +5973,8 @@ def _offload_tier_impl(
             _file_schema_rejection(iid)
             raise
         response = _with_schema_coverage(response, gaps)
+    if fleet_synthesis:
+        response = _fleet_synthesis.append_truncation_marker(response, generator=gen)
     return with_footer(response, iid)
 
 
@@ -9986,7 +9992,7 @@ def _orchestrator_worker(tier: str, learn: bool = False, timeout: int = 150):
                 prompt=prompt,
                 tier=tier,
                 temperature=0.2,
-                num_predict=1400,
+                num_predict=1400, fleet_synthesis=True,
                 learn=learn,
                 timeout=timeout,
                 cancel_check=master_orchestrator.current_worker_cancel_requested,
@@ -9995,37 +10001,14 @@ def _orchestrator_worker(tier: str, learn: bool = False, timeout: int = 150):
 
 
 def _orchestrator_agent_worker(
-    tier: str, project: str, max_steps: int = 8,
+    tier: str, project: str, max_steps: int = 8, *, build: bool = False,
 ):
-    response_id = activity_tracker.current_response_id()
-    project_scope = master_orchestrator.resolve_repository_project_root("", project)
-
-    def worker(prompt: str, assigned_project: str) -> master_orchestrator.RepositoryWorkerResult:
-        with activity_tracker.bind_response(response_id):
-            assigned = master_orchestrator.resolve_repository_project_root(
-                prompt, assigned_project,
-            )
-            if not master_orchestrator.same_project_root(assigned, project_scope):
-                raise RuntimeError("repository worker assignment changed after fleet start")
-            # The host-bound project is passed directly; child prompt parsing is
-            # only an ambiguity check and can never select the process cwd.
-            receipt = _agent_impl(
-                prompt,
-                tier=tier,
-                max_steps=max_steps,
-                allow_web=False,
-                require_file_evidence=True,
-                read_only=True,
-                include_evidence=True,
-                auto_checklist=True,
-                project=project_scope,
-                return_host_receipt=True,
-                cancel_check=master_orchestrator.current_worker_cancel_requested,
-            )
-            return master_orchestrator.repository_worker_result(
-                receipt, project_scope,
-            )
-    return worker
+    from sonder_runtime.adapters.fleet_workers import repository_worker
+    return repository_worker(
+        tier, project, max_steps, build=build, orchestrator=master_orchestrator,
+        activity=activity_tracker, agent_impl=_agent_impl,
+        project_tools=_PROJECT_BOUND_AGENT_TOOLS, unsafe_active=unsafe_lab.active,
+    )
 
 
 def _master_scope_error(detail) -> str:
@@ -10115,8 +10098,8 @@ def master_orchestrate(
 
     mode="ask" returns the choice prompt. mode="inline" keeps work in the master
     lane. mode="delegate" queues bounded subagents across RAM/CPU-safe worker
-    slots, then audits and merges their outputs. mode="fleet" queues the full
-    hardware-derived breadth ceiling in the background and returns immediately.
+    slots, then audits and merges their outputs. mode="fleet" queues
+    min(max_agents(), max(3, 2 * worker_slots)) agents and returns immediately.
     Pass a positive ``agents`` value to set fleet breadth. ``worker_cap`` is a
     per-run opt-in that may raise concurrent slots above the hardware-derived
     default, but never above the operator/compiled ceiling. A clear task phrase
@@ -10130,7 +10113,9 @@ def master_orchestrate(
     refusal = intents.containment_egress_refusal(task)
     if refusal:
         return refusal
-    task = (task or "").strip()
+    task, agents, fleet_prefix = master_orchestrator.fleet_briefing.normalize_request(
+        (task or "").strip(), agents, is_retry=bool(retry_of),
+    )
     try:
         protected_objectives = master_orchestrator.fleet_provenance.parse_objectives(task)
     except master_orchestrator.fleet_provenance.ProvenanceError as exc:
@@ -10159,7 +10144,7 @@ def master_orchestrate(
         "inlne": "inline",
         "workflow": "fleet",
     }.get(mode, mode)
-    if master_orchestrator.requests_fleet(task):
+    if fleet_prefix or master_orchestrator.requests_fleet(task):
         if mode in ("ask", "choose", "prompt", "delegate", "delegated", "agents", "parallel"):
             mode = "fleet"
     if mode in ("ask", "choose", "prompt"):
@@ -10169,9 +10154,7 @@ def master_orchestrate(
             )
         else:
             delegate_count = master_orchestrator.clamp_agent_count(agents, default=3)
-            fleet_count = master_orchestrator.clamp_agent_count(
-                agents, default=master_orchestrator.max_agents(),
-            )
+            fleet_count = master_orchestrator.fleet_agent_count(agents)
         if worker_cap:
             delegate_capacity = master_orchestrator.capacity(delegate_count, worker_cap=worker_cap)
             fleet_capacity = master_orchestrator.capacity(fleet_count, worker_cap=worker_cap)
@@ -10184,7 +10167,7 @@ def master_orchestrate(
             "  inline   - master handles the task directly.\n"
             "  delegate - queue %d agent(s) across %d safe worker slot(s), audit, then merge.\n"
             "  fleet    - queue %d agent(s) across %d safe worker slot(s), return immediately, then monitor it.\n"
-            "              Omit agents (or pass 0) to use the hardware ceiling.\n"
+            "              Omit agents (or pass 0): min(max_agents(), max(3, 2 * worker_slots)).\n"
             "              Set worker_cap (or say 'use N workers') for a bounded per-run override.\n"
             "Keywords fleet, swarm, spawn as many agents, parallel agents, and\n"
             "parallel workflow select fleet automatically without replacing an explicit agent count.\n"
@@ -10233,14 +10216,19 @@ def master_orchestrate(
             )
         except ValueError as exc:
             return _master_scope_error(exc)
-    creative_intent = None if needs_repo_tools else creative_router.classify(task, mode=mode)
+    from sonder_runtime.domain.fleet_intent import classify_task
+    build_workspace = (
+        not needs_repo_tools and classify_task(task) == "build"
+        and mode in ("delegate", "delegated", "agents", "parallel", "fleet", "swarm", "fanout")
+    )
+    creative_intent = None if needs_repo_tools or build_workspace else creative_router.classify(task, mode=mode)
     if creative_intent:
         return _master_grounded_build(
             task, mode, tier, creative_intent, retry_of=retry_of,
         )
     worker = (
-        _orchestrator_agent_worker(tier, project_scope)
-        if needs_repo_tools
+        _orchestrator_agent_worker(tier, project_scope, build=True) if build_workspace
+        else _orchestrator_agent_worker(tier, project_scope) if needs_repo_tools
         else _orchestrator_worker(
             tier,
             # Protected objective runs are never captured as learnable
@@ -10282,16 +10270,14 @@ def master_orchestrate(
         # This is the host's nonlearning text worker above. Repository agent
         # workers and learning workers may cause effects outside a model call,
         # so their controller suggestions are observation only.
-        pure_model_worker = not needs_repo_tools and not learn
+        pure_model_worker = not (needs_repo_tools or build_workspace) and not learn
         strategy_observer = compose_fleet_strategy_observer(
             strategy_trace, strategy_memory, strategy_rollout,
             pure_model=pure_model_worker, event_sink=master_orchestrator._event,
         )
         run_fleet_in_background = mode in ("fleet", "swarm", "fanout")
         if run_fleet_in_background and not worker_cap:
-            agents = master_orchestrator.clamp_agent_count(
-                agents, default=master_orchestrator.max_agents(),
-            )
+            agents = master_orchestrator.fleet_agent_count(agents)
         runner = (
             master_orchestrator.start_delegated
             if run_fleet_in_background
@@ -10321,6 +10307,7 @@ def master_orchestrate(
             project=project_scope,
             worker_cap=worker_cap,
             strategy_observer=strategy_observer,
+            **({"build_workspace": True} if build_workspace else {}),
         )
         if run_fleet_in_background:
             return "\n".join([
@@ -10330,6 +10317,10 @@ def master_orchestrate(
                 ),
                 "worker slots: %d (bounded concurrent model calls)" % (
                     result.get("worker_slots", 1)
+                ),
+                master_orchestrator.fleet_briefing.format_plan(
+                    task, len(result.get("agents") or []), result.get("worker_slots", 1),
+                    greenfield=not needs_repo_tools, output_workspace=result.get("output_workspace", ""),
                 ),
                 "monitor: master_status() | cancel: master_cancel('%s')" % (
                     result["master_id"]
@@ -20466,6 +20457,7 @@ def _agent_turn(
     cancel_check=None,
     session: str | None = None,
     pre_model_context=None,
+    require_guarded_project: bool = False,
     tool_help_kind=None,
 ) -> str:
     """Run a Claude-like local agent loop that can call tools.
@@ -20491,6 +20483,8 @@ def _agent_turn(
     _take_agent_model_failure()
     lane_read_only = read_only
     unsafe = unsafe_lab.active()
+    if require_guarded_project and (unsafe or not project):
+        raise RuntimeError("build fleet requires normal project and permission gates")
     if unsafe:
         # Unsafe lab mode is for a disposable host where the model is the
         # adversary under test. Remove all model-loop tool/root/read-only gates;
@@ -20520,6 +20514,8 @@ def _agent_turn(
         return "`sonder:latest` Ollama alias not found."
     provider = _bridge_provider_for_tier(tier_label)
     cloud = cloud or _provider_bridge.is_hosted(provider)
+    if require_guarded_project and cloud:
+        raise RuntimeError("build fleet requires a local model tier")
     controller = _standalone_lanes.current()
     if controller is not None:
         controller.restrict(read_only=lane_read_only, cloud=cloud)
@@ -24523,7 +24519,7 @@ def _fanout_synthesis_generate(model, source_bundle):
         raise ModelCallError("empty_response", "local synthesis model returned no answer")
     # Do not expose or store provider reasoning, response metadata, or the
     # constructed source prompt. The returned text is an ephemeral result.
-    return content
+    return _fleet_synthesis.append_truncation_marker(content, generator=out)
 
 
 def _fanout_health(model, exc, prompt):
@@ -25265,10 +25261,11 @@ def ensemble_answer(
             else _auto_model_context(synth_model)
         )
         gen = _make_tier_generate(
-            synth_label, synth_model, "", 0.2, max(256, int(num_predict)),
+            synth_label, synth_model, "", 0.2, _fleet_synthesis.json_num_predict(
+                max(256, int(num_predict)), bridged=_bridge_provider_for_tier(synth_label) == "sonder_inference"),
             synth_num_ctx,
         )
-        merged = (gen(build_prompt(question, answers)) or "").strip()
+        merged = _fleet_synthesis.generate_synthesis(gen, build_prompt(question, answers)).strip()
     except Exception as exc:
         # Synthesis is the only step that can fail after real work is done, so
         # hand back the strongest single answer rather than losing everything.

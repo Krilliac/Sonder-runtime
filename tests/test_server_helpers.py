@@ -2761,9 +2761,10 @@ def test_master_orchestrate_auto_fleet_preserves_explicit_agent_count(monkeypatc
     assert calls[0][1]["metadata"]["mode"] == "fleet"
 
 
-def test_master_orchestrate_fleet_without_agent_count_uses_ceiling(monkeypatch):
+def test_master_orchestrate_fleet_without_agent_count_uses_capacity(monkeypatch):
     calls = []
     monkeypatch.setattr(server.master_orchestrator, "max_agents", lambda: 12)
+    monkeypatch.setattr(server.master_orchestrator, "capacity", lambda: {"worker_slots": 2})
     monkeypatch.setattr(
         server.master_orchestrator,
         "start_delegated",
@@ -2778,8 +2779,8 @@ def test_master_orchestrate_fleet_without_agent_count_uses_ceiling(monkeypatch):
 
     out = server.master_orchestrate("inspect risks", mode="fleet")
 
-    assert "agents=12" in out
-    assert calls[0][1]["agents"] == 12
+    assert "agents=4" in out
+    assert calls[0][1]["agents"] == 4
 
 
 def test_master_orchestrate_fleet_persists_explicit_agent_count(monkeypatch):
@@ -2827,14 +2828,19 @@ def test_master_orchestrate_schema_marks_zero_as_automatic_agent_count():
     assert schema["properties"]["project"]["default"] == ""
 
 
-def test_master_routes_explicit_game_build_to_grounded_forge(monkeypatch):
+def test_master_routes_explicit_delegated_game_build_to_workspace_workers(monkeypatch):
     calls = []
+    workers = []
     monkeypatch.setattr(
-        server,
-        "_master_grounded_build",
-        lambda task, mode, tier, intent, retry_of="": (
-            calls.append((task, mode, tier, intent, retry_of)) or "grounded game"
-        ),
+        server, "_orchestrator_agent_worker",
+        lambda tier, project, **kwargs: workers.append((tier, project, kwargs)) or (lambda p, root: "unused"),
+    )
+    monkeypatch.setattr(
+        server.master_orchestrator, "run_delegated",
+        lambda task, **kwargs: calls.append((task, kwargs)) or {
+            "master_id": "master-game", "agents": ["agent-1"], "worker_slots": 1,
+            "output": "host build receipt",
+        },
     )
 
     out = server.master_orchestrate(
@@ -2842,11 +2848,10 @@ def test_master_routes_explicit_game_build_to_grounded_forge(monkeypatch):
         mode="delegate",
     )
 
-    assert out == "grounded game"
-    assert calls[0][1:3] == ("delegate", "code")
-    assert calls[0][3]["kind"] == "game"
-    assert calls[0][3]["language"] == "cpp"
-    assert calls[0][3]["dimension"] == "2.5d"
+    assert "host build receipt" in out
+    assert calls[0][1]["build_workspace"] is True
+    assert calls[0][0] == "Create a C++ 2.5D isometric RPG game with in-house assets."
+    assert workers == [("code", "", {"build": True})]
 
 
 def test_master_grounded_game_build_creates_verified_output(monkeypatch):
