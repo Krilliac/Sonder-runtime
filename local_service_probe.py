@@ -355,6 +355,7 @@ def _request_once(
     try:
         if parsed.scheme == "https":
             context = ssl.create_default_context()
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
             _set_deadline_timeout(sock, deadline)
             sock = context.wrap_socket(sock, server_hostname=host)
             _set_deadline_timeout(None, deadline)
