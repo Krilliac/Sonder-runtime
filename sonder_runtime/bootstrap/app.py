@@ -1056,9 +1056,12 @@ def build_application(
     def get_session_http_facade() -> HttpSessionFacade:
         nonlocal session_http
         if session_http is None:
+            from ..platform.version import runtime_version
+
             session_http = HttpSessionFacade(
                 get_session_repository(), max_replay_events=1_000,
                 continuity=get_session_continuity_service(),
+                agent_version=runtime_version(),
             )
         return session_http
 

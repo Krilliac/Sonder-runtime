@@ -58,6 +58,7 @@ def dispatch_session_route(
                 start_sequence=integer("start_sequence", 1) or 1,
                 end_sequence=integer("end_sequence"),
                 max_events=integer("max_events", 1_000) or 1_000,
+                format=one("format"),
             )
         if operation == "replay":
             return facade.replay(session_id, max_events=integer("max_events"))

@@ -1642,7 +1642,7 @@
       "category": "context",
       "name": "/session_export",
       "risk": "ask",
-      "summary": "Export a remembered conversation session as readable transcript text."
+      "summary": "Export a remembered conversation session as readable transcript text (format=\"atif\": ATIF-v1.7 JSON)."
     },
     {
       "category": "basic",
