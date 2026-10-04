@@ -635,15 +635,16 @@ passes there.
      operator calls against the nightly driver on the same run.
    - The item 8 CI job does not run
      `tests/test_selfmod_operator_isolation.py`'s root-only cases.
-10. **Crash-atomic promotion and rollback.** `selfmod.create_backup` verifies
+10. **Deployment crash-consistency limit.** `selfmod.create_backup` verifies
     a scoped backup bundle before publishing its lifecycle phase, and
     deployment/rollback hold the process-safe deployment lock. `_atomic_copy`
     fsyncs and replaces each file individually. This is not a crash-atomic
     multi-file release switch: interruption between replacements can leave
     partial installation and an uncertain stage requiring reconciliation.
-    The issue's atomic rollback/promotion acceptance still needs an explicit
-    crash-consistency contract and native qualification before unattended
-    deployment can be called verified.
+    The complete verified backup is sealed before `backed_up` is published,
+    and candidate execution requires that phase. This establishes #517's
+    atomic rollback point. A crash-atomic multi-file release switch is a
+    separate operational improvement, not an additional #517 criterion.
 
 ## Verification commands
 
