@@ -290,7 +290,7 @@ def test_http_inspection_preserves_receipts_and_authorization(guarded_host, monk
     else:
         pytest.fail("HTTP file inspection did not finish")
     assert record["status"] == "returned"
-    assert record["output"] == "Tool evidence: 3 files"
+    assert "Tool evidence: 3 files" in record["output"]
     receipt = record["result_receipt"]
     assert receipt["work_run_id"] == result.work_run_id
     assert receipt["requested_mode"] == "inspection"

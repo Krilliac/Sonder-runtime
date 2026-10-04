@@ -40,7 +40,7 @@ def test_auto_count_is_capacity_sized_before_legacy_host(argument):
     calls = []
     execute_master_command(argument, orchestrate=lambda **kw: calls.append(kw),
                            capacity=lambda: {"worker_slots": 1, "max_agents": 48}, project="C:/project")
-    assert calls[0]["agents"] == 1
+    assert calls[0]["agents"] == (3 if argument.startswith("fleet") else 1)
     assert calls[0]["project"] == "C:/project"
     assert calls[0]["task"] == "task"
 
@@ -50,6 +50,14 @@ def test_explicit_count_does_not_probe_or_replace_host_capacity():
     execute_master_command("fleet 8 task", orchestrate=lambda **kw: calls.append(kw),
                            capacity=lambda: pytest.fail("unexpected capacity probe"))
     assert calls[0]["agents"] == 8
+
+
+@pytest.mark.parametrize("slots,ceiling,expected", [(1, 48, 3), (4, 48, 8), (4, 5, 5), (1, 1, 1)])
+def test_auto_fleet_breadth_respects_capacity_and_operator_ceiling(slots, ceiling, expected):
+    calls = []
+    execute_master_command("fleet 0 task", orchestrate=lambda **kw: calls.append(kw),
+                           capacity=lambda: {"worker_slots": slots, "agent_ceiling": ceiling})
+    assert calls == [{"task": "task", "mode": "fleet", "agents": expected, "project": ""}]
 
 
 @pytest.mark.parametrize("task", [
@@ -81,7 +89,7 @@ def test_leading_assignment_in_task_is_not_mistaken_for_tool_arguments():
 
 
 @pytest.mark.parametrize("command", ["/master", "/master_orchestrate"])
-@pytest.mark.parametrize("arguments,count", [("fleet 0 task", 1), ("fleet task", 1), ("fleet 4 task", 4)])
+@pytest.mark.parametrize("arguments,count", [("fleet 0 task", 3), ("fleet task", 3), ("fleet 4 task", 4)])
 def test_http_slash_both_spellings_use_parser(monkeypatch, command, arguments, count):
     import sonder_runtime.interfaces.http.serve as serve
     calls = []
@@ -102,7 +110,7 @@ def test_native_control_command_uses_same_parser(monkeypatch):
     monkeypatch.setattr(server.master_orchestrator, "capacity", lambda: {"worker_slots": 2})
     monkeypatch.setattr(server, "master_orchestrate", lambda **kw: calls.append(kw) or "started")
     assert server.control_command("/master_orchestrate fleet 0 task", project="project") == "started"
-    assert calls == [{"task": "task", "mode": "fleet", "agents": 2, "project": "project"}]
+    assert calls == [{"task": "task", "mode": "fleet", "agents": 4, "project": "project"}]
 
 
 def test_native_delegate_reaches_durable_lane_boundary(monkeypatch):

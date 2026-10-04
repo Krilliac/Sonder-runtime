@@ -221,8 +221,9 @@ def test_small_configured_ceiling_wins_over_minimum(monkeypatch, ceiling):
 
 def test_ask_preview_matches_capacity_default(server, queued):
     text = server.master_orchestrate("compare ideas", mode="ask")
-    assert "fleet    - queue 3 agent(s) across 1 safe worker slot(s)" in text
-    assert "min(max_agents(), max(3, 2 * worker_slots))" in text
+    assert "fleet of 3 agents on 1 worker slots" in text
+    assert text.receipt_fields["orchestration"]["fleet_agents"] == 3
+    assert text.receipt_fields["orchestration"]["worker_slots"] == 1
     assert not queued
 
 
@@ -259,14 +260,28 @@ def test_slash_handler_preserves_prefix_until_master(server, queued, surface, mo
     source = Path(__file__).resolve().parents[1] / "sonder_runtime/interfaces" / surface
     tree = ast.parse(source.read_text(encoding="utf-8"))
     branch, = [node for node in ast.walk(tree) if isinstance(node, ast.If)
-               and ast.unparse(node.test) == "cmd == '/master'"]
+               and ast.unparse(node.test) in (
+                   "cmd in ('/master', '/master_orchestrate')",
+                   "cmd in ('/master', '/master_orchestrate', '/delegate')",
+               )]
     route = ast.parse("def route(arg): pass").body[0]
     route.body = branch.body
-    scope = dict(server=server, context=None, _emit=lambda text: text,
-                 _account_task_boundary_refusal=lambda *a: "")
+    from sonder_runtime.interfaces.orchestration_commands import execute_master_command
+    host = SimpleNamespace(
+        master_orchestrate=server.master_orchestrate, master_orchestrator=mo,
+        control_command=lambda command, **kw: execute_master_command(
+            command.split(None, 1)[1], orchestrate=server.master_orchestrate,
+            capacity=mo.capacity, project=kw.get("project", ""),
+        ),
+    )
+    scope = dict(server=host, context=None, _emit=lambda text: text,
+                 _account_task_boundary_refusal=lambda *a: "", project="",
+                 workspace_project=None, idempotency_key="", session_id="test",
+                 line=f"/master {mode} {count} make me something cool", stripped="/master",
+                 _idempotent_http_action=lambda _c, _k, _a, function: function(),
+                 _narrate_http_command=lambda _n, _a, function, _c: function())
     exec(compile(ast.fix_missing_locations(ast.Module(body=[route], type_ignores=[])),
                  str(source), "exec"), scope)
     scope["route"](f"{mode} {count} make me something cool")
     assert queued[0][0] == "make me something cool"
     assert queued[0][1]["agents"] == expected
-

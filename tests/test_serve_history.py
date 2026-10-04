@@ -251,7 +251,7 @@ def test_master_slash_routes_modes(monkeypatch):
     assert calls == [
         {"task": "build it", "mode": "delegate", "agents": 2, "project": ""},
         {"task": "build it", "mode": "delegate", "agents": 2, "project": ""},
-        {"task": "build it", "mode": "fleet", "agents": 2, "project": ""},
+        {"task": "build it", "mode": "fleet", "agents": 4, "project": ""},
     ]
 
 

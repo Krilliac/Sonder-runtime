@@ -1,4 +1,3 @@
-import contextlib
 from contextlib import contextmanager
 import http.client
 import io
