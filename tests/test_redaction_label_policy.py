@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 
 from sonder_runtime.application.session.query_export import DefaultExportRedactor
+from sonder_runtime.application.session.transcript_export import redact_export_text
 from sonder_runtime.application.tools.facade import PatternOutputRedactor
 from sonder_runtime.domain.security.redaction import REDACTED, redact_structure, redact_text
 from sonder_runtime.platform.logging import Redactor
@@ -45,3 +46,13 @@ def test_key_aware_walk_preserves_shape_and_noncredential_fields():
 def test_label_mentions_and_unrelated_identifiers_remain_unchanged(text):
     for redact in (redact_text, Redactor(env={}).redact, DefaultExportRedactor().redact):
         assert redact(text) == text
+
+
+def test_composed_export_retains_notes_after_a_redacted_authorization_value():
+    text = "Authorization: Bearer fixture-token-014 followed by ordinary notes"
+    expected = "Authorization: [REDACTED] followed by ordinary notes"
+    for redact in (redact_text, Redactor(env={}).redact, DefaultExportRedactor().redact):
+        assert redact(text) == expected
+        assert redact(expected) == expected
+    assert redact_export_text(text) == expected
+    assert redact_export_text(text, redact=Redactor(env={}).redact) == expected

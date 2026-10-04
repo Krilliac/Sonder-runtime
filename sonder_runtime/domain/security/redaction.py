@@ -27,7 +27,9 @@ WORKSPACE_LABEL = "[WORKSPACE]"
 # redact_text, so a known secret value is scrubbed even where no pattern
 # would match its surroundings.
 PATTERNS: tuple[re.Pattern, ...] = (
-    re.compile(r"(?i)\b(authorization\s*[:=]\s*)(\S+(?:\s+\S+)?)"),
+    # A prior pass replaced the complete credential with this single marker.
+    # Repeated redaction must not consume the ordinary word following it.
+    re.compile(r"(?i)\b(authorization\s*[:=]\s*)(\[REDACTED\]|\S+(?:\s+\S+)?)"),
     re.compile(r"(?i)\b((?:set-)?cookie\s*:\s*)([^\r\n]+)"),
     re.compile(r"(?i)\b(bearer\s+)([a-z0-9._~+/=-]{8,})"),
     re.compile(

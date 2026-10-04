@@ -64,7 +64,8 @@ def child_environment(base=None):
 
 
 _PATTERNS: tuple[re.Pattern, ...] = (
-    re.compile(r"(?i)\b(authorization\s*[:=]\s*)(\S+(?:\s+\S+)?)"),
+    # Keep the canonical marker handling idempotent (domain drift guard).
+    re.compile(r"(?i)\b(authorization\s*[:=]\s*)(\[REDACTED\]|\S+(?:\s+\S+)?)"),
     re.compile(r"(?i)\b((?:set-)?cookie\s*:\s*)([^\r\n]+)"),
     re.compile(r"(?i)\b(bearer\s+)([a-z0-9._~+/=-]{8,})"),
     re.compile(
