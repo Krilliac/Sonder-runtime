@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -272,6 +274,7 @@ def test_http_chat_and_explicit_pin_capture_and_replay_the_actual_lane(tmp_path,
     database = tmp_path / "http-chat.sqlite"
     repository = SQLiteSessionRepository(database)
     capture = SessionCaptureService(repository)
+    monkeypatch.setenv("SONDER_HTTP_WORK_RUNS_DB", str(tmp_path / "work-runs.sqlite"))
     monkeypatch.setattr(
         bootstrap_app, "default_app",
         lambda: SimpleNamespace(
@@ -331,6 +334,26 @@ def test_http_chat_and_explicit_pin_capture_and_replay_the_actual_lane(tmp_path,
                     if line.startswith("data: {")]
         return json.loads(body)
 
+    def completed_work(port, acknowledgement, content):
+        assert acknowledgement["status"] == "running"
+        assert content == acknowledgement["acknowledgement"]
+        assert "Build the Flutter app." in content
+        assert "single agent" in content
+        assert acknowledgement["work_run_id"] in content
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            status, _, body = _request(port, "GET", acknowledgement["get_url"])
+            assert status == 200, body
+            record = json.loads(body)
+            assert record["id"] == acknowledgement["work_run_id"]
+            if record["status"] != "running":
+                assert record["result_receipt"]["work_run_id"] == record["id"]
+                assert record["result_receipt"]["status"] == record["status"]
+                assert record["result_receipt"]["session_ref"] == acknowledgement["session_ref"]
+                return record
+            threading.Event().wait(0.05)
+        pytest.fail("admitted HTTP work did not finish")
+
     with _http_server(monkeypatch) as port:
         assert "model answer" in send(port, "Hello", session="ordinary-http")["choices"][0]["message"]["content"]
         assert "model answer" in send(
@@ -339,21 +362,39 @@ def test_http_chat_and_explicit_pin_capture_and_replay_the_actual_lane(tmp_path,
         work_result = send(
             port, "Build the Flutter app.", session="natural-work-http",
         )
-        assert "mode: foreground workbench" in work_result["choices"][0]["message"]["content"]
-        assert work_result["sonder_receipt"]["chat_work"]["status"] == "returned"
+        finished_work = completed_work(
+            port, work_result["sonder_receipt"]["chat_work"],
+            work_result["choices"][0]["message"]["content"],
+        )
+        assert "mode: foreground workbench" in finished_work["output"]
+        assert finished_work["result_receipt"]["status"] == "returned"
         resumed_work = send(
             port, "Build the Flutter app.", session="ordinary-http",
         )
-        assert resumed_work["sonder_receipt"]["chat_work"]["status"] == "returned"
+        finished_resumed_work = completed_work(
+            port, resumed_work["sonder_receipt"]["chat_work"],
+            resumed_work["choices"][0]["message"]["content"],
+        )
+        assert finished_resumed_work["result_receipt"]["status"] == "returned"
         streamed = send(
             port, "Build the Flutter app.", session="stream-work-http", stream=True,
         )
-        assert next(
+        streamed_receipt = next(
             chunk for chunk in streamed
             if chunk.get("choices") and chunk["choices"][0].get("finish_reason") == "stop"
-        )["sonder_receipt"]["chat_work"]["status"] == "returned"
+        )["sonder_receipt"]["chat_work"]
+        streamed_content = "".join(
+            chunk["choices"][0].get("delta", {}).get("content", "")
+            for chunk in streamed if chunk.get("choices")
+        )
+        finished_streamed_work = completed_work(port, streamed_receipt, streamed_content)
+        assert finished_streamed_work["result_receipt"]["status"] == "returned"
         unnamed = send(port, "Build the Flutter app.")
-        unnamed_ref = unnamed["sonder_receipt"]["chat_work"]["session_ref"]
+        finished_unnamed = completed_work(
+            port, unnamed["sonder_receipt"]["chat_work"],
+            unnamed["choices"][0]["message"]["content"],
+        )
+        unnamed_ref = finished_unnamed["result_receipt"]["session_ref"]
         assert unnamed_ref
         monkeypatch.setattr(
             serve.server, "answer_with_history",
@@ -366,8 +407,12 @@ def test_http_chat_and_explicit_pin_capture_and_replay_the_actual_lane(tmp_path,
         ):
             monkeypatch.setattr(server, "route_work_request", lambda *args, _result=output, **kwargs: _result)
             unknown = send(port, "Build the Flutter app.", session=session_name)
-            assert unknown["sonder_receipt"]["chat_work"]["status"] == "unknown"
-            assert "outcome is unknown" in unknown["choices"][0]["message"]["content"]
+            finished_unknown = completed_work(
+                port, unknown["sonder_receipt"]["chat_work"],
+                unknown["choices"][0]["message"]["content"],
+            )
+            assert finished_unknown["result_receipt"]["status"] == "unknown"
+            assert not finished_unknown["output"].strip()
         monkeypatch.setattr(server, "route_work_request", original_work_route)
         monkeypatch.setattr(serve.server, "answer_with_history", model_answer)
         monkeypatch.setattr(
@@ -396,7 +441,7 @@ def test_http_chat_and_explicit_pin_capture_and_replay_the_actual_lane(tmp_path,
         event for event in reopened.read_range("ordinary-http")
         if event.event_type == "model.response"
     )
-    resumed_receipt = resumed_work["sonder_receipt"]["chat_work"]
+    resumed_receipt = finished_resumed_work["result_receipt"]
     assert resumed_receipt["source_event_id"] == prior_response.event_id
     assert resumed_receipt["session_ref"] == "ordinary-http"
     assert [event.event_type for event in reopened.read_range("ordinary-http")][-2:] == [
@@ -413,7 +458,7 @@ def test_http_chat_and_explicit_pin_capture_and_replay_the_actual_lane(tmp_path,
         assert [event.event_type for event in reopened.read_range(session_name)] == [
             "chat.work.admitted", "chat.work.unknown",
         ]
-    assert "source_event_id" not in work_result["sonder_receipt"]["chat_work"]
+    assert "source_event_id" not in finished_work["result_receipt"]
     for session, reason in (
         ("ordinary-http", "ordinary conversation"),
         ("explanation-http", "ordinary conversation"),
