@@ -1685,8 +1685,8 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /workspace [path]  show/set the directory used for guarded project work;
                      /files /read /write /append /edit /mkdir /delete then
                      resolve relative paths inside it and refuse escapes;
-                     work with none set gets a dated folder under the first
-                     workspace root (SONDER_AUTO_WORKSPACE=0 asks instead)
+                     work with none set gets a dated folder in
+                     ~/Sonder/workspaces (SONDER_AUTO_WORKSPACE=0 asks instead)
   /workspace-create <path>  create a guarded directory, select it, and resume queued work
   /env [refresh]     show the host OS, shells, and installed toolchains
   /toolstatus <name> run the fixed local version probe for a discovered tool
@@ -3128,8 +3128,8 @@ def _recovery_posture_command():
 
 # Asked when work is requested before a directory is selected and no default
 # folder was made for it (``SONDER_AUTO_WORKSPACE=0``, ``/workspace clear``,
-# the ``/workspace-create`` gate refused, or no configured root can hold one).
-# The natural-language work route and ``/work``/``/agent`` share it.
+# the ``/workspace-create`` gate refused, or the default workspace root is
+# unusable).  The natural-language work route and ``/work``/``/agent`` share it.
 _WORKSPACE_ASK = (
     "That looks like project work — which folder should I use?\n"
     "  Existing: /workspace <path>\n"
@@ -3148,20 +3148,6 @@ _DEFAULT_WORKSPACE_LINE = (
 def _auto_workspace_enabled():
     """``SONDER_AUTO_WORKSPACE`` (``[state].auto_workspace``); on unless set false."""
     return env_bool_from_env("SONDER_AUTO_WORKSPACE", True)
-
-
-def _configured_workspace_roots():
-    """``[state].workspace_roots`` in order: the roots managed REPL work grants.
-
-    Startup exports the validated list as ``SONDER_FILE_ROOTS``
-    (``_export_runtime_environment``), the same list the application config
-    hands to managed work, so reading it here never builds the application.
-    """
-    return tuple(
-        part.strip()
-        for part in os.environ.get("SONDER_FILE_ROOTS", "").split(os.pathsep)
-        if part.strip()
-    )
 
 
 # Exception types reported as a refused request instead of ending the console.
@@ -3626,19 +3612,20 @@ def main(*, machine_output=False):
     def select_default_workspace(task):
         """Make, select and announce this session's default folder for ``task``.
 
-        Returns False when the caller should ask instead.  The folder is
-        planned without touching the disk, then created only if the same gate
-        ``/workspace-create`` passes allows it, so plan mode, or manual mode
-        with nobody to approve, falls back to the unchanged question.  Once
-        selected it stays the workspace, so follow-up work lands beside it.
+        Returns False when the caller should ask instead.  The folder goes in
+        the app-owned default workspace root (``~/Sonder/workspaces`` unless
+        ``[state].default_workspace_root`` says otherwise; startup exports it),
+        which managed work grants by design.  It is planned without touching
+        the disk, then created only if the same gate ``/workspace-create``
+        passes allows it, so plan mode, or manual mode with nobody to approve,
+        falls back to the unchanged question.  Once selected it stays the
+        workspace, so follow-up work lands beside it.
         """
         nonlocal workspace_root, pending_workspace_work
         if default_workspace_declined or not _auto_workspace_enabled():
             return False
         try:
-            target = creation_workspace.plan_session_workspace(
-                task, _configured_workspace_roots(),
-            )
+            target = creation_workspace.plan_session_workspace(task)
         except creation_workspace.CreationWorkspaceError as exc:
             print(_paint("(no default folder: %s)" % S.safe_text(str(exc)), "muted"))
             return False

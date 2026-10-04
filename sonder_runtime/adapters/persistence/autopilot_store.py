@@ -312,7 +312,9 @@ def create_run(
     if not objective:
         raise ValueError("autopilot objective is required")
     run_id = "auto-%s" % uuid.uuid4().hex[:12]
-    selected_project = writing_project(project, run_id) if policy != "observe" else project
+    selected_project = (
+        writing_project(project, run_id, task=objective) if policy != "observe" else project
+    )
     now = time.time()
     with _write_transaction() as conn:
         conn.execute(

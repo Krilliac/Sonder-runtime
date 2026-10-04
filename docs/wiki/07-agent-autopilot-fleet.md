@@ -96,21 +96,26 @@ Control: `/autopilot status|resume|cancel`, or the master orchestrator
 tools. See [autopilot-interruption](../runbooks/autopilot-interruption.md).
 
 Writing runs without an explicit project (`default`, empty, or an unresolved
-project name) use `<state-home>/creations/<run-id>/`. Autopilot persists this
-folder in its project field, shown by the app and by `working in:` in start,
-status, and report text. Standalone writing agents also allocate a creations
+project name) get a new folder in the app-owned default workspace root, the
+same place the console puts its folders: `%USERPROFILE%\Sonder\workspaces` on
+Windows, `~/Sonder/workspaces` elsewhere, or `[state].default_workspace_root`
+(env `SONDER_DEFAULT_WORKSPACE_ROOT`). The folder is named from the request,
+`<YYYY-MM-DD>-<a few words>-<4 hex>`. When that root is unusable (no user
+home, a link, inside a Sonder source checkout, or overlapping private control
+state, as for the packaged Linux service whose home is the state home), the
+run uses `<state-home>/creations/<run-id>/` instead and logs why. Autopilot
+persists the folder in its project field, shown by the app and by `working in:`
+in start, status, and report text. Standalone writing agents also allocate a
 folder before opening their lanes. Inside the agent loop only a named project
 that resolves to no directory is upgraded; an omitted project stays unbound for
 host-owned callers that keep their own root (the selfmod editor's candidate
 workspace, the web research agent, unsafe lab). Existing project directories keep their
 selected scope; read-only observe runs keep their existing behavior. A default
 state home inside a Sonder Git checkout is refused instead of writing artifacts
-into the Runtime source. Configured workspace grants still apply to delegation.
-
-The console is the exception: its managed work grants only
-`[state].workspace_roots` and refuses roots that overlap the state home, so
-its default folder goes under the first usable workspace root instead (see
-[workspace scope](20-terminal-ui-conventions.md#workspace-scope-for-file-commands)).
+into the Runtime source. Configured workspace grants still apply to delegation
+(lane control outside managed console work still needs a configured root).
+Managed console work grants the default root by design; see
+[workspace scope](20-terminal-ui-conventions.md#workspace-scope-for-file-commands).
 
 When unattended execution verifiers are refused (for example in `acceptEdits`),
 an implementation may pass using successful read-back of every changed file
