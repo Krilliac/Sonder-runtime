@@ -64,8 +64,11 @@ an eight-second timeout. Candidate source is JSON stdin data, never interpolated
 into the helper. The helper calls the native
 [`Parser.ParseInput`](https://learn.microsoft.com/en-us/dotnet/api/system.management.automation.language.parser.parseinput)
 API and recursively visits nested ASTs; it never compiles or invokes them.
-The native parser handles PowerShell escapes, comments, quoting, scriptblocks,
+The native parser handles PowerShell comments, quoting, scriptblocks,
 subexpressions and parse errors that a regex or POSIX shell parser cannot model.
+Escaped literal command names require inspection because their AST literal
+spelling is not a canonical command identity. Literal escapes in ordinary data
+arguments remain inspectable; candidate text is never evaluated or executed.
 
 Encoded executable switches, expression invocation, dynamic executable names,
 scriptblock construction/invocation, opaque PowerShell host arguments, dynamic
