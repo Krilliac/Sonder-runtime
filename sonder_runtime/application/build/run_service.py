@@ -312,20 +312,20 @@ class BuildJobService:
         if remaining is not None:
             # Leave the caller time to render; never wait past its deadline.
             wait = max(0.0, min(wait, remaining - 1.0))
-        record, exit_code, _ = self._launcher.wait(job_id, 0)
+        record, exit_code, pending = self._launcher.wait(job_id, 0)
         deadline = self._clock() + wait
-        while not record.is_terminal:
+        while not record.is_terminal or pending:
             if context.cancellation.cancelled or context.expired:
-                if cancel_on_abort:
+                if cancel_on_abort and not record.is_terminal:
                     self._launcher.cancel(job_id, "caller operation cancelled")
-                    record, exit_code, _ = self._launcher.wait(job_id, 5.0)
-                    if record.is_terminal:
+                    record, exit_code, pending = self._launcher.wait(job_id, 5.0)
+                    if record.is_terminal and not pending:
                         break
                 return self._status_view(job_id, record, meta)
             left = deadline - self._clock()
             if left <= 0:
                 return self._status_view(job_id, record, meta)
-            record, exit_code, _ = self._launcher.wait(job_id, min(_WAIT_SLICE_SECONDS, left))
+            record, exit_code, pending = self._launcher.wait(job_id, min(_WAIT_SLICE_SECONDS, left))
         model = self._models.cached_model(context.principal_id, str(meta.get("project_root", "")),
                                           str(meta.get("build_dir", "")))
         return self._collector.collect(job_id, meta, model, record=record, exit_code=exit_code)
