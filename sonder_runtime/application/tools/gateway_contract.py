@@ -16,8 +16,6 @@ from here rather than inventing another.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 import time
 from contextlib import nullcontext
@@ -31,6 +29,7 @@ from ...domain.tools.traits import ToolTraits
 from ..execution import effect_journal, gateway_calls
 from ..ports.tool_registry import ToolSchemaSelection
 from .scheduling import ToolConcurrencyGate
+from .receipt_digest import receipt_digest as _digest
 
 _LOG = logging.getLogger(__name__)
 
@@ -236,12 +235,6 @@ class ToolReceipt:
                                % ", ".join(TERMINAL_STATES))
 
 
-def _digest(value: Any) -> str:
-    return hashlib.sha256(
-        json.dumps(value, sort_keys=True, default=str, separators=(",", ":")).encode()
-    ).hexdigest()
-
-
 def _terminal_for(exc: BaseException) -> str:
     if isinstance(exc, Cancelled):
         return CANCELLED
@@ -381,7 +374,29 @@ class ToolGateway:
                 if journal_binding is not None and (
                     request.permission.effects or not request.permission.traits.is_read_only
                 ):
-                    journal_intent = self._begin_journaled(journal_binding, request)
+                    try:
+                        journal_intent = self._begin_journaled(journal_binding, request)
+                    except effect_journal.SettledEffectReplay as replay:
+                        # A production child can consume its exact settled
+                        # output without entering the invoker. Other callers
+                        # keep the explicit replay-refusal contract.
+                        calls = gateway_calls.current()
+                        if calls is None or not callable(getattr(self._audit, "read_receipt", None)):
+                            raise
+                        from .settled_replay import consume_settled_receipt
+                        try:
+                            receipt = ToolReceipt(**consume_settled_receipt(
+                                journal_binding, replay, request, self._audit,
+                            ))
+                            self._publish(request, receipt)
+                        except BaseException as error:
+                            # The ordinal matched, but the runner never got
+                            # its output. It cannot checkpoint past this call
+                            # or continue at a fresh ordinal after swallowing
+                            # the refusal.
+                            calls.halt(error)
+                            raise
+                        return receipt
                 try:
                     result = self._invoker.invoke(request)
                 except BaseException as exc:

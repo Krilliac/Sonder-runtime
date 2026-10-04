@@ -14,7 +14,7 @@ import logging
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
-from typing import Any, Iterator, Mapping, Protocol
+from typing import Iterator, Mapping, Protocol
 
 _LOG = logging.getLogger(__name__)
 
@@ -30,13 +30,14 @@ class SettledEffectReplay(EffectJournalError):
     settled receipt it was handed instead of repeating the effect.
     """
 
-    def __init__(self, idempotency_key: str, receipt_key: str) -> None:
+    def __init__(self, idempotency_key: str, receipt_key: str, *, intent_id: str = "") -> None:
         super().__init__(
             "effect already settled before resume; consume its receipt "
             f"{receipt_key!r} instead of re-invoking it"
         )
         self.idempotency_key = idempotency_key
         self.receipt_key = receipt_key
+        self.intent_id = intent_id
 
 
 class DivergentEffectReplay(EffectJournalError):
@@ -254,7 +255,9 @@ class JournalBinding:
         if settled is not None and idempotency_key in settled:
             # A resumed worker was handed this receipt; repeating the effect
             # is refused before any journal write.
-            raise SettledEffectReplay(idempotency_key, settled[idempotency_key])
+            raise SettledEffectReplay(
+                idempotency_key, settled[idempotency_key], intent_id=intent.intent_id,
+            )
         existing = getattr(self.journal, "get", lambda _intent_id: None)(intent.intent_id)
         if existing is not None and existing.idempotency_key != idempotency_key:
             raise DivergentEffectReplay(intent.intent_id)

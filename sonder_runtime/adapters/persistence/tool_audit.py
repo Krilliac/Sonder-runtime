@@ -157,7 +157,12 @@ class DurableToolAuditRepository:
                             "tool audit retention could not prune %s" % candidate.name
                         ) from exc
             else:
-                self.path.write_bytes(current + line)
+                # A journal terminal outcome may refer to this receipt as
+                # soon as append returns. Flush it before that can happen.
+                with self.path.open("wb") as stream:
+                    stream.write(current + line)
+                    stream.flush()
+                    os.fsync(stream.fileno())
 
     def _line(self, request: ToolGatewayRequest, receipt: ToolReceipt,
               previous: str, rotated_from: dict[str, Any] | None) -> bytes:
@@ -254,11 +259,13 @@ class DurableToolAuditRepository:
         self.path.replace(candidate)
         return candidate.name
 
-    def _read(self) -> list[dict[str, Any]]:
-        if not self.path.exists():
+    def _read(self, path: Path | None = None) -> list[dict[str, Any]]:
+        path = self.path if path is None else path
+        if not path.exists():
             return []
         try:
-            data = self.path.read_bytes()
+            with path.open("rb") as stream:
+                data = stream.read(self.limits.max_bytes + 1)
             if len(data) > self.limits.max_bytes:
                 raise ToolAuditError("tool audit byte bound exceeded")
             entries = [json.loads(line) for line in data.splitlines() if line.strip()]
@@ -285,14 +292,44 @@ class DurableToolAuditRepository:
 
     def verify(self) -> None:
         with self._lock:
-            previous = ""
-            for entry in self._read():
-                digest = entry.get("audit_digest")
-                material = dict(entry)
-                material.pop("audit_digest", None)
-                if entry.get("previous_audit_digest", "") != previous or digest != _digest(material):
-                    raise ToolAuditError("tool audit integrity check failed")
-                previous = digest
+            self._verify_entries(self._read())
+
+    @staticmethod
+    def _verify_entries(entries: list[dict[str, Any]]) -> None:
+        previous = ""
+        for entry in entries:
+            digest = entry.get("audit_digest")
+            material = dict(entry)
+            material.pop("audit_digest", None)
+            if entry.get("previous_audit_digest", "") != previous or digest != _digest(material):
+                raise ToolAuditError("tool audit integrity check failed")
+            previous = digest
+
+    def read_receipt(self, receipt_key: str) -> dict[str, Any] | None:
+        """Find one exact receipt in the bounded retained, verified chains.
+
+        A pruned receipt is unavailable, never permission to repeat its
+        effect. Repeated request ids are ambiguous even if their bytes agree.
+        """
+        if not isinstance(receipt_key, str) or not receipt_key:
+            raise ValueError("receipt key must be non-empty text")
+        with self._lock:
+            rotated = self.rotated_files()
+            if len(rotated) > self.limits.max_rotated_files:
+                raise ToolAuditError("tool audit retention record bound exceeded")
+            total = sum(path.stat().st_size for path in rotated)
+            if total > self.limits.max_rotated_bytes:
+                raise ToolAuditError("tool audit retention byte bound exceeded")
+            match = None
+            for path in (*rotated, self.path):
+                entries = self._read(path)
+                self._verify_entries(entries)
+                for entry in entries:
+                    if entry.get("request_id") == receipt_key:
+                        if match is not None:
+                            raise ToolAuditError("tool audit receipt identity is ambiguous")
+                        match = entry
+            return match
 
 
 __all__ = ["DurableToolAuditRepository", "RECORD_SCHEMA", "ToolAuditLimits"]
