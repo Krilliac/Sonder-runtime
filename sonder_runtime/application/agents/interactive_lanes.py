@@ -42,6 +42,13 @@ from ..context_integration import ContextPlanningFacade
 from ..context_planner import CONTEXT_SECTIONS, ModelContext
 from ..context_manifests import ContextRecord
 from ..live_context import LiveAgentContextProducer
+from ..execution.resume_reality import (
+    ResumeBarrier,
+    bound as bound_resume_barrier,
+    consume_resume_context,
+    current as current_resume_barrier,
+    has_mutating_effects,
+)
 from ...domain.context.priority import ContextItem
 
 _LANE_TOOLS = frozenset(
@@ -179,6 +186,7 @@ _HIDDEN = frozenset(
         "depth",
         "artifacts",
         "pending_response",
+        "resume_reality",
     }
 )
 
@@ -345,6 +353,7 @@ class AgentLaneService:
         strategy_observer=None,
         activity_observer=None,
         prompts: PromptRenderer | None = None,
+        workspace_reality=None,
     ):
         self.store, self.sessions, self.gateway, self.tools = (
             store,
@@ -406,6 +415,7 @@ class AgentLaneService:
         self._strategy_observer = strategy_observer
         self._activity_observer = activity_observer
         self._prompts = prompts
+        self.workspace_reality = workspace_reality
 
     def _observe_strategy(self, lane):
         if self._strategy_observer is None:
@@ -660,6 +670,130 @@ class AgentLaneService:
             lane = tx.lane(lane_id)
             self._authorize(lane, context, execute=True, tx=tx)
             return lane
+
+    def _capture_workspace_reality(self, lane):
+        """Capture only at a safe durable boundary; never on every tool call."""
+        if self.workspace_reality is None:
+            return
+        previous = lane.get("resume_reality") or {}
+        if previous.get("blocked") and previous.get("delta"):
+            # A failed resumed attempt must retain its unresolved barrier;
+            # taking a new terminal snapshot must never clear it.
+            return
+        capture = getattr(self.workspace_reality, "capture", None)
+        if not callable(capture):
+            return
+        try:
+            snapshot = capture(str(lane["workspace_root"]))
+        except Exception as exc:  # adapter failure must not strand the lane
+            _LOG.warning("lane workspace snapshot failed: %s", type(exc).__name__)
+            snapshot = None
+        if snapshot is not None:
+            lane["resume_reality"] = {
+                "snapshot": snapshot,
+                "delta": None,
+                "blocked": False,
+                "inspected": False,
+                "replanned": False,
+                "context_consumed": False,
+                "pending": False,
+            }
+
+    def _prepare_resume_reality(self, lane):
+        """Revalidate a restored lane before it can regain mutation authority."""
+        if self.workspace_reality is None:
+            return lane
+        state = lane.get("resume_reality") or {}
+        if not state.get("pending", False):
+            return lane
+        snapshot = state.get("snapshot")
+        try:
+            delta = self.workspace_reality.revalidate(
+                str(lane["workspace_root"]), snapshot or {}, ()
+            )
+        except Exception as exc:  # a broken adapter is a degraded barrier
+            _LOG.warning("lane workspace revalidation failed: %s", type(exc).__name__)
+            delta = {
+                "status": "unavailable",
+                "requires_reinspection": True,
+                "requires_replan": True,
+                "reason": type(exc).__name__,
+            }
+        previous = lane.get("resume_reality") or {}
+        if delta is None and previous.get("blocked"):
+            # An identical tree does not discharge an already-required
+            # inspection/replan sequence.
+            delta = previous.get("delta")
+        state = {
+            "snapshot": (delta or {}).get("snapshot", snapshot),
+            "delta": delta,
+            "blocked": bool(delta and (delta.get("requires_reinspection") or delta.get("requires_replan"))),
+            "inspected": False,
+            "replanned": False,
+            "context_consumed": False,
+            "pending": False,
+        }
+        lane["resume_reality"] = state
+        return lane
+
+    @staticmethod
+    def _resume_barrier(lane):
+        state = lane.get("resume_reality") or {}
+        delta = state.get("delta")
+        if not delta and not state.get("blocked"):
+            return None
+        barrier = ResumeBarrier(
+            delta=delta,
+            inspected=bool(state.get("inspected")),
+            replanned=bool(state.get("replanned")),
+        )
+        barrier._context_consumed = bool(state.get("context_consumed"))
+        if barrier.inspected:
+            barrier.record_inspection()
+            if barrier.replanned:
+                barrier.record_replan("persisted-host-plan")
+        return barrier
+
+    @staticmethod
+    def _persist_resume_barrier(lane, barrier, *, pending=None):
+        state = dict(lane.get("resume_reality") or {})
+        state.update(
+            delta=barrier.delta,
+            blocked=barrier.blocked,
+            inspected=barrier.inspected,
+            replanned=barrier.replanned,
+            context_consumed=bool(getattr(barrier, "_context_consumed", False)),
+        )
+        if pending is not None:
+            state["pending"] = bool(pending)
+        lane["resume_reality"] = state
+
+    def _seal_workspace_reality(self, lane_id):
+        """Attach a fresh snapshot after a terminal/paused state is durable."""
+        if self.workspace_reality is None:
+            return
+        lane = self.store.read_lane(lane_id)
+        revision, attempt = lane.get("revision"), lane.get("attempt_id")
+        # Git is deliberately outside the SQLite writer transaction.
+        self._capture_workspace_reality(lane)
+        if lane.get("resume_reality") == self.store.read_lane(lane_id).get(
+            "resume_reality"
+        ):
+            return
+        try:
+            with self.store.transaction() as tx:
+                fresh = tx.lane(lane_id)
+                if (
+                    fresh.get("revision") != revision
+                    or fresh.get("attempt_id") != attempt
+                    or fresh.get("owner")
+                    or fresh.get("status") in _ACTIVE
+                ):
+                    return
+                fresh["resume_reality"] = lane["resume_reality"]
+                tx.save(fresh)
+        except Exception as exc:
+            _LOG.warning("lane workspace seal failed: %s", type(exc).__name__)
 
     def resume_after_verification(self, parent_session_id):
         """Resume only contexts retained from actual dispatch, never minted authority."""
@@ -1078,6 +1212,16 @@ class AgentLaneService:
                 archived_at=None,
                 archive_tombstone=None,
             )
+            if self.workspace_reality is not None:
+                lane["resume_reality"] = {
+                    "snapshot": None,
+                    "delta": None,
+                    "blocked": False,
+                    "inspected": False,
+                    "replanned": False,
+                    "context_consumed": False,
+                    "pending": False,
+                }
             self._authorize(lane, context, execute=True, tx=tx)
             tx.insert(lane)
             tx.emit(
@@ -1303,6 +1447,11 @@ class AgentLaneService:
                 lane.update(
                     status="queued", attempt_id="attempt-" + uuid.uuid4().hex, error=""
                 )
+                if self.workspace_reality is not None:
+                    # Revalidate at actual dispatch, after any capacity or
+                    # verifier wait. Accepting a resume command is not a fresh
+                    # observation of the workspace when execution later starts.
+                    lane["resume_reality"] = dict(lane.get("resume_reality") or {}, pending=True)
                 if content:
                     tx.message(lane, content, author)
                 elif not lane.get("pending_response") and not any(
@@ -1966,6 +2115,21 @@ class AgentLaneService:
                 except (TypeError, ValueError) as exc:
                     system += "\nLive stable context unavailable: " + type(exc).__name__
         prompt += dynamic_suffix
+        resume_delta = consume_resume_context()
+        if resume_delta is not None:
+            prompt += (
+                "\nResume reality delta (host observation; inspect affected paths "
+                "before planning. Mutating tools stay disabled until you read "
+                "the affected files; when requires_replan is true, then reply "
+                "with a turn that begins 'Plan:' and states the revised plan): "
+                + json.dumps(resume_delta, ensure_ascii=False, sort_keys=True)
+            )
+            barrier = current_resume_barrier()
+            if barrier is not None:
+                with self.store.transaction() as tx:
+                    fresh = tx.lane(lane["id"])
+                    self._persist_resume_barrier(fresh, barrier)
+                    tx.save(fresh)
         request_options = {
             "num_predict": max(1, lane["max_output_tokens"] - lane["used_tokens"])
         }
@@ -2065,8 +2229,30 @@ class AgentLaneService:
                 proof = self._app_dispatch.get(lane_id)
             if proof is None or proof[0] is not context:
                 raise PermissionError("private admitted dispatch required")
+        prepared_reality = None
+        reality_lane_revision = None
+        reality_lane_attempt = None
+        if self.workspace_reality is not None:
+            reality_lane = self.store.read_lane(lane_id)
+            reality_lane_revision = reality_lane.get("revision")
+            reality_lane_attempt = reality_lane.get("attempt_id")
+            reality_state = reality_lane.get("resume_reality")
+            if reality_state is None or reality_state.get("pending"):
+                reality_lane["resume_reality"] = dict(reality_state or {}, pending=True)
+                prepared_reality = self._prepare_resume_reality(reality_lane).get(
+                    "resume_reality"
+                )
         with self._transaction(context, lane_id=lane_id) as tx:
             lane = tx.lane(lane_id)
+            if prepared_reality is not None:
+                if (
+                    lane["revision"] != reality_lane_revision
+                    or lane["attempt_id"] != reality_lane_attempt
+                ):
+                    raise PermissionError("lane changed during resume reality validation")
+                lane["resume_reality"] = prepared_reality
+                if prepared_reality.get("delta") is not None:
+                    tx.bump_verification(lane)
             self._authorize(lane, context, execute=True, tx=tx)
             if managed and proof[1] != lane["attempt_id"]:
                 raise PermissionError("managed dispatch attempt changed")
@@ -2087,6 +2273,8 @@ class AgentLaneService:
             tx.save(lane)
         started = time.monotonic()
         control = _LaneCancellation(self, lane_id, lane["attempt_id"])
+        barrier = self._resume_barrier(lane)
+        barrier_scope = bound_resume_barrier(barrier)
         run_context = replace(
             context,
             source="worker",
@@ -2102,6 +2290,7 @@ class AgentLaneService:
                 max(0, lane["grant_expires"] - time.time()),
             ),
         )
+        barrier_scope.__enter__()
         try:
             if managed:
                 run_context = replace(
@@ -2159,6 +2348,8 @@ class AgentLaneService:
                         stopped_status,
                         reason="lane control requested",
                     )
+                    # Git runs after waiters and the loop turn are released.
+                    self._seal_workspace_reality(lane_id)
                     break
                 if lane.get("pending_response"):
                     if self._consume_response(lane_id, run_context, started):
@@ -2311,7 +2502,10 @@ class AgentLaneService:
             if observed_lane is not None:
                 self._observe_strategy(observed_lane)
             self._loop_finish(lane, lane["status"], reason=str(exc))
+            if observed_lane is not None:
+                self._seal_workspace_reality(lane_id)
         finally:
+            barrier_scope.__exit__(None, None, None)
             if managed:
                 self.managed_authority.release_worker(
                     run_context, issuer=self._worker_issuer
@@ -2346,6 +2540,18 @@ class AgentLaneService:
         if tool is not None:
             self._execute_tool(lane, tool, context)
             return False
+        barrier = current_resume_barrier()
+        if barrier is not None and barrier.blocked and barrier.inspected:
+            # A plain report is not a plan.  Only an explicitly labelled
+            # planning/rationale turn can clear the replan half of the gate;
+            # that turn is terminal and therefore cannot also mutate.
+            text = str(known.get("text") or "").lstrip().casefold()
+            if text.startswith(("plan:", "rationale:", "reason:")):
+                barrier.record_replan(_digest(known["text"]))
+                with self.store.transaction() as tx:
+                    fresh = tx.lane(lane_id)
+                    self._persist_resume_barrier(fresh, barrier)
+                    tx.save(fresh)
         with self.store.transaction() as tx:
             lane = tx.lane(lane_id)
             if lane["owner"] != self.owner or lane["status"] != "running":
@@ -2372,10 +2578,14 @@ class AgentLaneService:
         self._done()
         self._observe_strategy(lane)
         self._loop_finish(lane, "completed")
+        self._seal_workspace_reality(lane_id)
         return True
 
     def _execute_tool(self, lane, tool, context):
         name, args, effects = tool
+        barrier = current_resume_barrier()
+        if barrier is not None and has_mutating_effects(effects):
+            barrier.require_mutation_allowed()
         # A retry of the same durable attempt/step must address the same
         # journal intent.  Random call IDs would make a replay look new.
         call_id = "call-%s-step-%s" % (lane["attempt_id"], lane["used_steps"])
@@ -2429,6 +2639,16 @@ class AgentLaneService:
             ))
         with binding_context:
             receipt = self.tools.execute(request)
+        if (barrier is not None and not has_mutating_effects(effects) and getattr(receipt, "success", False)
+                and name in {"file_read", "read_file", "file_read_range", "directory_tree", "file_find", "text_search"}):
+            # A successful read is the only host observation that can satisfy
+            # the inspection half of a restored barrier.  A scope-intersecting
+            # delta remains blocked until a later model planning turn.
+            barrier.record_inspection()
+            with self.store.transaction() as tx:
+                fresh = tx.lane(lane["id"])
+                self._persist_resume_barrier(fresh, barrier)
+                tx.save(fresh)
         output = getattr(receipt, "output", None)
         if hasattr(output, "output"):
             output = output.output

@@ -6,6 +6,7 @@ from pathlib import Path
 import time
 import uuid
 from ..application.ports.model_gateway import ModelRequest, require_model_text
+from ..application.execution.resume_reality import consume_resume_context
 
 
 def conversational_runner_factory(gateway, sessions, capture):
@@ -56,8 +57,15 @@ def conversational_runner_factory(gateway, sessions, capture):
                 cancellation=control,
                 deadline_monotonic=deadline,
             )
+            resume_delta = consume_resume_context()
+            prompt = request.prompt
+            if resume_delta is not None:
+                import json
+                prompt += "\n\n[HOST RESUME REALITY DELTA]\n" + json.dumps(
+                    dict(resume_delta), sort_keys=True, separators=(",", ":")
+                ) + "\n[/HOST RESUME REALITY DELTA]"
             model_request = ModelRequest(
-                request.prompt,
+                prompt,
                 tier=metadata.get("tier", "code"),
                 history=tuple(state.get("history", ())),
                 options={"num_predict": request.budget.max_output_tokens or 2048},

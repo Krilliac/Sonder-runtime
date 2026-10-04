@@ -115,6 +115,10 @@ CREATE TABLE IF NOT EXISTS autopilot_steering (
 );
 CREATE INDEX IF NOT EXISTS idx_autopilot_steering_run
     ON autopilot_steering(run_id, consumed_ts);
+CREATE TABLE IF NOT EXISTS autopilot_workspace_reality (
+    run_id TEXT PRIMARY KEY REFERENCES autopilot_runs(id) ON DELETE CASCADE,
+    data TEXT NOT NULL
+);
 """
 
 _RUN_COLUMN_MIGRATIONS = {
@@ -557,6 +561,41 @@ def save_progress(
     return _row_dict(row)
 
 
+def load_workspace_reality(run_id: str, owner_id: str) -> dict | None:
+    """Internal recovery metadata, available only to the current run owner."""
+    with _write_transaction() as conn:
+        row = conn.execute(
+            "SELECT r.data FROM autopilot_workspace_reality r JOIN autopilot_runs a "
+            "ON a.id=r.run_id WHERE a.id=? AND a.owner_id=? AND a.cancel_requested=0",
+            (run_id, owner_id),
+        ).fetchone()
+    if row is None:
+        return None
+    try:
+        value = json.loads(row[0])
+        return value if isinstance(value, dict) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def save_workspace_reality(run_id: str, owner_id: str, value: dict) -> bool:
+    """Persist a snapshot/barrier without expanding the public run projection."""
+    encoded = _json_text(value, 256_000)
+    with _write_transaction() as conn:
+        admitted = conn.execute(
+            "SELECT 1 FROM autopilot_runs WHERE id=? AND owner_id=? "
+            "AND status IN ('planning','running') AND cancel_requested=0",
+            (run_id, owner_id),
+        ).fetchone()
+        if admitted is None:
+            return False
+        conn.execute(
+            "INSERT INTO autopilot_workspace_reality(run_id,data) VALUES(?,?) "
+            "ON CONFLICT(run_id) DO UPDATE SET data=excluded.data", (run_id, encoded),
+        )
+    return True
+
+
 def request_pause(selector: str, request_owner: str | None = None) -> dict | None:
     now = time.time()
     with _write_transaction() as conn:
@@ -875,6 +914,15 @@ def finish_run(
             if existing is None:
                 return None
             evidence_reason = _completion_evidence_reason(existing)
+            reality = conn.execute(
+                "SELECT data FROM autopilot_workspace_reality WHERE run_id=?", (run_id,),
+            ).fetchone()
+            if reality is not None:
+                try:
+                    if json.loads(reality[0]).get("pending"):
+                        evidence_reason = "resume workspace inspection/replan remains pending"
+                except (ValueError, TypeError, AttributeError):
+                    evidence_reason = "resume workspace metadata is unavailable"
             if evidence_reason:
                 _event(
                     conn, run_id, "completion_refused",

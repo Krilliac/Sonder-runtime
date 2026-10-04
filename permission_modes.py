@@ -1569,6 +1569,18 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
         # previous one spent is not this one's.
         _SPENT_APPROVAL.set(None)
 
+    # A restored execution may read while its workspace reality is unresolved.
+    # This in-memory check has no Git/IO cost and never changes tool risk grades.
+    if risk in UNATTENDED_REFUSED_RISKS:
+        from sonder_runtime.application.execution.resume_reality import (
+            ResumeMutationBlocked, require_mutation_allowed,
+        )
+        try:
+            require_mutation_allowed()
+        except ResumeMutationBlocked as exc:
+            return Decision(DENY, active, risk, str(exc), name,
+                            source="fence", call_id=call)
+
     # 0. The fence on this thread's effects, before any policy is read. A
     #    worker whose lease is gone produces no effect whatever the mode or
     #    the rules say; it may still read.
