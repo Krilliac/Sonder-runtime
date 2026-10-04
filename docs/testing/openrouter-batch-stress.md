@@ -33,10 +33,13 @@ increase production concurrency automatically.
 On 2026-10-04, Python 3.12.14 completed the default 1,280-send workload with
 1,180 successful outcomes and 100 expected failures. All send-count, ordering,
 concurrency and cleanup invariants passed. A single run with a 10 ms peer
-delay measured 47.6, 87.6, 81.8 and 137.4 requests/second at 1, 2, 4 and 8
-workers respectively. Other qualification builds were running concurrently;
-the nonmonotonic middle measurements are retained rather than interpreted as
-a performance improvement. The generated JSON belongs outside the repository.
+delay measured 47.9, 83.6, 129.5 and 174.7 requests/second at 1, 2, 4 and 8
+workers respectively. A subsequent 5,120-send soak also passed every invariant (4,720 successes and
+400 expected failures). The listen backlog is configured before server activation;
+independent regression coverage checks the actual activated backlog, successful
+usage accounting and cleanup after validation failure. Concurrent builds and
+browser tests make these local timings point estimates. The generated JSON
+belongs outside the repository.
 
 The normally collected test runs a small real HTTP workload and verifies
 cleanup. The existing OpenRouter batch tests separately qualify cancellation,
