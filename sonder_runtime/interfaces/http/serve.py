@@ -2896,7 +2896,7 @@ def _dump_chat(messages=None, label="chat", state=None):
     return "dumped chat/debug log to %s" % path
 
 
-def _http_slash_refusal(cmd, argument="", context=None):
+def _http_slash_refusal(cmd, argument="", context=None, arguments=None):
     """The permission gate for this chain: "" to proceed, else the refusal text.
 
     This chain calls `server.file_write` / `file_edit` / `file_delete`
@@ -2943,7 +2943,7 @@ def _http_slash_refusal(cmd, argument="", context=None):
     # this chain and `server.control_command` cannot disagree about a read.
     tools = command_catalog.narrow_branch_tools(cmd, argument, tools)
     return _http_tool_refusal(
-        tools, cmd, context=context, arguments=_slash_call_arguments(cmd, argument),
+        tools, cmd, context=context, arguments=arguments if arguments is not None else _slash_call_arguments(cmd, argument),
     )
 
 
@@ -3241,11 +3241,10 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
     cmd = parts[0].lower()
     arg = parts[1] if len(parts) > 1 else ""
     _serve_logger.debug(f"_handle_slash: cmd={cmd!r}")
-
-    # One choke point in front of every branch below, for the same reason the
-    # REPL has one: this is a flat chain of ~130 `if cmd == ...` returns, and a
-    # check placed after even one of them leaves that one ungated.
-    refusal = _http_slash_refusal(cmd, arg, context=context)
+    # One choke point in front of every branch of this ~130-branch chain (as in the REPL).
+    from sonder_runtime.adapters.security.powershell_gate import slash_run_arguments
+    run_args = slash_run_arguments(cmd, lambda: _run_sources_from_messages(messages, state=state), grounding.extract_runnable_code_block)
+    refusal = _http_slash_refusal(cmd, arg, context=context) if run_args is None else _http_slash_refusal(cmd, arg, context=context, arguments=run_args)
     if refusal:
         _serve_logger.debug(f"_handle_slash: refused cmd={cmd!r}: {refusal!r}")
         return refusal
@@ -3747,7 +3746,7 @@ def _handle_feedback(content, state=None):
 def _handle_intent(content, messages=None, state=None):
     """Return response text if `content` is a natural-language control intent, else None."""
     state = _state_or_legacy(state)
-
+    from sonder_runtime.adapters.security.powershell_gate import run_intent
     intent = intents.classify(content)
     if not intent:
         return None
@@ -3760,7 +3759,7 @@ def _handle_intent(content, messages=None, state=None):
         state.strict = intent["strict"]
         replies.append("strict %s" % ("on" if state.strict else "off"))
     if intent.get("run"):
-        replies.append(_do_run_from_messages(messages=messages, state=state))
+        replies.append(run_intent(_do_run_from_messages, _handle_slash, _run_sources_from_messages(messages, state=state), grounding.extract_runnable_code_block, messages=messages, state=state))
     if "train" in intent:
         replies.append(_do_train(intent["train"]))
     return "\n".join(replies)
