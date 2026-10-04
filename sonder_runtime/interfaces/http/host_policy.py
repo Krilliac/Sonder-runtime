@@ -18,7 +18,10 @@ a request really came through, and both must be made before routing:
   any local process could rotate the header to dodge the authentication
   failure limiter or to lock out someone else's address.
 
-Both functions are pure so the policy can be tested without a socket.
+``reflectable_origin`` adds the one header-safety rule CORS needs before its
+allowlist lookup: an ``Origin`` value with a line break is never echoed back.
+
+All three are pure so the policy can be tested without a socket.
 """
 from __future__ import annotations
 
@@ -36,6 +39,7 @@ __all__ = [
     "machine_host_names",
     "normalize_allowed_host",
     "parse_host_header",
+    "reflectable_origin",
 ]
 
 _HOST_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
@@ -266,3 +270,20 @@ def _unmapped(address):
     """
     mapped = getattr(address, "ipv4_mapped", None)
     return mapped if mapped is not None else address
+
+
+def reflectable_origin(value) -> str | None:
+    """A request's ``Origin`` if it may be echoed into a header, else ``None``.
+
+    The stdlib header parser keeps an obs-folded value's CR/LF, and
+    ``BaseHTTPRequestHandler.send_header`` writes values verbatim, so the
+    exact-match CORS allowlist was all that stood between a folded ``Origin``
+    and response splitting.  No browser origin contains a line break, so such
+    a value is never reflected, even when an allowlist entry matches it.  The
+    replace-and-compare form, rather than a membership test, is the line-break
+    sanitizer CodeQL's ``py/http-response-splitting`` query recognises.
+    """
+    if not isinstance(value, str):
+        return None
+    origin = value.replace("\r", "").replace("\n", "")
+    return origin if origin == value else None
