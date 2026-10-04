@@ -6,6 +6,7 @@ import threading
 import time
 from contextvars import ContextVar
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 
 import pytest
 
@@ -180,6 +181,8 @@ def test_invalid_worker_limit_sends_nothing(peer, max_workers):
     [ModelRequest("", "code")], [object()], [ModelRequest("x", "code", stream=True)],
     [ModelRequest("x", "code", options={"model": "no-slash"})],
     [ModelRequest("x", "code", options={"num_predict": "invalid"})],
+    [ModelRequest("x", "code", options={"format": {"type": "object", "properties": set()}})],
+    [ModelRequest("x", "code", options={"format": {"value": float("nan")}})],
     [ModelRequest("x", "code")] * 65, "text", iter([ModelRequest("x", "code")]),
 ])
 def test_invalid_entire_batch_sends_nothing_even_with_valid_first_request(peer, bad):
@@ -238,6 +241,38 @@ def test_pending_deadline_preserves_completed_success_and_never_dispatches_tail(
     assert isinstance(results[1].error, DeadlineExceeded)
     assert isinstance(results[2].error, DeadlineExceeded)
     assert [body["messages"][-1]["content"] for _, _, body in peer.requests] == ["success", "slow"]
+
+
+@pytest.mark.parametrize("control", ["cancel", "deadline"])
+def test_completed_response_accounts_usage_before_control_stop_and_refuses_tail(peer, monkeypatch, control):
+    from sonder_runtime.application import context as context_module
+
+    clock = [0.0]
+    monkeypatch.setattr(context_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    cancel = Cancellation()
+    usage = []
+    monkeypatch.setattr("sonder_runtime.adapters.inference.openrouter_gateway.record_usage", usage.append)
+    instance = gateway(peer)
+
+    def transport(url, payload, headers, timeout):
+        data = OpenAICompatibleGateway._default_transport(url, payload, headers, timeout)
+        if control == "cancel":
+            cancel.event.set()
+        else:
+            clock[0] = 11.0
+        return data
+
+    instance._raw_post = transport
+    results = instance.generate_batch(
+        requests("completed", "pending"), context(cancellation=cancel, timeout_seconds=10), max_workers=1,
+    )
+    expected = Cancelled if control == "cancel" else DeadlineExceeded
+    assert all(isinstance(item.error, expected) for item in results)
+    assert len(peer.requests) == len(usage) == 1
+    assert usage[0]["cost_usd"] == pytest.approx(0.00042)
+    assert usage[0]["prompt_tokens"] == 12
+    assert usage[0]["completion_tokens"] == 5
+    assert instance.last_usage == usage[0]
 
 
 @pytest.mark.parametrize("cancelled", [True, False])

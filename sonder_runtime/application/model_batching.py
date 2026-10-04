@@ -77,41 +77,50 @@ def generate_batch(
     outcomes: list[ModelBatchOutcome | None] = [None] * len(items)
     pending = {}
     next_index = 0
-    with owned_runtime_pool(max_workers=min(max_workers, len(items)),
-                            thread_name_prefix="model-batch") as pool:
-        while next_index < len(items) or pending:
-            while next_index < len(items) and len(pending) < max_workers:
-                stopped = _control_error(context)
-                if stopped is not None:
-                    for index in range(next_index, len(items)):
-                        outcomes[index] = ModelBatchOutcome(error=stopped)
-                    next_index = len(items)
-                    break
-                try:
-                    # One independent context per submission, even when the
-                    # same executor thread later serves another batch item.
-                    future = pool.submit(copy_context().run, invoke, items[next_index])
-                except Exception:
-                    for index in range(next_index, len(items)):
-                        outcomes[index] = ModelBatchOutcome(error=InternalFailure(
-                            "model batch worker admission failed",
-                        ))
-                    next_index = len(items)
-                    break
-                pending[future] = next_index
-                next_index += 1
-            if pending:
-                completed, _ = wait(pending, timeout=0.05, return_when=FIRST_COMPLETED)
-                for future in completed:
-                    index = pending.pop(future)
+    try:
+        with owned_runtime_pool(max_workers=min(max_workers, len(items)),
+                                thread_name_prefix="model-batch") as pool:
+            while next_index < len(items) or pending:
+                while next_index < len(items) and len(pending) < max_workers:
+                    stopped = _control_error(context)
+                    if stopped is not None:
+                        for index in range(next_index, len(items)):
+                            outcomes[index] = ModelBatchOutcome(error=stopped)
+                        next_index = len(items)
+                        break
                     try:
-                        outcomes[index] = future.result()
+                        # One independent context per submission, even when the
+                        # same executor thread later serves another batch item.
+                        future = pool.submit(copy_context().run, invoke, items[next_index])
                     except Exception:
-                        # An owned executor may fail cleanup outside invoke.
-                        # That cannot authorize replay or erase other results.
-                        outcomes[index] = ModelBatchOutcome(error=InternalFailure(
-                            "model batch worker failed before publishing its result",
-                        ))
+                        for index in range(next_index, len(items)):
+                            outcomes[index] = ModelBatchOutcome(error=InternalFailure(
+                                "model batch worker admission failed",
+                            ))
+                        next_index = len(items)
+                        break
+                    pending[future] = next_index
+                    next_index += 1
+                if pending:
+                    completed, _ = wait(pending, timeout=0.05, return_when=FIRST_COMPLETED)
+                    for future in completed:
+                        index = pending.pop(future)
+                        try:
+                            outcomes[index] = future.result()
+                        except Exception:
+                            # An owned executor may fail cleanup outside invoke.
+                            # That cannot authorize replay or erase other results.
+                            outcomes[index] = ModelBatchOutcome(error=InternalFailure(
+                                "model batch worker failed before publishing its result",
+                            ))
+    except Exception:
+        # Factory construction, ownership admission and context entry/cleanup
+        # can fail before submit. Never leak host details or replay siblings.
+        for index, outcome in enumerate(outcomes):
+            if outcome is None:
+                outcomes[index] = ModelBatchOutcome(error=InternalFailure(
+                    "model batch worker ownership unavailable",
+                ))
     # Every input is either admitted once or explicitly refused above.
     return tuple(outcome if outcome is not None else ModelBatchOutcome(
         error=InternalFailure("model batch result unavailable"),
