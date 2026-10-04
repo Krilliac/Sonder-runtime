@@ -109,7 +109,7 @@ def test_compaction_and_continue_retains_every_planted_item_after_restart(tmp_pa
     compacted = SessionCompactionService(
         repo, event_id_factory=lambda: "compaction-1",
     ).compact(SESSION, start_sequence=1, end_sequence=len(planted))
-    assert compacted.payload["summary_schema"] == 2
+    assert compacted.payload["summary_schema"] == 3
 
     # Continue the session after compaction, then restart from disk.
     repo.append(SESSION, "message.received", {"text": "continue with attempt 3"},
@@ -139,7 +139,7 @@ def test_compaction_and_continue_retains_every_planted_item_after_restart(tmp_pa
     assert summary.facts == ("FACT-schema-v3",)
     retained_ids = {item.event_id for item in summary.modalities}
     assert {"req-1", "rationale-1", "attempt-1", "attempt-2", "model-failure"} <= retained_ids
-    assert "chat-1" not in retained_ids  # plain chatter collapses into the range
+    assert "chat-1" in retained_ids  # prose may carry an accepted decision without a structured tag
 
     # 2. Bulky tool output left live context by reference, not by inlining.
     for token in BULKY_TOKENS:
@@ -323,7 +323,7 @@ def test_unknown_summary_schema_and_tampered_reference_fail_closed(tmp_path):
     repo = SQLiteSessionRepository(tmp_path / "sessions.db")
     planted = _plant(repo)
     current = canonical_summary(_request(planted))
-    event = _append_persisted(repo, planted, current, event_id="future", schema=3)
+    event = _append_persisted(repo, planted, current, event_id="future", schema=4)
     service = SessionCompactionService(repo)
     with pytest.raises(SessionCompactionError, match="schema"):
         service.validate_persisted_event(event, planted)
@@ -376,7 +376,7 @@ def test_live_lane_continues_after_compaction_and_restart_without_losing_history
     compacted = service._compaction.compact(
         session_id, start_sequence=events[0].sequence, end_sequence=events[-1].sequence,
     )
-    assert compacted.payload["summary_schema"] == 2
+    assert compacted.payload["summary_schema"] == 3
 
     # Restart every durable component, then continue the lane.
     assert sessions.close() is True
