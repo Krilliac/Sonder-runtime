@@ -14,6 +14,7 @@ from typing import Any
 
 from ...domain.common.errors import InvalidInput, NotFound
 from ...application.context import OperationContext
+from ...application.execution.resume_reality import has_mutating_effects, require_mutation_allowed
 from ...application.ports.tool_execution import (
     ToolExecutionResult,
     ToolExecutor,
@@ -130,6 +131,8 @@ class PortBackedToolInvoker:
         context = self._context_factory(request)
         self._policy.authorize(descriptor, call, context)
         execution_class = self._policy.select_execution_class(descriptor)
+        if has_mutating_effects(descriptor.effects):
+            require_mutation_allowed()
         started = time.monotonic()
         result = self._executor.execute(descriptor, call, context, execution_class)
         elapsed = max(0, int((time.monotonic() - started) * 1000))
