@@ -481,16 +481,16 @@ def test_deploy_health_failure_automatically_restores(monkeypatch, isolated, use
     assert selfmod.get_run(run["id"])["phase"] == "restored"
 
 
-def test_interrupted_deployment_restores_partial_copy(monkeypatch, isolated):
+def test_interrupted_singlefile_deployment_restores_original_bytes(monkeypatch, isolated):
     root = repository(isolated, use_git=False)
-    run = reviewed(root, files=("calc.py", "tests/test_new.py"))
+    run = reviewed(root)
     selfmod.approve(run["id"], "user:test")
     original = hashes(root)
     real = selfmod._atomic_copy
     failed = False
     def fail_candidate(source, target, mode=None):
         nonlocal failed
-        if "workspaces" in str(source) and not failed and str(target).endswith("test_new.py"):
+        if "workspaces" in str(source) and not failed and str(target).endswith("calc.py"):
             failed = True
             raise OSError("interrupted deploy")
         return real(source, target, mode)
@@ -672,9 +672,9 @@ def test_emergency_recovery_preflights_every_backup_before_mutating(isolated):
 def test_end_to_end_edit_deploy_rollback_restores_every_hash(isolated):
     root = repository(isolated)
     original_hashes = hashes(root)
-    run = reviewed(root, files=("calc.py", "tests/test_new.py"))
+    run = reviewed(root)
     manifest = selfmod.verify_backup(run["id"])
-    assert any(not record["existed_before"] for record in manifest["files"])
+    assert [record["path"] for record in manifest["files"]] == ["calc.py"]
     selfmod.approve(run["id"], "user:e2e")
     deployed = selfmod.deploy(
         run["id"], health_command=[sys.executable, "-c", "from calc import add; assert add(10,2)==12"]
