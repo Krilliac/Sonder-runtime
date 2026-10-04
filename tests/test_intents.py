@@ -130,6 +130,25 @@ def test_execution_intent_routes_explicit_autonomy_fleet_and_foreground():
     )["mode"] == "autopilot"
 
 
+def test_foreground_cue_accepts_ordinary_route_text():
+    cue = intents._EXECUTION_NO_BACKGROUND_RE
+    for value in ("foreground background", "one-shot run it in background",
+                  "do not start background", "don't usebackground",
+                  "handle it inline", "foreground only"):
+        assert cue.search(value), value
+    # The cue runs on lowered text and stays case-sensitive: a dotless i is
+    # not an "in".
+    for value in ("foreground alone", "foreground start it outside background",
+                  "foreground \u0131n background"):
+        assert not cue.search(value), value
+    routed = intents.classify_execution(
+        "Fix the API tests in a single pass, do not run it in background."
+    )
+    assert (routed["mode"], routed["reason"]) == (
+        "workbench", "explicit foreground or one-shot request",
+    )
+
+
 def test_execution_intent_routes_plan_only_and_ambiguous_compound_work():
     planned = intents.classify_execution(
         "Plan only: inspect the repo, fix the API, and validate the app tests."
