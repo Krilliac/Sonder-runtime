@@ -166,6 +166,8 @@ Human review and deployment are separate from this task. Deployment requires
 the recorded tested bytes and a verified backup and rechecks the baseline;
 it uses a process-safe deployment lock and atomic replacement of each file.
 These per-file replacements are not a crash-atomic multi-file release switch.
-Do not describe the existing backup manifest and stage journal as proof of
-crash-atomic promotion/rollback. Keep scheduler deployment disabled while
-that acceptance requirement and full host qualification remain incomplete.
+The complete scoped backup is verified and sealed before its `backed_up`
+phase is published; candidate execution requires that phase. This establishes
+the rollback point required by the nightly isolation contract. Interrupted
+deployment still requires reconciliation. Scheduler deployment remains
+disabled while required evaluation partitions have not been evaluated.

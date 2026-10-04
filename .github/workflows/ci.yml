@@ -205,6 +205,8 @@ jobs:
           sudo "$python_bin" -B -m pytest -q -rs -p no:cacheprovider \
             tests/test_linux_candidate_isolation.py \
             tests/test_wiring_selfmod_linux_nightly.py \
+            tests/test_selfmod_independent_oracle.py::test_clean_candidate_advances_with_an_independent_receipt \
+            tests/test_selfmod_independent_oracle.py::test_host_auto_approval_requires_the_independent_oracle_and_existing_gates \
             --junitxml="$RUNNER_TEMP/selfmod-linux-isolation.xml"
           python - "$RUNNER_TEMP/selfmod-linux-isolation.xml" <<'PY'
           import sys
