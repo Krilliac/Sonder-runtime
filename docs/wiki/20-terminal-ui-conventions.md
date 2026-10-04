@@ -145,7 +145,7 @@ versioned and additive-only. Interactive terminals ignore the flag.
   line, and the task runs there:
 
   ```text
-  workspace: C:\Users\you\Sonder\workspaces\2026-10-01-cool-webpage-3f9a (created because none was selected — /workspace <path> to use another folder)
+  workspace: %USERPROFILE%\Sonder\workspaces\2026-10-01-cool-webpage-3f9a (created because none was selected — /workspace <path> to use another folder)
   ```
 
   Follow-up work in the same session lands in the same folder; a new

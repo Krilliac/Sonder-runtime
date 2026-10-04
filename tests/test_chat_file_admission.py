@@ -103,6 +103,7 @@ def test_production_compound_router_preserves_bounded_legacy_dispatch():
         "_execution_route_header": execution_route_header,
         "npu_service": SimpleNamespace(routing_active=lambda: "off", route_decide=lambda _p: None),
         "_execution_route_model": choose, "_workbench_agent_escalating": workbench,
+        "_narration_reason": lambda _reason: None,
     }
     route = _function("server.py", "_route_work_request", scope)
     output = route(prompt, project="demo")
