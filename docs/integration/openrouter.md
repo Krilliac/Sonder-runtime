@@ -196,8 +196,9 @@ for outcome in outcomes:
 The batch accepts a finite sequence of at most **64** `ModelRequest` values
 and **1–8** workers (default **2**); an empty batch returns an empty tuple.
 Every request must have a nonempty prompt and `stream=False`. Shape, model
-selection and supported options are validated for the entire batch before
-the first send. Invalid batch inputs raise `InvalidInput` without dispatch.
+selection, supported options and finite JSON encoding are validated for the
+entire batch before the first send. Invalid batch inputs raise `InvalidInput`
+without dispatch.
 Keep request options and host configuration stable while a batch executes.
 
 Each dispatched item sends one ordinary chat completion with its own messages, model
@@ -217,7 +218,11 @@ cancellation and timeout checks; executor workers are drained before return.
 Thread context is copied independently for each admitted request so capture
 and request provenance follow the caller. Use each returned response for
 token accounting; `gateway.last_usage` is only the most recently completed
-call and is not a per-item batch result.
+physical response and is not a per-item batch result. Returned usage is
+sanitized and recorded exactly once even when cancellation, deadline expiry
+or evidence persistence prevents publishing that completed response.
+Host worker ownership/capacity refusal produces content-free domain errors
+without dispatching requests.
 
 ## Errors
 
