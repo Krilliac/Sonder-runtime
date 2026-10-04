@@ -446,7 +446,7 @@
       ]
     },
     {
-      "file_count": 403,
+      "file_count": 404,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -769,6 +769,7 @@
         "sonder_runtime/application/selfmod/governance.py",
         "sonder_runtime/application/selfmod/independent_oracle.py",
         "sonder_runtime/application/selfmod/reproducer_contract.py",
+        "sonder_runtime/application/selfmod/rollback_scope.py",
         "sonder_runtime/application/selfmod/selfmod_service.py",
         "sonder_runtime/application/selfmod/stage_refusal.py",
         "sonder_runtime/application/selfmod/verification_lifecycle.py",
