@@ -633,8 +633,17 @@ class OpenRouterGateway(OpenAICompatibleGateway):
         self._call.retry_after = None
         try:
             if payload.get("stream") is True:
-                return self._stream_send(url, payload, headers, timeout)
-            return self._raw_post(url, payload, headers, timeout)
+                data = self._stream_send(url, payload, headers, timeout)
+            else:
+                data = self._raw_post(url, payload, headers, timeout)
+            # A completed physical response can be billable even when later
+            # cancellation or evidence persistence prevents publishing it.
+            # This is the sole accounting boundary, shared by stream/generate.
+            if isinstance(data, dict):
+                facts = self._sanitized_usage(data, str(payload.get("model", "")))
+                self.last_usage = MappingProxyType(dict(facts))
+                record_usage(facts)
+            return data
         except urllib.error.HTTPError as exc:
             self._call.retry_after = _retry_after_seconds(getattr(exc, "headers", None))
             raise
@@ -643,6 +652,15 @@ class OpenRouterGateway(OpenAICompatibleGateway):
         settings = getattr(self._call, "settings", None)
         secrets = (settings.api_key,) if settings is not None and settings.api_key else ()
         return _bounded(redact_text(text, secret_values=secrets))
+
+    def _sanitized_usage(self, data: dict, model: str) -> dict[str, object]:
+        facts = usage_facts(data, requested_model=model)
+        for label in ("model", "upstream_provider"):
+            value = data.get("provider") if label == "upstream_provider" else facts[label]
+            if isinstance(value, str) and value.strip():
+                # Redact before bounding, including keys crossing the limit.
+                facts[label] = self._redacted(value)
+        return facts
 
     def _classify_http_error(self, status: int, body: bytes) -> SonderError | None:
         message, kind = _error_fields(body)
@@ -786,9 +804,7 @@ class OpenRouterGateway(OpenAICompatibleGateway):
         usage = data.get("usage")
         if usage is not None and not isinstance(usage, dict):
             raise DependencyUnavailable("OpenRouter returned an invalid usage object")
-        facts = usage_facts(data, requested_model=model)
-        self.last_usage = MappingProxyType(dict(facts))
-        record_usage(facts)
+        facts = self._sanitized_usage(data, model)
         return ModelResponse(
             text=require_model_text(text),
             model=str(facts["model"]),
@@ -821,8 +837,11 @@ class OpenRouterGateway(OpenAICompatibleGateway):
             try:
                 settings = self.settings()
                 model = self.select_model(request, settings)
-                self.build_payload(request, settings, model, stream=False)
-            except (TypeError, ValueError, OverflowError) as exc:
+                payload = self.build_payload(request, settings, model, stream=False)
+                # Exercise the real wire encoder before any sibling can bill;
+                # additionally reject nonfinite JSON numbers in batch inputs.
+                json.dumps(payload, allow_nan=False).encode("utf-8")
+            except (TypeError, ValueError, OverflowError, RecursionError) as exc:
                 raise InvalidInput("invalid OpenRouter batch request configuration") from exc
 
         return batch_generate(self, requests, context, max_workers=max_workers,
