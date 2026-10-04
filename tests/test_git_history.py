@@ -84,6 +84,13 @@ def test_repo_show_returns_metadata_message_and_bounded_patch(repository):
     assert "+two" in prior["patch"]
 
 
+def test_repo_show_keeps_metadata_when_the_selected_commit_did_not_change_the_file(repository):
+    report = git_history.repo_show(repository, revision="HEAD", file_path="b.txt")
+    assert report["subject"] == "third commit"
+    assert report["patch"] == ""
+    assert report["truncated"] is False
+
+
 def test_repo_show_requires_safe_path_and_never_exposes_unfiltered_secrets(repository):
     secret = repository / ".env"
     secret.write_text("TOKEN=do-not-return\n", encoding="utf-8")
