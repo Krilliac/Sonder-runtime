@@ -4,6 +4,7 @@ from __future__ import annotations
 
 
 _MODE_LABELS = {
+    "inspection": "read-only workspace inspection",
     "workbench": "foreground workbench",
     "autopilot": "persistent Autopilot",
     "fleet": "hardware-bounded fleet",

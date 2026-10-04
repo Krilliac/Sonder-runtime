@@ -3766,17 +3766,15 @@ def _handle_intent(content, messages=None, state=None):
     return "\n".join(replies)
 
 
-def _work_project_for_request(project, storage_project):
+def _work_project_for_request(project, storage_project, content=""):
     """The project routed natural work runs under for one served request.
 
-    Durable state stays namespaced per principal (``storage_project``); the
-    workbench agent needs a directory. A client value that names an existing
-    directory inside the configured file roots is passed through as that
-    directory, which scopes the agent without widening its reach (measured
-    2026-09-03: an agent with no scope resolved the client's relative paths
-    against the package directory). Anything else keeps the namespaced id.
+    Durable state keeps its principal namespace; file work needs the original
+    project selection so an unset/default project can use a creations lane.
     """
-    return server.served_work_project(project) or storage_project
+    return server.served_work_project(project) or (
+        project or "default" if intents.classify_file_intent(content) else storage_project
+    )
 
 
 def _work_run_stop_reason():
@@ -3858,20 +3856,18 @@ def _bind_current_activity():
 
 def _handle_work_intent(content, project="", authorized=False, context=None,
                         idempotency_key="", session_id="", session_ref="",
-                        correlation_id="", with_receipt=False):
+                        correlation_id="", with_receipt=False, tool_tier=""):
     """Route developer work through the bounded execution-mode chooser."""
     refusal = intents.containment_egress_refusal(content)
     if refusal:
         return ChatWorkResult(refusal, "refused") if with_receipt else refusal
     if not authorized:
         return None
-    # Do not let ordinary keyed chat occupy the bounded replay cache.  The
-    # work router itself returns None for those turns, but caching that miss
-    # would evict a completed mutating action which a client may still retry.
-    # This is a pure host-side preflight; hand the same decision to the server
-    # boundary after the replay guard so it cannot classify a second time.
+    # Preflight preserves replay slots for work; reuse this exact decision.
     worker_cap = server.master_orchestrator.requested_worker_cap(content)
     classified_intent = None if worker_cap else intents.classify_execution(content)
+    if tool_tier and (not classified_intent or classified_intent["mode"] not in {"inspection", "workbench"}):
+        return None
     if not worker_cap and not classified_intent:
         return None
     action = "natural-work\0%s\0%s" % (project, content)
@@ -3919,6 +3915,7 @@ def _handle_work_intent(content, project="", authorized=False, context=None,
                     acknowledgement, activity_tracker.current_response_id() or "", lambda: server.route_work_request(
                         content, project=project, _classified_intent=classified_intent,
                         _admitted_decision=decision,
+                        **({"_tool_tier": tool_tier} if tool_tier else {}),
                     ))
             except BaseException:
                 # A lane may already have had side effects. Preserve uncertainty
@@ -3938,6 +3935,8 @@ def _handle_work_intent(content, project="", authorized=False, context=None,
                 routing_reason=decision.reason,
                 work_run_id=current_work_run_id(),
             )
+
+        # Bound work retains its cancel/budget and persisted answer by run id.
         try:
             return _work_admission_result(_idempotent_http_action(context, idempotency_key, action, lambda: _start_narrated_work(
                 _WORK_RUNNER, _state_principal(context), run_admitted_work, acknowledgement,
@@ -3955,6 +3954,7 @@ def _handle_work_intent(content, project="", authorized=False, context=None,
         context, idempotency_key, action,
         lambda: server.route_work_request(
             content, project=project, _classified_intent=classified_intent,
+            **({"_tool_tier": tool_tier} if tool_tier else {}),
         ),
     )
 
@@ -4237,8 +4237,10 @@ def _run_prompt(
     state.last_iid = iid
     state.last_response = out
     state.last_run_source = run_source
+    from sonder_runtime.application.chat.honesty import guard_unsaved_file_claim
+    from sonder_runtime.adapters.chat_file_routing import suggested_folder
     result = TurnResult(
-        _strip_footer(out), iid, run_source, _turn_reasoning(),
+        guard_unsaved_file_claim(_strip_footer(out), folder=suggested_folder(server, project)), iid, run_source, _turn_reasoning(),
         resolved_target.get("model", ""), resolved_target.get("tier", ""),
         cache_state.get("status", ""),
     )
@@ -7490,11 +7492,12 @@ class Handler(BaseHTTPRequestHandler):
                             gateway_bound=True,
                         )
                         web_routed = reply is not None
-                    if structured_schema is None and allow_control_routes and reply is None:
+                    if (structured_schema is None and reply is None and
+                            (allow_control_routes or (model_operation != "responses" and intents.classify_file_intent(prompt)))):
                         work_session_ref = session or self._correlation()
                         reply = _handle_work_intent(
                             prompt,
-                            project=_work_project_for_request(project, storage_project),
+                            project=_work_project_for_request(project, storage_project, prompt),
                             authorized=_developer_authorized(context),
                             context=context,
                             idempotency_key=self.headers.get("Idempotency-Key", ""),
@@ -7504,6 +7507,7 @@ class Handler(BaseHTTPRequestHandler):
                             session_ref=work_session_ref,
                             correlation_id=self._correlation(),
                             with_receipt=True,
+                            tool_tier=model_selector if not allow_control_routes else "",
                         )
                         execution_routed = reply is not None
                     if isinstance(reply, ChatWorkResult):

@@ -163,7 +163,10 @@ def test_answer_with_history_augment_opt_out_cannot_be_reenabled_by_tier(monkeyp
     assert captured["augment"] is False
 
 
-def test_answer_with_history_explicit_model_bypasses_control_routing(monkeypatch):
+@pytest.mark.parametrize("tier,cloud", [
+    ("cloud-general", True), ("general", False), ("fixture-model:latest", False),
+])
+def test_answer_with_history_explicit_model_bypasses_control_routing(monkeypatch, tier, cloud):
     """A caller-selected model must not be diverted into a local control route."""
     seen = {}
 
@@ -175,7 +178,7 @@ def test_answer_with_history_explicit_model_bypasses_control_routing(monkeypatch
     monkeypatch.setattr(
         server,
         "_serve_target",
-        lambda tier, _strict: ("cloud-answer:latest", True, False, tier),
+        lambda tier, _strict: ("selected-answer:latest", cloud, False, tier),
     )
     monkeypatch.setattr(server, "_should_learn", lambda *_args: False)
     monkeypatch.setattr(server, "_build_system", lambda *_args, **_kwargs: "system")
@@ -187,13 +190,54 @@ def test_answer_with_history_explicit_model_bypasses_control_routing(monkeypatch
     monkeypatch.setattr(server, "_make_generate", fake_generate)
 
     assert server._answer_with_history_impl(
-        "please inspect the project", [], tier="cloud-general"
+        "please inspect the project", [], tier=tier
     ) == "answer"
     assert seen == {
-        "model": "cloud-answer:latest",
+        "model": "selected-answer:latest",
         "system": "system",
-        "cloud": True,
+        "cloud": cloud,
     }
+
+
+@pytest.mark.parametrize("tier", [None, "sonder", "local"])
+@pytest.mark.parametrize("prompt,cloud,guidance", [
+    ("Hello!", False, False),
+    ("How do I read a file in Python?", False, False),
+    ("Read README.md without tools", False, False),
+    ("How many files are in this folder?", False, True),
+    ("Create a file named primes.py", False, True),
+    ("How many files are in this folder?", True, False),
+])
+def test_answer_with_history_guidance_only_for_unrouted_local_file_turns(
+    monkeypatch, tier, prompt, cloud, guidance,
+):
+    seen = {}
+    monkeypatch.setattr(server, "control_command", lambda *_a, **_kw: None)
+    monkeypatch.setattr(server, "_serve_target", lambda *_a: ("fixture-model", cloud, False, "general"))
+    monkeypatch.setattr(server, "_default_route_plan", lambda _p, rung: server.tier_escalation.single(rung))
+    monkeypatch.setattr(server, "_bridge_provider_for_tier", lambda *_a: None)
+    monkeypatch.setattr(server, "_should_learn", lambda *_a: False)
+    monkeypatch.setattr(server, "_build_system", lambda *_a, **_kw: "system\nexact bytes")
+
+    def generate(_model, system, *_args, **_kwargs):
+        seen["system"] = system
+        return lambda *_a: "answer"
+
+    monkeypatch.setattr(server, "_make_generate", generate)
+    assert server._answer_with_history_impl(prompt, [], tier=tier, context_size="4k") == "answer"
+    if guidance:
+        assert seen["system"].startswith("system\nexact bytes\n\n")
+        assert "workspace_inventory" in seen["system"]
+    else:
+        assert seen["system"] == "system\nexact bytes"
+
+
+def test_answer_with_history_routed_file_turn_skips_guidance_and_generation(monkeypatch):
+    monkeypatch.setattr(server, "control_command", lambda *_a, **_kw: "file tool result")
+    monkeypatch.setattr(server, "_append_activity", lambda result: result)
+    monkeypatch.setattr(server, "_build_system", lambda *_a, **_kw: pytest.fail("already routed"))
+    monkeypatch.setattr(server, "_serve_target", lambda *_a: pytest.fail("already routed"))
+    assert server._answer_with_history_impl("Read README.md", []) == "file tool result"
 
 
 def test_sonder_explicit_model_bypasses_control_routing(monkeypatch):

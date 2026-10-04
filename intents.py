@@ -6,6 +6,8 @@ on, /run), without hijacking real coding questions or requests. Stdlib only.
 """
 import re
 
+from sonder_runtime.application.chat.tool_intent import classify_file_intent, suppresses_file_tools
+
 # Messages that open with one of these are almost always a real question or
 # task ("how do I...", "explain strict mode in javascript"), not a control
 # command — even if they happen to contain a control-ish word later on. The
@@ -382,8 +384,17 @@ def classify_execution(text):
     host code still owns authorization, policies, and the final dispatch.
     """
     value = re.sub(r"\s+", " ", str(text or "")).strip()
-    if not value or value.startswith("/") or _EXECUTION_NO_TOOLS_RE.search(value.lower()):
+    if not value or _EXECUTION_NO_TOOLS_RE.search(value.lower()) or suppresses_file_tools(value):
         return None
+    # Keep the legacy execution classifier's ordering intact.  In particular,
+    # compound work must reach the bounded local mode chooser (``decide``)
+    # before the newer file-tool classifier can narrow it to workbench.
+    file_intent = classify_file_intent(value)
+    if value.startswith("/"):
+        # /delegate is the sole natural-language slash form admitted by the
+        # file classifier; all other slash commands remain on their command
+        # path, as they did before file routing was added.
+        return file_intent
     if requests_ensemble_compiler_retries(value):
         return {
             "mode": "workbench",
@@ -392,7 +403,7 @@ def classify_execution(text):
             "actions": ["ensemble_codegen_build_loop"],
         }
     if not classify_work(value):
-        return None
+        return file_intent
     lowered = value.lower()
     plan_only = bool(_EXECUTION_PLAN_ONLY_RE.search(lowered))
     actions = sorted(set(_WORK_ACTION_RE.findall(lowered)))
@@ -436,6 +447,8 @@ def classify_execution(text):
             "plan_only": False,
             "actions": actions,
         }
+    if file_intent and file_intent["mode"] == "inspection":
+        return file_intent
     return {
         "mode": "workbench",
         "reason": "bounded foreground task",
