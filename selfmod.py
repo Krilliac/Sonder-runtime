@@ -42,6 +42,7 @@ from sonder_runtime.application.selfmod.independent_oracle import (
     payload_nonce,
 )
 from sonder_runtime.application.selfmod.stage_refusal import SelfmodStageNotApplied, require_atomic_checkout_promotion
+from sonder_runtime.application.selfmod.rollback_scope import rollback_manifest
 
 
 MODES = ("observe", "propose", "auto-low-risk")
@@ -2138,7 +2139,7 @@ def deploy(run_id, *, health_command=None, commit=True, expected_digests=None):
                 code, output = _git(root, "add", "--", *diff["changed_files"])
                 if code:
                     raise RuntimeError("could not stage isolated self-improvement: %s" % output)
-                code, output = _git(root, "commit", "-m", "selfmod: %s" % run["objective"][:100])
+                code, output = _git(root, "commit", "-m", "selfmod: %s" % run["objective"][:100], "--only", "--", *diff["changed_files"])
                 if code:
                     raise RuntimeError("could not commit self-improvement: %s" % output)
                 _, deployed_commit = _git(root, "rev-parse", "HEAD")
@@ -2153,21 +2154,10 @@ def deploy(run_id, *, health_command=None, commit=True, expected_digests=None):
             # A later user edit must be treated as a conflict, not discarded.
             _record_deployed_files(run_id, root, diff["changed_files"])
             _phase(run_id, {"approved"}, "deployed", "deploy", "candidate deployed atomically", deployed_commit=deployed_commit, deployed_ts=time.time())
-            # Rollback readiness is checked first, and unconditionally.
-            #
-            # The health command a caller supplies proves the new bytes import.
-            # That is not the property auto-restore depends on: `selfmod.py` and
-            # `selfmod_recover.py` are `_protected()`, but an operator-typed
-            # `--maintenance` run can rewrite both inside one eight-file deploy,
-            # and a `selfmod.py` that imports cleanly while its restore path
-            # raises passed every check this function used to make. It is also
-            # not conditional on a caller remembering to ask: the unattended lane
-            # (`scripts/nightly_selfmod.py`) calls `deploy(run_id)` bare.
-            #
-            # Failing here is safe by construction. The probe writes only inside
-            # its own temporary directory, and the restore that follows is
-            # performed by the already-loaded module -- which is, necessarily,
-            # the code from before this deployment.
+            # Verify rollback unconditionally; import health does not prove
+            # recovery readiness. Even one maintenance change can break it.
+            # The probe writes only to scratch; on failure, already-loaded
+            # pre-deployment code performs the restore.
             _renew_deployment_lock(deployment_owner)
             budget = min(120, run["budgets"]["max_test_seconds"])
             ok, detail, probe, code, output, duration = _verify_deployed_rollback(run_id, root, budget)
@@ -2236,6 +2226,10 @@ def restore(run_id, from_candidate_only=False):
     if run["phase"] not in {"rollback_requested", "deployed", "approved"}:
         raise RuntimeError("restore is not valid from %s" % run["phase"])
     manifest = verify_backup(run_id)
+    with _connect() as conn:
+        paths = [row[0] for row in conn.execute(
+            "SELECT path FROM selfmod_deployed_files WHERE run_id=?", (run_id,))]
+    manifest = rollback_manifest(manifest, paths or list((tested_digests(run_id) or {}).get("files", {})))
     root = Path(manifest["repository_root"])
     _restore_manifest_files(manifest)
     if not run.get("git_status_start", "").strip():
@@ -2248,7 +2242,7 @@ def restore(run_id, from_candidate_only=False):
             code, output = _git(root, "add", "--", *paths)
             if code:
                 raise RuntimeError("restored files but could not stage rollback commit: %s" % output)
-            code, output = _git(root, "commit", "-m", "selfmod rollback: %s" % run["objective"][:90])
+            code, output = _git(root, "commit", "-m", "selfmod rollback: %s" % run["objective"][:90], "--only", "--", *paths)
             if code:
                 raise RuntimeError("restored files but could not record rollback commit: %s" % output)
     return _phase(run_id, {run["phase"]}, "restored", "restore", "exact backup hashes restored", restored_ts=time.time())

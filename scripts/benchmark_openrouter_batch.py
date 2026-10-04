@@ -86,9 +86,13 @@ def benchmark(*, batch_size=64, rounds=5, workers=(1, 2, 4, 8),
         def log_message(self, *args):
             pass
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    server.daemon_threads = False
-    server.request_queue_size = 16
+    class PeerServer(ThreadingHTTPServer):
+        # TCPServer.__init__ listens immediately, so configure its backlog
+        # before construction rather than changing an already active socket.
+        request_queue_size = 16
+        daemon_threads = False
+
+    server = PeerServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever,
                               kwargs={"poll_interval": 0.02}, name="batch-benchmark-peer")
     thread.start()
