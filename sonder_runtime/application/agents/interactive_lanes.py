@@ -902,6 +902,7 @@ class AgentLaneService:
         task,
         workspace_root,
         context,
+        lane_id=None,
         parent_lane_id=None,
         title=None,
         tier="code",
@@ -913,6 +914,12 @@ class AgentLaneService:
         command_id = _text(command_id, "command_id", 160)
         parent_session_id = _text(parent_session_id, "parent_session_id", 160)
         task = _text(task, "task")
+        if lane_id is not None:
+            lane_id = _text(lane_id, "lane_id", 160)
+            if len(lane_id) != 37 or not lane_id.startswith("lane-") or any(
+                c not in "0123456789abcdef" for c in lane_id[5:]
+            ):
+                raise ValueError("lane_id must be a canonical lane identifier")
         if author not in {"parent", "user"}:
             raise ValueError("invalid instruction author")
         tier = _text(tier, "tier", 80)
@@ -953,6 +960,8 @@ class AgentLaneService:
             max_wall_seconds=max_wall_seconds,
             author=author,
         )
+        if lane_id is not None:
+            args["lane_id"] = lane_id
         digest = _digest(args)
         # A resolver may consult a live model catalog. Perform root admission
         # and replay lookup before that I/O, outside the writer transaction.
@@ -1030,7 +1039,7 @@ class AgentLaneService:
                         "workspace overlaps another retained lane; use an isolated worktree or directory"
                     )
             lane = dict(
-                id="lane-" + uuid.uuid4().hex,
+                id=lane_id or "lane-" + uuid.uuid4().hex,
                 session_id="lane-session-" + uuid.uuid4().hex,
                 parent_lane_id=parent_lane_id,
                 parent_session_id=parent_session_id,
@@ -1086,7 +1095,7 @@ class AgentLaneService:
         self._schedule(lane["id"], context)
         return receipt
 
-    def list(self, context, *, parent_session_id=None, cursor=0, limit=50):
+    def list(self, context, *, parent_session_id=None, cursor=0, limit=50, newest_first=False):
         _bounds(cursor, limit)
         self.store.flush()
         with self._transaction(context) as tx:
@@ -1094,8 +1103,9 @@ class AgentLaneService:
                 from .lane_continuation import require_root_admission
 
                 require_root_admission(tx, self.store, parent_session_id, context)
-            rows = tx.lanes(context.principal_id, parent_session_id, cursor, limit + 1)
-            lanes = [self._public(l, tx) for _, l in rows[:limit]]
+            rows = tx.lanes(context.principal_id, parent_session_id, cursor, limit + 1,
+                            newest_first=newest_first)
+            lanes = [{**self._public(l, tx), "created_order": position} for position, l in rows[:limit]]
         return dict(
             lanes=lanes,
             next_cursor=rows[min(limit, len(rows)) - 1][0] if rows else cursor,

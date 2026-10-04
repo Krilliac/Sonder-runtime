@@ -2,6 +2,32 @@
 
 Three layers of increasing autonomy, all built on a guarded tool loop.
 
+## Delegate from Chat and follow background work
+
+`/delegate <task>` starts a durable, tool-capable agent conversation. The
+selected Chat project is its workspace. Without a selected project, the local
+operator gets an isolated `<state-home>/creations/<lane-id>/` folder, named in
+the acknowledgement. **Open in Agents** opens that lane. Finished lanes remain
+available for inspection and follow-up. Current permission mode still applies:
+for example, manual mode can leave a file write awaiting approval/input.
+Creating a folder does not bypass the tool permission gate or grant access to
+other runtime state. Existing exclusive workspace and lane-budget limits apply.
+
+The Agents tab also lists fleet masters with their children and autopilot runs,
+newest first. Fleet counts include completed, running and queued children and
+the actual worker-slot count; autopilot shows phase, current task and plan counts.
+Details and cancellation use the existing run controls. Background status refreshes
+every ten seconds while the app is active, pauses after a read failure, and offers
+explicit retry. A bounded snapshot says when older rows or children are omitted.
+
+`/master [inline|delegate|fleet] [N] <task>` and `/master_orchestrate` share
+the same argument parser. For these positional chat commands, zero or an omitted
+count selects a capacity-sized wave, never the maximum agent ceiling. With no
+mode, the reply offers inline, delegated and fleet choices; the app sends the
+complete command when a choice is tapped. Existing JSON/key-value tool syntax
+remains available. Explicit slash commands use the runtime control route even
+when Chat has a concrete model selected; ordinary chat retains that model.
+
 ## The agent tool loop (`workbench_agent`)
 
 A Claude-style local loop: the model chooses one JSON tool call at a time,

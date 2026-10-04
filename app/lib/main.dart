@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 
-import 'chat_screen.dart';
 import 'local_manager.dart';
 import 'settings.dart';
+import 'shell/app_shell.dart';
+import 'shell/preferences.dart';
+import 'shell/splash.dart';
 import 'theme.dart';
 
 void main() {
@@ -22,6 +24,7 @@ class SonderRuntimeApp extends StatefulWidget {
 class _SonderRuntimeAppState extends State<SonderRuntimeApp>
     with WidgetsBindingObserver {
   Settings? _settings;
+  bool _sidebarCollapsed = false;
   bool _startedLocalServer = false;
   bool _startingLocalServer = false;
 
@@ -29,10 +32,16 @@ class _SonderRuntimeAppState extends State<SonderRuntimeApp>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    Settings.load().then((s) {
-      setState(() => _settings = s);
-      _autoStartServer(s);
-    });
+    _load();
+  }
+
+  Future<void> _load() async {
+    final collapsed = ShellPreferences.sidebarCollapsed();
+    final settings = await Settings.load();
+    _sidebarCollapsed = await collapsed;
+    if (!mounted) return;
+    setState(() => _settings = settings);
+    _autoStartServer(settings);
   }
 
   Future<void> _autoStartServer(Settings settings) async {
@@ -106,9 +115,30 @@ class _SonderRuntimeAppState extends State<SonderRuntimeApp>
         'system' => ThemeMode.system,
         _ => ThemeMode.dark,
       },
-      home: settings == null
-          ? const Scaffold(body: Center(child: CircularProgressIndicator()))
-          : ChatScreen(settings: settings, onSettingsChanged: _update),
+      home: _Boot(
+        child: settings == null
+            ? const ShellSplash(key: ValueKey('splash'))
+            : AppShell(
+                key: const ValueKey('shell'),
+                settings: settings,
+                onSettingsChanged: _update,
+                initialSidebarCollapsed: _sidebarCollapsed,
+              ),
+      ),
     );
   }
+}
+
+/// Cross-fades from the splash to the app once settings are read.
+class _Boot extends StatelessWidget {
+  final Widget child;
+  const _Boot({required this.child});
+
+  @override
+  Widget build(BuildContext context) => AnimatedSwitcher(
+        duration: SonderMotion.of(context, SonderMotion.slow),
+        switchInCurve: SonderMotion.enter,
+        switchOutCurve: SonderMotion.exit,
+        child: child,
+      );
 }

@@ -1,9 +1,13 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../api.dart';
+import '../runtime/model_routing.dart';
 import '../safety_colors.dart';
 import '../theme.dart';
+import '../ui/kit.dart' show QuietAction, RingMeter;
 import '../workspace_ui.dart' show conversationWidth;
+import 'model_picker.dart';
 
 // ---------------------------------------------------------------------------
 // Slash intercepts (P0-5)
@@ -86,6 +90,21 @@ String? interceptLabel(String commandName) {
 // Composer
 // ---------------------------------------------------------------------------
 
+/// The message box and its control strip:
+///
+/// ```
+/// ┌──────────────────────────────────────────────────────────────┐
+/// │ Ask Sonder…                                                  │
+/// │ ● manual ⌄  sonder ⌄  ◔ 26%     Enter to send · …        (↑) │
+/// └──────────────────────────────────────────────────────────────┘
+/// ```
+///
+/// The permission mode chip (built by the shell; its contract and keys are
+/// unchanged), the model picker and the context ring sit on the left; a
+/// keyboard hint (wide layouts, when it fits whole) and Send, which becomes
+/// Stop while a turn runs, on the right. Enter sends and Shift+Enter adds a
+/// newline ([onKey]); a leading "/" opens the command palette above the
+/// box, whose footer opens the full browser ([onOpenCommands]).
 class ChatComposer extends StatelessWidget {
   final TextEditingController controller;
   final FocusNode focusNode;
@@ -105,6 +124,16 @@ class ChatComposer extends StatelessWidget {
   /// the server publishes no mode.
   final Widget? modeChip;
 
+  /// The `/v1/models` ids, the selected one and how routes are bound. The
+  /// picker shows when [onModelChanged] is set.
+  final List<String> models;
+  final String model;
+  final ModelRouting routing;
+  final ValueChanged<String>? onModelChanged;
+
+  /// The status poll, for the context ring; null leaves the ring out.
+  final ValueListenable<SystemInfo?>? status;
+
   const ChatComposer({
     super.key,
     required this.controller,
@@ -121,16 +150,22 @@ class ChatComposer extends StatelessWidget {
     required this.onOpenCommands,
     this.modeChip,
     this.desktop = false,
+    this.models = const <String>[],
+    this.model = '',
+    this.routing = const ModelRouting(),
+    this.onModelChanged,
+    this.status,
   });
 
   @override
   Widget build(BuildContext context) {
-    final tokens = SonderTokens.of(context);
+    final text = Theme.of(context).textTheme;
     return SafeArea(
       top: false,
       bottom: false,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+        padding: const EdgeInsets.fromLTRB(
+            SonderSpace.md, SonderSpace.xs, SonderSpace.md, SonderSpace.sm),
         child: Center(
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: conversationWidth),
@@ -144,13 +179,10 @@ class ChatComposer extends StatelessWidget {
                     grouped: paletteGrouped,
                     categories: paletteCategories,
                     onPick: onPalettePick,
+                    onBrowse: onOpenCommands,
                   ),
-                Container(
-                  decoration: BoxDecoration(
-                    color: tokens.panel,
-                    borderRadius: BorderRadius.circular(SonderRadius.sheet),
-                    border: Border.all(color: tokens.hairlineStrong),
-                  ),
+                _ComposerSurface(
+                  focusNode: focusNode,
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -163,75 +195,24 @@ class ChatComposer extends StatelessWidget {
                           maxLines: 6,
                           textInputAction: TextInputAction.send,
                           onSubmitted: (_) => onSend(),
-                          style: Theme.of(context).textTheme.bodyMedium,
+                          style: text.bodyMedium,
                           decoration: const InputDecoration(
                             hintText: 'Ask Sonder…',
                             filled: false,
-                            contentPadding: EdgeInsets.fromLTRB(14, 12, 14, 6),
+                            contentPadding: EdgeInsets.fromLTRB(SonderSpace.lg,
+                                SonderSpace.md, SonderSpace.lg, SonderSpace.xs),
                             border: InputBorder.none,
                             enabledBorder: InputBorder.none,
                             focusedBorder: InputBorder.none,
                           ),
                         ),
                       ),
+                      // The first pill lines up with the text above; Send
+                      // keeps the same visual inset on the right.
                       Padding(
-                        padding: const EdgeInsets.fromLTRB(8, 0, 8, 4),
-                        child: LayoutBuilder(builder: (context, row) {
-                          // The chip may take what the "/" and Send targets
-                          // leave, and truncates its label past that.
-                          final chipMax = (row.maxWidth - 48 - 48 - 12)
-                              .clamp(48.0, double.infinity);
-                          return Row(
-                            children: [
-                              if (modeChip != null) ...[
-                                ConstrainedBox(
-                                  constraints:
-                                      BoxConstraints(maxWidth: chipMax),
-                                  child: modeChip!,
-                                ),
-                                const SizedBox(width: 6),
-                              ],
-                              _CommandsButton(
-                                  onTap: onOpenCommands, desktop: desktop),
-                              Expanded(
-                                child: desktop
-                                    ? Padding(
-                                        padding: const EdgeInsets.only(
-                                            left: 8, right: 10),
-                                        child: Text(
-                                          'Enter send · Shift Enter newline',
-                                          textAlign: TextAlign.right,
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                          style: tokens.mono(11,
-                                              color: tokens.muted),
-                                        ),
-                                      )
-                                    : const SizedBox.shrink(),
-                              ),
-                              SizedBox(
-                                width: 48,
-                                height: 48,
-                                child: Center(
-                                  child: SizedBox(
-                                    width: 36,
-                                    height: 36,
-                                    child: FloatingActionButton.small(
-                                      key: const Key('composer-send'),
-                                      heroTag: null,
-                                      onPressed: sending ? onCancel : onSend,
-                                      tooltip: sending ? 'Stop' : 'Send',
-                                      child: sending
-                                          ? const Icon(Icons.stop, size: 18)
-                                          : const Icon(Icons.arrow_upward,
-                                              size: 18),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ],
-                          );
-                        }),
+                        padding: const EdgeInsets.only(
+                            left: SonderSpace.lg, right: SonderSpace.sm),
+                        child: _ControlStrip(composer: this),
                       ),
                     ],
                   ),
@@ -245,51 +226,343 @@ class ChatComposer extends StatelessWidget {
   }
 }
 
-class _CommandsButton extends StatelessWidget {
-  final VoidCallback onTap;
-  final bool desktop;
-  const _CommandsButton({required this.onTap, required this.desktop});
+/// The composer's frame. Its border brightens while the box has focus.
+class _ComposerSurface extends StatefulWidget {
+  final FocusNode focusNode;
+  final Widget child;
+  const _ComposerSurface({required this.focusNode, required this.child});
+
+  @override
+  State<_ComposerSurface> createState() => _ComposerSurfaceState();
+}
+
+class _ComposerSurfaceState extends State<_ComposerSurface> {
+  @override
+  void initState() {
+    super.initState();
+    widget.focusNode.addListener(_changed);
+  }
+
+  @override
+  void didUpdateWidget(covariant _ComposerSurface oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.focusNode, widget.focusNode)) {
+      oldWidget.focusNode.removeListener(_changed);
+      widget.focusNode.addListener(_changed);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.focusNode.removeListener(_changed);
+    super.dispose();
+  }
+
+  void _changed() {
+    if (mounted) setState(() {});
+  }
 
   @override
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
-    return Tooltip(
-      message: 'Commands (Ctrl+K)',
-      child: Semantics(
-        button: true,
-        label: 'Commands',
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(SonderRadius.pill),
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(minHeight: 48, minWidth: 48),
-            child: Center(
-              widthFactor: 1,
-              child: Container(
-                height: 28,
-                padding: const EdgeInsets.symmetric(horizontal: 10),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(SonderRadius.pill),
-                  border: Border.all(color: tokens.hairlineStrong),
+    final focused = widget.focusNode.hasFocus;
+    return AnimatedContainer(
+      key: const Key('composer-surface'),
+      duration: SonderMotion.of(context, SonderMotion.fast),
+      curve: SonderMotion.standard,
+      decoration: BoxDecoration(
+        color: tokens.panel,
+        borderRadius: BorderRadius.circular(SonderRadius.card),
+        border: Border.all(
+          color: focused
+              ? tokens.accentText.withValues(alpha: 0.7)
+              : tokens.hairlineStrong,
+        ),
+      ),
+      child: widget.child,
+    );
+  }
+}
+
+/// Mode, model and context on the left; the keyboard hint and Send/Stop on
+/// the right ([_StripLayout] gives each its width).
+class _ControlStrip extends StatelessWidget {
+  final ChatComposer composer;
+  const _ControlStrip({required this.composer});
+
+  @override
+  Widget build(BuildContext context) {
+    final c = composer;
+    final onModelChanged = c.onModelChanged;
+    return LayoutBuilder(builder: (context, constraints) {
+      // A very narrow strip leaves the ring out; the status line under the
+      // composer still states the context.
+      final status = constraints.maxWidth >= 320 ? c.status : null;
+      return SizedBox(
+        height: 48,
+        child: CustomMultiChildLayout(
+          delegate: _StripLayout(),
+          children: [
+            if (c.modeChip != null)
+              LayoutId(id: _StripSlot.mode, child: c.modeChip!),
+            if (onModelChanged != null && c.models.isNotEmpty)
+              LayoutId(
+                id: _StripSlot.model,
+                child: ModelPickerButton(
+                  models: c.models,
+                  current: c.model,
+                  routing: c.routing,
+                  onSelected: onModelChanged,
+                  dense: !c.desktop,
                 ),
-                child: ExcludeSemantics(
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text('/', style: tokens.mono(12, color: tokens.text2)),
-                      if (desktop) ...[
-                        const SizedBox(width: 6),
-                        Text('commands',
-                            style: tokens.mono(11, color: tokens.muted)),
-                      ],
-                    ],
-                  ),
-                ),
+              ),
+            if (status != null)
+              LayoutId(
+                id: _StripSlot.ring,
+                child: _ContextRing(status: status, showPercent: c.desktop),
+              ),
+            if (c.desktop)
+              LayoutId(id: _StripSlot.hint, child: const _KeyboardHint()),
+            LayoutId(
+              id: _StripSlot.send,
+              child: _SendButton(
+                controller: c.controller,
+                sending: c.sending,
+                onSend: c.onSend,
+                onStop: c.onCancel,
+              ),
+            ),
+          ],
+        ),
+      );
+    });
+  }
+}
+
+enum _StripSlot { mode, model, ring, hint, send }
+
+/// Lays the strip out in priority order: Send at the end; the mode chip at
+/// its natural width (it is the contract, and its label ellipsizes only
+/// when it must); the model picker in what the chip leaves; the ring when
+/// there is still room; the hint in whatever is left between them.
+class _StripLayout extends MultiChildLayoutDelegate {
+  static const _gap = SonderSpace.xs;
+  static const _pickerMin = 96.0;
+  static const _chipMin = 72.0;
+
+  @override
+  void performLayout(Size size) {
+    final height = size.height;
+    Size layout(_StripSlot slot, double maxWidth) => layoutChild(
+          slot,
+          BoxConstraints(
+              maxWidth: maxWidth < 0 ? 0 : maxWidth, maxHeight: height),
+        );
+    double centre(Size child) => (height - child.height) / 2;
+
+    final send = layout(_StripSlot.send, size.width);
+    var left = 0.0;
+    var room = size.width - send.width - _gap;
+
+    final hasRing = hasChild(_StripSlot.ring);
+    final hasModel = hasChild(_StripSlot.model);
+    final ring = hasRing ? layout(_StripSlot.ring, room) : Size.zero;
+    final ringWidth = ring.width;
+
+    if (hasChild(_StripSlot.mode)) {
+      final reserve = hasModel ? _pickerMin + _gap : 0.0;
+      final max = (room - ringWidth - reserve).clamp(_chipMin, 260.0);
+      final chip = layout(_StripSlot.mode, max);
+      positionChild(_StripSlot.mode, Offset(left, centre(chip)));
+      left += chip.width + _gap;
+      room -= chip.width + _gap;
+    }
+    if (hasModel) {
+      final max = (room - ringWidth).clamp(0.0, 300.0);
+      final picker = layout(_StripSlot.model, max);
+      positionChild(_StripSlot.model, Offset(left, centre(picker)));
+      left += picker.width;
+      room -= picker.width;
+    }
+    if (hasRing) {
+      positionChild(_StripSlot.ring, Offset(left, centre(ring)));
+      left += ringWidth;
+      room -= ringWidth;
+    }
+    if (hasChild(_StripSlot.hint)) {
+      final hint = layout(_StripSlot.hint, room - SonderSpace.sm);
+      positionChild(_StripSlot.hint,
+          Offset(size.width - send.width - _gap - hint.width, centre(hint)));
+    }
+    positionChild(
+        _StripSlot.send, Offset(size.width - send.width, centre(send)));
+  }
+
+  @override
+  bool shouldRelayout(_StripLayout oldDelegate) => false;
+}
+
+/// "Enter to send · Shift+Enter for a new line", shown only when it fits
+/// whole: a cut hint is noise.
+class _KeyboardHint extends StatelessWidget {
+  const _KeyboardHint();
+
+  static const text = 'Enter to send · Shift+Enter for a new line';
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = SonderTokens.of(context);
+    final style =
+        Theme.of(context).textTheme.bodySmall?.copyWith(color: tokens.muted);
+    return LayoutBuilder(builder: (context, constraints) {
+      final painter = TextPainter(
+        text: TextSpan(text: text, style: style),
+        textDirection: TextDirection.ltr,
+        textScaler: MediaQuery.textScalerOf(context),
+        maxLines: 1,
+      )..layout();
+      final fits = painter.width <= constraints.maxWidth;
+      final width = painter.width;
+      painter.dispose();
+      if (!fits) return const SizedBox.shrink();
+      return SizedBox(
+        width: width,
+        child: Text(text,
+            key: const Key('composer-hint'), maxLines: 1, style: style),
+      );
+    });
+  }
+}
+
+/// Send: an accent circle with an arrow, quiet while the box is empty.
+/// While a turn runs it is Stop.
+class _SendButton extends StatelessWidget {
+  final TextEditingController controller;
+  final bool sending;
+  final VoidCallback onSend;
+  final VoidCallback onStop;
+
+  const _SendButton({
+    required this.controller,
+    required this.sending,
+    required this.onSend,
+    required this.onStop,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = SonderTokens.of(context);
+    return ValueListenableBuilder<TextEditingValue>(
+      valueListenable: controller,
+      builder: (context, value, _) {
+        final empty = value.text.trim().isEmpty;
+        return IconButton.filled(
+          key: const Key('composer-send'),
+          tooltip: sending ? 'Stop' : 'Send',
+          onPressed: sending ? onStop : (empty ? null : onSend),
+          style: IconButton.styleFrom(
+            fixedSize: const Size(32, 32),
+            minimumSize: const Size(32, 32),
+            padding: EdgeInsets.zero,
+            tapTargetSize: MaterialTapTargetSize.padded,
+            shape: const CircleBorder(),
+            backgroundColor: tokens.accent,
+            foregroundColor: tokens.onAccent,
+            disabledBackgroundColor: tokens.raised,
+            disabledForegroundColor: tokens.muted,
+          ),
+          icon: AnimatedSwitcher(
+            duration: SonderMotion.of(context, SonderMotion.fast),
+            child: Icon(
+              sending ? Icons.stop_rounded : Icons.arrow_upward_rounded,
+              key: ValueKey<bool>(sending),
+              size: 18,
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// `2100` → `2,100`.
+String _grouped(int n) {
+  final digits = n.abs().toString();
+  final out = StringBuffer(n < 0 ? '-' : '');
+  for (var i = 0; i < digits.length; i++) {
+    if (i > 0 && (digits.length - i) % 3 == 0) out.write(',');
+    out.write(digits[i]);
+  }
+  return out.toString();
+}
+
+/// The words of the context ring: `Context: 2,100 of 8,192 tokens used
+/// (26%)`. Null when the server does not report context.
+String? contextUsageText(ContextHealth? ctx) {
+  if (ctx == null) return null;
+  final limit =
+      ctx.contextLimit > 0 ? ctx.contextLimit : ctx.nativeContextLimit;
+  if (limit <= 0) return null;
+  final used = ctx.estimatedTokens < 0 ? 0 : ctx.estimatedTokens;
+  final percent = (used * 100 / limit).round();
+  return 'Context: ${_grouped(used)} of ${_grouped(limit)} tokens used '
+      '($percent%)';
+}
+
+/// How full the session's context is: a small ring (and, on wide layouts,
+/// the percentage) whose tooltip states the numbers. It turns warn at 75%
+/// and danger at 90%. Hidden while the server does not report context (an
+/// account without host-wide status, offline).
+class _ContextRing extends StatelessWidget {
+  final ValueListenable<SystemInfo?> status;
+  final bool showPercent;
+  const _ContextRing({required this.status, this.showPercent = false});
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = SonderTokens.of(context);
+    return ValueListenableBuilder<SystemInfo?>(
+      valueListenable: status,
+      builder: (context, info, _) {
+        final ctx = info?.context;
+        final words = contextUsageText(ctx);
+        if (ctx == null || words == null) return const SizedBox.shrink();
+        final limit =
+            ctx.contextLimit > 0 ? ctx.contextLimit : ctx.nativeContextLimit;
+        final used = ctx.estimatedTokens < 0 ? 0 : ctx.estimatedTokens;
+        final fraction = used / limit;
+        return Tooltip(
+          key: const Key('context-ring'),
+          message: words,
+          triggerMode: TooltipTriggerMode.tap,
+          // The ring's own label already says it.
+          excludeFromSemantics: true,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: SonderSpace.sm),
+            child: SizedBox(
+              height: 40,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  RingMeter(value: fraction, semanticLabel: words),
+                  if (showPercent) ...[
+                    const SizedBox(width: SonderSpace.xs + SonderSpace.xxs),
+                    ExcludeSemantics(
+                      child: Text('${(fraction * 100).round()}%',
+                          key: const Key('context-ring-percent'),
+                          style: tokens.mono(11.5,
+                              color: RingMeter.colorFor(tokens, fraction) ==
+                                      tokens.accentText
+                                  ? tokens.muted
+                                  : RingMeter.colorFor(tokens, fraction))),
+                    ),
+                  ],
+                ],
               ),
             ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 }
@@ -316,8 +589,8 @@ class _RiskDot extends StatelessWidget {
           height: 24,
           child: Center(
             child: Container(
-              width: 9,
-              height: 9,
+              width: SonderSpace.sm,
+              height: SonderSpace.sm,
               decoration: BoxDecoration(
                   color: riskColor(cs, risk), shape: BoxShape.circle),
             ),
@@ -334,16 +607,19 @@ class _CategoryTag extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
+    final tokens = SonderTokens.of(context);
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+      padding: const EdgeInsets.symmetric(horizontal: SonderSpace.sm),
       decoration: BoxDecoration(
-        color: cs.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: cs.outlineVariant),
+        color: tokens.raised,
+        borderRadius: BorderRadius.circular(SonderRadius.control),
+        border: Border.all(color: tokens.hairline),
       ),
       child: Text(category,
-          style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+          style: Theme.of(context)
+              .textTheme
+              .labelMedium
+              ?.copyWith(color: tokens.text2)),
     );
   }
 }
@@ -364,7 +640,8 @@ class CommandRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
+    final tokens = SonderTokens.of(context);
+    final text = Theme.of(context).textTheme;
     final usage = command.usageLine;
     final aliases = command.aliases.where((a) => a.isNotEmpty).join(', ');
     final opens = interceptLabel(command.name);
@@ -377,11 +654,7 @@ class CommandRow extends StatelessWidget {
       if (aliases.isNotEmpty) 'aliases $aliases',
       'usage $usage',
     ];
-    final meta = TextStyle(
-      fontFamily: SonderTheme.mono,
-      fontSize: 11,
-      color: cs.onSurfaceVariant.withValues(alpha: 0.75),
-    );
+    final meta = tokens.mono(11, color: tokens.muted);
     return Semantics(
       button: true,
       selected: selected,
@@ -389,47 +662,46 @@ class CommandRow extends StatelessWidget {
       child: InkWell(
         onTap: onTap,
         child: Container(
-          color: selected ? cs.primary.withValues(alpha: 0.16) : null,
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          color: selected ? tokens.accentDim : null,
+          padding: const EdgeInsets.symmetric(
+              horizontal: SonderSpace.md, vertical: SonderSpace.sm),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Row(
                 children: [
                   _RiskDot(risk: command.risk),
-                  const SizedBox(width: 8),
+                  const SizedBox(width: SonderSpace.sm),
                   SizedBox(
                     width: 150,
                     child: Text(
                       command.displayName,
-                      style: TextStyle(
-                        fontFamily: SonderTheme.mono,
-                        fontWeight:
-                            selected ? FontWeight.w700 : FontWeight.w500,
-                        color: cs.primary,
-                      ),
+                      style: tokens.mono(13,
+                          color: tokens.accentText,
+                          weight: selected ? FontWeight.w600 : FontWeight.w500),
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
                   if (command.category.isNotEmpty) ...[
-                    const SizedBox(width: 8),
+                    const SizedBox(width: SonderSpace.sm),
                     _CategoryTag(category: command.category),
                   ],
-                  const SizedBox(width: 12),
+                  const SizedBox(width: SonderSpace.md),
                   Expanded(
                     child: Text(command.summary,
-                        style: TextStyle(color: cs.onSurfaceVariant),
+                        style: text.bodyMedium?.copyWith(color: tokens.text2),
                         overflow: TextOverflow.ellipsis),
                   ),
                   if (opens != null) ...[
-                    const SizedBox(width: 8),
+                    const SizedBox(width: SonderSpace.sm),
                     Text(opens, style: meta),
                   ],
                 ],
               ),
               if (usage != command.displayName || aliases.isNotEmpty)
                 Padding(
-                  padding: const EdgeInsets.only(left: 17, top: 2),
+                  padding: const EdgeInsets.only(
+                      left: 24 + SonderSpace.sm, top: SonderSpace.xxs),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -471,6 +743,9 @@ class CommandPalette extends StatelessWidget {
   final Map<String, String> categories;
   final ValueChanged<String> onPick;
 
+  /// Opens the full command browser; null leaves the footer out.
+  final VoidCallback? onBrowse;
+
   const CommandPalette({
     super.key,
     required this.matches,
@@ -478,6 +753,7 @@ class CommandPalette extends StatelessWidget {
     required this.grouped,
     required this.categories,
     required this.onPick,
+    this.onBrowse,
   });
 
   List<_PaletteRow> get _rows {
@@ -496,50 +772,75 @@ class CommandPalette extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
+    final tokens = SonderTokens.of(context);
+    final text = Theme.of(context).textTheme;
     final rows = _rows;
     return Container(
-      margin: const EdgeInsets.only(bottom: 8),
+      margin: const EdgeInsets.only(bottom: SonderSpace.sm),
       constraints: const BoxConstraints(maxHeight: 320),
+      clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
-        color: cs.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: cs.outlineVariant),
+        color: tokens.panel,
+        borderRadius: BorderRadius.circular(SonderRadius.card),
+        border: Border.all(color: tokens.hairlineStrong),
       ),
-      child: ListView.builder(
-        key: const Key('command-palette'),
-        shrinkWrap: true,
-        padding: const EdgeInsets.symmetric(vertical: 4),
-        itemCount: rows.length,
-        itemBuilder: (context, i) {
-          final row = rows[i];
-          final command = row.command;
-          if (command == null) {
-            final key = row.heading ?? '';
-            final blurb = categories[key] ?? '';
-            return Padding(
-              padding: const EdgeInsets.fromLTRB(12, 8, 12, 2),
-              child: Text(
-                blurb.isEmpty
-                    ? key.toUpperCase()
-                    : '${key.toUpperCase()} — $blurb',
-                style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 0.6,
-                  color: cs.onSurfaceVariant,
-                ),
-                overflow: TextOverflow.ellipsis,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Flexible(child: _list(rows, text)),
+          if (onBrowse != null) ...[
+            Divider(height: 1, color: tokens.hairline),
+            Row(children: [
+              QuietAction(
+                key: const Key('command-palette-browse'),
+                icon: Icons.manage_search,
+                label: 'Browse all commands',
+                onPressed: onBrowse,
               ),
-            );
-          }
-          return CommandRow(
-            command: command,
-            selected: row.matchIndex == selected,
-            onTap: () => onPick(command.name),
-          );
-        },
+              const Spacer(),
+              Padding(
+                padding: const EdgeInsets.only(right: SonderSpace.md),
+                child:
+                    Text('Ctrl+K', style: tokens.mono(11, color: tokens.muted)),
+              ),
+            ]),
+          ],
+        ],
       ),
+    );
+  }
+
+  Widget _list(List<_PaletteRow> rows, TextTheme text) {
+    return ListView.builder(
+      key: const Key('command-palette'),
+      shrinkWrap: true,
+      padding: const EdgeInsets.symmetric(vertical: SonderSpace.xs),
+      itemCount: rows.length,
+      itemBuilder: (context, i) {
+        final row = rows[i];
+        final command = row.command;
+        if (command == null) {
+          final key = row.heading ?? '';
+          final blurb = categories[key] ?? '';
+          return Padding(
+            padding: const EdgeInsets.fromLTRB(SonderSpace.md, SonderSpace.sm,
+                SonderSpace.md, SonderSpace.xxs),
+            child: Text(
+              blurb.isEmpty
+                  ? key.toUpperCase()
+                  : '${key.toUpperCase()} — $blurb',
+              style: text.labelSmall,
+              overflow: TextOverflow.ellipsis,
+            ),
+          );
+        }
+        return CommandRow(
+          command: command,
+          selected: row.matchIndex == selected,
+          onTap: () => onPick(command.name),
+        );
+      },
     );
   }
 }
@@ -592,7 +893,8 @@ class _CommandBrowserState extends State<CommandBrowser> {
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
+    final tokens = SonderTokens.of(context);
+    final text = Theme.of(context).textTheme;
     final grouped = widget.catalog.byCategory;
     final showingCategories = _query.isEmpty && _category == null;
     final results = _results;
@@ -603,7 +905,8 @@ class _CommandBrowserState extends State<CommandBrowser> {
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 760, maxHeight: 620),
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+          padding: const EdgeInsets.fromLTRB(
+              SonderSpace.lg, SonderSpace.md, SonderSpace.lg, SonderSpace.md),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -629,8 +932,7 @@ class _CommandBrowserState extends State<CommandBrowser> {
                           : (_query.isNotEmpty
                               ? 'Search results'
                               : _category ?? 'Commands'),
-                      style: const TextStyle(
-                          fontSize: 18, fontWeight: FontWeight.w700),
+                      style: text.titleMedium,
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
@@ -650,7 +952,7 @@ class _CommandBrowserState extends State<CommandBrowser> {
                   isDense: true,
                 ),
               ),
-              const SizedBox(height: 10),
+              const SizedBox(height: SonderSpace.md),
               Flexible(
                 child: showingCategories
                     ? ListView(
@@ -667,7 +969,8 @@ class _CommandBrowserState extends State<CommandBrowser> {
                                 widget.catalog.categories[entry.key] ?? '',
                                 overflow: TextOverflow.ellipsis,
                               ),
-                              trailing: Text('${entry.value.length}'),
+                              trailing: Text('${entry.value.length}',
+                                  style: tokens.mono(12, color: tokens.muted)),
                               onTap: () =>
                                   setState(() => _category = entry.key),
                             ),
@@ -685,13 +988,13 @@ class _CommandBrowserState extends State<CommandBrowser> {
                         ),
                       ),
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: SonderSpace.sm),
               Text(
                 widget.fromServer
                     ? '$total commands published by this server.'
                     : 'Server catalog unavailable — showing $total built-in '
                         'commands.',
-                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+                style: text.bodySmall,
               ),
             ],
           ),

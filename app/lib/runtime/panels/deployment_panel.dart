@@ -1,119 +1,80 @@
 part of '../runtime_screen.dart';
 
+/// The deployment profile: members, the preferred primary, and the honest
+/// limits of recovery. Each capability states its reason; unavailable reads
+/// `– off`, never red.
 class _DeploymentPanel extends StatelessWidget {
   final DeploymentInfo info;
 
   const _DeploymentPanel({super.key, required this.info});
 
-  String _capabilityValue(DeploymentCapabilityInfo capability) {
-    if (capability.available) {
-      return capability.reason.isEmpty
-          ? 'Available'
-          : 'Available — ${capability.reason}';
-    }
-    return capability.reason.isEmpty
-        ? 'Unavailable'
-        : 'Unavailable — ${capability.reason}';
-  }
-
   @override
   Widget build(BuildContext context) {
-    final privateCompute = info.capability('private_compute');
-    final takeover = info.capability('automatic_takeover');
-    final failback = info.capability('automatic_failback');
-    final replication = info.capability('acknowledged_state_replication');
-    final fencing = info.capability('worker_epoch_fencing');
-    final quorum = info.capability('quorum');
+    final text = Theme.of(context).textTheme;
     final policy = info.partitionPolicy.replaceAll('_', ' ');
-    return Column(
+    CapabilityRow row(String label, String name) {
+      final capability = info.capability(name);
+      return CapabilityRow(
+        label: label,
+        available: capability.available,
+        reason: capability.reason,
+      );
+    }
+
+    final posture = info.recoveryPosture;
+    return SettingsSection(
       key: const Key('deployment-panel-content'),
-      crossAxisAlignment: CrossAxisAlignment.start,
+      title: 'Deployment profile',
+      description: 'How this runtime shares work and state with other PCs.',
       children: [
-        _StatusRow(
+        ValueRow(
           label: 'Profile',
           value: info.profile.isEmpty
               ? info.displayProfile
               : '${info.displayProfile} (${info.profile})',
-          ok: info.profile.isNotEmpty || info.profileId.isNotEmpty,
         ),
-        _StatusRow(
-          label: 'Members',
-          value: info.membersLabel,
-          ok: info.configuredMembers.isNotEmpty,
-          off: true,
-        ),
+        ValueRow(label: 'Members', value: info.membersLabel),
         if (info.localNode.isNotEmpty)
-          _StatusRow(label: 'Local node', value: info.localNode, ok: true),
+          ValueRow(label: 'Local node', value: info.localNode, mono: true),
         if (info.preferredPrimary.isNotEmpty)
-          _StatusRow(
-            label: 'Preferred primary',
-            value: info.preferredPrimary,
-            ok: true,
-          ),
-        _StatusRow(
-          label: 'Private compute',
-          value: _capabilityValue(privateCompute),
-          ok: privateCompute.available,
-          off: true,
-        ),
-        _StatusRow(
-          label: 'Automatic takeover',
-          value: _capabilityValue(takeover),
-          ok: takeover.available,
-          off: true,
-        ),
-        _StatusRow(
-          label: 'Automatic failback',
-          value: _capabilityValue(failback),
-          ok: failback.available,
-          off: true,
-        ),
-        if (info.recoveryPosture != null)
-          _StatusRow(
+          ValueRow(
+              label: 'Preferred primary',
+              value: info.preferredPrimary,
+              mono: true),
+        row('Private compute', 'private_compute'),
+        row('Automatic takeover', 'automatic_takeover'),
+        row('Automatic failback', 'automatic_failback'),
+        if (posture != null)
+          CapabilityRow(
             label: 'Recovery posture',
-            value: info.recoveryPosture!.summary,
-            ok: info.recoveryPosture!.automaticTakeoverAvailable &&
-                info.recoveryPosture!.automaticFailbackAvailable,
-            off: true,
+            available: posture.automaticTakeoverAvailable &&
+                posture.automaticFailbackAvailable,
+            reason: posture.summary,
           ),
-        _StatusRow(
-          label: 'State replication',
-          value: _capabilityValue(replication),
-          ok: replication.available,
-          off: true,
-        ),
-        _StatusRow(
-          label: 'Worker fencing',
-          value: _capabilityValue(fencing),
-          ok: fencing.available,
-          off: true,
-        ),
-        _StatusRow(
-          label: 'Quorum',
-          value: _capabilityValue(quorum),
-          ok: quorum.available,
-          off: true,
-        ),
+        row('State replication', 'acknowledged_state_replication'),
+        row('Worker fencing', 'worker_epoch_fencing'),
+        row('Quorum', 'quorum'),
         if (info.controlStateScope.isNotEmpty)
-          _StatusRow(
-            label: 'State scope',
-            value: info.controlStateScope,
-            ok: true,
+          ValueRow(
+              label: 'State scope', value: info.controlStateScope, mono: true),
+        if (policy.isNotEmpty || !info.preferenceConfersAuthority)
+          RuntimeCardBody(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (policy.isNotEmpty)
+                  Text('Partition policy: $policy.', style: text.bodySmall),
+                if (!info.preferenceConfersAuthority) ...[
+                  if (policy.isNotEmpty) const SizedBox(height: SonderSpace.xs),
+                  Text(
+                    'Primary preference is advisory; it never grants '
+                    'promotion authority.',
+                    style: text.bodySmall,
+                  ),
+                ],
+              ],
+            ),
           ),
-        if (policy.isNotEmpty) ...[
-          const SizedBox(height: 4),
-          Text(
-            'Partition policy: $policy.',
-            style: Theme.of(context).textTheme.bodySmall,
-          ),
-        ],
-        if (!info.preferenceConfersAuthority) ...[
-          const SizedBox(height: 4),
-          Text(
-            'Primary preference is advisory; it never grants promotion authority.',
-            style: Theme.of(context).textTheme.bodySmall,
-          ),
-        ],
       ],
     );
   }

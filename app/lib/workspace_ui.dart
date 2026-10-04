@@ -1,17 +1,20 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'api.dart';
 import 'theme.dart';
 import 'ui/status_vocab.dart';
 import 'ui/strings.dart';
 
 export 'ui/status_vocab.dart' show StatusKind;
+// The shared Markdown presentation lives with chat, its main user.
+export 'chat/markdown.dart'
+    show ConversationContent, markdownImageAllowed, markdownDataImageMaxBytes;
 
+/// The four peer destinations, in sidebar order (Ctrl/⌘+1 … 4).
 enum WorkspaceDestination {
   chat('Chat', Icons.chat_bubble_outline),
-  agents('Agents', Icons.account_tree_outlined),
-  runtime('Runtime', Icons.dashboard_customize_outlined),
+  agents('Agents', Icons.hub_outlined),
+  runtime('Runtime', Icons.space_dashboard_outlined),
   settings('Settings', Icons.settings_outlined);
 
   final String label;
@@ -19,7 +22,8 @@ enum WorkspaceDestination {
   const WorkspaceDestination(this.label, this.icon);
 }
 
-/// Shared peer navigation. Routing remains with the owning chat workspace.
+/// Peer navigation for a page shown outside the app shell (the shell's
+/// sidebar replaces it; see `ShellScope`).
 class WorkspaceMenu extends StatelessWidget {
   final WorkspaceDestination current;
   final ValueChanged<WorkspaceDestination> onSelected;
@@ -47,27 +51,6 @@ class WorkspaceMenu extends StatelessWidget {
                 ]))
         ],
       );
-}
-
-class WorkspaceNavigation extends StatelessWidget {
-  final WorkspaceDestination current;
-  final ValueChanged<WorkspaceDestination> onSelected;
-  const WorkspaceNavigation(
-      {super.key, required this.current, required this.onSelected});
-
-  @override
-  Widget build(BuildContext context) =>
-      Column(mainAxisSize: MainAxisSize.min, children: [
-        for (final destination in WorkspaceDestination.values)
-          ListTile(
-              dense: true,
-              selected: destination == current,
-              leading: Icon(destination.icon, size: 20),
-              title: Text(destination.label),
-              onTap: destination == current
-                  ? null
-                  : () => onSelected(destination)),
-      ]);
 }
 
 /// The legacy three-tone notice API. Kept so existing call sites compile;
@@ -309,156 +292,3 @@ class RequestFailure {
 }
 
 const conversationWidth = 760.0;
-
-/// One Markdown owner for chat answers, agent messages and returned reports.
-///
-/// Code blocks (P2-8): fenced code is drawn on the panel with a transparent
-/// text background, so long blocks read as one surface instead of a stripe
-/// per line, and scroll horizontally instead of wrapping. Only inline code
-/// keeps the raised background. With [fullWidthCode] the blocks take the
-/// full available (reading) width; it needs a bounded width, so it is
-/// opt-in for callers that lay the content out inside one.
-class ConversationContent extends StatelessWidget {
-  final String content;
-  final Color? color;
-  final bool fullWidthCode;
-  const ConversationContent(
-      {super.key,
-      required this.content,
-      this.color,
-      this.fullWidthCode = false});
-  @override
-  Widget build(BuildContext context) {
-    final tokens = SonderTokens.of(context);
-    final body = Theme.of(context)
-        .textTheme
-        .bodyMedium
-        ?.copyWith(color: color ?? tokens.text);
-    final blockCode = tokens.mono(13, color: tokens.text);
-    return MarkdownBody(
-        data: content,
-        selectable: true,
-        softLineBreak: true,
-        fitContent: !fullWidthCode,
-        // Model-authored Markdown never fetches: see [markdownImageAllowed].
-        imageBuilder: (uri, title, alt) =>
-            _MarkdownImage(uri: uri, alt: alt ?? title ?? ''),
-        // Used only for fenced/indented blocks: a plain span with no
-        // background, so the block has no per-line stripes.
-        syntaxHighlighter: _PlainCodeHighlighter(blockCode),
-        styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
-          p: body,
-          strong: body?.copyWith(fontWeight: FontWeight.w600),
-          h1: Theme.of(context).textTheme.titleLarge,
-          h2: Theme.of(context).textTheme.titleMedium,
-          h3: Theme.of(context).textTheme.titleSmall,
-          a: body?.copyWith(
-              color: tokens.accentText,
-              decoration: TextDecoration.underline,
-              decorationColor: tokens.accentText.withValues(alpha: 0.5)),
-          // Inline code only; blocks use [_PlainCodeHighlighter].
-          code: tokens
-              .mono(13, color: tokens.text)
-              .copyWith(backgroundColor: tokens.raised),
-          codeblockPadding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
-          codeblockDecoration: BoxDecoration(
-              color: tokens.panel,
-              borderRadius: BorderRadius.circular(SonderRadius.row),
-              border: Border.all(color: tokens.hairline)),
-          blockquoteDecoration: BoxDecoration(
-              border: Border(
-                  left: BorderSide(color: tokens.hairlineStrong, width: 2))),
-          blockquotePadding: const EdgeInsets.fromLTRB(14, 2, 0, 2),
-          horizontalRuleDecoration: BoxDecoration(
-              border: Border(top: BorderSide(color: tokens.hairline))),
-          blockSpacing: 10,
-          listIndent: 22,
-        ));
-  }
-}
-
-/// Largest inline `data:` image rendered from Markdown, in bytes.
-const markdownDataImageMaxBytes = 2 * 1024 * 1024;
-
-/// Whether a Markdown image at [uri] may be rendered.
-///
-/// Markdown in this app is written by a model (and by whatever a tool fed
-/// it), so an image must not cause a request: an `http(s)` image is a
-/// beacon that leaks conversation data, and on Windows a `file://host/…` or
-/// UNC path opens an SMB connection that sends the user's credentials. Only
-/// a bounded inline `data:image/…` URI is rendered, from memory; everything
-/// else is shown as a placeholder naming the URL.
-bool markdownImageAllowed(Uri uri) {
-  if (uri.scheme != 'data') return false;
-  final data = uri.data;
-  if (data == null || !data.mimeType.startsWith('image/')) return false;
-  // Base64 expands 3 bytes to 4 characters; bound before decoding.
-  return uri.toString().length <= markdownDataImageMaxBytes * 4 ~/ 3 + 256;
-}
-
-/// A Markdown image: a `data:` image from memory, or a placeholder.
-class _MarkdownImage extends StatelessWidget {
-  final Uri uri;
-  final String alt;
-  const _MarkdownImage({required this.uri, required this.alt});
-
-  @override
-  Widget build(BuildContext context) {
-    if (markdownImageAllowed(uri)) {
-      try {
-        final bytes = uri.data!.contentAsBytes();
-        if (bytes.length <= markdownDataImageMaxBytes) {
-          return Image.memory(bytes,
-              semanticLabel: alt.isEmpty ? null : alt,
-              errorBuilder: (context, _, __) => _placeholder(context));
-        }
-      } on FormatException {
-        // Malformed data URI: fall through to the placeholder.
-      }
-    }
-    return _placeholder(context);
-  }
-
-  Widget _placeholder(BuildContext context) {
-    final tokens = SonderTokens.of(context);
-    final shown = uri.scheme == 'data'
-        ? 'inline data'
-        : (uri.toString().length > 200
-            ? '${uri.toString().substring(0, 200)}…'
-            : uri.toString());
-    final label = alt.isEmpty ? 'Image not loaded' : 'Image not loaded: $alt';
-    return Container(
-      key: const Key('markdown-image-blocked'),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-          color: tokens.raised,
-          borderRadius: BorderRadius.circular(SonderRadius.row),
-          border: Border.all(color: tokens.hairline)),
-      child: Row(mainAxisSize: MainAxisSize.min, children: [
-        Icon(Icons.image_not_supported_outlined, size: 16, color: tokens.muted),
-        const SizedBox(width: 6),
-        Flexible(
-          child: Text.rich(
-            TextSpan(children: [
-              TextSpan(text: label),
-              TextSpan(
-                  text: '  $shown',
-                  style: tokens.mono(12, color: tokens.muted)),
-            ]),
-            style: Theme.of(context).textTheme.bodySmall,
-            semanticsLabel: '$label. $shown',
-          ),
-        ),
-      ]),
-    );
-  }
-}
-
-/// Formats a code block as one plain mono span with no background.
-class _PlainCodeHighlighter extends SyntaxHighlighter {
-  final TextStyle style;
-  _PlainCodeHighlighter(this.style);
-
-  @override
-  TextSpan format(String source) => TextSpan(style: style, text: source);
-}

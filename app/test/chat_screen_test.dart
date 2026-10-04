@@ -5,7 +5,9 @@ import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sonder_runtime/api.dart';
+import 'package:sonder_runtime/chat/controller.dart';
 import 'package:sonder_runtime/chat/transcript.dart';
+import 'package:sonder_runtime/theme.dart';
 import 'package:sonder_runtime/models.dart';
 
 import 'chat_fakes.dart';
@@ -68,7 +70,8 @@ void main() {
         (tester) async {
       final backend = FakeChatBackend()
         ..statusError = SonderException('Cannot reach server: refused');
-      await pumpChat(tester, backend, size: const Size(1440, 900));
+      // The rail is the app shell's sidebar; its footer shows the state.
+      await pumpShell(tester, backend, size: const Size(1440, 900));
       await tester.pump(const Duration(milliseconds: 100));
       final rail = find.byKey(const Key('rail-connection'));
       expect(rail, findsOneWidget);
@@ -108,7 +111,12 @@ void main() {
     await _send(tester, 'why does PSO compile stall?');
     final turn = backend.lastTurn;
     expect(find.byKey(const Key('live-line')), findsOneWidget);
-    expect(find.textContaining('◈ working · routing · 0s', findRichText: true),
+    // The ◈ sits in the transcript gutter; the line is the REPL's after it.
+    expect(
+        find.descendant(
+            of: find.byKey(const Key('live-glyph')), matching: find.text('◈')),
+        findsOneWidget);
+    expect(find.textContaining('working · routing · 0s', findRichText: true),
         findsOneWidget);
 
     turn.phase('reading files');
@@ -123,10 +131,19 @@ void main() {
         findsOneWidget);
     expect(find.textContaining('slow local model', findRichText: true),
         findsNothing);
+    expect(find.textContaining('no output for', findRichText: true),
+        findsNothing);
+    // 21 s after the last text: the stall cue and the fast-route hint.
     await tester.pump(const Duration(seconds: 9));
+    await tester.pump(const Duration(milliseconds: 300));
     expect(
         find.textContaining('slow local model? try the fast route',
             findRichText: true),
+        findsOneWidget);
+    expect(find.textContaining('! no output for 21s', findRichText: true),
+        findsOneWidget);
+    // The timer itself never stopped.
+    expect(find.textContaining('reading files · 21s', findRichText: true),
         findsOneWidget);
 
     await tester.tap(find.byKey(const Key('live-stop')));
@@ -164,10 +181,90 @@ void main() {
     await tester.pump();
     expect(
         find.text('done 61.2s · 2 model calls · 2.6k→143 tok'), findsOneWidget);
-    expect(find.text('useful'), findsOneWidget);
+    expect(find.text('Useful'), findsOneWidget);
     // The tier from the receipt reaches the status line.
     expect(_statusLine(tester), startsWith('code · sonder'));
     await unmountChat(tester);
+  });
+
+  testWidgets('orchestration choices send the complete command', (
+    tester,
+  ) async {
+    final backend = FakeChatBackend();
+    await pumpChat(tester, backend);
+    await _send(tester, 'make something');
+    backend.lastTurn.done(
+      'Choose a mode',
+      metadata: const ChatResponseMetadata(
+        orchestration: OrchestrationReceipt(
+          choices: [
+            OrchestrationChoice(
+              label: 'Fleet',
+              command: '/master_orchestrate fleet 0 make something',
+            ),
+          ],
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(
+        const Key('orchestration-/master_orchestrate fleet 0 make something'),
+      ),
+    );
+    await tester.pump();
+    expect(backend.turns, hasLength(2));
+    expect(
+      backend.lastTurn.request.history.last.content,
+      '/master_orchestrate fleet 0 make something',
+    );
+    await unmountChat(tester);
+  });
+
+  testWidgets('lane acknowledgement opens the requested Agents lane', (
+    tester,
+  ) async {
+    String? opened;
+    final actions = TranscriptActions(
+      onStop: () {},
+      onFeedback: (_) {},
+      onRetry: (_) {},
+      onChangeMode: () {},
+      onApprove: null,
+      fetchWorkRun: (_) async => const WorkRun(id: 'x', status: 'unknown'),
+      cancelWorkRun: (_) async => const WorkRun(id: 'x', status: 'unknown'),
+      listWorkRuns: () async => const [],
+      onWorkRunResolved: (_, __) {},
+      onOpenAgentLane: (id) => opened = id,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: SonderTheme.dark,
+        home: Scaffold(
+          body: TranscriptTurn(
+            entry: const ChatEntry(
+              1,
+              ChatMessage(
+                role: Role.assistant,
+                content: 'Delegated.',
+                responseMetadata: ChatResponseMetadata(
+                  agentLane: AgentLaneReceipt(
+                    laneId: 'lane-123',
+                    folder: 'C:/creations/lane-123',
+                  ),
+                ),
+              ),
+            ),
+            live: ValueNotifier<LiveTurn?>(null),
+            actions: actions,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('open-agent-lane')));
+    expect(opened, 'lane-123');
+    await tester.pumpWidget(const SizedBox());
   });
 
   testWidgets('failures: plain text, retry, announced (P2-12, P2-13)',
@@ -203,7 +300,7 @@ void main() {
     expect(find.descendant(of: notice, matching: find.byType(MarkdownBody)),
         findsNothing,
         reason: 'error URLs are not auto-linked');
-    expect(find.text('useful'), findsNothing);
+    expect(find.text('Useful'), findsNothing);
     expect(find.textContaining('failed after'), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('error-retry')));

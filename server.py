@@ -157,6 +157,8 @@ import assetgen
 import sonder_runtime.adapters.artifact_grounding as artifact_grounding
 import game_forge
 import sonder_runtime.adapters.filesystem.workbench as workbench
+from sonder_runtime.bootstrap.work_narration import narrated as _narrated_work
+from sonder_runtime.application.ports.work_narration import route_reason as _narration_reason
 import creative_router
 import intents
 import sonder_runtime.adapters.runtime_policy as runtime_policy
@@ -3856,6 +3858,16 @@ def control_command(prompt: str, history=None, session="", project="",
         return preference_command(arg)
     if cmd in ("/improve", "/improvements"):
         return system_improvement_report()
+    if cmd == "/delegate":
+        from sonder_runtime.interfaces.http.agent_work_routes import native_delegate_reply
+        return native_delegate_reply(arg, context_of=_agent_lane_context, policy=permission_modes,
+                                     project=project, parent_session_id=session,
+                                     state_home_of=lambda app: app.config.state.home or sonder_paths.default_home())
+    if cmd in ("/master", "/master_orchestrate"):
+        from sonder_runtime.interfaces.orchestration_commands import execute_master_command, uses_tool_arguments
+        if not uses_tool_arguments(arg):
+            return execute_master_command(arg, orchestrate=master_orchestrate,
+                                          capacity=master_orchestrator.capacity, project=project)
     if cmd in ("/agents", "/masterstatus"):
         return master_status()
     if cmd in ("/capacity", "/agentcapacity"):
@@ -10101,6 +10113,7 @@ def _master_grounded_build(
 
 
 @mcp.tool()
+@_narrated_work("fleet", lambda: globals())
 def master_orchestrate(
     task: str,
     mode: str = "ask",
@@ -10170,31 +10183,14 @@ def master_orchestrate(
         else:
             delegate_count = master_orchestrator.clamp_agent_count(agents, default=3)
             fleet_count = master_orchestrator.clamp_agent_count(
-                agents, default=master_orchestrator.max_agents(),
+                agents, default=max(1, int(master_orchestrator.capacity()["worker_slots"])),
             )
         if worker_cap:
-            delegate_capacity = master_orchestrator.capacity(delegate_count, worker_cap=worker_cap)
             fleet_capacity = master_orchestrator.capacity(fleet_count, worker_cap=worker_cap)
         else:
-            delegate_capacity = master_orchestrator.capacity(delegate_count)
             fleet_capacity = master_orchestrator.capacity(fleet_count)
-        return (
-            "Master orchestrator ready.\n"
-            "Choose execution mode:\n"
-            "  inline   - master handles the task directly.\n"
-            "  delegate - queue %d agent(s) across %d safe worker slot(s), audit, then merge.\n"
-            "  fleet    - queue %d agent(s) across %d safe worker slot(s), return immediately, then monitor it.\n"
-            "              Omit agents (or pass 0) to use the hardware ceiling.\n"
-            "              Set worker_cap (or say 'use N workers') for a bounded per-run override.\n"
-            "Keywords fleet, swarm, spawn as many agents, parallel agents, and\n"
-            "parallel workflow select fleet automatically without replacing an explicit agent count.\n"
-            "Call master_orchestrate(task, mode='inline'|'delegate'|'fleet') or chat `/master inline ...`."
-        ) % (
-            delegate_count,
-            delegate_capacity["worker_slots"],
-            fleet_count,
-            fleet_capacity["worker_slots"],
-        )
+        from sonder_runtime.interfaces.orchestration_commands import master_choice
+        return master_choice(task, delegate_count, fleet_count, fleet_capacity["worker_slots"])
     if not task:
         return "ERROR: empty task."
     tier = _runtime_lane_tier("fleet", tier)
@@ -21983,6 +21979,7 @@ def _agent_turn(
 
 
 @mcp.tool()
+@_narrated_work("agent", lambda: globals())
 def agent(
     prompt: str,
     tier: str = "code",
@@ -22062,6 +22059,7 @@ def _work_expects_effects(prompt):
     return bool(verbs - _READ_ONLY_WORK_VERBS)
 
 
+@_narrated_work("workbench", lambda: globals())
 def _workbench_agent_escalating(
     prompt, tier, *, max_steps, allow_web, project, allow_location,
     prepared_plan=None, session=None,
@@ -22171,6 +22169,7 @@ def _workbench_agent_escalating_owned(
 
 
 @mcp.tool()
+@_narrated_work("workbench", lambda: globals())
 def workbench_agent(
     prompt: str,
     tier: str = "auto",
@@ -22765,6 +22764,7 @@ def _autopilot_not_launched(run_id: str) -> str:
     )
 
 
+@_narrated_work("autopilot", lambda: globals())
 def _autopilot_start(
     objective: str,
     project: str = "",
@@ -23316,6 +23316,7 @@ def _route_work_request(
 
     resolved_project = _resolve_project(handoff.project) or ""
     if mode == "fleet":
+        _narration_reason(reason)
         master_kwargs = {
             "task": handoff.objective, "mode": "fleet", "tier": selected_tier,
             "learn": False,
@@ -23327,6 +23328,7 @@ def _route_work_request(
             master_kwargs["project"] = resolved_project
         output = master_orchestrate(**master_kwargs)
     elif mode == "workbench":
+        _narration_reason(reason)
         output, selected_tier = _workbench_agent_escalating(
             handoff.objective, selected_tier, max_steps=12, allow_web=True,
             project=resolved_project, allow_location=False,
@@ -23355,6 +23357,7 @@ def _route_work_request(
                 current.get("objective", ""),
                 current.get("id", ""),
             )
+        _narration_reason(reason)
         output = autopilot_start(
             objective=handoff.objective,
             project=resolved_project,
@@ -24755,6 +24758,7 @@ def _execute_fanout_run(run_id):
     return receipt
 
 
+@_narrated_work("fanout", lambda: globals())
 def _model_fanout_authorized(prompt: str, scope: str = "", num_predict: int = 512,
                              timeout: int = 45, max_cloud_workers: int = 2,
                              request_owner: str = "", request_role: str = "",

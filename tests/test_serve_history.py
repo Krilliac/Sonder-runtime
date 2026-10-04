@@ -234,7 +234,11 @@ def test_artifactcheck_slash_routes_to_control_command(monkeypatch):
 
 
 def test_master_slash_routes_modes(monkeypatch):
+    """Positional modes now carry an explicit capacity-sized count and project."""
     calls = []
+    monkeypatch.setattr(
+        ts.server.master_orchestrator, "capacity", lambda: {"worker_slots": 2},
+    )
     monkeypatch.setattr(
         ts.server,
         "master_orchestrate",
@@ -245,9 +249,9 @@ def test_master_slash_routes_modes(monkeypatch):
     assert ts._handle_slash("/master delagte build it") == "mastered"
     assert ts._handle_slash("/master fleet build it") == "mastered"
     assert calls == [
-        {"task": "build it", "mode": "delegate"},
-        {"task": "build it", "mode": "delegate"},
-        {"task": "build it", "mode": "fleet"},
+        {"task": "build it", "mode": "delegate", "agents": 2, "project": ""},
+        {"task": "build it", "mode": "delegate", "agents": 2, "project": ""},
+        {"task": "build it", "mode": "fleet", "agents": 2, "project": ""},
     ]
 
 
