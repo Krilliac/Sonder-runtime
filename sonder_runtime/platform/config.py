@@ -178,9 +178,13 @@ class StateConfig:
     workspace_roots: tuple[str, ...] = ()
     minimum_free_disk_bytes: int = 5_368_709_120
     sqlite_busy_timeout_ms: int = 5_000
-    # Console work with no folder selected gets a dated folder under the first
-    # usable workspace root instead of a question (SONDER_AUTO_WORKSPACE).
+    # Console work with no folder selected gets a dated folder in the default
+    # workspace root instead of a question (SONDER_AUTO_WORKSPACE).
     auto_workspace: bool = True
+    # The app-owned root for work started without a project; empty means
+    # %USERPROFILE%\Sonder\workspaces or ~/Sonder/workspaces
+    # (SONDER_DEFAULT_WORKSPACE_ROOT).  Managed console work grants it by design.
+    default_workspace_root: str = ""
 
 
 @dataclass(frozen=True)
@@ -1523,6 +1527,10 @@ def _apply_environment(
     # Empty keeps the configured value, as env_bool_from_env reads it later.
     if env.get("SONDER_AUTO_WORKSPACE", "").strip():
         state = replace(state, auto_workspace=_env_bool(env["SONDER_AUTO_WORKSPACE"]))
+    if env.get("SONDER_DEFAULT_WORKSPACE_ROOT", "").strip():
+        state = replace(
+            state, default_workspace_root=env["SONDER_DEFAULT_WORKSPACE_ROOT"].strip()
+        )
     if env.get("OLLAMA_HOST", "").strip():
         raw = env["OLLAMA_HOST"].strip()
         url = raw if "://" in raw else f"http://{raw}"
@@ -1910,6 +1918,16 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         errors.append("[state].minimum_free_disk_bytes must be >= 0")
     if config.state.sqlite_busy_timeout_ms < 0:
         errors.append("[state].sqlite_busy_timeout_ms must be >= 0")
+    if config.state.default_workspace_root.strip():
+        try:
+            absolute = Path(config.state.default_workspace_root.strip()).expanduser().is_absolute()
+        except RuntimeError:  # "~" with no user home
+            absolute = False
+        if not absolute:
+            errors.append(
+                "[state].default_workspace_root must be an absolute path: "
+                f"{config.state.default_workspace_root!r}"
+            )
     local_workspace_mappings = {"default"}
     effective_workspace_roots: dict[str, Path] = {}
     for index, root in enumerate(config.state.workspace_roots):

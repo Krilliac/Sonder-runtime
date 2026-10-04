@@ -31,9 +31,16 @@ home = "/var/lib/sonder"
 workspace_roots = ["/srv/sonder/workspaces"]
 minimum_free_disk_bytes = 5368709120
 sqlite_busy_timeout_ms = 5000
-# Console work with no folder selected gets a dated folder under the first
-# usable workspace root (env SONDER_AUTO_WORKSPACE); false asks instead.
+# Console work with no folder selected gets a dated folder in the default
+# workspace root (env SONDER_AUTO_WORKSPACE); false asks instead.
 auto_workspace = true
+# Where work started without a project goes (env SONDER_DEFAULT_WORKSPACE_ROOT).
+# Empty means %USERPROFILE%\Sonder\workspaces or ~/Sonder/workspaces. Managed
+# console work grants this one root by design. The packaged service user's
+# home is the state home, where the root would be refused, so set it here,
+# inside a writable path such as a workspace root (otherwise project-less
+# writing runs fall back to <state home>/creations).
+default_workspace_root = "/srv/sonder/workspaces/creations"
 
 [memory_replication]
 # Disabled by default. This is a bounded, explicit, project-scoped fact-copy

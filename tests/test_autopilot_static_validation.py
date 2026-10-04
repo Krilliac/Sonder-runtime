@@ -114,24 +114,22 @@ def test_execution_allowed_still_requires_real_verifier(monkeypatch, tmp_path, e
 
 
 def test_default_writing_agent_uses_creation_root(monkeypatch, tmp_path, edits_only):
-    from sonder_runtime.platform import paths
-    home = tmp_path / "state"
-    monkeypatch.setattr(paths, "default_home", lambda: home)
+    workspaces = tmp_path / "Sonder" / "workspaces"
+    monkeypatch.setenv("SONDER_DEFAULT_WORKSPACE_ROOT", str(workspaces))
     result, _ = drive(monkeypatch, tmp_path, "starfield.html", "<html></html>", project="default", relative=True)
     root = Path(result.project_scope)
-    assert root.parent == home / "creations"
+    assert root.parent == workspaces.resolve()
     assert (root / "starfield.html").read_text(encoding="utf-8") == "<html></html>"
     assert result.validation_passed, result.output
     assert not (tmp_path / "starfield.html").exists()
 
 
 def test_real_file_tools_accept_and_check_default_creation(monkeypatch, tmp_path, edits_only):
-    from sonder_runtime.platform import paths
-    home = tmp_path / "state"
-    monkeypatch.setattr(paths, "default_home", lambda: home)
+    workspaces = tmp_path / "Sonder" / "workspaces"
+    monkeypatch.setenv("SONDER_DEFAULT_WORKSPACE_ROOT", str(workspaces))
     result, _ = drive(monkeypatch, tmp_path, "starfield.html", "<html><body><canvas></canvas></body></html>",
                       project="default", relative=True, real_tools=True)
     assert result.mutation_observed, result.output
     assert result.validation_passed, result.output
-    assert Path(result.project_scope).parent == home / "creations"
+    assert Path(result.project_scope).parent == workspaces.resolve()
     assert (Path(result.project_scope) / "starfield.html").is_file()

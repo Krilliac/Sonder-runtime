@@ -43,7 +43,7 @@ import server
 @pytest.fixture(autouse=True)
 def _keep_virtual_default_scope(monkeypatch):
     """Keep mocked verifier paths independent of run-workspace allocation."""
-    monkeypatch.setattr(server, "prepare_writing_project", lambda project: (project, ""))
+    monkeypatch.setattr(server, "prepare_writing_project", lambda project, task="": (project, ""))
 
 
 # Population shapes, expressed as the outcome-signal counts calibration reads.
