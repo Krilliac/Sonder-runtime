@@ -39,6 +39,10 @@ _INFERENCE_BACKEND_LABELS = frozenset({
 _UPSTREAM_LABEL = re.compile(r"[a-z0-9][a-z0-9._-]{0,39}")
 _MAX_UPSTREAM_LABELS = 32
 _USAGE_TOKEN_KINDS = ("prompt", "completion", "cached", "cache_write", "reasoning")
+_PREFIX_PROVIDER_LABELS = frozenset({"ollama", "ollama_cloud", "bridged"})
+_PREFIX_REASON_LABELS = frozenset({
+    "hit", "cold_start", "identity_changed", "version_changed", "prefix_changed",
+})
 _WORKER_LABELS = frozenset({*("w%d" % index for index in range(16)), "overflow"})
 _WORKER_IDENTITY = re.compile(r"[0-9a-f]{64}")
 _COMPUTE_REJECTION_REASONS = frozenset({
@@ -185,6 +189,18 @@ class MetricsRegistry:
                 "Provider-reported token usage by backend, upstream host and kind",
                 ["backend", "upstream", "kind"], registry=self._registry,
             )
+            self.prefix_cache_total = Counter(
+                "sonder_prefix_cache_total",
+                "Main-chat logical prefix decisions joined with provider cache reuse",
+                ["provider", "reason", "reuse"], registry=self._registry,
+            )
+            self.prefix_cached_ratio = Histogram(
+                "sonder_prefix_cached_ratio",
+                "Provider-reported cached share of prompt tokens by prefix decision",
+                ["provider", "reason"],
+                buckets=(0, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99, 1.0),
+                registry=self._registry,
+            )
             self.model_load_states_total = Counter(
                 "sonder_model_load_states_total",
                 "Explicit backend load-state observations",
@@ -272,6 +288,7 @@ class MetricsRegistry:
                 "model_token_throughput_per_second", "model_load_states_total",
                 "model_prompt_tokens", "model_cost_usd_total",
                 "model_usage_tokens_total",
+                "prefix_cache_total", "prefix_cached_ratio",
                 "sqlite_lock_wait_seconds", "task_states", "autopilot_runs_total",
                 "backup_age_seconds", "backup_runs_total", "disk_free_bytes",
                 "redaction_failures_total", "auth_failures_total",
@@ -351,6 +368,20 @@ class MetricsRegistry:
                 self.model_usage_tokens_total.labels(
                     backend=backend, upstream=label, kind=kind,
                 ).inc(count)
+    def observe_prefix_cache(self, join) -> None:
+        """Record one joined prefix-cache observation with closed label sets."""
+        if join is None:
+            return
+        provider = getattr(join, "provider", None)
+        provider = provider if provider in _PREFIX_PROVIDER_LABELS else "other"
+        reason = getattr(join, "reason", None)
+        reason = reason if reason in _PREFIX_REASON_LABELS else "other"
+        reuse = getattr(join, "provider_reuse", None)
+        reuse = reuse if reuse in {"none", "partial", "unmeasured"} else "other"
+        self.prefix_cache_total.labels(provider=provider, reason=reason, reuse=reuse).inc()
+        ratio = getattr(join, "cached_ratio", None)
+        if isinstance(ratio, float) and 0.0 <= ratio <= 1.0:
+            self.prefix_cached_ratio.labels(provider=provider, reason=reason).observe(ratio)
 
     def observe_model_call(
         self, *, cloud: bool, result: str, elapsed_seconds: float

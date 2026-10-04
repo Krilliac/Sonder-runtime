@@ -528,6 +528,7 @@ from sonder_runtime.domain.execution_route_formatting import (
 from sonder_runtime.adapters.inference import served_tier_models as _served_models
 from sonder_runtime.adapters.inference import overflow_route as _overflow_route
 from sonder_runtime.adapters.inference import gpu_residency as _gpu_residency
+from sonder_runtime.adapters.inference import prefix_cache as _prefix_cache
 from sonder_runtime.domain.agent_observation_quality import (
     observation_ok as _agent_observation_ok,
 )
@@ -2500,10 +2501,10 @@ def _build_system(system, trace, persona, model="", cloud=False, provider=None):
     values = parts or _read_system_context()
     profile, emotions, goal_block = values[:3]
     playbook_index = values[3] if len(values) > 3 else ""
-    return _join_system_parts(
-        _runtime_identity_block(model, cloud, provider), profile, emotions,
-        playbook_context.frame_owner_notes(playbook_index), goal_block,
+    return _prefix_cache.compose_local_system(  # stable first, volatile last
+        _runtime_identity_block(model, cloud, provider), profile, emotions, goal_block,
         effective_system,
+        playbook=playbook_context.frame_owner_notes(playbook_index),
     )
 
 
@@ -4207,6 +4208,7 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
             task_embedding_dim=embedding_provenance.get("dimension"),
         )
         playbook_context.record_usage(conn, playbook_selection, iid)
+        _prefix_cache.observe_chat_turn(effective_system, model=model, cloud=cloud, bridged=_provider_bridge.active_rung, response_meta=getattr(gen, "last_response_meta", None))
         _capture_preferences(
             conn, prompt, source_interaction=iid,
             scope="project:%s" % project if project else "global",
@@ -4223,6 +4225,7 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
         task_embedding_dim=embedding_provenance.get("dimension"),
     )
     playbook_context.record_usage(conn, playbook_selection, iid)
+    _prefix_cache.observe_chat_turn(effective_system, model=model, cloud=cloud, bridged=_provider_bridge.active_rung, response_meta=getattr(gen, "last_response_meta", None))
     _capture_preferences(
         conn, prompt, source_interaction=iid,
         scope="project:%s" % project if project else "global",
@@ -5535,11 +5538,12 @@ def prewarm_model(tier: str = "") -> bool:
 
     def _load():
         try:
-            # Empty prompt with keep_alive loads weights without generating.
-            prewarm_gate.run_as_prewarm(lambda: _post(
-                "/api/generate", {"model": model, "keep_alive": _keep_alive_for(model)},
-                timeout=_PREWARM_LOAD_TIMEOUT,
-            ))
+            # Prefill the stable system prefix (1 token) with the options the turn
+            # sends, so Ollama keeps the runner and its KV; else load weights only.
+            path, body = _prefix_cache.prewarm_request(model, _keep_alive_for(model), lambda: (
+                _build_system("", False, "", model=model, cloud=False),
+                _local_model_options(0.2, 1, _auto_model_context(model))))
+            prewarm_gate.run_as_prewarm(lambda: _post(path, body, timeout=_PREWARM_LOAD_TIMEOUT))
         except Exception:
             pass
         finally:
