@@ -13,7 +13,7 @@ def _keep_virtual_default_scope(monkeypatch):
     so binding an omitted project to a real run workspace would change their
     fixture boundary rather than exercise the gate under test.
     """
-    monkeypatch.setattr(server, "prepare_writing_project", lambda project: (project, ""))
+    monkeypatch.setattr(server, "prepare_writing_project", lambda project, task="": (project, ""))
 
 
 def test_agent_decision_paths_do_not_call_root_model_error_wrapper():

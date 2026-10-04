@@ -12,6 +12,7 @@ import 'package:sonder_runtime/runtime/runtime_screen.dart';
 import 'package:sonder_runtime/runtime/status_word.dart';
 import 'package:sonder_runtime/settings.dart';
 import 'package:sonder_runtime/theme.dart';
+import 'package:sonder_runtime/ui/kit.dart';
 
 import 'fixtures/server_fixtures.dart';
 import 'runtime_fixtures.dart';
@@ -34,7 +35,7 @@ Widget _panelApp(FakeRuntimeData data, {bool expanded = true}) => MaterialApp(
     );
 
 Future<void> _pumpPanel(WidgetTester tester, FakeRuntimeData data,
-    {bool expanded = true}) async {
+    {bool expanded = true, bool settle = true}) async {
   tester.view.physicalSize = const Size(900, 1400);
   tester.view.devicePixelRatio = 1;
   addTearDown(() {
@@ -42,7 +43,14 @@ Future<void> _pumpPanel(WidgetTester tester, FakeRuntimeData data,
     tester.view.resetDevicePixelRatio();
   });
   await tester.pumpWidget(_panelApp(data, expanded: expanded));
-  await tester.pumpAndSettle();
+  if (settle) {
+    await tester.pumpAndSettle();
+  } else {
+    // A read held open keeps the loading shimmer going: pump, not settle.
+    for (var i = 0; i < 5; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+  }
 }
 
 SonderException _tooLarge() =>
@@ -62,7 +70,8 @@ void main() {
     final data = FakeRuntimeData(toolInventoryFor: _byCategory);
     await _pumpPanel(tester, data, expanded: false);
     expect(data.toolInventoryReads, isEmpty);
-    await tester.tap(find.text('Host tools · Details'));
+    expect(find.text('Loads when opened'), findsOneWidget);
+    await tester.tap(find.text(hostToolsDisclosureTitle));
     await tester.pumpAndSettle();
     expect(data.toolInventoryReads, [null]);
 
@@ -252,7 +261,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(second.toolInventoryReads, [null]);
     expect(first.toolInventoryReads, [null, 'compiler']);
-    expect(find.text('Loading…'), findsNothing);
+    expect(find.byType(SkeletonRows), findsNothing);
     expect(
         find.textContaining('older than its refresh window'), findsOneWidget);
     expect(find.byTooltip('Refresh host tools'), findsOneWidget);
@@ -263,9 +272,10 @@ void main() {
     final gate = Completer<void>();
     final first = FakeRuntimeData(toolInventoryFor: _byCategory)
       ..toolInventoryGate = gate.future;
-    await _pumpPanel(tester, first);
+    await _pumpPanel(tester, first, settle: false);
     expect(first.toolInventoryReads, [null]);
-    expect(find.text('Loading…'), findsOneWidget);
+    // Loading shows the list's shape, not a spinner.
+    expect(find.byType(SkeletonRows), findsOneWidget);
 
     final second = FakeRuntimeData(
         toolInventoryFor: (_) =>
@@ -288,7 +298,7 @@ void main() {
         isNotNull);
   });
 
-  testWidgets('Runtime screen: rail items reach unbuilt sections both ways',
+  testWidgets('Runtime: host tools sit on Permissions and load when opened',
       (tester) async {
     final data = FakeRuntimeData(toolInventoryFor: _byCategory);
     tester.view.physicalSize = const Size(1280, 1000);
@@ -308,23 +318,23 @@ void main() {
       ),
     ));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Host tools').first);
+    await tester.tap(find.byKey(const Key('category-permissions')));
     await tester.pumpAndSettle();
     expect(find.text('Host developer tools'), findsOneWidget);
-    await tester.ensureVisible(find.text('Host tools · Details'));
-    await tester.pumpAndSettle();
     expect(data.toolInventoryReads, isEmpty);
-    await tester.tap(find.text('Host tools · Details'));
+    await tester.ensureVisible(find.text(hostToolsDisclosureTitle));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text(hostToolsDisclosureTitle));
     await tester.pumpAndSettle();
     expect(data.toolInventoryReads, [null]);
     await tester.ensureVisible(find.text('Compilers · 2'));
     expect(find.text('Compilers · 2'), findsOneWidget);
-    // Jumping back up reaches sections the lazy list has since dropped.
-    await tester.tap(find.text('Work runs').first);
+    // Another page and back: the list waits to be opened again, no read.
+    await tester.tap(find.byKey(const Key('category-activity')));
     await tester.pumpAndSettle();
-    expect(find.text('Work runs (0)').hitTestable(), findsOneWidget);
-    await tester.tap(find.text('Jobs').first);
+    await tester.tap(find.byKey(const Key('category-permissions')));
     await tester.pumpAndSettle();
-    expect(find.text('Jobs, fanout & compute').hitTestable(), findsOneWidget);
+    expect(find.text('Compilers · 2'), findsNothing);
+    expect(data.toolInventoryReads, [null]);
   });
 }

@@ -119,8 +119,8 @@ void main() {
 
     expect(find.byKey(const Key('refusal-notice')), findsOneWidget);
     expect(find.textContaining('⊘ refused', findRichText: true), findsWidgets);
-    expect(find.text('useful'), findsNothing);
-    expect(find.text('edited'), findsNothing);
+    expect(find.text('Useful'), findsNothing);
+    expect(find.text('Edited'), findsNothing);
     expect(
         find.bySemanticsLabel(RegExp('^refused: write_file')), findsOneWidget);
     expect(find.text('Approve this call once'), findsOneWidget);

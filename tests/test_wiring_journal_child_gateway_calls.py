@@ -12,8 +12,8 @@ Before this change the gateway keyed that call by a fresh ``request_id``;
 the re-issued call was a new intent and the append ran twice.  Now:
 
 * receipt settled, then crash: the re-issued call carries the same
-  deterministic identity and is refused with ``SettledEffectReplay`` before
-  any journal write; the runner consumes the receipt, the file holds one
+  deterministic identity and the gateway consumes the recorded audit output
+  without invoking the tool or writing a new journal intent; the file holds one
   append, and a genuinely new call after it still runs at the next ordinal;
 * append performed but no receipt, then crash: the intent is unresolved, the
   run stays fenced, the resume is refused and nothing runs again;
@@ -83,7 +83,6 @@ def _runner_factory(root: Path, *, first: str, crash_after_first: bool, follow_u
     """Checkpoint, append ``first`` through the gateway, optionally append more."""
     from sonder_runtime.application.execution.effect_journal import (
         DivergentEffectReplay,
-        SettledEffectReplay,
     )
 
     def bind(request, _context):
@@ -92,19 +91,17 @@ def _runner_factory(root: Path, *, first: str, crash_after_first: bool, follow_u
                 save({"step": 1}, "before-append")
             try:
                 receipt = _append(root, first)
-            except SettledEffectReplay as settled:
-                _trace(root, f"consumed {first}")
-                receipt_key = settled.receipt_key
             except DivergentEffectReplay:
                 _trace(root, f"divergent {first}")
                 raise
             else:
                 assert receipt.success, receipt
-                _trace(root, f"wrote {first}")
-                if crash_after_first:
+                replayed_from = receipt.evidence.get("replayed_from")
+                _trace(root, f"consumed {first}" if replayed_from else f"wrote {first}")
+                if crash_after_first and not replayed_from:
                     # The receipt committed; the next checkpoint was never saved.
                     os._exit(CRASH_EXIT)
-                receipt_key = receipt.request_id
+                receipt_key = replayed_from or receipt.request_id
             if follow_up:
                 assert _append(root, follow_up).success
                 _trace(root, f"wrote {follow_up}")
@@ -118,23 +115,18 @@ def _runner_factory(root: Path, *, first: str, crash_after_first: bool, follow_u
 
 def _checkpointed_calls_factory(root: Path, *, crash_after_second: bool):
     """Append ``a``, checkpoint, append ``b``: the second call follows a checkpoint."""
-    from sonder_runtime.application.execution.effect_journal import SettledEffectReplay
-
     def bind(request, _context):
         def run(state, save, _control):
             if int(state.get("step", 0)) == 0:
                 assert _append(root, "a").success
                 _trace(root, "wrote a")
                 save({"step": 1}, "after-a")
-            try:
-                receipt = _append(root, "b")
-            except SettledEffectReplay:
-                _trace(root, "consumed b")
-            else:
-                assert receipt.success, receipt
-                _trace(root, "wrote b")
-                if crash_after_second:
-                    os._exit(CRASH_EXIT)
+            receipt = _append(root, "b")
+            assert receipt.success, receipt
+            replayed_from = receipt.evidence.get("replayed_from")
+            _trace(root, "consumed b" if replayed_from else "wrote b")
+            if crash_after_second and not replayed_from:
+                os._exit(CRASH_EXIT)
             save({"step": 2}, "after-b")
             return "checkpointed output"
 

@@ -1,5 +1,21 @@
 # Issue 510 execution ledger
 
+## Original backlog closeout (2026-10-04)
+
+The original twelve-section backlog has its implemented runtime primitives and
+bounded qualification. The final original-scope gaps were lossless prose
+continuation, recoverable summary references, and measured rule TDD. They are
+covered by [context continuation evidence](evidence/ISSUE-510-CONTEXT-CONTINUATION-2026-10-04.md)
+and [rule TDD evidence](evidence/ISSUE-510-RULE-TDD-2026-10-04.md), together with
+[durable effect recovery](REMAINING-AGENT-515-EFFECT-JOURNAL.md) and the existing
+worker, guard, learning, retrieval and isolation evidence below.
+
+Later research objectives and historical open-item lists in this ledger do not
+reopen the original backlog's bounded implementation contract. They remain
+future qualification; this closeout does not claim universal model quality,
+production strategy ablations or permission to replay unknown effects. Final
+integration checks gate merging. No master-spec checkboxes change.
+
 Updated 2026-09-27. This is an implementation and verification work ledger for
 [#510](https://github.com/Krilliac/Sonder-runtime/issues/510), including the
 2026-09-24 strategy/recovery program, the associated ten-item defect audit, and the 2026-09-25 cross-provider agent/connector delta.

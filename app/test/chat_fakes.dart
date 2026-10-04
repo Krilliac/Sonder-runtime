@@ -8,6 +8,8 @@ import 'package:sonder_runtime/chat_screen.dart';
 import 'package:sonder_runtime/chat_store.dart';
 import 'package:sonder_runtime/models.dart';
 import 'package:sonder_runtime/settings.dart';
+import 'package:sonder_runtime/shell/app_shell.dart';
+import 'package:sonder_runtime/shell/signals.dart';
 import 'package:sonder_runtime/theme.dart';
 
 /// A turn the test drives by hand.
@@ -258,6 +260,47 @@ Future<Settings> pumpChat(
       settings: settings,
       onSettingsChanged: (_) {},
       backendFactory: (_) => backend,
+    ),
+  ));
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 50));
+  return settings;
+}
+
+/// Pump the app shell (sidebar or drawer around the destinations) with
+/// its chat on [backend] at [size]. The approvals ledger answers "no route"
+/// unless [approvals] is given, so no request leaves the test.
+Future<Settings> pumpShell(
+  dynamic tester,
+  FakeChatBackend backend, {
+  Size size = const Size(1440, 900),
+  ThemeMode themeMode = ThemeMode.dark,
+  Map<String, Object> prefs = const <String, Object>{},
+  ShellPageBuilder? pageBuilder,
+  ApprovalsReader? approvals,
+  DateTime Function()? clock,
+  bool collapsed = false,
+  ValueChanged<Settings>? onSettingsChanged,
+}) async {
+  SharedPreferences.setMockInitialValues(prefs);
+  ChatStore.backend = PrefsChatStoreBackend();
+  ChatStore.resetCache();
+  tester.view.physicalSize = size;
+  tester.view.devicePixelRatio = 1.0;
+  final settings = await Settings.load();
+  await tester.pumpWidget(MaterialApp(
+    debugShowCheckedModeBanner: false,
+    theme: SonderTheme.light,
+    darkTheme: SonderTheme.dark,
+    themeMode: themeMode,
+    home: AppShell(
+      settings: settings,
+      onSettingsChanged: onSettingsChanged ?? (_) {},
+      backendFactory: (_) => backend,
+      pageBuilder: pageBuilder,
+      approvals: approvals ?? () async => null,
+      clock: clock,
+      initialSidebarCollapsed: collapsed,
     ),
   ));
   await tester.pump();

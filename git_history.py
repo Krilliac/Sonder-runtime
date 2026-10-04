@@ -421,6 +421,7 @@ def repo_show(
     revision = validate_revision(revision)
     file_path = resolve_show_target(root, file_path)
     timeout_budget = _bounded_timeout(timeout)
+    operation_deadline = time.monotonic() + timeout_budget
     probe_timeout = max(0.1, timeout_budget / 3.0)
     patch_timeout = max(0.1, timeout_budget - probe_timeout)
     object_result = _run_git(
@@ -439,6 +440,16 @@ def repo_show(
     result = _run_git(
         root, arguments, timeout=patch_timeout, max_bytes=max_bytes,
     )
+    if not result["stdout"] and not result["truncated"]:
+        # Git suppresses even commit metadata when the path did not change.
+        # Read only metadata without a path filter; never request another patch.
+        remaining = operation_deadline - time.monotonic()
+        if remaining < 0.1:
+            raise GitHistoryError("git show timed out before metadata was available")
+        result = _run_git(
+            root, [*arguments[:-2], "--no-patch"],
+            timeout=remaining, max_bytes=max_bytes,
+        )
     fields = result["stdout"].split(b"\0", 7)
     if len(fields) != 8:
         raise GitHistoryError("git show output was incomplete before metadata ended")

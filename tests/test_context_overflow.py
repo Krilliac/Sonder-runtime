@@ -1,5 +1,6 @@
 """Context-overflow classification and the exactly-one compaction retry."""
 import io
+import json
 import urllib.error
 
 import pytest
@@ -194,16 +195,17 @@ def test_compaction_keeps_system_preamble_and_the_live_request():
     compacted = context_compaction.compact_messages(_conversation(4))
 
     assert compacted[0] == {"role": "system", "content": "be terse"}
-    assert compacted[1]["content"] == context_compaction.COMPACTION_NOTE
+    assert compacted[1]["content"].startswith(context_compaction.COMPACTION_NOTE + "\n")
     assert compacted[-1] == {"role": "user", "content": "live request"}
     assert len(compacted) < len(_conversation(4))
 
 
-def test_compaction_drops_the_oldest_turns_and_keeps_content_verbatim():
+def test_compaction_coalesces_oldest_turns_and_keeps_content_verbatim():
     compacted = context_compaction.compact_messages(_conversation(4))
     kept = [m["content"] for m in compacted]
 
-    assert "q0" not in kept
+    earlier = json.loads(kept[1].split("\n", 1)[1])
+    assert earlier == [["user", "q0"], ["assistant", "a0"], ["user", "q1"], ["assistant", "a1"]]
     assert "q3" in kept and "a3" in kept
     # Nothing that survives is rewritten or truncated.
     assert all(len(m["content"]) < 200 for m in compacted[2:])
@@ -223,9 +225,9 @@ def test_compaction_never_orphans_tool_results_or_assistant_messages():
 
     compacted = context_compaction.compact_messages(messages)
 
-    assert compacted[2]["role"] == "user"
-    assert compacted[2]["content"] == "newer request"
-    assert compacted[-1] == {"role": "user", "content": "live request"}
+    # Coalescing only two short old turns would grow this request. The tool
+    # protocol and all old content stay unchanged when no useful cut exists.
+    assert compacted is None
 
 
 @pytest.mark.parametrize("keep_recent", ["bad", object()])
