@@ -123,9 +123,6 @@ def _projection(summary) -> dict:
 
 
 def test_schema_2_projection_is_pinned():
-    assert SUMMARY_SCHEMA_VERSION == 2, (
-        "schema bumped: add a new golden for the new version and keep this one"
-    )
     history = tuple(
         SessionHistoryEvent(f"g{index}", "golden", index, event_type, payload)
         for index, (event_type, payload) in enumerate(FIXTURE, 1)
@@ -134,3 +131,25 @@ def test_schema_2_projection_is_pinned():
         "golden", history, SourceRange("golden", 1, len(history), "g1", f"g{len(history)}"),
     )
     assert _projection(canonical_summary(request, schema=2)) == GOLDEN
+
+
+def test_schema_3_projection_retains_conversation_text_without_changing_schema_2():
+    assert SUMMARY_SCHEMA_VERSION == 3
+    history = tuple(
+        SessionHistoryEvent(f"g{index}", "golden", index, event_type, payload)
+        for index, (event_type, payload) in enumerate(FIXTURE, 1)
+    )
+    request = CompactionRequest(
+        "golden", history, SourceRange("golden", 1, len(history), "g1", f"g{len(history)}"),
+    )
+    golden_3 = {**GOLDEN, "modalities": [
+        GOLDEN["modalities"][0],
+        {"event_id": "g2", "event_type": "message.received", "modality": "text",
+         "payload": {"text": "plain user chatter"}},
+        {"event_id": "g3", "event_type": "message.emitted", "modality": "text",
+         "payload": {"text": "plain assistant chatter"}},
+        {"event_id": "g4", "event_type": "message.emitted", "modality": "text",
+         "payload": {"text": "decided", "decisions": ["D-sqlite"], "facts": ["F-v3"], "confidence": 0.9}},
+        *GOLDEN["modalities"][1:],
+    ]}
+    assert _projection(canonical_summary(request, schema=3)) == golden_3

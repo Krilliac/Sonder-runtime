@@ -303,10 +303,11 @@ def test_live_lane_continues_over_a_legacy_lossy_summary(tmp_path):
 # ---------------------------------------------------------------- P3-d
 
 
-def test_message_emitted_plain_text_collapses_and_constrained_text_is_kept():
+def test_message_emitted_plain_text_and_constrained_text_are_kept():
     plain = _event("message.emitted", {"text": "chatter"})
     constrained = _event("message.emitted", {"text": "x", "constraints": ["C"]})
-    assert summarized_modality(plain) is None
+    assert summarized_modality(plain) is plain
+    assert summarized_modality(plain, preserve_messages=False) is None  # schema-2 compatibility
     assert summarized_modality(constrained) is constrained
 
 
