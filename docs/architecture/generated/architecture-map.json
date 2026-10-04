@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 394,
+      "file_count": 397,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -82,6 +82,7 @@
         "sonder_runtime/adapters/build/preimages.py",
         "sonder_runtime/adapters/build/source_editor.py",
         "sonder_runtime/adapters/build/tree_reader.py",
+        "sonder_runtime/adapters/chat_file_routing.py",
         "sonder_runtime/adapters/cli_options.py",
         "sonder_runtime/adapters/client_config.py",
         "sonder_runtime/adapters/client_endpoint.py",
@@ -273,6 +274,7 @@
         "sonder_runtime/adapters/observability/session_list_formatting.py",
         "sonder_runtime/adapters/observability/session_replay_formatting.py",
         "sonder_runtime/adapters/observability/trace_buffer.py",
+        "sonder_runtime/adapters/observability/work_narration_facts.py",
         "sonder_runtime/adapters/offload_schema_argument.py",
         "sonder_runtime/adapters/ollama/__init__.py",
         "sonder_runtime/adapters/ollama/gateway.py",
@@ -290,6 +292,7 @@
         "sonder_runtime/adapters/persistence/artifact_transfer.py",
         "sonder_runtime/adapters/persistence/autopilot_repository.py",
         "sonder_runtime/adapters/persistence/autopilot_store.py",
+        "sonder_runtime/adapters/persistence/background_work.py",
         "sonder_runtime/adapters/persistence/checkpoint_store.py",
         "sonder_runtime/adapters/persistence/child_migration.py",
         "sonder_runtime/adapters/persistence/composition_store.py",
@@ -438,7 +441,7 @@
       ]
     },
     {
-      "file_count": 392,
+      "file_count": 396,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -447,6 +450,7 @@
         "sonder_runtime/application/agent_registry/workbench_review.py",
         "sonder_runtime/application/agents/__init__.py",
         "sonder_runtime/application/agents/delegated_verification.py",
+        "sonder_runtime/application/agents/delegation.py",
         "sonder_runtime/application/agents/delegation_service.py",
         "sonder_runtime/application/agents/durable_lineage.py",
         "sonder_runtime/application/agents/host_turns.py",
@@ -484,9 +488,11 @@
         "sonder_runtime/application/chat/__init__.py",
         "sonder_runtime/application/chat/handle_chat.py",
         "sonder_runtime/application/chat/handoff_receipts.py",
+        "sonder_runtime/application/chat/honesty.py",
         "sonder_runtime/application/chat/lanes.py",
         "sonder_runtime/application/chat/provider_bridge.py",
         "sonder_runtime/application/chat/stream_sink.py",
+        "sonder_runtime/application/chat/tool_intent.py",
         "sonder_runtime/application/command_surface/__init__.py",
         "sonder_runtime/application/command_surface/mcp.py",
         "sonder_runtime/application/compaction.py",
@@ -692,6 +698,7 @@
         "sonder_runtime/application/ports/updates.py",
         "sonder_runtime/application/ports/vision_gateway.py",
         "sonder_runtime/application/ports/web.py",
+        "sonder_runtime/application/ports/work_narration.py",
         "sonder_runtime/application/ports/worker_registry.py",
         "sonder_runtime/application/ports/workflows.py",
         "sonder_runtime/application/preferences/__init__.py",
@@ -836,7 +843,7 @@
       ]
     },
     {
-      "file_count": 71,
+      "file_count": 74,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -876,6 +883,8 @@
         "sonder_runtime/bootstrap/evaluation.py",
         "sonder_runtime/bootstrap/generic_agent_dispatch.py",
         "sonder_runtime/bootstrap/host_tools.py",
+        "sonder_runtime/bootstrap/http_command_narration.py",
+        "sonder_runtime/bootstrap/http_work_narration.py",
         "sonder_runtime/bootstrap/lane_tests.py",
         "sonder_runtime/bootstrap/legacy_interfaces.py",
         "sonder_runtime/bootstrap/legacy_mcp.py",
@@ -909,11 +918,12 @@
         "sonder_runtime/bootstrap/strategy_observers.py",
         "sonder_runtime/bootstrap/subprocess_mcp.py",
         "sonder_runtime/bootstrap/thread_resources.py",
-        "sonder_runtime/bootstrap/typed_tools.py"
+        "sonder_runtime/bootstrap/typed_tools.py",
+        "sonder_runtime/bootstrap/work_narration.py"
       ]
     },
     {
-      "file_count": 272,
+      "file_count": 273,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1185,13 +1195,14 @@
         "sonder_runtime/domain/updates/runtime_update_formatting.py",
         "sonder_runtime/domain/updates/stash_formatting.py",
         "sonder_runtime/domain/verification_progress.py",
+        "sonder_runtime/domain/work_narration.py",
         "sonder_runtime/domain/work_stealing.py",
         "sonder_runtime/domain/worker_capacity.py",
         "sonder_runtime/domain/worker_epoch_fence.py"
       ]
     },
     {
-      "file_count": 72,
+      "file_count": 76,
       "name": "interfaces",
       "python_files": [
         "sonder_runtime/interfaces/__init__.py",
@@ -1207,10 +1218,13 @@
         "sonder_runtime/interfaces/editor/__init__.py",
         "sonder_runtime/interfaces/editor/transport.py",
         "sonder_runtime/interfaces/http/__init__.py",
+        "sonder_runtime/interfaces/http/agent_work_routes.py",
         "sonder_runtime/interfaces/http/app_control.py",
         "sonder_runtime/interfaces/http/artifact_transfer.py",
         "sonder_runtime/interfaces/http/authority_contract.py",
+        "sonder_runtime/interfaces/http/background_work.py",
         "sonder_runtime/interfaces/http/connection_limit.py",
+        "sonder_runtime/interfaces/http/delegate.py",
         "sonder_runtime/interfaces/http/facades/__init__.py",
         "sonder_runtime/interfaces/http/facades/a2a.py",
         "sonder_runtime/interfaces/http/facades/a2a_jsonrpc.py",
@@ -1249,6 +1263,7 @@
         "sonder_runtime/interfaces/mcp/__init__.py",
         "sonder_runtime/interfaces/mcp/handlers.py",
         "sonder_runtime/interfaces/mcp/transport.py",
+        "sonder_runtime/interfaces/orchestration_commands.py",
         "sonder_runtime/interfaces/repl/__init__.py",
         "sonder_runtime/interfaces/repl/command_router.py",
         "sonder_runtime/interfaces/repl/facades/__init__.py",

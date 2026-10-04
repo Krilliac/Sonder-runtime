@@ -10,6 +10,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import json
+import threading
+import time
 import pytest
 
 from sonder_runtime.adapters.chat_file_routing import (
@@ -266,15 +268,31 @@ def test_http_inspection_preserves_receipts_and_authorization(guarded_host, monk
     from sonder_runtime.adapters.persistence.session_repository import SQLiteSessionRepository
 
     repository = SQLiteSessionRepository(tmp_path / "chat.sqlite")
+    monkeypatch.setenv("SONDER_HTTP_WORK_RUNS_DB", str(tmp_path / "work-runs.sqlite"))
     monkeypatch.setattr(bootstrap_app, "default_app", lambda: SimpleNamespace(session_repository=lambda: repository))
     monkeypatch.setattr(host, "_agent_impl", lambda *_a, **_kw: "Tool evidence: 3 files")
     prompt = "How many files are in this folder?"
     assert serve._handle_work_intent(prompt, project=str(project), authorized=False) is None
+    context = {"mode": "local-open"}
     result = serve._handle_work_intent(
         prompt, project=str(project), authorized=True, with_receipt=True,
-        context={"mode": "local-open"}, session_id="file-chat", session_ref="file-chat",
+        context=context, session_id="file-chat", session_ref="file-chat",
     )
-    receipt = result.public_receipt()
+    acknowledgement = result.public_receipt()
+    assert acknowledgement["status"] == "running"
+    assert acknowledgement["acknowledgement"] == result.text
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        record = serve._WORK_RUNNER.get(result.work_run_id, serve._state_principal(context))
+        if record and record["status"] != "running":
+            break
+        threading.Event().wait(0.05)
+    else:
+        pytest.fail("HTTP file inspection did not finish")
+    assert record["status"] == "returned"
+    assert record["output"] == "Tool evidence: 3 files"
+    receipt = record["result_receipt"]
+    assert receipt["work_run_id"] == result.work_run_id
     assert receipt["requested_mode"] == "inspection"
     assert receipt["routing_reason"] == "read-only local workspace inspection"
     assert receipt["admission_event_id"] and receipt["return_event_id"]

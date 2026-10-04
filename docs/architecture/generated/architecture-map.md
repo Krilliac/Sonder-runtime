@@ -8,11 +8,11 @@ Authority: `docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md`
 
 | Layer | Python files |
 |---|---:|
-| `adapters` | 394 |
-| `application` | 392 |
-| `bootstrap` | 71 |
-| `domain` | 272 |
-| `interfaces` | 72 |
+| `adapters` | 397 |
+| `application` | 396 |
+| `bootstrap` | 74 |
+| `domain` | 273 |
+| `interfaces` | 76 |
 | `platform` | 49 |
 
 ## Composition roots
