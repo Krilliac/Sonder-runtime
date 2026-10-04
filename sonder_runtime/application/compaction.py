@@ -98,6 +98,8 @@ def _summary_from(
         # intentionally carries the limit but does not prescribe tokenization.
         estimate = sum(len(item.split()) for field in _STRUCTURED_FIELDS for item in getattr(summary, field))
         estimate += sum(len(" ".join(_strings(item.payload.get("text"))).split()) for item in modalities)
+        if schema >= 3:
+            estimate += sum(len(" ".join(_strings(item.payload.get("content"))).split()) for item in modalities)
         if estimate > max_tokens:
             raise CompactionValidationError("structured summary exceeds max_summary_tokens")
     return summary
