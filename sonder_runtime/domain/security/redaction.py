@@ -27,12 +27,15 @@ WORKSPACE_LABEL = "[WORKSPACE]"
 # redact_text, so a known secret value is scrubbed even where no pattern
 # would match its surroundings.
 PATTERNS: tuple[re.Pattern, ...] = (
-    re.compile(r"(?i)\b(authorization\s*[:=]\s*)(\S+(?:\s+\S+)?)"),
+    # A prior pass replaced the complete credential with this single marker.
+    # Repeated redaction must not consume the ordinary word following it.
+    re.compile(r"(?i)\b(authorization\s*[:=]\s*)(\[REDACTED\](?=\s|$)|\S+(?:\s+\S+)?)"),
     re.compile(r"(?i)\b((?:set-)?cookie\s*:\s*)([^\r\n]+)"),
     re.compile(r"(?i)\b(bearer\s+)([a-z0-9._~+/=-]{8,})"),
     re.compile(
         r"(?i)([\"']?(?:api[-_]?key|auth[-_]?secret|secret|token|password|"
-        r"passwd|credential)[\"']?\s*[:=]\s*)([\"']?[^\s\"',;}{]{4,}[\"']?)"
+        r"passwd|credential|\b(?:pwd|(?:aws[-_])?secret[-_]access[-_]key))"
+        r"[\"']?\s*[:=]\s*)([\"']?[^\s\"',;}{]{4,}[\"']?)"
     ),
     re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)([^/@\s:]+:[^/@\s]+)@"),
     re.compile(
@@ -87,7 +90,8 @@ MAX_WALK_ITEMS = 10_000
 # shape a text pattern can see once the key and value are separate objects.
 SENSITIVE_KEY = re.compile(
     r"(?i)^(?:.*[_-])?(?:api[_-]?key|auth[_-]?secret|client[_-]?secret|secret|"
-    r"token|access[_-]?token|refresh[_-]?token|password|passwd|credentials?|"
+    r"token|access[_-]?token|refresh[_-]?token|password|passwd|pwd|credentials?|"
+    r"secret[_-]access[_-]key|"
     r"authorization|cookie|private[_-]?key)$"
 )
 

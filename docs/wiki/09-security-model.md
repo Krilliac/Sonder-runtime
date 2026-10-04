@@ -143,7 +143,11 @@ of the model — an uncensored or "abliterated" model changes what it will
   JWTs), and configured workspace path prefixes are stripped. The provider
   formats live once in `domain/security/credential_formats.py` and are shared
   by the log redactor, the domain redaction set and the contribution privacy
-  classifier. A redaction failure
+  classifier. Assignment labels include password shorthand `pwd` and
+  `aws_secret_access_key` / `secret_access_key` (case-insensitive; hyphens or
+  underscores). Default session exports use the canonical domain policy;
+  key-aware structure walks recognize these labels as well. Plain label
+  mentions and unrelated identifiers remain unchanged. A redaction failure
   replaces the whole detail with `[REDACTION_FAILED]` and increments a
   metric — it degrades observability, never privacy.
 - **operations.db** stores identifiers, counts, hashes, durations, and
