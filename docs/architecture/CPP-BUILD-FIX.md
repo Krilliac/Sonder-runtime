@@ -45,6 +45,30 @@ never edits:
 It stops with `BUILD_TIME_TOOL_SOURCE` instead. It never launches the binaries
 it produces.
 
+### Owned build completion
+
+The process provider may publish a durable terminal status before the build
+launcher's session sweep and exit callback finish. The launcher keeps that
+owned run active through both steps. Its wait result remains pending until
+the callback has completed or raised; the callback releases the build-directory
+lease. This prevents a configure report from racing the next build on the same
+directory, including a build-fix child.
+
+`build_job_result` preserves its bounded wait. While owned completion is
+pending it returns a status view, which may already say `succeeded`, rather
+than a final build report. Cancellation or an expired caller deadline also
+returns that view without cancelling already terminal work. A later query can
+collect the final report after the completion marker. Without an owned run,
+the durable terminal record retains its existing result fallback.
+
+Completion of the sweep/callback attempt is bookkeeping, not cleanup proof.
+A failed or unavailable sweep remains false or unknown, and callback failures
+are logged before the marker is signalled. The explicit cancellation result's
+`cleanup_proven` contract and build-fix effect recovery/rollback are unchanged.
+The separate sweep and callback gates in
+`tests/test_build_completion_barrier.py` exercise real CMake configuration;
+unit controls cover callback exceptions and false/unknown sweep results.
+
 ## Behavior status
 
 | Behavior | Status | Boundary |

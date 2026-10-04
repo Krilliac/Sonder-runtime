@@ -285,3 +285,24 @@ def test_lease_keys_are_normalized_paths(tmp_path):
         with pytest.raises(SonderError) as excinfo:
             leases.acquire(alias, "build-job-" + "2" * 16, "p")
         assert excinfo.value.code == "BUILD_DIR_BUSY"
+
+
+@pytest.mark.parametrize("control", ["cancel", "deadline"])
+def test_run_abort_does_not_cancel_terminal_work_with_owned_cleanup_pending(svc, monkeypatch, control):
+    import time
+    from types import SimpleNamespace
+    job = svc.start(BuildJobRequest(), ctx())
+    svc.launcher.jobs[job]["record"] = replace(
+        svc.launcher.jobs[job]["record"], status=JobStatus.SUCCEEDED)
+    monkeypatch.setattr(svc.launcher, "wait",
+                        lambda job_id, timeout: (svc.launcher.jobs[job_id]["record"], 0, True))
+    context = ctx()
+    if control == "cancel":
+        context = replace(context, cancellation=SimpleNamespace(cancelled=True))
+    else:
+        context = replace(context, deadline_monotonic=time.monotonic() - 1)
+    result = svc._await(job, context, 5, cancel_on_abort=True)
+    assert isinstance(result, BuildJobStatusView) and result.status == "succeeded"
+    assert result.cleanup_proven is None
+    assert svc.launcher.cancelled == []
+    assert svc._leases.holder("/p/build") is not None

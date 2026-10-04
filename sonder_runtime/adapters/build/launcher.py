@@ -478,16 +478,21 @@ class ProcessBuildLauncher:
             # Commands a build tool moved to their own process group survive a
             # group kill; nothing of a finished job may outlive it.
             try:
-                run.swept = sweep_session(run.session_id)
-            except Exception:
-                logger.warning("build job session sweep failed", exc_info=True)
-                run.swept = False
-            run.done.set()
-            if run.on_exit is not None:
                 try:
-                    run.on_exit(job_id)
+                    run.swept = sweep_session(run.session_id)
                 except Exception:
-                    logger.warning("build job exit hook failed", exc_info=True)
+                    logger.warning("build job session sweep failed", exc_info=True)
+                    run.swept = False
+                if run.on_exit is not None:
+                    try:
+                        run.on_exit(job_id)
+                    except Exception:
+                        logger.warning("build job exit hook failed", exc_info=True)
+            finally:
+                # Terminal state is durable before session cleanup and the
+                # exit hook (which releases the build-directory lease).
+                # Completion of this bookkeeping is not a cleanup proof.
+                run.done.set()
 
     def _terminal(self, job_id: str) -> bool:
         record = self.poll(job_id)
@@ -522,7 +527,8 @@ class ProcessBuildLauncher:
         if exit_code is None and isinstance(record.result, Mapping):
             value = record.result.get("exit_code")
             exit_code = value if isinstance(value, int) and not isinstance(value, bool) else None
-        return record, exit_code, not record.is_terminal
+        pending = not record.is_terminal or (run is not None and not run.done.is_set())
+        return record, exit_code, pending
 
     def cancel(self, job_id: str, reason: str) -> bool:
         """Cancel the job's process tree; True once cleanup is proven."""
