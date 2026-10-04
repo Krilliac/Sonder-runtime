@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 397,
+      "file_count": 402,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -160,6 +160,7 @@
         "sonder_runtime/adapters/fanout_failures.py",
         "sonder_runtime/adapters/fanout_health.py",
         "sonder_runtime/adapters/fanout_receipt.py",
+        "sonder_runtime/adapters/fanout_synthesis.py",
         "sonder_runtime/adapters/filesystem/__init__.py",
         "sonder_runtime/adapters/filesystem/atomic_json.py",
         "sonder_runtime/adapters/filesystem/child_migration_bundle.py",
@@ -173,6 +174,10 @@
         "sonder_runtime/adapters/filesystem/workbench.py",
         "sonder_runtime/adapters/filesystem/workflow_store.py",
         "sonder_runtime/adapters/filesystem/workspace_manifest.py",
+        "sonder_runtime/adapters/fleet_aggregation.py",
+        "sonder_runtime/adapters/fleet_creations.py",
+        "sonder_runtime/adapters/fleet_synthesis.py",
+        "sonder_runtime/adapters/fleet_workers.py",
         "sonder_runtime/adapters/gateway_generation.py",
         "sonder_runtime/adapters/git/__init__.py",
         "sonder_runtime/adapters/git_discovery.py",
@@ -441,7 +446,7 @@
       ]
     },
     {
-      "file_count": 396,
+      "file_count": 399,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -462,7 +467,10 @@
         "sonder_runtime/application/agents/workflow_integration.py",
         "sonder_runtime/application/architecture/ownership_catalog.py",
         "sonder_runtime/application/artifacts/__init__.py",
+        "sonder_runtime/application/artifacts/candidates.py",
+        "sonder_runtime/application/artifacts/fanin.py",
         "sonder_runtime/application/artifacts/immutable_manifest.py",
+        "sonder_runtime/application/artifacts/master_fanin.py",
         "sonder_runtime/application/artifacts/mobility.py",
         "sonder_runtime/application/artifacts/mobility_source.py",
         "sonder_runtime/application/artifacts/readiness.py",
@@ -923,7 +931,7 @@
       ]
     },
     {
-      "file_count": 273,
+      "file_count": 275,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1064,6 +1072,8 @@
         "sonder_runtime/domain/fanout_redaction.py",
         "sonder_runtime/domain/fanout_residency.py",
         "sonder_runtime/domain/fanout_worker_identity.py",
+        "sonder_runtime/domain/fleet_briefing.py",
+        "sonder_runtime/domain/fleet_intent.py",
         "sonder_runtime/domain/fleet_pressure.py",
         "sonder_runtime/domain/health_formatting.py",
         "sonder_runtime/domain/host_tools/__init__.py",

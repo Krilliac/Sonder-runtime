@@ -9,10 +9,52 @@ Three-Hundred-Twenty-Sixth Slice with its behaviour byte-for-byte intact.
 from __future__ import annotations
 
 import time
+from datetime import timedelta
 
 from sonder_runtime.adapters.persistence import fanout_store
 from sonder_runtime.domain.fanout_admission import fanout_limits
 from sonder_runtime.domain.work_narration import progress
+from sonder_runtime.application.artifacts.fanin import decode_readiness, readiness_error
+
+
+def synthesis_rows(run, rows):
+    """Return every expected slot with an empty error only for sealed output.
+
+    Public progress receipts retain their diagnostic preview contract. Only
+    aggregation treats a preview as evidence, through this separate projection.
+    """
+    import json
+
+    expected = json.loads(run.get("models_json") or "[]")
+    found = {row["model"] for row in rows}
+    slots = list(rows) + [
+        {"model": model, "status": "missing"} for model in expected if model not in found
+    ]
+    projected = []
+    for row in slots:
+        status = row.get("status")
+        if expected and row["model"] not in expected:
+            error = "artifact producer was not selected for this run"
+        elif status != "answered":
+            error = "artifact is incomplete or unavailable (worker status: %s)" % status
+        elif not row.get("answer_truncation_known"):
+            error = "unknown truncation truth for legacy answer preview"
+        elif row.get("answer_truncated"):
+            error = "truncated answer previews are not complete artifacts"
+        elif row.get("done_reason") in ("length", "max_tokens", "max_output_tokens"):
+            error = "provider output is truncated"
+        elif not isinstance(row.get("answer"), str):
+            error = "fanout receipt has a non-text answer preview"
+        else:
+            error = readiness_error(
+                decode_readiness(row.get("readiness_json", "")),
+                run_id=run["id"], producer_id=row["model"], content=row["answer"],
+                # A persisted, digest-bound answer stays valid for as long as
+                # retention keeps its run; synthesis has no freshness window.
+                max_age=timedelta(seconds=fanout_store.MAX_RETENTION_TTL_SECONDS),
+            )
+        projected.append((row, error))
+    return projected
 
 
 def build_receipt(run_id, *, admission):
