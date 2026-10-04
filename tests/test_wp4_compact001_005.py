@@ -29,13 +29,14 @@ def test_compaction_is_append_only_and_binds_exact_source_range():
         request.history = ()  # type: ignore[misc]
 
 
-def test_structured_retention_and_typed_modalities_are_separate():
+def test_structured_retention_preserves_text_and_typed_modalities():
     result = CompactionApplicationService(event_id_factory=lambda: "c1").compact(_request())
     assert result.summary.facts == ("alpha", "beta")
     assert result.summary.tool_outcomes == ("ok",)
     assert result.summary.artifacts == ("report.pdf",)
-    assert tuple(event.modality for event in result.summary.modalities) == ("tool", "attachment")
-    assert result.summary.modalities[0].payload["facts"] == ("beta",)
+    assert tuple(event.modality for event in result.summary.modalities) == ("text", "tool", "attachment")
+    assert result.summary.modalities[0].payload["text"] == "hello"
+    assert result.summary.modalities[1].payload["facts"] == ("beta",)
 
 
 def test_validation_reports_missing_source_facts_and_recompaction_uses_original_history():
