@@ -1,0 +1,117 @@
+# Diagnostic branch only; never a replacement for required product gates.
+name: TLS early-suite diagnosis
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  harness-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out isolated diagnostic harness
+        timeout-minutes: 1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        timeout-minutes: 2
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements-dev.txt
+            requirements-runtime.txt
+      - name: Install authorized diagnostic dependencies
+        timeout-minutes: 3
+        run: |
+          python -m pip install uv==0.12.19
+          uv pip install -r requirements-dev.txt --system
+      - name: Verify hooks and owned cleanup using disposable fake tests
+        timeout-minutes: 1
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+          TLS_CI_SMOKE_DIR: ${{ runner.temp }}/tls-ci-smoke
+        run: python .github/scripts/tls_ci_diagnostic_smoke.py
+      - name: Retain fake smoke receipts
+        timeout-minutes: 2
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: tls-diagnostic-harness-smoke
+          path: ${{ runner.temp }}/tls-ci-smoke
+          if-no-files-found: error
+          retention-days: 14
+  tls-early-suite-diagnostic:
+    needs: harness-smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - label: passing-prior
+            sha: 10b5ea43aae587ae6dc6a0ee0ea97be062f90835
+          - label: current-candidate
+            sha: cd406847a03ca684ba88c0247ce870b01bd8c6e5
+    steps:
+      - name: Read diagnostic harness from isolated branch
+        timeout-minutes: 1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: diagnostic
+          persist-credentials: false
+      - name: Check out exact recorded tested merge
+        timeout-minutes: 1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: source
+          ref: ${{ matrix.sha }}
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        timeout-minutes: 2
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            source/requirements-dev.txt
+            source/requirements-runtime.txt
+      - name: Install same requirement set and uv pin
+        timeout-minutes: 3
+        working-directory: source
+        run: |
+          python -m pip install uv==0.12.19
+          uv pip install -r requirements-dev.txt --system
+      - name: Capture bounded diagnostic with immediate failure identities
+        timeout-minutes: 20
+        run: >-
+          python diagnostic/.github/scripts/tls_ci_diagnostic_runner.py
+          --source "$GITHUB_WORKSPACE/source"
+          --expected-sha "${{ matrix.sha }}"
+          --label "${{ matrix.label }}"
+          --evidence "$RUNNER_TEMP/tls-ci-diagnostic"
+      - name: Print captured named failures and final diagnostic receipt
+        timeout-minutes: 1
+        if: always()
+        run: |
+          if test -f "$RUNNER_TEMP/tls-ci-diagnostic/events-controller.jsonl"; then
+            sed -n '/"kind": "failure"/p; /"kind": "cap"/p; /"kind": "session_finish"/p' "$RUNNER_TEMP/tls-ci-diagnostic/events-controller.jsonl"
+          fi
+          if test -f "$RUNNER_TEMP/tls-ci-diagnostic/supervisor-result.json"; then
+            cat "$RUNNER_TEMP/tls-ci-diagnostic/supervisor-result.json"
+          fi
+      - name: Retain partial events, collections, output and available JUnit
+        timeout-minutes: 2
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: tls-diagnostic-${{ matrix.label }}
+          path: ${{ runner.temp }}/tls-ci-diagnostic
+          if-no-files-found: error
+          retention-days: 14
