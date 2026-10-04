@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from sonder_runtime.adapters.persistence.agent_lanes import SQLiteAgentLaneStore
 from sonder_runtime.adapters.persistence.session_repository import SQLiteSessionRepository
 from sonder_runtime.application.agents.interactive_lanes import AgentLaneService
-from sonder_runtime.application.compaction import SessionCompactionService
+from sonder_runtime.application.compaction import SessionCompactionError, SessionCompactionService
 from sonder_runtime.application.compaction.legacy import canonical_summary
 from sonder_runtime.application.compaction.session_service import _json_value
 from sonder_runtime.application.context import local_owner_context
@@ -75,6 +77,18 @@ def test_authentic_schema_2_summary_replays_unstructured_prose_from_original_eve
     summary = SessionCompactionService(repository).validate_persisted_event(event, sources)
     assert [dict(item.payload) for item in summary.modalities] == [dict(source.payload) for source in sources]
     assert repository.read_range("s", start_sequence=3, limit=1)[0] == event
+
+
+@pytest.mark.parametrize("field", ["text", "content"])
+def test_retained_prose_refuses_an_insufficient_summary_budget_without_truncating(tmp_path, field):
+    repository = SQLiteSessionRepository(tmp_path / "sessions.db")
+    source = repository.append("s", "message.received", {field: "Keep all exports offline."})
+    service = SessionCompactionService(repository)
+    with pytest.raises(SessionCompactionError, match="max_summary_tokens"):
+        service.compact("s", start_sequence=1, end_sequence=1, max_summary_tokens=2)
+    assert repository.read_range("s", limit=10) == (source,)
+    summary = service.compact("s", start_sequence=1, end_sequence=1, max_summary_tokens=4)
+    assert summary.payload["summary"]["modalities"][0]["payload"][field] == source.payload[field]
 
 
 def test_lane_restart_preserves_prose_nested_summary_and_recovers_reference_via_tool(tmp_path):
