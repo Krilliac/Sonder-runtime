@@ -13,6 +13,9 @@ passes record the narrow runtime hardening and adversarial coverage they added.
 - **[history-privacy-debt.md](./history-privacy-debt.md)** — exact revision,
   result, release-gate, and bounded-inspection evidence for the seven historical
   private-object pairs.
+- **[CODEQL-PR661-STATIC-TRIAGE.md](./CODEQL-PR661-STATIC-TRIAGE.md)** — static
+  assessment of the 33 PR 661 annotations, unchanged-sink evidence, reviewed
+  controls, and the unresolved source-trace access limitation.
 
 See also **[ISOLATED_EXECUTION.md](./ISOLATED_EXECUTION.md)** for the optional
 Docker/Podman-backed `isolated_run` contract, fixed controls, availability, and
