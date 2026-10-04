@@ -186,6 +186,18 @@ def test_build_system_local_orders_request_before_volatile(monkeypatch):
     assert text.endswith("EMO\n\nGOAL")
 
 
+def test_local_prefix_preserves_framed_owner_playbooks(monkeypatch):
+    import server
+
+    notes = "Use the repository's documented build command."
+    monkeypatch.setattr(server._SYSTEM_CONTEXT, "parts", ("PROFILE", "EMO", "GOAL", notes), raising=False)
+    text = server._build_system("REQ", False, "", model="qwen:7b", cloud=False)
+    framed = server.playbook_context.frame_owner_notes(notes)
+    assert framed in text
+    assert text.index("PROFILE") < text.index(framed) < text.index("REQ") < text.index("EMO")
+    assert "never override system policy or current owner instructions" in text
+
+
 @pytest.mark.real_prewarm
 def test_prewarm_prefills_the_local_system_prefix(monkeypatch):
     import server

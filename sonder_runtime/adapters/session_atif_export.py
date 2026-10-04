@@ -12,6 +12,7 @@ import json
 from collections.abc import Mapping
 
 from ..application.session.atif import AtifAgent, interaction_turns_to_atif
+from ..domain.common.errors import InvalidInput
 from ..platform.version import runtime_version
 
 SESSION_EXPORT_FORMATS = ("text", "atif")
@@ -39,7 +40,7 @@ def interaction_session_atif(conn, session_id: str, session: Mapping[str, object
     """Render one remembered session's last ``limit`` turns as ATIF JSON."""
     turns = _turn_records(conn, session_id)[-limit:]
     if not turns:
-        return "ERROR: session '%s' has no turns to export as ATIF." % session_id
+        raise InvalidInput("session has no turns to export as ATIF")
     extra: dict[str, object] = {}
     if session.get("title"):
         extra["title"] = session["title"]

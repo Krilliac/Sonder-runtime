@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import socket
+import sqlite3
 
 import pytest
 
 from sonder_runtime.adapters.process_liveness import PROCESS_ALIVE, PROCESS_DEAD, PROCESS_UNKNOWN
 from sonder_runtime.adapters.resource_leases import SqliteResourceLeaseRegistry, port_is_free
-from sonder_runtime.domain.common.errors import Conflict, Forbidden, InvalidInput, NotFound
+from sonder_runtime.domain.common.errors import Conflict, DependencyUnavailable, Forbidden, InvalidInput, NotFound
 from sonder_runtime.domain.resource_leases import (
     KIND_DESKTOP_SESSION, KIND_DEV_SERVER, KIND_PORT, KIND_TEMP_DB, RESOURCE_LEASE_BUSY,
     RESOURCE_LEASE_EXHAUSTED, RESOURCE_LEASE_NOT_FOUND, RESOURCE_LEASE_NOT_OWNER,
@@ -37,6 +38,29 @@ class Rig:
 @pytest.fixture()
 def rig(tmp_path):
     return Rig(tmp_path)
+
+
+@pytest.mark.parametrize("failed_statement", ["schema", "begin"])
+def test_failed_store_admission_closes_the_created_connection(rig, monkeypatch, failed_statement):
+    from sonder_runtime.adapters import resource_leases
+
+    class BusyConnection:
+        isolation_level = ""
+        closed = False
+
+        def execute(self, statement):
+            is_begin = statement == "BEGIN IMMEDIATE"
+            if is_begin == (failed_statement == "begin"):
+                raise sqlite3.OperationalError("database is locked")
+
+        def close(self):
+            self.closed = True
+
+    connection = BusyConnection()
+    monkeypatch.setattr(resource_leases, "sqlite_connect", lambda *args, **kwargs: connection)
+    with pytest.raises(DependencyUnavailable, match="resource lease store unavailable"):
+        rig.registry().acquire(KIND_DEV_SERVER, "web", "worker-a", ttl_seconds=60)
+    assert connection.closed
 
 
 # -- acquire / refuse / release --------------------------------------------
@@ -75,6 +99,21 @@ def test_same_owner_reacquire_renews_instead_of_refusing(rig):
     again = reg.acquire(KIND_DEV_SERVER, "web", "worker-a", ttl_seconds=60, metadata={"pid": 5})
     assert again.lease_id == first.lease_id and again.expires_at == rig.now + 60
     assert again.metadata == {"pid": 5}
+
+
+@pytest.mark.parametrize("pid,identity", [(12, "new-process"), (11, "new-process")])
+def test_same_logical_owner_requires_fresh_acquisition_after_process_change(rig, pid, identity):
+    reg = rig.registry()
+    held = reg.acquire(KIND_DEV_SERVER, "web", "worker-a", ttl_seconds=60,
+                       owner_pid=11, owner_identity="original-process")
+    with pytest.raises(Forbidden, match="owner process changed"):
+        reg.acquire(KIND_DEV_SERVER, "web", "worker-a", ttl_seconds=60,
+                    owner_pid=pid, owner_identity=identity)
+    assert reg.holder(KIND_DEV_SERVER, "web") == held
+    assert reg.release(KIND_DEV_SERVER, "web", "worker-a")
+    acquired = reg.acquire(KIND_DEV_SERVER, "web", "worker-a", ttl_seconds=60,
+                           owner_pid=pid, owner_identity=identity)
+    assert (acquired.owner_pid, acquired.owner_identity) == (pid, identity)
 
 
 def test_input_is_validated(rig):
