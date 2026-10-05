@@ -147,7 +147,9 @@ Git. Content-free receipt identifiers are:
 - Local qualification SHA256: `1985798552d75711487c9a771f7c7dc4956d07b478fb0137362234ca646838c6`.
 - Independent raw audit SHA256: `132b5b18afc37bb91b28c9af67628a435403cc7530f2b13de0bea3f0833d94fc`.
 - Qualified gateway SHA256: `92495d14d6a0ffa31630188370823100bd874dee987ff8c22b5fed6d1249ac73`.
-- Qualified test-module AST SHA256: `f9c111f0c7545841f35a1cce06e4bac3b877b8f04fbf3e0b87d7fd9fc266e8ce`.
+- Qualified test-module AST SHA256 (Python 3.12.14): `197e5716a888606814b90921e432e851312f390271bf23799f5694d36f3c2c67`.
 
-The subsequent test-comment cleanup preserved the complete module AST.
+The AST digest uses the qualification interpreter and UTF-8 encoding of
+`ast.dump(ast.parse(text), include_attributes=False)`; the dump format varies
+with Python versions. The test-comment cleanup preserved the complete module AST.
 Before merging, the final PR revision must also pass the required hosted checks.
