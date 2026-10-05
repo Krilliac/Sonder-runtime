@@ -251,6 +251,7 @@ _GATED_CHILD = textwrap.dedent(r'''
 
             original_finish = master_orchestrator._finish
             original_start = master_orchestrator._start_agent
+            original_run = master_orchestrator.run_delegated
             if startup_delay:
                 def delayed_start(agent_id, *args, **kwargs):
                     if (master_orchestrator._AGENTS.get(agent_id) or {}).get("role") == "agent":
@@ -260,6 +261,14 @@ _GATED_CHILD = textwrap.dedent(r'''
 
             gate = threading.Event()
             held = {}
+
+            def tracked_run(*args, **kwargs):
+                # Record ownership before startup, so an early entry assertion
+                # failure still opens the gate and joins this exact coordinator.
+                held["coordinator"] = threading.current_thread()
+                return original_run(*args, **kwargs)
+
+            monkeypatch.setattr(master_orchestrator, "run_delegated", tracked_run)
 
             def gated_finish(agent_id, *args, **kwargs):
                 if (master_orchestrator._AGENTS.get(agent_id) or {}).get("role") == "master":
