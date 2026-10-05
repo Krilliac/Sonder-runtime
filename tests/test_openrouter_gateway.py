@@ -27,6 +27,7 @@ from sonder_runtime.adapters.inference.openrouter_gateway import (
     protocol_probe_gateway,
 )
 from sonder_runtime.application.context import local_owner_context
+from sonder_runtime.application.session import provider_attempts
 from sonder_runtime.application.ports.model_gateway import ModelRequest
 from sonder_runtime.domain.common.errors import (
     CapacityExceeded,
@@ -45,6 +46,8 @@ from sonder_runtime.domain.openrouter_policy import (
 from sonder_runtime.domain.routing.backend_conformance import BackendIdentity
 from sonder_runtime.domain.security.redaction import redact_text
 from sonder_runtime.platform.metrics import MetricsRegistry
+from tests.test_openrouter_stream_backpressure import observed as observed
+from tests.test_openrouter_stream_terminal import Observer, _capture
 
 FAKE_KEY = "sk-or-v1-" + "0123456789abcdef" * 4
 MODEL = "anthropic/claude-sonnet-4"
@@ -523,6 +526,158 @@ def test_key_never_appears_in_logs_errors_status_or_metrics(fake, caplog):
     assert "[REDACTED]" in messages[0]
 
 
+# Explicit fixture-owned values deliberately lack a credential-pattern shape.
+_DUMMY_ERROR_KEY_32 = "fixture-only-" + "q" * 19
+_DUMMY_ERROR_KEY_384 = "fixture-only-" + "q" * 371
+
+
+@pytest.mark.parametrize("key, kind, suffix", [
+    (_DUMMY_ERROR_KEY_32, _DUMMY_ERROR_KEY_32, " [[REDACTED]]"),
+    (_DUMMY_ERROR_KEY_32, "worker:" + _DUMMY_ERROR_KEY_32, " [worker:[REDACTED]]"),
+    ("echo", "echo-" * 12, ""),
+], ids=["configured_kind", "embedded_kind", "expanded_kind_omitted"])
+def test_error_kind_redacts_configured_credential(fake, key, kind, suffix):
+    fake.chat_status = 500
+    fake.chat_body = {"error": {"metadata": {"error_type": kind}}}
+    gateway = _gateway(fake, OPENROUTER_API_KEY=key)
+    with pytest.raises(DependencyUnavailable) as caught:
+        gateway.generate(_request(), _context())
+    assert str(caught.value) == "OpenRouter failed the request (HTTP 500)" + suffix
+    assert key not in str(caught.value)
+    assert len(fake.chat_requests()) == 1
+    assert gateway.last_usage is None
+
+
+@pytest.mark.parametrize("key, prefix, status, error", [
+    (_DUMMY_ERROR_KEY_384, "", 400, InvalidInput),
+    (_DUMMY_ERROR_KEY_32, "a" * 220, 500, DependencyUnavailable),
+], ids=["long_configured_value", "cross_display_boundary"])
+def test_error_message_redacts_before_display_bound(fake, key, prefix, status, error):
+    fake.chat_status = status
+    fake.chat_body = {"error": {"message": prefix + key + " harmless"}}
+    gateway = _gateway(fake, OPENROUTER_API_KEY=key)
+    with pytest.raises(error) as caught:
+        gateway.generate(_request(), _context())
+    detail = str(caught.value).split(": ", 1)[1]
+    assert detail == prefix + "[REDACTED] harmless"
+    assert len(detail) <= 240
+    assert key not in str(caught.value) and key[:16] not in str(caught.value)
+    assert len(fake.chat_requests()) == 1
+    assert gateway.last_usage is None
+
+
+@pytest.mark.parametrize("key, prefix", [
+    (_DUMMY_ERROR_KEY_384, ""),
+    (_DUMMY_ERROR_KEY_32, "a" * 220),
+], ids=["long_configured_value", "cross_display_boundary"])
+def test_stream_error_redacts_before_display_bound(fake, observed, monkeypatch, tmp_path, key, prefix):
+    usage = []
+    observer = Observer()
+    monkeypatch.setattr("sonder_runtime.adapters.inference.openrouter_gateway.record_usage", usage.append)
+    monkeypatch.setattr(provider_attempts, "_attempt_observer", observer)
+    fake.stream_events = [
+        "data: " + json.dumps({"choices": [{"delta": {"content": text}}]})
+        for text in ("firstλ", "secondμ")
+    ] + ["data: " + json.dumps({"error": {"message": prefix + key + " harmless"}})]
+    gateway = _gateway(fake, OPENROUTER_API_KEY=key)
+    repository, capture, request, pending = _capture(tmp_path)
+    chunks = []
+    stream = gateway.stream(request, _context())
+    try:
+        with provider_attempts.provider_attempt_scope(capture, pending):
+            with pytest.raises(DependencyUnavailable) as caught:
+                for chunk in stream:
+                    chunks.append(chunk)
+        events = repository.read_range("session")
+    finally:
+        stream.close()
+        assert repository.close()
+    assert str(caught.value) == "OpenRouter stream failed mid-response: " + prefix + "[REDACTED] harmless"
+    assert key not in str(caught.value) and key[:16] not in str(caught.value)
+    assert [chunk.text for chunk in chunks] == ["firstλ", "secondμ"]
+    assert usage == [] and gateway.last_usage is None
+    assert [event.event_type for event in events] == [
+        "model.requested", "provider.requested", "provider.failed",
+    ]
+    assert set(events[-1].payload) == {"turn_id", "request_id", "attempt_id", "error_code"}
+    assert events[-1].payload["error_code"] == "DEPENDENCY_UNAVAILABLE"
+    assert events[-1].payload["attempt_id"] == events[-2].payload["attempt_id"]
+    assert observer.finishes == [{"error_code": "DEPENDENCY_UNAVAILABLE"}]
+    evidence = json.dumps({
+        "events": [{"event_type": event.event_type, "payload": dict(event.payload)} for event in events],
+        "observer_starts": observer.starts, "observer_finishes": observer.finishes,
+    }, sort_keys=True)
+    assert key not in evidence and key[:16] not in evidence
+    assert len(fake.chat_requests()) == len(observer.starts) == len(observer.finishes) == 1
+    assert observed.queues[0].high_water <= 64
+    assert not observed.workers[0].is_alive()
+
+
+@pytest.mark.parametrize("message, kind, suffix", [
+    ("ordinary unavailable", "upstream_failure", ": ordinary unavailable [upstream_failure]"),
+    ("hello \n λ", "benign", ": hello λ [benign]"),
+    ("a" * 240, None, ": " + "a" * 240),
+    ("a" * 241, None, ": " + "a" * 237 + "..."),
+    (17, 19, ""),
+    (None, "k" * 65, ""),
+    (None, "k" * 64, " [" + "k" * 64 + "]"),
+    ("", None, ""),
+], ids=["benign", "unicode_whitespace", "at_display_limit", "over_display_limit",
+        "non_string_fields", "oversized_kind", "kind_at_limit", "empty_fields"])
+def test_error_detail_compatibility(fake, message, kind, suffix):
+    fake.chat_status = 500
+    fake.chat_body = {"error": {"message": message, "metadata": {"error_type": kind}}}
+    gateway = _gateway(fake, OPENROUTER_API_KEY=_DUMMY_ERROR_KEY_32)
+    with pytest.raises(DependencyUnavailable) as caught:
+        gateway.generate(_request(), _context())
+    assert str(caught.value) == "OpenRouter failed the request (HTTP 500)" + suffix
+    assert len(fake.chat_requests()) == 1
+    assert gateway.last_usage is None
+
+
+@pytest.mark.parametrize("streaming", [False, True], ids=["http_error_budget", "sse_line_budget"])
+def test_error_sanitation_size_controls(fake, observed, monkeypatch, streaming):
+    from sonder_runtime.adapters.inference.openai_compat_gateway import ERROR_BODY_LIMIT
+    from sonder_runtime.adapters.inference.openrouter_gateway import _STREAM_LINE_LIMIT
+
+    key = _DUMMY_ERROR_KEY_32
+    message = "large " + key + " "
+    document = {"error": {"message": message}}
+    budget = _STREAM_LINE_LIMIT - 1 if streaming else ERROR_BODY_LIMIT - 1
+    framing = len(b"data: \n") if streaming else 0
+    size = len(json.dumps(document).encode()) + framing
+    document["error"]["message"] += "a" * (budget - size)
+    assert len(json.dumps(document).encode()) + framing == budget
+    gateway = _gateway(fake, OPENROUTER_API_KEY=key)
+    usage = []
+    monkeypatch.setattr("sonder_runtime.adapters.inference.openrouter_gateway.record_usage", usage.append)
+    chunks = []
+    if streaming:
+        fake.stream_events = [
+            'data: {"choices":[{"delta":{"content":"prefix"}}]}',
+            "data: " + json.dumps(document),
+        ]
+        stream = gateway.stream(_request(), _context())
+        try:
+            with pytest.raises(DependencyUnavailable) as caught:
+                for chunk in stream:
+                    chunks.append(chunk)
+        finally:
+            stream.close()
+        assert [chunk.text for chunk in chunks] == ["prefix"]
+        assert observed.queues[0].high_water <= 64
+        assert not observed.workers[0].is_alive()
+    else:
+        fake.chat_status, fake.chat_body = 500, document
+        with pytest.raises(DependencyUnavailable) as caught:
+            gateway.generate(_request(), _context())
+    detail = str(caught.value).split(": ", 1)[1]
+    assert detail == "large [REDACTED] " + "a" * 220 + "..."
+    assert len(detail) == 240 and key not in str(caught.value)
+    assert usage == [] and gateway.last_usage is None
+    assert len(fake.chat_requests()) == 1
+
+
 def test_openrouter_keys_are_covered_by_redaction():
     assert FAKE_KEY not in redact_text("using %s now" % FAKE_KEY)
     assert FAKE_KEY not in redact_text("OPENROUTER_API_KEY=%s" % FAKE_KEY)
@@ -595,3 +750,112 @@ def test_protocol_probe_reaches_the_fake_openrouter_route(fake):
 def test_settings_repr_hides_key():
     settings = OpenRouterSettings(api_key=FAKE_KEY)
     assert FAKE_KEY not in repr(settings)
+
+
+def test_error_sanitation_small_stress(observed, monkeypatch, caplog):
+    from collections import Counter
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import contextmanager
+
+    usage = []
+    monkeypatch.setattr("sonder_runtime.adapters.inference.openrouter_gateway.record_usage", usage.append)
+    active_lock = threading.Lock()
+    active = peak = 0
+
+    @contextmanager
+    def peer(category, key, prefix, texts):
+        state = FakeOpenRouter()
+        # Set one response before starting the peer; never change it concurrently.
+        if category == "kind":
+            state.chat_status = 500
+            state.chat_body = {"error": {"metadata": {"error_type": key}}}
+        elif category == "http":
+            state.chat_status = 500
+            state.chat_body = {"error": {"message": prefix + key + " harmless"}}
+        else:
+            state.stream_events = [
+                "data: " + json.dumps({"choices": [{"delta": {"content": text}}]})
+                for text in texts
+            ] + ["data: " + json.dumps({"error": {"message": prefix + key + " harmless"}})]
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                state.handle(self, "POST")
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01})
+        state.base_url = "http://127.0.0.1:%d/api/v1" % server.server_port
+        thread.start()
+        try:
+            yield state
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(3)
+            assert not thread.is_alive(), "synthetic loopback peer did not drain"
+
+    def exchange(index):
+        nonlocal active, peak
+        category = ("kind", "http", "sse")[index % 3]
+        short_key = "fixture-only-" + ("%019d" % index)
+        # Kind retains its existing 64-character input cap. Other categories
+        # alternate a 32-character boundary key and a 384-character value.
+        key = short_key if category == "kind" or index % 2 == 0 else short_key + "q" * 352
+        prefix = "a" * 220 if len(key) == 32 else ""
+        texts = tuple("%dλ" % number for number in range(128))
+        with active_lock:
+            active += 1
+            peak = max(peak, active)
+            assert active <= 2
+        try:
+            with peer(category, key, prefix, texts) as state:
+                gateway = _gateway(state, OPENROUTER_API_KEY=key)
+                chunks = []
+                if category == "sse":
+                    stream = gateway.stream(_request(prompt="synthetic stress prompt"), _context())
+                    try:
+                        with pytest.raises(DependencyUnavailable) as caught:
+                            for chunk in stream:
+                                chunks.append(chunk)
+                    finally:
+                        stream.close()
+                    assert [chunk.text for chunk in chunks] == list(texts)
+                    assert all(chunk.text and chunk.finish_reason is None for chunk in chunks)
+                    expected = "OpenRouter stream failed mid-response: " + prefix + "[REDACTED] harmless"
+                else:
+                    with pytest.raises(DependencyUnavailable) as caught:
+                        gateway.generate(_request(prompt="synthetic stress prompt"), _context())
+                    expected = "OpenRouter failed the request (HTTP 500)"
+                    expected += " [[REDACTED]]" if category == "kind" else ": " + prefix + "[REDACTED] harmless"
+                detail = str(caught.value)
+                assert detail == expected
+                assert key not in detail and short_key[:16] not in detail
+                assert gateway.last_usage is None
+                (sent,) = state.chat_requests()
+                assert sent["method"] == "POST"
+                assert sent["body"]["stream"] is (category == "sse")
+                assert sent["body"]["provider"] == {"data_collection": "deny", "zdr": True, "allow_fallbacks": True}
+                assert len(state.requests) == 1  # no retry or hidden route request
+                return category
+        finally:
+            with active_lock:
+                active -= 1
+
+    # At most two tasks are submitted at once; no unbounded future backlog.
+    results = []
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        for first in range(0, 120, 2):
+            futures = [pool.submit(exchange, index) for index in (first, first + 1)]
+            results.extend(future.result(timeout=35) for future in futures)
+    assert Counter(results) == {"kind": 40, "http": 40, "sse": 40}
+    assert active == 0 and 1 <= peak <= 2
+    assert usage == []
+    assert len(observed.queues) == len(observed.workers) == 40
+    assert all(item.maxsize == 64 and item.high_water <= 64 for item in observed.queues)
+    for worker in observed.workers:
+        worker.join(3)
+        assert not worker.is_alive(), "synthetic stream worker did not drain"
+    assert "fixture-only-" not in caplog.text
