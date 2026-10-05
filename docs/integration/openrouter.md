@@ -235,6 +235,14 @@ delivery; buffered text is not delivered after a detected control stop.
 Normal completion and worker errors remain available independently of queue
 capacity, and successful text chunks retain their original order.
 
+A normal SSE completion requires the provider's `[DONE]` marker. EOF before
+that marker raises `DependencyUnavailable`, including after a finish reason
+or usage event. Earlier queued deltas drain in order before the failure;
+no normal final chunk or successful provider response is produced. A finish
+reason remains optional when `[DONE]` is present. An incomplete stream can
+still have incurred provider charges; this failure does not establish zero
+billing or remote cancellation.
+
 Iterator cleanup waits at most 250 ms for the worker. Queue-blocked workers
 poll control state every 25 ms; an HTTP worker blocked in a socket read can
 remain alive until the existing per-call transport timeout. This is
