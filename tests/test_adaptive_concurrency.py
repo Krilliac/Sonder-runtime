@@ -499,6 +499,15 @@ def test_run_delegated_stall_is_uncertain_and_retains_child_capacity(
 
     monkeypatch.setenv("SONDER_TIMEOUT", "1")
     monkeypatch.setattr(fleet_store, "MODEL_CALL_PROGRESS_MARGIN_SECONDS", 0)
+    # This synthetic stall control exercises real ledger/dispatch work, not
+    # cold native GPU or local-model discovery before the worker-entry gate.
+    monkeypatch.setattr(master_orchestrator.os, "cpu_count", lambda: 16)
+    monkeypatch.setattr(
+        master_orchestrator, "physical_memory_bytes", lambda: (16 * 1024 ** 3, 10 * 1024 ** 3),
+    )
+    monkeypatch.setattr(master_orchestrator, "gpu_memory_bytes", lambda: (0, 0))
+    monkeypatch.setattr(master_orchestrator, "fleet_model_bytes", lambda: 0)
+    monkeypatch.setattr(master_orchestrator, "ollama_parallel_limit", lambda: 16)
     monkeypatch.setattr(master_orchestrator, "parallel_worker_slots", lambda requested: 1)
     release = threading.Event()
     entered = threading.Event()
