@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import sqlite3
+
+import pytest
 import tempfile
 import unittest
 from pathlib import Path
@@ -112,3 +114,83 @@ class TestCachedConnection(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.mark.parametrize("stage", ["row_factory", "busy_timeout", "wal", "foreign_keys"])
+def test_failed_factory_setup_closes_the_created_connection(monkeypatch, stage):
+    from sonder_runtime.adapters.persistence import sqlite_factory
+
+    failure = ValueError("setup refused") if stage == "row_factory" else sqlite3.OperationalError("setup refused")
+
+    class Connection:
+        close_calls = 0
+
+        def __setattr__(self, name, value):
+            if name == "row_factory" and stage == name:
+                raise failure
+            object.__setattr__(self, name, value)
+
+        def execute(self, statement):
+            selected = {"busy_timeout": "PRAGMA busy_timeout=", "wal": "PRAGMA journal_mode=WAL",
+                        "foreign_keys": "PRAGMA foreign_keys=ON"}.get(stage)
+            if selected is not None and statement.startswith(selected):
+                raise failure
+
+        def close(self):
+            self.close_calls += 1
+
+    connection = Connection()
+    monkeypatch.setattr(sqlite_factory, "owned_sqlite_connect", lambda *args, **kwargs: connection)
+    with pytest.raises(type(failure)) as err:
+        connect(":memory:", foreign_keys=True)
+    assert err.value is failure
+    assert connection.close_calls == 1
+
+
+def test_failed_factory_setup_cleanup_has_no_retryable_contention_code(monkeypatch):
+    from sonder_runtime.adapters.persistence import sqlite_factory
+
+    busy = sqlite3.OperationalError("database is locked")
+    busy.sqlite_errorcode = sqlite3.SQLITE_BUSY
+
+    class Connection:
+        close_calls = 0
+
+        def execute(self, statement):
+            raise busy
+
+        def close(self):
+            self.close_calls += 1
+            raise busy
+
+    connection = Connection()
+    monkeypatch.setattr(sqlite_factory, "owned_sqlite_connect", lambda *args, **kwargs: connection)
+    with pytest.raises(sqlite_factory.SQLiteConnectionSetupCleanupError) as err:
+        connect(":memory:")
+    assert connection.close_calls == 1
+    assert err.value.retryable is False
+    assert getattr(err.value, "sqlite_errorcode", None) is None
+    assert str(err.value) == "SQLite connection setup cleanup failed"
+
+
+
+def test_failed_factory_setup_releases_managed_owner_capacity(tmp_path, monkeypatch):
+    from sonder_runtime.adapters.persistence import sqlite_factory
+    from sonder_runtime.adapters.persistence.owned_sqlite import OwnedSQLiteConnections
+
+    owner = OwnedSQLiteConnections((tmp_path,), max_connections=1)
+
+    def connect_owned(database, **kwargs):
+        connection = owner.connect(database, **kwargs)
+        connection.set_authorizer(
+            lambda action, name, value, database, trigger:
+            sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_PRAGMA and name == "journal_mode" else sqlite3.SQLITE_OK)
+        return connection
+
+    monkeypatch.setattr(sqlite_factory, "owned_sqlite_connect", connect_owned)
+    with pytest.raises(sqlite3.DatabaseError):
+        connect(tmp_path / "setup.sqlite3")
+    assert owner.snapshot().clean
+    admitted = owner.connect(tmp_path / "setup.sqlite3")
+    admitted.close()
+    assert owner.snapshot().clean

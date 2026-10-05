@@ -29,6 +29,12 @@ _DEFAULT_BUSY_TIMEOUT_MS = 5000
 _thread_local = threading.local()
 
 
+class SQLiteConnectionSetupCleanupError(sqlite3.Error):
+    """Failed setup left cleanup unresolved; reopening is not safe to retry."""
+
+    retryable = False
+
+
 def connect(
     db_path: str | Path,
     *,
@@ -46,16 +52,26 @@ def connect(
 
     conn = owned_sqlite_connect(path, timeout=timeout, check_same_thread=check_same_thread)
 
-    if row_factory:
-        conn.row_factory = sqlite3.Row
+    try:
+        if row_factory:
+            conn.row_factory = sqlite3.Row
 
-    conn.execute("PRAGMA busy_timeout=%d" % busy_timeout_ms)
+        conn.execute("PRAGMA busy_timeout=%d" % busy_timeout_ms)
 
-    if wal:
-        conn.execute("PRAGMA journal_mode=WAL")
+        if wal:
+            conn.execute("PRAGMA journal_mode=WAL")
 
-    if foreign_keys:
-        conn.execute("PRAGMA foreign_keys=ON")
+        if foreign_keys:
+            conn.execute("PRAGMA foreign_keys=ON")
+    except BaseException:
+        try:
+            conn.close()
+        except BaseException as cleanup_error:
+            # Never preserve a BUSY code when the failed handle may still be
+            # open: a caller must not retry by opening another connection.
+            raise SQLiteConnectionSetupCleanupError(
+                "SQLite connection setup cleanup failed") from cleanup_error
+        raise
 
     return conn
 
@@ -117,6 +133,7 @@ def close_current_thread() -> None:
 
 
 __all__ = [
+    "SQLiteConnectionSetupCleanupError",
     "cached_connection",
     "close_cached",
     "connect",

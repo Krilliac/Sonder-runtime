@@ -49,8 +49,8 @@ def test_failed_store_admission_closes_the_created_connection(rig, monkeypatch, 
         closed = False
 
         def execute(self, statement):
-            is_begin = statement == "BEGIN IMMEDIATE"
-            if is_begin == (failed_statement == "begin"):
+            selected = "BEGIN IMMEDIATE" if failed_statement == "begin" else resource_leases._SCHEMA
+            if statement == selected:
                 raise sqlite3.OperationalError("database is locked")
 
         def close(self):
@@ -61,6 +61,251 @@ def test_failed_store_admission_closes_the_created_connection(rig, monkeypatch, 
     with pytest.raises(DependencyUnavailable, match="resource lease store unavailable"):
         rig.registry().acquire(KIND_DEV_SERVER, "web", "worker-a", ttl_seconds=60)
     assert connection.closed
+
+
+class _AdmissionConnection:
+    def __init__(self, *, errors=None, advance=lambda phase: None, close_error=None):
+        self.errors = dict(errors or {})
+        self.advance = advance
+        self.close_error = close_error
+        self.statements = []
+        self.close_calls = 0
+        self.in_transaction = False
+        self.isolation_level = ""
+
+    def execute(self, statement):
+        phase = ("schema" if statement.lstrip().startswith("CREATE TABLE") else
+                 {"BEGIN IMMEDIATE": "begin", "COMMIT": "commit", "ROLLBACK": "rollback",
+                  "BODY": "body"}.get(statement, "other"))
+        self.statements.append(statement)
+        self.advance(phase)
+        if phase in self.errors:
+            raise self.errors[phase]
+        if phase == "begin":
+            self.in_transaction = True
+        elif phase in ("commit", "rollback"):
+            self.in_transaction = False
+        return self
+
+    def close(self):
+        self.close_calls += 1
+        if self.close_error is not None:
+            raise self.close_error
+
+
+def _admission_error(code):
+    error = sqlite3.OperationalError("database is locked")
+    if code is not None:
+        error.sqlite_errorcode = code
+    return error
+
+
+def _admission_clock(monkeypatch, module):
+    from types import SimpleNamespace
+
+    clock = SimpleNamespace(now=100.0, sleeps=[])
+
+    def sleep(seconds):
+        clock.sleeps.append(seconds)
+        clock.now += seconds
+
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: clock.now, sleep=sleep))
+    return clock
+
+
+@pytest.mark.parametrize("phase", ["setup", "schema", "begin"])
+@pytest.mark.parametrize("code", [sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED, sqlite3.SQLITE_BUSY | (2 << 8)])
+def test_classified_admission_contention_retries_before_one_body(rig, monkeypatch, phase, code):
+    from sonder_runtime.adapters import resource_leases
+
+    clock = _admission_clock(monkeypatch, resource_leases)
+    error = _admission_error(code)
+    failed = _AdmissionConnection(errors={} if phase == "setup" else {phase: error})
+    admitted = _AdmissionConnection()
+    calls = []
+
+    def connect(*args, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            if phase == "setup":
+                failed.close()  # the factory's failed-setup close contract
+                raise error
+            return failed
+        return admitted
+
+    monkeypatch.setattr(resource_leases, "sqlite_connect", connect)
+    effects = []
+    with rig.registry()._connection() as conn:
+        effects.append("one body")
+        assert conn is admitted
+    assert effects == ["one body"]
+    assert len(calls) == 2 and calls[1]["timeout"] < calls[0]["timeout"] <= 10
+    assert failed.close_calls == admitted.close_calls == 1
+    assert clock.sleeps and all(0 < delay <= 0.05 for delay in clock.sleeps)
+    assert admitted.statements.count("COMMIT") == 1
+
+
+def test_admission_wait_budget_shrinks_between_connection_schema_and_begin(rig, monkeypatch):
+    from sonder_runtime.adapters import resource_leases
+
+    clock = _admission_clock(monkeypatch, resource_leases)
+    calls = []
+
+    def advance(phase):
+        if phase == "schema":
+            clock.now += 2
+        elif phase == "begin":
+            clock.now += 5
+
+    failed = _AdmissionConnection(errors={"begin": _admission_error(sqlite3.SQLITE_BUSY)}, advance=advance)
+    admitted = _AdmissionConnection()
+
+    def connect(*args, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            clock.now += 2
+            return failed
+        return admitted
+
+    monkeypatch.setattr(resource_leases, "sqlite_connect", connect)
+    with rig.registry()._connection():
+        pass
+    timeouts = [int(sql.split("=")[1]) for sql in failed.statements if sql.startswith("PRAGMA busy_timeout=")]
+    assert calls[0]["timeout"] == 10 and calls[0]["busy_timeout_ms"] == 10000
+    assert timeouts == [8000, 6000]
+    assert 0 < calls[1]["timeout"] < 1
+    assert failed.close_calls == admitted.close_calls == 1
+
+
+def test_admission_budget_exhaustion_closes_every_attempt_without_body(rig, monkeypatch):
+    from sonder_runtime.adapters import resource_leases
+
+    clock = _admission_clock(monkeypatch, resource_leases)
+    connections, timeouts = [], []
+
+    def connect(*args, **kwargs):
+        connection = _AdmissionConnection(errors={"begin": _admission_error(sqlite3.SQLITE_BUSY)})
+        connections.append(connection)
+        timeouts.append(kwargs["timeout"])
+        return connection
+
+    monkeypatch.setattr(resource_leases, "sqlite_connect", connect)
+    effects = []
+    with pytest.raises(DependencyUnavailable):
+        with rig.registry()._connection():
+            effects.append("must not run")
+    assert not effects and 1 < len(connections) <= 1001
+    assert all(conn.close_calls == 1 for conn in connections)
+    assert timeouts == sorted(timeouts, reverse=True) and max(timeouts) <= 10
+    assert all(0 < delay <= 0.05 for delay in clock.sleeps)
+    assert clock.now == pytest.approx(110)
+
+
+def test_expired_successful_begin_rolls_back_without_body_or_retry(rig, monkeypatch):
+    from sonder_runtime.adapters import resource_leases
+
+    clock = _admission_clock(monkeypatch, resource_leases)
+    calls = []
+
+    def advance(phase):
+        if phase == "begin":
+            clock.now += 10
+
+    connection = _AdmissionConnection(advance=advance)
+
+    def connect(*args, **kwargs):
+        calls.append(kwargs)
+        return connection
+
+    monkeypatch.setattr(resource_leases, "sqlite_connect", connect)
+    with pytest.raises(DependencyUnavailable, match="admission timed out"):
+        with rig.registry()._connection():
+            pytest.fail("late admission must not run the body")
+    assert len(calls) == connection.close_calls == 1
+    assert connection.statements.count("ROLLBACK") == 1 and not connection.in_transaction
+    assert not clock.sleeps
+
+
+@pytest.mark.parametrize("code", [sqlite3.SQLITE_IOERR, None, True])
+def test_nonbusy_or_message_only_admission_errors_do_not_retry(rig, monkeypatch, code):
+    from sonder_runtime.adapters import resource_leases
+
+    clock = _admission_clock(monkeypatch, resource_leases)
+    connection = _AdmissionConnection(errors={"schema": _admission_error(code)})
+    calls = []
+
+    def connect(*args, **kwargs):
+        calls.append(kwargs)
+        return connection
+
+    monkeypatch.setattr(resource_leases, "sqlite_connect", connect)
+    with pytest.raises(DependencyUnavailable):
+        with rig.registry()._connection():
+            pytest.fail("failed admission must not run the body")
+    assert len(calls) == connection.close_calls == 1 and not clock.sleeps
+
+
+def test_failed_admission_cleanup_stops_instead_of_reopening(rig, monkeypatch):
+    from sonder_runtime.adapters import resource_leases
+
+    clock = _admission_clock(monkeypatch, resource_leases)
+    busy = _admission_error(sqlite3.SQLITE_BUSY)
+    connection = _AdmissionConnection(errors={"begin": busy}, close_error=busy)
+    calls = []
+
+    def connect(*args, **kwargs):
+        calls.append(kwargs)
+        return connection
+
+    monkeypatch.setattr(resource_leases, "sqlite_connect", connect)
+    with pytest.raises(DependencyUnavailable, match="admission cleanup failed") as err:
+        with rig.registry()._connection():
+            pytest.fail("cleanup failure must not run the body")
+    assert len(calls) == connection.close_calls == 1 and not clock.sleeps
+    assert err.value.retryable is False
+
+
+def test_failed_factory_cleanup_is_not_retried_by_lease_admission(rig, monkeypatch):
+    from sonder_runtime.adapters import resource_leases
+    from sonder_runtime.adapters.persistence.sqlite_factory import SQLiteConnectionSetupCleanupError
+
+    clock = _admission_clock(monkeypatch, resource_leases)
+    calls = []
+
+    def connect(*args, **kwargs):
+        calls.append(kwargs)
+        raise SQLiteConnectionSetupCleanupError("SQLite connection setup cleanup failed")
+
+    monkeypatch.setattr(resource_leases, "sqlite_connect", connect)
+    with pytest.raises(DependencyUnavailable, match="setup cleanup failed") as err:
+        with rig.registry()._connection():
+            pytest.fail("failed factory cleanup must not run the body")
+    assert len(calls) == 1 and not clock.sleeps
+    assert err.value.retryable is False
+
+
+@pytest.mark.parametrize("phase", ["body", "commit"])
+def test_busy_body_or_commit_never_replays_effects(rig, monkeypatch, phase):
+    from sonder_runtime.adapters import resource_leases
+
+    clock = _admission_clock(monkeypatch, resource_leases)
+    error = _admission_error(sqlite3.SQLITE_BUSY)
+    connection = _AdmissionConnection(errors={phase: error})
+    calls, effects = [], []
+
+    def connect(*args, **kwargs):
+        calls.append(kwargs)
+        return connection
+
+    monkeypatch.setattr(resource_leases, "sqlite_connect", connect)
+    with pytest.raises(DependencyUnavailable):
+        with rig.registry()._connection() as conn:
+            effects.append("evidence or operation effect")
+            conn.execute("BODY")
+    assert effects == ["evidence or operation effect"]
+    assert len(calls) == connection.close_calls == 1 and not clock.sleeps
+    assert connection.statements.count("BODY") == 1
+    assert connection.statements.count("ROLLBACK" if phase == "body" else "COMMIT") == 1
 
 
 # -- acquire / refuse / release --------------------------------------------
@@ -351,6 +596,7 @@ def test_a_recycled_indicator_pid_is_not_mistaken_for_the_indicator(rig):
 
 
 _RACER = """
+import json
 import sys
 from sonder_runtime.adapters.resource_leases import SqliteResourceLeaseRegistry
 from sonder_runtime.domain.common.errors import SonderError
@@ -360,6 +606,11 @@ try:
     print("won")
 except SonderError as exc:
     print(getattr(exc, "code", "?"))
+    if exc.code != "RESOURCE_LEASE_BUSY":
+        code = getattr(exc.__context__, "sqlite_errorcode", None)
+        print(json.dumps({"stage": "unknown", "domain_code": exc.code,
+                          "sqlite_primary_code": (code & 255) if type(code) is int else None}),
+              file=sys.stderr)
 """
 
 
@@ -369,9 +620,34 @@ def test_racing_processes_get_exactly_one_lease(tmp_path):
     from pathlib import Path
 
     root = str(Path(__file__).resolve().parents[1])
-    racers = [subprocess.Popen([sys.executable, "-c", _RACER, str(tmp_path / "l.sqlite3"), str(i)],
-                               cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-              for i in range(6)]
-    results = [racer.communicate(timeout=120) for racer in racers]
-    outcomes = sorted(out.strip() for out, _err in results)
-    assert outcomes == ["RESOURCE_LEASE_BUSY"] * 5 + ["won"], results
+    racers = []
+    try:
+        for i in range(6):
+            racers.append(subprocess.Popen(
+                [sys.executable, "-c", _RACER, str(tmp_path / "l.sqlite3"), str(i)],
+                cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
+        results = [racer.communicate(timeout=120) for racer in racers]
+        assert all(racer.returncode == 0 for racer in racers), results
+        outcomes = sorted(out.strip() for out, _err in results)
+        assert outcomes == ["RESOURCE_LEASE_BUSY"] * 5 + ["won"], results
+    finally:
+        cleanup_errors = []
+        for racer in racers:
+            try:
+                if racer.poll() is None:
+                    racer.terminate()
+                try:
+                    racer.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    racer.kill()
+                    racer.communicate(timeout=5)
+            except BaseException as exc:
+                cleanup_errors.append((racer.pid, type(exc).__name__))
+            finally:
+                for pipe in (racer.stdout, racer.stderr):
+                    if pipe is not None:
+                        try:
+                            pipe.close()
+                        except BaseException as exc:
+                            cleanup_errors.append((racer.pid, type(exc).__name__))
+        assert not cleanup_errors, cleanup_errors
