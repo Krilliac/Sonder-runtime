@@ -503,6 +503,16 @@ def test_run_delegated_stall_is_uncertain_and_retains_child_capacity(
     release = threading.Event()
     entered = threading.Event()
     audited = threading.Event()
+    original_deadline = fleet_store.lane_progress_deadline
+
+    def entry_armed_deadline(row, deadline):
+        # This control measures a hung model call, not scheduler/DB startup.
+        # Keep the same five-second startup bound until the worker enters;
+        # then retain the real short model-call deadline and strict joins.
+        value = original_deadline(row, deadline)
+        return value if entered.is_set() else max(5.0, value)
+
+    monkeypatch.setattr(fleet_store, "lane_progress_deadline", entry_armed_deadline)
     result_box = {}
     checkpoints = {"test_started_ns": time.monotonic_ns()}
 

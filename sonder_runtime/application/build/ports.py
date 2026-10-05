@@ -368,7 +368,12 @@ class BuildLauncher(Protocol):
     def poll(self, job_id: str) -> JobRecord | None: ...
 
     def wait(self, job_id: str, timeout: float) -> tuple[JobRecord, int | None, bool]:
-        """(record, exit_code, timed_out); ``timed_out`` never claims terminal."""
+        """(record, exit_code, pending); pending includes owned exit-hook cleanup.
+
+        A durable terminal record may still be pending. False means the owned
+        completion marker finished, or no owned run remains; it is not proof
+        that process cleanup succeeded.
+        """
 
     def cancel(self, job_id: str, reason: str) -> bool:
         """Cancel the job's process tree; True once cleanup is proven."""
