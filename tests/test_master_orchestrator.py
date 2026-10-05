@@ -1080,38 +1080,62 @@ def test_delegated_fleet_limits_actual_concurrency(monkeypatch):
 
 
 def test_start_delegated_returns_before_background_workers_finish(monkeypatch):
+    # Pin capacity() as well as worker slots: cold hardware/model probes can
+    # outlast the production startup deadline before durable IDs are published.
+    _fake_hardware(monkeypatch)
     monkeypatch.setattr(master_orchestrator, "parallel_worker_slots", lambda requested: 1)
     started = threading.Event()
     release = threading.Event()
+    worker_outputs = []
+    coordinators = []
+    original_thread = master_orchestrator.Thread
+
+    def capture_coordinator(*args, **kwargs):
+        thread = original_thread(*args, **kwargs)
+        coordinators.append(thread)
+        return thread
+
+    monkeypatch.setattr(master_orchestrator, "Thread", capture_coordinator)
 
     def worker(prompt):
         started.set()
-        assert release.wait(2)
+        # The gate, rather than elapsed time, proves the worker is unfinished.
+        # This bound only prevents a broken test from holding a worker forever.
+        assert release.wait(30)
+        worker_outputs.append("worker result")
         return "worker result"
 
-    result = master_orchestrator.start_delegated(
-        "background fleet",
-        worker_fn=worker,
-        audit_fn=lambda prompt: "audited result",
-        agents=2,
-    )
+    try:
+        result = master_orchestrator.start_delegated(
+            "background fleet",
+            worker_fn=worker,
+            audit_fn=lambda prompt: "audited result",
+            agents=2,
+        )
 
-    assert result["background"] is True
-    assert result["output"] == "RUNNING"
-    assert len(result["agents"]) == 2
-    assert started.wait(1)
-    assert master_orchestrator.snapshot(include_finished=False)["active_agents"] > 0
+        assert result["background"] is True
+        assert result["output"] == "RUNNING"
+        assert len(result["agents"]) == 2
+        assert started.wait(10)
+        assert not release.is_set()
+        assert worker_outputs == []
+        assert master_orchestrator.snapshot(include_finished=False)["active_agents"] > 0
+    finally:
+        # A startup or assertion failure must not leave a coordinator running
+        # across reset_for_tests() or monkeypatch teardown into the next test.
+        release.set()
+        for thread in coordinators:
+            if thread.ident is not None:
+                thread.join(10)
+        assert all(not thread.is_alive() for thread in coordinators)
 
-    release.set()
-    deadline = time.time() + 3
-    while time.time() < deadline:
-        snap = master_orchestrator.snapshot()
-        if snap["active_agents"] == 0:
-            break
-        time.sleep(0.02)
-
+    assert len(coordinators) == 1
+    assert coordinators[0].name == "sonder-master-background"
+    assert worker_outputs == ["worker result", "worker result"]
+    snap = master_orchestrator.snapshot()
     assert snap["active_agents"] == 0
     assert snap["latest_master_result"] == "audited result"
+    assert master_orchestrator.reserved_slot_count() == 0
 
 
 def test_cancel_master_skips_queued_workers_and_discards_running_result(monkeypatch):
