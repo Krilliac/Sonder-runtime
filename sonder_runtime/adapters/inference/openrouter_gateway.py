@@ -420,7 +420,7 @@ def _retry_after_seconds(headers: object) -> float | None:
 
 
 def _error_fields(body: bytes) -> tuple[str, str]:
-    """``(message, error_type)`` from ``{"error": {"message", "metadata"}}``."""
+    """Extract untrusted fields; callers redact before display bounding."""
     try:
         document = json.loads(body.decode("utf-8")) if body else None
     except (UnicodeDecodeError, ValueError, RecursionError):
@@ -432,7 +432,7 @@ def _error_fields(body: bytes) -> tuple[str, str]:
     metadata = error.get("metadata") if isinstance(error.get("metadata"), dict) else {}
     kind = metadata.get("error_type")
     return (
-        _bounded(message) if isinstance(message, str) else "",
+        message if isinstance(message, str) else "",
         kind if isinstance(kind, str) and len(kind) <= 64 else "",
     )
 
@@ -667,6 +667,8 @@ class OpenRouterGateway(OpenAICompatibleGateway):
     def _classify_http_error(self, status: int, body: bytes) -> SonderError | None:
         message, kind = _error_fields(body)
         message = self._redacted(message) if message else ""
+        kind = self._redacted(kind) if kind else ""
+        kind = kind if len(kind) <= 64 else ""
         suffix = ": %s" % message if message else ""
         retry_after = getattr(self._call, "retry_after", None)
         self._call.retry_after = None

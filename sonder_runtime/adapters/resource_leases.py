@@ -30,7 +30,6 @@ same resource serialize on the database lock: exactly one wins.
 from __future__ import annotations
 
 import json
-from contextlib import suppress
 import logging
 import os
 import secrets
@@ -125,23 +124,64 @@ class SqliteResourceLeaseRegistry:
 
         class _Txn:
             def __enter__(self_inner):
-                conn = None
-                try:
-                    conn = sqlite_connect(registry._path, timeout=10.0, busy_timeout_ms=10000)
-                    conn.isolation_level = None
-                    if not registry._schema_ready:
-                        conn.execute(_SCHEMA)
-                        registry._schema_ready = True
-                    conn.execute("BEGIN IMMEDIATE")
-                except sqlite3.Error as exc:
-                    # A failed __enter__ never reaches __exit__. Release the
-                    # connection immediately, including ordinary busy errors.
-                    if conn is not None:
-                        with suppress(sqlite3.Error):
-                            conn.close()
-                    raise DependencyUnavailable("resource lease store unavailable: %s" % exc) from None
-                self_inner.conn = conn
-                return conn
+                deadline = time.monotonic() + 10.0
+                delay = 0.01
+
+                def remaining_timeout():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise DependencyUnavailable(
+                            "resource lease store unavailable: admission timed out")
+                    return remaining
+
+                while True:
+                    conn = None
+                    try:
+                        remaining = remaining_timeout()
+                        conn = sqlite_connect(
+                            registry._path, timeout=remaining,
+                            busy_timeout_ms=int(remaining * 1000))
+                        conn.isolation_level = None
+                        if not registry._schema_ready:
+                            conn.execute("PRAGMA busy_timeout=%d" % int(remaining_timeout() * 1000))
+                            conn.execute(_SCHEMA)
+                            # Schema creation remains outside BEGIN/autocommit,
+                            # so a failed later admission does not undo it.
+                            registry._schema_ready = True
+                        conn.execute("PRAGMA busy_timeout=%d" % int(remaining_timeout() * 1000))
+                        conn.execute("BEGIN IMMEDIATE")
+                        remaining_timeout()
+                    except BaseException as exc:
+                        # Only admission can retry. Close before another open;
+                        # an expired successful BEGIN has no operation body.
+                        if conn is not None:
+                            try:
+                                try:
+                                    if getattr(conn, "in_transaction", False):
+                                        conn.execute("ROLLBACK")
+                                finally:
+                                    conn.close()
+                            except BaseException:
+                                failure = DependencyUnavailable(
+                                    "resource lease store unavailable: admission cleanup failed")
+                                failure.retryable = False
+                                raise failure from None
+                        if not isinstance(exc, sqlite3.Error):
+                            raise
+                        code = getattr(exc, "sqlite_errorcode", None)
+                        contention = (type(code) is int and
+                                      (code & 0xff) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED))
+                        remaining = deadline - time.monotonic()
+                        if contention and remaining > 0:
+                            time.sleep(min(delay, remaining))
+                            delay = min(delay * 2, 0.05)
+                            continue
+                        failure = DependencyUnavailable("resource lease store unavailable: %s" % exc)
+                        if getattr(exc, "retryable", None) is False:
+                            failure.retryable = False
+                        raise failure from None
+                    self_inner.conn = conn
+                    return conn
 
             def __exit__(self_inner, exc_type, exc, tb):
                 conn = self_inner.conn

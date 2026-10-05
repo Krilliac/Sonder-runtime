@@ -44,6 +44,7 @@ jobs:
       # (--system), where the pip install used to land, several times faster.
       # uv itself is pinned like the actions above; bump it deliberately.
       - name: Install deps (stdlib core + mcp for server import)
+        id: install-core-deps
         run: |
           python -m pip install uv==0.12.19
           uv pip install -r requirements-dev.txt --system
@@ -117,6 +118,7 @@ jobs:
               raise SystemExit("full-suite runner requires at least 3000 MiB MemAvailable")
           PY
       - name: Run test suite
+        id: full-suite
         # network/model-marked tests are skipped unless --run-network /
         # --run-model is passed (see conftest.py); CI intentionally does not
         # opt in, since those require a live Ollama/hosted model or network
@@ -132,7 +134,9 @@ jobs:
       # has run and require every update-trust test to run: a skip here means
       # the verification path went unexercised, which is a failure.
       - name: Run the TUF update-trust suites (no skips allowed)
-        if: ${{ !cancelled() }}
+        # Keep running after a failed full suite, but not when setup never
+        # supplied uv and the core test dependencies.
+        if: ${{ !cancelled() && steps.install-core-deps.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -152,7 +156,9 @@ jobs:
           assert totals["skipped"] == totals["errors"] == totals["failures"] == 0, totals
           PY
       - name: Upload test report
-        if: always()
+        # A skipped full suite cannot produce a report. Once it has an
+        # executed outcome, keep missing XML a strict artifact failure.
+        if: ${{ always() && (steps.full-suite.outcome == 'success' || steps.full-suite.outcome == 'failure' || steps.full-suite.outcome == 'cancelled') }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: pytest-report
