@@ -862,6 +862,7 @@ class OpenRouterGateway(OpenAICompatibleGateway):
         parts: list[str] = []
         final: dict[str, object] = {}
         finish_reason = None
+        done = False
         headers = {**headers, "Accept": "text/event-stream"}
         raw_stream = self._raw_stream(url, payload, headers, timeout)
         try:
@@ -873,6 +874,7 @@ class OpenRouterGateway(OpenAICompatibleGateway):
                     continue  # blank separators and ": OPENROUTER PROCESSING" keep-alives
                 data = line[5:].strip()
                 if data == "[DONE]":
+                    done = True
                     break
                 try:
                     event = json.loads(data)
@@ -903,6 +905,10 @@ class OpenRouterGateway(OpenAICompatibleGateway):
             close = getattr(raw_stream, "close", None)
             if callable(close):
                 close()
+        if not done:
+            # EOF may follow usable deltas, even with a finish reason. Only
+            # the terminal marker establishes a complete provider response.
+            raise DependencyUnavailable("OpenRouter stream ended before [DONE]")
         final.update({
             "object": "chat.completion",
             "choices": [{"index": 0, "finish_reason": finish_reason,
