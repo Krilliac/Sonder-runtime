@@ -224,6 +224,30 @@ or evidence persistence prevents publishing that completed response.
 Host worker ownership/capacity refusal produces content-free domain errors
 without dispatching requests.
 
+## Bounded streaming backpressure
+
+`gateway.stream(request, context)` buffers at most **64** pending text chunks.
+A paused consumer backpressures SSE reads rather than buffering the whole
+response in the delivery queue. Close a partially consumed iterator explicitly
+(`stream.close()` or `contextlib.closing`) to release a queue-blocked worker.
+Cancellation and deadline checks run during enqueue and before further text
+delivery; buffered text is not delivered after a detected control stop.
+Normal completion and worker errors remain available independently of queue
+capacity, and successful text chunks retain their original order.
+
+Iterator cleanup waits at most 250 ms for the worker. Queue-blocked workers
+poll control state every 25 ms; an HTTP worker blocked in a socket read can
+remain alive until the existing per-call transport timeout. This is
+cooperative cancellation, not a guarantee that a remote provider stopped
+generation or billing. No request is retried.
+
+The queue bound counts chunks, not text bytes. The gateway still assembles
+the full reply for its established evidence/accounting path, and the real
+HTTP transport retains its 1 MiB line and 16 MiB response limits. Backpressure
+does not change cloud consent, privacy preferences, capture policy, batching
+or usage accounting. See [stream stability qualification](../testing/openrouter-stream-stability.md)
+for executable synthetic controls and supported boundaries.
+
 ## Errors
 
 | HTTP | Sonder error | What to do |
