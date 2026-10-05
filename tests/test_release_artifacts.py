@@ -333,7 +333,21 @@ def _step_block(job_text: str, name: str) -> str:
 def test_ci_runs_the_tuf_update_trust_suites_and_refuses_skips():
     ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
     step = _step_block(_job_block(ci, "tests"), "Run the TUF update-trust suites (no skips allowed)")
-    assert "if: ${{ !cancelled() }}" in step
+    assert "if: ${{ !cancelled() && steps.install-core-deps.outcome == 'success' }}" in step
+    job = _job_block(ci, "tests")
+    deps = _step_block(job, "Install deps (stdlib core + mcp for server import)")
+    assert "id: install-core-deps" in deps
+    assert "python -m pip install uv==0.12.19" in deps
+    assert "uv pip install -r requirements-dev.txt --system" in deps
+    assert "continue-on-error" not in deps
+    assert job.index("Install deps (stdlib core + mcp for server import)") < job.index(
+        "Run the TUF update-trust suites (no skips allowed)"
+    )
+    # The explicit status function must preserve TUF after a failed FULL;
+    # success() or a FULL-success dependency would silently skip this gate.
+    assert "steps.full-suite" not in step
+    assert "success()" not in step
+    assert "continue-on-error" not in step
     assert "uv pip install -r requirements-dev.txt -r requirements-update.txt --system" in step
     assert "tests/production/test_tuf_publisher.py" in step
     assert "tests/test_update_manifest_trust.py" in step
@@ -344,6 +358,34 @@ def test_ci_runs_the_tuf_update_trust_suites_and_refuses_skips():
     # dev install leaves the TUF stack out, and this step is what runs them.
     assert "tuf" not in (Path(__file__).resolve().parents[1] / "requirements-dev.txt").read_text(
         encoding="utf-8")
+
+
+def test_ci_uploads_full_report_only_after_an_executed_suite_outcome():
+    ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+    job = _job_block(ci, "tests")
+    full = _step_block(job, "Run test suite")
+    report = _step_block(job, "Upload test report")
+    assert "id: full-suite" in full
+    assert "python -m pytest -v -n auto --dist load --durations=25" in full
+    assert "--junitxml=pytest-report.xml" in full
+    assert "continue-on-error" not in full
+    assert (
+        "if: ${{ always() && (steps.full-suite.outcome == 'success' || "
+        "steps.full-suite.outcome == 'failure' || "
+        "steps.full-suite.outcome == 'cancelled') }}"
+    ) in report
+    assert "path: pytest-report.xml" in report
+    assert "if-no-files-found: error" in report
+    assert "continue-on-error" not in report
+    assert job.index("Run test suite") < job.index("Upload test report")
+    # The refusal stays a failing required check even when all setup/FULL
+    # steps are skipped; this repair only removes impossible follow-ups.
+    assert "needs: [windows-focused, container-qualification, linux-selfmod-isolation]" in job
+    assert "if: ${{ always() }}" in job.split("    steps:\n", 1)[0]
+    refusal = _step_block(job, "Require native Windows gate")
+    for prerequisite in ("windows-focused", "container-qualification", "linux-selfmod-isolation"):
+        assert "needs.%s.result != 'success'" % prerequisite in refusal
+    assert "exit 1" in refusal
 
 
 WINDOWS_DEVTOOLS_SUITES = (
