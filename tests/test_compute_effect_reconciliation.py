@@ -23,6 +23,7 @@ from sonder_runtime.adapters.persistence.sqlite.job_registry import (
 )
 from sonder_runtime.adapters.process_termination import ProcessTreeSupervisor
 from sonder_runtime.application.compute_fabric.jobs import (
+    ArgumentPolicy,
     ComputeJobWorker,
     JobCatalogEntry,
     RemoteJobEnvelope,
@@ -39,6 +40,7 @@ from sonder_runtime.application.execution.worker_bindings import (
 )
 from sonder_runtime.application.ports.jobs import JobIdentity, JobStatus
 from sonder_runtime.domain.compute_fabric import WorkloadKind
+from sonder_runtime.domain.common.errors import InvalidInput
 from tests.test_compute_job_worker import _TestScopeLimiter
 
 CRASH_EXIT = 86
@@ -136,6 +138,38 @@ def _seed(root: Path, *, attach: bool = True, terminal: bool = True,
         reconciliation="idempotent",
     )
     return journal, registry, intent
+
+
+def test_invalid_catalog_option_is_rejected_before_effect_intent(tmp_path):
+    class NoStartProvider:
+        def start(self, _request):
+            raise AssertionError("an invalid catalog request must not start a process")
+
+    journal = _journal(tmp_path)
+    binding = _binding(journal, 1)
+    assert binding.recover_before_restart().action == "resume"
+    entry = JobCatalogEntry(
+        entry_id="once", workload=WorkloadKind.TEST, program=sys.executable,
+        fixed_args=("-c", "pass"),
+        argument_policy=ArgumentPolicy.RELATIVE_PATHS_AND_TEST_SELECTORS,
+        workspace_mappings=frozenset({"project"}),
+        allowed_bounded_options=frozenset({"--config"}),
+    )
+    worker = ComputeJobWorker(
+        worker_id=WORKER_ID, catalog={"once": entry},
+        workspace_mappings={"project": tmp_path}, provider=NoStartProvider(),
+        effect_binding=binding,
+    )
+    envelope = RemoteJobEnvelope.create(
+        controller_job_id="invalid-option", idempotency_key="invalid-option",
+        workload=WorkloadKind.TEST, catalog_entry_id="once",
+        workspace_mapping="project", arguments=("--config", "Release"),
+        idempotent=True,
+    )
+    with pytest.raises(InvalidInput, match="--config"):
+        worker.submit(envelope)
+    assert journal.get(f"{RUN_ID}:compute-submit:{WORKER_ID}:invalid-option") is None
+    assert _binding(journal, 2).recover_before_restart().action == "resume"
 
 
 @pytest.mark.parametrize("invalid", [
