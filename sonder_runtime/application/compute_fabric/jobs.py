@@ -664,6 +664,10 @@ class ComputeJobWorker:
                 if prior.request_sha256 != envelope.request_sha256:
                     raise Conflict("idempotency key is already bound to another request")
                 return prior
+            # A catalog or path refusal cannot have launched a process. Reject
+            # it before admitting an effect intent, which otherwise becomes
+            # uncertain and fences every later compute submission.
+            self._validated_launch(envelope)
             self._reject_occupied_capacity_before_intent(envelope)
             return journaled_effect(
                 self._effect_binding,
@@ -710,19 +714,12 @@ class ComputeJobWorker:
         ):
             raise CapacityExceeded("worker catalog capacity is occupied")
 
-    def _submit_unjournaled(self, envelope: RemoteJobEnvelope) -> RemoteJobReceipt:
-        logger.debug(f"ComputeJobWorker.submit: worker_id={self.worker_id!r}, catalog_entry={envelope.catalog_entry_id!r}, idempotency_key={envelope.idempotency_key!r}, workload={envelope.workload.value!r}")
+    def _validated_launch(self, envelope: RemoteJobEnvelope):
+        """Check deterministic launch inputs without admitting an effect."""
         try:
             envelope.verify()
         except (TypeError, ValueError) as exc:
             raise InvalidInput(f"compute job envelope digest/shape is invalid: {exc}") from exc
-        with self._lock:
-            prior = self._by_idempotency.get(envelope.idempotency_key)
-            if prior is not None:
-                if prior.request_sha256 != envelope.request_sha256:
-                    raise Conflict("idempotency key is already bound to another request")
-                logger.warning(f"returning prior compute job for duplicate idempotency key: idempotency_key={envelope.idempotency_key!r}, state={prior.state!r}")
-                return prior
         entry = self._catalog.get(envelope.catalog_entry_id)
         if entry is None:
             raise InvalidInput("compute job catalog entry is not configured")
@@ -745,6 +742,22 @@ class ComputeJobWorker:
             environment = entry.environment_for(envelope.environment)
         except ValueError as exc:
             raise InvalidInput(str(exc)) from exc
+        return entry, root, cwd, argv, environment
+
+    def _submit_unjournaled(self, envelope: RemoteJobEnvelope) -> RemoteJobReceipt:
+        logger.debug(f"ComputeJobWorker.submit: worker_id={self.worker_id!r}, catalog_entry={envelope.catalog_entry_id!r}, idempotency_key={envelope.idempotency_key!r}, workload={envelope.workload.value!r}")
+        try:
+            envelope.verify()
+        except (TypeError, ValueError) as exc:
+            raise InvalidInput(f"compute job envelope digest/shape is invalid: {exc}") from exc
+        with self._lock:
+            prior = self._by_idempotency.get(envelope.idempotency_key)
+            if prior is not None:
+                if prior.request_sha256 != envelope.request_sha256:
+                    raise Conflict("idempotency key is already bound to another request")
+                logger.warning(f"returning prior compute job for duplicate idempotency key: idempotency_key={envelope.idempotency_key!r}, state={prior.state!r}")
+                return prior
+        entry, root, cwd, argv, environment = self._validated_launch(envelope)
         remote_job_id = "cf-" + hashlib.sha256(
             f"{self.worker_id}\x00{envelope.idempotency_key}".encode("utf-8")
         ).hexdigest()[:24]
