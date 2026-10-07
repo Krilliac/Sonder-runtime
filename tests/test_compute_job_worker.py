@@ -311,6 +311,38 @@ def test_worker_idempotency_returns_same_job_and_conflict_rejects(tmp_path: Path
         worker.submit(_envelope(arguments=("different.py",)))
 
 
+def test_worker_revalidates_envelope_before_returning_cached_receipt(tmp_path: Path) -> None:
+    class CountingProvider(CapturingProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.starts = 0
+
+        def start(self, request):
+            self.starts += 1
+            return super().start(request)
+
+    provider = CountingProvider()
+    worker = ComputeJobWorker(
+        worker_id="worker-1",
+        catalog={"pytest": _entry()},
+        workspace_mappings={"sonder": tmp_path},
+        provider=provider,
+    )
+    original = _envelope()
+    first = worker.submit(original)
+    assert worker.submit(_envelope()) is first
+    assert provider.starts == 1
+    altered = _envelope()
+    # Keep the admitted digest/key while changing the canonical request.
+    object.__setattr__(altered, "arguments", ("different.py",))
+    assert altered.request_sha256 == first.request_sha256
+    assert altered.idempotency_key == first.idempotency_key
+    with pytest.raises(InvalidInput, match="digest"):
+        worker.submit(altered)
+    assert worker.submit(_envelope()) is first
+    assert provider.starts == 1
+
+
 def test_worker_revalidates_digest_even_if_constructed_unsafely(tmp_path: Path) -> None:
     worker = ComputeJobWorker(
         worker_id="worker-1",
