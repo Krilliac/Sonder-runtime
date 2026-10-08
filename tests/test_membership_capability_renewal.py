@@ -73,10 +73,12 @@ def test_controller_does_not_reprobe_members_far_from_expiry():
     control = controller(source, pool, wall)
     try:
         control.refresh(timeout_seconds=2)
+        # The first pass proves the member and renews the static loopback lane.
+        assert sorted(probes) == sorted([LOCAL, REMOTE])
         wall.now += timedelta(seconds=30)
         mono.now += 30
         source.snapshot = signed_snapshot(generation=2, issued_at=wall.now)
         control.refresh(timeout_seconds=2)
-        assert probes == [REMOTE]
+        assert sorted(probes) == sorted([LOCAL, REMOTE])
     finally:
         assert control.close(timeout=2)
