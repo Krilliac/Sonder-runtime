@@ -1658,12 +1658,46 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         usable = []
         for key, gateway, endpoint in candidates:
             snapshot = gateway._peek_health(endpoint)
+            if endpoint.private_worker:
+                # A worker is chosen only on positive evidence that it serves
+                # this exact model: a missing model would be a 404, which is
+                # final and never moves to another endpoint.
+                if not self._worker_serves(gateway, endpoint, snapshot, model):
+                    continue
+                usable.append((key, gateway, endpoint))
+                continue
             if snapshot is not None and snapshot.state != "ready" and not snapshot.busy:
                 continue
             if not self._serves(snapshot, model):
                 continue
             usable.append((key, gateway, endpoint))
         return usable
+
+    @staticmethod
+    def _worker_serves(gateway: "SonderInferenceGateway", endpoint: SonderInferenceConfig,
+                       snapshot: HealthSnapshot | None, model: str) -> bool:
+        """True only when the worker's health (probed if stale) lists ``model``.
+
+        The ``default`` alias names whatever each server was started with, so
+        it never selects a worker.  The probe is the cached, single-flight,
+        bounded health check (at most one per worker per health TTL).
+        """
+        if model == DEFAULT_MODEL:
+            return False
+        if snapshot is None:
+            try:
+                snapshot = gateway.health(settings=endpoint)
+            except Exception as exc:  # noqa: BLE001 - an unusable worker is skipped
+                logger.info("private sonder-inference worker %s skipped: %s",
+                            endpoint.display_base_url,
+                            _bounded(exc if isinstance(exc, SonderError) else type(exc).__name__))
+                return False
+        if snapshot.document is None or (snapshot.state != "ready" and not snapshot.busy):
+            return False
+        models = snapshot.document.get("models")
+        if not isinstance(models, list):
+            return False
+        return model in {item.get("id") for item in models if isinstance(item, dict)}
 
     def _acquire_endpoint(self, usable, excluded: set[str]):
         """Pick the endpoint with the lowest expected cost and count it.

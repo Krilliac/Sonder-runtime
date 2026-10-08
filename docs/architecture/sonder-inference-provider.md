@@ -171,7 +171,15 @@ The primary's `max_inflight` is `SONDER_INFERENCE_MAX_INFLIGHT` (default 1).
 The per-token estimate is an EWMA of successful calls with the queueing in
 front of each call divided out, and an idle endpoint that has never been
 measured is tried once first. A much slower worker therefore receives only
-overflow work. A call moves to another endpoint
+overflow work.
+
+A worker is a candidate only on positive evidence: its health document
+(the cached health check, probed when stale) must be ready and must list the
+exact requested model id. A worker that has not answered, or does not list
+the model, never receives the request, because a 404 there would be final.
+The `default` alias never selects a worker, since each server resolves it
+to its own model. Tiers whose model only the primary serves therefore stay
+on the primary. A call moves to another endpoint
 only after `SonderInferenceUnreachable` (provably never executed there);
 timeouts, 4xx and 5xx are final, as on a single endpoint. When nothing is
 eligible the primary produces the refusal. `provider_status()` adds a

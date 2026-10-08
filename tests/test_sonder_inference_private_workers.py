@@ -81,7 +81,8 @@ class Hosts:
             behaviour = behaviour(payload)
         if isinstance(behaviour, BaseException):
             raise behaviour
-        return behaviour or _chat(payload["model"])
+        served = payload["model"] if payload["model"] != "default" else "sonder:latest"
+        return behaviour or _chat(served)
 
 
 @pytest.fixture
@@ -261,13 +262,14 @@ def test_concurrent_requests_spread_across_primary_and_worker(ca_bundle):
     assert gateway._inflight == {}
 
 
-def test_sequential_requests_alternate_when_idle(ca_bundle):
+def test_sequential_requests_use_both_idle_endpoints(ca_bundle):
+    # Which endpoint gets the later calls depends on measured latency (real
+    # wall time here), so only the exploration of both is deterministic.
     hosts = Hosts()
     gateway = _gateway(hosts, _env(ca_bundle))
     for prompt in "abcd":
         gateway.generate(ModelRequest(prompt=prompt, tier="fast"), _ctx())
-    bases = [base for base, _h, _ca in hosts.posts]
-    assert bases.count(PRIMARY) == 2 and bases.count(WORKER) == 2
+    assert {base for base, _h, _ca in hosts.posts} == {PRIMARY, WORKER}
 
 
 def test_a_much_slower_worker_only_gets_overflow(ca_bundle):
@@ -337,6 +339,37 @@ def test_worker_without_the_model_is_not_chosen(ca_bundle):
     gateway.provider_status()  # warms both health caches
     for prompt in "abc":
         gateway.generate(ModelRequest(prompt=prompt, tier="code"), _ctx())
+    assert {base for base, _h, _ca in hosts.posts} == {PRIMARY}
+
+
+def test_cold_worker_is_never_sent_a_model_it_does_not_list(ca_bundle):
+    """No warm-up: the first placements must already respect the worker's models."""
+    hosts = Hosts()
+    hosts.health[WORKER] = _health(models=("qwen3.6:35b", "sonder:latest"))
+    hosts.health[PRIMARY] = _health(models=("sonder:latest", "big-coder"))
+    gateway = _gateway(hosts, _env(ca_bundle, SONDER_INFERENCE_TIER_MODELS="code=big-coder"))
+    for prompt in "abcdef":
+        gateway.generate(ModelRequest(prompt=prompt, tier="code"), _ctx())
+    assert {base for base, _h, _ca in hosts.posts} == {PRIMARY}
+    hosts.posts.clear()
+    gateway.generate(ModelRequest(prompt="x", tier="fast", options={"model": "qwen3.6:35b"}), _ctx())
+    assert [base for base, _h, _ca in hosts.posts] == [WORKER]
+
+
+def test_default_alias_never_selects_a_worker(ca_bundle):
+    hosts = Hosts()
+    gateway = _gateway(hosts, _env(ca_bundle, SONDER_INFERENCE_MODEL=None))
+    for prompt in "abcd":
+        gateway.generate(ModelRequest(prompt=prompt, tier="fast"), _ctx())
+    assert {base for base, _h, _ca in hosts.posts} == {PRIMARY}
+
+
+def test_worker_whose_health_cannot_be_read_gets_nothing(ca_bundle):
+    hosts = Hosts()
+    hosts.health[WORKER] = _health(status="starting")
+    gateway = _gateway(hosts, _env(ca_bundle))
+    for prompt in "abc":
+        gateway.generate(ModelRequest(prompt=prompt, tier="fast"), _ctx())
     assert {base for base, _h, _ca in hosts.posts} == {PRIMARY}
 
 
