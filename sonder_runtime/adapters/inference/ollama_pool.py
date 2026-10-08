@@ -1265,7 +1265,12 @@ class OllamaWorkerPool:
                         or self._membership_clock() >= state.membership_expires_at
                     ):
                         continue
-                    if _membership and state.membership_state is None:
+                    # The controller's pass is the only periodic refresh, so it
+                    # also renews the static loopback lane. Skipping it let the
+                    # local primary's evidence lapse after one TTL while a remote
+                    # member that advertises the model kept every request.
+                    if (_membership and state.membership_state is None
+                            and not _is_loopback(state.endpoint.origin)):
                         continue
                     if not (
                         (force or self._capabilities_renewal_due(state, now, _renew_within))
