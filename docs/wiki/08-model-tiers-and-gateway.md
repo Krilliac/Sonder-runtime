@@ -264,7 +264,9 @@ fallback cannot fix. Chat and agent generation consumers follow provider
 bindings, including A2A chat, session summarize/title, interactive agents,
 workbench, autopilot, master/fleet workers, ensembles, web research and
 audit/helpers. Exact model pins, strict `sonder` aliases and durable fanout
-remain explicitly Ollama; images/schema retain the non-Ollama refusal, and the
+remain explicitly Ollama; images/schema retain the non-Ollama refusal (with
+`SONDER_INFERENCE_FALLBACK=ollama`, a Sonder Inference tier serves them on
+loopback Ollama instead, recorded in the turn receipt), and the
 sealed single-send codegen canary refuses a bound non-Ollama provider. See
 [the provider reference](../architecture/sonder-inference-provider.md) for
 the remaining explicit Ollama boundaries.

@@ -168,7 +168,16 @@ and only the sampling options the caller set (plus family defaults when
 `presence_penalty`, `frequency_penalty`, `repeat_penalty`, `repeat_last_n` and
 `num_ctx` pass through by name (the last four as Sonder extensions). `format`,
 `tools`, `tool_choice`, `functions` and `response_format` are refused locally
-with `InvalidInput`; Inference v1 would reject them anyway. `think` is
+with `InvalidInput`; Inference v1 would reject them anyway. On the legacy
+chat path (`_chat_request`), a step that needs one of them (a decoder schema,
+native tools, images or tool calls; `provider_bridge.ollama_only_feature`) is
+served on local Ollama instead when `SONDER_INFERENCE_FALLBACK=ollama` is set:
+the payload's own tier model, the loopback daemon only (never the worker pool,
+a `-cloud` model or a remote endpoint, which are refused). The reroute is
+logged, announced as `route.changed` (`reason_code=ollama_only_feature`) and
+noted in the turn receipt's `degraded` list as `served by ollama (ollama-only
+feature: ...)`. Without the declaration the step is refused with a 400 that
+names the fix. `think` is
 forwarded as `chat_template_kwargs.enable_thinking` when the server advertises
 support; otherwise `think=True` is refused and `think=False` dropped.
 
@@ -333,7 +342,9 @@ interactive agents, workbench turns, autopilot planner/task/review calls,
 master/fleet workers, ensembles, web research and audit/helper calls. Each
 call resolves its provider from the selected tier. Exact model pins, strict
 `sonder` aliases and durable fanout remain explicitly Ollama-bound; image and
-schema requests retain the chat refusal for non-Ollama providers, and the
+schema requests retain the chat refusal for non-Ollama providers (a
+`sonder_inference` tier with `SONDER_INFERENCE_FALLBACK=ollama` serves them on
+local Ollama instead; see the wire format above), and the
 sealed single-send codegen canary refuses a bound non-Ollama provider. The
 `/v1/models` listing and escalation rungs may still deduplicate by Ollama model
 name; that identity has no meaning for an Inference-bound tier.
