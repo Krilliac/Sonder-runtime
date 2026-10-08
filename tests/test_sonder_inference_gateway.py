@@ -636,6 +636,7 @@ def test_provider_status_keys_and_types_when_ready():
         "tier_models": {tier: DEFAULT_MODEL for tier in
                         ("fast", "general", "code", "reasoning", "vision")},
         "busy": False,
+        "workers": None,
     }
 
 

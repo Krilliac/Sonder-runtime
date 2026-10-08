@@ -55,6 +55,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -134,6 +135,13 @@ ENV_HEALTH_TTL = "SONDER_INFERENCE_HEALTH_TTL_SECONDS"
 ENV_HEALTH_TIMEOUT = "SONDER_INFERENCE_HEALTH_TIMEOUT_SECONDS"
 ENV_HEALTH_STALE = "SONDER_INFERENCE_HEALTH_STALE_SECONDS"
 ENV_FALLBACK = "SONDER_INFERENCE_FALLBACK"
+ENV_PRIVATE_WORKERS = "SONDER_INFERENCE_PRIVATE_WORKERS"
+MAX_PRIVATE_WORKERS = 8
+MAX_WORKER_INFLIGHT = 16
+MIN_WORKER_TOKEN_LENGTH = 16
+PRIVATE_WORKERS_LIMIT = 16_384
+_TOKEN_ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]{0,127}\Z")
+_WORKER_KEYS = frozenset({"url", "ca_bundle", "token_env", "max_inflight"})
 
 # Pinned by the ecosystem contract (section 3.4): correlation ids outside this
 # alphabet are omitted rather than rewritten, because Inference rejects them.
@@ -155,7 +163,7 @@ STATUS_KEYS = (
     "provider", "state", "healthy", "checked_at", "detail", "capabilities",
     "base_url", "version", "api_version", "models", "synthetic", "identity",
     "telemetry", "fallback", "fallback_count", "tier_models",
-    "busy",
+    "busy", "workers",
 )
 
 _BIND_ADDRESS_REWRITES = {"0.0.0.0": "127.0.0.1", "::": "::1"}
@@ -216,6 +224,9 @@ class SonderInferenceResponse(ModelResponse):
 
     timings: Mapping[str, int | float] | None = None
     finish_reason: str | None = None
+    # Scheme and host of the endpoint that served it, when private workers
+    # are configured (never a path, query or credential).
+    endpoint: str | None = None
 
 
 # -- transport ---------------------------------------------------------------
@@ -302,9 +313,36 @@ class _BudgetedHTTPHandler(urllib.request.HTTPHandler):
         )
 
 
+_TRUST = threading.local()
+
+
+@contextmanager
+def trust_scope(ca_bundle: str):
+    """Verify HTTPS exchanges on this thread against exactly ``ca_bundle``.
+
+    A private worker names its own CA bundle; inside this scope the bundle is
+    the only trust anchor (the system store is not consulted), so a private
+    worker's URL cannot be satisfied by a publicly issued certificate.  An
+    empty value keeps the system trust store.  Scopes nest and always restore.
+    """
+    previous = getattr(_TRUST, "ca_bundle", "")
+    _TRUST.ca_bundle = ca_bundle or ""
+    try:
+        yield
+    finally:
+        _TRUST.ca_bundle = previous
+
+
+def _tls_context() -> ssl.SSLContext:
+    ca_bundle = getattr(_TRUST, "ca_bundle", "")
+    if ca_bundle:
+        return ssl.create_default_context(cafile=ca_bundle)
+    return ssl.create_default_context()
+
+
 class _BudgetedHTTPSHandler(urllib.request.HTTPSHandler):
     def __init__(self, budget: _ExchangeBudget) -> None:
-        super().__init__(context=ssl.create_default_context())
+        super().__init__(context=_tls_context())
         self._budget = budget
 
     def https_open(self, req):
@@ -421,9 +459,19 @@ class SonderInferenceConfig:
     base_url_source: str = "default"
     health_timeout_seconds: float = HEALTH_PROBE_TIMEOUT_SECONDS
     health_stale_seconds: float = DEFAULT_HEALTH_STALE_SECONDS
+    # Private-worker lane (see ``parse_private_workers``).  ``workers`` is set
+    # only on the primary; ``private_worker``/``ca_bundle`` only on a worker.
+    workers: tuple["PrivateWorkerSpec", ...] = ()
+    private_worker: bool = False
+    ca_bundle: str = ""
+    max_inflight: int = 1
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "base_url", normalize_base_url(self.base_url))
+        object.__setattr__(self, "workers", tuple(self.workers or ()))
+        if type(self.max_inflight) is not int or not 1 <= self.max_inflight <= MAX_WORKER_INFLIGHT:
+            raise InvalidInput("sonder-inference max_inflight must be an integer in [1, %d]"
+                               % MAX_WORKER_INFLIGHT)
         if not isinstance(self.model, str) or not _MODEL_ID.fullmatch(self.model):
             raise InvalidInput("sonder-inference model id must be 1-128 non-space characters")
         tiers = dict(self.tier_models or {})
@@ -567,6 +615,113 @@ def read_ready_file(path: str) -> str:
     return url.strip()
 
 
+@dataclass(frozen=True)
+class PrivateWorkerSpec:
+    """One operator-approved private Sonder Inference endpoint.
+
+    The token itself is never part of the spec: ``token_env`` names the
+    environment variable that holds it, read when the worker is used.
+    """
+
+    url: str
+    ca_bundle: str
+    token_env: str
+    max_inflight: int = 1
+
+    @property
+    def display_url(self) -> str:
+        parts = urlsplit(self.url)
+        return urlunsplit((parts.scheme, parts.netloc, "", "", ""))
+
+
+def _private_worker_url(raw: object, where: str) -> str:
+    if not isinstance(raw, str):
+        raise InvalidInput("%s.url must be a string" % where)
+    url = normalize_base_url(raw)
+    parts = urlsplit(url)
+    if parts.scheme != "https":
+        raise InvalidInput("%s.url must use https://" % where)
+    try:
+        address = ipaddress.ip_address(parts.hostname or "")
+    except ValueError:
+        raise InvalidInput(
+            "%s.url host must be an IP literal on a private network (a DNS "
+            "name could resolve to a public host)" % where
+        ) from None
+    if (address.is_loopback or address.is_unspecified or address.is_multicast
+            or not (address.is_private or address.is_link_local)):
+        raise InvalidInput(
+            "%s.url host %s is not a private-network address; private workers "
+            "never reach public or loopback hosts" % (where, address)
+        )
+    if parts.port is None:
+        raise InvalidInput("%s.url must name an explicit port" % where)
+    return url
+
+
+def parse_private_workers(raw: str, *, allow_remote: bool,
+                          primary_url: str = "") -> tuple[PrivateWorkerSpec, ...]:
+    """Parse ``SONDER_INFERENCE_PRIVATE_WORKERS`` (a JSON array of objects).
+
+    Each object has ``url`` (https, private IP literal, explicit port),
+    ``ca_bundle`` (absolute path to an existing PEM file, the worker's only
+    trust anchor), ``token_env`` (the variable holding its bearer token) and
+    optionally ``max_inflight`` (1-16, default 1).  The list is the explicit
+    private-node consent for inference; it is honoured only together with the
+    provider's remote opt-in (``SONDER_ALLOW_REMOTE_INFERENCE=1``) and never
+    implies cloud consent.  Any fault refuses the whole configuration.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return ()
+    if not allow_remote:
+        raise InvalidInput(
+            "%s lists private workers but %s is not 1; private inference "
+            "workers require the remote-inference opt-in" % (ENV_PRIVATE_WORKERS, ENV_ALLOW_REMOTE)
+        )
+    if len(text) > PRIVATE_WORKERS_LIMIT:
+        raise InvalidInput("%s exceeds %d characters" % (ENV_PRIVATE_WORKERS, PRIVATE_WORKERS_LIMIT))
+    try:
+        document = json.loads(text)
+    except (ValueError, RecursionError):
+        raise InvalidInput("%s must be a JSON array of worker objects" % ENV_PRIVATE_WORKERS) from None
+    if not isinstance(document, list) or not 1 <= len(document) <= MAX_PRIVATE_WORKERS:
+        raise InvalidInput(
+            "%s must be a JSON array of 1-%d worker objects" % (ENV_PRIVATE_WORKERS, MAX_PRIVATE_WORKERS)
+        )
+    workers: list[PrivateWorkerSpec] = []
+    seen = {primary_url} if primary_url else set()
+    for index, item in enumerate(document):
+        where = "%s[%d]" % (ENV_PRIVATE_WORKERS, index)
+        if not isinstance(item, dict) or not {"url", "ca_bundle", "token_env"} <= set(item) \
+                or not set(item) <= _WORKER_KEYS:
+            raise InvalidInput(
+                "%s must be an object with url, ca_bundle, token_env and optional max_inflight" % where
+            )
+        url = _private_worker_url(item["url"], where)
+        if url in seen:
+            raise InvalidInput("%s.url duplicates another endpoint" % where)
+        seen.add(url)
+        ca_bundle = item["ca_bundle"]
+        if not isinstance(ca_bundle, str) or not ca_bundle.strip():
+            raise InvalidInput("%s.ca_bundle must be a path" % where)
+        ca_path = Path(ca_bundle.strip()).expanduser()
+        if not ca_path.is_absolute() or not ca_path.is_file():
+            raise InvalidInput("%s.ca_bundle must be an absolute path to an existing file" % where)
+        token_env = item["token_env"]
+        if not isinstance(token_env, str) or not _TOKEN_ENV_NAME.fullmatch(token_env):
+            raise InvalidInput("%s.token_env must be an upper-case environment variable name" % where)
+        if token_env == ENV_API_KEY:
+            raise InvalidInput(
+                "%s.token_env must not reuse %s; each endpoint has its own token" % (where, ENV_API_KEY)
+            )
+        inflight = item.get("max_inflight", 1)
+        if type(inflight) is not int or not 1 <= inflight <= MAX_WORKER_INFLIGHT:
+            raise InvalidInput("%s.max_inflight must be an integer in [1, %d]" % (where, MAX_WORKER_INFLIGHT))
+        workers.append(PrivateWorkerSpec(url, str(ca_path), token_env, inflight))
+    return tuple(workers)
+
+
 def config_from_env(env: Mapping[str, str] | None = None) -> SonderInferenceConfig:
     """Resolve settings lazily from the environment (never at import)."""
     source = os.environ if env is None else env
@@ -581,7 +736,12 @@ def config_from_env(env: Mapping[str, str] | None = None) -> SonderInferenceConf
     allow_remote_raw = str(source.get(ENV_ALLOW_REMOTE, "") or "").strip()
     if allow_remote_raw not in ("", "0", "1"):
         raise InvalidInput("%s must be 0 or 1, got %r" % (ENV_ALLOW_REMOTE, allow_remote_raw))
+    workers = parse_private_workers(
+        str(source.get(ENV_PRIVATE_WORKERS, "") or ""),
+        allow_remote=allow_remote_raw == "1", primary_url=normalize_base_url(base_url),
+    )
     return SonderInferenceConfig(
+        workers=workers,
         base_url=base_url,
         model=str(source.get(ENV_MODEL, "") or "").strip() or DEFAULT_MODEL,
         tier_models=_parse_tier_models(str(source.get(ENV_TIER_MODELS, "") or "")),
@@ -600,9 +760,11 @@ def check_endpoint_policy(settings: SonderInferenceConfig) -> None:
 
     This is the part of consent that applies to every request, probes
     included, because every request carries the API key.  Prompt-bearing
-    calls additionally require ``OperationContext.cloud_allowed``.
+    calls additionally require ``OperationContext.cloud_allowed`` -- except
+    on an approved private worker, whose consent is the private-worker list
+    itself (and which must then also carry its own CA bundle).
     """
-    if settings.loopback:
+    if settings.loopback and not settings.private_worker:
         return
     missing = []
     if not settings.allow_remote:
@@ -610,7 +772,9 @@ def check_endpoint_policy(settings: SonderInferenceConfig) -> None:
     if urlsplit(settings.base_url).scheme != "https":
         missing.append("an https:// base URL")
     if not settings.api_key:
-        missing.append(ENV_API_KEY)
+        missing.append("a worker token" if settings.private_worker else ENV_API_KEY)
+    if settings.private_worker and not settings.ca_bundle:
+        missing.append("a worker CA bundle")
     if missing:
         raise Forbidden(
             "sonder-inference endpoint %s is not loopback; remote inference "
@@ -804,6 +968,13 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         # Settings of the call in flight on this thread, so the transport's
         # error classifiers can name the endpoint and update its health.
         self._call = threading.local()
+        # Private-worker placement (primary only): one child gateway per
+        # approved worker, rebuilt when its resolved settings change, plus the
+        # in-flight count per endpoint and a rotation cursor for ties.
+        self._transport_seams = (transport, get_transport)
+        self._workers: dict[str, tuple[tuple, SonderInferenceGateway]] = {}
+        self._inflight: dict[str, int] = {}
+        self._cursor = 0
 
     @property
     def last_response_meta(self) -> dict[str, object]:
@@ -833,7 +1004,9 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
     def _enforce_consent(self, cfg: OpenAICompatibleConfig, context: OperationContext) -> None:
         settings = self.settings()
         check_endpoint_policy(settings)
-        if not settings.loopback and not context.cloud_allowed:
+        # An approved private worker is its own consent lane: it neither needs
+        # nor grants cloud consent.  Every other non-loopback endpoint does.
+        if not settings.loopback and not settings.private_worker and not context.cloud_allowed:
             raise Forbidden(
                 "sonder-inference endpoint %s is not loopback and this "
                 "operation context does not allow prompts to leave the machine"
@@ -1011,7 +1184,8 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         self._call.settings = settings
         cfg = OpenAICompatibleConfig(base_url=settings.base_url, api_key=settings.api_key)
         try:
-            status, document = self.get_json("/v1/sonder/health", timeout=timeout, cfg=cfg)
+            with trust_scope(settings.ca_bundle):
+                status, document = self.get_json("/v1/sonder/health", timeout=timeout, cfg=cfg)
         except SonderInferenceUnreachable as exc:
             return snapshot("unavailable", exc.reason)
         except DeadlineExceeded:
@@ -1161,7 +1335,8 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
             path += "?model=" + quote(model, safe="")
         self._call.settings = settings
         cfg = OpenAICompatibleConfig(base_url=settings.base_url, api_key=settings.api_key)
-        status, document = self.get_json(path, timeout=HEALTH_PROBE_TIMEOUT_SECONDS, cfg=cfg)
+        with trust_scope(settings.ca_bundle):
+            status, document = self.get_json(path, timeout=HEALTH_PROBE_TIMEOUT_SECONDS, cfg=cfg)
         if status == 404:
             raise InvalidInput("sonder-inference does not serve model %r" % (model or ""))
         if status in (401, 403):
@@ -1215,6 +1390,33 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         """``{provider: {tier: model}}`` from configuration alone (no I/O)."""
         return {PROVIDER_ID: self._tier_models(self.settings())}
 
+    def _workers_status(self, settings: SonderInferenceConfig) -> list[dict[str, object]]:
+        """One content-free row per approved private worker (never the token)."""
+        rows: list[dict[str, object]] = []
+        for spec in settings.workers:
+            row: dict[str, object] = {
+                "base_url": spec.display_url, "state": "unavailable", "healthy": False,
+                "detail": None, "models": [], "max_inflight": spec.max_inflight,
+            }
+            with self._lock:
+                row["inflight"] = self._inflight.get(spec.url, 0)
+            try:
+                gateway = self._worker_gateway(settings, spec)
+                snap = gateway.health()
+            except Exception as exc:  # noqa: BLE001 - status reports, never raises
+                row["detail"] = _bounded(exc if isinstance(exc, SonderError) else type(exc).__name__)
+                rows.append(row)
+                continue
+            models = (snap.document or {}).get("models")
+            row.update(
+                state=snap.state, healthy=snap.state == "ready", detail=snap.detail,
+                models=[item["id"] for item in models
+                        if isinstance(item, dict) and isinstance(item.get("id"), str)]
+                if isinstance(models, list) else [],
+            )
+            rows.append(row)
+        return rows
+
     def provider_status(self) -> Mapping[str, Mapping[str, object]]:
         """Content-free status for doctor, the ecosystem route and the app."""
         entry: dict[str, object] = {key: None for key in STATUS_KEYS}
@@ -1227,6 +1429,8 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
             settings = self.settings()
             entry["base_url"] = settings.display_base_url
             entry["tier_models"] = self._tier_models(settings)
+            if settings.workers:
+                entry["workers"] = self._workers_status(settings)
             snap = self.health(settings=settings)
         except SonderInferenceUnreachable as exc:
             entry["detail"] = _bounded(exc.summary)
@@ -1331,7 +1535,8 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
             if timeout <= 0:
                 raise DeadlineExceeded("sonder-inference retry budget exhausted")
             try:
-                return self._post("/v1/chat/completions", payload, cfg, timeout, context=context)
+                with trust_scope(settings.ca_bundle):
+                    return self._post("/v1/chat/completions", payload, cfg, timeout, context=context)
             except SonderInferenceBusyTimeout as exc:
                 if attempt or (live is not None and (live.generated or live.cancelled)):
                     raise
@@ -1350,7 +1555,156 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         timeout = settings.timeout_seconds
         return timeout if remaining is None else min(timeout, remaining)
 
+    # -- private-worker placement -------------------------------------------
+    #
+    # With approved private workers configured, each request is placed whole
+    # on the primary or one worker: the least-loaded endpoint (in-flight /
+    # max_inflight) that is not known to be down and serves the model, ties
+    # rotated.  A request moves to another endpoint only after
+    # SonderInferenceUnreachable, i.e. when it provably never executed; any
+    # other failure is final, exactly as on a single endpoint.
+
+    def _worker_settings(self, settings: SonderInferenceConfig,
+                         spec: PrivateWorkerSpec) -> SonderInferenceConfig:
+        source = os.environ if self._env is None else self._env
+        token = str(source.get(spec.token_env, "") or "").strip()
+        if len(token) < MIN_WORKER_TOKEN_LENGTH:
+            raise Forbidden(
+                "private sonder-inference worker %s: %s is unset or shorter than %d characters"
+                % (spec.display_url, spec.token_env, MIN_WORKER_TOKEN_LENGTH)
+            )
+        return SonderInferenceConfig(
+            base_url=spec.url, model=settings.model, tier_models=dict(settings.tier_models),
+            api_key=token, allow_remote=True, timeout_seconds=settings.timeout_seconds,
+            health_ttl_seconds=settings.health_ttl_seconds, base_url_source="private_worker",
+            health_timeout_seconds=settings.health_timeout_seconds,
+            health_stale_seconds=settings.health_stale_seconds,
+            private_worker=True, ca_bundle=spec.ca_bundle, max_inflight=spec.max_inflight,
+        )
+
+    def _worker_gateway(self, settings: SonderInferenceConfig,
+                        spec: PrivateWorkerSpec) -> "SonderInferenceGateway":
+        worker = self._worker_settings(settings, spec)
+        key = (worker.base_url, worker.api_key, worker.ca_bundle, worker.max_inflight, worker.model,
+               tuple(sorted(worker.tier_models.items())), worker.timeout_seconds,
+               worker.health_ttl_seconds, worker.health_timeout_seconds, worker.health_stale_seconds)
+        with self._lock:
+            cached = self._workers.get(spec.url)
+            if cached is not None and cached[0] == key:
+                return cached[1]
+        transport, get_transport = self._transport_seams
+        gateway = SonderInferenceGateway(
+            worker, transport=transport, get_transport=get_transport,
+            request_admission=self._request_admission, env=self._env,
+            monotonic=self._monotonic, wall_clock=self._wall_clock,
+        )
+        with self._lock:
+            self._workers[spec.url] = (key, gateway)
+        return gateway
+
+    def _peek_health(self, settings: SonderInferenceConfig) -> HealthSnapshot | None:
+        """The cached snapshot within its TTL, without probing."""
+        with self._lock:
+            cached = self._health_cache
+        if cached is None or cached.base_url != settings.base_url:
+            return None
+        if self._monotonic() - cached.checked_monotonic >= settings.health_ttl_seconds and not cached.busy:
+            return None
+        return cached
+
+    @staticmethod
+    def _serves(snapshot: HealthSnapshot | None, model: str) -> bool:
+        """False only when fresh health lists models and ``model`` is absent."""
+        if snapshot is None or snapshot.document is None or model == DEFAULT_MODEL:
+            return True
+        models = snapshot.document.get("models")
+        if not isinstance(models, list):
+            return True
+        ids = {item.get("id") for item in models if isinstance(item, dict)}
+        return model in ids
+
+    def _placement_candidates(self, request: ModelRequest, settings: SonderInferenceConfig):
+        """``[(key, gateway, settings)]`` for the primary and each usable worker."""
+        candidates = [(settings.base_url, self, settings)]
+        for spec in settings.workers:
+            try:
+                gateway = self._worker_gateway(settings, spec)
+            except SonderError as exc:
+                logger.warning("private sonder-inference worker skipped: %s", _bounded(exc))
+                continue
+            candidates.append((spec.url, gateway, gateway.settings()))
+        model = self.select_model(request, settings)
+        usable = []
+        for key, gateway, endpoint in candidates:
+            snapshot = gateway._peek_health(endpoint)
+            if snapshot is not None and snapshot.state != "ready" and not snapshot.busy:
+                continue
+            if not self._serves(snapshot, model):
+                continue
+            usable.append((key, gateway, endpoint))
+        return usable
+
+    def _acquire_endpoint(self, usable, excluded: set[str]):
+        with self._lock:
+            open_ = [item for item in usable if item[0] not in excluded]
+            if not open_:
+                return None
+            start = self._cursor % len(open_)
+            self._cursor += 1
+            rotated = open_[start:] + open_[:start]
+            chosen = min(rotated, key=lambda item: (
+                self._inflight.get(item[0], 0) / item[2].max_inflight,
+                self._inflight.get(item[0], 0),
+            ))
+            self._inflight[chosen[0]] = self._inflight.get(chosen[0], 0) + 1
+            return chosen
+
+    def _release_endpoint(self, key: str) -> None:
+        with self._lock:
+            remaining = self._inflight.get(key, 0) - 1
+            if remaining > 0:
+                self._inflight[key] = remaining
+            else:
+                self._inflight.pop(key, None)
+
     def generate(self, request: ModelRequest, context: OperationContext) -> ModelResponse:
+        settings = self.settings()
+        if settings.private_worker or not settings.workers:
+            return self._generate_here(request, context)
+        self._call.response_meta = {}
+        usable = self._placement_candidates(request, settings)
+        if not usable:
+            # Nothing is known to be able to take it: let the primary produce
+            # the precise refusal (not ready, unknown model, consent, ...).
+            return self._generate_here(request, context)
+        excluded: set[str] = set()
+        last_error: SonderInferenceUnreachable | None = None
+        while True:
+            chosen = self._acquire_endpoint(usable, excluded)
+            if chosen is None:
+                assert last_error is not None
+                raise last_error
+            key, gateway, endpoint = chosen
+            try:
+                logger.info(
+                    "sonder-inference placed request on %s (%s)",
+                    endpoint.display_base_url, "private worker" if endpoint.private_worker else "primary",
+                )
+                response = gateway._generate_here(request, context)
+            except SonderInferenceUnreachable as exc:
+                # Provably never executed there: another endpoint may take it.
+                excluded.add(key)
+                last_error = exc
+                continue
+            finally:
+                self._release_endpoint(key)
+                if gateway is not self:
+                    self._call.response_meta = gateway.last_response_meta
+            if isinstance(response, SonderInferenceResponse):
+                response = replace(response, endpoint=endpoint.display_base_url)
+            return response
+
+    def _generate_here(self, request: ModelRequest, context: OperationContext) -> ModelResponse:
         self._call.response_meta = {}
         if not (request.prompt or "").strip():
             raise InvalidInput("model request prompt is empty")
@@ -1455,10 +1809,12 @@ __all__ = [
     "API_VERSION",
     "CORRELATION_VALUE",
     "DEFAULT_BASE_URL",
+    "ENV_PRIVATE_WORKERS",
     "HealthSnapshot",
     "IdentityObservation",
     "PROVIDER_ID",
     "PROVIDER_LABEL",
+    "PrivateWorkerSpec",
     "Readiness",
     "STATUS_KEYS",
     "SonderInferenceConfig",
@@ -1472,5 +1828,7 @@ __all__ = [
     "direct_post_transport",
     "is_loopback_url",
     "normalize_base_url",
+    "parse_private_workers",
     "read_ready_file",
+    "trust_scope",
 ]

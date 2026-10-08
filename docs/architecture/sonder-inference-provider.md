@@ -53,6 +53,7 @@ task does not switch thinking or sampling modes between decisions.
 | `SONDER_INFERENCE_TIER_MODELS` | unset | `fast=a,general=b`; keys must be provider tiers. |
 | `SONDER_INFERENCE_API_KEY` | unset | Sent as `Authorization: Bearer`; in the log redaction set. |
 | `SONDER_ALLOW_REMOTE_INFERENCE` | `0` | `1` permits a non-loopback base URL (see consent). |
+| `SONDER_INFERENCE_PRIVATE_WORKERS` | unset | JSON array of approved private workers, `[{"url": "https://10.77.0.2:8443/sonder-inference", "ca_bundle": "C:/.../ca.pem", "token_env": "SONDER_INFERENCE_NODE1_TOKEN", "max_inflight": 2}]` (see Private workers). Requires `SONDER_ALLOW_REMOTE_INFERENCE=1`. |
 | `SONDER_INFERENCE_TIMEOUT_SECONDS` | `300` | Per-call ceiling, never beyond the operation deadline. |
 | `SONDER_INFERENCE_HEALTH_TTL_SECONDS` | `5` | How long a health observation is reused. |
 | `SONDER_INFERENCE_HEALTH_TIMEOUT_SECONDS` | `5` | Probe budget in seconds, greater than zero and at most 6. Generation retries a timeout/overloaded probe once with twice this budget, capped at 6 seconds and the operation's remaining budget. |
@@ -134,6 +135,44 @@ summary, without prompt or response content.
   cloud, from sending prompts off-host through an env-only opt-in.
 - Health and identity probes apply the URL, TLS and key checks (they carry
   the key) but not the context flag (they carry no prompt).
+
+## Private workers
+
+`SONDER_INFERENCE_PRIVATE_WORKERS` is a separate consent lane for
+operator-approved Sonder Inference servers on the owner's private network
+(for example a second PC behind a TLS proxy). It is not cloud consent and
+grants none: hosted tiers, `cloud_allowed` and remote-Ollama consent are
+unchanged by it, and it is unchanged by them.
+
+- It is honoured only with `SONDER_ALLOW_REMOTE_INFERENCE=1`; a list without
+  that opt-in is a configuration error, never silently ignored.
+- Each worker URL must be `https://`, an IP literal in a private or
+  link-local range (never a DNS name, loopback or public address) with an
+  explicit port; a path prefix for the proxy is allowed.
+- `ca_bundle` (an absolute path to an existing file) is the worker's only
+  trust anchor: the system store is not consulted for it, so a publicly
+  issued certificate cannot impersonate the worker.
+- `token_env` names the variable holding the worker's bearer token (at least
+  16 characters). The token is read when used, never stored in the list,
+  never sent to another endpoint, and never reported. A worker whose token
+  is missing is skipped and shown as such in status. It may not reuse
+  `SONDER_INFERENCE_API_KEY`.
+- Prompt-bearing calls to an approved worker do not need `cloud_allowed`;
+  every other non-loopback endpoint still does. The lane applies to every
+  operation that reaches this provider, A2A included; leave the list unset
+  where that is not wanted.
+
+Placement is whole-request: each call goes to the least-loaded endpoint
+(in-flight divided by `max_inflight`; the primary counts as 1) among the
+primary and the workers that are not known to be down (fresh health) and
+serve the requested model, ties rotated. A call moves to another endpoint
+only after `SonderInferenceUnreachable` (provably never executed there);
+timeouts, 4xx and 5xx are final, as on a single endpoint. When nothing is
+eligible the primary produces the refusal. `provider_status()` adds a
+`workers` list (scheme and host, state, models, in-flight; never a path or
+token), each response carries `endpoint`, and every placement is logged at
+INFO as `sonder-inference placed request on <scheme://host> (primary|private
+worker)`.
 
 ## Transport
 
