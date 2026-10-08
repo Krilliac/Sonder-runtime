@@ -91,9 +91,12 @@ def test_long_lived_entrypoint_admits_configured_static_remote_worker(monkeypatc
         pool = bootstrap.default_app().inference_pool
         deadline = time.monotonic() + 10
         # No admin refresh, no request: the owner surface alone must admit it.
-        while time.monotonic() < deadline and not _remote_record(pool)["healthy"]:
+        # The membership pass also renews the static loopback lane, so both
+        # workers become eligible without any request-driven refresh.
+        while time.monotonic() < deadline and not (
+                _remote_record(pool)["healthy"]
+                and pool.summary()["eligible_worker_count"] == 2):
             time.sleep(0.02)
-        # The local primary is still unprobed here; only the remote is proven.
         observed.append((pool.summary()["eligible_worker_count"], _remote_record(pool)))
 
     monkeypatch.setattr(serve, "main", run_interface)
@@ -107,8 +110,8 @@ def test_long_lived_entrypoint_admits_configured_static_remote_worker(monkeypatc
         ollama_pool.reset_typed_workers()
     assert len(observed) == 1
     eligible, remote = observed[0]
-    assert REMOTE in probes
-    assert eligible == 1
+    assert REMOTE in probes and LOCAL in probes
+    assert eligible == 2
     assert remote["state"] == "ready" and remote["healthy"] is True
     assert remote["model_preview"] == ["qwen3.6:35b"] and remote["version"] == "0.33.2"
 
