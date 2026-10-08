@@ -27,6 +27,52 @@ def safe_mcp_error(value) -> str:
     return "runtime source refresh failed"
 
 
+# Errors a fresh server.py raises when it imports a helper module that this
+# process already holds at an older version (sys.modules is not refreshed for
+# helpers outside the live-reload watch list). Observed 2026-10-08 after a
+# 340-file fast-forward under a running MCP server: the new
+# ``fanout_synthesis`` imported ``synthesis_rows`` from the cached, older
+# ``fanout_receipt``. No later refresh can succeed until the process restarts.
+_SKEW_ERROR_TYPES = frozenset({"ImportError", "ModuleNotFoundError", "AttributeError", "NameError"})
+
+
+def stale_registry_action(data) -> str:
+    """Operator action when the registry is stale behind a failed refresh.
+
+    Returns an empty string unless the last refresh failed AND the source on
+    disk differs from the loaded registry. For import-shaped failures the
+    action names the restart explicitly: retrying cannot help, because the
+    stale helper modules stay cached for the life of the process.
+    """
+    error = str((data or {}).get("last_error") or "")
+    loaded = str((data or {}).get("loaded_digest") or "")
+    current = str((data or {}).get("current_digest") or "")
+    if not error or not loaded or not current or loaded == current:
+        return ""
+    if error.partition(":")[0] in _SKEW_ERROR_TYPES:
+        return (
+            "restart the Sonder MCP server; server.py changed on disk and imports "
+            "helper code this process holds at an older version, which live "
+            "refresh does not reload"
+        )
+    return "fix the source error or restart the Sonder MCP server to load server.py"
+
+
+def capability_shadow_line(report: str, stale_action: str) -> str:
+    """Render the diagnostics shadow line, qualified while the registry is stale.
+
+    Watched helper modules (``tool_capabilities`` among them) live-reload even
+    when ``server.py`` cannot, so a stale registry is compared against
+    descriptors from newer source; the resulting mismatches are version skew,
+    not descriptor drift, and must not read as plain drift.
+    """
+    prefix = (
+        "UNRELIABLE (stale MCP registry; descriptors may be newer than the "
+        "loaded tool surfaces) " if stale_action else ""
+    )
+    return "  tool capability shadow: %s%s" % (prefix, report)
+
+
 def format_mcp_runtime(data, *, recovery_action) -> str:
     """Render the MCP runtime status block.
 
@@ -90,6 +136,9 @@ def format_mcp_runtime(data, *, recovery_action) -> str:
             "  ERROR: %s (last known-good registry remains active)"
             % safe_mcp_error(data["last_error"])
         )
+        stale_action = stale_registry_action(data)
+        if stale_action:
+            lines.append("  ACTION: %s" % stale_action)
     if data.get("last_notification_error"):
         lines.append("  notification warning: MCP list-change notification failed")
     return "\n".join(lines)

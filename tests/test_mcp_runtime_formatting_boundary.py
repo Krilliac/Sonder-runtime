@@ -90,3 +90,53 @@ def test_root_wrapper_collects_live_data_and_injects_the_recovery_action(monkeyp
     assert "  status: live | live source refresh: on" in server.format_mcp_runtime()
     monkeypatch.setattr(server, "_safe_mcp_recovery_action", lambda _p: "act now")
     assert "  ACTION: act now" in server.format_mcp_runtime(_state(provenance={"issue": "stale"}))
+
+
+def test_stale_registry_after_an_import_failure_names_the_restart():
+    # The shape seen live on 2026-10-08: a fast-forward changed server.py and
+    # its helpers under a running server; the refresh hit ImportError against
+    # a cached older helper, and every later refresh fails the same way.
+    stale = _state(
+        status="error", last_error="ImportError: source refresh failed",
+        loaded_digest="11a08fdc9775aa", current_digest="945b2d7f1dfcbb",
+    )
+    action = rendering.stale_registry_action(stale)
+    assert action.startswith("restart the Sonder MCP server")
+    lines = rendering.format_mcp_runtime(stale, recovery_action=lambda _p: "").splitlines()
+    assert lines[-2:] == [
+        "  ERROR: ImportError: source refresh failed (last known-good registry remains active)",
+        "  ACTION: " + action,
+    ]
+
+
+def test_stale_registry_action_stays_silent_without_a_pending_source_change():
+    assert rendering.stale_registry_action({}) == ""
+    assert rendering.stale_registry_action(None) == ""
+    # Error but the loaded registry already matches disk: nothing is pending.
+    assert rendering.stale_registry_action(_state(last_error="ImportError: x")) == ""
+    # Pending change but no failure: an ordinary refresh will pick it up.
+    assert rendering.stale_registry_action(_state(current_digest="different")) == ""
+    other = rendering.stale_registry_action(
+        _state(last_error="SyntaxError: source refresh failed", current_digest="different")
+    )
+    assert other == "fix the source error or restart the Sonder MCP server to load server.py"
+
+
+def test_diagnostics_marks_capability_shadow_unreliable_while_registry_is_stale(monkeypatch):
+    stale = _state(
+        status="error", last_error="ImportError: source refresh failed",
+        loaded_digest="11a08fdc9775aa", current_digest="945b2d7f1dfcbb",
+    )
+    monkeypatch.setattr(server, "mcp_runtime_data", lambda: stale)
+    monkeypatch.setattr(server, "tool_capability_shadow_report", lambda: "ERROR 1 drift issue(s): x")
+    text = server.diagnostics()
+    assert "  mcp refresh ACTION: restart the Sonder MCP server" in text
+    assert (
+        "  tool capability shadow: UNRELIABLE (stale MCP registry; descriptors may be "
+        "newer than the loaded tool surfaces) ERROR 1 drift issue(s): x"
+    ) in text
+
+    monkeypatch.setattr(server, "mcp_runtime_data", lambda: _state())
+    text = server.diagnostics()
+    assert "mcp refresh ACTION" not in text
+    assert "  tool capability shadow: ERROR 1 drift issue(s): x" in text
