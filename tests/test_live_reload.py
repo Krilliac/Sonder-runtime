@@ -158,6 +158,52 @@ def test_reload_preserves_only_explicitly_guarded_private_state(monkeypatch, tmp
         live_reload._ERRORS.pop(module_name, None)
 
 
+def test_reload_preserves_every_private_name_bound_inside_the_guard(monkeypatch, tmp_path):
+    """A guard keyed on one name often initializes several (master_orchestrator:
+    ``if "_OWNER_ID" not in globals(): _OWNER_ID = ...; _OWNER_REGISTERED = False``).
+    Carrying only the tested name made the guard skip on reload, so the
+    sibling names were never bound and the first call raised NameError."""
+    module_name = "live_reload_guard_siblings_mod"
+    module_path = tmp_path / (module_name + ".py")
+    source = (
+        'if "_OWNER_ID" not in globals():\n'
+        '    _OWNER_ID = object()\n'
+        '    _OWNER_REGISTERED = False\n'
+        '    _HEARTBEAT: list = []\n'
+        '    _A, (_B, PUBLIC_RETIRED) = 1, (2, 3)\n'
+        'VALUE = %d\n'
+        'def registered():\n'
+        '    return _OWNER_REGISTERED\n'
+    )
+    module_path.write_text(source % 1, encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    try:
+        original = importlib.import_module(module_name)
+        original._OWNER_REGISTERED = True
+        original._HEARTBEAT.append("beat")
+        live_reload.reload_changed_modules([module_name])
+
+        module_path.write_text(source % 2, encoding="utf-8")
+        future = time.time() + 2
+        os.utime(module_path, (future, future))
+
+        refreshed = live_reload.reload_changed_modules([module_name])[module_name]
+        assert live_reload._ERRORS.get(module_name, "") == ""
+        assert refreshed is not original
+        assert refreshed.VALUE == 2
+        assert refreshed._OWNER_ID is original._OWNER_ID
+        assert refreshed.registered() is True
+        assert refreshed._HEARTBEAT is original._HEARTBEAT
+        assert (refreshed._A, refreshed._B) == (1, 2)
+        # Public names are never inherited, even from inside a guard.
+        assert not hasattr(refreshed, "PUBLIC_RETIRED")
+    finally:
+        sys.modules.pop(module_name, None)
+        live_reload._MTIMES.pop(module_name, None)
+        live_reload._SIGNATURES.pop(module_name, None)
+        live_reload._ERRORS.pop(module_name, None)
+
+
 def test_reload_rebinds_existing_importer_module_references(monkeypatch, tmp_path):
     dependency_name = "live_reload_imported_dependency"
     importer_name = "live_reload_existing_importer"

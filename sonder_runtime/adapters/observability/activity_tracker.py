@@ -786,8 +786,30 @@ def set_response_status(status, summary=""):
     if response is None:
         return
     with _LOCK:
+        if normalized == "incomplete" and response.get("status") != "incomplete":
+            # Private (never projected): lets record_escalation undo this.
+            response["_status_before_incomplete"] = response.get("status")
         response["status"] = normalized
         _event(response, "response_%s" % normalized, summary=_short(summary, 180))
+
+
+def record_escalation(summary, *, model=""):
+    """Record a model escalation, undoing the superseded attempt's downgrade.
+
+    An escalating runner reruns a failed attempt inside the same outer span
+    (HTTP chat, work runs), so the failed rung's ``incomplete`` would
+    otherwise outlive a later rung that recovers.  Only a downgrade made by
+    :func:`set_response_status` is undone, back to the status it replaced; an
+    exhausted ladder fails after its last escalation and stays incomplete.
+    """
+    response = _current()
+    if response is None:
+        return None
+    with _LOCK:
+        previous = response.pop("_status_before_incomplete", None)
+        if response.get("status") == "incomplete" and previous in ("running", "unverified"):
+            response["status"] = previous
+        return deepcopy(_event(response, "model_escalation", summary=summary, model=model))
 
 
 @contextlib.contextmanager
