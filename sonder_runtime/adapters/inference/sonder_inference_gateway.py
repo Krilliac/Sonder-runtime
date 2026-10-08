@@ -136,6 +136,8 @@ ENV_HEALTH_TIMEOUT = "SONDER_INFERENCE_HEALTH_TIMEOUT_SECONDS"
 ENV_HEALTH_STALE = "SONDER_INFERENCE_HEALTH_STALE_SECONDS"
 ENV_FALLBACK = "SONDER_INFERENCE_FALLBACK"
 ENV_PRIVATE_WORKERS = "SONDER_INFERENCE_PRIVATE_WORKERS"
+ENV_MAX_INFLIGHT = "SONDER_INFERENCE_MAX_INFLIGHT"
+LATENCY_EWMA_ALPHA = 0.3
 MAX_PRIVATE_WORKERS = 8
 MAX_WORKER_INFLIGHT = 16
 MIN_WORKER_TOKEN_LENGTH = 16
@@ -722,6 +724,19 @@ def parse_private_workers(raw: str, *, allow_remote: bool,
     return tuple(workers)
 
 
+def _parse_max_inflight(source: Mapping[str, str]) -> int:
+    raw = str(source.get(ENV_MAX_INFLIGHT, "") or "").strip()
+    if not raw:
+        return 1
+    try:
+        value = int(raw)
+    except ValueError:
+        raise InvalidInput("%s must be an integer, got %r" % (ENV_MAX_INFLIGHT, raw)) from None
+    if not 1 <= value <= MAX_WORKER_INFLIGHT:
+        raise InvalidInput("%s must be in [1, %d]" % (ENV_MAX_INFLIGHT, MAX_WORKER_INFLIGHT))
+    return value
+
+
 def config_from_env(env: Mapping[str, str] | None = None) -> SonderInferenceConfig:
     """Resolve settings lazily from the environment (never at import)."""
     source = os.environ if env is None else env
@@ -752,6 +767,7 @@ def config_from_env(env: Mapping[str, str] | None = None) -> SonderInferenceConf
         health_timeout_seconds=_parse_float(source, ENV_HEALTH_TIMEOUT, HEALTH_PROBE_TIMEOUT_SECONDS),
         health_stale_seconds=_parse_float(source, ENV_HEALTH_STALE, DEFAULT_HEALTH_STALE_SECONDS),
         base_url_source=origin,
+        max_inflight=_parse_max_inflight(source),
     )
 
 
@@ -975,6 +991,9 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         self._workers: dict[str, tuple[tuple, SonderInferenceGateway]] = {}
         self._inflight: dict[str, int] = {}
         self._cursor = 0
+        # Observed milliseconds per output token per endpoint (EWMA of
+        # successful calls), so a much slower endpoint only gets overflow.
+        self._ms_per_token: dict[str, float] = {}
 
     @property
     def last_response_meta(self) -> dict[str, object]:
@@ -1400,6 +1419,8 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
             }
             with self._lock:
                 row["inflight"] = self._inflight.get(spec.url, 0)
+                observed = self._ms_per_token.get(spec.url)
+            row["ms_per_token"] = round(observed, 1) if observed is not None else None
             try:
                 gateway = self._worker_gateway(settings, spec)
                 snap = gateway.health()
@@ -1558,9 +1579,9 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
     # -- private-worker placement -------------------------------------------
     #
     # With approved private workers configured, each request is placed whole
-    # on the primary or one worker: the least-loaded endpoint (in-flight /
-    # max_inflight) that is not known to be down and serves the model, ties
-    # rotated.  A request moves to another endpoint only after
+    # on the primary or one worker: the endpoint with the lowest expected
+    # cost ((in-flight + 1) / max_inflight x observed ms per output token)
+    # among those not known to be down that serve the model, ties rotated.  A request moves to another endpoint only after
     # SonderInferenceUnreachable, i.e. when it provably never executed; any
     # other failure is final, exactly as on a single endpoint.
 
@@ -1645,19 +1666,54 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         return usable
 
     def _acquire_endpoint(self, usable, excluded: set[str]):
+        """Pick the endpoint with the lowest expected cost and count it.
+
+        Cost = (in-flight + 1) / max_inflight x observed ms per output token.
+        An idle endpoint with no observation yet costs nothing, so each one is
+        measured once rather than starved; a busy unobserved one borrows the
+        fastest observed value (1.0 when there is none, i.e. plain
+        least-in-flight).  Ties rotate.
+        """
         with self._lock:
             open_ = [item for item in usable if item[0] not in excluded]
             if not open_:
                 return None
+            known = [self._ms_per_token[item[0]] for item in open_ if item[0] in self._ms_per_token]
+            fallback = min(known) if known else 1.0
             start = self._cursor % len(open_)
             self._cursor += 1
             rotated = open_[start:] + open_[:start]
-            chosen = min(rotated, key=lambda item: (
-                self._inflight.get(item[0], 0) / item[2].max_inflight,
-                self._inflight.get(item[0], 0),
-            ))
+
+            def cost(item):
+                inflight = self._inflight.get(item[0], 0)
+                load = (inflight + 1) / item[2].max_inflight
+                if item[0] not in self._ms_per_token and inflight == 0:
+                    return (0.0, load)
+                return (load * self._ms_per_token.get(item[0], fallback), load)
+
+            chosen = min(rotated, key=cost)
+            load = cost(chosen)[1]
             self._inflight[chosen[0]] = self._inflight.get(chosen[0], 0) + 1
-            return chosen
+            return chosen, load
+
+    def _observe_latency(self, key: str, response: ModelResponse, load: float) -> None:
+        """Fold one success into the endpoint's ms-per-token estimate.
+
+        The duration includes waiting behind the requests already in flight
+        there, so it is divided by the dispatch load ((in-flight + 1) /
+        max_inflight, at least 1): the estimate is the service rate, and
+        ``cost`` multiplies the current load back in exactly once.
+        """
+        tokens = getattr(response, "tokens_out", None)
+        duration = getattr(response, "duration_ms", None)
+        if not isinstance(tokens, int) or tokens <= 0 or not isinstance(duration, (int, float)) or duration < 0:
+            return
+        sample = max(float(duration), 1.0) / tokens / max(1.0, load)
+        with self._lock:
+            previous = self._ms_per_token.get(key)
+            self._ms_per_token[key] = sample if previous is None else (
+                LATENCY_EWMA_ALPHA * sample + (1 - LATENCY_EWMA_ALPHA) * previous
+            )
 
     def _release_endpoint(self, key: str) -> None:
         with self._lock:
@@ -1680,10 +1736,11 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         excluded: set[str] = set()
         last_error: SonderInferenceUnreachable | None = None
         while True:
-            chosen = self._acquire_endpoint(usable, excluded)
-            if chosen is None:
+            acquired = self._acquire_endpoint(usable, excluded)
+            if acquired is None:
                 assert last_error is not None
                 raise last_error
+            chosen, load = acquired
             key, gateway, endpoint = chosen
             try:
                 logger.info(
@@ -1700,6 +1757,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                 self._release_endpoint(key)
                 if gateway is not self:
                     self._call.response_meta = gateway.last_response_meta
+            self._observe_latency(key, response, load)
             if isinstance(response, SonderInferenceResponse):
                 response = replace(response, endpoint=endpoint.display_base_url)
             return response

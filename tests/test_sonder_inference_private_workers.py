@@ -270,6 +270,40 @@ def test_sequential_requests_alternate_when_idle(ca_bundle):
     assert bases.count(PRIMARY) == 2 and bases.count(WORKER) == 2
 
 
+def test_a_much_slower_worker_only_gets_overflow(ca_bundle):
+    import time as _time
+
+    def slow(payload):
+        _time.sleep(0.25)
+        return _chat(payload["model"])
+
+    hosts = Hosts(chat={WORKER: slow})
+    gateway = _gateway(hosts, _env(ca_bundle))
+    for prompt in "ab":  # one each: both endpoints get observed
+        gateway.generate(ModelRequest(prompt=prompt, tier="fast"), _ctx())
+    assert sorted(base for base, _h, _ca in hosts.posts) == sorted([PRIMARY, WORKER])
+    hosts.posts.clear()
+    for prompt in "cdef":
+        gateway.generate(ModelRequest(prompt=prompt, tier="fast"), _ctx())
+    assert {base for base, _h, _ca in hosts.posts} == {PRIMARY}
+    assert gateway._ms_per_token[WORKER] > gateway._ms_per_token[PRIMARY]
+
+
+def test_every_endpoint_is_measured_before_capacity_weights_apply(ca_bundle):
+    """A worker with more slots must not starve the unmeasured primary."""
+    hosts = Hosts()
+    gateway = _gateway(hosts, _env(ca_bundle, **{ENV_PRIVATE_WORKERS: _workers(ca_bundle, max_inflight=4)}))
+    for prompt in "ab":
+        gateway.generate(ModelRequest(prompt=prompt, tier="fast"), _ctx())
+    assert sorted(base for base, _h, _ca in hosts.posts) == sorted([PRIMARY, WORKER])
+
+
+def test_primary_capacity_is_configurable(ca_bundle):
+    assert config_from_env(_env(ca_bundle, SONDER_INFERENCE_MAX_INFLIGHT="8")).max_inflight == 8
+    with pytest.raises(InvalidInput, match="SONDER_INFERENCE_MAX_INFLIGHT"):
+        config_from_env(_env(ca_bundle, SONDER_INFERENCE_MAX_INFLIGHT="0"))
+
+
 def test_unreachable_worker_falls_back_to_primary(ca_bundle):
     hosts = Hosts()
     hosts.health[WORKER] = ConnectionRefusedError()
@@ -312,7 +346,7 @@ def test_status_lists_workers_without_secrets(ca_bundle):
     assert status["workers"] == [{
         "base_url": "https://10.77.0.2:8443", "state": "ready", "healthy": True,
         "detail": "ready: 1 model(s)", "models": ["sonder:latest"], "max_inflight": 1,
-        "inflight": 0,
+        "inflight": 0, "ms_per_token": None,
     }]
     assert TOKEN not in json.dumps(status) and "sonder-inference" not in status["workers"][0]["base_url"]
 

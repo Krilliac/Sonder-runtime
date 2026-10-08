@@ -53,6 +53,7 @@ task does not switch thinking or sampling modes between decisions.
 | `SONDER_INFERENCE_TIER_MODELS` | unset | `fast=a,general=b`; keys must be provider tiers. |
 | `SONDER_INFERENCE_API_KEY` | unset | Sent as `Authorization: Bearer`; in the log redaction set. |
 | `SONDER_ALLOW_REMOTE_INFERENCE` | `0` | `1` permits a non-loopback base URL (see consent). |
+| `SONDER_INFERENCE_MAX_INFLIGHT` | `1` | The primary's parallel capacity for private-worker placement (1-16); unused without workers. |
 | `SONDER_INFERENCE_PRIVATE_WORKERS` | unset | JSON array of approved private workers, `[{"url": "https://10.77.0.2:8443/sonder-inference", "ca_bundle": "C:/.../ca.pem", "token_env": "SONDER_INFERENCE_NODE1_TOKEN", "max_inflight": 2}]` (see Private workers). Requires `SONDER_ALLOW_REMOTE_INFERENCE=1`. |
 | `SONDER_INFERENCE_TIMEOUT_SECONDS` | `300` | Per-call ceiling, never beyond the operation deadline. |
 | `SONDER_INFERENCE_HEALTH_TTL_SECONDS` | `5` | How long a health observation is reused. |
@@ -162,10 +163,15 @@ unchanged by it, and it is unchanged by them.
   operation that reaches this provider, A2A included; leave the list unset
   where that is not wanted.
 
-Placement is whole-request: each call goes to the least-loaded endpoint
-(in-flight divided by `max_inflight`; the primary counts as 1) among the
-primary and the workers that are not known to be down (fresh health) and
-serve the requested model, ties rotated. A call moves to another endpoint
+Placement is whole-request: each call goes to the endpoint with the lowest
+expected cost, `(in-flight + 1) / max_inflight` times its observed
+milliseconds per output token, among the primary and the workers that are not
+known to be down (fresh health) and serve the requested model; ties rotate.
+The primary's `max_inflight` is `SONDER_INFERENCE_MAX_INFLIGHT` (default 1).
+The per-token estimate is an EWMA of successful calls with the queueing in
+front of each call divided out, and an idle endpoint that has never been
+measured is tried once first. A much slower worker therefore receives only
+overflow work. A call moves to another endpoint
 only after `SonderInferenceUnreachable` (provably never executed there);
 timeouts, 4xx and 5xx are final, as on a single endpoint. When nothing is
 eligible the primary produces the refusal. `provider_status()` adds a
