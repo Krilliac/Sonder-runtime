@@ -1109,3 +1109,50 @@ def test_typed_pool_cache_rejects_primary_config_mismatch(monkeypatch, primary):
         assert ollama_pool._configured_pool is None
     finally:
         ollama_pool.reset_typed_workers()
+
+
+def test_membership_refresh_renews_the_loopback_lane_with_remote_members():
+    """A remote member advertising the model must not strand the local primary.
+
+    The controller's renewal pass is the only periodic capability refresh. If it
+    renewed remote members alone, the loopback worker's evidence expired after one
+    TTL and every model request went to the remote PC while local sat idle (no
+    model-miss refresh fires because the remote still advertises the model).
+    """
+    clock = Clock()
+    mono = [1000.0]
+    probes = []
+    pool = OllamaWorkerPool(LOCAL, (REMOTE,), allow_remote=True, capability_ttl_seconds=300,
+                            clock=lambda: mono[0],
+                            capability_prober=lambda origin: probes.append(origin) or {"models": ["code"]})
+    control = controller(source := Source(signed_snapshot()), pool, clock)
+    try:
+        pool.refresh_capabilities()
+        control.refresh(timeout_seconds=2)
+        assert pool.summary()["eligible_worker_count"] == 2
+        mono[0] += 301
+        clock.now += timedelta(seconds=30)
+        source.snapshot = signed_snapshot(generation=2, issued_at=clock.now)
+        probes.clear()
+        control.refresh(timeout_seconds=2)
+        assert sorted(probes) == sorted([LOCAL, REMOTE])
+        assert pool.summary()["eligible_worker_count"] == 2
+        seen = set()
+        hold, release = threading.Event(), threading.Event()
+
+        def busy(origin):
+            seen.add(origin)
+            hold.set()
+            release.wait(3)
+            return origin
+        worker = threading.Thread(target=lambda: pool.request(busy, model="code"))
+        worker.start()
+        try:
+            assert hold.wait(2)
+            seen.add(pool.request(lambda origin: origin, model="code"))
+        finally:
+            release.set()
+            worker.join(3)
+        assert seen == {LOCAL, REMOTE}
+    finally:
+        assert control.close(timeout=2)
