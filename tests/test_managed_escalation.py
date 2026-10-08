@@ -289,3 +289,67 @@ def test_actual_restricted_loop_preserves_parent_model_admission(
             with pytest.raises(PermissionError):
                 controller.prepare_command({"action": "spawn", "payload": {}})
     assert calls == ["model"]
+
+
+
+def test_recovered_escalation_restores_the_shared_response_status(monkeypatch, tmp_path):
+    # PR 670 review (P1): HTTP chat and work runs wrap the escalating
+    # workbench in one outer response span that every rung's agent() reuses.
+    # A first rung ending on a ModelCallError marks that span "incomplete";
+    # a later rung that recovers must not inherit the terminal downgrade.
+    from sonder_runtime.adapters.model_transport import ModelCallError
+    from sonder_runtime.adapters.observability import activity_tracker
+
+    activity_tracker.reset_for_tests()
+    models = _install_agent_fakes(monkeypatch, {})
+
+    def make_generate(model, *args, **kwargs):
+        models.append(model)
+        if model == "m-code":
+            def fail(prompt, history=None):
+                raise ModelCallError("timeout", "timed out")
+            return fail
+        replies = iter([
+            json.dumps({"tool": "file_read", "args": {"path": str(tmp_path / "a.txt")}}),
+        ])
+        return lambda prompt, history=None: next(
+            replies, '{"final":"general inspected the repository"}'
+        )
+
+    (tmp_path / "a.txt").write_text("hello")
+    # The hermetic calibration store is empty, so the standing would demand
+    # verification and mark every run "unverified"; this test is about the
+    # escalation status hand-off, not the standing.
+    monkeypatch.setattr(server, "_agent_verification_standing", lambda: (False, ""))
+    monkeypatch.setattr(server, "_make_generate", make_generate)
+    with activity_tracker.response_span("chat:test", "inspect", surface="http") as outer:
+        result = server.workbench_agent(
+            prompt="inspect the repository", tier="auto", project=str(tmp_path)
+        )
+    assert models[:1] == ["m-code"] and "m-general" in models, models
+    assert "general inspected the repository" in result
+    assert outer["status"] == "complete", result
+    assert "result: incomplete" not in result
+
+
+def test_exhausted_escalation_keeps_the_incomplete_status(monkeypatch, tmp_path):
+    from sonder_runtime.adapters.model_transport import ModelCallError
+    from sonder_runtime.adapters.observability import activity_tracker
+
+    activity_tracker.reset_for_tests()
+    models = _install_agent_fakes(monkeypatch, {})
+
+    def make_generate(model, *args, **kwargs):
+        models.append(model)
+
+        def fail(prompt, history=None):
+            raise ModelCallError("timeout", "timed out")
+        return fail
+
+    monkeypatch.setattr(server, "_make_generate", make_generate)
+    with activity_tracker.response_span("chat:test", "inspect", surface="http") as outer:
+        server.workbench_agent(
+            prompt="inspect the repository", tier="auto", project=str(tmp_path)
+        )
+    assert len(set(models)) > 1, models
+    assert outer["status"] == "incomplete"

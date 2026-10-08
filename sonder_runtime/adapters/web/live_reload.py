@@ -207,6 +207,26 @@ def _reload_preserved_state_names(spec):
         ):
             continue
         names.append(test.left.value)
+        # A guard keyed on one name usually initializes several siblings
+        # (``_OWNER_ID`` plus ``_OWNER_REGISTERED``, ``_HEARTBEAT_THREAD`` ...).
+        # Carrying only the tested name made the guard skip on reload while
+        # the siblings were never bound, so the first use raised NameError.
+        # Carry every private name the guarded block itself binds.
+        for inner in statement.body:
+            if isinstance(inner, ast.Assign):
+                targets = inner.targets
+            elif isinstance(inner, ast.AnnAssign):
+                targets = [inner.target]
+            else:
+                continue
+            for target_node in targets:
+                for node in ast.walk(target_node):
+                    if (
+                        isinstance(node, ast.Name)
+                        and node.id.startswith("_")
+                        and node.id not in names
+                    ):
+                        names.append(node.id)
     return tuple(names)
 
 

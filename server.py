@@ -272,6 +272,7 @@ from sonder_runtime.domain.updates.runtime_update_formatting import (
 from sonder_runtime.domain.mcp_runtime_formatting import (
     format_mcp_runtime as _format_mcp_runtime_report,
     safe_mcp_error as _safe_mcp_error,
+    capability_shadow_line as _capability_shadow_line, stale_registry_action as _stale_mcp_registry_action,
 )
 from sonder_runtime.domain.fanout_admission import (
     fanout_admission as _fanout_admission_policy,
@@ -1092,11 +1093,10 @@ def served_work_project(project):
 
 
 def _note_escalation(step, surface):
-    """Record one escalation on the activity record; observation only."""
+    """Record one escalation; the superseded rung no longer decides the outcome."""
     try:
-        activity_tracker.record_event(
-            "model_escalation", summary="%s: %s" % (surface, step.summary()),
-            model=step.to_rung.model,
+        activity_tracker.record_escalation(
+            "%s: %s" % (surface, step.summary()), model=step.to_rung.model,
         )
     except Exception:
         pass
@@ -6267,8 +6267,9 @@ def offload(
     fine-tuning data for the local model. 'fast'/'general' (mechanical work) and
     learn=False run the plain path: no capture, no footer, just text.
 
-    Tiers: fast=3B (default), code=7B coder, general=7B instruct,
-    cloud-code / cloud-general (METERED, prompt leaves this machine).
+    Tiers: fast (default), code, general (operator-bound models: runtime_policy_status),
+    cloud-code / cloud-general (METERED, prompt leaves this machine). A learned Ollama
+    call runs the `sonder:latest` alias if installed; learn=False runs the tier's model.
     Give a FULLY self-contained prompt (the model can't see this chat or your files).
 
     schema: optional JSON Schema *as JSON text*, e.g.
@@ -21244,6 +21245,7 @@ def _agent_turn(
                     tier_escalation.failure_reason(error=decision_error),
                     key=escalation_key, step=step,
                 )
+                activity_tracker.set_response_status("incomplete", "model request failed")  # not `complete`
                 return _early_exit(render_model_error(decision_error))
             if auto_checklist:
                 _agent_checklist_fail(
@@ -21926,6 +21928,7 @@ def _agent_turn(
                         "model request failed during final synthesis",
                         active_item,
                     )
+                activity_tracker.set_response_status("incomplete", "model request failed")  # not `complete`
                 return _early_exit(render_model_error(final_error))
             if auto_checklist:
                 active_item = 3 if validation_attempted else 2 if mutated else 1
@@ -23832,8 +23835,11 @@ def diagnostics() -> str:
     )
     if mcp_state.get("last_error"):
         lines.append("  mcp refresh ERROR: %s" % mcp_state["last_error"])
+    stale_action = _stale_mcp_registry_action(mcp_state)
+    if stale_action:
+        lines.append("  mcp refresh ACTION: %s" % stale_action)
     try:
-        lines.append("  tool capability shadow: %s" % tool_capability_shadow_report())
+        lines.append(_capability_shadow_line(tool_capability_shadow_report(), stale_action))
         lines.append("  tool capability coverage: %s" % tool_capability_coverage_report())
     except Exception as e:
         lines.append("  tool capability shadow: ERROR validator failed: %s" % e)
