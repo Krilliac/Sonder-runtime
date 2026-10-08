@@ -134,7 +134,7 @@ keep the primary on loopback, and set:
 
 ```text
 SONDER_ALLOW_REMOTE_INFERENCE=1
-SONDER_INFERENCE_PRIVATE_WORKERS=[{"url":"https://10.77.0.2:8443/sonder-inference","ca_bundle":"C:/Users/me/AppData/Local/sonder/certs/sonder-ca-bundle.pem","token_env":"SONDER_INFERENCE_NODE1_TOKEN","max_inflight":2}]
+SONDER_INFERENCE_PRIVATE_WORKERS=[{"url":"https://10.77.0.2:8443/sonder-inference","ca_bundle":"C:/ProgramData/sonder/certs/sonder-ca-bundle.pem","token_env":"SONDER_INFERENCE_NODE1_TOKEN","max_inflight":2}]
 SONDER_INFERENCE_NODE1_TOKEN=<the worker's token, from a secret store>
 ```
 
