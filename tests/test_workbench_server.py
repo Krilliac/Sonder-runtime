@@ -475,3 +475,21 @@ def test_file_exists_failure_hint_names_overwrite(monkeypatch, tmp_path, without
     assert without_standing(result) == "replaced existing.py"
     joined = "\n".join(prompts)
     assert "repeat the call with mode=overwrite" in joined
+
+
+def test_agent_end_report_is_incomplete_when_the_model_call_fails(monkeypatch, tmp_path):
+    # Seen live 2026-10-08: a 300 s model timeout on the first decision ended
+    # with "ERROR contacting ... timed out" and, directly under it,
+    # "result: complete" -- the failure read as a finished run.
+    activity_tracker.reset_for_tests()
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "agent.db"))
+
+    def failing_generate(prompt, history=None):
+        raise server.ModelCallError("transport", "timed out")
+
+    monkeypatch.setattr(server, "_make_generate", lambda *a, **k: failing_generate)
+    output = server.agent("list the files in this project", checklist=True)
+
+    assert "timed out" in output
+    assert "result: incomplete" in output
+    assert "result: complete" not in output
