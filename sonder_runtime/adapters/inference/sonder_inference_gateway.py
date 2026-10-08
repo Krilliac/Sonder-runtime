@@ -1666,6 +1666,13 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                     continue
                 usable.append((key, gateway, endpoint))
                 continue
+            if snapshot is None:
+                # Learn the primary's model list too, so a model only a worker
+                # serves is not sent here first (a 404 would be final).
+                try:
+                    snapshot = self.health(settings=endpoint)
+                except Exception:  # noqa: BLE001 - the primary path reports it
+                    snapshot = None
             if snapshot is not None and snapshot.state != "ready" and not snapshot.busy:
                 continue
             if not self._serves(snapshot, model):

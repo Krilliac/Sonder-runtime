@@ -356,6 +356,15 @@ def test_cold_worker_is_never_sent_a_model_it_does_not_list(ca_bundle):
     assert [base for base, _h, _ca in hosts.posts] == [WORKER]
 
 
+def test_model_only_the_worker_serves_never_goes_to_the_primary_first(ca_bundle):
+    hosts = Hosts()
+    hosts.health[WORKER] = _health(models=("sonder:latest", "qwen3.6:35b"))
+    gateway = _gateway(hosts, _env(ca_bundle))
+    for prompt in "abc":
+        gateway.generate(ModelRequest(prompt=prompt, tier="general", options={"model": "qwen3.6:35b"}), _ctx())
+    assert {base for base, _h, _ca in hosts.posts} == {WORKER}
+
+
 def test_default_alias_never_selects_a_worker(ca_bundle):
     hosts = Hosts()
     gateway = _gateway(hosts, _env(ca_bundle, SONDER_INFERENCE_MODEL=None))
