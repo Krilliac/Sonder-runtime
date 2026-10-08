@@ -2163,6 +2163,26 @@ class OllamaWorkerPool:
             logger.info("worker pool drained successfully")
             return True
 
+    def model_capacity(self, model: str | None) -> int | None:
+        """Admission slots the pool can currently grant for ``model``.
+
+        Sums the capacity of admissible, non-cooling workers whose fresh
+        capability evidence advertises the model. Returns ``None`` when no
+        worker has such evidence, because "unknown" must not be read as "zero":
+        a caller sizing a fan-out should then leave its concurrency alone.
+        """
+        now = self._clock()
+        with self._condition:
+            total = sum(
+                self._capacity(state)
+                for state in self._states
+                if self._membership_admissible(state, now)
+                and not state.compatibility_error
+                and state.cooldown_until <= now
+                and self._supports_model(state, model)
+            )
+        return total or None
+
     def snapshots(self) -> tuple[WorkerSnapshot, ...]:
         now = self._clock()
         with self._condition:
