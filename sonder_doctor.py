@@ -530,9 +530,22 @@ def _check_ollama_workers(*, timeout: float = 5.0, config=None) -> dict:
     except Exception as exc:  # pragma: no cover - import guard
         return _skip("Ollama transport unavailable (%s)" % exc)
 
+    # Verify private-CA workers with the same typed bundle runtime composition
+    # binds; without it doctor fell back to the system store and reported a
+    # healthy worker as "self-signed certificate".
+    bundle_error = None
+    try:
+        ollama_endpoint.configure_typed_ca_bundle(
+            getattr(getattr(config, "ollama", None), "ca_bundle", None))
+    except ValueError as exc:
+        bundle_error = "[ollama].ca_bundle: %s" % exc
+
     up: list[str] = []
     down: list[str] = []
     for origin in workers:
+        if bundle_error is not None:
+            down.append("%s (%s)" % (urlsplit(origin).hostname or origin, bundle_error))
+            continue
         host = urlsplit(origin).hostname or origin
         tags_url = origin.rstrip("/") + "/api/tags"
         try:
