@@ -1,4 +1,5 @@
 """MCP runtime rendering lives in the domain; the root names stay compatible."""
+import pytest
 import server
 from sonder_runtime.domain import mcp_runtime_formatting as rendering
 
@@ -101,7 +102,13 @@ def test_stale_registry_after_an_import_failure_names_the_restart():
         loaded_digest="11a08fdc9775aa", current_digest="945b2d7f1dfcbb",
     )
     action = rendering.stale_registry_action(stale)
-    assert action.startswith("restart the Sonder MCP server")
+    # The class alone cannot prove skew (PR 670 review, P2): the action leads
+    # with fixing the source and names the restart only conditionally.
+    assert action.startswith(
+        "fix the source error or restart the Sonder MCP server to load server.py; "
+        "if server.py imports cleanly in a fresh interpreter"
+    )
+    assert "only a restart helps" in action
     lines = rendering.format_mcp_runtime(stale, recovery_action=lambda _p: "").splitlines()
     assert lines[-2:] == [
         "  ERROR: ImportError: source refresh failed (last known-good registry remains active)",
@@ -130,7 +137,7 @@ def test_diagnostics_marks_capability_shadow_unreliable_while_registry_is_stale(
     monkeypatch.setattr(server, "mcp_runtime_data", lambda: stale)
     monkeypatch.setattr(server, "tool_capability_shadow_report", lambda: "ERROR 1 drift issue(s): x")
     text = server.diagnostics()
-    assert "  mcp refresh ACTION: restart the Sonder MCP server" in text
+    assert "  mcp refresh ACTION: fix the source error or restart the Sonder MCP server" in text
     assert (
         "  tool capability shadow: UNRELIABLE (stale MCP registry; descriptors may be "
         "newer than the loaded tool surfaces) ERROR 1 drift issue(s): x"
@@ -140,3 +147,14 @@ def test_diagnostics_marks_capability_shadow_unreliable_while_registry_is_stale(
     text = server.diagnostics()
     assert "mcp refresh ACTION" not in text
     assert "  tool capability shadow: ERROR 1 drift issue(s): x" in text
+
+
+@pytest.mark.parametrize("error_type", ["ImportError", "ModuleNotFoundError", "AttributeError", "NameError"])
+def test_import_shaped_failure_is_never_diagnosed_as_skew_outright(error_type):
+    # An ordinary bad import in server.py records the same class as helper
+    # skew; the action must not assert the cache is the cause.
+    action = rendering.stale_registry_action(
+        _state(last_error="%s: source refresh failed" % error_type, current_digest="different")
+    )
+    assert action.startswith(rendering._GENERIC_STALE_ACTION)
+    assert not action.startswith("restart")

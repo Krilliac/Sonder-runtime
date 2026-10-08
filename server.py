@@ -1093,11 +1093,10 @@ def served_work_project(project):
 
 
 def _note_escalation(step, surface):
-    """Record one escalation on the activity record; observation only."""
+    """Record one escalation; the superseded rung no longer decides the outcome."""
     try:
-        activity_tracker.record_event(
-            "model_escalation", summary="%s: %s" % (surface, step.summary()),
-            model=step.to_rung.model,
+        activity_tracker.record_escalation(
+            "%s: %s" % (surface, step.summary()), model=step.to_rung.model,
         )
     except Exception:
         pass
