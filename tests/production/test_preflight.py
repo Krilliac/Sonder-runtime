@@ -134,3 +134,38 @@ def test_optional_worker_outage_is_reported_as_degraded_not_failed(
     assert report.ok
     assert report.degraded
     assert not worker.ok and not worker.required
+
+
+def test_worker_probe_uses_the_configured_ca_bundle(tmp_path, monkeypatch):
+    """Preflight verifies a private-CA HTTPS worker with ``[ollama].ca_bundle``."""
+    monkeypatch.setenv(
+        "SONDER_RUNTIME_POLICY", str(tmp_path / "home" / "runtime_policy.json")
+    )
+    bundle = tmp_path / "ca.pem"
+    bundle.write_text("placeholder", encoding="ascii")
+    monkeypatch.delenv("SONDER_OLLAMA_CA_BUNDLE", raising=False)
+    monkeypatch.setattr(sonder_preflight.ollama_endpoint, "_configured_ca_bundle", None)
+    config = sonder_config.load_config(
+        env={
+            "SONDER_HOME": str(tmp_path / "home"),
+            "SONDER_OPERATIONS_DB": str(tmp_path / "home" / "operations.db"),
+            "SONDER_RUNTIME_POLICY": str(tmp_path / "home" / "runtime_policy.json"),
+            "SONDER_ALLOW_REMOTE_OLLAMA": "1",
+            "SONDER_OLLAMA_WORKERS": "https://worker.example:443",
+        },
+        overrides={"state.minimum_free_disk_bytes": "0", "ollama.ca_bundle": str(bundle)},
+    )
+    seen = []
+
+    def context(*_a, cafile=None, **_k):
+        seen.append(cafile)
+        raise sonder_preflight.ollama_endpoint.ssl.SSLError("stub context")
+
+    monkeypatch.setattr(sonder_preflight.ollama_endpoint.ssl, "create_default_context", context)
+    monkeypatch.setattr(
+        sonder_preflight.ollama_endpoint._OPENER, "open",
+        lambda request, timeout: (_ for _ in ()).throw(URLError("primary offline")),
+    )
+    sonder_preflight.run_preflight(config, ollama_timeout=0.1)
+
+    assert seen == [str(bundle)]

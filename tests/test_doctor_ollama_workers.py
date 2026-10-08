@@ -129,3 +129,68 @@ def test_non_200_worker_response_counts_as_unreachable(monkeypatch):
 
     assert result["status"] == sonder_doctor.STATUS_FAIL
     assert "HTTP 503" in result["detail"]
+
+
+def test_worker_probe_uses_the_configured_ca_bundle(monkeypatch, tmp_path):
+    """Doctor must verify a private-CA worker with ``[ollama].ca_bundle``.
+
+    Runtime composition binds the bundle; doctor did not, so a healthy
+    private-CA worker failed as ``self-signed certificate`` (observed
+    2026-10-08 with Node1) while the live pool reached it fine.
+    """
+    bundle = tmp_path / "ca.pem"
+    bundle.write_text("placeholder", encoding="ascii")
+    monkeypatch.setattr(ollama_endpoint, "_configured_ca_bundle", None)
+    monkeypatch.delenv("SONDER_OLLAMA_CA_BUNDLE", raising=False)
+    seen = []
+
+    def context(*_a, cafile=None, **_k):
+        seen.append(cafile)
+        raise ollama_endpoint.ssl.SSLError("stub context")
+
+    monkeypatch.setattr(ollama_endpoint.ssl, "create_default_context", context)
+    config = _config(("https://pc2:443",))
+    config.ollama.ca_bundle = str(bundle)
+    monkeypatch.setattr(sonder_doctor, "_load_config_or_none", lambda: config)
+
+    sonder_doctor._check_ollama_workers()
+
+    assert seen == [str(bundle)]
+
+
+def test_primary_probe_uses_the_configured_ca_bundle(monkeypatch, tmp_path):
+    """``_check_ollama`` runs before the worker check, and alone when no
+    workers are configured, so it must bind ``[ollama].ca_bundle`` itself."""
+    bundle = tmp_path / "ca.pem"
+    bundle.write_text("placeholder", encoding="ascii")
+    monkeypatch.setattr(ollama_endpoint, "_configured_ca_bundle", None)
+    monkeypatch.delenv("SONDER_OLLAMA_CA_BUNDLE", raising=False)
+    seen = []
+
+    def context(*_a, cafile=None, **_k):
+        seen.append(cafile)
+        raise ollama_endpoint.ssl.SSLError("stub context")
+
+    monkeypatch.setattr(ollama_endpoint.ssl, "create_default_context", context)
+    config = _config(())
+    config.ollama.url = "https://pc2:443"
+    config.ollama.ca_bundle = str(bundle)
+
+    result = sonder_doctor._check_ollama(config=config)
+
+    assert seen == [str(bundle)]
+    assert result["status"] == sonder_doctor.STATUS_FAIL
+
+
+def test_primary_probe_reports_an_invalid_ca_bundle(monkeypatch):
+    monkeypatch.setattr(ollama_endpoint, "_configured_ca_bundle", None)
+    monkeypatch.setattr(ollama_endpoint, "open_url",
+                        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("probed")))
+    config = _config(())
+    config.ollama.url = "https://pc2:443"
+    config.ollama.ca_bundle = "relative/ca.pem"
+
+    result = sonder_doctor._check_ollama(config=config)
+
+    assert result["status"] == sonder_doctor.STATUS_FAIL
+    assert "[ollama].ca_bundle" in result["detail"]

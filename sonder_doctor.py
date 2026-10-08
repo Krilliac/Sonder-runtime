@@ -450,6 +450,20 @@ def backup_check(config=None, *, max_age_hours: float = 48.0):
     return check
 
 
+def _bind_ollama_ca_bundle(config, ollama_endpoint) -> str | None:
+    """Bind ``[ollama].ca_bundle`` as runtime composition does; return any error.
+
+    Without it every doctor probe used the system trust store and reported a
+    healthy private-CA endpoint as "self-signed certificate".
+    """
+    try:
+        ollama_endpoint.configure_typed_ca_bundle(
+            getattr(getattr(config, "ollama", None), "ca_bundle", None))
+    except ValueError as exc:
+        return "[ollama].ca_bundle: %s" % exc
+    return None
+
+
 def _check_ollama(*, timeout: float = 5.0, config=None) -> dict:
     """Probe Ollama reachability read-only via GET /api/tags."""
     config = config if config is not None else _load_config_or_none()
@@ -469,6 +483,9 @@ def _check_ollama(*, timeout: float = 5.0, config=None) -> dict:
     except Exception as exc:  # pragma: no cover - import guard
         return _skip("Ollama transport unavailable (%s)" % exc)
     host = urlsplit(url).hostname or ""
+    bundle_error = _bind_ollama_ca_bundle(config, ollama_endpoint)
+    if bundle_error is not None and urlsplit(url).scheme == "https":
+        return {"status": STATUS_FAIL, "detail": "%s: %s" % (host, bundle_error)}
     tags_url = url.rstrip("/") + "/api/tags"
     try:
         request = urllib.request.Request(tags_url, method="GET")
@@ -530,9 +547,14 @@ def _check_ollama_workers(*, timeout: float = 5.0, config=None) -> dict:
     except Exception as exc:  # pragma: no cover - import guard
         return _skip("Ollama transport unavailable (%s)" % exc)
 
+    bundle_error = _bind_ollama_ca_bundle(config, ollama_endpoint)
+
     up: list[str] = []
     down: list[str] = []
     for origin in workers:
+        if bundle_error is not None:
+            down.append("%s (%s)" % (urlsplit(origin).hostname or origin, bundle_error))
+            continue
         host = urlsplit(origin).hostname or origin
         tags_url = origin.rstrip("/") + "/api/tags"
         try:
