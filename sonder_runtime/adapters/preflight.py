@@ -266,6 +266,12 @@ def run_preflight(
     checks.extend(_check_schema_versions(config))
     checks.append(_check_runtime_policy())
     if check_ollama:
+        # Probe HTTPS workers with the typed CA bundle composition binds, not
+        # only the system trust store (a private-CA worker otherwise fails).
+        try:
+            ollama_endpoint.configure_typed_ca_bundle(config.ollama.ca_bundle)
+        except ValueError as exc:
+            checks.append(CheckResult("ollama_ca_bundle", False, False, str(exc)))
         checks.append(_check_ollama(config, timeout=ollama_timeout))
         checks.extend(_check_ollama_workers(config, timeout=ollama_timeout))
     inference = _check_sonder_inference()
