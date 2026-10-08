@@ -1269,8 +1269,11 @@ class OllamaWorkerPool:
                     # also renews the static loopback lane. Skipping it let the
                     # local primary's evidence lapse after one TTL while a remote
                     # member that advertises the model kept every request.
+                    # An external source without local_fallback disables that
+                    # lane (open_url refuses it), so it is not renewed either.
                     if (_membership and state.membership_state is None
-                            and not _is_loopback(state.endpoint.origin)):
+                            and not (_is_loopback(state.endpoint.origin)
+                                     and self._membership_admissible(state, now))):
                         continue
                     if not (
                         (force or self._capabilities_renewal_due(state, now, _renew_within))
