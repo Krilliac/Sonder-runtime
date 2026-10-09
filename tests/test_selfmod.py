@@ -391,7 +391,14 @@ def test_testing_drops_old_candidate_bytecode_before_binding_source(isolated):
     run = prepare(plan(root))
     workspace = Path(run["workspace_path"])
     original = workspace / "calc.py"
-    subprocess.run([sys.executable, "-c", "import calc"], cwd=workspace, check=True)
+    # Write the stale bytecode explicitly. A plain `import calc` writes
+    # nothing when the inherited environment sets PYTHONDONTWRITEBYTECODE
+    # (agent shells do), and the test then failed in its setup with
+    # StopIteration rather than on the behaviour it guards.
+    subprocess.run(
+        [sys.executable, "-c", "import py_compile; py_compile.compile('calc.py', doraise=True)"],
+        cwd=workspace, check=True,
+    )
     cache = next((workspace / "__pycache__").glob("calc*.pyc"))
     timestamp = original.stat().st_mtime_ns
     selfmod.apply_candidate_changes(run["id"], {
