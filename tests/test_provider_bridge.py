@@ -132,6 +132,35 @@ def test_images_and_native_tool_calls_in_messages_are_refused():
         bridge.model_request_from_ollama_payload(payload, tier="general")
 
 
+@pytest.mark.parametrize("extra,feature", [
+    ({"format": {"type": "object"}}, "format"),
+    ({"format": "json"}, "format"),
+    ({"think": True}, "think"),
+    ({"tools": [{"type": "function", "function": {"name": "x"}}]}, "tools"),
+])
+def test_ollama_only_feature_predicate_matches_the_refusal(extra, feature):
+    found = bridge.ollama_only_feature(_payload(**extra), provider="openrouter")
+    assert found is not None and found[0] == feature
+    with pytest.raises(bridge.UnsupportedProviderFeature) as caught:
+        bridge.model_request_from_ollama_payload(
+            _payload(**extra), tier="general", provider="openrouter",
+        )
+    assert str(caught.value) == found[1]
+
+
+def test_ollama_only_feature_predicate_covers_messages_and_thinking_providers():
+    payload = _payload()
+    payload["messages"][-1]["images"] = ["aGVsbG8="]
+    assert bridge.ollama_only_feature(payload)[0] == "images"
+    payload = _payload()
+    payload["messages"][-2]["tool_calls"] = [{"function": {"name": "x"}}]
+    assert bridge.ollama_only_feature(payload)[0] == "tool_calls"
+    # Inference carries think itself; think=False is never a feature.
+    assert bridge.ollama_only_feature(_payload(think=True), provider="sonder_inference") is None
+    assert bridge.ollama_only_feature(_payload(think=False)) is None
+    assert bridge.ollama_only_feature(_payload()) is None
+
+
 def test_think_false_is_not_a_feature_request():
     request = bridge.model_request_from_ollama_payload(_payload(think=False), tier="general")
     assert request.prompt == "current question"
