@@ -1,9 +1,6 @@
 """Strict HTTPS client for authenticated compute-node observations."""
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
-from datetime import datetime
 import hashlib
 import hmac
 import http.client
@@ -15,6 +12,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from ...application.compute_fabric.jobs import (
@@ -32,6 +32,7 @@ from ...application.compute_fabric.wire import (
 )
 from ...domain.common.errors import DependencyUnavailable
 from ...domain.compute_fabric import ComputeNode, NodeSnapshot
+from ..tls_contexts import default_https_context, https_handler
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -40,7 +41,9 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def _default_opener(request: urllib.request.Request, *, timeout: float):
-    return urllib.request.build_opener(_NoRedirect()).open(request, timeout=timeout)
+    return urllib.request.build_opener(_NoRedirect(), https_handler()).open(
+        request, timeout=timeout,
+    )
 
 
 class PinnedHttpsClientError(RuntimeError):
@@ -210,7 +213,7 @@ class PinnedHttpsClient:
         connection = None
         try:
             try:
-                context = ssl.create_default_context()
+                context = default_https_context()
                 connection = self._connection_factory(
                     self._host, self._port, self._timeout_seconds, context
                 )

@@ -23,6 +23,7 @@ from ...domain.memory.replication import (
     MemoryReplicationBatch,
     MemoryReplicationError,
 )
+from ..tls_contexts import https_handler
 
 
 _IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
@@ -43,6 +44,7 @@ def _default_opener(request: urllib.request.Request, *, timeout: float):
     return urllib.request.build_opener(
         urllib.request.ProxyHandler({}),
         _NoRedirect(),
+        https_handler(),
     ).open(request, timeout=timeout)
 
 

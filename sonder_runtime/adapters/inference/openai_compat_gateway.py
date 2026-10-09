@@ -35,6 +35,7 @@ import ipaddress
 import json
 import logging
 import socket
+import ssl
 import time
 import urllib.error
 import urllib.request
@@ -80,6 +81,7 @@ from ..model_request_admission import (
     host_model_request_admission,
 )
 from ..model_transport import ModelCallError
+from ..tls_contexts import default_https_context
 from ..provider_bindings import provider_id_for_label
 from .telemetry import from_openai_compatible
 
@@ -100,6 +102,16 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def shared_https_context() -> ssl.SSLContext:
+    """The verifying TLS context for model-endpoint openers, shared in-process.
+
+    See :mod:`sonder_runtime.adapters.tls_contexts`: an opener built per
+    request otherwise reloads the platform trust store (~150-200 ms on
+    Windows) on every request, plain-HTTP loopback included.
+    """
+    return default_https_context()
+
+
 def _opener_for(url: str):
     """A non-redirecting opener; loopback URLs also bypass every proxy.
 
@@ -110,7 +122,7 @@ def _opener_for(url: str):
     only sees a CONNECT tunnel).  Built per call so the proxy decision reflects
     the current environment rather than the one at import time.
     """
-    handlers: list = [_NoRedirect()]
+    handlers: list = [_NoRedirect(), urllib.request.HTTPSHandler(context=shared_https_context())]
     if (urlsplit(url).hostname or "").lower() in _LOOPBACK_HOSTS:
         handlers.append(urllib.request.ProxyHandler({}))
     return urllib.request.build_opener(*handlers)
