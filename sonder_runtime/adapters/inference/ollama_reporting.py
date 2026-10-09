@@ -8,11 +8,20 @@ primary's address: a remote worker's model list on the loopback line, and
 """
 from __future__ import annotations
 
+import time
 from typing import Callable
 
 import sonder_runtime.adapters.inference.ollama_endpoint as ollama_endpoint
+from sonder_runtime.platform.runtime_threads import (
+    ThreadPoolExecutor as owned_runtime_pool,
+    run_bounded,
+)
 
 _SHOWN_MODELS = 8
+# Pool members are probed concurrently under one overall budget, so a slow or
+# unreachable member costs diagnostics a few seconds, not a 15 s read each.
+INVENTORY_PARALLELISM = 8
+INVENTORY_DEADLINE_SECONDS = 4.0
 
 
 def error_endpoint(base: str, pool, display: str | None = None) -> dict:
@@ -42,26 +51,51 @@ def model_list_summary(names) -> str:
 def model_inventory_lines(
     pool, *, get_tags: Callable[[], object], member_tags: Callable[[str], object],
     require_endpoint: Callable[[], None], names: Callable[[object], list],
+    parallelism: int = INVENTORY_PARALLELISM,
+    deadline_seconds: float = INVENTORY_DEADLINE_SECONDS,
 ) -> list[str]:
     """Diagnostics inventory lines, each attributed to the endpoint holding it.
 
     A pooled ``/api/tags`` read may be answered by any member, so with a pool
     every member is listed with its own catalog instead of one unattributed
-    "ollama:" line.
+    "ollama:" line. Members are read concurrently (at most ``parallelism`` at
+    once) within one overall ``deadline_seconds``; a member that has not
+    answered by then is reported as timed out and its late reply discarded.
     """
     if not pool.enabled:
         try:
             return ["  ollama: %s" % model_list_summary(names(get_tags()))]
         except Exception as e:
             return ["  ollama: ERROR %s" % e]
+    origins = tuple(pool.origins)
+    labels = ["  ollama @ %s:" % ollama_endpoint.safe_display(origin) for origin in origins]
+    try:
+        require_endpoint()
+    except Exception as e:
+        return ["%s ERROR %s" % (label, e) for label in labels]
+    if not origins:
+        return []
+    deadline = time.monotonic() + float(deadline_seconds)
+
+    def read(origin):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None, None, False
+        return run_bounded(
+            lambda: model_list_summary(names(member_tags(origin))), remaining,
+            name="sonder-diagnostics-tags",
+        )
+
+    with owned_runtime_pool(max_workers=max(1, min(int(parallelism), len(origins)))) as executor:
+        outcomes = list(executor.map(read, origins))
     lines = []
-    for origin in pool.origins:
-        label = "  ollama @ %s:" % ollama_endpoint.safe_display(origin)
-        try:
-            require_endpoint()
-            lines.append("%s %s" % (label, model_list_summary(names(member_tags(origin)))))
-        except Exception as e:
-            lines.append("%s ERROR %s" % (label, e))
+    for label, (summary, error, completed) in zip(labels, outcomes, strict=True):
+        if not completed:
+            lines.append("%s ERROR timed out (no answer within %.1fs)" % (label, float(deadline_seconds)))
+        elif error is not None:
+            lines.append("%s ERROR %s" % (label, error))
+        else:
+            lines.append("%s %s" % (label, summary))
     return lines
 
 
@@ -84,15 +118,16 @@ def clamp_workers(
         capacity = pool.model_capacity(model)
     except Exception:
         return requested, None
-    if not capacity:
+    if capacity is None:
         return requested, None
+    # Zero free slots still runs one candidate at a time rather than none.
     return max(1, min(requested, int(capacity))), int(capacity)
 
 
 def workers_label(effective: int, requested: int, capacity: int | None) -> str:
     if effective == requested or capacity is None:
         return "workers=%d" % effective
-    return "workers=%d, requested %d, clamped to Ollama pool capacity %d" % (
+    return "workers=%d, requested %d, clamped to available Ollama pool capacity %d" % (
         effective, requested, capacity)
 
 

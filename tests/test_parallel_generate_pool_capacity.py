@@ -57,7 +57,7 @@ def test_fanout_is_clamped_to_pool_capacity_and_reports_it(monkeypatch, multi_la
     assert sizes == [1]
     assert pool.asked == ["example-coder:30b"]
     assert "3/3 passed" in out
-    assert "workers=1, requested 3, clamped to Ollama pool capacity 1" in out.splitlines()[0]
+    assert "workers=1, requested 3, clamped to available Ollama pool capacity 1" in out.splitlines()[0]
 
 
 def test_fanout_within_capacity_is_unchanged(monkeypatch):
@@ -85,3 +85,10 @@ def test_bridged_tier_is_not_clamped_by_the_ollama_pool(monkeypatch):
     server.parallel_generate_run("print one", variants=3, max_workers=3)
     assert sizes == [3]
     assert pool.asked == []
+
+
+def test_fully_busy_pool_runs_one_candidate_at_a_time(monkeypatch):
+    sizes = _stub_generation(monkeypatch, _Pool(0))
+    out = server.parallel_generate_run("print one", variants=3, max_workers=3)
+    assert sizes == [1]
+    assert "workers=1, requested 3, clamped to available Ollama pool capacity 0" in out.splitlines()[0]

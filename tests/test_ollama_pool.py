@@ -926,3 +926,24 @@ def test_model_capacity_sums_only_workers_advertising_the_model():
     assert pool.model_capacity("qwen3-coder:30b") == 2
     # No worker advertises it: unknown, never a zero that a caller could act on.
     assert pool.model_capacity("missing-model") is None
+
+
+def test_model_capacity_counts_free_slots_and_one_half_open_probe():
+    pool = OllamaWorkerPool(
+        PRIMARY, (SECOND,), max_inflight_per_worker=3,
+        capability_prober=lambda origin: {"models": ["coder"]},
+    )
+    pool.refresh_capabilities()
+    assert pool.model_capacity("coder") == 6
+
+    primary, second = pool._states
+    primary.inflight = 2                      # one free slot left
+    assert pool.model_capacity("coder") == 4
+
+    second.consecutive_failures = pool._failure_threshold  # half-open: one probe only
+    assert pool.model_capacity("coder") == 2
+    second.half_open_inflight = True          # its probe is already running
+    assert pool.model_capacity("coder") == 1
+
+    primary.inflight = 3                      # every advertising worker busy
+    assert pool.model_capacity("coder") == 0  # known zero, not unknown

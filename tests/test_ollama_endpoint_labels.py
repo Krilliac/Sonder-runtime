@@ -7,11 +7,14 @@ Two regressions with a loopback primary plus a remote pool worker (Node1):
 * model errors printed "remote Ollama at http://127.0.0.1:11434", because the
   label used whole-pool locality while the address printed was the primary's.
 """
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
 
 import server
+from sonder_runtime.adapters.inference import ollama_reporting
 from sonder_runtime.adapters.model_transport import ModelCallError
 
 
@@ -102,3 +105,40 @@ def test_local_only_error_display_is_unchanged(monkeypatch):
     monkeypatch.setattr(server, "OLLAMA_POOL", _pool(enabled=False, origins=(LOCAL,), remote=False))
     message = server._format_model_call_error(ModelCallError("connection", "connection refused"))
     assert message == "ERROR contacting local Ollama at %s after 1 attempt(s): connection refused" % LOCAL
+
+
+def _inventory(pool, member_tags, **kwargs):
+    return ollama_reporting.model_inventory_lines(
+        pool, get_tags=lambda: pytest.fail("pool path used get_tags"),
+        member_tags=member_tags, require_endpoint=lambda: None,
+        names=lambda payload: [row["name"] for row in payload["models"]], **kwargs)
+
+
+def test_pool_members_are_read_concurrently():
+    origins = (LOCAL, REMOTE, "http://10.20.30.41:11434")
+    together = threading.Barrier(len(origins), timeout=2)
+
+    def tags(origin):
+        together.wait()  # breaks unless every member is being read at once
+        return {"models": [{"name": "m"}]}
+
+    lines = _inventory(_pool(origins=origins), tags, deadline_seconds=3)
+    assert all(line.endswith("ok (1 models: m)") for line in lines), lines
+
+
+def test_slow_pool_member_times_out_within_the_overall_deadline():
+    release = threading.Event()
+
+    def tags(origin):
+        if origin == REMOTE:
+            release.wait(5)
+        return {"models": [{"name": "local-small:3b"}]}
+
+    started = time.monotonic()
+    try:
+        lines = _inventory(_pool(), tags, deadline_seconds=0.3)
+    finally:
+        release.set()
+    assert time.monotonic() - started < 2
+    assert lines[0] == "  ollama @ %s: ok (1 models: local-small:3b)" % LOCAL
+    assert lines[1] == "  ollama @ %s: ERROR timed out (no answer within 0.3s)" % REMOTE

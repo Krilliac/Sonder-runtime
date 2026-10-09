@@ -2172,24 +2172,35 @@ class OllamaWorkerPool:
             return True
 
     def model_capacity(self, model: str | None) -> int | None:
-        """Admission slots the pool can currently grant for ``model``.
+        """Admission slots the pool can grant for ``model`` right now.
 
-        Sums the capacity of admissible, non-cooling workers whose fresh
-        capability evidence advertises the model. Returns ``None`` when no
-        worker has such evidence, because "unknown" must not be read as "zero":
-        a caller sizing a fan-out should then leave its concurrency alone.
+        Mirrors ``_choose``: per admissible, non-cooling worker whose fresh
+        capability evidence advertises the model, the free slots are capacity
+        minus inflight, except that a half-open worker (failure threshold
+        reached) takes a single recovery probe and none while one is in
+        flight. Returns ``None`` when no worker advertises the model, because
+        "unknown" must not be read as "zero"; ``0`` means every advertising
+        worker is busy.
         """
         now = self._clock()
+        advertised, total = False, 0
         with self._condition:
-            total = sum(
-                self._capacity(state)
-                for state in self._states
-                if self._membership_admissible(state, now)
-                and not state.compatibility_error
-                and state.cooldown_until <= now
-                and self._supports_model(state, model)
-            )
-        return total or None
+            for state in self._states:
+                if not (
+                    self._membership_admissible(state, now)
+                    and not state.compatibility_error
+                    and state.cooldown_until <= now
+                    and self._supports_model(state, model)
+                ):
+                    continue
+                advertised = True
+                if state.half_open_inflight:
+                    continue
+                free = max(0, self._capacity(state) - state.inflight)
+                if state.consecutive_failures >= self._failure_threshold:
+                    free = min(1, free)
+                total += free
+        return total if advertised else None
 
     def snapshots(self) -> tuple[WorkerSnapshot, ...]:
         now = self._clock()
