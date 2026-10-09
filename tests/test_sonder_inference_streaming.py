@@ -37,9 +37,15 @@ class FakeInference:
 
     def __init__(self, *, token_delay=0.05, prefill_delay=0.0, tokens=TOKENS,
                  error_after=None, health_extra=None, json_to_stream=False,
-                 status=200, error_code=""):
+                 status=200, error_code="", hold_after_first=None, prefill_gate=None):
         self.token_delay = token_delay
         self.prefill_delay = prefill_delay
+        # Optional gates (threading.Event) that pause a streamed generation at
+        # a known point until the test releases it, so ordering is asserted
+        # from state rather than from wall-clock bounds (load-flaky on a busy
+        # runner). Each wait is bounded so a test that never releases fails.
+        self.hold_after_first = hold_after_first
+        self.prefill_gate = prefill_gate
         self.tokens = list(tokens)
         self.error_after = error_after
         self.health_extra = dict(health_extra or {})
@@ -122,7 +128,10 @@ def serving(fake: FakeInference):
             self.end_headers()
             self.close_connection = True
             try:
-                time.sleep(fake.prefill_delay)
+                if fake.prefill_gate is not None:
+                    fake.prefill_gate.wait(10)
+                else:
+                    time.sleep(fake.prefill_delay)
                 self.wfile.write(b": keep-alive\n\n")
                 self._event({"id": "chatcmpl-r1", "object": "chat.completion.chunk",
                              "model": "qwen3.8:27b",
@@ -139,6 +148,8 @@ def serving(fake: FakeInference):
                                  "choices": [{"index": 0, "delta": {"content": token},
                                               "finish_reason": None}]})
                     fake.written += 1
+                    if index == 0 and fake.hold_after_first is not None:
+                        fake.hold_after_first.wait(10)
                 self._event(fake.final())
                 self._event({"id": "chatcmpl-r1", "object": "chat.completion.chunk",
                              "model": "qwen3.8:27b", "choices": [],
@@ -176,15 +187,18 @@ def _ctx(timeout=30.0):
 class Recorder:
     """A client that records when each delta arrived."""
 
-    def __init__(self, *, fail_after=None):
+    def __init__(self, *, fail_after=None, on_first=None):
         self.deltas: list[tuple[float, str]] = []
         self.fail_after = fail_after
+        self.on_first = on_first
         self.gone = False
 
     def write(self, text):
         if self.fail_after is not None and len(self.deltas) >= self.fail_after:
             return False
         self.deltas.append((time.monotonic(), text))
+        if len(self.deltas) == 1 and self.on_first is not None:
+            self.on_first()
         return True
 
 
@@ -207,31 +221,41 @@ def _bridged_turn(gateway, recorder, *, provider="sonder_inference", hold=None):
 
 
 def test_streaming_cuts_time_to_first_token_to_one_token():
-    fake = FakeInference(token_delay=0.08)
+    # The fake pauses after the first streamed token until the client has
+    # received it, so "first token before the rest is generated" is shown by
+    # state (how many tokens the server had written when the client saw its
+    # first delta), not by wall-clock bounds that a loaded runner breaks.
+    held = threading.Event()
+    fake = FakeInference(token_delay=0.0, hold_after_first=held)
+    finished_at_first = []
+
+    def first_delta():
+        # The server cannot finish while it is held after its first token.
+        finished_at_first.append(fake.finished.is_set())
+        held.set()
+
     with serving(fake) as url:
         gateway = _gateway(url)
         # Before (the non-streaming route): nothing is visible until the
         # whole completion has been generated and returned.
-        started = time.monotonic()
         before = gateway.generate(ModelRequest(prompt="hi", tier="general"), _ctx())
-        before_ttft = time.monotonic() - started
-        recorder = Recorder()
+        fake.finished.wait(5)
+        fake.finished.clear()
+        recorder = Recorder(on_first=first_delta)
         live, shaped, response, turn_started, turn_done = _bridged_turn(gateway, recorder)
-    after_ttft = recorder.deltas[0][0] - turn_started
-    total = turn_done - turn_started
-    print("TTFT before=%.3fs after=%.3fs (generation %.3fs, %d tokens x %.2fs)"
-          % (before_ttft, after_ttft, total, len(TOKENS), fake.token_delay))
+    print("first delta arrived with generation finished=%s; turn %.3fs"
+          % (finished_at_first, turn_done - turn_started))
     assert before.text == response.text == "".join(TOKENS)
     assert fake.requests[0]["stream"] is False
     assert fake.requests[1]["stream"] is True
     assert fake.requests[1]["stream_options"] == {"include_usage": True}
-    # One token's delay (plus the health check), not the whole generation.
-    assert after_ttft < before_ttft / 3
-    assert after_ttft < 0.5
+    # One token, not the whole generation: the first delta reached the client
+    # while the server was still holding after its first token.
+    assert finished_at_first == [False]
     assert "".join(text for _at, text in recorder.deltas) == "".join(TOKENS)
     assert live.forwarded == response.text and live.reconcile(response.text) == ("", False)
     # Deltas arrived progressively, not in one burst at the end.
-    assert recorder.deltas[-1][0] - recorder.deltas[0][0] > 0.5 * fake.token_delay * len(TOKENS)
+    assert len(recorder.deltas) > 1
 
 
 def test_streamed_response_keeps_usage_telemetry_and_served_model():
@@ -308,16 +332,22 @@ def test_client_disconnect_mid_stream_cancels_and_closes_upstream():
 
 
 def test_client_gone_during_prefill_cancels_before_any_token():
-    fake = FakeInference(prefill_delay=3.0, token_delay=0.0)
+    # Prefill is held open until the test releases it, so "cancelled during
+    # prefill" is shown by the turn ending while the gate is still closed,
+    # not by an elapsed-time bound (load-flaky on a busy runner).
+    prefill = threading.Event()
+    fake = FakeInference(token_delay=0.0, prefill_gate=prefill)
     recorder = Recorder()
     with serving(fake) as url:
-        timer = threading.Timer(0.3, lambda: setattr(recorder, "gone", True))
-        timer.start()
-        started = time.monotonic()
-        with pytest.raises(Cancelled):
-            _bridged_turn(_gateway(url), recorder)
-        elapsed = time.monotonic() - started
-    assert elapsed < 2.0
+        try:
+            timer = threading.Timer(0.3, lambda: setattr(recorder, "gone", True))
+            timer.start()
+            with pytest.raises(Cancelled):
+                _bridged_turn(_gateway(url), recorder)
+            assert not prefill.is_set()
+            assert fake.written == 0
+        finally:
+            prefill.set()  # let the held handler finish before the server closes
     assert recorder.deltas == []
 
 
@@ -390,8 +420,12 @@ def test_parser_bounds_the_body():
 # -- end to end: served HTTP turn -> bridge -> gateway -> Inference -------------
 
 
-def _served_turn(monkeypatch, fake, *, prompt="hello"):
-    """POST one streamed chat turn to the real serve handler; return timings and events."""
+def _served_turn(monkeypatch, fake, *, prompt="hello", on_first_content=None):
+    """POST one streamed chat turn to the real serve handler; return timings and events.
+
+    ``on_first_content`` is called once, from the reading loop, when the first
+    content delta reaches the client (used to release a held fake).
+    """
     import socket
     from types import SimpleNamespace
 
@@ -437,6 +471,10 @@ def _served_turn(monkeypatch, fake, *, prompt="hello"):
                         break
                     buffer += chunk
                     arrivals.append((time.monotonic() - started, chunk))
+                    if (on_first_content is not None
+                            and b'"content": "' in buffer.split(b"\r\n\r\n", 1)[-1]):
+                        on_first_content()
+                        on_first_content = None
         finally:
             httpd.shutdown()
             httpd.server_close()
@@ -469,19 +507,31 @@ def test_served_turn_streams_tokens_as_they_are_generated(monkeypatch):
     with monkeypatch.context() as patch:
         patch.setattr(bridge, "STREAMING_PROVIDERS", frozenset())
         before_first, before_total, before_events, _ = _served_turn(
-            patch, FakeInference(token_delay=0.1),
+            patch, FakeInference(token_delay=0.0),
         )
-    fake = FakeInference(token_delay=0.1)
-    after_first, after_total, events, text = _served_turn(monkeypatch, fake)
-    print("served TTFT before=%.3fs (turn %.3fs) after=%.3fs (turn %.3fs)"
-          % (before_first, before_total, after_first, after_total))
+    # The fake holds after its first token until the client has seen content,
+    # so "first token long before the turn completes" is shown by how many
+    # tokens the server had written at that moment (state, not wall-clock
+    # bounds, which a loaded runner breaks).
+    held = threading.Event()
+    fake = FakeInference(token_delay=0.0, hold_after_first=held)
+    finished_at_first = []
+
+    def first_content():
+        finished_at_first.append(fake.finished.is_set())
+        held.set()
+
+    after_first, after_total, events, text = _served_turn(
+        monkeypatch, fake, on_first_content=first_content,
+    )
+    print("served TTFT before=%.3fs (turn %.3fs) after=%.3fs (turn %.3fs), finished at first=%s"
+          % (before_first, before_total, after_first, after_total, finished_at_first))
     assert _content(before_events) == _content(events) == "".join(TOKENS)
     content_events = [e for e in before_events if e.get("choices") and e["choices"][0]["delta"].get("content")]
     assert len(content_events) == 1  # historical: one chunk with the whole answer
     assert fake.requests[-1]["stream"] is True
-    # The first token reaches the client long before the turn completes.
-    assert after_first < after_total - 0.5
-    assert after_first < before_first - 0.5
+    # The first token reaches the client while the rest is still ungenerated.
+    assert finished_at_first == [False]
     final = [e for e in events if e.get("choices") and e["choices"][0].get("finish_reason")]
     assert final[0]["sonder_receipt"]["live_stream"]["revised"] is False
     assert "ttft_ms" in final[0]["sonder_receipt"]["live_stream"]
