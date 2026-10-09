@@ -316,7 +316,10 @@ def test_original_stall_failure_retains_coordinator_stack_before_cleanup(tmp_pat
             [sys.executable, "-c", _GATED_CHILD, str(coordinator_receipt),
              str(evidence_directory), str(junit_path), TARGET_NODE, str(startup_delay)],
             cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding="utf-8", errors="replace", timeout=30, check=False,
+            # Contains a lost teardown only.  The child's own pytest start-up
+            # took over 30s on a loaded machine (TimeoutExpired before the
+            # child reached the assertion this test verifies).
+            text=True, encoding="utf-8", errors="replace", timeout=180, check=False,
         )
         (tmp_path / "child-pytest.log").write_text(completed.stdout, encoding="utf-8")
 

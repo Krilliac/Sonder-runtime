@@ -488,6 +488,11 @@ def test_dispatch_lanes_surfaces_stalled_lane_without_waiting_for_executor_shutd
     assert "fleet lanes stalled" in caplog.text and "hung" in caplog.text
 
 
+# Worker startup (ledger, scheduler, agent start) is not what the stall
+# control measures, so it is bounded only against a real hang.
+_STARTUP_HANG_SECONDS = 60.0
+
+
 def test_run_delegated_stall_is_uncertain_and_retains_child_capacity(
     monkeypatch, request, tmp_path,
 ):
@@ -516,10 +521,13 @@ def test_run_delegated_stall_is_uncertain_and_retains_child_capacity(
 
     def entry_armed_deadline(row, deadline):
         # This control measures a hung model call, not scheduler/DB startup.
-        # Keep the same five-second startup bound until the worker enters;
-        # then retain the real short model-call deadline and strict joins.
+        # Until the worker enters, startup may take as long as the machine
+        # needs: a fixed five-second startup bound quarantined the lane before
+        # entry on a loaded Windows runner (PR #675 CI, "fleet lanes stalled"
+        # with the worker never entered).  Once it enters, the real short
+        # model-call deadline and the strict coordinator join apply.
         value = original_deadline(row, deadline)
-        return value if entered.is_set() else max(5.0, value)
+        return value if entered.is_set() else max(_STARTUP_HANG_SECONDS, value)
 
     monkeypatch.setattr(fleet_store, "lane_progress_deadline", entry_armed_deadline)
     result_box = {}
@@ -546,7 +554,8 @@ def test_run_delegated_stall_is_uncertain_and_retains_child_capacity(
     thread.start()
     phase = "worker-entry"
     try:
-        assert entered.wait(5)
+        # A hang detector for startup, not a latency bound (see above).
+        assert entered.wait(_STARTUP_HANG_SECONDS)
         phase = "coordinator-join"
         checkpoints["join_started_ns"] = time.monotonic_ns()
         thread.join(5)
