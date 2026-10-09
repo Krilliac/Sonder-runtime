@@ -426,7 +426,10 @@ def generate_via_gateway(
     """
     binding = active_rung()
     provider = binding.provider if binding is not None else None
-    if provider in THINKING_PROVIDERS and payload.get("think") is not False:
+    # An explicit payload value wins; otherwise a frozen binding option decides.
+    bound = binding.options if binding is not None and isinstance(binding.options, Mapping) else {}
+    think = payload["think"] if "think" in payload else bound.get("think")
+    if provider in THINKING_PROVIDERS and think is not False:
         # A reasoning model left free to think (Qwen3.5/3.8 default to it) spends
         # num_predict on thought first; a tight cap returns done_reason=length
         # with no content.  Same headroom the local Ollama path gives a known

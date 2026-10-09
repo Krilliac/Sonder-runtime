@@ -343,3 +343,20 @@ def test_bridged_thinking_provider_gets_local_thinking_headroom(think, provider,
             context=local_owner_context(correlation_id="think-budget"),
         )
     assert seen["options"]["num_predict"] == expected
+
+
+def test_bound_think_false_keeps_the_callers_small_budget():
+    seen = {}
+
+    class Gateway:
+        def generate(self, request, context):
+            seen["options"] = request.options
+            return ModelResponse(text="ok", model="m", tier=request.tier)
+
+    with bridge.bind_rung("sonder_inference", "fast", options={"think": False}):
+        bridge.generate_via_gateway(
+            Gateway(), _payload(), tier="fast",
+            context=local_owner_context(correlation_id="bound-think-false"),
+        )
+    assert seen["options"]["num_predict"] == 64
+    assert seen["options"]["think"] is False
