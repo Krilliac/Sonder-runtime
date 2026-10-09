@@ -5,10 +5,12 @@ host administrator during execution. Hashes and directory anchors do not deny
 such writes. Model-writable roots must be disjoint from every closure root.
 """
 import json
+import marshal
 import os
 import shutil
 import stat
 import sys
+import warnings
 from hashlib import sha256
 from pathlib import Path
 
@@ -17,14 +19,24 @@ from ...application.ports.runtime_owner import OwnerRefused, canonical
 from ..filesystem.atomic_json import write_json_atomic
 
 # The existing supported size/count envelope remains unchanged. Preflight
-# refuses out-of-bounds closures before reading their contents. Each admission
-# still hashes all bytes, including once in the child; metadata cannot prove
-# content integrity. A host can select the installer-owned lean runtime venv.
+# refuses out-of-bounds closures before reading their contents. Each launch
+# hashes all bytes once in the owner and once more in the child; metadata
+# cannot prove content integrity. A host can select the installer-owned lean
+# runtime venv.
 MAX_FILES = 50000
 MAX_BYTES = 4 * 1024**3
 MAX_MANIFEST = 32 * 1024**2
 MAX_PTH_BYTES = 1024 * 1024
 MAX_PTH_ENTRIES = 256
+# Owner-compiled bytecode for the closure's Python sources. It is one ordinary
+# file inside the owned root, so it joins the hashed manifest like any other
+# closure file. Directories that a runtime never imports are left out to keep
+# it small; their modules still import correctly by compiling from source.
+BYTECODE_NAME = "python-bytecode.marshal"
+MAX_BYTECODE = 512 * 1024**2
+_BYTECODE_SKIPPED_DIRECTORIES = frozenset(
+    {"test", "tests", "idle_test", "idlelib", "turtledemo", "lib2to3", "ensurepip"}
+)
 
 
 def disjoint(paths, writable_roots):
@@ -37,8 +49,9 @@ def disjoint(paths, writable_roots):
 
 
 def plain(path):
+    # One lstat answers both questions; ``Path.is_symlink`` would stat again.
     metadata = path.lstat()
-    if path.is_symlink() or getattr(metadata, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400):
+    if stat.S_ISLNK(metadata.st_mode) or getattr(metadata, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400):
         raise OwnerRefused("runtime artifact contains a reparse path")
     return metadata
 
@@ -154,6 +167,54 @@ def inventory(roots):
     return rows
 
 
+def compile_bytecode(entries):
+    """Compile every ``.py`` under the given import roots into checked-hash pycs.
+
+    ``entries`` holds ``(import_root, exclude_site)`` pairs whose strings equal
+    the child's ``sys.path`` entries, so each key equals the source path the
+    child's import system computes. Each value is a CHECKED_HASH pyc: the
+    child's standard import machinery uses it only while the source file's
+    bytes still hash to the recorded value, and compiles from source
+    otherwise. Bytecode is therefore never reused for different source. Files
+    that do not compile are left out; importing them reports the real error.
+
+    Returns the marshalled table and the SHA-256 of each compiled source, so
+    the caller can prove the bytecode was compiled from the hashed sources.
+    """
+    from importlib.util import source_hash
+    from importlib._bootstrap_external import _code_to_hash_pyc
+
+    table, digests = {}, {}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for root, exclude_site in entries:
+            root = Path(root)
+            for path in files(root, exclude_site=exclude_site):
+                if path.suffix != ".py" or _BYTECODE_SKIPPED_DIRECTORIES.intersection(
+                        path.relative_to(root).parts[:-1]):
+                    continue
+                source = path.read_bytes()
+                try:
+                    code = compile(source, str(path), "exec", dont_inherit=True, optimize=0)
+                except (SyntaxError, ValueError):
+                    continue
+                table[str(path)] = bytes(_code_to_hash_pyc(code, source_hash(source), True))
+                digests[str(path)] = sha256(source).hexdigest()
+    return marshal.dumps(table), digests
+
+
+def _require_compiled_from(digests, rows, site_root, dependencies):
+    """Refuse bytecode unless every compiled source is a hashed closure file."""
+    hashed = {os.path.normcase(row[0]): row[4] for row in rows}
+    alias = (os.path.normcase(str(site_root)), os.path.normcase(str(dependencies)))
+    for path, digest in digests.items():
+        key = os.path.normcase(path)
+        if key not in hashed and key.startswith(alias[0]):
+            key = alias[1] + key[len(alias[0]):]
+        if hashed.get(key) != digest:
+            raise OwnerRefused("runtime artifact changed during inspection")
+
+
 def _runtime_layout(runtime_venv=None):
     """Base interpreter and selected dependency closure (private test seam)."""
     source = Path(__file__).resolve().parents[3]
@@ -247,7 +308,7 @@ class RuntimePayload:
         disjoint((source, base, dependencies, *((runtime_venv,) if runtime_venv else ())), writable_roots)
         # In particular, detect training stacks that would exceed the
         # supported closure before copying the private application payload.
-        preflight(external)
+        planned = preflight(external)
         self.anchor = PrivateDirectoryAnchor.open_base(self.path, require_new=True)
         try:
             sources = [source / "sonder_runtime", source / "migrations", source / "seed"]
@@ -267,12 +328,28 @@ class RuntimePayload:
             (self.root / "python-cache").mkdir()
             roots = [(str(self.path), False), *external,
                      *((path, False) for path in profile_roots)]
+            bytecode, compiled = compile_bytecode(
+                ((str(self.path), False), (str(base / "Lib"), True), (str(site_paths[0]), False)))
+            # The bytecode is an optimization only. A closure already close to
+            # the verification budget launches without it instead of failing.
+            if (len(bytecode) <= MAX_BYTECODE
+                    and len(planned) + copied + 1 <= MAX_FILES
+                    and sum(item.st_size for _, item in planned) + total + len(bytecode) <= MAX_BYTES):
+                with (self.root / BYTECODE_NAME).open("xb") as stream:
+                    stream.write(bytecode)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                roots.append((str(self.root / BYTECODE_NAME), False))
+            else:
+                compiled = {}
+            rows = inventory(roots)
+            _require_compiled_from(compiled, rows, site_paths[0], dependencies)
             self.manifest = {
                 "schema": 2, "payload": str(self.path), "executable": str(executable),
                 "paths": [str(self.path), str(base / "Lib"), str(base / "DLLs"),
                           *(str(path) for path in site_paths)],
                 "dll_paths": dll_paths, "source": str(source), "roots": roots,
-                "files": inventory(roots), "python": [3, 12],
+                "files": rows, "python": [3, 12],
                 "profile": str(runtime_venv) if runtime_venv else "",
             }
             if len(canonical(self.manifest)) > MAX_MANIFEST:
@@ -282,7 +359,31 @@ class RuntimePayload:
             self.close()
             raise
 
+    def bytecode_binding(self):
+        """``[path, sha256]`` of the manifest's owner-compiled bytecode, or None.
+
+        The digest comes from the manifest's own inventory row, so the child
+        accepts exactly the bytecode this payload digest covers.
+        """
+        expected = str(self.root / BYTECODE_NAME)
+        for row in self.manifest["files"]:
+            if row[0] == expected:
+                return [row[0], row[4]]
+        return None
+
     def validate(self, writable_roots, *, expected=None):
+        """Recheck identity and writable-root separation, then hash every byte."""
+        self.recheck_identity(writable_roots, expected=expected)
+        if inventory(self.manifest["roots"]) != self.manifest["files"]:
+            raise OwnerRefused("runtime artifact content or identity changed")
+
+    def recheck_identity(self, writable_roots, *, expected=None):
+        """Every check of :meth:`validate` except rehashing the content.
+
+        Only for a payload whose content this same launch has just validated:
+        it rechecks the private anchor, the digest, the profile and the live
+        separation from model-writable roots without hashing gigabytes again.
+        """
         self.anchor.validate()
         value = self.manifest
         if expected is not None and self.digest != expected:
@@ -291,8 +392,6 @@ class RuntimePayload:
             raise OwnerRefused("runtime artifact profile changed")
         disjoint((value["source"], *value["paths"], *value["dll_paths"], value["executable"],
                   *((value["profile"],) if value["profile"] else ())), tuple(writable_roots))
-        if inventory(value["roots"]) != value["files"]:
-            raise OwnerRefused("runtime artifact content or identity changed")
 
     def close(self):
         if self.anchor is not None:
