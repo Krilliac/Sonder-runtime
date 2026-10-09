@@ -693,6 +693,7 @@ def parse_private_workers(raw: str, *, allow_remote: bool,
         )
     workers: list[PrivateWorkerSpec] = []
     seen = {primary_url} if primary_url else set()
+    token_envs: set[str] = set()
     for index, item in enumerate(document):
         where = "%s[%d]" % (ENV_PRIVATE_WORKERS, index)
         if not isinstance(item, dict) or not {"url", "ca_bundle", "token_env"} <= set(item) \
@@ -717,6 +718,11 @@ def parse_private_workers(raw: str, *, allow_remote: bool,
             raise InvalidInput(
                 "%s.token_env must not reuse %s; each endpoint has its own token" % (where, ENV_API_KEY)
             )
+        if token_env in token_envs:
+            raise InvalidInput(
+                "%s.token_env duplicates another worker's; each endpoint has its own token" % where
+            )
+        token_envs.add(token_env)
         inflight = item.get("max_inflight", 1)
         if type(inflight) is not int or not 1 <= inflight <= MAX_WORKER_INFLIGHT:
             raise InvalidInput("%s.max_inflight must be an integer in [1, %d]" % (where, MAX_WORKER_INFLIGHT))
@@ -1644,9 +1650,18 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         ids = {item.get("id") for item in models if isinstance(item, dict)}
         return model in ids
 
-    def _placement_candidates(self, request: ModelRequest, settings: SonderInferenceConfig):
+    def _placement_candidates(self, request: ModelRequest, settings: SonderInferenceConfig,
+                              context: OperationContext):
         """``[(key, gateway, settings)]`` for the primary and each usable worker."""
-        candidates = [(settings.base_url, self, settings)]
+        candidates = []
+        try:
+            # The primary is a candidate only when this call may use it at all:
+            # a consent refusal there is final and would never reach a worker.
+            check_endpoint_policy(settings)
+            if settings.loopback or context.cloud_allowed:
+                candidates.append((settings.base_url, self, settings))
+        except SonderError:
+            pass
         for spec in settings.workers:
             try:
                 gateway = self._worker_gateway(settings, spec)
@@ -1769,7 +1784,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         if settings.private_worker or not settings.workers:
             return self._generate_here(request, context)
         self._call.response_meta = {}
-        usable = self._placement_candidates(request, settings)
+        usable = self._placement_candidates(request, settings, context)
         if not usable:
             # Nothing is known to be able to take it: let the primary produce
             # the precise refusal (not ready, unknown model, consent, ...).

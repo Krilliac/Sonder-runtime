@@ -157,7 +157,7 @@ unchanged by it, and it is unchanged by them.
   16 characters). The token is read when used, never stored in the list,
   never sent to another endpoint, and never reported. A worker whose token
   is missing is skipped and shown as such in status. It may not reuse
-  `SONDER_INFERENCE_API_KEY`.
+  `SONDER_INFERENCE_API_KEY` or another worker's variable.
 - Prompt-bearing calls to an approved worker do not need `cloud_allowed`;
   every other non-loopback endpoint still does. The lane applies to every
   operation that reaches this provider, A2A included; leave the list unset
@@ -179,7 +179,9 @@ exact requested model id. A worker that has not answered, or does not list
 the model, never receives the request, because a 404 there would be final.
 The `default` alias never selects a worker, since each server resolves it
 to its own model. Tiers whose model only the primary serves therefore stay
-on the primary. A call moves to another endpoint
+on the primary. A non-loopback primary is a candidate only for calls whose
+context allows cloud (its own consent rule); other calls go to an approved
+worker, or get the primary's refusal when no worker can take them. A call moves to another endpoint
 only after `SonderInferenceUnreachable` (provably never executed there);
 timeouts, 4xx and 5xx are final, as on a single endpoint. When nothing is
 eligible the primary produces the refusal. `provider_status()` adds a

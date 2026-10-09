@@ -177,6 +177,12 @@ def test_worker_entries_are_validated(ca_bundle, tmp_path):
     two = json.dumps([{"url": WORKER, "ca_bundle": ca_bundle, "token_env": "A_TOKEN"}] * 2)
     with pytest.raises(InvalidInput, match="duplicates"):
         parse_private_workers(two, allow_remote=True)
+    shared_token = json.dumps([
+        {"url": WORKER, "ca_bundle": ca_bundle, "token_env": "A_TOKEN"},
+        {"url": "https://10.77.0.3:8443", "ca_bundle": ca_bundle, "token_env": "A_TOKEN"},
+    ])
+    with pytest.raises(InvalidInput, match="token_env duplicates"):
+        parse_private_workers(shared_token, allow_remote=True)
     many = json.dumps([{"url": "https://10.77.0.%d:8443" % i, "ca_bundle": ca_bundle,
                         "token_env": "A_TOKEN"} for i in range(2, 11)])
     with pytest.raises(InvalidInput, match="1-8"):
@@ -380,6 +386,25 @@ def test_worker_whose_health_cannot_be_read_gets_nothing(ca_bundle):
     for prompt in "abc":
         gateway.generate(ModelRequest(prompt=prompt, tier="fast"), _ctx())
     assert {base for base, _h, _ca in hosts.posts} == {PRIMARY}
+
+
+def test_remote_primary_without_cloud_consent_is_not_a_candidate(ca_bundle):
+    """Only the approved worker may take a no-cloud call; never a final Forbidden."""
+    hosts = Hosts()
+    remote_primary = "https://10.77.0.9:8443"
+    hosts._base = staticmethod(lambda url: WORKER if url.startswith(WORKER) else PRIMARY)
+    env = _env(ca_bundle, SONDER_INFERENCE_BASE_URL=remote_primary,
+               SONDER_INFERENCE_API_KEY=PRIMARY_KEY)
+    gateway = _gateway(hosts, env)
+    for prompt in "abcd":
+        response = gateway.generate(ModelRequest(prompt=prompt, tier="fast"), _ctx(cloud=False))
+        assert response.endpoint == "https://10.77.0.2:8443"
+    assert {base for base, _h, _ca in hosts.posts} == {WORKER}
+    # With cloud consent the remote primary is eligible again.
+    hosts.posts.clear()
+    for prompt in "efgh":
+        gateway.generate(ModelRequest(prompt=prompt, tier="fast"), _ctx(cloud=True))
+    assert PRIMARY in {base for base, _h, _ca in hosts.posts}
 
 
 def test_status_lists_workers_without_secrets(ca_bundle):
