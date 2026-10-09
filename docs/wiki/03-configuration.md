@@ -388,6 +388,7 @@ procedure: [runbook](../runbooks/sonder-inference.md)):
 | `SONDER_INFERENCE_TIER_MODELS` | unset | e.g. `fast=a,general=b` |
 | `SONDER_INFERENCE_API_KEY` | unset | bearer token; redacted from logs |
 | `SONDER_ALLOW_REMOTE_INFERENCE` | `0` | `1` permits a non-loopback URL, which also needs `https://`, a key, and a cloud-allowed context |
+| `SONDER_INFERENCE_PRIVATE_WORKERS` | unset | JSON list of approved private workers (https private IP, own CA bundle, own token variable); needs `SONDER_ALLOW_REMOTE_INFERENCE=1`, not cloud consent; requests are placed on the least-loaded endpoint ([provider reference](../architecture/sonder-inference-provider.md#private-workers)) |
 | `SONDER_INFERENCE_TIMEOUT_SECONDS` | `300` | per-call ceiling, never beyond the operation deadline |
 | `SONDER_INFERENCE_HEALTH_TTL_SECONDS` | `5` | health-cache lifetime |
 | `SONDER_INFERENCE_FALLBACK` | `none` | `ollama` sends requests Inference never received to local Ollama once, and serves schema/tool/image chat steps (which Inference v1 cannot carry) on local Ollama |
