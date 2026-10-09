@@ -873,7 +873,7 @@
       ]
     },
     {
-      "file_count": 74,
+      "file_count": 75,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -949,6 +949,7 @@
         "sonder_runtime/bootstrap/subprocess_mcp.py",
         "sonder_runtime/bootstrap/thread_resources.py",
         "sonder_runtime/bootstrap/typed_tools.py",
+        "sonder_runtime/bootstrap/verified_bytecode.py",
         "sonder_runtime/bootstrap/work_narration.py"
       ]
     },

@@ -32,11 +32,29 @@ hashed on each validation, so optional training packages present only in the
 host venv are not part of the dedicated child's path or verification cost.
 
 The digest is bound into configuration, prepared launch, process metadata and
-READY/CLEAN evidence. Content/identity and live writable-root separation are
-rechecked before the process effect, immediately before native spawn, and at
-child startup. The child uses explicit import paths with `-E -S`, no user-site
+READY/CLEAN evidence. Every byte of the closure is hashed once per launch
+before the process effect, and again by the child at startup. Immediately
+before native spawn, the owner rechecks the directory anchor, digest, profile
+and live writable-root separation; it does not rehash bytes that the same
+single-use, operation-bound admission hashed moments earlier. Resuming the
+readiness wait of a launch that already started spawns nothing and admits
+nothing. The child uses explicit import paths with `-E -S`, no user-site
 or `.pth` execution, a private pycache prefix with bytecode writes disabled,
-and a minimal declared runtime DLL PATH. Standard operating-system libraries
+and a minimal declared runtime DLL PATH.
+
+The child never compiles its whole closure on each launch. At payload creation
+the owner compiles the payload, standard library and site-packages sources
+into one file of checked-hash pycs, `python-bytecode.marshal`, inside the owned
+root (test and IDLE directories are left out). That file is a closure root, so
+its bytes are in the hashed manifest and the payload digest covers it. The
+parent passes its path and SHA-256 from the manifest; the child reads it once,
+refuses a mismatch, and serves its entries from memory
+(`sonder_runtime/bootstrap/verified_bytecode.py`). Because each entry is a
+checked-hash pyc, the import system uses it only while the source file's bytes
+still hash to the recorded value, so bytecode is never reused for different
+source even when size and mtime are unchanged. Any other bytecode read below
+the private prefix fails, and the child still never writes bytecode. A closure
+too close to the verification budget launches without the file. Standard operating-system libraries
 remain part of the trusted Windows platform. Files belonging to another
 trusted same-user host administrator are **not** write-locked for the duration
 of execution: hashes and directory anchors do not prevent that administrator
