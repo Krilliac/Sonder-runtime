@@ -9,6 +9,7 @@ import urllib.error
 import urllib.request
 
 from .client_request import build_chat_request, require_secure_key_transport
+from .tls_contexts import https_handler
 
 # Per socket operation (connect, send, each read) -- a server that stops
 # talking raises ``TimeoutError`` after this long.
@@ -64,7 +65,7 @@ def _open(request):
     would travel in plaintext to the proxy host. Keyed https requests keep
     proxy support because CONNECT tunnels the header inside TLS.
     """
-    handlers = [_AuthenticatedRedirectRefusal]
+    handlers = [_AuthenticatedRedirectRefusal, https_handler()]
     if (
         request.has_header("Authorization")
         and request.type.lower() == "http"
