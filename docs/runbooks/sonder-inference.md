@@ -47,8 +47,12 @@ otherwise `SONDER_INFERENCE_MODEL` (default `default`, Inference's first
 
 Optional: `SONDER_INFERENCE_FALLBACK=ollama` sends requests Inference never
 received (refused connection, unresolvable host, health not ready, 503
-`not_ready`) to local Ollama once. Leave it unset if a silent switch of model
-family is unacceptable for your work.
+`not_ready`) to local Ollama once. It also serves chat steps Inference v1
+cannot carry (decoder schemas, native tools, images) on loopback Ollama with
+the tier's policy model, recorded as `served by ollama (ollama-only feature:
+...)` in the turn receipt; without it those steps fail with a 400 naming this
+setting. Leave it unset if a switch of model family is unacceptable for your
+work.
 
 ## Verify
 
