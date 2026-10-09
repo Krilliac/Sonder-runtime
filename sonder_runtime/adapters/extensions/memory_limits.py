@@ -191,11 +191,20 @@ class _WindowsJobToken:
             raise ExtensionMemoryLimitError("owned root process handle missing")
         return accounting.active, tuple(int(wait(handle, 0)) for _, handle in self._process_handles)
 
-    def quiesce(self, *, force: bool) -> ProcessContainmentResult:
-        """Require empty accounting AND signaled retained exact process handles."""
+    def quiesce(self, *, force: bool, exit_grace: float = 0.0) -> ProcessContainmentResult:
+        """Require empty accounting AND signaled retained exact process handles.
+
+        ``exit_grace`` lets members that are already on their way out finish
+        before ``force`` terminates the job.  After a console root exits
+        cleanly, its own ``conhost.exe`` stays a job member for a moment.
+        Forcing at once recorded that clean exit as a forced cleanup.
+        """
         import ctypes
         from ctypes import wintypes
-        deadline = time.monotonic() + 3
+        started = time.monotonic()
+        grace = max(0.0, float(exit_grace))
+        force_after = started + grace
+        deadline = started + 3 + grace
         forced = False
         forced_member_images: tuple[tuple[int, str], ...] = ()
         with self._lock:
@@ -220,7 +229,8 @@ class _WindowsJobToken:
                 # Accounting and process signaling can settle in either order.
                 # Permission to force cleanup is not evidence it is necessary.
                 needs_termination = self._proof_failed or (active > 0 and 258 in states)
-                if force and not forced and needs_termination:
+                if (force and not forced and needs_termination
+                        and (self._proof_failed or time.monotonic() >= force_after)):
                     forced_member_images = self._last_member_images or tuple(
                         (pid, "?") for pid in self._last_member_pids
                     )
@@ -366,7 +376,10 @@ class _SystemdScopeToken:
             return "missing", detail
         return None, detail or "systemctl did not report scope state"
 
-    def quiesce(self, *, force: bool) -> ProcessContainmentResult:
+    def quiesce(self, *, force: bool, exit_grace: float = 0.0) -> ProcessContainmentResult:
+        # ``exit_grace`` is a Windows job-object concern; a systemd scope is
+        # already settled through its own state below.
+        del exit_grace
         state, detail = self._state()
         if state in self._QUIESCENT_STATES:
             return ProcessContainmentResult(True, detail=f"scope is {state}")

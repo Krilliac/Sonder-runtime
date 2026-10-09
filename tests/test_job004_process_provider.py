@@ -291,7 +291,7 @@ class _ScopedToken(_LimitToken):
         self.results = list(results)
         self.calls: list[bool] = []
 
-    def quiesce(self, *, force: bool) -> ProcessContainmentResult:
+    def quiesce(self, *, force: bool, exit_grace: float = 0.0) -> ProcessContainmentResult:
         self.calls.append(force)
         if self.results:
             return self.results.pop(0)
@@ -1304,7 +1304,7 @@ class _TerminateJobToken(_ScopedToken):
         self.process = process
         self.waiter = None
 
-    def quiesce(self, *, force: bool) -> ProcessContainmentResult:
+    def quiesce(self, *, force: bool, exit_grace: float = 0.0) -> ProcessContainmentResult:
         self.calls.append(force)
         if force and not self.process.exited.is_set():
             self.process.exited.set()
