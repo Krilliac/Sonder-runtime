@@ -114,6 +114,9 @@ class DurableProcessEffectVerifier:
 # Upper bound ``wait`` spends publishing the last output window after the
 # root process exited and its readers reached end of file.
 OUTPUT_DRAIN_SECONDS = 5.0
+# After a root exits on its own, how long members already exiting may take
+# to leave its job before the cleanup is forced (and recorded as forced).
+ROOT_EXIT_SETTLE_SECONDS = 2.0
 
 
 class _ProcessSlotLease:
@@ -543,7 +546,11 @@ class SubprocessJobProvider:
                 exit_code = process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             return ProcessJobWait(self._registry.poll(job_id), None, timed_out=True)
-        containment = self._quiesce_containment(job_id, force=True)
+        # The root exited on its own: give members already exiting (a console
+        # root's conhost.exe) time to leave before forcing the job.
+        containment = self._quiesce_containment(
+            job_id, force=True, exit_grace=ROOT_EXIT_SETTLE_SECONDS,
+        )
         if containment is None and self._platform == "posix":
             view = self._registry.view(job_id)
             containment = self._quiesce_exited_group(
@@ -1117,6 +1124,7 @@ class SubprocessJobProvider:
         job_id: str,
         *,
         force: bool,
+        exit_grace: float = 0.0,
     ) -> ProcessContainmentResult | None:
         token = self._memory_tokens.get(job_id)
         if token is None:
@@ -1125,7 +1133,7 @@ class SubprocessJobProvider:
         if not callable(quiesce):
             return None
         try:
-            result = quiesce(force=force)
+            result = quiesce(force=force, exit_grace=exit_grace)
         except Exception as exc:
             return ProcessContainmentResult(
                 False,

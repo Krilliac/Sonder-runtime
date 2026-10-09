@@ -76,7 +76,7 @@ def _first_composition(tmp_path, monkeypatch, *, pending: bool):
             super().__init__()
             self.emptied = False
 
-        def quiesce(self, *, force: bool) -> ProcessContainmentResult:
+        def quiesce(self, *, force: bool, exit_grace: float = 0.0) -> ProcessContainmentResult:
             self.calls.append(force)
             if force and self.results:
                 return self.results.pop(0)

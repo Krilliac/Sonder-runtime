@@ -190,7 +190,17 @@ def detach_owned_application(application) -> bool:
     if not isinstance(legacy, ModuleType):
         return False
     lock = getattr(legacy, "_APP_GRAPH_LOCK", None)
-    if lock is None or not lock.acquire(timeout=5):
+    if lock is None:
+        # ``server`` is in sys.modules but still executing its first import
+        # (the HTTP command-catalog warm-up thread can be that importer).
+        # Only configure_application binds a graph, and it needs the
+        # finished module's lock, so nothing can be bound to it yet.  This
+        # used to raise "busy", which turned a clean owned-runtime stop into
+        # a non-zero exit (STOPPED_UNCLEAN).
+        if _owned_application is application:
+            raise RuntimeError("legacy application composition is inconsistent")
+        return False
+    if not lock.acquire(timeout=5):
         raise RuntimeError("legacy application composition is busy")
     try:
         if getattr(legacy, "_APP_GRAPH", None) is application and _owned_application is application:
