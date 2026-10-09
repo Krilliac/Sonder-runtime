@@ -748,8 +748,17 @@ def test_pruned_output_references_release_spill_quota(tmp_path):
         inline_output_bytes=8, output_batch=OutputBatchPolicy(max_lines=1),
     )
     provider.start(_request("rolling-spills", "for i in range(3): print(str(i) * 20, flush=True)"))
+    readers = provider.snapshot_output_readers("rolling-spills")
     waited = provider.wait("rolling-spills", timeout=30)
     assert waited.record.status is JobStatus.SUCCEEDED
+    # wait() gives readers one second after the root exits; a reader that is
+    # still slower (a loaded Windows runner) publishes its tail afterwards, by
+    # design. Read the stream only once every reader and the persister ended,
+    # i.e. once the last line is durable (CI flake 2026-10-08: the page still
+    # held line 1).
+    for thread in readers:
+        thread.join(timeout=30)
+        assert not thread.is_alive()
     page = registry.stream("rolling-spills")
     assert len(page.events) == 1
     assert output.read(page.events[0].spill, max_bytes=64) == b"2" * 20 + b"\n"

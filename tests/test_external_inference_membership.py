@@ -240,6 +240,32 @@ def test_external_membership_status_reports_pinned_admission_without_origins(
         assert controller.close(timeout=2)
 
 
+@pytest.mark.parametrize("fallback", [False, True])
+def test_membership_renewal_skips_a_loopback_lane_external_fallback_disables(source, fallback):
+    """With local_fallback off, open_url refuses the loopback lane, so renewing
+    it only fails, logs, and spends a probe-batch slot on every pass."""
+    from sonder_runtime.adapters.inference.ollama_pool import OllamaWorkerPool
+    from sonder_runtime.application.inference_membership.controller import MembershipController
+
+    value, _, _ = source
+    value._config = replace(value._config, local_fallback=fallback)
+    pool = OllamaWorkerPool("http://127.0.0.1:11434", max_workers=4)
+    pool.configure_external_source(value)
+    controller = MembershipController(
+        value, pool, clock=lambda: NOW, cluster_id="cluster", issuer_id="issuer",
+        refresh_interval_seconds=30,
+        source_limits=MembershipSourceLimits(max_advertisements=16, max_bytes=1_048_576))
+    probed = []
+    pool._capability_prober = lambda origin: probed.append(origin) or {"models": ["code"]}
+    try:
+        controller.refresh(timeout_seconds=2)
+        local = [origin for origin in probed if "127.0.0.1" in origin]
+        assert bool(local) is fallback
+        assert ORIGIN in probed
+    finally:
+        assert controller.close(timeout=2)
+
+
 @pytest.mark.parametrize("module_name", ["embeddings", "ollama_endpoint"])
 def test_external_embedding_fence_survives_real_staged_live_reload(source, monkeypatch, module_name):
     import sys
