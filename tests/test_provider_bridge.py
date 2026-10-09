@@ -320,3 +320,26 @@ def test_malformed_length_content_is_still_a_protocol_error():
     from sonder_runtime.adapters.inference.openai_compat_gateway import OpenAICompatibleGateway
     with pytest.raises(DependencyUnavailable):
         OpenAICompatibleGateway._extract_text({"choices": [{"finish_reason": "length", "message": {"content": {"bad": "shape"}}}]})
+
+
+@pytest.mark.parametrize("think, provider, expected", [
+    (None, "sonder_inference", 4096),
+    (True, "sonder_inference", 4096),
+    (False, "sonder_inference", 64),
+    (None, "openai_compatible", 64),
+])
+def test_bridged_thinking_provider_gets_local_thinking_headroom(think, provider, expected):
+    seen = {}
+
+    class Gateway:
+        def generate(self, request, context):
+            seen["options"] = request.options
+            return ModelResponse(text="ok", model="m", tier=request.tier)
+
+    extra = {} if think is None else {"think": think}
+    with bridge.bind_rung(provider, "fast"):
+        bridge.generate_via_gateway(
+            Gateway(), _payload(**extra), tier="fast",
+            context=local_owner_context(correlation_id="think-budget"),
+        )
+    assert seen["options"]["num_predict"] == expected
