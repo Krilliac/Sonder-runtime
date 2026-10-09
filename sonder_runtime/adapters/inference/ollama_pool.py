@@ -1265,7 +1265,15 @@ class OllamaWorkerPool:
                         or self._membership_clock() >= state.membership_expires_at
                     ):
                         continue
-                    if _membership and state.membership_state is None:
+                    # The controller's pass is the only periodic refresh, so it
+                    # also renews the static loopback lane. Skipping it let the
+                    # local primary's evidence lapse after one TTL while a remote
+                    # member that advertises the model kept every request.
+                    # An external source without local_fallback disables that
+                    # lane (open_url refuses it), so it is not renewed either.
+                    if (_membership and state.membership_state is None
+                            and not (_is_loopback(state.endpoint.origin)
+                                     and self._membership_admissible(state, now))):
                         continue
                     if not (
                         (force or self._capabilities_renewal_due(state, now, _renew_within))
@@ -2162,6 +2170,37 @@ class OllamaWorkerPool:
                 self._condition.wait(timeout=remaining)
             logger.info("worker pool drained successfully")
             return True
+
+    def model_capacity(self, model: str | None) -> int | None:
+        """Admission slots the pool can grant for ``model`` right now.
+
+        Mirrors ``_choose``: per admissible, non-cooling worker whose fresh
+        capability evidence advertises the model, the free slots are capacity
+        minus inflight, except that a half-open worker (failure threshold
+        reached) takes a single recovery probe and none while one is in
+        flight. Returns ``None`` when no worker advertises the model, because
+        "unknown" must not be read as "zero"; ``0`` means every advertising
+        worker is busy.
+        """
+        now = self._clock()
+        advertised, total = False, 0
+        with self._condition:
+            for state in self._states:
+                if not (
+                    self._membership_admissible(state, now)
+                    and not state.compatibility_error
+                    and state.cooldown_until <= now
+                    and self._supports_model(state, model)
+                ):
+                    continue
+                advertised = True
+                if state.half_open_inflight:
+                    continue
+                free = max(0, self._capacity(state) - state.inflight)
+                if state.consecutive_failures >= self._failure_threshold:
+                    free = min(1, free)
+                total += free
+        return total if advertised else None
 
     def snapshots(self) -> tuple[WorkerSnapshot, ...]:
         now = self._clock()

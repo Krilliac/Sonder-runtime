@@ -33,6 +33,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from types import MappingProxyType
 
+from ...domain.thinking_controls import with_local_thinking_budget
 from ...domain.common.errors import (
     Cancelled,
     CapacityExceeded,
@@ -212,6 +213,34 @@ def _text(value: object, where: str) -> str:
     return value
 
 
+def ollama_only_feature(
+    payload: Mapping[str, object], *, provider: str | None = None,
+) -> tuple[str, str] | None:
+    """The first Ollama-only feature ``payload`` asks for, as (feature, message).
+
+    The single predicate the bridge refuses on (``model_request_from_ollama_payload``)
+    and the legacy hook reroutes on (``legacy_chat_bridge.ollama_only_reroute``),
+    so the two can never disagree.  ``think=True`` is a feature only for a
+    provider outside ``THINKING_PROVIDERS``; ``think=False`` never is.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    if payload.get("format") is not None:
+        return ("format",
+                "response_format/schema decoding is only available on Ollama tiers")
+    if payload.get("think") is True and provider not in THINKING_PROVIDERS:
+        return ("think", "model thinking is only available on Ollama tiers")
+    if payload.get("tools"):
+        return ("tools", "native tool calls are only available on Ollama tiers")
+    messages = payload.get("messages")
+    for message in messages if isinstance(messages, list) else ():
+        if isinstance(message, Mapping) and (
+                message.get("images") or message.get("tool_calls")):
+            return ("images" if message.get("images") else "tool_calls",
+                    "images and tool calls are only available on Ollama tiers")
+    return None
+
+
 def model_request_from_ollama_payload(
     payload: Mapping[str, object], *, tier: str, provider: str | None = None,
 ) -> ModelRequest:
@@ -222,10 +251,9 @@ def model_request_from_ollama_payload(
     """
     if not isinstance(payload, Mapping):
         raise InvalidInput("chat payload must be an object")
-    if payload.get("format") is not None:
-        raise UnsupportedProviderFeature(
-            "response_format/schema decoding is only available on Ollama tiers"
-        )
+    refused = ollama_only_feature(payload, provider=provider)
+    if refused is not None:
+        raise UnsupportedProviderFeature(refused[1])
     think = payload.get("think")
     binding = active_rung()
     bound_options = (
@@ -239,14 +267,6 @@ def model_request_from_ollama_payload(
     payload_options = payload.get("options")
     payload_options = payload_options if isinstance(payload_options, Mapping) else {}
     carry_think = provider in THINKING_PROVIDERS and isinstance(think, bool)
-    if think is True and not carry_think:
-        raise UnsupportedProviderFeature(
-            "model thinking is only available on Ollama tiers"
-        )
-    if payload.get("tools"):
-        raise UnsupportedProviderFeature(
-            "native tool calls are only available on Ollama tiers"
-        )
     messages = payload.get("messages")
     if not isinstance(messages, list) or not messages:
         raise InvalidInput("chat payload has no messages")
@@ -255,10 +275,6 @@ def model_request_from_ollama_payload(
     for index, message in enumerate(messages):
         if not isinstance(message, Mapping):
             raise InvalidInput("chat message %d is not an object" % index)
-        if message.get("images") or message.get("tool_calls"):
-            raise UnsupportedProviderFeature(
-                "images and tool calls are only available on Ollama tiers"
-            )
         role = message.get("role")
         if role not in _ROLES:
             raise InvalidInput("chat message %d has an unsupported role" % index)
@@ -410,6 +426,15 @@ def generate_via_gateway(
     """
     binding = active_rung()
     provider = binding.provider if binding is not None else None
+    # An explicit payload value wins; otherwise a frozen binding option decides.
+    bound = binding.options if binding is not None and isinstance(binding.options, Mapping) else {}
+    think = payload["think"] if "think" in payload else bound.get("think")
+    if provider in THINKING_PROVIDERS and think is not False:
+        # A reasoning model left free to think (Qwen3.5/3.8 default to it) spends
+        # num_predict on thought first; a tight cap returns done_reason=length
+        # with no content.  Same headroom the local Ollama path gives a known
+        # thinking model; it only raises a cap, so non-thinking models are unaffected.
+        payload = with_local_thinking_budget(payload)
     request = model_request_from_ollama_payload(payload, tier=tier, provider=provider)
     with suspend_rung():
         if provider in STREAMING_PROVIDERS:
@@ -443,6 +468,7 @@ __all__ = [
     "generate_via_gateway",
     "is_bridged",
     "model_request_from_ollama_payload",
+    "ollama_only_feature",
     "ollama_shape",
     "provider_for_tier",
     "record_degradation",

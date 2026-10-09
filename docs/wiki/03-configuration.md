@@ -388,9 +388,10 @@ procedure: [runbook](../runbooks/sonder-inference.md)):
 | `SONDER_INFERENCE_TIER_MODELS` | unset | e.g. `fast=a,general=b` |
 | `SONDER_INFERENCE_API_KEY` | unset | bearer token; redacted from logs |
 | `SONDER_ALLOW_REMOTE_INFERENCE` | `0` | `1` permits a non-loopback URL, which also needs `https://`, a key, and a cloud-allowed context |
+| `SONDER_INFERENCE_PRIVATE_WORKERS` | unset | JSON list of approved private workers (https private IP, own CA bundle, own token variable); needs `SONDER_ALLOW_REMOTE_INFERENCE=1`, not cloud consent; requests are placed on the least-loaded endpoint ([provider reference](../architecture/sonder-inference-provider.md#private-workers)) |
 | `SONDER_INFERENCE_TIMEOUT_SECONDS` | `300` | per-call ceiling, never beyond the operation deadline |
 | `SONDER_INFERENCE_HEALTH_TTL_SECONDS` | `5` | health-cache lifetime |
-| `SONDER_INFERENCE_FALLBACK` | `none` | `ollama` sends requests Inference never received to local Ollama once |
+| `SONDER_INFERENCE_FALLBACK` | `none` | `ollama` sends requests Inference never received to local Ollama once, and serves schema/tool/image chat steps (which Inference v1 cannot carry) on local Ollama |
 
 Provider bindings apply to every model call that selects a tier. This includes
 interactive agents and workbench turns, autopilot planning, task execution,
@@ -413,7 +414,14 @@ Inference fallback is fail-closed by default. Set
 `SONDER_INFERENCE_FALLBACK=ollama` only when a fallback is explicitly wanted;
 Ollama is then permitted once, and only after the primary provider proves that
 it did not execute the request. Timeouts, partial responses, and an unknown
-execution outcome do not qualify for fallback.
+execution outcome do not qualify for fallback. The same declaration lets a
+chat step that needs an Ollama-only feature (a decoder schema from
+`offload(schema=...)`, `extract_grounded` or agent JSON steps, native tools,
+images) run on the loopback Ollama daemon with the tier's policy model instead
+of being refused; a `-cloud` model or remote Ollama endpoint is still refused,
+and the turn receipt records `served by ollama (ollama-only feature: ...)`.
+Without the declaration such a step fails with a 400 naming
+`SONDER_INFERENCE_FALLBACK=ollama` as the fix.
 
 For local agent, autopilot and fleet work, pool admission waits in a bounded
 queue. `SONDER_POOL_ADMISSION_TIMEOUT_SECONDS` controls that wait (default

@@ -132,6 +132,35 @@ def test_images_and_native_tool_calls_in_messages_are_refused():
         bridge.model_request_from_ollama_payload(payload, tier="general")
 
 
+@pytest.mark.parametrize("extra,feature", [
+    ({"format": {"type": "object"}}, "format"),
+    ({"format": "json"}, "format"),
+    ({"think": True}, "think"),
+    ({"tools": [{"type": "function", "function": {"name": "x"}}]}, "tools"),
+])
+def test_ollama_only_feature_predicate_matches_the_refusal(extra, feature):
+    found = bridge.ollama_only_feature(_payload(**extra), provider="openrouter")
+    assert found is not None and found[0] == feature
+    with pytest.raises(bridge.UnsupportedProviderFeature) as caught:
+        bridge.model_request_from_ollama_payload(
+            _payload(**extra), tier="general", provider="openrouter",
+        )
+    assert str(caught.value) == found[1]
+
+
+def test_ollama_only_feature_predicate_covers_messages_and_thinking_providers():
+    payload = _payload()
+    payload["messages"][-1]["images"] = ["aGVsbG8="]
+    assert bridge.ollama_only_feature(payload)[0] == "images"
+    payload = _payload()
+    payload["messages"][-2]["tool_calls"] = [{"function": {"name": "x"}}]
+    assert bridge.ollama_only_feature(payload)[0] == "tool_calls"
+    # Inference carries think itself; think=False is never a feature.
+    assert bridge.ollama_only_feature(_payload(think=True), provider="sonder_inference") is None
+    assert bridge.ollama_only_feature(_payload(think=False)) is None
+    assert bridge.ollama_only_feature(_payload()) is None
+
+
 def test_think_false_is_not_a_feature_request():
     request = bridge.model_request_from_ollama_payload(_payload(think=False), tier="general")
     assert request.prompt == "current question"
@@ -291,3 +320,43 @@ def test_malformed_length_content_is_still_a_protocol_error():
     from sonder_runtime.adapters.inference.openai_compat_gateway import OpenAICompatibleGateway
     with pytest.raises(DependencyUnavailable):
         OpenAICompatibleGateway._extract_text({"choices": [{"finish_reason": "length", "message": {"content": {"bad": "shape"}}}]})
+
+
+@pytest.mark.parametrize("think, provider, expected", [
+    (None, "sonder_inference", 4096),
+    (True, "sonder_inference", 4096),
+    (False, "sonder_inference", 64),
+    (None, "openai_compatible", 64),
+])
+def test_bridged_thinking_provider_gets_local_thinking_headroom(think, provider, expected):
+    seen = {}
+
+    class Gateway:
+        def generate(self, request, context):
+            seen["options"] = request.options
+            return ModelResponse(text="ok", model="m", tier=request.tier)
+
+    extra = {} if think is None else {"think": think}
+    with bridge.bind_rung(provider, "fast"):
+        bridge.generate_via_gateway(
+            Gateway(), _payload(**extra), tier="fast",
+            context=local_owner_context(correlation_id="think-budget"),
+        )
+    assert seen["options"]["num_predict"] == expected
+
+
+def test_bound_think_false_keeps_the_callers_small_budget():
+    seen = {}
+
+    class Gateway:
+        def generate(self, request, context):
+            seen["options"] = request.options
+            return ModelResponse(text="ok", model="m", tier=request.tier)
+
+    with bridge.bind_rung("sonder_inference", "fast", options={"think": False}):
+        bridge.generate_via_gateway(
+            Gateway(), _payload(), tier="fast",
+            context=local_owner_context(correlation_id="bound-think-false"),
+        )
+    assert seen["options"]["num_predict"] == 64
+    assert seen["options"]["think"] is False
