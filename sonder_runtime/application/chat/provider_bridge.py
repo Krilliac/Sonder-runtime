@@ -33,6 +33,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from types import MappingProxyType
 
+from ...domain.thinking_controls import with_local_thinking_budget
 from ...domain.common.errors import (
     Cancelled,
     CapacityExceeded,
@@ -425,6 +426,15 @@ def generate_via_gateway(
     """
     binding = active_rung()
     provider = binding.provider if binding is not None else None
+    # An explicit payload value wins; otherwise a frozen binding option decides.
+    bound = binding.options if binding is not None and isinstance(binding.options, Mapping) else {}
+    think = payload["think"] if "think" in payload else bound.get("think")
+    if provider in THINKING_PROVIDERS and think is not False:
+        # A reasoning model left free to think (Qwen3.5/3.8 default to it) spends
+        # num_predict on thought first; a tight cap returns done_reason=length
+        # with no content.  Same headroom the local Ollama path gives a known
+        # thinking model; it only raises a cap, so non-thinking models are unaffected.
+        payload = with_local_thinking_budget(payload)
     request = model_request_from_ollama_payload(payload, tier=tier, provider=provider)
     with suspend_rung():
         if provider in STREAMING_PROVIDERS:

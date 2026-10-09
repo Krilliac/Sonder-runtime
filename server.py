@@ -5863,15 +5863,10 @@ def _offload_tier_impl(
                     timeout=request_timeout,
                     cancel_check=cancel_check,
                 )
-            else:
-                out, msg = _chat_request(
-                    payload,
-                    model=model,
-                    cloud=False,
-                    timeout=request_timeout,
-                    cancel_check=cancel_check,
-                    idempotent=True,
-                )
+            else:  # a bridged tier must reach its provider, not Ollama with num_ctx=0
+                with _provider_bridge.bind_rung(provider, tier) if provider is not None else contextlib.nullcontext():
+                    out, msg = _chat_request(payload, model=model, cloud=False, timeout=request_timeout,
+                                             cancel_check=cancel_check, idempotent=True)
             if provider is not None:
                 used_model = out.get("model") or model
             tokens_in = _model_usage_count(out.get("prompt_eval_count"))
