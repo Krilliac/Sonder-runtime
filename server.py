@@ -495,6 +495,7 @@ from sonder_runtime.interfaces.http.serve_policy import (
     serve_temperature as _serve_temperature,
 )
 from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool, prewarm_gate
+from sonder_runtime.adapters.inference import ollama_reporting as _ollama_reporting
 from sonder_runtime.domain import ollama_policy
 from sonder_runtime.domain.runtime_model_configuration import (
     RuntimeModelConfiguration,
@@ -1543,8 +1544,7 @@ def _direct_fanout_access(run_id: str, token: str, started, tool_name: str):
     def render_model_error(error):
         return _format_runtime_model_call_error_policy(
             error,
-            endpoint_loopback=_ollama_endpoint_is_local(),
-            display=_ollama_display(),
+            **_ollama_error_endpoint(),
         )
 
     refusal = _developer_gate(tool_name, token, started)
@@ -4821,6 +4821,10 @@ def _transport_error_detail(error) -> str:
 _ollama_display = lambda: ollama_endpoint.safe_display(BASE)  # noqa: E731 - reads BASE per call
 
 
+def _ollama_error_endpoint() -> dict:
+    return _ollama_reporting.error_endpoint(BASE, OLLAMA_POOL, _ollama_display())
+
+
 def _require_ollama_endpoint(*, cloud: bool = False) -> None:
     error = ollama_endpoint.policy_error(BASE)
     if error:
@@ -5458,8 +5462,7 @@ def _chat_request(
 def _format_model_call_error(error: ModelCallError) -> str:
     return _format_runtime_model_call_error_policy(
         error,
-        endpoint_loopback=ollama_endpoint.is_loopback(BASE),
-        display=_ollama_display(),
+        **_ollama_error_endpoint(),
     )
 
 
@@ -5940,15 +5943,10 @@ def _offload_tier_impl(
         )
         retrieve_kwargs["retrieve_fn"] = _no_retrieve_policy
     else:
-        learning_model = model if provider is not None else resolve_sonder_model(_STRICT_DEFAULT)
-        if learning_model is None:
-            raise ModelCallError(
-                "configuration",
-                "`sonder:latest` Ollama alias not found. Run setup_alias.py, "
-                "or call with strict=False to fall back to the base coder.",
-            )
+        # Learned calls use the tier's own binding, as learn=False does; the strict
+        # sonder:latest alias belongs to the default chat route (_serve_target).
         gen = _make_tier_generate(
-            tier, learning_model,
+            tier, model,
             system,
             temperature,
             num_predict,
@@ -6267,9 +6265,10 @@ def offload(
     fine-tuning data for the local model. 'fast'/'general' (mechanical work) and
     learn=False run the plain path: no capture, no footer, just text.
 
-    Tiers: fast (default), code, general (operator-bound models: runtime_policy_status),
-    cloud-code / cloud-general (METERED, prompt leaves this machine). A learned Ollama
-    call runs the `sonder:latest` alias if installed; learn=False runs the tier's model.
+    Tiers: fast (default), code, general, optional reasoning/vision, and
+    cloud-code / cloud-general (METERED, prompt leaves this machine). Each tier
+    generates with the model its runtime-policy binding names (see
+    runtime_policy_status) -- with learn=True as well as learn=False.
     Give a FULLY self-contained prompt (the model can't see this chat or your files).
 
     schema: optional JSON Schema *as JSON text*, e.g.
@@ -6296,7 +6295,7 @@ def offload(
 
     Omit schema (the default) and this call behaves exactly as it always has:
     no format constraint, no checking, raw text back.
-    Small object shapes work far better than deep ones on a 3B/7B local tier.
+    Small object shapes work far better than deep ones on a small local model.
 
     session: optional durable session identity. When supplied, the exact
     model-visible request, effective provider attempts, and accepted response
@@ -6320,8 +6319,7 @@ def offload(
     except ModelCallError as error:
         return _format_runtime_model_call_error_policy(
             error,
-            endpoint_loopback=_ollama_endpoint_is_local(),
-            display=_ollama_display(),
+            **_ollama_error_endpoint(),
         )
 
 
@@ -6473,8 +6471,7 @@ def extract_grounded(
     except ModelCallError as error:
         return _format_runtime_model_call_error_policy(
             error,
-            endpoint_loopback=_ollama_endpoint_is_local(),
-            display=_ollama_display(),
+            **_ollama_error_endpoint(),
         )
 
 
@@ -6793,8 +6790,7 @@ def _sonder_impl_serialized(
     except ModelCallError as error:
         return _format_runtime_model_call_error_policy(
             error,
-            endpoint_loopback=_ollama_endpoint_is_local(),
-            display=_ollama_display(),
+            **_ollama_error_endpoint(),
         )
     except urllib.error.URLError as e:
         return ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
@@ -6924,8 +6920,7 @@ def sonder(
     def render_model_error(error):
         return _format_runtime_model_call_error_policy(
             error,
-            endpoint_loopback=_ollama_endpoint_is_local(),
-            display=_ollama_display(),
+            **_ollama_error_endpoint(),
         )
 
     # An explicitly selected target is a caller-owned routing contract.  Do
@@ -7251,8 +7246,7 @@ def _answer_with_history_impl(
             raise
         return _format_runtime_model_call_error_policy(
             error,
-            endpoint_loopback=_ollama_endpoint_is_local(),
-            display=_ollama_display(),
+            **_ollama_error_endpoint(),
         )
     except urllib.error.URLError as e:
         return ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
@@ -7613,6 +7607,8 @@ def parallel_generate_run(
         "Return one complete runnable Python solution in a single ```python code block. "
         "No prose outside the code block. Avoid input() and unbounded loops."
     )
+    requested_workers, (max_workers, pool_capacity) = max_workers, _ollama_reporting.clamp_workers(
+        max_workers, pool=OLLAMA_POOL, model=model, cloud=cloud, bridged=lambda: _bridge_provider_for_tier(tier))
     gen = _make_tier_generate(tier, model, system, temperature, num_predict, num_ctx, cloud=cloud)
     started = time.time()
     generation_results = [None] * variants
@@ -7663,8 +7659,9 @@ def parallel_generate_run(
     elapsed = round(time.time() - started, 3)
     passed = sum(1 for r in generation_results if r and r.get("ok"))
     lines = [
-        "parallel generate/run: %d/%d passed in %.3fs (tier=%s, workers=%d)"
-        % (passed, variants, elapsed, tier, max_workers)
+        "parallel generate/run: %d/%d passed in %.3fs (tier=%s, %s)"
+        % (passed, variants, elapsed, tier,
+           _ollama_reporting.workers_label(max_workers, requested_workers, pool_capacity))
     ]
     for r in generation_results:
         status = "PASS" if r.get("ok") else "FAIL"
@@ -7723,6 +7720,8 @@ def parallel_generate_run_languages(
     if _is_cloud_tier(tier, model) and not _cloud_allowed_policy(os.environ):
         return _cloud_disabled_message()
     cloud = _is_cloud_tier(tier, model)
+    requested_workers, (max_workers, pool_capacity) = max_workers, _ollama_reporting.clamp_workers(
+        max_workers, pool=OLLAMA_POOL, model=model, cloud=cloud, bridged=lambda: _bridge_provider_for_tier(tier))
     started = time.time()
     results = [None] * len(jobs)
     fanin = CandidateFanIn(prompt, check)
@@ -7790,8 +7789,9 @@ def parallel_generate_run_languages(
     elapsed = round(time.time() - started, 3)
     passed = sum(1 for r in results if r and r.get("ok"))
     lines = [
-        "parallel multi-language generate/run: %d/%d passed in %.3fs (tier=%s, workers=%d)"
-        % (passed, len(results), elapsed, tier, max_workers)
+        "parallel multi-language generate/run: %d/%d passed in %.3fs (tier=%s, %s)"
+        % (passed, len(results), elapsed, tier,
+           _ollama_reporting.workers_label(max_workers, requested_workers, pool_capacity))
     ]
     for r in results:
         status = "PASS" if r.get("ok") else "SKIP" if isinstance(r.get("output"), _powershell_gate.ApprovalRequired) else "FAIL"
@@ -14399,8 +14399,7 @@ def vision_analyze(
     except ModelCallError as exc:
         rendered = _format_runtime_model_call_error_policy(
             exc,
-            endpoint_loopback=_ollama_endpoint_is_local(),
-            display=_ollama_display(),
+            **_ollama_error_endpoint(),
         )
         _record_direct_tool("vision_analyze", args, ok=False, started=started, summary=exc.kind)
         return rendered
@@ -18075,8 +18074,7 @@ def _agent_negative_claim_review(
                 "decision": "error",
                 "reason": _format_runtime_model_call_error_policy(
                     error,
-                    endpoint_loopback=_ollama_endpoint_is_local(),
-                    display=_ollama_display(),
+                    **_ollama_error_endpoint(),
                 ),
                 "tool": "",
                 "args": {},
@@ -20500,8 +20498,7 @@ def _agent_turn(
     def render_model_error(error):
         return _format_runtime_model_call_error_policy(
             error,
-            endpoint_loopback=_ollama_endpoint_is_local(),
-            display=_ollama_display(),
+            **_ollama_error_endpoint(),
         )
 
     _maybe_live_reload()
@@ -23808,6 +23805,13 @@ def self_heal_repair(apply: bool = False) -> str:
     return self_heal.format_report(issues, actions=actions)
 
 
+def _diagnostics_ollama_model_lines() -> list[str]:
+    return _ollama_reporting.model_inventory_lines(
+        OLLAMA_POOL, get_tags=lambda: _get("/api/tags"), member_tags=_pool_member_tags,
+        require_endpoint=_require_ollama_endpoint,
+        names=lambda payload: _inventory_model_names(_inventory_rows_policy(payload, "/api/tags")))
+
+
 @mcp.tool()
 def diagnostics() -> str:
     """Run lightweight health checks for the local Sonder Runtime installation."""
@@ -23966,20 +23970,7 @@ def diagnostics() -> str:
         lines.append("  npu accelerator: %s" % npu_service.diagnostics_line())
     except Exception:
         lines.append("  npu accelerator: unknown (status unavailable)")
-    try:
-        names = _inventory_model_names(
-            _inventory_rows_policy(_get("/api/tags"), "/api/tags")
-        )
-        # Show the count AND an enumeration consistent with it: truncating the
-        # list to 8 while printing "11 models" silently hid three models
-        # (including sonder:latest, the active tier). Cap the enumeration but
-        # make the omission explicit.
-        shown = ", ".join(names[:8]) if names else "none"
-        if len(names) > 8:
-            shown += ", +%d more" % (len(names) - 8)
-        lines.append("  ollama: ok (%d models: %s)" % (len(names), shown))
-    except Exception as e:
-        lines.append("  ollama: ERROR %s" % e)
+    lines.extend(_diagnostics_ollama_model_lines())
     lines.append("  web tools: %s" % ("on" if web_tools.enabled() else "off"))
     return "\n".join(lines)
 
@@ -24770,8 +24761,7 @@ def _model_fanout_authorized(prompt: str, scope: str = "", num_predict: int = 51
     def render_model_error(error):
         return _format_runtime_model_call_error_policy(
             error,
-            endpoint_loopback=_ollama_endpoint_is_local(),
-            display=_ollama_display(),
+            **_ollama_error_endpoint(),
         )
 
     question = str(prompt or "").strip()
@@ -24856,8 +24846,7 @@ def model_fanout_status(run_id: str, token: str = "") -> str:
     def render_model_error(error):
         return _format_runtime_model_call_error_policy(
             error,
-            endpoint_loopback=_ollama_endpoint_is_local(),
-            display=_ollama_display(),
+            **_ollama_error_endpoint(),
         )
 
     started = time.time()
@@ -24884,8 +24873,7 @@ def model_fanout_recent(limit: StrictInt = 20, include_finished: StrictBool = Tr
     def render_model_error(error):
         return _format_runtime_model_call_error_policy(
             error,
-            endpoint_loopback=_ollama_endpoint_is_local(),
-            display=_ollama_display(),
+            **_ollama_error_endpoint(),
         )
 
     started = time.time()
@@ -24915,8 +24903,7 @@ def model_fanout_cancel(run_id: str, token: str = "") -> str:
     def render_model_error(error):
         return _format_runtime_model_call_error_policy(
             error,
-            endpoint_loopback=_ollama_endpoint_is_local(),
-            display=_ollama_display(),
+            **_ollama_error_endpoint(),
         )
 
     started = time.time()
@@ -24943,8 +24930,7 @@ def model_fanout_resume(run_id: str, include_failed: StrictBool = False,
     def render_model_error(error):
         return _format_runtime_model_call_error_policy(
             error,
-            endpoint_loopback=_ollama_endpoint_is_local(),
-            display=_ollama_display(),
+            **_ollama_error_endpoint(),
         )
 
     started = time.time()
@@ -24990,8 +24976,7 @@ def model_fanout_synthesize(run_id: str, synth_model: StrictStr = "", token: str
     def render_model_error(error):
         return _format_runtime_model_call_error_policy(
             error,
-            endpoint_loopback=_ollama_endpoint_is_local(),
-            display=_ollama_display(),
+            **_ollama_error_endpoint(),
         )
 
     started = time.time()
@@ -25150,8 +25135,7 @@ def ensemble_answer(
     def render_model_error(error):
         return _format_runtime_model_call_error_policy(
             error,
-            endpoint_loopback=_ollama_endpoint_is_local(),
-            display=_ollama_display(),
+            **_ollama_error_endpoint(),
         )
 
     _maybe_live_reload()
@@ -26403,8 +26387,7 @@ def codegen_build_loop(
                         # remains pending and cannot count as a failed reuse.
                         return _format_runtime_model_call_error_policy(
                             error,
-                            endpoint_loopback=_ollama_endpoint_is_local(),
-                            display=_ollama_display(),
+                            **_ollama_error_endpoint(),
                         )
                 else:
                     reply = ensemble_answer(
