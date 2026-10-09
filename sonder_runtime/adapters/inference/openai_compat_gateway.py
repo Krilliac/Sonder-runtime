@@ -30,11 +30,14 @@ body only up to a fixed byte ceiling.
 """
 from __future__ import annotations
 
+import functools
 import http.client
 import ipaddress
 import json
 import logging
+import os
 import socket
+import ssl
 import time
 import urllib.error
 import urllib.request
@@ -100,6 +103,32 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def shared_https_context() -> ssl.SSLContext:
+    """The verifying TLS context for model-endpoint openers, shared in-process.
+
+    Loading the platform trust store costs ~150-200 ms on Windows.
+    ``urllib.request.build_opener()`` does that load eagerly for its default
+    HTTPS handler, even when the URL is plain-HTTP loopback.  An opener built
+    per request therefore paid it on every request.  This context matches
+    urllib's default one (CERT_REQUIRED, check_hostname, ALPN http/1.1,
+    post-handshake auth).  Nothing changes it after creation, so threads can
+    share it.  It is keyed by the OpenSSL trust-path variables, so changing
+    ``SSL_CERT_FILE``/``SSL_CERT_DIR`` still takes effect on the next request,
+    as it did when each request built its own context.  Edits made in place
+    to the trust store or bundle files take effect on restart.
+    """
+    return _https_context(os.environ.get("SSL_CERT_FILE"), os.environ.get("SSL_CERT_DIR"))
+
+
+@functools.lru_cache(maxsize=4)
+def _https_context(_cert_file: str | None, _cert_dir: str | None) -> ssl.SSLContext:
+    context = ssl.create_default_context()
+    context.set_alpn_protocols(["http/1.1"])
+    if context.post_handshake_auth is not None:
+        context.post_handshake_auth = True
+    return context
+
+
 def _opener_for(url: str):
     """A non-redirecting opener; loopback URLs also bypass every proxy.
 
@@ -110,7 +139,7 @@ def _opener_for(url: str):
     only sees a CONNECT tunnel).  Built per call so the proxy decision reflects
     the current environment rather than the one at import time.
     """
-    handlers: list = [_NoRedirect()]
+    handlers: list = [_NoRedirect(), urllib.request.HTTPSHandler(context=shared_https_context())]
     if (urlsplit(url).hostname or "").lower() in _LOOPBACK_HOSTS:
         handlers.append(urllib.request.ProxyHandler({}))
     return urllib.request.build_opener(*handlers)
