@@ -27,6 +27,7 @@ from sonder_runtime.adapters.inference.sonder_inference_gateway import (
     SonderInferenceUnreachable,
     config_from_env,
     correlation_headers,
+    direct_get_transport,
 )
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.model_gateway import ModelRequest
@@ -740,7 +741,19 @@ def test_real_http_round_trip_and_not_ready_error_body(loopback_server):
         "/v1/sonder/health": (200, _health()),
         "/v1/chat/completions": (200, _chat("real")),
     })
-    gateway = SonderInferenceGateway(SonderInferenceConfig(base_url=base, health_ttl_seconds=0))
+    # Real stdlib GET transport, with a budget that cannot expire spuriously.
+    # The gateway caps health probes at 5s, and a loopback probe starved past
+    # that under CPU load (measured 5.17s) takes the designed busy fallback:
+    # the recent "ready" observation is reused, labelled busy, so the final
+    # "degraded" assertion saw "ready".  That fallback has its own tests
+    # (test_a3_*); this test is about the HTTP round trip and its mapping.
+    # 60s is a hang detector here, not a latency expectation.
+    def unhurried_get(url, headers, _timeout):
+        return direct_get_transport(url, headers, 60.0)
+
+    gateway = SonderInferenceGateway(
+        SonderInferenceConfig(base_url=base, health_ttl_seconds=0), get_transport=unhurried_get,
+    )
     response = gateway.generate(ModelRequest(prompt="hi", tier="fast"), _ctx(correlation="r-1"))
     assert (response.text, response.model) == ("real", "mock")
     post = [entry for entry in handler.seen if entry[0] == "POST"][0]
@@ -762,7 +775,8 @@ def test_real_http_round_trip_and_not_ready_error_body(loopback_server):
     assert not isinstance(info.value, SonderInferenceUnreachable)
 
     handler.routes["/v1/sonder/health"] = (503, _health("starting"))
-    assert gateway.provider_status()["sonder_inference"]["state"] == "degraded"
+    status = gateway.provider_status()["sonder_inference"]
+    assert (status["state"], status["busy"]) == ("degraded", False), status["detail"]
 
 
 def test_real_refused_port_is_unreachable_and_logged(caplog):
