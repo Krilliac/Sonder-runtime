@@ -11,6 +11,7 @@ import io
 import json
 import logging
 import socket
+import ssl
 import threading
 import urllib.error
 from datetime import datetime, timezone
@@ -1007,6 +1008,54 @@ def test_health_probe_is_bounded_by_wall_clock_not_per_read():
         assert _time.monotonic() - started < 1.6
     finally:
         close()
+
+
+def test_requests_never_reload_the_tls_trust_store(loopback_server, monkeypatch, tmp_path):
+    # Loading the platform trust store costs ~150-200 ms on Windows.  Every
+    # exchange used to do it, plain-HTTP loopback included: our HTTPS
+    # handler built a fresh context, and build_opener() built another for
+    # its default HTTPS handler.  Each small loopback request took ~200 ms
+    # instead of ~2 ms.
+    from sonder_runtime.adapters.inference.openai_compat_gateway import (
+        OpenAICompatibleGateway,
+        shared_https_context,
+    )
+
+    server, handler = loopback_server
+    base = "http://127.0.0.1:%d" % server.server_address[1]
+    handler.routes.update({
+        "/v1/sonder/health": (200, _health()),
+        "/v1/chat/completions": (200, _chat("ok")),
+    })
+    gateway = SonderInferenceGateway(SonderInferenceConfig(base_url=base, health_ttl_seconds=0))
+    chat = {"model": "m", "messages": [{"role": "user", "content": "x"}]}
+
+    def every_transport():
+        gateway.generate(ModelRequest(prompt="x", tier="fast"), _ctx())  # health GET + POST
+        OpenAICompatibleGateway._default_get_transport(base + "/v1/sonder/health", {}, 5)
+        OpenAICompatibleGateway._default_transport(
+            base + "/v1/chat/completions", chat, {"Content-Type": "application/json"}, 5,
+        )
+
+    every_transport()  # the shared context may load the store once per process
+    loads = []
+    real_load = ssl.SSLContext.load_default_certs
+
+    def counting_load(self, *args, **kwargs):
+        loads.append(1)
+        return real_load(self, *args, **kwargs)
+
+    monkeypatch.setattr(ssl.SSLContext, "load_default_certs", counting_load)
+    for _ in range(3):
+        every_transport()
+    assert loads == [], "%d trust-store loads in 3 rounds of requests" % len(loads)
+
+    # The shared context still verifies.
+    context = shared_https_context()
+    assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname
+    # OpenSSL's trust-path variables are still honoured per request.
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "bundle.pem"))
+    assert shared_https_context() is not context
 
 
 OVERLOADED = {"error": {"message": "too many connections", "type": "service_unavailable",

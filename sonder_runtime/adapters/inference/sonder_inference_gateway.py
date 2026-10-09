@@ -48,7 +48,6 @@ import math
 import os
 import re
 import socket
-import ssl
 import sys
 import threading
 import time
@@ -95,6 +94,7 @@ from .openai_compat_gateway import (
     GET_BODY_LIMIT,
     OpenAICompatibleConfig,
     OpenAICompatibleGateway,
+    shared_https_context,
 )
 from .request_tuning import tune_request
 from .sse_stream import post_streaming
@@ -304,7 +304,7 @@ class _BudgetedHTTPHandler(urllib.request.HTTPHandler):
 
 class _BudgetedHTTPSHandler(urllib.request.HTTPSHandler):
     def __init__(self, budget: _ExchangeBudget) -> None:
-        super().__init__(context=ssl.create_default_context())
+        super().__init__(context=shared_https_context())
         self._budget = budget
 
     def https_open(self, req):
