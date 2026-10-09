@@ -102,3 +102,34 @@ def test_default_sonder_route_keeps_strict_alias_semantics(monkeypatch):
     assert server._serve_target("sonder", True) == ("sonder:latest", False, True, "sonder")
     monkeypatch.setattr(server, "resolve_sonder_model", lambda strict=False: None)
     assert server._serve_target("", True) == (None, False, True, "sonder")
+
+
+def test_unlearned_offload_on_a_bridged_tier_reaches_the_bound_provider(monkeypatch):
+    # Regression (2026-10-08): learn=False never bound the rung, so a tier bound
+    # to Sonder Inference was posted to Ollama with num_ctx=0; Ollama sized the
+    # context to 256 tokens, truncated the prompt and generated unrelated text.
+    from types import SimpleNamespace
+
+    seen = {}
+
+    def fake_bridge_chat_request(gateway, payload, rung, *, context):
+        seen["provider"], seen["tier"] = rung.provider, rung.tier
+        seen["model"] = payload["model"]
+        return {"message": {"content": "bridged"}, "model": payload["model"]}, "bridged"
+
+    def no_ollama(*_a, **_k):
+        raise AssertionError("bridged tier was posted to Ollama")
+
+    monkeypatch.setattr(server, "_post", no_ollama)
+    monkeypatch.setattr(server, "_should_learn", lambda tier, learn: False)
+    monkeypatch.setattr(server, "_refresh_live_cloud_tiers", lambda: None)
+    monkeypatch.setattr(server, "_bridge_provider_for_tier", lambda tier, cloud=False: "sonder_inference")
+    monkeypatch.setattr(server, "_application", lambda: SimpleNamespace(model_gateway=object()))
+    monkeypatch.setattr(server._legacy_chat_bridge, "chat_request", fake_bridge_chat_request)
+    monkeypatch.setattr(server._legacy_chat_bridge, "ollama_only_reroute", lambda *a, **k: None)
+    monkeypatch.setitem(server.TIERS, "code", CODE_MODEL)
+
+    out = server._offload_impl("write a parser", tier="code", learn=False)
+
+    assert out == "bridged"
+    assert seen == {"provider": "sonder_inference", "tier": "code", "model": CODE_MODEL}

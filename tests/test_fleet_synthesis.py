@@ -4,7 +4,9 @@ from sonder_runtime.adapters.fleet_synthesis import (
     generate_synthesis,
     json_num_predict,
 )
+from sonder_runtime.application.chat import provider_bridge
 import ast
+import contextlib
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -47,7 +49,8 @@ def test_master_offload_applies_budget_and_marks_raw_provider_truncation(provide
         requests.append(payload)
         return raw, "## Verified Findings (what"
     scope = _host_functions({"_offload_tier_impl"}, dict(
-        TIMEOUT=180, TIERS={"code": "test"}, os=os,
+        TIMEOUT=180, TIERS={"code": "test"}, os=os, contextlib=contextlib,
+        _provider_bridge=provider_bridge,
         time=SimpleNamespace(time=lambda: 0), _fleet_synthesis=fleet_synthesis,
         _parse_schema_arg=lambda value: value, _refresh_live_cloud_tiers=lambda: None,
         _bound_request_timeout=lambda timeout, default: timeout,
