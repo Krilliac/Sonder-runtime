@@ -97,7 +97,7 @@ from .openai_compat_gateway import (
     OpenAICompatibleConfig,
     OpenAICompatibleGateway,
 )
-from .request_tuning import tune_request
+from .request_tuning import thinking_supported, tune_request
 from .sse_stream import post_streaming
 from .telemetry import from_openai_compatible
 
@@ -1849,18 +1849,54 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         started = time.monotonic()
         data = self._post_with_busy_retry(payload, cfg, settings, context, live)
         self._check_liveness(context, phase="during model call")
-        extension = data.get("sonder")
-        if isinstance(extension, dict) and "api_version" in extension:
-            if extension["api_version"] != API_VERSION:
+
+        def served_model(result: dict) -> str:
+            extension = result.get("sonder")
+            if isinstance(extension, dict) and "api_version" in extension:
+                if extension["api_version"] != API_VERSION:
+                    raise DependencyUnavailable(
+                        "incompatible sonder-inference API version %r (this runtime speaks %d)"
+                        % (extension["api_version"], API_VERSION)
+                    )
+            served = result.get("model")
+            if not isinstance(served, str) or not served.strip() or served == DEFAULT_MODEL:
                 raise DependencyUnavailable(
-                    "incompatible sonder-inference API version %r (this runtime speaks %d)"
-                    % (extension["api_version"], API_VERSION)
+                    "incompatible sonder-inference API: the response did not name the served model"
                 )
-        served = data.get("model")
-        if not isinstance(served, str) or not served.strip() or served == DEFAULT_MODEL:
-            raise DependencyUnavailable(
-                "incompatible sonder-inference API: the response did not name the served model"
-            )
+            return served
+
+        served = served_model(data)
+        choices = data.get("choices")
+        choice = choices[0] if isinstance(choices, list) and choices else None
+        message = choice.get("message") if isinstance(choice, dict) else None
+        empty_length = (
+            isinstance(choice, dict) and choice.get("finish_reason") == "length"
+            and isinstance(message, dict)
+            and (message.get("content") is None
+                 or isinstance(message.get("content"), str)
+                 and not message["content"].strip())
+        )
+        repaired = False
+        if (empty_length and think is None
+                and thinking_supported(snap.document, self._env)
+                and (live is None or not live.generated and not live.cancelled)):
+            # The model used its entire cap on private reasoning. No answer
+            # reached the caller, so one non-thinking retry can recover it.
+            # Keep this within the original transport and operation deadlines.
+            remaining = min(self._call_timeout(settings, context),
+                            timeout - (time.monotonic() - started))
+            if remaining > 0:
+                retry = dict(payload)
+                retry["stream"] = False
+                retry.pop("stream_options", None)
+                template = dict(retry.get("chat_template_kwargs") or {})
+                template["enable_thinking"] = False
+                retry["chat_template_kwargs"] = template
+                data = self._post("/v1/chat/completions", retry, cfg, remaining,
+                                  context=context)
+                self._check_liveness(context, phase="during model call")
+                served = served_model(data)
+                repaired = True
         text = self._extract_text(data)
         usage = data.get("usage")
         if usage is None:
@@ -1887,6 +1923,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         finish = finish if finish in ("stop", "length", "content_filter", "tool_calls", "function_call") else None
         self._call.response_meta = {key: value for key, value in (
             ("finish_reason", finish), ("done_reason", finish), ("timings", measured),
+            ("empty_length_recovered", True if repaired else None),
         ) if value is not None}
         # The public activity projection retains summary, while the owning
         # span also gets structured measurements. Never attach response text.
