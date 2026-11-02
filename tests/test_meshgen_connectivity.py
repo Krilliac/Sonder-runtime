@@ -6,8 +6,8 @@ import pytest
 from sonder_runtime.adapters.meshgen import blender_runner as runner
 from sonder_runtime.domain.meshgen import connectivity as cx
 from sonder_runtime.domain.meshgen.critique import (
-    FLOATING_SCORE_CAP, cap_score, detached_notes, detached_parts, geometry_issues, remember_floating,
-    reopened_issues,)
+    FLOATING_SCORE_CAP, brief_allows_floating, cap_score, brief_allows_floating, detached_notes, detached_parts, geometry_issues, remember_floating, reopened_parts,
+    reopened_issues, reopened_parts,)
 from sonder_runtime.domain.meshgen.selection import has_floating
 
 
@@ -315,15 +315,48 @@ def test_detached_parts_are_read_and_reminded_about():
     assert detached_parts(None) == [] and detached_notes({}) == []
 
 
-def test_a_part_that_floated_before_and_is_detached_now_is_reported_again_by_line_or_by_name():
-    memory = {"lines": set(), "names": set()}
-    remember_floating(memory, {"floating": [entry(parts=["loaf"], lines=[34])]})
-    assert memory == {"lines": {34}, "names": {"loaf"}}
-    again = {"detached": [{"name": "renamed", "line": 34}]}
-    assert "line 34: 'renamed' was floating in an earlier round" in reopened_issues(again, memory)[0]
-    assert reopened_issues({"detached": [{"name": "loaf", "line": 90}]}, memory)               # the line moved
-    assert reopened_issues({"detached": [{"name": "mote", "line": 5}]}, memory) == []           # never floated
+def test_a_detached_part_is_reopened_by_where_it_is_not_by_name_or_line():
+    memory = {"boxes": []}
+    remember_floating(memory, {"floating": [dict(entry(parts=["loaf"], lines=[34]), box=[0, 0, 1, 1, 1, 1.1])]})
+    assert memory == {"boxes": [(0.0, 0.0, 1.0, 1.0, 1.0, 1.1)]}
+    here = [0.1, 0.1, 1.02, 0.9, 0.9, 1.1]
+    moved = {"detached": [{"name": "renamed", "line": 90, "box": here}]}
+    assert "'renamed' was floating in an earlier round and is now marked detached" in reopened_issues(moved, memory)[0]
+    assert "the brief mentions nothing that floats" in reopened_issues(moved, memory)[0]
+    # the same name or the same line elsewhere is NOT the old floater: both are recycled between rewrites
+    far = [5.0, 5.0, 5.0, 5.2, 5.2, 5.2]
+    assert reopened_issues({"detached": [{"name": "loaf", "line": 34, "box": far}]}, memory) == []
+    assert reopened_issues({"detached": [{"name": "loaf", "line": 34}]}, memory) == []        # no box, no match
     assert reopened_issues({}, memory) == []
+    assert reopened_parts(moved, memory) == [("renamed", 90)]
+
+
+def test_a_cover_everything_or_inside_out_box_is_not_a_match():
+    memory = {"boxes": [(0.0, 0.0, 1.0, 1.0, 1.0, 1.1)]}
+    prop = {"dims": [1.0, 1.0, 1.2], "height": 1.2}
+    huge = dict(prop, detached=[{"name": "sky", "line": 2, "box": [-50, -50, -50, 50, 50, 50]}])
+    assert reopened_issues(huge, memory) == []
+    inside_out = dict(prop, detached=[{"name": "flip", "line": 2, "box": [1, 1, 1.2, 0, 0, 1]}])
+    assert reopened_issues(inside_out, memory) == []
+    honest = dict(prop, detached=[{"name": "mote", "line": 2, "box": [0.2, 0.2, 1.0, 0.4, 0.4, 1.1]}])
+    assert reopened_issues(honest, memory)
+
+
+def test_the_brief_allows_floating_things_only_when_it_says_so():
+    for brief in ("a candle with a floating flame", "A LANTERN with fireflies", "wisp lamp", "a levitating stone",
+                  "a hovering drone", "glow-motes around a shrine", "a chandelier suspended from chains",
+                  "an orb on a stand", "drifting sparks", "it floats"):
+        assert brief_allows_floating(brief), brief
+    for brief in ("a wooden cart", "a floater", "a forbidden temple", "ambient lighting", "a sparkling gem",
+                  "a motel sign", "", None):
+        assert not brief_allows_floating(brief), brief
+
+
+def test_the_sanitiser_drops_an_inside_out_box():
+    block = {"parts": 1, "height": 1, "dims": [1, 1, 1], "floating": [dict(entry(), box=[1, 0, 0, 0, 1, 1])],
+             "detached": [{"name": "m", "line": 1, "box": [0, 0, 1, 1, 1, 0]}]}
+    clean = runner.sanitize_result({"ok": True, "geometry": block})["geometry"]
+    assert "box" not in clean["floating"][0] and "box" not in clean["detached"][0]
 
 
 def test_the_revise_prompt_does_not_claim_a_reviewer_when_there_is_no_score():
@@ -348,10 +381,20 @@ def test_split_islands_groups_triangles_that_share_vertices():
 
 
 def test_split_islands_gives_up_past_the_limit():
-    many = [(3 * i, 3 * i + 1, 3 * i + 2) for i in range(cx.MAX_ISLANDS + 1)]
-    assert cx.split_islands(many) is None
-    assert len(cx.split_islands(many[:cx.MAX_ISLANDS])) == cx.MAX_ISLANDS
-    assert cx.MAX_ISLANDS == 64
+    many = [(3 * i, 3 * i + 1, 3 * i + 2) for i in range(65)]
+    assert cx.split_islands(many, 64) is None
+    assert len(cx.split_islands(many[:64], 64)) == 64
+    assert len(cx.split_islands(many)) == 65                          # no limit unless one is asked for
+
+
+def test_the_node_budget_collapses_the_parts_with_the_most_islands_first():
+    assert cx.MAX_NODES == 4000
+    assert cx.single_node_parts([1, 2, 3], budget=6) == set()          # fits: every part is split
+    assert cx.single_node_parts([1, 2, 3], budget=5) == {2}            # one part too many: the largest collapses
+    assert cx.single_node_parts([5, 1, 9, 5], budget=12) == {2}        # 20 nodes down to 12
+    assert cx.single_node_parts([5, 1, 9, 5], budget=8) == {2, 0}      # ties: the lowest index first
+    assert cx.single_node_parts([1, 1, 1], budget=1) == set()          # single-island parts are never "collapsed"
+    assert cx.single_node_parts([], budget=1) == set()
 
 
 def test_only_a_watertight_mesh_is_closed_and_manifold():

@@ -21,7 +21,7 @@ SAMPLE_CAP = 256            # vertices sampled per part for the gap measurement
 CONTACT_SAMPLE_CAP = 1024   # surface samples per part and direction for the touch test
 MAX_PAIRS = 200_000         # candidate pairs above which the whole check is skipped
 MAX_DETACHED = 20           # detached parts listed in a report
-MAX_ISLANDS = 64            # loose pieces one part may be split into; more and it stays a single node
+MAX_NODES = 4000            # islands across all parts; past this the parts with the most islands stay single nodes
 MAX_FLOATING = 20           # floating entries kept in a report
 MAX_NAMES = 8               # part names / lines kept per entry
 MAX_NAME_CHARS = 40
@@ -88,13 +88,12 @@ def candidate_pairs(boxes, tol, limit=None) -> list:
     return pairs
 
 
-def split_islands(triangles, limit=MAX_ISLANDS):
+def split_islands(triangles, limit=None):
     """Group triangle indices into loose islands (triangles that share a vertex, directly or through others).
 
     A part made of several separate pieces (a join, or a kit mesh with detached bits) is several nodes of the
     touching graph, otherwise one grounded piece would hide a floating one.  Returns lists of triangle indices
-    ordered by their first triangle, or ``None`` when there are more than ``limit`` islands (the part is then
-    treated as one node, which bounds the cost of a mesh with unwelded faces)."""
+    ordered by their first triangle, or ``None`` when ``limit`` is given and there are more islands than that."""
     parent = {}
 
     def find(item):
@@ -115,9 +114,26 @@ def split_islands(triangles, limit=MAX_ISLANDS):
     groups = {}
     for index, tri in enumerate(triangles):
         groups.setdefault(find(tri[0]), []).append(index)
-        if len(groups) > limit:
+        if limit is not None and len(groups) > limit:
             return None
     return [groups[key] for key in sorted(groups, key=lambda key: groups[key][0])]
+
+
+def single_node_parts(counts, budget=MAX_NODES) -> set:
+    """Which parts stay a single node so that the total number of nodes fits ``budget``.
+
+    ``counts[i]`` is the number of islands of part ``i``.  Every part is split while the budget allows; once it is
+    exceeded the parts with the most islands (the likeliest to be unwelded junk) are collapsed first, lowest index
+    first among equals, until the total fits.  Returns the indices to collapse."""
+    total = sum(max(1, count) for count in counts)
+    collapsed = set()
+    for index in sorted(range(len(counts)), key=lambda i: (-counts[i], i)):
+        if total <= budget:
+            break
+        if counts[index] > 1:
+            total -= counts[index] - 1
+            collapsed.add(index)
+    return collapsed
 
 
 def is_closed_manifold(triangles) -> bool:
@@ -287,8 +303,8 @@ def geometry_block(part_count, entries, height, dims, detached=()) -> dict:
             "height": _rounded([height])[0], "dims": _rounded(dims), "detached": listed}
 
 
-__all__ = ["CONTACT_SAMPLE_CAP", "MAX_DETACHED", "MAX_FLOATING", "MAX_ISLANDS", "MAX_NAMES", "MAX_NAME_CHARS",
-           "MAX_PAIRS", "boxes_near", "is_closed_manifold", "split_islands",
+__all__ = ["CONTACT_SAMPLE_CAP", "MAX_DETACHED", "MAX_FLOATING", "MAX_NODES", "MAX_NAMES", "MAX_NAME_CHARS",
+           "MAX_PAIRS", "boxes_near", "is_closed_manifold", "single_node_parts", "split_islands",
            "SAMPLE_CAP", "TOL_FLOOR", "TOL_FRACTION", "TooManyPairs", "box_contains", "box_distance",
            "candidate_pairs", "clip_polygon", "contact_samples", "floating_components", "floating_entry",
            "geometry_block", "is_grounded", "sample_indices", "tolerance", "triangle_boxes"]

@@ -47,7 +47,7 @@ class Rig:
             return self.critiques.pop(0) if self.critiques else None
 
     def go(self, **kw):
-        request = MeshRequest(brief="a cart", **kw)
+        request = MeshRequest(brief=kw.pop("brief", "a cart"), **kw)
         return run(request, generate=self.generate, build=self.build, critique=self.critique,
                    map_parallel=serial, record=in_process_recorder(request.manifest))
 
@@ -304,8 +304,9 @@ def geometry(*entries):
     return {"parts": 3, "floating": list(entries), "height": 1.0, "dims": [1.0, 1.0, 1.0]}
 
 
+LOAF_BOX = [0.0, 0.0, 1.0, 0.5, 0.5, 1.1]
 LOAF = {"parts": ["loaf"], "part_count": 1, "lines": [34], "centre": [0, 0, 1], "gap": 0.12,
-        "gap_vec": [0, 0, 0.12], "nearest": "plate"}
+        "gap_vec": [0, 0, 0.12], "nearest": "plate", "box": LOAF_BOX}
 LOAF_ISSUE = "line 34: 'loaf' floats 0.12 m above the nearest part ('plate'); move it down to rest on it"
 
 
@@ -396,9 +397,9 @@ def test_the_winner_is_the_clean_version_even_when_the_floating_one_scored_highe
 
 
 # ---------------------------------------------------------------------------------------------- detached accountability
-def detached_build(name="loaf", line=34, floating_entries=()):
+def detached_build(name="loaf", line=34, floating_entries=(), box=LOAF_BOX):
     block = geometry(*floating_entries)
-    block["detached"] = [{"name": name, "line": line}]
+    block["detached"] = [{"name": name, "line": line, "box": box}]
     return dict(ok_build(), geometry=block)
 
 
@@ -424,15 +425,9 @@ def test_detaching_a_part_that_floated_last_round_keeps_the_cap_and_blocks_accep
     attempts = report["candidates"][0]["attempts"]
     assert [a["status"] for a in attempts] == ["revise", "revise", "revise"]
     assert attempts[1]["score"] == 6 and attempts[2]["score"] == 6                  # the critic said 10 both times
-    assert "'loaf' was floating in an earlier round and you now mark it detached" in attempts[1]["issues"][0]
+    assert "'loaf' was floating in an earlier round and is now marked detached" in attempts[1]["issues"][0]
     assert attempts[1]["reopened"] and report["winner"]["score"] == 6
     assert "was floating in an earlier round" in rig.prompts[2]
-
-
-def test_the_line_moving_does_not_hide_it_the_name_still_matches():
-    rig = Rig(builds=[floating_build(), detached_build("loaf", 90)], critiques=[verdict(7), verdict(10)])
-    attempts = rig.go(candidates=1, rounds=2, target_score=8)["candidates"][0]["attempts"]
-    assert attempts[1]["status"] == "revise" and attempts[1]["score"] == 6
 
 
 def test_a_version_that_reopened_a_floating_part_ranks_below_a_clean_one():
@@ -449,15 +444,67 @@ def test_the_measured_revise_prompt_without_a_reviewer_says_so():
 
 
 def test_detaching_a_renamed_floater_on_another_line_is_caught_by_where_it_is():
-    first = dict(LOAF, box=[0.0, 0.0, 1.0, 0.5, 0.5, 1.1])
-    moved = detached_build("tabletop", 77)
-    moved["geometry"]["detached"][0]["box"] = [0.0, 0.0, 1.0, 0.5, 0.5, 1.1]
-    rig = Rig(builds=[floating_build(first), moved], critiques=[verdict(7), verdict(10)])
+    rig = Rig(builds=[floating_build(), detached_build("tabletop", 77)], critiques=[verdict(7), verdict(10)])
     attempts = rig.go(candidates=1, rounds=2, target_score=8)["candidates"][0]["attempts"]
     assert attempts[1]["status"] == "revise" and attempts[1]["score"] == 6 and attempts[1]["reopened"]
-    # the control: the same detached part somewhere else is legitimate
-    elsewhere = detached_build("tabletop", 77)
-    elsewhere["geometry"]["detached"][0]["box"] = [3.0, 3.0, 5.0, 3.5, 3.5, 5.1]
-    rig = Rig(builds=[floating_build(first), elsewhere], critiques=[verdict(7), verdict(10)])
-    attempts = rig.go(candidates=1, rounds=2, target_score=8)["candidates"][0]["attempts"]
+
+
+# the brief decides whether detaching a part that floated before is a dodge or what was asked for
+FLAME = "a candle with a floating flame"
+
+
+def test_a_floating_flame_the_brief_asks_for_is_not_capped_when_the_model_detaches_it_after_round_0():
+    rig = Rig(builds=[floating_build(), detached_build("flame", 40)], critiques=[verdict(7), verdict(10)])
+    report = rig.go(candidates=1, rounds=3, target_score=8, brief=FLAME)
+    attempts = report["candidates"][0]["attempts"]
+    assert [a["status"] for a in attempts] == ["revise", "accepted"] and attempts[1]["score"] == 10
+    assert "reopened" not in attempts[1] and attempts[1]["detached_again"] == ["flame"]
+    assert report["winner"]["score"] == 10 and not report["winner"].get("reopened")
+
+
+def test_the_same_sequence_without_float_words_in_the_brief_is_capped_and_never_accepted():
+    rig = Rig(builds=[floating_build(), detached_build("flame", 40)], critiques=[verdict(7), verdict(10)])
+    report = rig.go(candidates=1, rounds=2, target_score=8, brief="a candle")
+    attempts = report["candidates"][0]["attempts"]
+    assert [a["status"] for a in attempts] == ["revise", "revise"] and attempts[1]["score"] == 6
+    assert "the brief mentions nothing that floats" in attempts[1]["issues"][0]
+
+
+def test_an_allowed_reopened_part_only_gets_an_advisory_in_the_revise_prompt():
+    rig = Rig(builds=[floating_build(), detached_build("flame", 40), ok_build()],
+              critiques=[verdict(7), verdict(5, "flat colours"), verdict(9)])
+    rig.go(candidates=1, rounds=3, target_score=8, brief=FLAME)
+    assert ("you marked 'flame' detached; keep that only if 'flame' is one of the floating things the brief "
+            "asks for") in rig.prompts[2]
+    assert "mentions nothing that floats" not in rig.prompts[2]
+    assert rig.prompts[2].count("you marked 'flame'") == 1                  # not also the generic reminder
+
+
+def test_an_allowed_reopened_version_is_not_ranked_down():
+    rig = Rig(builds=[floating_build(), detached_build("flame", 40), ok_build(tris=900)],
+              critiques=[verdict(7), verdict(7), verdict(5, "plain")])
+    report = rig.go(candidates=1, rounds=3, target_score=9, brief=FLAME)
+    assert report["winner"]["score"] == 7 and report["winner"]["round"] == 1
+
+
+def test_an_unrelated_detached_mote_on_a_recycled_line_is_not_reopened():
+    far = [3.0, 3.0, 5.0, 3.2, 3.2, 5.2]
+    rig = Rig(builds=[floating_build(), detached_build("mote", 34, box=far)], critiques=[verdict(7), verdict(10)])
+    attempts = rig.go(candidates=1, rounds=2, target_score=8, brief="a candle")["candidates"][0]["attempts"]
+    assert attempts[1]["status"] == "accepted" and attempts[1]["score"] == 10 and "reopened" not in attempts[1]
+
+
+def test_a_new_mote_beside_the_old_floater_is_not_capped_when_the_brief_has_float_words():
+    near = [0.0, 0.0, 1.12, 0.1, 0.1, 1.2]                               # 0.02 m above the old floater's box
+    brief = "a lantern with fireflies"
+    tall = detached_build("firefly", 55, box=near)
+    tall["geometry"]["height"] = 2.0                                      # a 2 m prop: tolerance 0.03 m
+    rig = Rig(builds=[floating_build(), tall], critiques=[verdict(7), verdict(10)])
+    attempts = rig.go(candidates=1, rounds=2, target_score=8, brief=brief)["candidates"][0]["attempts"]
     assert attempts[1]["status"] == "accepted" and attempts[1]["score"] == 10
+    # the control: without float words the same mote is where the old floater was, so it is capped
+    tall = detached_build("firefly", 55, box=near)
+    tall["geometry"]["height"] = 2.0
+    rig = Rig(builds=[floating_build(), tall], critiques=[verdict(7), verdict(10)])
+    attempts = rig.go(candidates=1, rounds=2, target_score=8, brief="a lantern")["candidates"][0]["attempts"]
+    assert attempts[1]["status"] == "revise" and attempts[1]["score"] == 6

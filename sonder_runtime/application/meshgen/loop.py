@@ -32,7 +32,8 @@ import time
 from dataclasses import dataclass
 
 from ...domain.meshgen.critique import (
-    cap_score, detached_notes, detached_parts, geometry_issues, parse_critique, remember_floating, reopened_issues,)
+    brief_allows_floating, cap_score, detached_notes, detached_parts, geometry_issues, parse_critique,
+    remember_floating, reopened_issue, reopened_note, reopened_parts,)
 from ...domain.meshgen.dsl.errors import ScriptError
 from ...domain.meshgen.dsl.recorder import compile_script
 from ...domain.meshgen.prompts import (
@@ -199,13 +200,18 @@ def run(request: MeshRequest, *, generate, build, critique, map_parallel, record
             version["geometry"] = attempt["geometry"] = geometry
         floating = geometry_issues(geometry)
         # a part reported floating earlier and marked detached now is still a floating part
-        reopened = reopened_issues(geometry, memory)
-        floating = floating + reopened
-        if reopened:
-            version["reopened"] = attempt["reopened"] = reopened
+        reopened = reopened_parts(geometry, memory)
+        notes = detached_notes(geometry, skip={name for name, _line in reopened})
+        if reopened and brief_allows_floating(request.brief):
+            # the brief has floating things, so this may be one of them: advise, do not cap, block or rank down
+            attempt["detached_again"] = [name for name, _line in reopened]
+            notes += [reopened_note(name) for name, _line in reopened]
+        elif reopened:
+            issues_again = [reopened_issue(name, line) for name, line in reopened]
+            floating = floating + issues_again
+            version["reopened"] = attempt["reopened"] = issues_again
         if detached_parts(geometry):
             attempt["detached"] = [{"name": name, "line": line} for name, line in detached_parts(geometry)]
-        notes = detached_notes(geometry)
         remember_floating(memory, geometry)
         versions.append(version)
         if not within:
@@ -259,7 +265,7 @@ def run(request: MeshRequest, *, generate, build, critique, map_parallel, record
         attempts: list[dict] = []
         versions: list[dict] = []
         prompt = base
-        memory = {"lines": set(), "names": set(), "boxes": []}   # parts reported floating in this candidate's earlier rounds
+        memory = {"boxes": []}   # where this candidate's earlier rounds reported floating parts
         for round_index in range(max(1, int(request.rounds))):
             began = time.monotonic()
             attempt = {"tier": tier, "round": round_index, "status": "", "tris": None,

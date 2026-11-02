@@ -238,11 +238,12 @@ def _triple(value) -> list:
 
 
 def _box(value) -> list | None:
-    """A six-number bounding box with every number clamped, or ``None`` when it is not one."""
+    """A six-number bounding box with every number clamped, or ``None`` when it is not one (or is inside out)."""
     if not isinstance(value, list) or len(value) != 6 or not all(
             isinstance(v, (int, float)) and not isinstance(v, bool) for v in value):
         return None
-    return [_finite(v) for v in value]
+    box = [_finite(v) for v in value]
+    return box if all(box[k] <= box[k + 3] for k in range(3)) else None
 
 
 def _sanitize_geometry(value) -> dict | None:

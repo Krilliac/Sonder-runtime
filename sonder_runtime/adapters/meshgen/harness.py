@@ -30,7 +30,7 @@ DEFAULT_GREY = (0.69, 0.69, 0.69)
 
 RESULT_PATH = ""
 PARTS = []
-GEOM_BUDGET_S = 5.0   # wall time the floating-part check may use before it is skipped
+GEOM_BUDGET_S = 5.0   # CPU seconds (process time, so a busy machine cannot trip it) before the check is skipped
 GEOM_PARTS = []   # per baked part: name, creating script line, detached flag, world-space vertices and triangles
 
 
@@ -155,15 +155,15 @@ def _node(points, triangles, name, line, detached):
             "line": line, "detached": detached, "box": box}
 
 
-def _part_views(part, scale, shift):
+def _part_views(part, scale, shift, islands):
     """The graph nodes of one part in final (normalised) space: one per loose island, so a join or a kit mesh with
     separate pieces cannot hide a floating piece behind a grounded one.  A part with several islands names them
-    ``"<name> (piece k)"``; one with more than ``MAX_ISLANDS`` stays a single node."""
+    ``"<name> (piece k)"``.  ``islands`` is the part's islands (``None`` keeps it a single node, which is what the
+    total node budget does to the parts with the most islands)."""
     flat = part["verts"]
     points = [(flat[i] * scale + shift[0], flat[i + 1] * scale + shift[1], flat[i + 2] * scale + shift[2])
               for i in range(0, len(flat), 3)]
     triangles = [tuple(part["tris"][i:i + 3]) for i in range(0, len(part["tris"]), 3)]
-    islands = connectivity.split_islands(triangles) if triangles else None
     if not islands or len(islands) == 1:
         return [_node(points, triangles, part["name"], part["line"], part["detached"])]
     nodes = []
@@ -246,7 +246,7 @@ def _touch(a, b, tol, deadline):
             hit = bvh.find_nearest(point)
             if hit[0] is not None and hit[3] <= tol:
                 return True
-        if time.monotonic() > deadline:
+        if time.process_time() > deadline:
             raise _Skipped("skipped: over the time budget")
     for inner, outer in ((a, b), (b, a)):
         if not connectivity.box_contains(outer["box"], inner["box"]):
@@ -269,7 +269,7 @@ def _closest(members, others, deadline):
     for lower, mi, oi in ordered:
         if best is not None and lower >= best[0]:
             break
-        if time.monotonic() > deadline:
+        if time.process_time() > deadline:
             raise _Skipped("skipped: over the time budget")
         member, other = members[mi], others[oi]
         found = _nearest(member, other)
@@ -288,12 +288,16 @@ def _geometry_report(height_m):
         return None
     lo, hi = _extent(flat)
     scale, shift = _normal_transform(lo, hi, height_m)
-    views = [node for part in GEOM_PARTS for node in _part_views(part, scale, shift)]
+    split = [connectivity.split_islands([tuple(part["tris"][i:i + 3]) for i in range(0, len(part["tris"]), 3)])
+             for part in GEOM_PARTS]
+    single = connectivity.single_node_parts([len(found) for found in split])
+    views = [node for index, part in enumerate(GEOM_PARTS)
+             for node in _part_views(part, scale, shift, None if index in single else split[index])]
     dims = [(hi[k] - lo[k]) * scale for k in range(3)]
     tol = connectivity.tolerance(dims[2])
     eligible = [v["box"] is not None and bool(v["triangles"]) and not v["detached"] for v in views]
     boxes = [v["box"] if eligible[i] else None for i, v in enumerate(views)]
-    deadline = time.monotonic() + GEOM_BUDGET_S
+    deadline = time.process_time() + GEOM_BUDGET_S
     try:
         pairs = connectivity.candidate_pairs(boxes, tol, connectivity.MAX_PAIRS)
     except connectivity.TooManyPairs:

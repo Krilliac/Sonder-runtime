@@ -350,7 +350,7 @@ def round_geometry(tmp_path, source):
 def remembered(tmp_path):
     from sonder_runtime.domain.meshgen.critique import remember_floating
 
-    memory = {"lines": set(), "names": set(), "boxes": []}
+    memory = {"boxes": []}
     first = round_geometry(tmp_path / "round0", TABLE % ("1.2", ""))
     assert len(first["floating"]) == 1 and first["floating"][0]["box"]            # the floater and where it was
     remember_floating(memory, first)
@@ -370,7 +370,7 @@ def test_detaching_a_floater_after_renaming_it_and_moving_its_line_is_still_reop
 '''
     geometry = round_geometry(tmp_path / "renamed", renamed)
     assert geometry["floating"] == [] and geometry["detached"][0]["name"] == "Tabletop"
-    assert geometry["detached"][0]["line"] == 5 and "Tabletop" not in memory["names"] and 5 not in memory["lines"]
+    assert geometry["detached"][0]["line"] == 5
     assert reopened_issues(geometry, memory)
     # the control: a mote hovering elsewhere is a legitimate detached part
     far = TABLE % ("0.825", '    mote = primitive("uv_sphere", "Mote", radius=0.05, loc=(0, 0, 2.5))\n    detached(mote)\n')
@@ -407,3 +407,14 @@ def test_detaching_a_floater_after_joining_it_into_a_new_part_is_still_reopened(
     geometry = round_geometry(tmp_path / "joined", joined)
     assert geometry["floating"] == [] and geometry["detached"][0]["name"] == "Lid"
     assert reopened_issues(geometry, memory)
+
+
+def test_a_floater_joined_into_a_part_of_sixty_five_pieces_is_still_reported(tmp_path):
+    lines = ["def build():"]
+    lines += ['    c%d = primitive("cube", "C%d", size=0.2, loc=(%f, %f, 0.1))' % (i, i, (i % 8) * 0.5, (i // 8) * 0.5)
+              for i in range(64)]
+    lines += ['    hat = primitive("cube", "Hat", size=0.2, loc=(0, 0, 1.0))',
+              '    pile = join([%s, hat], "Pile")' % ", ".join("c%d" % i for i in range(64))]
+    entries = floating_of(build(tmp_path, chr(10).join(lines) + chr(10), max_tris=5000))
+    assert len(entries) == 1 and entries[0]["lines"] == [67] and entries[0]["parts"][0].startswith("Pile (piece")
+    assert entries[0]["gap"] > 0.5                                       # the hat, 0.8 m above the grounded cubes

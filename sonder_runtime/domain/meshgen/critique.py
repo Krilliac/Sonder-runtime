@@ -2,12 +2,17 @@
 from __future__ import annotations
 
 import json
+import re
 
 from .connectivity import boxes_near, tolerance
 
 MAX_ISSUES = 8
 _MAX_ISSUE_CHARS = 300
 MAX_REMEMBERED_BOXES = 200
+# words that mean the brief itself asks for something that floats (whole words, any case)
+_FLOAT_WORDS = re.compile(
+    r"\b(?:float|floating|floats|hover|hovering|levitat\w*|orbs?|motes?|wisps?|sparks?|fireflies|firefly|drifting|"
+    r"suspended)\b", re.IGNORECASE)
 FLOATING_SCORE_CAP = 6          # a candidate with a measured floating part never scores above this
 MAX_GEOMETRY_ISSUES = 8
 # (axis, sign of the gap vector) -> (where the floating part sits relative to what it should touch, how to move it).
@@ -87,10 +92,22 @@ def floating_entries(geometry) -> list:
             if isinstance(entry, dict) and _names(entry)]
 
 
+def brief_allows_floating(brief) -> bool:
+    """True when the brief names something that floats (float, hover, orb, mote, wisp, spark, firefly, ...)."""
+    return bool(_FLOAT_WORDS.search(str(brief or "")))
+
+
 def _box(value):
     ok = (isinstance(value, (list, tuple)) and len(value) == 6
           and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value))
-    return tuple(float(v) for v in value) if ok else None
+    if not ok:
+        return None
+    box = tuple(float(v) for v in value)
+    return box if all(box[k] <= box[k + 3] for k in range(3)) else None
+
+
+def _volume(box) -> float:
+    return max(0.0, box[3] - box[0]) * max(0.0, box[4] - box[1]) * max(0.0, box[5] - box[2])
 
 
 def _detached_items(geometry) -> list:
@@ -106,42 +123,59 @@ def detached_parts(geometry) -> list:
 
 
 def remember_floating(memory, geometry) -> None:
-    """Add the lines and part names reported floating in ``geometry`` to a candidate's ``memory`` (two sets)."""
+    """Remember where the floating components of ``geometry`` are (their boxes), in a candidate's ``memory``."""
     for entry in floating_entries(geometry):
-        memory["names"].update(_names(entry))
-        memory["lines"].update(line for line in (entry.get("lines") or []) if isinstance(line, int) and line > 0)
         box = _box(entry.get("box"))
         if box is not None and len(memory.setdefault("boxes", [])) < MAX_REMEMBERED_BOXES:
             memory["boxes"].append(box)
 
 
-def detached_notes(geometry) -> list:
+def detached_notes(geometry, skip=()) -> list:
     """One reminder per detached part for the revise prompt: detach only what the brief says floats."""
     return ["you marked '%s'%s detached; only do that if the brief says it floats (motes, wisps, orbs), otherwise "
             "attach it to the model" % (name, " (line %d)" % line if line else "")
-            for name, line in detached_parts(geometry)[:MAX_GEOMETRY_ISSUES]]
+            for name, line in detached_parts(geometry)[:MAX_GEOMETRY_ISSUES] if name not in skip]
+
+
+def reopened_note(name) -> str:
+    """The advisory for a reopened part when the brief does ask for floating things."""
+    return ("you marked '%s' detached; keep that only if '%s' is one of the floating things the brief asks for"
+            % (name, name))
+
+
+def reopened_parts(geometry, memory) -> list:
+    """``(name, line)`` of detached parts that sit where a floating component was reported in an earlier round.
+
+    Matched by place only: the part's bounding box overlaps, or lies within the tolerance of, a remembered floating
+    box.  Names and line numbers are not used (lines are recycled between rewrites and names collide), and a
+    detached box bigger than the whole prop is ignored (a cover-everything box would otherwise match anything).
+    Renaming, moving to another line, splitting or joining a floater does not change where it is."""
+    found = []
+    remembered = memory.get("boxes", [])
+    tol = tolerance(geometry.get("height") if isinstance(geometry, dict) else None)
+    dims = geometry.get("dims") if isinstance(geometry, dict) else None
+    whole = None
+    if isinstance(dims, list) and len(dims) == 3 and all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                                                         for v in dims):
+        whole = dims[0] * dims[1] * dims[2]
+    for item in _detached_items(geometry)[:MAX_GEOMETRY_ISSUES]:
+        box = _box(item.get("box"))
+        if box is None or (whole is not None and _volume(box) > whole * 1.001 + 1e-9):
+            continue
+        if any(boxes_near(box, old, tol) for old in remembered):
+            found.append((item["name"], item["line"] if isinstance(item.get("line"), int) and item["line"] > 0 else 0))
+    return found
+
+
+def reopened_issue(name, line) -> str:
+    """The issue for a reopened part when the brief mentions nothing that floats (the host cannot know more)."""
+    return (("line %d: " % line if line else "") + "'%s' was floating in an earlier round and is now marked detached; "
+            "the brief mentions nothing that floats, so attach it to the prop instead" % name)
 
 
 def reopened_issues(geometry, memory) -> list:
-    """Issues for a part that was reported floating in an earlier round and is now marked detached.
-
-    Matched by place first: a detached part whose bounding box overlaps, or lies within the tolerance of, a box
-    remembered from a floating component counts, whatever it is now called or which line makes it (renaming,
-    splitting or joining it does not move it).  Script line and name are extra signals.  Detaching a part is not a
-    way round the floating check, so these count as floating parts: they cap the score and block acceptance."""
-    issues = []
-    tol = tolerance(geometry.get("height") if isinstance(geometry, dict) else None)
-    remembered = memory.get("boxes", [])
-    for item in _detached_items(geometry)[:MAX_GEOMETRY_ISSUES]:
-        name = item["name"]
-        line = item["line"] if isinstance(item.get("line"), int) and item["line"] > 0 else 0
-        box = _box(item.get("box"))
-        here = box is not None and any(boxes_near(box, old, tol) for old in remembered)
-        if here or (line and line in memory["lines"]) or name in memory["names"]:
-            issues.append(("line %d: " % line if line else "") + "'%s' was floating in an earlier round and you now mark "
-                          "it detached; the brief did not ask for it to float, so attach it to the model instead"
-                          % name)
-    return issues
+    """``reopened_issue`` for every part in ``reopened_parts``."""
+    return [reopened_issue(name, line) for name, line in reopened_parts(geometry, memory)]
 
 
 def geometry_issues(geometry) -> list:
