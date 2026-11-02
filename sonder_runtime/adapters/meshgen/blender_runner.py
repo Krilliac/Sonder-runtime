@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import uuid
@@ -171,18 +172,82 @@ def build_argv(blender: str, job_path: str, harness: str = str(HARNESS_PATH)) ->
             "--python", harness, "--", job_path]
 
 
+MAX_RESULT_BYTES = 1024 * 1024          # the harness' result JSON
+MAX_MODEL_BYTES = 256 * 1024 * 1024     # a copied-back GLB/FBX
+MAX_IMAGE_BYTES = 64 * 1024 * 1024      # a copied-back render
+MAX_TEXT_CHARS = 2000                   # any text that can reach a prompt or a payload
+MAX_TAIL_LINE_CHARS = 300
+_ALLOWED_RESULT_KEYS = frozenset({"ok", "error", "tris", "within_budget", "size", "files", "parts",
+                                  "render_error", "tail", "traceback"})
+_SECRET_PATTERNS = (
+    re.compile(r"(?i)\b[\w.-]*(?:api[_-]?key|access[_-]?key|secret|token|passw(?:or)?d|credential)[\w.-]*\s*[=:]\s*\S+"),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{12,}"),
+    re.compile(r"\b(?:ghp|gho|ghs|github_pat|xox[abp]|AKIA|AIza)[A-Za-z0-9_-]{12,}"),
+    re.compile(r"\b[A-Za-z0-9_-]{40,}={0,2}"),
+)
+
+
+def redact_and_bound(value, limit: int = MAX_TEXT_CHARS) -> str:
+    """Text safe to hand to a prompt or payload: secret-looking runs removed, length capped.
+
+    The sandbox is what keeps secrets out of the build process; this is the host-side backstop for
+    anything that still comes back through a script-controlled string (an exception message).
+    """
+    text = str(value if value is not None else "")
+    for pattern in _SECRET_PATTERNS:
+        text = pattern.sub(lambda match: "[redacted]", text)
+    if len(text) > limit:
+        text = text[:limit] + "...[truncated]"
+    return text
+
+
+def sanitize_result(result: dict) -> dict:
+    """Keep only the keys the loop understands, with bounded, typed values.
+
+    The result file is written by code the model controls, so every field is treated as hostile.
+    """
+    clean: dict = {}
+    for key in _ALLOWED_RESULT_KEYS & set(result):
+        value = result[key]
+        if key in ("error", "render_error"):
+            clean[key] = redact_and_bound(value)
+        elif key in ("tail", "traceback"):
+            lines = value if isinstance(value, list) else [value]
+            clean[key] = [redact_and_bound(line, MAX_TAIL_LINE_CHARS) for line in lines[-_TAIL_LINES:]]
+        elif key == "tris":
+            clean[key] = int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
+        elif key in ("ok", "within_budget"):
+            clean[key] = bool(value)
+        elif key == "size":
+            seq = value if isinstance(value, list) else []
+            clean[key] = [float(v) for v in seq[:3] if isinstance(v, (int, float)) and not isinstance(v, bool)]
+        elif key == "files":
+            clean[key] = {str(k)[:20]: str(v) for k, v in (value.items() if isinstance(value, dict) else [])}
+        elif key == "parts":
+            parts = []
+            for part in (value if isinstance(value, list) else [])[:8]:
+                if isinstance(part, dict):
+                    tris = part.get("tris")
+                    parts.append({"name": redact_and_bound(part.get("name"), 40),
+                                  "tris": int(tris) if isinstance(tris, (int, float)) and not isinstance(tris, bool) else 0})
+            clean[key] = parts
+    return clean
+
+
 def _tail(text: str) -> list[str]:
     lines = [line.rstrip() for line in str(text or "").splitlines() if line.strip()]
-    return lines[-_TAIL_LINES:]
+    return [redact_and_bound(line, MAX_TAIL_LINE_CHARS) for line in lines[-_TAIL_LINES:]]
 
 
 def read_result(result_path: Path) -> dict | None:
-    """The harness' result object, or ``None`` when it is missing or malformed."""
+    """The harness' result object, or ``None`` when it is missing, oversized or malformed."""
     try:
+        if result_path.stat().st_size > MAX_RESULT_BYTES:
+            return None
         value = json.loads(result_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    return value if isinstance(value, dict) else None
+    return sanitize_result(value) if isinstance(value, dict) else None
 
 
 def confine_files(result: dict, out_dir: Path) -> dict:
@@ -202,6 +267,7 @@ def confine_files(result: dict, out_dir: Path) -> dict:
 
 
 def sandbox_mode(env=None) -> str:
+    """``appcontainer`` or ``unsandboxed`` (explicit opt-out); raises ``SandboxUnavailable`` otherwise."""
     return sandbox_win.decide_mode(os.environ if env is None else env, os.name)
 
 
@@ -209,12 +275,10 @@ def preflight(blender) -> dict:
     """Verify the sandbox before any model time is spent; raises ``SandboxUnavailable`` (fail closed)."""
     mode = sandbox_mode()
     if mode == sandbox_win.SANDBOXED:
-        sandbox_win.prepare(os.path.dirname(os.path.abspath(str(blender))))
-        return {"sandbox": mode}
-    if os.name == "nt":
-        reason = "explicit opt-out via %s" % sandbox_win.OPT_OUT_ENV
-    else:
-        reason = "no sandbox implementation on this platform"
+        info = {"sandbox": mode}
+        info.update(sandbox_win.preflight(os.path.dirname(os.path.realpath(str(blender)))))
+        return info
+    reason = "explicit opt-out via %s" % sandbox_win.OPT_OUT_ENV
     return {"sandbox": mode, "warning": "Blender runs UNSANDBOXED (%s); model-written code has the server's authority" % reason}
 
 
@@ -233,12 +297,28 @@ def _job_dict(code_path, out_dir, name, kit_path, kit_excluded, max_tris, height
     }
 
 
-def _sandboxed(blender, code_path, out, *, name, kit_path, kit_excluded, max_tris, height_m, export, render, timeout):
-    blender_dir = os.path.dirname(os.path.abspath(str(blender)))
+def _copy_back(files: dict, destination: Path) -> dict:
+    """Copy the build's files out of the run directory with per-file size caps; returns new paths."""
+    moved = {}
+    for key, value in files.items():
+        source = Path(value)
+        cap = MAX_MODEL_BYTES if source.suffix.lower() in (".glb", ".fbx") else MAX_IMAGE_BYTES
+        size = source.stat().st_size
+        if size > cap:
+            raise ValueError("%s is %d MB, over the %d MB limit" % (key, size >> 20, cap >> 20))
+        target = destination / source.name
+        shutil.copyfile(source, target)
+        moved[key] = str(target)
+    return moved
+
+
+def _sandboxed(blender, code_path, out, *, name, kit_path, kit_excluded, max_tris, height_m, export, render,
+               timeout, memory_mb):
+    blender = os.path.realpath(str(blender))
+    blender_dir = os.path.dirname(blender)
     kit_file = Path(kit_path).resolve() if kit_path else None
-    memory_mb = sandbox_win.memory_limit_mb(os.environ)
-    protected = [Path.home()]
-    with sandbox_win.granted_run_dir(out, blender_dir, kit_file.parent if kit_file else None, protected) as (run, sid):
+    with sandbox_win.granted_run_dir(out, blender_dir, kit_file.parent if kit_file else None) as build:
+        run = build.run
         harness = run / "harness.py"
         shutil.copyfile(HARNESS_PATH, harness)
         script = run / "script.py"
@@ -253,28 +333,39 @@ def _sandboxed(blender, code_path, out, *, name, kit_path, kit_excluded, max_tri
         job = _job_dict(script, run_out, name, run_kit, kit_excluded, max_tris, height_m, export, render, result_path)
         job_path = run / "job.json"
         job_path.write_text(json.dumps(job), encoding="utf-8")
-        argv = build_argv(str(blender), str(job_path), str(harness))
+        argv = build_argv(blender, str(job_path), str(harness))
         env = sandbox_win.sandbox_env(run, blender_dir, os.environ.get("SystemRoot") or os.environ.get("SYSTEMROOT") or "")
-        outcome = sandbox_win.run_sandboxed(argv, cwd=run, env=env, timeout=timeout,
-                                            sid_ptr=sandbox_win.container_sid()[0], memory_mb=memory_mb)
+        outcome = sandbox_win.run_sandboxed(argv, cwd=run, env=env, timeout=timeout, slot=build.slot,
+                                            memory_mb=memory_mb)
         tail_text = outcome.stdout.decode("utf-8", "replace") + "\n" + outcome.stderr.decode("utf-8", "replace")
         if outcome.timed_out:
-            return {"ok": False, "error": "blender timed out after %ss" % timeout, "tail": _tail(tail_text)}
-        result = read_result(result_path)
-        if outcome.memory_exceeded and (result is None or not result.get("ok")):
-            return {"ok": False, "error": "memory limit exceeded (%d MB)" % outcome.memory_limit_mb,
-                    "tail": _tail(tail_text)}
-        if result is None:
-            return {"ok": False, "error": "no result; rc=%s" % outcome.returncode, "tail": _tail(tail_text)}
-        result = confine_files(result, run_out)
-        if not result.get("ok"):
-            return result
-        moved = {}
-        for key, value in (result.get("files") or {}).items():
-            target = out / os.path.basename(str(value))
-            shutil.copyfile(str(value), target)
-            moved[key] = str(target)
-        return dict(result, files=moved)
+            result = {"ok": False, "error": "blender timed out after %ss" % timeout, "tail": _tail(tail_text)}
+        else:
+            result = read_result(result_path)
+            failed = result is None or not result.get("ok")
+            # Evidence for "memory limit": the job reached its limit AND the build failed in a way that fits
+            # (no result at all, or the script/harness reported MemoryError).
+            oom_marked = result is None or "MemoryError" in str(result.get("error", ""))
+            if outcome.memory_exceeded and failed and oom_marked:
+                result = {"ok": False, "error": "memory limit exceeded (%d MB)" % outcome.memory_limit_mb,
+                          "tail": _tail(tail_text)}
+            elif result is None:
+                result = {"ok": False, "error": "no result; rc=%s" % outcome.returncode, "tail": _tail(tail_text)}
+            else:
+                result = confine_files(result, run_out)
+                if result.get("ok"):
+                    used = sandbox_win.tree_size(run)
+                    if used > sandbox_win.MAX_TREE_BYTES:
+                        result = {"ok": False, "error": "the build wrote more than %d MB into its run directory"
+                                  % (sandbox_win.MAX_TREE_BYTES >> 20)}
+                    else:
+                        try:
+                            result = dict(result, files=_copy_back(result.get("files") or {}, out))
+                        except (OSError, ValueError) as exc:
+                            result = {"ok": False, "error": "cannot copy the build output back: %s" % exc}
+    if build.problems:
+        result = dict(result, warnings=[redact_and_bound(item, 300) for item in build.problems[:3]])
+    return result
 
 
 def _unsandboxed(blender, code_path, out, *, name, kit_path, kit_excluded, max_tris, height_m, export, render,
@@ -298,8 +389,8 @@ def _unsandboxed(blender, code_path, out, *, name, kit_path, kit_excluded, max_t
         return {"ok": False, "error": "could not start blender: %s: %s" % (type(exc).__name__, exc)}
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
-    stdout = raw_out.decode("utf-8", "replace")
-    stderr = raw_err.decode("utf-8", "replace")
+    stdout = raw_out.decode("utf-8", "replace")[-sandbox_win.OUTPUT_TAIL_BYTES:]
+    stderr = raw_err.decode("utf-8", "replace")[-sandbox_win.OUTPUT_TAIL_BYTES:]
     result = read_result(result_path)
     try:
         result_path.unlink()
@@ -312,24 +403,30 @@ def _unsandboxed(blender, code_path, out, *, name, kit_path, kit_excluded, max_t
 
 
 def build_candidate(blender, code_path, out_dir, *, name, kit_path=None, kit_excluded=(), max_tris,
-                    height_m, export="glb", render=True, timeout=180, memory_mb=DEFAULT_MEMORY_MB,
-                    sandbox=None) -> dict:
-    """Build one candidate.  ``sandbox`` is ``None`` (decide from the environment) or an explicit mode."""
+                    height_m, export="glb", render=True, timeout=180, memory_mb=None, sandbox=None) -> dict:
+    """Build one candidate.
+
+    ``sandbox`` is ``None`` (decide from the environment) or an explicit mode.  ``memory_mb`` is the
+    memory ceiling for this build; ``None`` means ``SONDER_MESHGEN_MEM_MB``/4096 when sandboxed and
+    8192 on the unsandboxed path.
+    """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     if not HARNESS_PATH.is_file():
         return {"ok": False, "error": "harness missing: %s" % HARNESS_PATH}
-    mode = sandbox or sandbox_mode()
     common = dict(name=name, kit_path=kit_path, kit_excluded=kit_excluded, max_tris=max_tris, height_m=height_m,
                   export=export, render=render, timeout=timeout)
+    mode = sandbox or sandbox_win.UNSANDBOXED
     try:
+        mode = sandbox or sandbox_mode()
         if mode == sandbox_win.SANDBOXED:
-            result = _sandboxed(blender, code_path, out, **common)
+            limit = int(memory_mb) if memory_mb else sandbox_win.memory_limit_mb(os.environ)
+            result = _sandboxed(blender, code_path, out, memory_mb=limit, **common)
         else:
-            result = _unsandboxed(blender, code_path, out, memory_mb=memory_mb, **common)
+            result = _unsandboxed(blender, code_path, out, memory_mb=int(memory_mb or DEFAULT_MEMORY_MB), **common)
     except sandbox_win.SandboxUnavailable as exc:
-        return {"ok": False, "error": "sandbox unavailable, build refused (not falling back to unsandboxed): %s" % exc,
-                "sandbox": mode}
+        return {"ok": False, "error": "sandbox unavailable, build refused (not falling back to unsandboxed): %s"
+                % redact_and_bound(exc, 400), "sandbox": mode}
     result = dict(result, sandbox=mode)
     if mode != sandbox_win.SANDBOXED:
         result["warning"] = "built UNSANDBOXED"

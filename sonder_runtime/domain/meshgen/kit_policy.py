@@ -33,9 +33,10 @@ DANGEROUS_MODULES = frozenset({
 _IO_NAMES = frozenset({
     "open", "exec", "eval", "compile", "__import__", "input", "breakpoint", "exit", "quit", "Path", "PurePath",
 })
-# Attribute names that are only I/O on a dangerous receiver (``os.system``); generic elsewhere
-# (``bpy.types.Operator.system`` style names must not exclude a harmless kit function).
-_RECEIVER_ATTRIBUTES = frozenset({"system", "popen", "spawn", "startfile", "walk", "listdir", "remove", "unlink"})
+# Attributes of a dangerous module (``os``...) that do no I/O: pure path-string manipulation and
+# constants.  Every other use of such a module marks the function (``os.system``, ``os.remove``...),
+# while ``thing.system`` on an ordinary object does not: the receiver decides, not the bare name.
+_SAFE_MODULE_ATTRIBUTES = frozenset({"path", "sep", "linesep", "pathsep", "curdir", "pardir", "name"})
 _IO_ATTRIBUTES = frozenset({
     "save", "save_as", "save_render", "save_as_mainfile", "save_mainfile", "write", "writelines", "filepath",
     "filepath_raw", "filename", "directory", "export_scene", "import_scene", "open_mainfile", "read_homefile",
@@ -91,20 +92,24 @@ def analyse_kit(kit_source: str) -> tuple[frozenset[str], frozenset[str]]:
     dangerous = _dangerous_aliases(tree)
 
     def touches_io(node: ast.AST) -> bool:
-        for sub in ast.walk(node):
-            if isinstance(sub, ast.Name) and (sub.id in dangerous or sub.id in _IO_NAMES):
+        nodes = list(ast.walk(node))
+        safe_receivers = {
+            id(sub.value) for sub in nodes
+            if isinstance(sub, ast.Attribute) and isinstance(sub.value, ast.Name) and sub.value.id in dangerous
+            and sub.attr in _SAFE_MODULE_ATTRIBUTES}
+        for sub in nodes:
+            if isinstance(sub, ast.Name) and id(sub) not in safe_receivers and (
+                    sub.id in dangerous or sub.id in _IO_NAMES):
                 return True
             if isinstance(sub, ast.Attribute):
                 if sub.attr in _IO_ATTRIBUTES:
-                    return True
-                if sub.attr in _RECEIVER_ATTRIBUTES and isinstance(sub.value, ast.Name) and sub.value.id in dangerous:
                     return True
                 if sub.attr == "render" and isinstance(sub.value, ast.Attribute) and sub.value.attr == "ops":
                     return True
         return False
 
     bad: set[str] = set()      # tainted: touches I/O, directly or through another bad name
-    hidden: set[str] = set()   # text constants: not exposed, but harmless to the kit's own code
+    hidden: set[str] = set()   # text constants: not exposed, but harmless to the kit's own code (COL)
     for name, node in defs.items():
         if touches_io(node):
             bad.add(name)
@@ -112,6 +117,9 @@ def analyse_kit(kit_source: str) -> tuple[frozenset[str], frozenset[str]]:
         if isinstance(value, ast.JoinedStr) or (
                 isinstance(value, ast.Constant) and isinstance(value.value, (str, bytes))):
             hidden.add(name)
+        elif any(isinstance(n, ast.Name) and (n.id == "__file__" or n.id in dangerous) for n in ast.walk(value)):
+            hidden.add(name)  # a location (KIT_DIR, REPO_ROOT...): never shown, and its users are excluded
+            bad.add(name)
         elif touches_io(value):
             bad.add(name)
 

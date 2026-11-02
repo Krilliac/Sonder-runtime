@@ -82,7 +82,7 @@ mistakes cheaply, give the model repair feedback and keep the prompt honest, but
 can always be bypassed and none of it is relied on to contain a hostile script.
 
 Inside the sandbox the process can read and write only its own per-build run directory and read the
-Blender install directory. User files, repositories and credential stores are unreadable; there is
+Blender install directory. User files, repositories and credential stores on disk are unreadable; there is
 no network (loopback included); no second process can be started (`ActiveProcessLimit=1`); the job
 has a memory limit (default 4096 MB) and is killed when its handle closes. The process is created
 suspended and resumed only after `AssignProcessToJobObject` succeeded; if that or any other setup
@@ -93,14 +93,43 @@ control showing the probe really would succeed: reading a canary file outside th
 connection to a loopback listener, and `wm.obj_import` of a canary file all fail in the sandbox; the
 Lanternfall `lf_kit.box` builds, exports and renders through it.
 
+Further isolation, each verified with real Blender and an unsandboxed control
+(`tests/test_meshgen_sandbox_live.py`): writes outside the run dir, process spawn, symlink, junction
+and hardlink escapes, loopback and external TCP, DNS, and screen capture (the build runs on a private
+desktop) all fail in the sandbox. Two concurrent builds use different AppContainer profiles (three
+slots, a cross-process mutex per slot) and cannot open each other's processes; the AppContainer's
+own storage is wiped before every build so nothing persists between builds.
+
+**KNOWN GAP (review B1): the sandbox can READ the user's `HKCU` registry** (for example
+`HKCU\Environment`, which may hold API keys the user set as user environment variables, and
+`RecentDocs`). Every AppContainer is a member of ALL APPLICATION PACKAGES, which the user's HKCU keys
+grant read. Measured: a Blender script can read these values and could leak them through an exception
+message; the host redacts secret-looking text and caps every returned string at about 2 KB, which is a
+backstop, not a boundary. What was tried: LPAC (opting out of ALL APPLICATION PACKAGES) makes Blender
+exit with 0xC0000022 because side-by-side manifest activation needs `HKLM\...\SideBySide`, which
+grants only that group and the `registryRead` capability; adding that capability restores startup but
+the same capability is also in the user's HKCU key ACLs (so HKCU stays readable) and rendering then
+crashes (no GPU/OpenGL driver access). A DENY ACE for the package SID on a key had no effect. The
+test `test_hkcu_environment_and_recentdocs_are_unreadable_from_the_sandbox` is a strict xfail that
+will start failing the day this is fixed. Options for the operator: keep secrets out of user-level
+environment variables and the HKCU hive while using this tool; run the server under a separate
+low-privilege Windows account (or a VM) with an empty HKCU; or deny ALL APPLICATION PACKAGES on the
+HKCU keys yourself (invasive, breaks UWP apps). `preflight` reports `registry: readable` with a warning.
+
+Probed and not fixable from inside this design: `GetAsyncKeyState` returned 0 in both modes with no
+key pressed (inconclusive; the private desktop is the mitigation); the POSIX `prlimit` path was not
+run on this machine.
+
 What the sandbox does not claim: it does not stop CPU use until the timeout, nor a Windows
 AppContainer escape; the opt-out and non-Windows platforms have no sandbox at all.
 
 **ACL footprint** (everything the sandbox changes on the machine, and how to undo it):
 
-- an AppContainer profile `Sonder.MeshGen` for the current user (created on first use);
-- one persistent grant, added once and only if missing: `(OI)(CI)(RX)` for that profile's SID on the
-  Blender install directory. Undo: `icacls "<blender dir>" /remove:g *<SID>` (the SID is printed by
+- three AppContainer profiles `Sonder.MeshGen.s0`..`s2` for the current user (created on first use);
+- a private desktop per build in the current window station (closed afterwards);
+- one persistent grant per profile, added once and only if missing: `(OI)(CI)(RX)` for that profile's SID on the
+  Blender install directory (validated first: symlinks and shims are resolved, and the home directory,
+  its ancestors and descendants, drive roots and any directory containing the kit are refused). Undo: `icacls "<blender dir>" /remove:g *<SID>` (the SID is printed by
   `icacls "<blender dir>"`; the profile itself can be removed with `DeleteAppContainerProfile`);
 - per build, a fresh run directory `<candidate dir>/.run-<id>` with a `(OI)(CI)(M)` grant that is
   removed, and the directory deleted, when the build ends (also on failure/timeout). Builds run in
@@ -128,8 +157,8 @@ Environment variables:
 
 If the sandbox cannot be set up (for example the Blender grant needs an account that may edit its
 ACL, run the printed `icacls ... /grant` once) `mesh_generate` returns an error naming the cause and
-the opt-out; it never starts a build first. Non-Windows hosts have no sandbox here: they report
-`unsandboxed`, and the POSIX memory ceiling is a best-effort `prlimit` on Linux only (no
+the opt-out; it never starts a build first. Non-Windows hosts have no sandbox here: they fail closed
+and run only with `SONDER_MESHGEN_UNSANDBOXED=1` (then reported as `unsandboxed`), and the POSIX memory ceiling is a best-effort `prlimit` on Linux only (no
 `preexec_fn`, which is unsafe with threads).
 
 Cost: roughly 2 s extra per build (profile and ACL work, a second process launch, copying the

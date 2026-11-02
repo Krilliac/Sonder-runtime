@@ -129,12 +129,18 @@ def test_loop_passes_excluded_names_into_the_repair_hint():
 
 def test_system_and_popen_exclude_only_on_dangerous_receivers():
     source = (
-        "import os\nimport bpy\n"
+        "import os\nimport bpy\nfrom os import system as run_it\n"
         "def shell():\n    os.system('x')\n"
+        "def aliased():\n    run_it('x')\n"
+        "def remover(p):\n    os.remove(p)\n"
+        "def pathy(a):\n    return os.path.join(a, 'b')\n"
+        "def handing_over():\n    return os\n"
         "def harmless(thing):\n    thing.system = 1\n    thing.popen()\n"
+        "HERE = os.path.dirname(__file__)\n"
     )
     allowed, excluded = analyse_kit(source)
-    assert "shell" in excluded and "harmless" in allowed
+    assert {"shell", "aliased", "remover", "handing_over", "HERE"} <= excluded
+    assert {"pathy", "harmless"} <= allowed  # path-string manipulation and plain objects are not I/O
 
 
 def test_a_colour_constant_is_not_a_callable_and_stays_usable_inside_the_kit():

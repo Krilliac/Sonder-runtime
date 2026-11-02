@@ -27,7 +27,10 @@ def test_mode_is_sandboxed_on_windows_unless_explicitly_opted_out():
     assert sandbox_win.decide_mode({"SONDER_MESHGEN_UNSANDBOXED": ""}, "nt") == "appcontainer"
     for value in ("1", "true", "YES"):
         assert sandbox_win.decide_mode({"SONDER_MESHGEN_UNSANDBOXED": value}, "nt") == "unsandboxed"
-    assert sandbox_win.decide_mode({}, "posix") == "unsandboxed"  # honest: no sandbox implemented there
+    # no sandbox exists off Windows: fail closed unless explicitly opted out (review I7)
+    with pytest.raises(sandbox_win.SandboxUnavailable, match="SONDER_MESHGEN_UNSANDBOXED"):
+        sandbox_win.decide_mode({}, "posix")
+    assert sandbox_win.decide_mode({"SONDER_MESHGEN_UNSANDBOXED": "1"}, "posix") == "unsandboxed"
 
 
 def test_environment_is_minimal_and_points_inside_the_run_dir(tmp_path):
@@ -142,3 +145,147 @@ def test_posix_memory_cap_does_not_use_preexec_fn():
 
     source = inspect.getsource(runner.run_limited) + inspect.getsource(runner._posix_limit)
     assert "preexec_fn" not in source.replace("``preexec_fn``", "").replace("no preexec_fn", "")
+
+
+# ---- review round 5: host-side caps, redaction, grant validation, wipe, memory plumbing -------------
+
+def test_redaction_removes_secret_shapes_and_bounds_length():
+    text = runner.redact_and_bound("ValueError: API_KEY=abcd1234 sk-" + "a" * 30 + " " + "Z" * 60)
+    assert "abcd1234" not in text and "sk-aaaa" not in text and "ZZZZZZZZZZ" not in text
+    assert "[redacted]" in text
+    long = runner.redact_and_bound("x " * 5000)
+    assert len(long) <= runner.MAX_TEXT_CHARS + 20 and long.endswith("...[truncated]")
+    assert runner.redact_and_bound(None) == ""
+
+
+def test_sanitize_result_keeps_known_typed_keys_only():
+    hostile = {"ok": 1, "error": "token=hunter2 " + "e" * 9000, "tris": "9", "extra": "x", "size": [1, "a", True, 2, 3, 4],
+               "tail": ["password: pw" + str(i) for i in range(20)], "files": {"model": "/m.glb"},
+               "parts": [{"name": "n" * 500, "tris": 3}] * 20}
+    clean = runner.sanitize_result(hostile)
+    assert "extra" not in clean and clean["ok"] is True and clean["tris"] == 0
+    assert "hunter2" not in clean["error"] and len(clean["error"]) < 2100
+    assert clean["size"] == [1.0]  # first three entries only; non-numbers and bools dropped
+    assert len(clean["tail"]) == 8 and not any("pw1" in line for line in clean["tail"])
+    assert len(clean["parts"]) == 8 and len(clean["parts"][0]["name"]) < 60
+
+
+def test_read_result_refuses_an_oversized_or_malformed_file(tmp_path):
+    big = tmp_path / "big.json"
+    big.write_text('{"ok": true, "error": "' + "a" * (runner.MAX_RESULT_BYTES + 10) + '"}', encoding="utf-8")
+    assert runner.read_result(big) is None
+    bad = tmp_path / "bad.json"
+    bad.write_text("[1, 2]", encoding="utf-8")
+    assert runner.read_result(bad) is None
+    assert runner.read_result(tmp_path / "missing.json") is None
+
+
+def test_copy_back_enforces_per_file_caps(tmp_path, monkeypatch):
+    src = tmp_path / "run"
+    src.mkdir()
+    (src / "m.glb").write_bytes(b"x" * 100)
+    (src / "p.png").write_bytes(b"y" * 100)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    moved = runner._copy_back({"model": str(src / "m.glb"), "preview": str(src / "p.png")}, dest)
+    assert {Path(v).name for v in moved.values()} == {"m.glb", "p.png"}
+    monkeypatch.setattr(runner, "MAX_MODEL_BYTES", 50)
+    with pytest.raises(ValueError, match="over the"):
+        runner._copy_back({"model": str(src / "m.glb")}, dest)
+
+
+def test_tail_bytes_keeps_only_the_end(tmp_path):
+    path = tmp_path / "o.txt"
+    path.write_bytes(b"A" * 1000 + b"END")
+    assert sandbox_win.tail_bytes(path, 10) == b"AAAAAAAEND"
+    assert sandbox_win.tail_bytes(path, 5000).endswith(b"END")
+    assert sandbox_win.tail_bytes(tmp_path / "none") == b""
+
+
+def test_tree_size_counts_files_and_stops_at_the_cap(tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "f").write_bytes(b"1" * 100)
+    (tmp_path / "g").write_bytes(b"2" * 100)
+    assert sandbox_win.tree_size(tmp_path) == 200
+    assert sandbox_win.tree_size(tmp_path, cap=50) >= 100  # stopped early, over the cap
+
+
+def test_wipe_removes_contents_but_keeps_top_level_structure(tmp_path):
+    root = tmp_path / "ac"
+    (root / "LocalCache" / "deep").mkdir(parents=True)
+    (root / "LocalCache" / "deep" / "f.txt").write_text("x")
+    (root / "LocalCache" / "g.txt").write_text("x")
+    (root / "stray.txt").write_text("x")
+    assert sandbox_win.wipe_directory_contents(root) == []
+    assert (root / "LocalCache").is_dir() and list((root / "LocalCache").iterdir()) == []
+    assert not (root / "stray.txt").exists()
+
+
+def test_wipe_does_not_follow_links_out_of_the_tree(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep")
+    root = tmp_path / "ac"
+    (root / "Local").mkdir(parents=True)
+    link = root / "Local" / "link"
+    try:
+        os.symlink(outside, link, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not permitted here")
+    sandbox_win.wipe_directory_contents(root)
+    assert (outside / "keep.txt").read_text() == "keep" and not link.exists()
+
+
+def test_blender_dir_validation(tmp_path):
+    home = tmp_path / "home"
+    (home / "apps" / "blender").mkdir(parents=True)
+    kit_dir = tmp_path / "repo" / "tools"
+    kit_dir.mkdir(parents=True)
+    ok = tmp_path / "apps" / "blender"
+    ok.mkdir(parents=True)
+    assert sandbox_win.check_blender_dir(ok, kit_dir, [home])
+    for bad in (home, home / "apps" / "blender", tmp_path, tmp_path / "repo"):
+        with pytest.raises(sandbox_win.SandboxUnavailable):
+            sandbox_win.check_blender_dir(bad, kit_dir, [home])
+    with pytest.raises(sandbox_win.SandboxUnavailable, match="drive root"):
+        sandbox_win.check_blender_dir(Path(tmp_path.anchor), None, [])
+
+
+def test_blender_dir_symlink_into_home_is_resolved_and_refused(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    link = tmp_path / "shim"
+    try:
+        os.symlink(home, link, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not permitted here")
+    with pytest.raises(sandbox_win.SandboxUnavailable):
+        sandbox_win.check_blender_dir(link, None, [home])
+
+
+def test_build_candidate_honours_memory_mb_on_the_sandboxed_path(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake(blender, code_path, out, *, memory_mb, **kwargs):
+        seen["memory_mb"] = memory_mb
+        return {"ok": True}
+
+    monkeypatch.setattr(runner, "_sandboxed", fake)
+    code = tmp_path / "c.py"
+    code.write_text("def build(): pass" + chr(10))
+    args = dict(name="n", max_tris=10, height_m=0, sandbox="appcontainer")
+    runner.build_candidate("blender", str(code), str(tmp_path / "o"), memory_mb=1234, **args)
+    assert seen["memory_mb"] == 1234
+    monkeypatch.setenv("SONDER_MESHGEN_MEM_MB", "2048")
+    runner.build_candidate("blender", str(code), str(tmp_path / "o"), **args)
+    assert seen["memory_mb"] == 2048
+
+
+def test_non_windows_build_is_refused_without_the_opt_out(tmp_path, monkeypatch):
+    monkeypatch.delenv("SONDER_MESHGEN_UNSANDBOXED", raising=False)
+    monkeypatch.setattr(runner.os, "name", "posix")
+    monkeypatch.setattr(runner, "run_limited", lambda *a, **k: pytest.fail("ran unsandboxed"))
+    code = tmp_path / "c.py"
+    code.write_text("def build(): pass" + chr(10))
+    result = runner.build_candidate("blender", str(code), str(tmp_path / "o"), name="n", max_tris=10, height_m=0)
+    assert result["ok"] is False and "SONDER_MESHGEN_UNSANDBOXED" in result["error"]
