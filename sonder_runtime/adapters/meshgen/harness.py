@@ -20,6 +20,8 @@ import importlib
 # parses ``import`` statements, which would otherwise flag this Blender-only file.
 bpy = importlib.import_module("bpy")
 mathutils = importlib.import_module("mathutils")
+importlib.import_module("mathutils.bvhtree")
+connectivity = None  # set by main(): the sibling module, importable once sys.path includes this folder
 
 RENDER_PX = 512
 DEFAULT_GREY = (0.69, 0.69, 0.69)
@@ -27,6 +29,7 @@ DEFAULT_GREY = (0.69, 0.69, 0.69)
 
 RESULT_PATH = ""
 PARTS = []
+GEOM_PARTS = []   # per baked part: name, creating script line, detached flag, world-space vertices and triangles
 
 
 def _emit(payload):
@@ -79,6 +82,7 @@ def _bake_and_join(name):
         baked.color_attributes.active_color = baked.color_attributes.get("Col")
         baked.update()
         PARTS.append({"name": str(obj.name)[:40], "tris": sum(len(poly.vertices) - 2 for poly in baked.polygons)})
+        GEOM_PARTS.append(_capture_part(obj, baked))
     view_layer.update()
     bpy.ops.object.select_all(action="DESELECT")
     for obj in objs:
@@ -94,6 +98,18 @@ def _bake_and_join(name):
     return joined
 
 
+def _capture_part(obj, baked):
+    """Copy what the floating-part check needs from one baked part (its vertices are already in world space)."""
+    flat = _vertices(baked)
+    baked.calc_loop_triangles()
+    triangles = baked.loop_triangles
+    indices = [0] * (len(triangles) * 3)
+    triangles.foreach_get("vertices", indices)
+    line = obj.get("meshgen_line", 0)
+    return {"name": str(obj.name), "line": line if isinstance(line, int) else 0,
+            "detached": bool(obj.get("meshgen_detached", 0)), "verts": flat, "tris": indices}
+
+
 def _vertices(mesh):
     flat = [0.0] * (len(mesh.vertices) * 3)
     mesh.vertices.foreach_get("co", flat)
@@ -105,21 +121,126 @@ def _extent(flat):
     return (min(xs), min(ys), min(zs)), (max(xs), max(ys), max(zs))
 
 
+def _normal_transform(lo, hi, height_m):
+    """Uniform scale and translation that size the build to ``height_m``, centre it on X/Y and stand it on Z=0."""
+    scale = 1.0
+    if height_m and height_m > 0 and hi[2] - lo[2] > 1e-9:
+        scale = height_m / (hi[2] - lo[2])
+    cx, cy = (lo[0] + hi[0]) / 2.0 * scale, (lo[1] + hi[1]) / 2.0 * scale
+    return scale, (-cx, -cy, -lo[2] * scale)
+
+
 def _normalise(obj, height_m):
     mesh = obj.data
     if not mesh.vertices:
         raise RuntimeError("the joined mesh has no vertices")
     lo, hi = _extent(_vertices(mesh))
-    scale = 1.0
-    if height_m and height_m > 0 and hi[2] - lo[2] > 1e-9:
-        scale = height_m / (hi[2] - lo[2])
-    cx, cy = (lo[0] + hi[0]) / 2.0 * scale, (lo[1] + hi[1]) / 2.0 * scale
-    matrix = mathutils.Matrix.Translation((-cx, -cy, -lo[2] * scale)) @ mathutils.Matrix.Scale(scale, 4)
+    scale, shift = _normal_transform(lo, hi, height_m)
+    matrix = mathutils.Matrix.Translation(shift) @ mathutils.Matrix.Scale(scale, 4)
     mesh.transform(matrix)
     mesh.update()
     bpy.context.view_layer.update()
     lo, hi = _extent(_vertices(mesh))
     return [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]], lo, hi
+
+
+def _part_view(part, scale, shift):
+    """One part in final (normalised) space: points, bounding box and, built on demand, a BVH tree."""
+    flat = part["verts"]
+    points = [(flat[i] * scale + shift[0], flat[i + 1] * scale + shift[1], flat[i + 2] * scale + shift[2])
+              for i in range(0, len(flat), 3)]
+    triangles = [tuple(part["tris"][i:i + 3]) for i in range(0, len(part["tris"]), 3)]
+    box = None
+    if points:
+        xs, ys, zs = [p[0] for p in points], [p[1] for p in points], [p[2] for p in points]
+        box = (min(xs), min(ys), min(zs), max(xs), max(ys), max(zs))
+    return {"points": points, "triangles": triangles, "bvh": None, "name": part["name"], "line": part["line"],
+            "detached": part["detached"], "box": box}
+
+
+def _bvh(view):
+    if view["bvh"] is None:
+        view["bvh"] = mathutils.bvhtree.BVHTree.FromPolygons(view["points"], view["triangles"], all_triangles=True)
+    return view["bvh"]
+
+
+def _nearest(source, target, limit):
+    """Smallest distance from a bounded sample of ``source``'s vertices to ``target``'s surface, stopping early
+    once it is within ``limit``.  Returns ``(distance, point_on_source, point_on_target)`` or ``None``."""
+    bvh = _bvh(target)
+    best = None
+    for index in connectivity.sample_indices(len(source["points"])):
+        point = source["points"][index]
+        hit = bvh.find_nearest(point)
+        if hit[0] is None:
+            continue
+        if best is None or hit[3] < best[0]:
+            best = (hit[3], point, tuple(hit[0]))
+            if best[0] <= limit:
+                break
+    return best
+
+
+def _touch(a, b, tol):
+    """True when the two parts' surfaces overlap, or a sampled vertex of either lies within ``tol`` of the other."""
+    if _bvh(a).overlap(_bvh(b)):
+        return True
+    for source, target in ((a, b), (b, a)):
+        found = _nearest(source, target, tol)
+        if found is not None and found[0] <= tol:
+            return True
+    return False
+
+
+def _closest(members, others):
+    """The nearest approach of any member to any other part: ``(distance, vector, other)``.  ``vector`` points from
+    the other part's closest point to the member's.  Pairs are tried nearest-box first and the search stops
+    once a box is farther than the best distance found."""
+    best = None
+    ordered = sorted((connectivity.box_distance(m["box"], o["box"]), mi, oi)
+                     for mi, m in enumerate(members) for oi, o in enumerate(others))
+    for lower, mi, oi in ordered:
+        if best is not None and lower >= best[0]:
+            break
+        member, other = members[mi], others[oi]
+        found = _nearest(member, other, 0.0)
+        if found is not None and (best is None or found[0] < best[0]):
+            best = (found[0], tuple(found[1][k] - found[2][k] for k in range(3)), other)
+        found = _nearest(other, member, 0.0)
+        if found is not None and (best is None or found[0] < best[0]):
+            best = (found[0], tuple(found[2][k] - found[1][k] for k in range(3)), other)
+    return best
+
+
+def _geometry_report(height_m):
+    """The ``geometry`` block: which parts float free of the ground-standing ones (see ``connectivity.py``)."""
+    flat = [value for part in GEOM_PARTS for value in part["verts"]]
+    if not flat:
+        return None
+    lo, hi = _extent(flat)
+    scale, shift = _normal_transform(lo, hi, height_m)
+    views = [_part_view(part, scale, shift) for part in GEOM_PARTS]
+    dims = [(hi[k] - lo[k]) * scale for k in range(3)]
+    tol = connectivity.tolerance(dims[2])
+    eligible = [v["box"] is not None and bool(v["triangles"]) and not v["detached"] for v in views]
+    boxes = [v["box"] if eligible[i] else None for i, v in enumerate(views)]
+    touching = [(i, j) for i, j in connectivity.candidate_pairs(boxes, tol) if _touch(views[i], views[j], tol)]
+    grounded = [boxes[i] is not None and connectivity.is_grounded(boxes[i][2], tol) for i in range(len(views))]
+    groups = connectivity.floating_components(len(views), touching, grounded, [not e for e in eligible])
+    entries = []
+    for group in groups[:connectivity.MAX_FLOATING]:
+        members = [views[i] for i in group]
+        others = [views[i] for i in range(len(views)) if eligible[i] and i not in group]
+        box = [min(m["box"][k] for m in members) if k < 3 else max(m["box"][k] for m in members) for k in range(6)]
+        centre = [(box[k] + box[k + 3]) / 2.0 for k in range(3)]
+        best = _closest(members, others) if others else None
+        if best is None:
+            gap, vector, nearest = box[2], (0.0, 0.0, box[2]), None
+        else:
+            gap, vector, nearest = best[0], best[1], best[2]["name"]
+        entries.append(connectivity.floating_entry([m["name"] for m in members], [m["line"] for m in members],
+                                                   centre, gap, vector, nearest))
+    return connectivity.geometry_block(len(views), entries, dims[2], dims)
 
 
 def _export(obj, path, kind):
@@ -233,21 +354,22 @@ def _compose_sheet(paths, sheet_path, single_path, keep_dir_name):
 
 
 def _load_support():
-    """Import the sibling support modules (opschema, replay) that sit next to this file."""
+    """Import the sibling support modules (opschema, connectivity, replay) that sit next to this file."""
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:
         sys.path.insert(0, here)
-    return importlib.import_module("opschema"), importlib.import_module("replay")
+    return (importlib.import_module("opschema"), importlib.import_module("replay"),
+            importlib.import_module("connectivity"))
 
 
 def main():
-    global RESULT_PATH
+    global RESULT_PATH, connectivity
     job = _job()
     RESULT_PATH = job["result_path"]
     out_dir = job["out_dir"]
     name = job["name"]
     os.makedirs(out_dir, exist_ok=True)
-    opschema, replay = _load_support()
+    opschema, replay, connectivity = _load_support()
     kit_path = job.get("kit_path") or ""
     kit_name = os.path.splitext(os.path.basename(kit_path))[0] if kit_path else ""
     kit_allowed = [str(item) for item in (job.get("kit_allowed") or [])] if kit_name else []
@@ -262,6 +384,11 @@ def main():
     replay.run(doc, kit_name, kit_allowed)
     obj = _bake_and_join(name)
     size, lo, hi = _normalise(obj, float(job.get("height_m") or 0.0))
+    geometry, geometry_error = None, ""
+    try:
+        geometry = _geometry_report(float(job.get("height_m") or 0.0))
+    except Exception as exc:  # noqa: BLE001 - the model is fine; a failed measurement only drops the geometry block
+        geometry_error = "%s: %s" % (type(exc).__name__, exc)
     mesh = obj.data
     tris = sum(len(poly.vertices) - 2 for poly in mesh.polygons)
     kind = "fbx" if str(job.get("export", "glb")).lower() == "fbx" else "glb"
@@ -271,6 +398,10 @@ def main():
     result = {"ok": True, "tris": tris, "within_budget": tris <= int(job.get("max_tris") or 0),
               "size": [round(v, 4) for v in size], "files": files,
               "parts": sorted(PARTS, key=lambda part: -part["tris"])[:8]}
+    if geometry is not None:
+        result["geometry"] = geometry
+    if geometry_error:
+        result["geometry_error"] = geometry_error[:300]
     if job.get("render", True):
         try:
             paths = _render_views(obj, out_dir, name, size, lo, hi)

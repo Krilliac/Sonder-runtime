@@ -214,7 +214,7 @@ def test_the_trusted_harness_files_are_staged_next_to_the_harness_and_removed_af
 
     _patch_run(monkeypatch, fake_run)
     _build(tmp_path)
-    assert seen["files"] == ["harness.py", "opschema.py", "replay.py"] and all(seen["same"])
+    assert seen["files"] == ["connectivity.py", "harness.py", "opschema.py", "replay.py"] and all(seen["same"])
     assert not seen["dir"].exists()
 
 

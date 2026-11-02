@@ -2,7 +2,7 @@
 
 Model-written code never executes.  The host records the script into a JSON op list
 (``domain/meshgen/dsl``); this module stages ``ops.json`` plus the trusted ``harness.py``,
-``replay.py`` and ``opschema.py`` and runs Blender over them.  On Windows the run happens inside a
+``replay.py``, ``opschema.py`` and ``connectivity.py`` and runs Blender over them.  On Windows the run happens inside a
 zero-capability AppContainer (``sandbox_win``), which bounds what even the trusted code can do with
 hostile *data*; if the sandbox cannot be set up the build fails closed.
 ``SONDER_MESHGEN_UNSANDBOXED=1`` is the one explicit opt-out; results then carry
@@ -15,6 +15,7 @@ file, which is treated as untrusted input (``sanitize_result``).
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -27,7 +28,8 @@ import sonder_runtime.adapters.meshgen.sandbox_win as sandbox_win  # exact modul
 HARNESS_PATH = Path(__file__).with_name("harness.py")
 REPLAY_PATH = Path(__file__).with_name("replay.py")
 OPSCHEMA_PATH = Path(__file__).resolve().parents[2] / "domain" / "meshgen" / "dsl" / "opschema.py"
-HARNESS_FILES = (HARNESS_PATH, REPLAY_PATH, OPSCHEMA_PATH)
+CONNECTIVITY_PATH = Path(__file__).resolve().parents[2] / "domain" / "meshgen" / "connectivity.py"
+HARNESS_FILES = (HARNESS_PATH, REPLAY_PATH, OPSCHEMA_PATH, CONNECTIVITY_PATH)
 _TAIL_LINES = 8
 DEFAULT_MEMORY_MB = 8192
 SCRATCH_NAME = ".blender_profile"
@@ -181,8 +183,10 @@ MAX_MODEL_BYTES = 256 * 1024 * 1024     # a copied-back GLB/FBX
 MAX_IMAGE_BYTES = 64 * 1024 * 1024      # a copied-back render
 MAX_TEXT_CHARS = 2000                   # any text that can reach a prompt or a payload
 MAX_TAIL_LINE_CHARS = 300
+MAX_FLOATING_ENTRIES = 20               # floating-part entries kept from the harness' geometry block
+MAX_ENTRY_NAMES = 8
 _ALLOWED_RESULT_KEYS = frozenset({"ok", "error", "tris", "within_budget", "size", "files", "parts",
-                                  "render_error", "tail", "traceback"})
+                                  "render_error", "tail", "traceback", "geometry", "geometry_error"})
 _SECRET_PATTERNS = (
     re.compile(r"(?i)\b[\w.-]*(?:api[_-]?key|access[_-]?key|secret|token|passw(?:or)?d|credential)[\w.-]*\s*[=:]\s*\S+"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{12,}"),
@@ -205,6 +209,43 @@ def bound_text(value, limit: int = MAX_TEXT_CHARS) -> str:
     return text
 
 
+def _finite(value) -> float:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) \
+        and math.isfinite(value) else 0.0
+
+
+def _triple(value) -> list:
+    seq = value if isinstance(value, list) else []
+    return [_finite(item) for item in (seq + [0.0, 0.0, 0.0])[:3]]
+
+
+def _sanitize_geometry(value) -> dict | None:
+    """The harness' ``geometry`` block with every field typed and bounded, or ``None`` when it is not a block."""
+    if not isinstance(value, dict) or not isinstance(value.get("floating"), list):
+        return None
+    count = value.get("parts")
+    entries = []
+    for item in value["floating"][:MAX_FLOATING_ENTRIES]:
+        if not isinstance(item, dict):
+            continue
+        names = item.get("parts") if isinstance(item.get("parts"), list) else []
+        lines = item.get("lines") if isinstance(item.get("lines"), list) else []
+        total = item.get("part_count")
+        nearest = item.get("nearest")
+        entries.append({
+            "parts": [bound_text(name, 40) for name in names[:MAX_ENTRY_NAMES]],
+            "part_count": int(total) if isinstance(total, int) and not isinstance(total, bool) and total >= 0
+            else len(names),
+            "lines": [line for line in lines[:MAX_ENTRY_NAMES]
+                      if isinstance(line, int) and not isinstance(line, bool) and line > 0],
+            "centre": _triple(item.get("centre")), "gap": _finite(item.get("gap")),
+            "gap_vec": _triple(item.get("gap_vec")),
+            "nearest": bound_text(nearest, 40) if isinstance(nearest, str) else None,
+        })
+    return {"parts": int(count) if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else 0,
+            "floating": entries, "height": _finite(value.get("height")), "dims": _triple(value.get("dims"))}
+
+
 def sanitize_result(result: dict) -> dict:
     """Keep only the keys the loop understands, with bounded, typed values.
 
@@ -213,7 +254,11 @@ def sanitize_result(result: dict) -> dict:
     clean: dict = {}
     for key in _ALLOWED_RESULT_KEYS & set(result):
         value = result[key]
-        if key in ("error", "render_error"):
+        if key == "geometry":
+            geometry = _sanitize_geometry(value)
+            if geometry is not None:
+                clean[key] = geometry
+        elif key in ("error", "render_error", "geometry_error"):
             clean[key] = bound_text(value)
         elif key in ("tail", "traceback"):
             lines = value if isinstance(value, list) else [value]

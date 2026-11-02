@@ -5,7 +5,9 @@ All I/O is injected, so the loop is deterministic under test:
 * ``generate(tier, prompt) -> str``     one model completion
 * ``build(candidate_index, round_index, code, recording) -> dict``  replays the recorded script
   (``recording.text`` is its ``ops.json``) and returns ``ok``, ``tris``, ``within_budget``,
-  ``error``, ``files`` with an optional ``sheet``; it may raise, which is treated as a failed build
+  ``error``, ``files`` with an optional ``sheet`` and an optional ``geometry`` block (the harness' measured
+  part-connectivity report; absent from an old harness, in which case nothing below changes); it may raise,
+  which is treated as a failed build
 * ``critique(sheet_path) -> str | None``  vision reply; ``None`` = unavailable
 * ``map_parallel(fn, items) -> list``    ordered parallel map
 * ``record(code, seed) -> Recording``    records a script (raises ``ScriptError``).  Required: production passes
@@ -14,6 +16,10 @@ All I/O is injected, so the loop is deterministic under test:
 
 The model's script is never executed: ``compile_script`` records it into an op list (a
 ``ScriptError`` is the failure the model sees, with a line number) and only that data is built.
+
+A floating part in the ``geometry`` block is a measured fact, not an opinion: it becomes concrete issues that
+go first in the revise prompt, caps the score at ``FLOATING_SCORE_CAP`` whatever the critic said, and keeps the
+candidate from being accepted even without a vision score.
 
 Each candidate runs on its own thread of control and keeps every attempt plus
 its best version; the overall winner is :func:`pick_best` over those.  The
@@ -25,7 +31,7 @@ import re
 import time
 from dataclasses import dataclass
 
-from ...domain.meshgen.critique import parse_critique
+from ...domain.meshgen.critique import cap_score, geometry_issues, parse_critique
 from ...domain.meshgen.dsl.errors import ScriptError
 from ...domain.meshgen.dsl.recorder import compile_script
 from ...domain.meshgen.prompts import (
@@ -187,12 +193,17 @@ def run(request: MeshRequest, *, generate, build, critique, map_parallel, record
         version = {"round": round_index, "built": True, "within_budget": within, "tier": tier,
                    "tris": attempt["tris"], "score": None, "issues": [], "files": files,
                    "size": result.get("size")}
+        geometry = result.get("geometry") if isinstance(result.get("geometry"), dict) else None
+        if geometry is not None:
+            version["geometry"] = attempt["geometry"] = geometry
+        floating = geometry_issues(geometry)
         versions.append(version)
         if not within:
             attempt["status"] = "over_budget"
             failure = _over_budget_text(result, request.max_tris)
             return False, lambda stuck: repair_prompt(base, code, failure, stuck=stuck)
         sheet = files.get("sheet")
+        parsed = None
         if request.vision and not vision_off["reason"] and sheet:
             vision_off["used"] += 1
             try:
@@ -206,12 +217,20 @@ def run(request: MeshRequest, *, generate, build, critique, map_parallel, record
                 parsed = parse_critique(verdict)
                 version["score"] = attempt["score"] = parsed["score"]
                 version["issues"] = attempt["issues"] = list(parsed["issues"])
-                if parsed["score"] is not None:
-                    if parsed["score"] >= request.target_score:
-                        attempt["status"] = "accepted"
-                        return True, None
-                    attempt["status"] = "revise"
-                    return False, lambda stuck: revise_prompt(base, code, parsed, stuck=stuck)
+        if floating:
+            # measured: ahead of the critic's issues, over its score, and never accepted as it stands
+            capped = cap_score(parsed["score"] if parsed else None, floating)
+            issues = floating + (list(parsed["issues"]) if parsed else [])
+            version["score"] = attempt["score"] = capped
+            version["issues"] = attempt["issues"] = issues
+            attempt["status"] = "revise"
+            return False, lambda stuck: revise_prompt(base, code, {"score": capped, "issues": issues}, stuck=stuck)
+        if parsed is not None and parsed["score"] is not None:
+            if parsed["score"] >= request.target_score:
+                attempt["status"] = "accepted"
+                return True, None
+            attempt["status"] = "revise"
+            return False, lambda stuck: revise_prompt(base, code, parsed, stuck=stuck)
         attempt["status"] = "built"
         return True, None
 

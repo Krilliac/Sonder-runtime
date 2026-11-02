@@ -5,6 +5,15 @@ import json
 
 MAX_ISSUES = 8
 _MAX_ISSUE_CHARS = 300
+FLOATING_SCORE_CAP = 6          # a candidate with a measured floating part never scores above this
+MAX_GEOMETRY_ISSUES = 8
+# (axis, sign of the gap vector) -> (where the floating part sits relative to what it should touch, how to move it).
+# The front of the model faces -Y, so -Y is "in front" and +Y is "behind".
+_DIRECTIONS = {
+    (2, 1): ("above", "down"), (2, -1): ("below", "up"),
+    (0, 1): ("to the right (+X) of", "left (toward -X)"), (0, -1): ("to the left (-X) of", "right (toward +X)"),
+    (1, 1): ("behind (+Y)", "forward (toward -Y)"), (1, -1): ("in front (-Y) of", "back (toward +Y)"),
+}
 
 
 def critique_prompt(brief: str, max_tris: int | None = None) -> str:
@@ -49,6 +58,62 @@ def critique_prompt(brief: str, max_tris: int | None = None) -> str:
         'e.g. "rear wheels lie flat; rotate 90 degrees so they stand upright on the axle">]}.',
         "10 means a clean, correct, recognisable model. Give an empty issues list only when nothing needs fixing.",
     ])
+
+
+def _quoted(names, count) -> str:
+    shown = ", ".join("'%s'" % name for name in names[:3])
+    rest = max(int(count), len(names)) - min(len(names), 3)
+    return shown + (" and %d more parts" % rest if rest > 0 else "")
+
+
+def _number(value) -> float:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+
+
+def geometry_issues(geometry) -> list:
+    """One concrete, deterministic issue per floating component of a harness ``geometry`` block (else ``[]``).
+
+    Reads ``floating`` entries (``parts``, ``part_count``, ``lines``, ``gap``, ``gap_vec`` from the nearest other
+    part to the floating one, ``nearest`` part name or ``None`` for the ground).  Pure and tolerant: anything
+    that is not a well-formed entry is skipped."""
+    entries = geometry.get("floating") if isinstance(geometry, dict) else None
+    issues = []
+    for entry in (entries if isinstance(entries, list) else [])[:MAX_GEOMETRY_ISSUES]:
+        if not isinstance(entry, dict) or not isinstance(entry.get("parts"), list) or not entry["parts"]:
+            continue
+        names = [str(name) for name in entry["parts"]]
+        count = entry.get("part_count") if isinstance(entry.get("part_count"), int) else len(names)
+        lines = [line for line in (entry.get("lines") or []) if isinstance(line, int) and line > 0][:3]
+        where = ("line%s %s: " % ("s" if len(lines) > 1 else "", ", ".join(str(line) for line in lines))) if lines else ""
+        nearest = entry.get("nearest")
+        ground = not (isinstance(nearest, str) and nearest)
+        target = "the ground" if ground else "the nearest part ('%s')" % nearest
+        gap = _number(entry.get("gap"))
+        vector = entry.get("gap_vec") if isinstance(entry.get("gap_vec"), list) and len(entry["gap_vec"]) == 3 else []
+        values = [_number(item) for item in vector]
+        plural = max(int(count), len(names)) > 1
+        verb, pronoun = ("float", "them") if plural else ("floats", "it")
+        distance = "%.3f" % gap if gap < 0.01 else "%.2f" % gap
+        head = "%s%s %s %s m" % (where, _quoted(names, count), verb, distance)
+        if values and max(abs(item) for item in values) > 1e-9:
+            axis = 2 if ground else max(range(3), key=lambda k: abs(values[k]))
+            side, move = _DIRECTIONS[(axis, 1 if values[axis] >= 0 else -1)]
+            end = "stand on the ground (z=0)" if ground else ("rest on it" if axis == 2 else "touch it")
+            text = "%s %s %s; move %s %s to %s" % (head, side, target, pronoun, move, end)
+        else:
+            text = "%s away from %s; move %s until %s" % (
+                head, target, pronoun, "it touches it" if not plural else "they touch it")
+        if plural:
+            text += " (together they touch each other but nothing that stands on the ground)"
+        issues.append(text[:_MAX_ISSUE_CHARS])
+    return issues
+
+
+def cap_score(score, floating_issues):
+    """The critic's score, capped at ``FLOATING_SCORE_CAP`` while any floating part was measured."""
+    if score is None or not floating_issues:
+        return score
+    return min(score, FLOATING_SCORE_CAP)
 
 
 def _first_object(text: str):

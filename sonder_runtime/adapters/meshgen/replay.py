@@ -14,6 +14,8 @@ bpy = importlib.import_module("bpy")
 opschema = importlib.import_module("opschema")
 
 MAX_COORD = 100000.0
+LINE_TAG = "meshgen_line"            # custom property: the script line that created the object (0 = unknown)
+DETACHED_TAG = "meshgen_detached"    # custom property: the script marked this part as intentionally free-floating
 MAX_VERTS = 200000
 MAX_FACES = 400000
 PRIMITIVES = ("cube", "uv_sphere", "ico_sphere", "cylinder", "cone", "torus", "plane", "circle", "grid")
@@ -415,6 +417,8 @@ def core_join(kit, objs, name):
     name = _text(name, "name", "joined")
     first.name = name
     first.data.name = name
+    if DETACHED_TAG in first:
+        del first[DETACHED_TAG]  # the joined object is a new part: detach it again after joining if wanted
     return first
 
 
@@ -424,14 +428,36 @@ def core_delete(kit, obj):
     return None
 
 
+def core_detached(kit, obj):
+    """Mark a part as intentionally free-floating: the harness' floating-part check leaves it out."""
+    obj = _object(obj, "obj")
+    obj[DETACHED_TAG] = 1
+    return None
+
+
 CORE = {
     "primitive": core_primitive, "mesh": core_mesh, "transform": core_transform, "shade_smooth": core_shade_smooth,
     "modifier": core_modifier, "paint": core_paint, "paint_faces": core_paint_faces, "join": core_join,
-    "delete": core_delete,
+    "delete": core_delete, "detached": core_detached,
 }
 
 
 # ---------------------------------------------------------------------------------------------- driver
+def _tag_line(value, line, force=False):
+    """Record on the object(s) in value the script line that made them, for the floating-part report."""
+    items = value if isinstance(value, (list, tuple)) else [value]
+    for item in items[:64]:
+        if isinstance(item, bpy.types.Object) and (force or LINE_TAG not in item):
+            item[LINE_TAG] = int(line)
+
+
+def _tag_unreturned(line):
+    """Objects a kit call created without returning them get the line too (scans only when the count changed)."""
+    for obj in bpy.data.objects:
+        if LINE_TAG not in obj:
+            obj[LINE_TAG] = int(line)
+
+
 def _resolve(value, store):
     if isinstance(value, list):
         return [_resolve(item, store) for item in value]
@@ -453,12 +479,16 @@ def run(doc, kit_name, kit_allowed):
         try:
             args = [_resolve(item, store) for item in op["args"]]
             kwargs = {key: _resolve(item, store) for key, item in op["kwargs"].items()}
+            before = len(bpy.data.objects)
             if kind == "core":
                 result = CORE[short](kit, *args, **kwargs)
             elif kind == "kit" and kit is not None and short in allowed:
                 result = getattr(kit, short)(*args, **kwargs)
             else:
                 raise ValueError("op not permitted")
+            _tag_line(result, op["line"], force=(short == "join"))
+            if kind == "kit" and len(bpy.data.objects) != before:
+                _tag_unreturned(op["line"])
         except Exception as exc:  # noqa: BLE001 - every failure becomes a line-numbered error for the repair loop
             label = ("%s.%s" % (kit_name, short)) if kind == "kit" else short
             raise ReplayError("line %d: %s(...) failed in Blender: %s: %s"

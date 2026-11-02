@@ -34,8 +34,11 @@ CORE_SIGS = {
     "paint_faces": (("obj", "predicate", "colour"), 3, False),
     "join": (("objs", "name"), 2, False),
     "delete": (("obj",), 1, False),
+    "detached": (("obj",), 1, False),
 }
 CORE_PREDICATE_PARAMS = {"paint_faces": ("predicate",)}
+# core parameters that must be a handle (an earlier call's result), checked when recording and when validating
+CORE_HANDLE_PARAMS = {"detached": ("obj",)}
 
 _FACE_ATTRS = {"center": ("x", "y", "z"), "normal": ("x", "y", "z"), "index": (), "area": (), "material_index": ()}
 PRED_MATH = frozenset({"sin", "cos", "tan", "asin", "acos", "atan", "atan2", "sqrt", "radians", "degrees", "floor",
@@ -219,7 +222,12 @@ def validate_ops(doc, kit_names=frozenset()):
             if not isinstance(key, str) or not key.isidentifier() or len(key) > MAX_KEY or key.startswith("__"):
                 _fail(where, "bad keyword name")
             _value(item, 1, ctx, where)
+        for param in CORE_HANDLE_PARAMS.get(short, ()) if kind == "core" else ():
+            position = CORE_SIGS[short][0].index(param)
+            value = op["args"][position] if position < len(op["args"]) else op["kwargs"].get(param)
+            if not (isinstance(value, dict) and "$ref" in value):
+                _fail(where, "%s of %s must be the result of an earlier call" % (param, short))
 
 
-__all__ = ["CORE_PREDICATE_PARAMS", "CORE_SIGS", "MAX_JSON_BYTES", "MAX_OPS", "OpsError", "PRED_BUILTINS", "PRED_MATH",
+__all__ = ["CORE_HANDLE_PARAMS", "CORE_PREDICATE_PARAMS", "CORE_SIGS", "MAX_JSON_BYTES", "MAX_OPS", "OpsError", "PRED_BUILTINS", "PRED_MATH",
            "validate_ops", "validate_pred"]

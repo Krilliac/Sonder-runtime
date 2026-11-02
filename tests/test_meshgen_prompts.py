@@ -244,3 +244,9 @@ def test_excluded_wheels_get_no_wheel_rotation_at_all():
                   "the water wheel is tilted", "the steering wheel is tilted"):
         text = orientation_guidance([issue])
         assert text and "rot=(0, 90, 0)" not in text and "axle" not in text, issue
+
+
+def test_the_generation_prompt_tells_the_model_when_detached_is_allowed():
+    prompt = generation_prompt("a lantern with motes", max_tris=1500, height_m=1.0, kit_module=None, api_doc="")
+    assert "detached(obj)" in prompt
+    assert "use detached(part) only for parts the brief says float (motes, wisps, orbs)" in prompt

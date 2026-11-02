@@ -297,3 +297,93 @@ def test_the_no_progress_note_sits_before_the_closing_instruction():
     assert third.rstrip().splitlines()[-1].startswith("Return ONLY")
     note = third.lower().rindex("no progress") if "no progress" in third.lower() else third.lower().rindex("same")
     assert 0 < note < third.rindex("Return ONLY")
+
+
+# ---------------------------------------------------------------------------------------------- floating parts
+def geometry(*entries):
+    return {"parts": 3, "floating": list(entries), "height": 1.0, "dims": [1.0, 1.0, 1.0]}
+
+
+LOAF = {"parts": ["loaf"], "part_count": 1, "lines": [34], "centre": [0, 0, 1], "gap": 0.12,
+        "gap_vec": [0, 0, 0.12], "nearest": "plate"}
+LOAF_ISSUE = "line 34: 'loaf' floats 0.12 m above the nearest part ('plate'); move it down to rest on it"
+
+
+def floating_build(*entries):
+    return dict(ok_build(), geometry=geometry(*(entries or (LOAF,))))
+
+
+def test_a_floating_candidate_is_capped_at_six_even_when_the_critic_says_ten():
+    rig = Rig(builds=[floating_build()], critiques=[verdict(10, "the lid is slightly crooked")])
+    report = rig.go(candidates=1, rounds=1, target_score=8)
+    attempt = report["candidates"][0]["attempts"][0]
+    assert attempt["status"] == "revise" and attempt["score"] == 6
+    assert report["winner"]["score"] == 6 and report["ok"] is True
+    assert attempt["issues"] == [LOAF_ISSUE, "the lid is slightly crooked"]
+
+
+def test_the_control_without_a_geometry_block_is_accepted_at_ten():
+    rig = Rig(builds=[ok_build()], critiques=[verdict(10, "the lid is slightly crooked")])
+    report = rig.go(candidates=1, rounds=1, target_score=8)
+    attempt = report["candidates"][0]["attempts"][0]
+    assert attempt["status"] == "accepted" and attempt["score"] == 10 and "geometry" not in attempt
+    assert attempt["issues"] == ["the lid is slightly crooked"]
+
+
+def test_a_geometry_block_with_nothing_floating_changes_nothing_but_is_recorded():
+    clean = dict(ok_build(), geometry=geometry())
+    rig = Rig(builds=[clean], critiques=[verdict(10)])
+    report = rig.go(candidates=1, rounds=1, target_score=8)
+    attempt = report["candidates"][0]["attempts"][0]
+    assert attempt["status"] == "accepted" and attempt["score"] == 10
+    assert attempt["geometry"] == geometry() and report["winner"]["geometry"] == geometry()
+
+
+def test_the_measured_issues_come_first_in_the_revise_prompt_and_the_next_round_can_win():
+    rig = Rig(builds=[floating_build(), dict(ok_build(), geometry=geometry())],
+              critiques=[verdict(9, "the handle is too thin"), verdict(9)])
+    report = rig.go(candidates=1, rounds=3, target_score=8)
+    revise = rig.prompts[1]
+    assert LOAF_ISSUE in revise and "the handle is too thin" in revise
+    assert revise.index(LOAF_ISSUE) < revise.index("the handle is too thin")
+    assert "Score: 6/10" in revise and "Score: 9/10" not in revise
+    statuses = [a["status"] for a in report["candidates"][0]["attempts"]]
+    assert statuses == ["revise", "accepted"] and report["winner"]["score"] == 9
+    assert report["candidates"][0]["attempts"][0]["geometry"]["floating"][0]["parts"] == ["loaf"]
+
+
+def test_a_floating_candidate_is_not_accepted_even_when_the_target_is_below_the_cap():
+    rig = Rig(builds=[floating_build()], critiques=[verdict(10)])
+    report = rig.go(candidates=1, rounds=1, target_score=5)
+    assert report["candidates"][0]["attempts"][0]["status"] == "revise"
+
+
+def test_a_floating_part_is_revised_even_when_no_critique_is_available():
+    rig = Rig(builds=[floating_build(), ok_build()], critiques=[None])
+    report = rig.go(candidates=1, rounds=2, target_score=8)
+    attempts = report["candidates"][0]["attempts"]
+    assert attempts[0]["status"] == "revise" and attempts[0]["score"] is None
+    assert attempts[0]["issues"] == [LOAF_ISSUE] and LOAF_ISSUE in rig.prompts[1]
+    assert attempts[1]["status"] == "built"
+
+
+def test_a_floating_part_is_revised_with_vision_switched_off():
+    rig = Rig(builds=[floating_build(), ok_build()])
+    report = rig.go(candidates=1, rounds=2, vision=False)
+    assert [a["status"] for a in report["candidates"][0]["attempts"]] == ["revise", "built"]
+    assert LOAF_ISSUE in rig.prompts[1]
+
+
+def test_the_same_floating_issue_twice_counts_as_no_progress():
+    rig = Rig(builds=[floating_build(), floating_build(), ok_build()],
+              critiques=[verdict(7), verdict(7), verdict(9)])
+    report = rig.go(candidates=1, rounds=3, target_score=8)
+    assert report["candidates"][0]["attempts"][1].get("stuck") is True
+    assert "did not fix" in rig.prompts[2]
+
+
+def test_malformed_geometry_is_ignored():
+    for junk in ("x", 3, [], {"floating": "x"}, {"floating": [None, 3, {}]}):
+        rig = Rig(builds=[dict(ok_build(), geometry=junk)], critiques=[verdict(10)])
+        attempt = rig.go(candidates=1, rounds=1)["candidates"][0]["attempts"][0]
+        assert attempt["status"] == "accepted" and attempt["score"] == 10

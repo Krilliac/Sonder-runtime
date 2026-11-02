@@ -786,3 +786,32 @@ def test_a_none_colour_is_refused_for_core_and_kit_calls():
     for call in ("propkit.box('b', 1, hexcol=None)", "propkit.box('b', 1, 0.0, None)"):
         message = reject("import propkit\ndef build():\n    %s\n" % call)
         assert "is required" in message and "not None" in message, message
+
+
+def test_detached_records_a_handle_positionally_or_by_keyword():
+    positional = rec("def build():\n    a = primitive('cube')\n    detached(a)\n")
+    assert positional.ops[-1] == {"id": 2, "line": 3, "op": "core.detached", "args": [{"$ref": 1}], "kwargs": {}}
+    keyword = rec("def build():\n    a = primitive('cube')\n    detached(obj=a)\n")
+    assert keyword.ops[-1]["kwargs"] == {"obj": {"$ref": 1}} and keyword.ops[-1]["args"] == []
+    opschema.validate_ops(json.loads(positional.text), MANIFEST.exposed)
+    opschema.validate_ops(json.loads(keyword.text), MANIFEST.exposed)
+
+
+@pytest.mark.parametrize("argument", ["5", "'cube'", "None", "[1, 2]", "(0, 0, 1)", "1.5", "True"])
+def test_detached_refuses_a_value_that_is_not_a_handle(argument):
+    with pytest.raises(ScriptError) as info:
+        rec("def build():\n    a = primitive('cube')\n    detached(%s)\n" % argument)
+    assert "earlier kit/core call" in str(info.value) and str(info.value).startswith("line 3")
+    with pytest.raises(ScriptError) as info:
+        rec("def build():\n    a = primitive('cube')\n    detached(obj=%s)\n" % argument)
+    assert "earlier kit/core call" in str(info.value)
+
+
+def test_detached_takes_exactly_one_argument():
+    for call, needle in (("detached()", "missing"), ("detached(a, a)", "at most 1"), ("detached(a, extra=1)", "no parameter")):
+        with pytest.raises(ScriptError) as info:
+            rec("def build():\n    a = primitive('cube')\n    %s\n" % call)
+        assert needle in str(info.value), call
+    # a list of parts is not one part
+    with pytest.raises(ScriptError):
+        rec("def build():\n    a = primitive('cube')\n    detached([a])\n")

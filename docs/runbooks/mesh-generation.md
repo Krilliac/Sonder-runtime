@@ -12,13 +12,16 @@ several candidates:
    the line number and a repair hint; that costs a round.
 3. Headless Blender replays the op list with trusted code (`harness.py`, `replay.py`, the kit),
    joins the parts into one mesh, scales it (when
-   `height_m` is set), stands it on the ground, counts triangles, exports it, and renders a
+   `height_m` is set), stands it on the ground, counts triangles, measures which parts float free
+   of the ground (see "Floating parts"), exports it, and renders a
    2x2 contact sheet (front from -Y, right from +X, three-quarter, top) plus the three-quarter
    view alone.
 4. A build error, or a triangle count over `max_tris`, goes back to the model as a repair prompt.
 5. A vision model scores the sheet (0-10) and lists concrete issues. Below `target_score` the
    score and issues go back to the model as a revision prompt; at or above it the candidate stops.
-6. Candidates are ranked: built, then within budget, then vision score, then fewer triangles.
+   A measured floating part overrides this: its issues go first in the revision prompt, the score is
+   capped at 6 and the candidate is never accepted as it stands (see "Floating parts").
+6. Candidates are ranked: built, then within budget, then vision score (the capped one), then fewer triangles.
    The best one wins and is copied to `<output_dir>/<name>.glb` (or `.fbx`), `<name>_sheet.png`,
    `<name>_view.png`, `<name>.py` and `<name>.ops.json`.
 
@@ -72,6 +75,38 @@ about the same triangle count, the next prompt says so explicitly (placed before
 a different tier, preferring one that candidate has not used yet. The winner is credited with the
 tier that produced its version, and each candidate reports `tiers_used`.
 
+## Floating parts
+
+The vision critic misses disconnected geometry (a table top hovering over its legs scored 5 and was never
+fixed; straw tufts off a scarecrow's sleeves scored 10), so the harness measures it, in the same Blender
+process, after the build and the normalisation and before the export. It costs about 0.1 s for 80 parts and
+10000 triangles.
+
+- **Touching.** Tolerance `tol = max(0.01 m, 1.5% of the prop's final height)`. Two parts touch when their
+  BVH trees overlap, or when the nearest distance from a sample of at most 256 vertices of one to the other's
+  surface is `<= tol`, in either direction. Pairs are pruned first by bounding boxes expanded by `tol`.
+- **Grounded.** A part whose lowest point is `<= tol` above `z = 0` (the harness stands every build on the
+  ground, so the lowest part of a prop is always grounded). The touching graph is union-found; every
+  component with no grounded part is floating.
+- **`detached(part)`.** A core op for parts the brief says float (motes, wisps, orbs). A detached part is not a
+  node at all: never reported, and it neither grounds nor bridges its neighbours. The argument must be a
+  handle (refused when recording and by the grammar). Joining parts makes a new part: detach the result.
+- **Result.** The harness result gains `"geometry": {"parts", "floating", "height", "dims"}`. Each `floating`
+  entry (at most 20) has `parts` (names, at most 8), `part_count`, `lines` (the script lines that made them,
+  a join is the line of the `join`), `centre`, `gap` (distance to the nearest other part, or to the ground
+  when there is none), `gap_vec` (from that part to the floating one) and `nearest` (`null` for the ground).
+  A harness without the block, or one that failed to measure (`geometry_error`), changes nothing.
+- **Loop.** Each entry becomes a deterministic issue, for example `line 34: 'loaf' floats 0.12 m above the
+  nearest part ('plate'); move it down to rest on it` (direction words from `gap_vec`: above/below, left/right
+  in X, front (-Y)/behind (+Y)). These go first in the revision prompt, ahead of the critic's issues. The score
+  is `min(score, 6)` even when the critic says 10, so a floating candidate cannot reach a `target_score` of 7
+  or more, and it is not accepted at any target; with vision off or unavailable it still gets a revision
+  round. Attempts and the winner carry the `geometry` block.
+- **Known limits.** The check sees the exported geometry: a detached part that is the lowest point of the prop
+  becomes the ground reference, and the rest then floats above it. Vertex sampling can miss a near approach
+  between two large, coarse parts that neither overlap nor have a vertex within `tol` of the other. A
+  duplicated part (copy made inside a kit) inherits the line of its source.
+
 ## Safety model
 
 **Model-written code never executes.** An earlier design ran the model's Python in Blender behind an
@@ -83,7 +118,7 @@ encodings or numeric channels. So the model's script is now **data**, not code:
 | Layer | Job |
 | --- | --- |
 | **Recorder** (`domain/meshgen/dsl/`, pure stdlib, host side) | An allow-list interpreter. It evaluates the dialect itself and only *records* calls to the kit and to the core functions into an op list. Values are a closed domain: `None`, bool, int below 2^63, finite float, capped str, list/tuple/dict of those, an opaque result handle and a face predicate. A function, module, type, frame, generator, exception or `bpy` object cannot exist in the interpreter. No generic dispatch: attributes exist only on the `math`/`random`/kit aliases and on a fixed method table for str/list/tuple/dict; the recorder source itself never calls `exec`, `eval`, `compile`, `__import__`, `getattr`, `setattr`, `type`, `vars`, `globals` or `locals` and imports only `ast`, `math`, `random`, `json`, `time` and its own siblings (a static test enforces this). |
-| **Replay and harness** (`adapters/meshgen/harness.py`, `replay.py`, `dsl/opschema.py`, trusted, inside Blender) | The harness validates `ops.json` against the same grammar the recorder emits (fail closed: an unknown op, a forward or undefined `$ref`, an unknown key, an oversized value or file refuses the whole build before anything is created), then `replay.py` performs each op with trusted code: the core functions (`primitive`, `mesh`, `transform`, `shade_smooth`, `modifier`, `paint`, `paint_faces`, `join`, `delete`, with size caps and a per-modifier property allow-list) and the exposed kit functions. Face predicates are evaluated by a small recursive evaluator, never `eval`. |
+| **Replay and harness** (`adapters/meshgen/harness.py`, `replay.py`, `dsl/opschema.py`, `connectivity.py`, trusted, inside Blender) | The harness validates `ops.json` against the same grammar the recorder emits (fail closed: an unknown op, a forward or undefined `$ref`, an unknown key, an oversized value or file refuses the whole build before anything is created), then `replay.py` performs each op with trusted code: the core functions (`primitive`, `mesh`, `transform`, `shade_smooth`, `modifier`, `paint`, `paint_faces`, `join`, `delete`, `detached`, with size caps and a per-modifier property allow-list) and the exposed kit functions. Face predicates are evaluated by a small recursive evaluator, never `eval`. |
 | **OS sandbox** (`sandbox_win.py`: zero-capability AppContainer, Job Object, private desktop) | **Defence in depth** for the trusted code: it can read and write only its run directory (and read the Blender install), has no network and cannot start a process. |
 
 What the recorder budgets: 2,000,000 interpreter steps, 10 s wall clock (checked on every step and every charge),
@@ -205,7 +240,7 @@ AppContainer escape; the opt-out and non-Windows platforms have no sandbox at al
 
 No grant is ever placed on the kit's source directory, the repository or any user directory; a run
 directory that would overlap the kit's directory (or contain the user's home) is refused. The kit
-file, the trusted harness files (`harness.py`, `replay.py`, `opschema.py`) and `ops.json` are *copied* into the run directory (only the single kit file is
+file, the trusted harness files (`harness.py`, `replay.py`, `opschema.py`, `connectivity.py`) and `ops.json` are *copied* into the run directory (only the single kit file is
 copied, so a kit that imports sibling modules will not work in the sandbox). Outputs are copied back
 to the candidate directory afterwards.
 
