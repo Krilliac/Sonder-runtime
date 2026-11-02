@@ -379,7 +379,8 @@ class _Interp:
         raise self.err("a dict cannot be passed to a kit/core function; use a list or tuple")
 
     def add_size(self, count):
-        """Keep a running upper bound of the ``ops.json`` text, so an oversized recording fails before it is built."""
+        """Keep a running early estimate of the ``ops.json`` text, so an oversized recording usually fails before it is
+        built; the exact size check after the build is authoritative."""
         self.json_size += count
         if self.json_size > opschema.MAX_JSON_BYTES + _SIZE_SLACK:  # an estimate; the exact check follows the build
             raise self.err("the recorded calls are larger than %d MB of JSON; pass fewer or smaller values"
@@ -951,7 +952,9 @@ class _Interp:
     def check_colour(self, origin, name, value, node):
         """Colour parameters take '#RRGGBB' / '#RGB' or a palette name; anything else fails at record time."""
         if value is None:
-            return
+            if origin.startswith("core."):
+                raise self.err("%s: %s is required: pass '#RRGGBB' or a palette name, not None" % (origin, name), node)
+            return  # a kit function receives None as its own "no colour"
         if isinstance(value, str):
             text = value.strip()
             palette = self.manifest.constants.get("PALETTE")
@@ -1572,21 +1575,21 @@ _COLOUR_PARAMS = frozenset({"colour", "hexcol"})
 
 
 def _json_text_size(text):
-    """An upper bound of the JSON text of a string: quotes, escapes, and 6 bytes for anything not plain ASCII."""
+    """An estimate of the JSON text of a string: quotes, escapes, and 6 bytes for anything not plain ASCII."""
     if text.isascii() and text.isprintable():
         return len(text) + 2 + text.count(chr(34)) + text.count(chr(92))
     return 6 * len(text) + 2
 
 
 def _tree_stats(tree):
-    """(values in a predicate tree, an upper bound of its JSON bytes); iterative."""
+    """(values in a predicate tree, an estimate of its JSON bytes); iterative."""
     nodes = size = 0
     stack = [tree]
     while stack:
         item = stack.pop()
         nodes += 1
         if isinstance(item, list):
-            size += 2 + len(item)
+            size += 2  # brackets; every element adds its own comma below
             stack.extend(item)
         elif isinstance(item, str):
             size += _json_text_size(item) + 1

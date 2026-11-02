@@ -165,6 +165,10 @@ def repair_hint(failure: str, kit_module: str | None, kit_names, kit_excluded=()
             "the call." % name)
 
 
+# whole words only ("entire" is not "tire"); steering, ship's, water, valve and similar wheels are not road wheels
+_WHEEL_WORDS = re.compile(r"\b(wheels?|axles?|tyres?|tires?|hubcaps?)\b")
+_OTHER_WHEELS = re.compile(r"\b(steering|ship'?s?|helm|water ?wheels?|valve|hand ?wheels?|potter'?s?|spinning|"
+                           r"mill ?wheels?|ferris|cog|gear|roulette|wheel of)\b")
 _QUALIFIED_UNAVAILABLE = re.compile(r"(\w+)\.(\w+) is not available in build scripts")
 
 
@@ -173,13 +177,12 @@ def orientation_guidance(issues) -> str:
     text = " ".join(str(item).lower() for item in (issues or []))
     if not any(word in text for word in _ORIENTATION_WORDS):
         return ""
-    wheel = any(word in text for word in ("wheel", "axle", "tyre", "tire"))
     override = ""
-    if wheel:
-        override = ("A wheel's axle runs along X (side to side) because the front of the object faces -Y: build "
-                    "the cylinder, then rot=(0, 90, 0). Rotating a wheel about X puts its axle along Y, which is "
-                    "sideways and wrong; if an issue above says to rotate a wheel about X, use rot=(0, 90, 0) "
-                    "instead. ")
+    if _WHEEL_WORDS.search(text) and not _OTHER_WHEELS.search(text):
+        override = ("For a cart, barrow or vehicle wheel the axle runs along X (side to side, perpendicular to the "
+                    "direction of travel) because the front of the object faces -Y: build the cylinder, then "
+                    "rot=(0, 90, 0). Rotating such a wheel about X puts its axle along Y, which is sideways and "
+                    "wrong; if an issue above says to rotate it about X, use rot=(0, 90, 0) instead. ")
     return (override + "Orientation help: cylinders, cones, tori and lathes are created around the Z axis, so they lie "
             "flat. To stand a wheel upright with its axle along X, set rot=(0, 90, 0) "
             "(rotate 90 degrees about Y); for an axle along Y use rot=(90, 0, 0). Rotations are in degrees. "

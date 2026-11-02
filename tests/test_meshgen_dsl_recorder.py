@@ -778,3 +778,8 @@ def test_the_kit_function_wins_over_a_core_function_of_the_same_name():
 
 def test_a_name_that_is_neither_kit_nor_core_is_still_refused():
     assert "is not available" in reject("import propkit\ndef build():\n    propkit.bogus(1)\n")
+
+
+def test_core_colour_none_is_refused_on_the_host_but_a_kit_hexcol_none_is_passed_through():
+    assert "is required" in reject("def build():\n    paint(primitive('cube'), None)\n")
+    rec("import propkit\ndef build():\n    propkit.box('b', 1, hexcol=None)\n")

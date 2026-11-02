@@ -101,12 +101,14 @@ store that would close a cycle is a `script_error`). Top-level assignments and d
 constants (numbers, strings, `None`, bools and lists, tuples and dicts of those); everything else belongs in
 `build()`.
 
-Recorded calls also keep a running upper bound of the `ops.json` text (strings by length and escapes, numbers by
-digits, every predicate node), so a recording that would pass 4 MB fails at the call that crosses it, before the
-file is built. Predicate trees are charged per node as work and as leaves. A `key in dict` costs the key, not the
+Recorded calls also keep a running early estimate of the `ops.json` text (strings by length and escapes, numbers by
+digits, every predicate node), so a recording that is probably over 4 MB usually fails at the call that crosses it, before the
+file is built; the exact size check after the build is authoritative. Predicate trees are charged per node as work and as leaves. A `key in dict` costs the key, not the
 dict, and `seq * 0` costs nothing. Colour parameters (`colour` of `paint`/`paint_faces`, a kit's `hexcol`) must be
 `'#RRGGBB'`/`'#RGB'` or a name in the kit's `PALETTE`; a tuple colour is a `script_error` with its line number
-instead of a failed Blender build.
+instead of a failed Blender build. `None` is refused for the core colour (replay would reject it) and passed
+through to a kit function as its own "no colour". Extra positional arguments of a kit's `*args` are not
+validated, because their meaning is unknown.
 
 **Hard backstop.** The in-process accounting is not trusted to be complete, so the host records the script in
 a separate process (`adapters/meshgen/record_runner.py` starting `recorder_worker.py` with `python -I`, same

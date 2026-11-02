@@ -26,10 +26,12 @@ def critique_prompt(brief: str, max_tris: int | None = None) -> str:
         "Scene conventions you judge against: Z is up, the ground is z=0, the front of the object faces "
         "-Y (the front view). A wheel is upright when its AXLE IS HORIZONTAL: it then shows as a full "
         "circle from the side and as a thin bar from the top. A wheel that shows as a flat disc from the top "
-        "has a vertical axle and is lying flat; a wheel's axle must run along X (side to side), so the fix is "
-        "rot=(0, 90, 0), a rotation of 90 degrees about Y (parts built around the Z axis, such as cylinders "
-        "and lathes, lie flat until rotated). Never tell the author to rotate a wheel about X: that puts the "
-        "axle along Y, sideways. The fix is NOT to make the axle vertical.",
+        "has a vertical axle and is lying flat. For cart, barrow and vehicle wheels the axle must run along X "
+        "(side to side, perpendicular to the direction of travel), so the fix is rot=(0, 90, 0), a rotation of "
+        "90 degrees about Y (parts built around the Z axis, such as cylinders and lathes, lie flat until "
+        "rotated); never tell the author to rotate such a wheel about X, which puts the axle along Y, "
+        "sideways. Other wheels (a ship's or steering wheel, a waterwheel, a valve) follow how the brief mounts "
+        "them. The fix is NOT to make the axle vertical.",
         "",
         "Before scoring, work through this checklist using all four views:",
         "1. ORIENTATION: for each part the brief names or implies, is it oriented as described? "

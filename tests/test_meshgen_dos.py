@@ -87,7 +87,7 @@ SECOND = {
     'str_of_aliased_dict_150k': 'def build():\n    d = dict([(str(i), 0) for i in range(150000)])\n    L = [d]\n    for j in range(100):\n        for i in range(1000):\n            s = str(L)\n',
 }
 
-SECOND_BOUNDS = {"c09_print_dict": 8.0}
+SECOND_BOUNDS = {"c09_print_dict": 4.5}
 MUST_BE_WORK = ("insert_pop_front", "seed_long_string", "split_long_separator",
                 "startswith_tuple_4000_literal", "str_of_aliased_dict_150k", "c01_startswith_literal_1call",
                 "c03_startswith_append200k_loop", "c04_show_dict_literal", "c09_print_dict", "c07_seed_str")
@@ -232,3 +232,37 @@ def test_the_clock_is_read_on_a_work_charge_below_the_old_threshold(monkeypatch)
     interp.deadline = time.monotonic() - 1.0
     with pytest.raises(ScriptError):
         interp.work(3)  # far below the 4,096-unit threshold the clock used to need
+
+
+# ---- charges that no other test pinned down (each has a RED proof against a reverted copy of the fix)
+def test_dict_membership_costs_the_key_not_the_whole_dict():
+    """20,000 `in` lookups on a 20,000-key dict: fine at one unit each, over the work limit at 20,000 each."""
+    source = chr(10).join(["def build():", "    d = {}", "    for i in range(20000):", "        d['k%d' % i] = i",
+                           "    n = 0", "    for j in range(20000):", "        if 'k5' in d:", "            n += 1",
+                           "    print(n)", ""])
+    started = time.monotonic()
+    assert compile_script(source).log == ["20000"]
+    assert time.monotonic() - started < 6.0
+
+
+def test_weight_charges_its_own_walk():
+    """`pts * 1` walks 50,000 distinct tuples (200,000 nodes) per call; ten calls must exceed the work budget."""
+    source = chr(10).join(["def build():", "    pts = [(i, 0, 0) for i in range(50000)]", "    for j in range(10):",
+                           "        x = pts * 1", ""])
+    started = time.monotonic()
+    with pytest.raises(ScriptError) as info:
+        compile_script(source)
+    assert "too much work" in str(info.value) and time.monotonic() - started < 6.0
+
+
+def test_predicate_nodes_are_charged_as_work_before_the_size_estimate_can_refuse_them():
+    """Each lambda has about 1,990 cheap nodes (4 KB of JSON): 700 of them stay under 4 MB but cost 2 x 1,990 units
+    each, so the work budget, not the size estimate, must be what stops the script."""
+    lam = "p.index > 0" + " and 1" * 1990
+    source = chr(10).join(["def build():", "    c = primitive('cube')", "    for i in range(1000):",
+                           "        paint_faces(c, lambda p: " + lam + ", '#ff0000')", ""])
+    started = time.monotonic()
+    with pytest.raises(ScriptError) as info:
+        compile_script(source)
+    assert "too much work" in str(info.value), str(info.value)
+    assert "larger than 4 MB" not in str(info.value) and time.monotonic() - started < 6.0

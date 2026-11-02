@@ -187,7 +187,7 @@ def test_a_wheel_is_rotated_about_y_and_a_critic_saying_x_is_overridden():
     from sonder_runtime.domain.meshgen.prompts import orientation_guidance
     text = orientation_guidance(["wheel axle is vertical; rotate 90 degrees about X"])
     assert "axle runs along X" in text and "rot=(0, 90, 0)" in text
-    assert "Rotating a wheel about X puts its axle along Y" in text
+    assert "Rotating such a wheel about X puts its axle along Y" in text
     assert "axle runs along X" not in orientation_guidance(["the roof is too flat"])
     prompt = critique_prompt("a wheelbarrow") if callable(critique_prompt) else ""
     assert "rot=(0, 90, 0)" in prompt and "about X or Y" not in prompt
@@ -200,3 +200,23 @@ def test_a_core_function_called_with_the_kit_prefix_gets_a_specific_hint():
     assert "primitive is a core function" in hint or "`primitive` is a core function" in hint
     assert "without the `lf_kit.` prefix" in hint
     assert "is a core function" not in repair_hint("line 5: lf_kit.bogus is not available in build scripts", "lf_kit", {"box"})
+
+
+def test_entire_is_not_a_tyre_and_gets_no_wheel_rule():
+    from sonder_runtime.domain.meshgen.prompts import orientation_guidance
+    text = orientation_guidance(["the entire roof is tilted"])
+    assert text and "axle runs along X" not in text and "cart, barrow" not in text
+
+
+def test_a_ships_wheel_or_valve_wheel_does_not_get_the_cart_rule():
+    from sonder_runtime.domain.meshgen.prompts import orientation_guidance
+    for issue in ("the ship's wheel lies flat", "steering wheel is rotated wrongly", "the waterwheel is tilted",
+                  "valve wheel is lying flat"):
+        assert "axle runs along X" not in orientation_guidance([issue]), issue
+
+
+def test_a_cart_wheel_lying_flat_still_gets_the_cart_rule():
+    from sonder_runtime.domain.meshgen.prompts import orientation_guidance
+    for issue in ("the cart wheel lies flat", "Wheels are lying flat; rotate 90 degrees about X", "front tyre is flat"):
+        text = orientation_guidance([issue])
+        assert "axle runs along X" in text and "rot=(0, 90, 0)" in text, issue
