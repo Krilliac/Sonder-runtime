@@ -18,6 +18,8 @@ MAX_LOG_LINES = 50
 MAX_LOG_CHARS = 2000
 MAX_PRED_DEPTH = 32
 MAX_PRED_NODES = 2000
+MAX_PRED_POWER = 64
+MAX_PRED_DIGITS = 20
 MAX_KEY = 64
 
 # name -> (parameter names, required positional count, accepts extra keyword arguments)
@@ -77,8 +79,7 @@ def validate_pred(tree, where="predicate"):
             _fail(where, "malformed node")
         head, rest = item[0], item[1:]
         if head == "s":
-            if len(rest) != 1 or not isinstance(rest[0], str) or len(rest[0]) > MAX_STRING:
-                _fail(where, "malformed string constant")
+            _fail(where, "strings are not allowed in a predicate (predicates are numbers and bools)")
         elif head == "f":
             if not rest or rest[0] not in _FACE_ATTRS:
                 _fail(where, "unknown face attribute")
@@ -88,6 +89,9 @@ def validate_pred(tree, where="predicate"):
         elif head in _BINARY or head in _COMPARE:
             if len(rest) != 2:
                 _fail(where, "%s takes two operands" % head)
+            if head == "**" and not (isinstance(rest[1], (int, float)) and not isinstance(rest[1], bool)
+                                     and abs(rest[1]) <= MAX_PRED_POWER):
+                _fail(where, "the exponent of ** must be a number literal between -%d and %d" % (MAX_PRED_POWER, MAX_PRED_POWER))
             for sub in rest:
                 node(sub, depth + 1)
         elif head in ("neg", "pos", "not"):
@@ -115,6 +119,15 @@ def validate_pred(tree, where="predicate"):
                 _fail(where, "unknown function")
             if len(rest) < 2 or len(rest) > 4:
                 _fail(where, "bad argument count")
+            if name == "abs" and len(rest) != 2:
+                _fail(where, "abs takes one argument")
+            if name == "round":
+                if len(rest) > 3:
+                    _fail(where, "round takes a number and optional digits")
+                if len(rest) == 3 and not (isinstance(rest[2], int) and not isinstance(rest[2], bool)
+                                           and abs(rest[2]) <= MAX_PRED_DIGITS):
+                    _fail(where, "round digits must be an integer literal between -%d and %d"
+                          % (MAX_PRED_DIGITS, MAX_PRED_DIGITS))
             for sub in rest[1:]:
                 node(sub, depth + 1)
         else:
@@ -203,7 +216,7 @@ def validate_ops(doc, kit_names=frozenset()):
         for item in op["args"]:
             _value(item, 1, ctx, where)
         for key, item in op["kwargs"].items():
-            if not isinstance(key, str) or not key.isidentifier() or len(key) > MAX_KEY:
+            if not isinstance(key, str) or not key.isidentifier() or len(key) > MAX_KEY or key.startswith("__"):
                 _fail(where, "bad keyword name")
             _value(item, 1, ctx, where)
 

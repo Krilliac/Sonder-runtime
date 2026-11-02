@@ -8,6 +8,8 @@ All I/O is injected, so the loop is deterministic under test:
   ``error``, ``files`` with an optional ``sheet``; it may raise, which is treated as a failed build
 * ``critique(sheet_path) -> str | None``  vision reply; ``None`` = unavailable
 * ``map_parallel(fn, items) -> list``    ordered parallel map
+* ``record(code, seed) -> Recording``    records a script (raises ``ScriptError``); the default records in
+  process, production wires a resource-limited subprocess.  Any other exception ends that attempt.
 
 The model's script is never executed: ``compile_script`` records it into an op list (a
 ``ScriptError`` is the failure the model sees, with a line number) and only that data is built.
@@ -124,8 +126,11 @@ def _stuck_note(attempt) -> str:
             "parts instead of adjusting small ones." % attempt["tris"])
 
 
-def run(request: MeshRequest, *, generate, build, critique, map_parallel) -> dict:
+def run(request: MeshRequest, *, generate, build, critique, map_parallel, record=None) -> dict:
     started = time.monotonic()
+    if record is None:
+        def record(code, seed):
+            return compile_script(code, request.manifest, seed=seed)
     tiers = tuple(request.tiers) or ("general",)
     base = generation_prompt(
         request.brief, max_tris=request.max_tris, height_m=request.height_m,
@@ -147,13 +152,17 @@ def run(request: MeshRequest, *, generate, build, critique, map_parallel) -> dic
             return False, None
         code = extract_code(reply)
         try:
-            recording = compile_script(code, request.manifest, seed=index * 100 + round_index)
+            recording = record(code, index * 100 + round_index)
         except ScriptError as exc:
             attempt["status"] = "script_error"
             attempt["issues"] = [str(exc)]
             failure = "The script could not be recorded:\n- " + str(exc)
             hint = repair_hint(failure, request.kit_module, request.kit_names, request.kit_excluded)
             return False, lambda stuck: repair_prompt(base, code, failure, hint=hint, stuck=stuck)
+        except Exception as exc:  # noqa: BLE001 - the recorder process failed or the run is out of time
+            attempt["status"] = "build_error"
+            attempt["error"] = _clip("%s: %s" % (type(exc).__name__, exc), 400)
+            return False, None
         try:
             result = build(index, round_index, code, recording)
         except Exception as exc:  # noqa: BLE001 - a builder crash is a failed build

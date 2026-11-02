@@ -441,7 +441,7 @@ class _Gen:
 
     def stmt(self, depth=0):
         r = self.rng
-        kind = r.randrange(9)
+        kind = r.randrange(17)
         if kind == 0:
             return "n = %s" % self.num()
         if kind == 1:
@@ -460,11 +460,40 @@ class _Gen:
         if kind == 7 and depth < 2:
             body = "\n".join("    " + line for line in self.stmt(depth + 1).splitlines())
             return "if %s < %s:\n%s" % (self.num(), self.num(), body)
+        if kind == 9:
+            return "x = twice(%s)" % self.num()
+        if kind == 10:
+            return r.choice(["d['k'] = %s" % self.num(), "d.update({'z': %s})" % self.num(), "x = d.get('k', %s)" % self.num(),
+                             "items = list(d.keys())", "items = list(d.values())", "x = len(d.items())",
+                             "d.pop('k', None)", "d.setdefault('q', %s)" % self.seq()])
+        if kind == 11:
+            return r.choice(["b = items", "b = items\nb.append(%s)" % self.num(), "items = [items, items]",
+                             "b = [items] * %s" % self.num(), "items += %s" % self.seq(),
+                             "items[0] = %s" % self.num(), "items.extend(%s)" % self.seq()])
+        if kind == 12:
+            return r.choice(["items.append(items)", "items.insert(0, items)", "d['k'] = d", "items[0] = items",
+                             "items.extend([items])", "items += [items]", "b = [items]\nitems.append(b)"])
+        if kind == 13:
+            return r.choice(["propkit.box(%s, %s, loc=(%s, 0, 0))" % (self.text(), self.num(), self.num()),
+                             "propkit.box('k', 1, loc=items)", "propkit.box('k', 1, loc=d)",
+                             "propkit.wheel('w', %s, w=%s, loc=(1, 2, 3))" % (self.num(), self.num()),
+                             "propkit.box(name, 1, hexcol=propkit.PALETTE['red'])"])
+        if kind == 14:
+            return r.choice(["propkit.tint(h, lambda p: p.center.z > %s, '#112233')" % self.num(),
+                             "propkit.tint(h, lambda p: p.area < %s and p.index > 1, '#112233')" % self.num(),
+                             "propkit.tint(h, lambda p: %s, '#112233')" % self.text(),
+                             "propkit.tint(h, lambda p: [p.index], '#112233')",
+                             "paint_faces(h, lambda p: abs(p.normal.x) ** 2 > %s, '#445566')" % self.num()])
+        if kind == 15:
+            return r.choice(["items = sorted(items, key=lambda v: -v)", "x = sum(map(lambda v: v, items))",
+                             "f = lambda v: v + %s\nx = f(%s)" % (self.num(), self.num()),
+                             "items = [twice(v) for v in items]", "items = list(zip(items, items))"])
         return "x = %s" % self.num()
 
     def program(self):
-        lines = ["import math", "import random", "", "def build():", "    n = 1", "    x = 2", "    name = 'p'",
-                 "    items = [1, 2]", "    h = primitive('cube')"]
+        lines = ["import math", "import random", "import propkit", "", "def twice(v):", "    return v + v", "",
+                 "def build():", "    n = 1", "    x = 2", "    name = 'p'",
+                 "    items = [1, 2]", "    d = {'k': 1}", "    h = primitive('cube')"]
         for _ in range(self.rng.randrange(1, 9)):
             for line in self.stmt().splitlines():
                 lines.append("    " + line)
@@ -488,7 +517,7 @@ def test_random_programs_never_leave_the_value_domain_or_crash():
             result = compile_script(source, MANIFEST, seed=index, probe=probe)
         except ScriptError as exc:
             rejected += 1
-            assert LINE.match(str(exc)) or str(exc), source
+            assert LINE.match(str(exc)), "%s\n%s" % (exc, source)
             assert "internal error" not in str(exc), "%s\n%s" % (exc, source)
             continue
         accepted += 1
@@ -630,3 +659,83 @@ def test_runtime_errors_carry_the_line_number():
 def test_no_manifest_means_no_kit_functions():
     message = reject("import propkit\ndef build():\n    propkit.box('A', (1, 1, 1))\n", manifest=None)
     assert LINE.match(message)
+
+
+# ---------------------------------------------------------------- acyclic domain, arity, names, constants
+@pytest.mark.parametrize("body", [
+    "a = [1]\n    a.append(a)",
+    "a = [1]\n    b = [a]\n    a.append(b)",
+    "a = [1]\n    a[0] = a",
+    "d = {}\n    d['k'] = d",
+    "a = [1]\n    a.insert(0, a)",
+    "a = [1]\n    a.extend([a])",
+    "a = [1]\n    a += [a]",
+])
+def test_cyclic_containers_are_refused(body):
+    message = reject("def build():\n    %s\n" % body)
+    assert "cannot contain itself" in message and LINE.match(message), message
+
+
+def test_is_domain_terminates_on_a_cycle_and_rejects_it():
+    loop = [1]
+    loop.append(loop)
+    assert is_domain(loop) is False
+    table = {}
+    table["k"] = [table]
+    assert is_domain(table) is False
+    shared = [1, 2]
+    assert is_domain([shared, shared, {"k": shared}]) is True  # aliasing is not a cycle
+
+
+def test_list_augmented_assignment_extends_in_place_like_python():
+    result = rec("def build():\n    a = [1]\n    b = a\n    a += [2]\n    print(len(b))\n")
+    assert json.loads(result.text)["log"] == ["2"]
+
+
+def test_random_random_checks_its_arity():
+    message = reject("import random\ndef build():\n    x = random.random(1, 2, 3)\n")
+    assert "random.random takes 0 arguments" in message, message
+
+
+def test_dunder_keyword_names_are_refused_for_kit_calls():
+    message = reject("import propkit\ndef build():\n    propkit.box('a', 1, __class__=2)\n")
+    assert "keyword names starting with '__'" in message, message
+
+
+@pytest.mark.parametrize("source", [
+    "import math\nX = math.sqrt(4)\ndef build():\n    primitive('cube')\n",
+    "def f(x=len([1])):\n    return x\ndef build():\n    primitive('cube')\n",
+    "X = [i for i in range(3)]\ndef build():\n    primitive('cube')\n",
+])
+def test_top_level_values_must_be_constants(source):
+    assert "must be constants" in reject(source)
+
+
+def test_top_level_constants_are_allowed():
+    rec("SCALE = 2\nNAMES = ['a', 'b']\nPAIR = (1, -2.5)\ndef f(x=[1, 2]):\n    return x\n"
+        "def build():\n    primitive('cube', size=SCALE)\n")
+
+
+def test_recursion_limits_share_one_message():
+    host = reject("def f(n):\n    return f(n + 1)\ndef build():\n    f(0)\n")
+    nested = reject("def build():\n    x = " + "[" * 150 + "]" * 150 + "\n")
+    expression = nested
+    for message in (host, nested, expression):
+        assert "nested too deeply" in message, message
+
+
+def test_the_kit_exception_class_is_not_a_recordable_op():
+    kit = KIT + "\nclass LFError(Exception):\n    pass\n"
+    manifest = build_manifest(kit, "propkit")
+    assert "LFError" not in manifest.exposed and "LFError" not in manifest.functions
+    message = reject("import propkit\ndef build():\n    propkit.LFError('x')\n", manifest)
+    assert "LFError" in message and "not available" in message, message
+
+
+def test_work_is_charged_for_each_big_operation_not_just_for_loops():
+    for body in ("sorted(l)", "sum(l)", "max(l)", "min(l)", "any(l)", "l == l2", "0 in l", "l[1:]",
+                 "l.count(0)", "len(list(l))", "[l] * 10 == [l2] * 10"):
+        source = ("def build():\n    l = [0] * 150000\n    l2 = [0] * 150000\n    for i in range(2000):\n"
+                  "        x = %s\n" % body)
+        message = _capped(source)
+        assert "too much work" in message or "too large" in message, (body, message)

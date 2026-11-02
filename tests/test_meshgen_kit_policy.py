@@ -144,8 +144,8 @@ def test_system_and_popen_exclude_only_on_dangerous_receivers():
         "HERE = os.path.dirname(__file__)\n"
     )
     allowed, excluded = analyse_kit(source)
-    assert {"shell", "aliased", "remover", "handing_over", "HERE"} <= excluded
-    assert {"pathy", "harmless"} <= allowed  # path-string manipulation and plain objects are not I/O
+    assert {"shell", "aliased", "remover", "handing_over", "HERE", "pathy"} <= excluded
+    assert {"harmless"} <= allowed and "pathy" not in allowed  # os.path stats the file system; plain objects do not
 
 
 def test_a_colour_constant_is_not_a_callable_and_stays_usable_inside_the_kit():

@@ -39,25 +39,55 @@ class Pred:
 
 
 def is_domain(value, depth: int = 0) -> bool:
-    """True when ``value`` belongs to the closed value domain (recursively)."""
-    if depth > MAX_DEPTH:
-        return False
-    if value is None or isinstance(value, bool):
-        return True
-    if isinstance(value, int):
-        return -MAX_INT < value < MAX_INT
-    if isinstance(value, float):
-        return math.isfinite(value)
-    if isinstance(value, str):
-        return len(value) <= MAX_STR
-    if isinstance(value, (Handle, Pred)):
-        return True
-    if isinstance(value, (list, tuple)):
-        return len(value) <= MAX_CONTAINER and all(is_domain(item, depth + 1) for item in value)
-    if isinstance(value, dict):
-        return len(value) <= MAX_CONTAINER and all(
-            isinstance(key, str) and is_domain(item, depth + 1) for key, item in value.items())
-    return False
+    """True when ``value`` belongs to the closed value domain.
+
+    The domain is the finite trees and DAGs of the types above.  A container that contains itself (a cycle) is
+    NOT in the domain; the interpreter refuses to create one.  Iterative, so nesting depth cannot exhaust the
+    Python stack; ``depth`` is accepted for compatibility and ignored.
+    """
+    active = set()
+    done = set()
+    stack = [(value, False)]
+    while stack:
+        item, leaving = stack.pop()
+        if leaving:
+            active.discard(id(item))
+            done.add(id(item))
+            continue
+        if item is None or isinstance(item, bool):
+            continue
+        if isinstance(item, int):
+            if not -MAX_INT < item < MAX_INT:
+                return False
+        elif isinstance(item, float):
+            if not math.isfinite(item):
+                return False
+        elif isinstance(item, str):
+            if len(item) > MAX_STR:
+                return False
+        elif isinstance(item, (Handle, Pred)):
+            continue
+        elif isinstance(item, (list, tuple, dict)):
+            key = id(item)
+            if key in active:
+                return False
+            if key in done:
+                continue
+            if len(item) > MAX_CONTAINER:
+                return False
+            active.add(key)
+            stack.append((item, True))
+            if isinstance(item, dict):
+                if not all(isinstance(name, str) for name in item):
+                    return False
+                children = item.values()
+            else:
+                children = item
+            for child in children:
+                stack.append((child, False))
+        else:
+            return False
+    return True
 
 
 def copy_value(value, depth: int = 0):

@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 
 from ..adapters.filesystem import file_ops
-from ..adapters.meshgen import blender_runner
+from ..adapters.meshgen import blender_runner, record_runner
 from ..application.meshgen.loop import MeshRequest, run as run_loop
 from ..domain.common.errors import SonderError
 from ..domain.meshgen.critique import critique_prompt
@@ -152,6 +152,7 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
     kit_excluded = frozenset()
     api_doc = ""
     kit_file = None
+    kit_source = None
     manifest = None
     if str(kit_path or "").strip():
         kit_file, kit_source = _read_text(kit_path.strip(), MAX_KIT_BYTES, "kit")
@@ -160,6 +161,7 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
             raise SonderError("kit_path must be a .py file with a plain module name: %s" % kit_file)
         kit_names, kit_excluded = analyse_kit(kit_source)
         manifest = build_manifest(kit_source, kit_module)
+        kit_names = frozenset(manifest.exposed)  # exception classes are not recordable and are not shown
         if str(api_doc_path or "").strip():
             api_doc = _read_text(api_doc_path.strip(), MAX_API_DOC_CHARS * 4, "api doc")[1][:MAX_API_DOC_CHARS]
         else:
@@ -181,6 +183,15 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
         return rt._generate_text(prompt, tier=tier, temperature=0.3, num_predict=GENERATE_NUM_PREDICT, num_ctx=GENERATE_NUM_CTX,
                                  timeout=int(min(remaining(), _GENERATE_TIMEOUT_CAP)))
 
+    def record(code, seed):
+        """Record in a resource-limited child process; its wall clock counts against the tool timeout."""
+        left = remaining()
+        if left < MIN_BUILD_SECONDS:
+            raise TimeoutError("mesh_generate has under %ds left" % MIN_BUILD_SECONDS)
+        return record_runner.record_script(
+            code, kit_source=kit_source, kit_module=kit_module, seed=seed,
+            timeout=min(record_runner.DEFAULT_TIMEOUT_S, left))
+
     def build(index, round_index, code, recording):
         left = remaining()
         if left < MIN_BUILD_SECONDS:
@@ -192,7 +203,7 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
         ops_path.write_text(recording.text, encoding="utf-8")
         result = runner.build_candidate(
             blender, str(ops_path), str(root / stem), name=slug,
-            kit_path=str(kit_file) if kit_file else None, kit_allowed=sorted(manifest.exposed) if manifest else (),
+            kit_path=str(kit_file) if kit_file else None, kit_allowed=sorted(manifest.functions) if manifest else (),
             max_tris=max_tris, height_m=height,
             export=export, render=True, timeout=int(max(MIN_BUILD_SECONDS, min(left, _BUILD_TIMEOUT))),
         )
@@ -227,7 +238,8 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
         brief=brief, max_tris=max_tris, height_m=height, kit_module=kit_module, kit_names=kit_names, kit_excluded=kit_excluded, manifest=manifest, api_doc=api_doc,
         candidates=candidates, rounds=rounds, tiers=tier_list, target_score=target_score, vision=bool(vision),
     )
-    report = run_loop(request, generate=generate, build=build, critique=critique, map_parallel=map_parallel)
+    report = run_loop(request, generate=generate, build=build, critique=critique, map_parallel=map_parallel,
+                      record=record)
     if vision_state["dead"]:
         report["vision"] = "unavailable: %s" % vision_state["dead"]
     payload = {

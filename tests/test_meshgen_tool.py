@@ -273,3 +273,31 @@ def test_kit_exposure_policy_reaches_the_prompt_the_recorder_and_the_runner(tmp_
     assert "run_prop" not in prompts[0] and "wheel" in prompts[0]
     assert not runner.calls  # the recorder refused the excluded call before any build
     assert payload["candidates"][0]["attempts"][0]["status"] == "script_error"
+
+
+def test_only_kit_functions_are_allowed_to_the_runner_and_the_exception_class_is_not(tmp_path):
+    kit = tmp_path / "propkit.py"
+    kit.write_text('class LFError(Exception):\n    pass\n\n\ndef wheel(r):\n    """Make a wheel."""\n',
+                   encoding="utf-8")
+    rt = fake_runtime(tmp_path)
+    rt._generate_text = lambda prompt, **kw: "```python\nimport propkit\n\ndef build():\n    propkit.wheel(1)\n```"
+    payload, runner, _ = call(tmp_path, rt=rt, kit_path=str(kit), candidates=1, rounds=1)
+    assert payload["ok"] is True, payload
+    allowed = list(runner.calls[0][2]["kit_allowed"])
+    assert allowed == ["wheel"], allowed
+
+    rt._generate_text = lambda prompt, **kw: "```python\nimport propkit\n\ndef build():\n    propkit.LFError('x')\n```"
+    payload, runner, _ = call(tmp_path, rt=rt, kit_path=str(kit), candidates=1, rounds=1)
+    assert runner.calls == [] and payload["candidates"][0]["attempts"][0]["status"] == "script_error"
+
+
+def test_a_recorder_that_hits_its_hard_limit_is_a_script_error_for_the_model(tmp_path, monkeypatch):
+    from sonder_runtime.domain.meshgen.dsl.errors import ScriptError
+
+    def boom(*args, **kwargs):
+        raise ScriptError(0, mesh_agent_tools.record_runner.LIMIT_MESSAGE)
+
+    monkeypatch.setattr(mesh_agent_tools.record_runner, "record_script", boom)
+    payload, runner, _ = call(tmp_path, candidates=1, rounds=1)
+    assert runner.calls == []
+    assert payload["candidates"][0]["attempts"][0]["status"] == "script_error"

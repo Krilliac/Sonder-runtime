@@ -118,18 +118,60 @@ def _write_corners(obj, corners):
 
 
 # ---------------------------------------------------------------------------------------------- predicates
+PREDICATE_BUDGET = 5_000_000      # predicate nodes evaluated in one replay, over every polygon
+_pred_state = {"left": PREDICATE_BUDGET}
+
+
+def _bounded(value):
+    """Defence in depth for predicate arithmetic: ints stay below 2**63 and floats finite, so no operation can
+    grow a number without bound (the grammar already rejects string operands and huge exponents)."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if not -opschema.MAX_INT < value < opschema.MAX_INT:
+            raise ValueError("predicate integer overflow")
+    elif isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("predicate result is not finite")
+    else:
+        raise ValueError("predicate values must be numbers or bools")
+    return value
+
+
+def _arith(head, a, b):
+    if head == "**":
+        if abs(b) > opschema.MAX_PRED_POWER:
+            raise ValueError("predicate exponent too large")
+        return a ** b
+    if head == "+":
+        return a + b
+    if head == "-":
+        return a - b
+    if head == "*":
+        return a * b
+    if head == "/":
+        return a / b
+    if head == "//":
+        return a // b
+    return a % b
+
+
 def eval_pred(node, poly):
-    """Evaluate a validated predicate tree for one polygon (no eval; a small recursive interpreter)."""
+    """Evaluate a validated predicate tree for one polygon (no eval; a small recursive interpreter).
+
+    Re-checks what the grammar already guarantees (numbers only, bounded exponents, bounded results) and
+    stops after ``PREDICATE_BUDGET`` nodes in total, because the tree comes from a file."""
+    _pred_state["left"] -= 1
+    if _pred_state["left"] < 0:
+        raise ValueError("predicate work limit exceeded")
     if isinstance(node, (bool, int, float)):
-        return node
+        return _bounded(node)
     head = node[0]
-    if head == "s":
-        return node[1]
     if head == "f":
         if node[1] == "center":
-            return getattr(poly.center, node[2])
+            return float(getattr(poly.center, node[2]))
         if node[1] == "normal":
-            return getattr(poly.normal, node[2])
+            return float(getattr(poly.normal, node[2]))
         return {"index": poly.index, "area": poly.area, "material_index": poly.material_index}[node[1]]
     rest = node[1:]
     if head == "and":
@@ -152,25 +194,28 @@ def eval_pred(node, poly):
         values = [eval_pred(item, poly) for item in rest[1:]]
         name = rest[0]
         if name == "abs":
-            return abs(*values)
+            return _bounded(abs(*values))
         if name == "min":
-            return min(*values)
+            return _bounded(min(*values))
         if name == "max":
-            return max(*values)
+            return _bounded(max(*values))
         if name == "round":
-            return round(*values)
-        return getattr(math, name[5:])(*values)
+            if len(values) == 2 and (not isinstance(values[1], int) or abs(values[1]) > opschema.MAX_PRED_DIGITS):
+                raise ValueError("round digits out of range")
+            return _bounded(round(*values))
+        return _bounded(getattr(math, name[5:])(*values))
     values = [eval_pred(item, poly) for item in rest]
     if head == "neg":
-        return -values[0]
+        return _bounded(-values[0])
     if head == "pos":
-        return +values[0]
+        return _bounded(+values[0])
     if head == "not":
         return not values[0]
     a, b = values
-    return {"+": lambda: a + b, "-": lambda: a - b, "*": lambda: a * b, "/": lambda: a / b, "//": lambda: a // b,
-            "%": lambda: a % b, "**": lambda: a ** b, "<": lambda: a < b, "<=": lambda: a <= b, ">": lambda: a > b,
-            ">=": lambda: a >= b, "==": lambda: a == b, "!=": lambda: a != b}[head]()
+    if head in ("<", "<=", ">", ">=", "==", "!="):
+        return {"<": lambda: a < b, "<=": lambda: a <= b, ">": lambda: a > b, ">=": lambda: a >= b,
+                "==": lambda: a == b, "!=": lambda: a != b}[head]()
+    return _bounded(_arith(head, a, b))
 
 
 def _predicate(tree):
@@ -237,7 +282,10 @@ def core_mesh(kit, name, verts, faces, loc=None, rot=None, scale=None):
     for face in faces:
         if not isinstance(face, (list, tuple)) or not 3 <= len(face) <= 8:
             raise ValueError("each face needs 3 to 8 vertex indices")
-        polygons.append(tuple(_integer(index, "face index", 0, count - 1) for index in face))
+        indices = tuple(_integer(index, "face index", 0, count - 1) for index in face)
+        if len(set(indices)) != len(indices):
+            raise ValueError("a face may not repeat a vertex index")
+        polygons.append(indices)
     name = _text(name, "name", "mesh")
     mesh = bpy.data.meshes.new(name)
     mesh.from_pydata(points, [], polygons)
@@ -396,6 +444,7 @@ def _resolve(value, store):
 
 def run(doc, kit_name, kit_allowed):
     """Replay every op in order; raises ``ReplayError`` naming the script line on the first failure."""
+    _pred_state["left"] = PREDICATE_BUDGET
     kit = importlib.import_module(kit_name) if kit_name else None
     allowed = frozenset(kit_allowed)
     store = {}

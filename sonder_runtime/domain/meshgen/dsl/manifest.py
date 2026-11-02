@@ -95,6 +95,28 @@ def _called_parameters(node) -> tuple:
     return tuple(called)
 
 
+_EXCEPTION_SUFFIXES = ("Error", "Exception", "Warning", "Exit", "Interrupt")
+
+
+def _exception_classes(tree) -> frozenset:
+    """Names of kit classes that are exceptions (a base ending in Error/Exception..., or a kit class that is)."""
+    classes = [node for node in tree.body if isinstance(node, ast.ClassDef)]
+    found: set = set()
+    changed = True
+    while changed:
+        changed = False
+        for node in classes:
+            if node.name in found:
+                continue
+            for base in node.bases:
+                label = base.id if isinstance(base, ast.Name) else base.attr if isinstance(base, ast.Attribute) else ""
+                if label in found or label.endswith(_EXCEPTION_SUFFIXES):
+                    found.add(node.name)
+                    changed = True
+                    break
+    return frozenset(found)
+
+
 def _override(tree, name):
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
@@ -115,6 +137,8 @@ def build_manifest(kit_source: str, kit_module: str) -> Manifest:
     signatures: dict = {}
     constants: dict = {}
     predicates: dict = {}
+    exceptions = _exception_classes(tree)  # LFError and friends: raising is the kit's business, not a recordable call
+    allowed = frozenset(name for name in allowed if name not in exceptions)
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name in allowed:
             signatures[node.name] = _signature(node)

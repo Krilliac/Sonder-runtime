@@ -22,7 +22,7 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from . import sandbox_win
+import sonder_runtime.adapters.meshgen.sandbox_win as sandbox_win  # exact module: "from . import x" adds an edge to every sibling
 
 HARNESS_PATH = Path(__file__).with_name("harness.py")
 REPLAY_PATH = Path(__file__).with_name("replay.py")

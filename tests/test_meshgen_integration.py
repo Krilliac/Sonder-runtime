@@ -286,3 +286,40 @@ def test_import_winreg_is_a_script_error_before_blender_starts(tmp_path, monkeyp
 def test_the_registry_gap_is_still_measured_as_readable():
     """HKCU stays readable (documented known gap): safety comes from structure, not from this."""
     assert sandbox_win.registry_isolation(os.path.dirname(BLENDER)) == "readable"
+
+
+# ---------------------------------------------------------------- crafted predicates and faces
+def _bomb(depth):
+    tree = 1000
+    for _ in range(depth):
+        tree = ["**", tree, 64]
+    return [">", tree, ["f", "center", "z"]]
+
+
+def test_a_crafted_predicate_bomb_is_refused_or_bounded_quickly(tmp_path):
+    """Nested ``** 64`` would build an astronomically large number; the grammar and the replay both cap it."""
+    import time
+    cube = ("core.primitive", ["cube"], {})
+    for depth in (12, 31):
+        ops = _doc(cube, ("core.paint_faces", [{"$ref": 1}, {"$pred": _bomb(depth)}, "#ff0000"], {}))
+        started = time.monotonic()
+        result = _run(tmp_path, ops, render=False)
+        elapsed = time.monotonic() - started
+        assert elapsed < 90, "depth %d took %.1fs" % (depth, elapsed)
+        assert result["ok"] is False and "line 2" in result["error"], result
+    wide = ["and"] + [_bomb(1)] * 1500
+    ops = _doc(cube, ("core.paint_faces", [{"$ref": 1}, {"$pred": wide}, "#ff0000"], {}))
+    started = time.monotonic()
+    result = _run(tmp_path, ops, render=False)
+    assert time.monotonic() - started < 90 and isinstance(result, dict)
+
+
+def test_a_degenerate_face_is_refused_before_a_modifier_can_run_on_it(tmp_path):
+    triangle = [[0, 0, 0], [1, 0, 0], [0, 1, 0]]
+    for face in ([0, 0, 1], [0, 1, 1], [2, 2, 2]):
+        ops = _doc(("core.mesh", ["Tri", triangle, [face]], {}),
+                   ("core.modifier", [{"$ref": 1}, "BEVEL"], {}))
+        result = _run(tmp_path, ops, render=False)
+        assert result["ok"] is False and "line 1" in result["error"] and "repeat" in result["error"], result
+    good = _doc(("core.mesh", ["Tri", triangle, [[0, 1, 2]]], {}), ("core.modifier", [{"$ref": 1}, "BEVEL"], {}))
+    assert _run(tmp_path, good, render=False)["ok"] is True

@@ -33,10 +33,43 @@ def test_free_variables_are_captured_by_value():
     assert "0.75" in json.dumps(compile_script(source).ops[-1]["args"][1])
 
 
-def test_string_and_bool_captures():
-    assert "wood" in json.dumps(pred_of("p.material_index == 0 or name == 'wood'", prelude="    name = 'wood'\n"))
+def test_bool_captures_work_but_strings_are_not_allowed_in_a_predicate():
     tree = pred_of("flag and p.area > 0.1", prelude="    flag = True\n")
     assert isinstance(tree, list)
+    for expr, prelude in (("name == 'wood'", "    name = 'wood'\n"),
+                          ("p.index > len(name)", "    name = 'wood'\n")):
+        with pytest.raises(ScriptError) as info:
+            pred_of(expr, prelude=prelude)
+        assert str(info.value).startswith("line "), str(info.value)
+
+
+@pytest.mark.parametrize("expr", [
+    "p.center.z ** p.index > 1", "p.center.z ** 65 > 1", "p.center.z ** -65 > 1",
+    "p.index ** 1e9 > 1", "round(p.area, 99) > 0", "round(p.area, p.index) > 0", "'a' * 9 == 'a'",
+])
+def test_predicate_arithmetic_is_capped_at_record_time(expr):
+    with pytest.raises(ScriptError) as info:
+        pred_of(expr)
+    assert str(info.value).startswith("line 4"), str(info.value)
+
+
+def test_opschema_refuses_string_nodes_and_unbounded_powers_in_hand_crafted_trees():
+    face = ["f", "index"]
+    for bad in (["s", "x"], ["==", ["s", "a"], ["s", "a"]], ["**", face, face], ["**", 9, 65], ["**", 9, -65],
+                ["**", 9, True], ["call", "round", face, 40],
+                ["call", "abs", face, face]):
+        with pytest.raises(opschema.OpsError):
+            opschema.validate_pred(bad)
+    opschema.validate_pred(["**", face, 64])
+    opschema.validate_pred(["**", face, -64])
+    opschema.validate_pred(["call", "round", face, 20])
+
+
+def test_opschema_refuses_dunder_keyword_names():
+    document = {"version": 1, "kit": "k", "seed": 0, "log": [],
+                "ops": [{"id": 1, "line": 1, "op": "kit.box", "args": [], "kwargs": {"__class__": 1}}]}
+    with pytest.raises(opschema.OpsError):
+        opschema.validate_ops(document, ["box"])
 
 
 def test_boolean_logic_and_arithmetic_and_calls():

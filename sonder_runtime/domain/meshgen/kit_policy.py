@@ -12,7 +12,7 @@ allow-list derived from the kit's source:
   ``read_homefile``...: the harness exports and renders itself, and a kit helper that does it
   too would clobber the harness' output), process control (``exit``/``quit``, ``exec``/``eval``/
   ``compile``/``__import__``, ``input``/``breakpoint``) or one of the modules that read
-  secrets or spawn processes (``os`` except path-string helpers, ``sys``, ``subprocess``,
+  secrets or spawn processes (``os`` except separator constants, ``sys``, ``subprocess``,
   ``socket``, ``ctypes``, ``winreg``, ``importlib``, ``builtins``, ``pickle``, ``marshal``,
   ``urllib``, ``http``);
 * a module-level constant is excluded when it is a string/f-string/bytes literal, or built from
@@ -32,10 +32,10 @@ DANGEROUS_MODULES = frozenset({
     "builtins", "pickle", "marshal", "urllib", "http", "multiprocessing", "signal",
 })
 _IO_NAMES = frozenset({"exec", "eval", "compile", "__import__", "input", "breakpoint", "exit", "quit"})
-# Attributes of a dangerous module (``os``...) that do no I/O: pure path-string manipulation and
-# constants.  Every other use of such a module marks the function (``os.system``, ``os.remove``...),
+# Attributes of a dangerous module (``os``...) that are plain constants (separators).  ``os.path`` is NOT
+# among them: its functions stat, resolve and expand the file system, so a function using it is excluded.  Every other use of such a module marks the function (``os.system``, ``os.remove``...),
 # while ``thing.system`` on an ordinary object does not: the receiver decides, not the bare name.
-_SAFE_MODULE_ATTRIBUTES = frozenset({"path", "sep", "linesep", "pathsep", "curdir", "pardir", "name"})
+_SAFE_MODULE_ATTRIBUTES = frozenset({"sep", "linesep", "pathsep", "curdir", "pardir", "name"})
 # Scene-level export/import/save/render touch points: the harness owns those steps.
 _IO_ATTRIBUTES = frozenset({
     "save", "save_as", "save_render", "save_as_mainfile", "save_mainfile", "export_scene", "import_scene",

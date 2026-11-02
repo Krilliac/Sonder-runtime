@@ -90,6 +90,23 @@ What the recorder budgets: 2,000,000 interpreter steps, 10 s wall clock (checked
 call depth 64, containers of at most 200,000 elements, ints below 2^63, at most 5,000 recorded calls, a
 4 MB `ops.json` and a 60,000 character script. Anything over a cap is a `script_error` naming the line.
 
+Work is also charged in proportion to the elements an operation touches (iteration and slicing copies,
+`sum`/`min`/`max`/`any`/`all`/`sorted`/`sort`/`shuffle`/`count`/`index`/`join`/`replace`/`split`, `==`, `in` and
+ordering on containers, copies of default arguments, `*` on containers), counting an aliased element once
+per occurrence, up to 3,000,000 units per run; `print`, `str`, f-strings and `assert` messages are built under
+a character cap, so a heavily aliased value cannot be expanded. Lists and dicts cannot contain themselves (a
+store that would close a cycle is a `script_error`). Top-level assignments and default argument values must be
+constants (numbers, strings, `None`, bools and lists, tuples and dicts of those); everything else belongs in
+`build()`.
+
+**Hard backstop.** The in-process accounting is not trusted to be complete, so the host records the script in
+a separate process (`adapters/meshgen/record_runner.py` starting `recorder_worker.py` with `python -I`, same
+interpreter, a minimal environment and a private temp directory). The child has a 15 s wall-clock kill (counted
+inside the tool `timeout`, so it never exceeds what is left), a 1024 MB memory cap (Windows Job Object, or
+`prlimit` on Linux) and a bounded result file; the host validates the returned `ops.json` again. A timeout,
+crash, memory kill or oversized answer becomes `script_error: the script did too much work (time/memory
+limit)`. The recorder needs no sandbox because it reads nothing but its job file.
+
 **`ops.json` grammar.** `{"version":1, "kit", "seed", "ops":[{"id","line","op","args","kwargs"}], "log"}`.
 `op` is `core.<name>` or `kit.<name>` with a name the manifest exposes. A value is `null`, bool, a finite
 number, a string of at most 256 characters, an array, or an object with exactly one key: `$ref` (the id of
@@ -106,7 +123,9 @@ body calls, for example `paint_faces.predicate`, or the operator's `MESHGEN_PRED
 place a `lambda` is allowed. The lambda is serialised into a nested-array tree (face attributes in
 object-local coordinates, arithmetic, comparisons, `and`/`or`/`not`, conditional expressions,
 `abs`/`min`/`max`/`round` and `math.*`; at most 32 deep and 2,000 nodes); free variables are captured by
-value and must be numbers, bools or strings.
+value and must be numbers or bools. Strings, containers and handles cannot appear in a predicate; `**` needs a
+literal exponent between -64 and 64, `round` literal digits between -20 and 20, and the replay refuses ints beyond 2^63 and
+non-finite floats and stops after 5,000,000 predicate nodes in total.
 
 **Kit manifest.** Built on the host from the kit source with `ast` (never imported): the exposed names
 (`kit_policy`), their signatures (so a wrong keyword produces an error listing the real parameters), literal
@@ -213,7 +232,7 @@ harness files, ops and kit into the run directory).
   or render (`export_scene`, `import_scene`, `save*`, `ops.render`, `open_mainfile`, `read_homefile`...:
   the harness exports and renders itself, and a kit helper doing it too would clobber the harness'
   output), process control (`exit`, `exec`/`eval`/`compile`/`__import__`), or one of the modules that read
-  secrets or spawn processes (`os` except path-string helpers like `os.path`, `sys`, `subprocess`, `socket`,
+  secrets or spawn processes (`os` except separator constants (`os.path` is not exempt), `sys`, `subprocess`, `socket`,
   `ctypes`, `winreg`, `importlib`, `builtins`, `pickle`, `marshal`, `urllib`, `http`; `system`/`popen`
   only on such receivers); location constants (`KIT_DIR`, `REPO_ROOT`, ...) and text constants are
   never exposed, and exclusion is transitive (a function that uses an excluded location is excluded).

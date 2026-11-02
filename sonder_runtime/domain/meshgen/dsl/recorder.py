@@ -37,6 +37,10 @@ MAX_CALL_DEPTH = 64
 MAX_EXPR_DEPTH = 100
 MAX_TOTAL_ELEMENTS = 10_000_000
 MAX_TOTAL_CHARS = 50_000_000
+MAX_WORK = 3_000_000          # elements an operation walks or copies, summed over the whole run
+_WEIGHT_CAP = 2 ** 40
+_RECURSION_MESSAGE = ("the script is nested too deeply (functions may call each other at most %d levels deep and "
+                      "expressions %d levels)" % (MAX_CALL_DEPTH, MAX_EXPR_DEPTH))
 MAX_PRINT_LINES = opschema.MAX_LOG_LINES
 MAX_PRINT_CHARS = opschema.MAX_LOG_CHARS
 _TIME_CHECK_EVERY = 10_000
@@ -90,6 +94,7 @@ _MATH_CONSTANTS = {"pi": math.pi, "tau": math.tau, "e": math.e}
 _BUILTINS = frozenset({"range", "len", "min", "max", "abs", "round", "int", "float", "str", "bool", "list", "tuple",
                        "dict", "sum", "enumerate", "zip", "reversed", "sorted", "any", "all", "print"})
 _RANDOM_FUNCS = frozenset({"random", "uniform", "randint", "choice", "shuffle", "seed"})
+_RANDOM_ARITY = {"random": 0, "uniform": 2, "randint": 2, "choice": 1, "shuffle": 1, "seed": 1}
 _BPY_HINT = "bpy is not available; use the kit and core functions listed in the prompt"
 
 
@@ -115,6 +120,10 @@ class Recording:
 
 class _Control(Exception):
     pass
+
+
+class _Full(Exception):
+    """Internal: the text being built reached its character cap."""
 
 
 class _Break(_Control):
@@ -173,6 +182,7 @@ class _Interp:
         self.elems = 0
         self.chars = 0
         self.leaves = 0
+        self.work_done = 0
         self.deadline = time.monotonic() + MAX_SECONDS
         self.probe = None
         self.core_names = frozenset(opschema.CORE_SIGS)
@@ -201,11 +211,85 @@ class _Interp:
         if count > MAX_CONTAINER or self.elems > MAX_TOTAL_ELEMENTS:
             raise self.err("the script built containers that are too large (limit: %d elements each, %d in total)"
                            % (MAX_CONTAINER, MAX_TOTAL_ELEMENTS))
+        self.work(count)
 
     def charge_text(self, count):
         self.chars += count
         if count > MAX_STR or self.chars > MAX_TOTAL_CHARS:
             raise self.err("the script built strings that are too long (limit: %d characters each)" % MAX_STR)
+        self.work(count >> 6)
+
+    def work(self, units):
+        """Charge ``units`` of element-proportional work (one per element walked, copied or compared)."""
+        self.work_done += units
+        if self.work_done > MAX_WORK:
+            raise self.too_much()
+        if units >= 4096 and time.monotonic() > self.deadline:
+            raise self.too_much()
+
+    def weight(self, value):
+        """Expanded size of ``value``: every container counts itself plus its children each time it appears
+        (aliased rows count once per alias), a string counts 1 + len/64.  This is the work a full walk
+        (compare, copy, repr) costs.  Iterative, memoised, and it stops early once the remaining work budget
+        is exceeded, so asking is never more expensive than the budget allows."""
+        if isinstance(value, str):
+            return 1 + (len(value) >> 6)
+        if not isinstance(value, (list, tuple, dict)):
+            return 1
+        budget = MAX_WORK - self.work_done + 1
+        memo = {}
+        steps = 0
+        stack = [(value, False)]
+        while stack:
+            item, leaving = stack.pop()
+            key = id(item)
+            children = item.values() if isinstance(item, dict) else item
+            if leaving:
+                total = 1
+                for child in children:
+                    if isinstance(child, (list, tuple, dict)):
+                        total += memo.get(id(child), 1)
+                    elif isinstance(child, str):
+                        total += 1 + (len(child) >> 6)
+                    else:
+                        total += 1
+                memo[key] = total if total < _WEIGHT_CAP else _WEIGHT_CAP
+                continue
+            if key in memo:
+                continue
+            steps += len(item)
+            if steps > budget:
+                return budget
+            stack.append((item, True))
+            for child in children:
+                if isinstance(child, (list, tuple, dict)) and id(child) not in memo:
+                    stack.append((child, False))
+        return memo[id(value)]
+
+    def reaches(self, value, target):
+        """True when the container ``target`` is ``value`` or appears anywhere inside it (identity)."""
+        if not isinstance(value, (list, tuple, dict)):
+            return False
+        seen = set()
+        stack = [value]
+        while stack:
+            item = stack.pop()
+            if item is target:
+                return True
+            key = id(item)
+            if key in seen:
+                continue
+            seen.add(key)
+            self.work(len(item))
+            for child in (item.values() if isinstance(item, dict) else item):
+                if isinstance(child, (list, tuple, dict)):
+                    stack.append(child)
+        return False
+
+    def check_store(self, receiver, value, node=None):
+        """A container may not be stored inside itself (the value domain is acyclic)."""
+        if isinstance(value, (list, tuple, dict)) and self.reaches(value, receiver):
+            raise self.err("a list or dict cannot contain itself", node)
 
     def checked(self, value):
         """Every number that enters the interpreter passes here: ints < 2**63 and finite floats only."""
@@ -441,11 +525,10 @@ class _Interp:
         if isinstance(op, ast.Mult):
             seq, count = (left, right) if not _is_number(left) else (right, left)
             if isinstance(seq, (str, list, tuple)) and isinstance(count, int):
-                size = len(seq) * max(count, 0)
                 if isinstance(seq, str):
-                    self.charge_text(size)
+                    self.charge_text(len(seq) * max(count, 0))
                 else:
-                    self.charge(size)
+                    self.charge((self.weight(seq) - 1) * max(count, 0))  # deep size: aliased rows count each time
                 return seq * count
         if isinstance(op, ast.Mod) and isinstance(left, str):
             return self.percent(left, right, node)
@@ -458,6 +541,9 @@ class _Interp:
         items = args if isinstance(args, tuple) else (args,)
         if not all(item is None or isinstance(item, (bool, int, float, str)) for item in items):
             raise self.err("% formatting accepts only numbers and strings", node)
+        if template.count("%") > 64:
+            raise self.err("a % format may contain at most 64 conversions", node)
+        self.work(len(template) >> 6)
         text = template % items
         self.charge_text(len(text))
         return text
@@ -478,6 +564,8 @@ class _Interp:
             same = left is right
             return same if isinstance(op, ast.Is) else not same
         self.reject_handle(left, right, node=node)
+        if not (isinstance(left, (int, float)) and isinstance(right, (int, float))):
+            self.work(self.weight(left) + self.weight(right))  # a comparison may walk both values
         try:
             if isinstance(op, ast.Eq):
                 return left == right
@@ -502,14 +590,11 @@ class _Interp:
 
     def iterable(self, value, node=None):
         self.reject_handle(value, node=node)
-        if isinstance(value, list):
-            return list(value)
-        if isinstance(value, tuple):
+        if isinstance(value, (list, tuple, dict)):
+            self.work(len(value))
             return list(value)
         if isinstance(value, str):
             self.charge(len(value))
-            return list(value)
-        if isinstance(value, dict):
             return list(value)
         raise self.err("TypeError: this value is not iterable (use a list, tuple, string, dict or range)", node)
 
@@ -573,7 +658,7 @@ class _Interp:
                 raise self.err("f-string format specs must be constants such as .2f", node)
             spec = "".join(piece.value for piece in pieces)
         if not spec:
-            return self.show(value)
+            return self.show(value, MAX_STR)
         if not (value is None or isinstance(value, (int, float, str))) or not _safe_spec(spec):
             raise self.err("unsupported f-string format %r; use simple specs like .2f, 03d or >8" % spec[:20], node)
         try:
@@ -581,21 +666,54 @@ class _Interp:
         except (ValueError, TypeError, OverflowError) as exc:
             raise self.err("%s: %s" % (exc.__class__.__name__, str(exc)[:80]), node) from None
 
-    def show(self, value, depth=0):
-        """Text for print()/f-strings: plain repr for scalars, ``<result of op>`` for handles."""
-        if depth > 8:
-            return "..."
-        if isinstance(value, str):
-            return value
-        if isinstance(value, (list, tuple)):
-            inner = ", ".join(self.show_item(item, depth + 1) for item in value[:200])
-            return "[%s]" % inner if isinstance(value, list) else "(%s)" % inner
-        if isinstance(value, dict):
-            return "{%s}" % ", ".join("%r: %s" % (key, self.show_item(item, depth + 1)) for key, item in list(value.items())[:200])
-        return repr(value)
+    def show(self, value, limit=MAX_STR):
+        """Text for print()/f-strings: plain repr for scalars, ``<result of op>`` for handles.
 
-    def show_item(self, value, depth):
-        return repr(value) if isinstance(value, str) else self.show(value, depth)
+        Built under a character cap (it stops as soon as the cap is reached), at most 200 items per container
+        and 8 levels, so showing a huge or heavily aliased value costs at most ``limit`` characters."""
+        out = []
+        used = [0]
+
+        def put(text):
+            out.append(text)
+            used[0] += len(text)
+            if used[0] > limit:
+                raise _Full()
+
+        def walk(item, depth, top):
+            if isinstance(item, str):
+                put(item[:limit + 1] if top else repr(item[:limit + 1]))
+            elif isinstance(item, (list, tuple)):
+                if depth > 8:
+                    put("...")
+                    return
+                put("[" if isinstance(item, list) else "(")
+                for position, child in enumerate(item[:200]):
+                    if position:
+                        put(", ")
+                    walk(child, depth + 1, False)
+                put("]" if isinstance(item, list) else ")")
+            elif isinstance(item, dict):
+                if depth > 8:
+                    put("...")
+                    return
+                put("{")
+                for position, (key, child) in enumerate(list(item.items())[:200]):
+                    if position:
+                        put(", ")
+                    put("%r: " % key[:limit + 1])
+                    walk(child, depth + 1, False)
+                put("}")
+            else:
+                put(repr(item))
+
+        try:
+            walk(value, 0, True)
+            text = "".join(out)
+        except _Full:
+            text = "".join(out)[:limit]
+        self.work(len(out) + (len(text) >> 6))
+        return text
 
     def ev_comp(self, node):
         out = []
@@ -686,6 +804,10 @@ class _Interp:
     def call_random(self, attr, args, kwargs, node):
         if attr not in _RANDOM_FUNCS or kwargs:
             raise self.err("random.%s is not available in build scripts" % attr[:40], node)
+        arity = _RANDOM_ARITY[attr]
+        if len(args) != arity:
+            raise self.err("random.%s takes %d argument%s, not %d" % (attr, arity, "" if arity == 1 else "s", len(args)),
+                           node)
         if attr == "random":
             return self.rng.random()
         if attr == "uniform":
@@ -693,16 +815,17 @@ class _Interp:
         if attr == "randint":
             return self.rng.randint(*args)
         if attr == "seed":
-            if len(args) != 1 or isinstance(args[0], list) or isinstance(args[0], tuple):
+            if isinstance(args[0], (list, tuple)):
                 raise self.err("random.seed takes one number or string", node)
             self.rng.seed(args[0])
             return None
-        sequence = args[0] if len(args) == 1 else None
+        sequence = args[0]
         if attr == "choice":
             if isinstance(sequence, (list, tuple, str)) and len(sequence) > 0:
                 return self.rng.choice(sequence)
             raise self.err("random.choice needs a non-empty list, tuple or string", node)
         if isinstance(sequence, list):
+            self.work(16 * len(sequence))  # shuffle is a Python-level loop
             self.rng.shuffle(sequence)
             return None
         raise self.err("random.shuffle needs a list", node)
@@ -747,6 +870,8 @@ class _Interp:
             args.append(self.argument_value(argument, name in predicate_params, node))
         kwargs = {}
         for keyword in node.keywords:
+            if keyword.arg.startswith("__"):
+                raise self.err("%s: keyword names starting with '__' are not allowed" % origin, node)
             if keyword.arg not in params and not loose:
                 raise self.err("%s has no parameter %r; its parameters are: %s" % (origin, keyword.arg[:40], real), node)
             if keyword.arg in params and params.index(keyword.arg) < len(args):
@@ -778,11 +903,17 @@ class _Interp:
         for name in func.params:
             if name not in bound:
                 if name in func.defaults:
-                    bound[name] = copy_value(func.defaults[name])
+                    default = func.defaults[name]
+                    if isinstance(default, (list, tuple, dict)):
+                        self.charge(self.weight(default))  # a fresh deep copy on every call
+                    try:
+                        bound[name] = copy_value(default)
+                    except ValueError:
+                        raise self.err(_RECURSION_MESSAGE, node) from None
                 else:
                     raise self.err("%s() is missing the argument %r" % (func.name, name), node)
         if self.call_depth >= MAX_CALL_DEPTH:
-            raise self.err("functions are nested more than %d calls deep (recursion is limited)" % MAX_CALL_DEPTH, node)
+            raise self.err(_RECURSION_MESSAGE, node)
         scope = _Scope(None)
         scope.vars.update(bound)
         saved, saved_depth = self.scope, self.depth
@@ -864,8 +995,10 @@ class _Interp:
             index = self.ev(target.slice)
             try:
                 if isinstance(container, list) and isinstance(index, int) and not isinstance(index, bool):
+                    self.check_store(container, value, target)
                     container[index] = value
                 elif isinstance(container, dict) and isinstance(index, str):
+                    self.check_store(container, value, target)
                     if index not in container:
                         self.charge(1)
                     container[index] = value
@@ -890,7 +1023,12 @@ class _Interp:
             found, current = self.lookup(node.target.id)
             if not found:
                 raise self.err("NameError: name '%s' is not defined" % node.target.id[:60], node)
-            self.assign(node.target, self.binop(node.op, current, self.ev(node.value), node))
+            combined = self.binop(node.op, current, self.ev(node.value), node)
+            if isinstance(node.op, ast.Add) and isinstance(current, list) and isinstance(combined, list):
+                self.check_store(current, combined, node)
+                current[:] = combined  # lists are extended in place, as in Python: other names see it
+                return
+            self.assign(node.target, combined)
             return
         if isinstance(node.target, ast.Subscript):
             container = self.ev(node.target.value)
@@ -899,8 +1037,10 @@ class _Interp:
             current = self.ev_subscript_value(container, index, node)
             combined = self.binop(node.op, current, self.ev(node.value), node)
             if isinstance(container, list) and isinstance(index, int) and not isinstance(index, bool):
+                self.check_store(container, combined, node)
                 container[index] = combined
             elif isinstance(container, dict) and isinstance(index, str):
+                self.check_store(container, combined, node)
                 container[index] = combined
             else:
                 raise self.err("only list and dict items can be assigned", node)
@@ -959,7 +1099,7 @@ class _Interp:
 
     def st_assert(self, node):
         if not self.truth(self.ev(node.test), node):
-            message = "" if node.msg is None else self.show(self.ev(node.msg))
+            message = "" if node.msg is None else self.show(self.ev(node.msg), 300)
             raise self.err("AssertionError: %s" % message[:300], node)
 
     def st_import(self, node):
@@ -1010,6 +1150,8 @@ class _Interp:
         defaults = {}
         offset = len(params) - len(args.defaults)
         for position, default in enumerate(args.defaults):
+            if not _is_constant_expression(default):
+                raise self.err(_CONSTANT_MESSAGE, default)
             defaults[params[offset + position]] = self.ev(default)
         self.funcs[node.name] = _Func(node.name, params, defaults, node.body, node.lineno)
 
@@ -1097,6 +1239,7 @@ def run_builtin(interp, name, args, kwargs, node):
         pool = interp.iterable(args[0], node) if n == 1 else list(args)
         if not pool:
             raise interp.err("%s() of an empty sequence" % name, node)
+        interp.work(interp.weight(pool))
         return min(pool) if name == "min" else max(pool)
     if name == "abs":
         need(1, 1)
@@ -1129,7 +1272,7 @@ def run_builtin(interp, name, args, kwargs, node):
         return interp.checked(float(args[0]))
     if name == "str":
         need(1, 1)
-        text = interp.show(args[0])
+        text = interp.show(args[0], MAX_STR)
         interp.charge_text(len(text))
         return text
     if name == "bool":
@@ -1189,6 +1332,7 @@ def run_builtin(interp, name, args, kwargs, node):
         reverse = kwargs.get("reverse", False)
         items = interp.iterable(args[0], node)
         interp.charge(len(items))
+        interp.work(8 * len(items) + interp.weight(items))
         items.sort(reverse=bool(reverse))
         return items
     if name == "any":
@@ -1199,7 +1343,7 @@ def run_builtin(interp, name, args, kwargs, node):
         return all(bool(item) for item in interp.iterable(args[0], node))
     if name == "print":
         if len(interp.log) < MAX_PRINT_LINES:
-            interp.log.append(" ".join(interp.show(a) for a in args)[:MAX_PRINT_CHARS])
+            interp.log.append(" ".join(interp.show(a, MAX_PRINT_CHARS) for a in args)[:MAX_PRINT_CHARS])
         return None
     raise interp.err("NameError: name '%s' is not defined" % name[:60], node)
 
@@ -1216,6 +1360,7 @@ def method_call(interp, receiver, name, args, kwargs, node):
     if kwargs and not (name in ("sort",) and set(kwargs) <= {"reverse"}):
         raise interp.err(".%s() does not take keyword arguments" % name, node)
     if isinstance(receiver, str):
+        interp.work((len(receiver) >> 6) + 1)
         if name in ("upper", "lower"):
             need(0, 0)
             return receiver.upper() if name == "upper" else receiver.lower()
@@ -1263,12 +1408,15 @@ def method_call(interp, receiver, name, args, kwargs, node):
         if name == "append":
             need(1, 1)
             interp.charge(1)
+            interp.check_store(receiver, args[0], node)
             receiver.append(args[0])
             return None
         if name == "extend":
             need(1, 1)
             items = interp.iterable(args[0], node)
             interp.charge(len(items) + len(receiver))
+            for item in items:
+                interp.check_store(receiver, item, node)
             receiver.extend(items)
             return None
         if name == "pop":
@@ -1279,23 +1427,24 @@ def method_call(interp, receiver, name, args, kwargs, node):
             if not isinstance(args[0], int) or isinstance(args[0], bool):
                 raise interp.err("insert() index must be an integer", node)
             interp.charge(1)
+            interp.check_store(receiver, args[1], node)
             receiver.insert(args[0], args[1])
             return None
         if name == "sort":
             need(0, 0)
+            interp.work(8 * len(receiver) + interp.weight(receiver))
             receiver.sort(reverse=bool(kwargs.get("reverse", False)))
             return None
         if name == "reverse":
             need(0, 0)
+            interp.work(len(receiver))
             receiver.reverse()
             return None
     if isinstance(receiver, (list, tuple)):
-        if name == "index":
+        if name in ("index", "count"):
             need(1, 1)
-            return receiver.index(args[0])
-        if name == "count":
-            need(1, 1)
-            return receiver.count(args[0])
+            interp.work(interp.weight(receiver) + interp.weight(args[0]))
+            return receiver.index(args[0]) if name == "index" else receiver.count(args[0])
     elif isinstance(receiver, dict):
         if name == "get":
             need(1, 2)
@@ -1304,6 +1453,7 @@ def method_call(interp, receiver, name, args, kwargs, node):
             return receiver.get(args[0], args[1] if n == 2 else None)
         if name in ("keys", "values", "items"):
             need(0, 0)
+            interp.work(len(receiver))
             out = list(receiver) if name == "keys" else (
                 list(receiver.values()) if name == "values" else list(receiver.items()))
             interp.charge(len(out))
@@ -1373,6 +1523,15 @@ def _check_tree(tree):
             raise ScriptError(line, "NameError: name '__import__' is not defined")
 
 
+_CONSTANT_MESSAGE = ("top-level assignments and default argument values must be constants (numbers, strings, lists, "
+                     "tuples, dicts, math.pi, kit constants); call functions inside def build()")
+
+
+def _is_constant_expression(node):
+    return not any(isinstance(sub, (ast.Call, ast.Lambda, ast.ListComp, ast.GeneratorExp, ast.JoinedStr,
+                                    ast.FormattedValue)) for sub in ast.walk(node))
+
+
 def _check_top_level(tree):
     builds = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "build"]
     if len(builds) != 1:
@@ -1382,7 +1541,11 @@ def _check_top_level(tree):
     if args.args or args.defaults:
         raise ScriptError(build.lineno, "def build() takes no parameters")
     for node in tree.body:
-        if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.Assign, ast.AnnAssign, ast.Pass)):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            if node.value is not None and not _is_constant_expression(node.value):
+                raise ScriptError(_lineno(node), _CONSTANT_MESSAGE)
+            continue
+        if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.Pass)):
             continue
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
             continue
@@ -1433,7 +1596,7 @@ def compile_script(source, manifest=None, seed=0, probe=None):
     except _Control:
         raise ScriptError(interp.line, "'break', 'continue' or 'return' used outside a function or loop") from None
     except RecursionError:
-        raise ScriptError(interp.line, "the script is nested too deeply") from None
+        raise ScriptError(interp.line, _RECURSION_MESSAGE) from None
     except MemoryError:
         raise ScriptError(interp.line, "the script used too much memory") from None
     except Exception as exc:  # noqa: BLE001 - the contract is that only ScriptError escapes; the tests flag these

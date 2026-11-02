@@ -1,9 +1,9 @@
 """Serialise a ``lambda p: ...`` in a predicate position into a JSON tree (no code crosses to Blender).
 
-Grammar: numbers and bools; ``p.center.{x,y,z}``, ``p.normal.{x,y,z}``, ``p.center[i]``,
+Grammar: numbers and bools (no strings); ``p.center.{x,y,z}``, ``p.normal.{x,y,z}``, ``p.center[i]``,
 ``p.normal[i]``, ``p.index``, ``p.area``, ``p.material_index``; arithmetic, chained comparisons,
 and/or/not, ``a if c else b``; ``abs``/``min``/``max``/``round`` and ``math.*``.  Free variables are
-captured BY VALUE and must be numbers, bools or strings.  Evaluated in Blender by ``replay.py`` with a
+captured BY VALUE and must be numbers or bools.  Evaluated in Blender by ``replay.py`` with a
 small recursive evaluator.
 """
 from __future__ import annotations
@@ -11,7 +11,7 @@ from __future__ import annotations
 import ast
 
 from .errors import ScriptError
-from .opschema import MAX_PRED_DEPTH, MAX_PRED_NODES, MAX_STRING, PRED_BUILTINS, PRED_MATH, validate_pred, OpsError
+from .opschema import MAX_PRED_DEPTH, MAX_PRED_NODES, PRED_BUILTINS, PRED_MATH, OpsError, validate_pred
 
 _BINOPS = {ast.Add: "+", ast.Sub: "-", ast.Mult: "*", ast.Div: "/", ast.FloorDiv: "//", ast.Mod: "%", ast.Pow: "**"}
 _CMPOPS = {ast.Lt: "<", ast.LtE: "<=", ast.Gt: ">", ast.GtE: ">=", ast.Eq: "==", ast.NotEq: "!="}
@@ -83,18 +83,14 @@ def compile_predicate(node, capture, math_aliases=("math",)):
             value = sub.value
             if isinstance(value, bool) or isinstance(value, (int, float)):
                 return value
-            if isinstance(value, str) and len(value) <= MAX_STRING:
-                return ["s", value]
-            raise err(sub, "only numbers, bools and short strings can appear in a predicate")
+            raise err(sub, "only numbers and bools can appear in a predicate (strings are not allowed)")
         if isinstance(sub, ast.Name):
             if sub.id == param:
                 raise err(sub, "use a face attribute such as %s.center.z, not the bare parameter" % param)
             value = capture(sub.id, _lineno(sub, line))
             if isinstance(value, bool) or isinstance(value, (int, float)):
                 return value
-            if isinstance(value, str) and len(value) <= MAX_STRING:
-                return ["s", value]
-            raise err(sub, "%r is captured by value in a predicate and must be a number, bool or string" % sub.id)
+            raise err(sub, "%r is captured by value in a predicate and must be a number or bool" % sub.id[:40])
         if isinstance(sub, ast.BinOp) and sub.op.__class__ in _BINOPS:
             return [_BINOPS[sub.op.__class__], walk(sub.left, depth + 1), walk(sub.right, depth + 1)]
         if isinstance(sub, ast.UnaryOp):
