@@ -719,7 +719,7 @@ def test_top_level_constants_are_allowed():
 def test_recursion_limits_share_one_message():
     host = reject("def f(n):\n    return f(n + 1)\ndef build():\n    f(0)\n")
     nested = reject("def build():\n    x = " + "[" * 150 + "]" * 150 + "\n")
-    expression = nested
+    expression = reject("def build():\n    x = " + "-" * 150 + "1\n")
     for message in (host, nested, expression):
         assert "nested too deeply" in message, message
 

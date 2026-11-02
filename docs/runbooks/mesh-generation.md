@@ -86,14 +86,16 @@ encodings or numeric channels. So the model's script is now **data**, not code:
 | **Replay and harness** (`adapters/meshgen/harness.py`, `replay.py`, `dsl/opschema.py`, trusted, inside Blender) | The harness validates `ops.json` against the same grammar the recorder emits (fail closed: an unknown op, a forward or undefined `$ref`, an unknown key, an oversized value or file refuses the whole build before anything is created), then `replay.py` performs each op with trusted code: the core functions (`primitive`, `mesh`, `transform`, `shade_smooth`, `modifier`, `paint`, `paint_faces`, `join`, `delete`, with size caps and a per-modifier property allow-list) and the exposed kit functions. Face predicates are evaluated by a small recursive evaluator, never `eval`. |
 | **OS sandbox** (`sandbox_win.py`: zero-capability AppContainer, Job Object, private desktop) | **Defence in depth** for the trusted code: it can read and write only its run directory (and read the Blender install), has no network and cannot start a process. |
 
-What the recorder budgets: 2,000,000 interpreter steps, 10 s wall clock (checked every 10,000 steps),
+What the recorder budgets: 2,000,000 interpreter steps, 10 s wall clock (checked on every step and every charge),
 call depth 64, containers of at most 200,000 elements, ints below 2^63, at most 5,000 recorded calls, a
 4 MB `ops.json` and a 60,000 character script. Anything over a cap is a `script_error` naming the line.
 
 Work is also charged in proportion to the elements an operation touches (iteration and slicing copies,
 `sum`/`min`/`max`/`any`/`all`/`sorted`/`sort`/`shuffle`/`count`/`index`/`join`/`replace`/`split`, `==`, `in` and
 ordering on containers, copies of default arguments, `*` on containers), counting an aliased element once
-per occurrence, up to 3,000,000 units per run; `print`, `str`, f-strings and `assert` messages are built under
+per occurrence, up to 3,000,000 units per run (argument-proportional work counts too: every needle of a
+`startswith`/`endswith` tuple, `replace`/`split`/`strip` arguments, `random.seed(str)`, `insert`/`pop` shifting the
+tail, f-string parts, recorded call arguments); `print`, `str`, f-strings and `assert` messages are built under
 a character cap, so a heavily aliased value cannot be expanded. Lists and dicts cannot contain themselves (a
 store that would close a cycle is a `script_error`). Top-level assignments and default argument values must be
 constants (numbers, strings, `None`, bools and lists, tuples and dicts of those); everything else belongs in
@@ -103,9 +105,12 @@ constants (numbers, strings, `None`, bools and lists, tuples and dicts of those)
 a separate process (`adapters/meshgen/record_runner.py` starting `recorder_worker.py` with `python -I`, same
 interpreter, a minimal environment and a private temp directory). The child has a 15 s wall-clock kill (counted
 inside the tool `timeout`, so it never exceeds what is left), a 1024 MB memory cap (Windows Job Object, or
-`prlimit` on Linux) and a bounded result file; the host validates the returned `ops.json` again. A timeout,
-crash, memory kill or oversized answer becomes `script_error: the script did too much work (time/memory
-limit)`. The recorder needs no sandbox because it reads nothing but its job file.
+`prlimit(RLIMIT_AS)` on Linux at three times the cap, because address space is larger than committed memory) and a
+bounded result file (the recording itself comes back in its own file, so JSON escaping cannot inflate it); the host validates the returned `ops.json` again. A timeout,
+memory kill, crash or oversized answer becomes a `script_error` that says which one (`time limit of 15 s
+exceeded`, `memory limit of 1024 MB exceeded`, `stopped without an answer (exit code N)`, `larger than 4 MB`).
+The loop requires the subprocess recorder: `loop.run(..., record=...)` has no in-process default, and unit tests opt
+in with `in_process_recorder`. The recorder needs no sandbox because it reads nothing but its job file.
 
 **`ops.json` grammar.** `{"version":1, "kit", "seed", "ops":[{"id","line","op","args","kwargs"}], "log"}`.
 `op` is `core.<name>` or `kit.<name>` with a name the manifest exposes. A value is `null`, bool, a finite

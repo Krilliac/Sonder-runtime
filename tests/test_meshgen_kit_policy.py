@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from sonder_runtime.application.meshgen.loop import MeshRequest, run
+from sonder_runtime.application.meshgen.loop import MeshRequest, in_process_recorder, run
 from sonder_runtime.domain.meshgen.kit_policy import analyse_kit
 from sonder_runtime.domain.meshgen.prompts import generation_prompt, kit_api_digest, repair_hint
 from sonder_runtime.domain.meshgen.dsl.errors import ScriptError
@@ -127,7 +127,7 @@ def test_loop_passes_excluded_names_into_the_repair_hint():
     request = MeshRequest(brief="x", kit_module="kit", kit_names=allowed, kit_excluded=excluded,
                           manifest=build_manifest(KIT, "kit"), candidates=1, rounds=2, vision=False)
     run(request, generate=generate, build=lambda i, r, c, rec: {"ok": False, "error": "no build expected"},
-        critique=lambda s: None,
+        critique=lambda s: None, record=in_process_recorder(request.manifest),
         map_parallel=lambda fn, items: [fn(i) for i in items])
     assert "not available in this tool" in seen[1]
 

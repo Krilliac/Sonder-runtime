@@ -139,3 +139,16 @@ def test_validate_pred_rejects_hand_crafted_trees():
                 ["call", "math.system"], ["+", 1], ["s", "x" * 300]):
         with pytest.raises(opschema.OpsError):
             opschema.validate_pred(bad)
+
+
+@pytest.mark.parametrize("expr", ["(9 ** 64) ** 64 > p.index", "1e300 * 1e300 < p.index", "(2 ** 62) * 4 > p.index",
+                                  "p.index > 1 / 0", "p.index > 7 ** 70"])
+def test_constant_arithmetic_is_folded_and_refused_at_record_time(expr):
+    with pytest.raises(ScriptError) as info:
+        pred_of(expr)
+    assert str(info.value).startswith("line 4") and "constant part" in str(info.value), str(info.value)
+
+
+def test_literal_arithmetic_is_computed_on_the_host():
+    assert pred_of("p.index > 2 * 3 + 1") == [">", ["f", "index"], 7]
+    assert pred_of("p.center.z < 2 ** -1") == ["<", ["f", "center", "z"], 0.5]

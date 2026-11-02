@@ -45,7 +45,7 @@ def test_a_worker_that_never_finishes_is_killed_at_the_deadline(tmp_path):
     with pytest.raises(ScriptError) as info:
         record_runner.record_script(GOOD, timeout=1.5, worker=worker)
     assert time.monotonic() - started < 10
-    assert record_runner.LIMIT_MESSAGE in str(info.value)
+    assert "time limit of 1.5 s" in str(info.value), str(info.value)
 
 
 def test_a_busy_loop_in_the_recorder_is_killed_too(tmp_path):
@@ -53,7 +53,7 @@ def test_a_busy_loop_in_the_recorder_is_killed_too(tmp_path):
     started = time.monotonic()
     with pytest.raises(ScriptError) as info:
         record_runner.record_script(GOOD, timeout=1.0, worker=worker)
-    assert time.monotonic() - started < 10 and record_runner.LIMIT_MESSAGE in str(info.value)
+    assert time.monotonic() - started < 10 and "time limit" in str(info.value)
 
 
 def test_a_worker_that_exhausts_memory_fails_closed(tmp_path):
@@ -61,29 +61,34 @@ def test_a_worker_that_exhausts_memory_fails_closed(tmp_path):
                                "open(result, 'w').write(json.dumps({'ok': False, 'line': 1, 'message': 'survived'}))\n")
     with pytest.raises(ScriptError) as info:
         record_runner.record_script(GOOD, timeout=30, memory_mb=256, worker=worker)
-    assert record_runner.LIMIT_MESSAGE in str(info.value), str(info.value)
+    assert "memory limit of 256 MB" in str(info.value), str(info.value)
 
 
 @pytest.mark.parametrize("body", [
-    "sys.exit(3)\n",                                                      # crash without an answer
-    "open(result, 'w').write('not json')\n",
-    "open(result, 'w').write('[1, 2]')\n",
-    "open(result, 'w').write(json.dumps({'ok': True}))\n",                 # no text
-    "open(result, 'w').write(json.dumps({'ok': True, 'text': 'x' * 5000000}))\n",
-    "open(result, 'w').write('0' * 9000000)\n",                            # oversized answer file
-    "open(result, 'w').write(json.dumps({'ok': True, 'text': '{\"version\": 1}'}))\n",   # invalid ops document
+    ("sys.exit(3)\n", "exit code 3"),                                       # crash without an answer
+    ("open(result, 'w').write('not json')\n", "could not be read"),
+    ("open(result, 'w').write('[1, 2]')\n", "not a JSON object"),
+    ("open(result, 'w').write(json.dumps({'ok': True}))\n", "no recording"),
+    ("open(result, 'w').write(json.dumps({'ok': True}))\nopen('ops.json', 'w').write('x' * 5000000)\n",
+     "larger than 4 MB"),
+    ("open(result, 'w').write('0' * 90000)\n", "larger than 64 KB"),                  # oversized answer file
+    ("open(result, 'w').write(json.dumps({'ok': True}))\nopen('ops.json', 'w').write('{\"version\": 1}')\n",
+     "invalid recording"),
+    ("open(result, 'w').write(json.dumps({'ok': False, 'memory': True}))\n", "memory limit"),
 ])
-def test_a_bad_answer_is_a_script_error_not_an_exception(tmp_path, body):
-    worker = _worker(tmp_path, body)
-    with pytest.raises(ScriptError):
+def test_a_bad_answer_is_a_script_error_with_an_accurate_message(tmp_path, body):
+    code, needle = body
+    worker = _worker(tmp_path, code)
+    with pytest.raises(ScriptError) as info:
         record_runner.record_script(GOOD, timeout=20, worker=worker)
+    assert needle in str(info.value), str(info.value)
 
 
 def test_a_forged_script_error_is_bounded(tmp_path):
     worker = _worker(tmp_path, "open(result, 'w').write(json.dumps({'ok': False, 'line': 'x', 'message': 5}))\n")
     with pytest.raises(ScriptError) as info:
         record_runner.record_script(GOOD, timeout=20, worker=worker)
-    assert record_runner.LIMIT_MESSAGE in str(info.value)
+    assert "malformed" in str(info.value), str(info.value)
 
 
 def test_the_child_sees_a_minimal_environment(tmp_path, monkeypatch):
@@ -101,4 +106,20 @@ def test_a_wall_clock_bomb_that_gets_past_the_in_process_accounting_is_still_con
     started = time.monotonic()
     with pytest.raises(ScriptError) as info:
         record_runner.record_script(GOOD, timeout=2.0, worker=worker)
-    assert time.monotonic() - started < 15 and record_runner.LIMIT_MESSAGE in str(info.value)
+    assert time.monotonic() - started < 15 and "time limit" in str(info.value)
+
+
+def test_a_valid_recording_whose_json_escaping_is_large_is_not_refused():
+    """4,999 recorded calls with a 380-number argument (reviewer probe m03): valid, and bigger once escaped."""
+    source = "def build():@@    r = [0] * 380@@    for i in range(4999):@@        primitive('cube', loc=r)@@".replace("@@", chr(10))
+    assert len(record_runner.record_script(source).ops) == 4999
+
+
+def test_the_memory_cap_holds_on_every_start_not_just_most(tmp_path):
+    """The child is assigned to its Job Object just after it starts; it must never get to allocate first."""
+    worker = _worker(tmp_path, "blocks = []\nfor _ in range(64):\n    blocks.append(bytearray(64 * 1024 * 1024))\n"
+                               "open(result, 'w').write(json.dumps({'ok': False, 'line': 1, 'message': 'SURVIVED'}))\n")
+    for _ in range(10):
+        with pytest.raises(ScriptError) as info:
+            record_runner.record_script(GOOD, timeout=30, memory_mb=256, worker=worker)
+        assert "memory limit" in str(info.value), str(info.value)

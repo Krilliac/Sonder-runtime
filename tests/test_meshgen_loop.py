@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import threading
 
-from sonder_runtime.application.meshgen.loop import MeshRequest, run
+from sonder_runtime.application.meshgen.loop import MeshRequest, in_process_recorder, run
 from sonder_runtime.domain.meshgen.dsl.manifest import build_manifest
 
 GOOD_CODE = "def build():\n    primitive('cube')\n"
@@ -49,7 +49,7 @@ class Rig:
     def go(self, **kw):
         request = MeshRequest(brief="a cart", **kw)
         return run(request, generate=self.generate, build=self.build, critique=self.critique,
-                   map_parallel=serial)
+                   map_parallel=serial, record=in_process_recorder(request.manifest))
 
 
 def ok_build(tris=100, within=True, sheet="/x/sheet.png"):
@@ -176,7 +176,8 @@ def test_generate_failure_retries_the_round_with_the_same_prompt():
 
     rig = Rig(critiques=[verdict(9)])
     request = MeshRequest(brief="a cart", candidates=1, rounds=3)
-    report = run(request, generate=flaky, build=rig.build, critique=rig.critique, map_parallel=serial)
+    report = run(request, generate=flaky, build=rig.build, critique=rig.critique, map_parallel=serial,
+                 record=in_process_recorder(request.manifest))
     attempts = report["candidates"][0]["attempts"]
     assert [a["status"] for a in attempts] == ["generate_error", "accepted"]
     assert "TimeoutError" in attempts[0]["error"]
@@ -227,7 +228,8 @@ def test_repeated_build_error_escalates_with_a_note_and_switches_tier():
     rig = Rig(builds=[err, err, ok_build()], critiques=[verdict(9)])
     request = MeshRequest(brief="a cart", candidates=1, rounds=3, tiers=("code", "general"),
                           kit_module="propkit", kit_names=frozenset({"reset_scene"}))
-    report = run(request, generate=rig.generate, build=rig.build, critique=rig.critique, map_parallel=serial)
+    report = run(request, generate=rig.generate, build=rig.build, critique=rig.critique, map_parallel=serial,
+                 record=in_process_recorder(request.manifest))
     attempts = report["candidates"][0]["attempts"]
     assert [a["status"] for a in attempts] == ["build_error", "build_error", "accepted"]
     assert not attempts[0].get("stuck") and attempts[1]["stuck"] is True

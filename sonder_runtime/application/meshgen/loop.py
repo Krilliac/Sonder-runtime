@@ -8,8 +8,9 @@ All I/O is injected, so the loop is deterministic under test:
   ``error``, ``files`` with an optional ``sheet``; it may raise, which is treated as a failed build
 * ``critique(sheet_path) -> str | None``  vision reply; ``None`` = unavailable
 * ``map_parallel(fn, items) -> list``    ordered parallel map
-* ``record(code, seed) -> Recording``    records a script (raises ``ScriptError``); the default records in
-  process, production wires a resource-limited subprocess.  Any other exception ends that attempt.
+* ``record(code, seed) -> Recording``    records a script (raises ``ScriptError``).  Required: production passes
+  the resource-limited subprocess recorder; unit tests opt in to :func:`in_process_recorder`, which has no
+  hard wall-clock or memory limit.  Any other exception ends that attempt.
 
 The model's script is never executed: ``compile_script`` records it into an op list (a
 ``ScriptError`` is the failure the model sees, with a line number) and only that data is built.
@@ -126,11 +127,16 @@ def _stuck_note(attempt) -> str:
             "parts instead of adjusting small ones." % attempt["tris"])
 
 
-def run(request: MeshRequest, *, generate, build, critique, map_parallel, record=None) -> dict:
+def in_process_recorder(manifest):
+    """A ``record`` callable that runs the recorder in this process.  For unit tests only: it has no hard
+    wall-clock kill and no memory cap, so production must pass the subprocess recorder instead."""
+    def record(code, seed):
+        return compile_script(code, manifest, seed=seed)
+    return record
+
+
+def run(request: MeshRequest, *, generate, build, critique, map_parallel, record) -> dict:
     started = time.monotonic()
-    if record is None:
-        def record(code, seed):
-            return compile_script(code, request.manifest, seed=seed)
     tiers = tuple(request.tiers) or ("general",)
     base = generation_prompt(
         request.brief, max_tris=request.max_tris, height_m=request.height_m,

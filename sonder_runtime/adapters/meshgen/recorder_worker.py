@@ -3,8 +3,10 @@
 Stdlib only; it never imports ``sonder_runtime``.  It loads the pure ``domain/meshgen/dsl`` package by file
 path, records the script named in the job file and writes one JSON result file:
 
-* ``{"ok": true, "text": <ops.json text>}``
+* ``{"ok": true}`` and the ops.json text in its own file ``ops.json`` next to the result (so the result
+  stays small and JSON escaping cannot inflate it)
 * ``{"ok": false, "line": N, "message": "..."}`` for a ``ScriptError``
+* ``{"ok": false, "memory": true}`` when the process ran out of memory
 
 The parent (``record_runner``) enforces a hard wall-clock kill and a memory ceiling around this process, so a
 script that makes a single builtin do too much work cannot stall or exhaust the server.
@@ -35,15 +37,21 @@ def main(argv):
     job_path, result_path = argv[1], argv[2]
     with open(job_path, "r", encoding="utf-8") as handle:
         job = json.load(handle)
-    recorder, manifest_module, errors = _load_dsl()
-    manifest = None
-    if job.get("kit_source") is not None and job.get("kit_module"):
-        manifest = manifest_module.build_manifest(job["kit_source"], job["kit_module"])
     try:
-        recording = recorder.compile_script(job["source"], manifest, seed=int(job.get("seed") or 0))
-        result = {"ok": True, "text": recording.text}
-    except errors.ScriptError as exc:
-        result = {"ok": False, "line": int(exc.line), "message": str(exc.message)[:1000]}
+        recorder, manifest_module, errors = _load_dsl()
+        manifest = None
+        if job.get("kit_source") is not None and job.get("kit_module"):
+            manifest = manifest_module.build_manifest(job["kit_source"], job["kit_module"])
+        try:
+            recording = recorder.compile_script(job["source"], manifest, seed=int(job.get("seed") or 0))
+            with open(os.path.join(os.path.dirname(os.path.abspath(result_path)), "ops.json"), "w",
+                      encoding="utf-8") as handle:
+                handle.write(recording.text)
+            result = {"ok": True}
+        except errors.ScriptError as exc:
+            result = {"ok": False, "line": int(exc.line), "message": str(exc.message)[:1000]}
+    except MemoryError:
+        result = {"ok": False, "memory": True}
     with open(result_path, "w", encoding="utf-8") as handle:
         json.dump(result, handle)
     return 0

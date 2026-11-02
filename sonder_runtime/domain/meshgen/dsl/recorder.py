@@ -43,7 +43,6 @@ _RECURSION_MESSAGE = ("the script is nested too deeply (functions may call each 
                       "expressions %d levels)" % (MAX_CALL_DEPTH, MAX_EXPR_DEPTH))
 MAX_PRINT_LINES = opschema.MAX_LOG_LINES
 MAX_PRINT_CHARS = opschema.MAX_LOG_CHARS
-_TIME_CHECK_EVERY = 10_000
 
 _HINTS = {
     "Try": "errors cannot be caught; check values before using them",
@@ -193,14 +192,14 @@ class _Interp:
         return ScriptError(line, message)
 
     def too_much(self):
-        return self.err("the script did too much work (limits: %d steps, %d seconds); use fewer or smaller loops"
-                        % (MAX_STEPS, int(MAX_SECONDS)))
+        return self.err("the script did too much work (limits: %d steps, %d work units, %d seconds); use fewer or "
+                        "smaller loops" % (MAX_STEPS, MAX_WORK, int(MAX_SECONDS)))
 
     def tick(self, node):
         self.steps += 1
         if self.steps > MAX_STEPS:
             raise self.too_much()
-        if self.steps % _TIME_CHECK_EVERY == 0 and time.monotonic() > self.deadline:
+        if time.monotonic() > self.deadline:
             raise self.too_much()
         line = _lineno(node)
         if line:
@@ -213,6 +212,13 @@ class _Interp:
                            % (MAX_CONTAINER, MAX_TOTAL_ELEMENTS))
         self.work(count)
 
+    def grow(self, receiver, extra):
+        """Charge ``extra`` new elements for a list that is being extended in place and keep it under the cap."""
+        if len(receiver) + extra > MAX_CONTAINER:
+            raise self.err("the script built containers that are too large (limit: %d elements each, %d in total)"
+                           % (MAX_CONTAINER, MAX_TOTAL_ELEMENTS))
+        self.charge(extra)
+
     def charge_text(self, count):
         self.chars += count
         if count > MAX_STR or self.chars > MAX_TOTAL_CHARS:
@@ -224,7 +230,7 @@ class _Interp:
         self.work_done += units
         if self.work_done > MAX_WORK:
             raise self.too_much()
-        if units >= 4096 and time.monotonic() > self.deadline:
+        if time.monotonic() > self.deadline:
             raise self.too_much()
 
     def weight(self, value):
@@ -336,6 +342,7 @@ class _Interp:
     def encode(self, value, depth=1):
         """A domain value as JSON-grammar data (handles become ``$ref``)."""
         self.leaves += 1
+        self.work(1)
         if self.leaves > opschema.MAX_LEAVES:
             raise self.err("the recorded calls hold more than %d values" % opschema.MAX_LEAVES)
         if value is None or isinstance(value, bool):
@@ -635,6 +642,7 @@ class _Interp:
 
     def ev_joined(self, node):
         parts = []
+        total = 0
         for item in node.values:
             if isinstance(item, ast.Constant):
                 parts.append(item.value)
@@ -642,6 +650,10 @@ class _Interp:
                 parts.append(self.format_value(item))
             else:
                 raise self.err("unsupported f-string part", node)
+            total += len(parts[-1])
+            if total > MAX_STR:
+                self.charge_text(total)  # raises the strings-too-long error before anything is joined
+            self.work((len(parts[-1]) >> 6) + 1)
         text = "".join(parts)
         self.charge_text(len(text))
         return text
@@ -662,9 +674,11 @@ class _Interp:
         if not (value is None or isinstance(value, (int, float, str))) or not _safe_spec(spec):
             raise self.err("unsupported f-string format %r; use simple specs like .2f, 03d or >8" % spec[:20], node)
         try:
-            return format(value, spec)
+            text = format(value, spec)
         except (ValueError, TypeError, OverflowError) as exc:
             raise self.err("%s: %s" % (exc.__class__.__name__, str(exc)[:80]), node) from None
+        self.charge_text(len(text))
+        return text
 
     def show(self, value, limit=MAX_STR):
         """Text for print()/f-strings: plain repr for scalars, ``<result of op>`` for handles.
@@ -692,17 +706,23 @@ class _Interp:
                     if position:
                         put(", ")
                     walk(child, depth + 1, False)
+                if isinstance(item, tuple) and len(item) == 1:
+                    put(",")
                 put("]" if isinstance(item, list) else ")")
             elif isinstance(item, dict):
                 if depth > 8:
                     put("...")
                     return
                 put("{")
-                for position, (key, child) in enumerate(list(item.items())[:200]):
+                position = 0
+                for key, child in item.items():
+                    if position >= 200:
+                        break
                     if position:
                         put(", ")
                     put("%r: " % key[:limit + 1])
                     walk(child, depth + 1, False)
+                    position += 1
                 put("}")
             else:
                 put(repr(item))
@@ -712,7 +732,7 @@ class _Interp:
             text = "".join(out)
         except _Full:
             text = "".join(out)[:limit]
-        self.work(len(out) + (len(text) >> 6))
+        self.work(2 * len(out) + (len(text) >> 6))
         return text
 
     def ev_comp(self, node):
@@ -817,6 +837,8 @@ class _Interp:
         if attr == "seed":
             if isinstance(args[0], (list, tuple)):
                 raise self.err("random.seed takes one number or string", node)
+            if isinstance(args[0], str):
+                self.work((len(args[0]) >> 4) + 1)
             self.rng.seed(args[0])
             return None
         sequence = args[0]
@@ -1023,12 +1045,15 @@ class _Interp:
             found, current = self.lookup(node.target.id)
             if not found:
                 raise self.err("NameError: name '%s' is not defined" % node.target.id[:60], node)
-            combined = self.binop(node.op, current, self.ev(node.value), node)
-            if isinstance(node.op, ast.Add) and isinstance(current, list) and isinstance(combined, list):
-                self.check_store(current, combined, node)
-                current[:] = combined  # lists are extended in place, as in Python: other names see it
+            addend = self.ev(node.value)
+            if isinstance(node.op, ast.Add) and isinstance(current, list) and isinstance(addend, list):
+                items = list(addend)  # a copy, so `a += a` is safe
+                self.grow(current, len(items))
+                for item in items:
+                    self.check_store(current, item, node)
+                current.extend(items)  # extended in place, as in Python: other names see it
                 return
-            self.assign(node.target, combined)
+            self.assign(node.target, self.binop(node.op, current, addend, node))
             return
         if isinstance(node.target, ast.Subscript):
             container = self.ev(node.target.value)
@@ -1259,6 +1284,8 @@ def run_builtin(interp, name, args, kwargs, node):
         if base is not None:
             if not isinstance(value, str) or not isinstance(base, int):
                 raise interp.err("int(text, base) needs a string and an integer base", node)
+            if len(value) > 40:
+                raise interp.err("int() of a very long string", node)
             return interp.checked(int(value, base))
         if isinstance(value, str) and len(value) > 40:
             raise interp.err("int() of a very long string", node)
@@ -1269,6 +1296,8 @@ def run_builtin(interp, name, args, kwargs, node):
         need(1, 1)
         if not isinstance(args[0], (bool, int, float, str)):
             raise interp.err("float() needs a number or string", node)
+        if isinstance(args[0], str):
+            interp.work(len(args[0]) >> 6)
         return interp.checked(float(args[0]))
     if name == "str":
         need(1, 1)
@@ -1368,6 +1397,7 @@ def method_call(interp, receiver, name, args, kwargs, node):
             need(0, 1)
             if args and not isinstance(args[0], str):
                 raise interp.err("strip() takes a string of characters", node)
+            interp.work(sum(len(a) for a in args) >> 6)
             return receiver.strip(*args)
         if name == "join":
             need(1, 1)
@@ -1382,6 +1412,7 @@ def method_call(interp, receiver, name, args, kwargs, node):
             old, new = args[0], args[1]
             if not (isinstance(old, str) and isinstance(new, str)):
                 raise interp.err("replace() needs strings", node)
+            interp.work(((len(old) + len(new)) >> 6) + (len(receiver) >> 6))
             count = receiver.count(old) if old else len(receiver) + 1
             if len(receiver) + count * max(len(new) - len(old), 0) > MAX_STR:
                 raise interp.err("the replaced string would be too long", node)
@@ -1391,11 +1422,15 @@ def method_call(interp, receiver, name, args, kwargs, node):
             need(1, 1)
             if not (isinstance(args[0], str) or (isinstance(args[0], tuple) and all(isinstance(a, str) for a in args[0]))):
                 raise interp.err("%s() needs a string" % name, node)
+            needles = args[0] if isinstance(args[0], tuple) else (args[0],)
+            for needle in needles:  # one comparison per tuple element, each as long as the shorter string
+                interp.work((min(len(needle), len(receiver)) >> 6) + 1)
             return receiver.startswith(args[0]) if name == "startswith" else receiver.endswith(args[0])
         if name == "split":
             need(0, 2)
             if args and (not isinstance(args[0], str) or not args[0]):
                 raise interp.err("split() separator must be a non-empty string", node)
+            interp.work(sum(len(a) for a in args if isinstance(a, str)) >> 6)
             parts = receiver.split(*args)
             interp.charge(len(parts))
             return parts
@@ -1403,30 +1438,37 @@ def method_call(interp, receiver, name, args, kwargs, node):
             need(1, 1)
             if not isinstance(args[0], int) or isinstance(args[0], bool) or not 0 <= args[0] <= 1000:
                 raise interp.err("zfill() width must be between 0 and 1000", node)
-            return receiver.zfill(args[0])
+            text = receiver.zfill(args[0])
+            interp.charge_text(len(text))
+            return text
     elif isinstance(receiver, list):
         if name == "append":
             need(1, 1)
-            interp.charge(1)
+            interp.grow(receiver, 1)
             interp.check_store(receiver, args[0], node)
             receiver.append(args[0])
             return None
         if name == "extend":
             need(1, 1)
             items = interp.iterable(args[0], node)
-            interp.charge(len(items) + len(receiver))
+            interp.grow(receiver, len(items))
             for item in items:
                 interp.check_store(receiver, item, node)
             receiver.extend(items)
             return None
         if name == "pop":
             need(0, 1)
-            return receiver.pop(*args)
+            interp.work((len(receiver) >> 4) + 1)  # pop(0) shifts the tail
+            try:
+                return receiver.pop(*args)
+            except (IndexError, TypeError) as exc:
+                raise interp.err("%s: pop index out of range or not an integer" % exc.__class__.__name__, node) from None
         if name == "insert":
             need(2, 2)
             if not isinstance(args[0], int) or isinstance(args[0], bool):
                 raise interp.err("insert() index must be an integer", node)
-            interp.charge(1)
+            interp.grow(receiver, 1)
+            interp.work((len(receiver) >> 4) + 1)  # an insertion shifts the tail
             interp.check_store(receiver, args[1], node)
             receiver.insert(args[0], args[1])
             return None
@@ -1450,6 +1492,7 @@ def method_call(interp, receiver, name, args, kwargs, node):
             need(1, 2)
             if not isinstance(args[0], str):
                 raise interp.err("dict keys must be strings", node)
+            interp.work(len(args[0]) >> 6)
             return receiver.get(args[0], args[1] if n == 2 else None)
         if name in ("keys", "values", "items"):
             need(0, 0)

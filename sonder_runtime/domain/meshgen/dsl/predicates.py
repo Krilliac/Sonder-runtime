@@ -9,15 +9,21 @@ small recursive evaluator.
 from __future__ import annotations
 
 import ast
+import math
 
 from .errors import ScriptError
-from .opschema import MAX_PRED_DEPTH, MAX_PRED_NODES, PRED_BUILTINS, PRED_MATH, OpsError, validate_pred
+from .opschema import (MAX_INT, MAX_PRED_DEPTH, MAX_PRED_NODES, MAX_PRED_POWER, PRED_BUILTINS, PRED_MATH,
+                       OpsError, validate_pred)
 
 _BINOPS = {ast.Add: "+", ast.Sub: "-", ast.Mult: "*", ast.Div: "/", ast.FloorDiv: "//", ast.Mod: "%", ast.Pow: "**"}
 _CMPOPS = {ast.Lt: "<", ast.LtE: "<=", ast.Gt: ">", ast.GtE: ">=", ast.Eq: "==", ast.NotEq: "!="}
 _AXES = {"x": 0, "y": 1, "z": 2}
 _VECTORS = ("center", "normal")
 _SCALARS = ("index", "area", "material_index")
+
+
+def _is_number(value):
+    return isinstance(value, (int, float))
 
 
 def _lineno(node, default):
@@ -72,6 +78,24 @@ def compile_predicate(node, capture, math_aliases=("math",)):
                 raise err(sub, "index p.%s with 0, 1 or 2" % base.attr)
         return None
 
+    def fold(sub, left, right):
+        """Evaluate arithmetic on two literals now, so a constant bomb such as (9**64)**64 is refused here."""
+        op = sub.op.__class__
+        try:
+            if op is ast.Pow and (not isinstance(right, (int, float)) or abs(right) > MAX_PRED_POWER):
+                raise OverflowError
+            value = {ast.Add: lambda: left + right, ast.Sub: lambda: left - right, ast.Mult: lambda: left * right,
+                     ast.Div: lambda: left / right, ast.FloorDiv: lambda: left // right,
+                     ast.Mod: lambda: left % right, ast.Pow: lambda: left ** right}[op]()
+        except ZeroDivisionError:
+            raise err(sub, "division by zero in a constant part of the predicate") from None
+        except (OverflowError, ValueError):
+            raise err(sub, "a constant part of the predicate is too large to compute") from None
+        if isinstance(value, complex) or (isinstance(value, float) and not math.isfinite(value)) or (
+                isinstance(value, int) and not -MAX_INT < value < MAX_INT):
+            raise err(sub, "a constant part of the predicate is out of range (whole numbers must stay below 2**63)")
+        return value
+
     def walk(sub, depth):
         nodes[0] += 1
         if nodes[0] > MAX_PRED_NODES or depth > MAX_PRED_DEPTH:
@@ -92,12 +116,16 @@ def compile_predicate(node, capture, math_aliases=("math",)):
                 return value
             raise err(sub, "%r is captured by value in a predicate and must be a number or bool" % sub.id[:40])
         if isinstance(sub, ast.BinOp) and sub.op.__class__ in _BINOPS:
-            return [_BINOPS[sub.op.__class__], walk(sub.left, depth + 1), walk(sub.right, depth + 1)]
+            left, right = walk(sub.left, depth + 1), walk(sub.right, depth + 1)
+            if _is_number(left) and _is_number(right):
+                return fold(sub, left, right)  # literal-only arithmetic is computed here, bounded
+            return [_BINOPS[sub.op.__class__], left, right]
         if isinstance(sub, ast.UnaryOp):
-            if isinstance(sub.op, ast.USub):
-                return ["neg", walk(sub.operand, depth + 1)]
-            if isinstance(sub.op, ast.UAdd):
-                return ["pos", walk(sub.operand, depth + 1)]
+            if isinstance(sub.op, (ast.USub, ast.UAdd)):
+                inner = walk(sub.operand, depth + 1)
+                if _is_number(inner):
+                    return -inner if isinstance(sub.op, ast.USub) else +inner
+                return ["neg" if isinstance(sub.op, ast.USub) else "pos", inner]
             if isinstance(sub.op, ast.Not):
                 return ["not", walk(sub.operand, depth + 1)]
         if isinstance(sub, ast.BoolOp):
