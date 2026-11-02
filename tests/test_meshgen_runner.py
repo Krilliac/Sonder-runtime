@@ -258,3 +258,32 @@ def test_run_limited_caps_memory_where_the_platform_can(tmp_path):
     code, out, err = runner.run_limited([sys.executable, "-c", grab], cwd=str(tmp_path),
                                          env=dict(runner.os.environ), timeout=60, memory_mb=512)
     assert b"allocated" not in out and code != 0
+
+
+# --- output paths are never redacted or truncated (a long slug is a legitimate directory name) ---
+
+def _files_result(path):
+    return {"ok": True, "tris": 1, "files": {"model": path}}
+
+
+def test_long_slug_paths_survive_sanitising_and_confinement(tmp_path):
+    slug = "a-very-long-asset-slug-ab"  # 25 characters, as produced from a long asset name
+    assert len(slug) >= 24
+    folder = tmp_path / ("%s-20261101T120000Z" % slug)
+    folder.mkdir()
+    long_segment = "x" * 60
+    (folder / long_segment).mkdir()
+    model = folder / long_segment / "model.glb"
+    model.write_text("g")
+    for target in (folder / "model.glb", model):
+        target.write_text("g")
+        cleaned = runner.sanitize_result(_files_result(str(target)))
+        assert cleaned["files"]["model"] == str(target)
+        assert runner.confine_files(cleaned, folder) == cleaned
+
+
+def test_over_long_or_nul_paths_are_refused_with_the_key_named(tmp_path):
+    for bad in ("p" * (runner.MAX_PATH_CHARS + 1), str(tmp_path / "m.glb") + chr(0), 12345):
+        cleaned = runner.sanitize_result(_files_result(bad))
+        refused = runner.confine_files(cleaned, tmp_path)
+        assert refused["ok"] is False and "model" in refused["error"]

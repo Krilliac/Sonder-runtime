@@ -185,6 +185,7 @@ class _Interp:
         self.work_done = 0
         self.deadline = time.monotonic() + MAX_SECONDS
         self.json_size = 0
+        self.consumed = {}  # handle id -> (how, line, op) for results that join or delete destroyed
         self.probe = None
         self.core_names = frozenset(opschema.CORE_SIGS)
 
@@ -366,6 +367,7 @@ class _Interp:
             self.add_size(_json_text_size(value) + 1)
             return value
         if isinstance(value, Handle):
+            self.check_alive(value)
             self.add_size(18)
             return {"$ref": value.id}
         if isinstance(value, Pred):
@@ -393,8 +395,40 @@ class _Interp:
         ident = len(self.ops) + 1
         entry = {"id": ident, "line": self.line, "op": op, "args": [self.encode(a) for a in args],
                  "kwargs": {key: self.encode(val) for key, val in kwargs.items()}}
+        if op.startswith("core."):
+            try:
+                opschema.check_core_call(op[5:], entry["args"], entry["kwargs"])
+            except opschema.OpsError as exc:
+                raise self.err("%s: %s" % (origin, exc)) from None
         self.ops.append(entry)
+        self.consume(op, args, kwargs, ident)
         return Handle(ident, origin)
+
+    def check_alive(self, handle):
+        """A result that join merged away or delete removed cannot be used again."""
+        gone = self.consumed.get(handle.id)
+        if gone is not None:
+            how, line, into = gone
+            made = self.ops[handle.id - 1]
+            if how == "deleted":
+                raise self.err("the result of %s (line %d) was deleted at line %d; it cannot be used afterwards"
+                               % (made["op"], made["line"], line))
+            raise self.err("the result of %s (line %d) was joined into the result of %s at line %d and no longer "
+                           "exists; use the join result instead" % (made["op"], made["line"], into, line))
+
+    def consume(self, op, args, kwargs, ident):
+        """Remember which results this call destroyed: all but the first of a join's list, or the deleted one."""
+        if op == "core.delete":
+            for value in list(args) + list(kwargs.values()):
+                if isinstance(value, Handle):
+                    self.consumed[value.id] = ("deleted", self.line, op)
+        elif op == "core.join" or op == "kit.join":
+            for value in list(args) + list(kwargs.values()):
+                if isinstance(value, (list, tuple)):
+                    handles = [item for item in value if isinstance(item, Handle)]
+                    for item in handles[1:]:
+                        self.consumed[item.id] = ("joined", self.line, op)
+                    break
 
     # ------------------------------------------------------------------ expression dispatch
     def ev(self, node):

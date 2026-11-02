@@ -301,3 +301,20 @@ def test_a_recorder_that_hits_its_hard_limit_is_a_script_error_for_the_model(tmp
     payload, runner, _ = call(tmp_path, candidates=1, rounds=1)
     assert runner.calls == []
     assert payload["candidates"][0]["attempts"][0]["status"] == "script_error"
+
+
+class OverBudgetRunner(FakeRunner):
+    def build_candidate(self, blender, ops_path, out_dir, **kw):
+        return dict(super().build_candidate(blender, ops_path, out_dir, **kw), tris=1076, within_budget=False)
+
+
+def test_an_over_budget_winner_is_reported_with_a_warning_and_within_budget_false(tmp_path):
+    payload, _, rt = call(tmp_path, runner=OverBudgetRunner(), candidates=1, rounds=2, max_tris=800)
+    assert payload["ok"] is True and payload["within_budget"] is False
+    assert payload["warning"] == "winner is 1076/800 tris and was never critiqued"
+    assert "no build was within the 800 triangle budget" in payload["vision"] and rt.vision_calls == []
+
+
+def test_an_in_budget_winner_reports_within_budget_true_and_no_warning(tmp_path):
+    payload, _, _ = call(tmp_path, candidates=1, rounds=1)
+    assert payload["within_budget"] is True and "warning" not in payload

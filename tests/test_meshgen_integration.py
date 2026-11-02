@@ -192,7 +192,7 @@ def test_an_empty_scene_is_an_error(tmp_path):
 def test_replay_caps_are_enforced_even_for_hand_crafted_ops(tmp_path):
     big = _doc(("core.primitive", ["uv_sphere"], {"segments": 100000, "rings": 100000}))
     result = _run(tmp_path, big, render=False)
-    assert result["ok"] is False and "line 1" in result["error"], result
+    assert result["ok"] is False and "op 1" in result["error"], result
     unknown_prop = _doc(("core.primitive", ["cube"], {}), ("core.modifier", [{"$ref": 1}, "BEVEL"], {"filepath": "x"}))
     result = _run(tmp_path, unknown_prop, render=False)
     assert result["ok"] is False and "line 2" in result["error"], result
@@ -320,6 +320,26 @@ def test_a_degenerate_face_is_refused_before_a_modifier_can_run_on_it(tmp_path):
         ops = _doc(("core.mesh", ["Tri", triangle, [face]], {}),
                    ("core.modifier", [{"$ref": 1}, "BEVEL"], {}))
         result = _run(tmp_path, ops, render=False)
-        assert result["ok"] is False and "line 1" in result["error"] and "repeat" in result["error"], result
+        assert result["ok"] is False and "op 1" in result["error"] and "repeat" in result["error"], result
     good = _doc(("core.mesh", ["Tri", triangle, [[0, 1, 2]]], {}), ("core.modifier", [{"$ref": 1}, "BEVEL"], {}))
     assert _run(tmp_path, good, render=False)["ok"] is True
+
+
+def test_a_long_asset_name_builds_and_its_paths_are_not_redacted(tmp_path):
+    recording, allowed = _record(CUBE)
+    ops = tmp_path / "ops.json"
+    ops.write_text(recording.text, encoding="utf-8")
+    name = "weathered-oak-barrel-with-iron-hoops-and-a-lid-xyz"
+    result = blender_runner.build_candidate(
+        BLENDER, str(ops), str(tmp_path / "out"), name=name, kit_allowed=allowed, max_tris=100, height_m=1.0,
+        timeout=240, render=False)
+    assert result["ok"] is True, result
+    model = Path(result["files"]["model"])
+    assert model.is_file() and len(model.stem) >= 40
+
+
+def test_replay_refuses_a_joined_away_object_with_a_clear_message(tmp_path):
+    doc = _doc(("core.primitive", ["cube"], {}), ("core.primitive", ["cube"], {"loc": [2, 0, 0]}),
+               ("core.join", [[{"$ref": 1}, {"$ref": 2}], "J"], {}), ("core.paint", [{"$ref": 2}, "#ffffff"], {}))
+    result = _run(tmp_path, doc, render=False)
+    assert result["ok"] is False and "joined" in result["error"] and "StructRNA" not in result["error"], result

@@ -243,12 +243,14 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
     if vision_state["dead"]:
         report["vision"] = "unavailable: %s" % vision_state["dead"]
     payload = {
-        "ok": bool(report.get("ok")), "name": slug, "output_dir": str(root), "blender": blender,
+        "ok": bool(report.get("ok")), "within_budget": bool(report.get("within_budget")), "name": slug, "output_dir": str(root), "blender": blender,
         "vision": report["vision"], "elapsed_s": report["elapsed_s"], **sandbox_info,
         "winner": report.get("winner"),
         "candidates": [_candidate_summary(item) for item in report["candidates"]],
     }
     winner = report.get("winner")
+    if report.get("warning"):
+        payload["warning"] = report["warning"]
     if winner:
         final = {}
         for key, suffix in (("model", ".%s" % export), ("sheet", "_sheet.png"), ("view", "_view.png"),

@@ -80,25 +80,25 @@ def test_object_values_have_exactly_one_known_key():
 
 def test_numbers_and_strings_are_bounded():
     for number in (float("nan"), float("inf"), -float("inf"), 2 ** 63, -(2 ** 63)):
-        bad(doc(("core.primitive", ["cube"], {"size": number})))
-    bad(doc(("core.primitive", ["x" * 300], {})), "string")
-    validate_ops(doc(("core.primitive", ["x" * opschema.MAX_STRING], {})), KIT)
-    bad(doc(("core.primitive", [object()], {})), "unsupported")
+        bad(doc(("kit.box", ["cube"], {"size": number})))
+    bad(doc(("kit.box", ["x" * 300], {})), "string")
+    validate_ops(doc(("kit.box", ["x" * opschema.MAX_STRING], {})), KIT)
+    bad(doc(("kit.box", [object()], {})), "unsupported")
 
 
 def test_nesting_depth_limit():
     ok = 1
     for _ in range(opschema.MAX_NESTING):
         ok = [ok]
-    validate_ops(doc(("core.primitive", [ok], {})), KIT)
+    validate_ops(doc(("kit.box", [ok], {})), KIT)
     deeper = [ok]
-    bad(doc(("core.primitive", [deeper], {})), "nested")
+    bad(doc(("kit.box", [deeper], {})), "nested")
 
 
 def test_leaf_count_limit():
     chunk = [0] * 1000
     args = [chunk] * (opschema.MAX_LEAVES // 1000 + 1)
-    bad(doc(("core.primitive", [args], {})), "more than")
+    bad(doc(("kit.box", [args], {})), "more than")
 
 
 def test_op_count_and_log_limits():
@@ -150,3 +150,45 @@ def test_core_signature_table_matches_the_digest():
     text = core_api_digest()
     for name in opschema.CORE_SIGS:
         assert "%s(" % name in text
+
+
+# --- core argument kinds: the host validator refuses what replay would refuse ---
+
+BAD_CORE_ARGS = [
+    ("primitive", ["plane"], {"size": [0.8, 0.4]}),
+    ("primitive", ["cube"], {"size": "big"}),
+    ("primitive", ["cube"], {"size": 0}),
+    ("primitive", ["uv_sphere"], {"segments": 8.5}),
+    ("primitive", ["uv_sphere"], {"segments": 2}),
+    ("primitive", ["blob"], {}),
+    ("primitive", ["cube"], {"rot": 90}),
+    ("primitive", ["cube"], {"loc": [1, 2]}),
+    ("primitive", ["cube"], {"scale": [1, 2, 3, 4]}),
+    ("mesh", ["M", [[0, 0], [1, 0], [0, 1]], [[0, 1, 2]]], {}),
+    ("mesh", ["M", [[0, 0, 0], [1, 0, 0], [0, 1, 0]], [[0, 1]]], {}),
+    ("mesh", ["M", [[0, 0, 0], [1, 0, 0], [0, 1, 0]], [[0, 1, 5]]], {}),
+    ("mesh", ["M", [[0, 0, 0], [1, 0, 0], [0, 1, 0]], [[0, 0, 1]]], {}),
+    ("shade_smooth", [{"$ref": 1}, "yes"], {}),
+    ("paint", [{"$ref": 1}, 5], {}),
+]
+
+
+@pytest.mark.parametrize("op,args,kwargs", BAD_CORE_ARGS)
+def test_validate_ops_refuses_badly_typed_core_arguments(op, args, kwargs):
+    prefix = [] if op in ("primitive", "mesh") else [("core.primitive", ["cube"], {})]
+    bad(doc(*prefix, ("core." + op, args, kwargs)))
+
+
+def test_check_core_arg_accepts_in_range_values_and_names_the_parameter():
+    opschema.check_core_arg("primitive", "size", 1.5)
+    opschema.check_core_arg("primitive", "scale", [1, 2, 3])
+    opschema.check_core_arg("primitive", "scale", 2)
+    with pytest.raises(OpsError) as info:
+        opschema.check_core_arg("primitive", "segments", 8.5)
+    assert "segments" in str(info.value)
+
+
+def test_every_core_sig_parameter_has_a_kind():
+    for op, (names, _required, extra) in opschema.CORE_SIGS.items():
+        for name in names:
+            assert name in opschema.CORE_PARAM_KINDS[op] or (extra and name == "type"), (op, name)

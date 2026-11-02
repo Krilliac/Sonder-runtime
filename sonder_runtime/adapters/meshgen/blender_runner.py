@@ -181,6 +181,7 @@ MAX_MODEL_BYTES = 256 * 1024 * 1024     # a copied-back GLB/FBX
 MAX_IMAGE_BYTES = 64 * 1024 * 1024      # a copied-back render
 MAX_TEXT_CHARS = 2000                   # any text that can reach a prompt or a payload
 MAX_TAIL_LINE_CHARS = 300
+MAX_PATH_CHARS = 1024                  # a file path in a result; longer is refused, never shortened
 _ALLOWED_RESULT_KEYS = frozenset({"ok", "error", "tris", "within_budget", "size", "files", "parts",
                                   "render_error", "tail", "traceback"})
 _SECRET_PATTERNS = (
@@ -205,6 +206,14 @@ def bound_text(value, limit: int = MAX_TEXT_CHARS) -> str:
     return text
 
 
+def _keep_path(value) -> str:
+    """The path as written, or an empty string (which confine_files refuses) when it is not text, holds a NUL or
+    is longer than MAX_PATH_CHARS."""
+    if isinstance(value, str) and chr(0) not in value and len(value) <= MAX_PATH_CHARS:
+        return value
+    return ""
+
+
 def sanitize_result(result: dict) -> dict:
     """Keep only the keys the loop understands, with bounded, typed values.
 
@@ -226,8 +235,10 @@ def sanitize_result(result: dict) -> dict:
             seq = value if isinstance(value, list) else []
             clean[key] = [float(v) for v in seq[:3] if isinstance(v, (int, float)) and not isinstance(v, bool)]
         elif key == "files":
-            clean[key] = {str(k)[:20]: bound_text(v, 600)
-                          for k, v in (value.items() if isinstance(value, dict) else [])}
+            # a path is not prose: redacting long runs would corrupt it (a 40-character folder name is not a
+            # secret), and truncating it would point somewhere else.  Keep it whole or refuse it; confine_files
+            # then checks that it names a real file inside the output directory.
+            clean[key] = {str(k)[:20]: _keep_path(v) for k, v in (value.items() if isinstance(value, dict) else [])}
         elif key == "parts":
             parts = []
             for part in (value if isinstance(value, list) else [])[:8]:
@@ -264,10 +275,12 @@ def confine_files(result: dict, out_dir: Path) -> dict:
             inside = os.path.commonpath([root, real]) == root and real != root
         except ValueError:
             inside = False
+        shown = bound_text(str(value)[:200], 240) if value else "(missing, too long or not text)"
         if not inside:
-            return {"ok": False, "error": "result names a file outside the output directory: %s" % key}
+            return {"ok": False, "error": "result names a file outside the output directory: %s = %s (output "
+                                          "directory %s)" % (key, shown, str(out_dir)[:200])}
         if not os.path.isfile(real):
-            return {"ok": False, "error": "result names a file that does not exist: %s" % key}
+            return {"ok": False, "error": "result names a file that does not exist: %s = %s" % (key, shown)}
     return result
 
 

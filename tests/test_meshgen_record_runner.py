@@ -111,8 +111,8 @@ def test_a_wall_clock_bomb_that_gets_past_the_in_process_accounting_is_still_con
 
 
 def test_a_valid_recording_whose_json_escaping_is_large_is_not_refused():
-    """4,999 recorded calls with a 380-number argument (reviewer probe m03): valid, and bigger once escaped."""
-    source = "def build():@@    r = [0] * 380@@    for i in range(4999):@@        primitive('cube', loc=r)@@".replace("@@", chr(10))
+    """4,999 recorded calls with a 180-number argument (reviewer probe m03): valid, and bigger once escaped."""
+    source = "def build():@@    r = [(0, 0, 0)] * 60@@    for i in range(4999):@@        mesh('m', r, [(0, 1, 2)])@@".replace("@@", chr(10))
     assert len(record_runner.record_script(source).ops) == 4999
 
 

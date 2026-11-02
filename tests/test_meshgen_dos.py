@@ -190,7 +190,7 @@ def test_multiplying_by_zero_or_a_negative_count_walks_nothing():
 
 
 def test_a_list_of_small_tuples_can_be_repeated_to_the_element_limit():
-    compile_script(chr(10).join(["def build():", "    pts = [(0, 0, 0)] * 60000", "    mesh('m', [(0, 0, 0)] * 10, [])", ""]))
+    compile_script(chr(10).join(["def build():", "    pts = [(0, 0, 0)] * 60000", "    mesh('m', [(0, 0, 0)] * 10, [(0, 1, 2)])", ""]))
 
 
 def test_case_changes_and_strip_count_toward_the_string_budget():

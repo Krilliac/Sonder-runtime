@@ -72,7 +72,7 @@ def test_a_40_by_40_grid_with_a_40_entry_palette_lookup_per_cell_records():
         "            verts += [(i * 0.1, j * 0.1, 0.0)]",
         "            if 'k%d' % (j % 50) in PALETTE:",
         "                hits += 1",
-        "    mesh('terrain', verts, faces)",
+        "    mesh('terrain', verts, [(0, 1, 2)])",
         ""])
     assert compile_script(source).ops
 

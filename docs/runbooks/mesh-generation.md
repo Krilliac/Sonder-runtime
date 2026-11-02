@@ -66,6 +66,19 @@ modifiers, and literal counts such as subdivision `levels` are capped. The defau
 tokens. An over-budget result is repaired with the biggest parts named. The critic also flags blocky,
 low-effort results when the budget allowed more.
 
+An over-budget winner is not a success to trust: when every build exceeded `max_tris` no version was
+critiqued, so the report keeps `ok: true` (a model exists) but carries `within_budget: false`, a
+`warning` such as `winner is 1076/800 tris and was never critiqued`, and a `vision` line saying no
+build was within the budget. Raise `max_tris` or rerun.
+
+Core operation arguments are type- and range-checked when the script is recorded (`size` is ONE
+number, a box uses `scale=(x, y, z)`; `segments` is an integer 3..256; a mesh needs 3-number vertices
+and in-range, distinct face indices), so a bad argument is a `script_error` with the line, not a
+Blender failure. `join` keeps the first object and destroys the rest, and `delete` destroys its
+object: using such a handle afterwards is refused with the line of the join or delete. Output file
+paths are returned exactly as written (never redacted or shortened); a path longer than 1024
+characters or containing a NUL is refused.
+
 If a candidate repeats the same build error, or the same top critique issue with the same score and
 about the same triangle count, the next prompt says so explicitly (placed before the closing
 "Return ONLY ..." line) and, with more than one tier, the remaining rounds of that candidate move to

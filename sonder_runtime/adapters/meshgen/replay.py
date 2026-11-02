@@ -13,10 +13,16 @@ import math
 bpy = importlib.import_module("bpy")
 opschema = importlib.import_module("opschema")
 
-MAX_COORD = 100000.0
-MAX_VERTS = 200000
-MAX_FACES = 400000
-PRIMITIVES = ("cube", "uv_sphere", "ico_sphere", "cylinder", "cone", "torus", "plane", "circle", "grid")
+MAX_COORD = opschema.MAX_COORD
+MAX_VERTS = opschema.MAX_VERTS
+MAX_FACES = opschema.MAX_FACES
+PRIMITIVES = opschema.PRIMITIVES  # the same table the recorder and the harness validator use
+
+
+def _range(op, param):
+    """(low, high) of a core parameter, from the shared table."""
+    spec = opschema.CORE_PARAM_KINDS[op][param]
+    return spec[1], spec[2]
 # modifier type -> {property: (kind, low, high)}; kinds: float int angle(degrees) enum bool bools3 vec3 object
 MODIFIERS = {
     "BEVEL": {"width": ("float", 0.0, 10.0), "segments": ("int", 1, 16), "limit_method": ("enum",),
@@ -74,7 +80,13 @@ def _text(value, name, default=""):
 
 
 def _object(value, name):
-    if not isinstance(value, bpy.types.Object) or value.type != "MESH":
+    if not isinstance(value, bpy.types.Object):
+        raise ValueError("%s must be a mesh object made by an earlier kit/core call" % name)
+    try:
+        kind = value.type
+    except ReferenceError:
+        raise ValueError("%s was joined into another object or deleted earlier; use the result of the join" % name) from None
+    if kind != "MESH":
         raise ValueError("%s must be a mesh object made by an earlier kit/core call" % name)
     return value
 
@@ -237,16 +249,16 @@ def core_primitive(kit, kind, name="", size=1, radius=1, depth=2, segments=32, r
                    major_radius=1, minor_radius=0.25, loc=None, rot=None, scale=None):
     if kind not in PRIMITIVES:
         raise ValueError("kind must be one of: %s" % ", ".join(PRIMITIVES))
-    size = _number(size, "size", 0.0001, MAX_COORD)
-    radius = _number(radius, "radius", 0.0001, MAX_COORD)
-    depth = _number(depth, "depth", 0.0001, MAX_COORD)
-    segments = _integer(segments, "segments", 3, 256)
-    rings = _integer(rings, "rings", 2, 128)
-    subdivisions = _integer(subdivisions, "subdivisions", 1, 5)
-    major_radius = _number(major_radius, "major_radius", 0.0001, MAX_COORD)
-    minor_radius = _number(minor_radius, "minor_radius", 0.0001, MAX_COORD)
+    size = _number(size, "size", *_range("primitive", "size"))
+    radius = _number(radius, "radius", *_range("primitive", "radius"))
+    depth = _number(depth, "depth", *_range("primitive", "depth"))
+    segments = _integer(segments, "segments", *_range("primitive", "segments"))
+    rings = _integer(rings, "rings", *_range("primitive", "rings"))
+    subdivisions = _integer(subdivisions, "subdivisions", *_range("primitive", "subdivisions"))
+    major_radius = _number(major_radius, "major_radius", *_range("primitive", "major_radius"))
+    minor_radius = _number(minor_radius, "minor_radius", *_range("primitive", "minor_radius"))
     loc = _vec3(loc, "loc", (0.0, 0.0, 0.0))
-    rot = _vec3(rot, "rot", (0.0, 0.0, 0.0), -3600.0, 3600.0)
+    rot = _vec3(rot, "rot", (0.0, 0.0, 0.0), *_range("primitive", "rot"))
     scale = _vec3(scale, "scale", (1.0, 1.0, 1.0))
     ops = bpy.ops.mesh
     if kind == "cube":

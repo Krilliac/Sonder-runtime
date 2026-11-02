@@ -21,6 +21,10 @@ MAX_PRED_NODES = 2000
 MAX_PRED_POWER = 64
 MAX_PRED_DIGITS = 20
 MAX_KEY = 64
+MAX_COORD = 100000.0
+MAX_VERTS = 200000
+MAX_FACES = 400000
+PRIMITIVES = ("cube", "uv_sphere", "ico_sphere", "cylinder", "cone", "torus", "plane", "circle", "grid")
 
 # name -> (parameter names, required positional count, accepts extra keyword arguments)
 CORE_SIGS = {
@@ -36,6 +40,142 @@ CORE_SIGS = {
     "delete": (("obj",), 1, False),
 }
 CORE_PREDICATE_PARAMS = {"paint_faces": ("predicate",)}
+
+# core op -> parameter -> (kind, low, high, may be null).  The recorder checks these when a script is recorded and
+# the Blender harness checks them again; replay takes its ranges from here, so the two cannot drift.
+#   enum(values)  num(low, high)  int(low, high)  vec3(low, high): a number or three numbers  vec3x3: exactly three
+#   text  bool  obj: a result handle  objs: a list of handles  pred  colour: a string  verts  faces  modtype: a string
+_POS = (0.0001, MAX_COORD)
+CORE_PARAM_KINDS = {
+    "primitive": {
+        "kind": ("enum", PRIMITIVES, None, False), "name": ("text", None, None, True),
+        "size": ("num",) + _POS + (False,), "radius": ("num",) + _POS + (False,), "depth": ("num",) + _POS + (False,),
+        "segments": ("int", 3, 256, False), "rings": ("int", 2, 128, False), "subdivisions": ("int", 1, 5, False),
+        "major_radius": ("num",) + _POS + (False,), "minor_radius": ("num",) + _POS + (False,),
+        "loc": ("vec3", -MAX_COORD, MAX_COORD, True), "rot": ("vec3", -3600.0, 3600.0, True),
+        "scale": ("vec3", -MAX_COORD, MAX_COORD, True),
+    },
+    "mesh": {
+        "name": ("text", None, None, True), "verts": ("verts", None, None, False), "faces": ("faces", None, None, False),
+        "loc": ("vec3", -MAX_COORD, MAX_COORD, True), "rot": ("vec3", -3600.0, 3600.0, True),
+        "scale": ("vec3", -MAX_COORD, MAX_COORD, True),
+    },
+    "transform": {
+        "obj": ("obj", None, None, False), "loc": ("vec3", -MAX_COORD, MAX_COORD, True),
+        "rot": ("vec3", -3600.0, 3600.0, True), "scale": ("vec3", -MAX_COORD, MAX_COORD, True),
+    },
+    "shade_smooth": {"obj": ("obj", None, None, False), "smooth": ("bool", None, None, False),
+                     "angle": ("num", 0.0, 180.0, True)},
+    "modifier": {"obj": ("obj", None, None, False), "type": ("modtype", None, None, False)},
+    "paint": {"obj": ("obj", None, None, False), "colour": ("colour", None, None, False)},
+    "paint_faces": {"obj": ("obj", None, None, False), "predicate": ("pred", None, None, False),
+                    "colour": ("colour", None, None, False)},
+    "join": {"objs": ("objs", None, None, False), "name": ("text", None, None, True)},
+    "delete": {"obj": ("obj", None, None, False)},
+}
+
+
+def _is_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _kind_of(value):
+    if value is None:
+        return "None"
+    if isinstance(value, bool):
+        return "a true/false value"
+    if isinstance(value, (int, float)):
+        return "a number"
+    if isinstance(value, str):
+        return "a string"
+    if isinstance(value, list):
+        return "a list"
+    if isinstance(value, dict):
+        return "a result or predicate"
+    return "this kind of value"
+
+
+def check_core_arg(op, param, value):
+    """Check one argument of a core op (``op`` is ``primitive``, ``mesh`` ...; ``value`` is the JSON form, so a
+    result is ``{"$ref": n}``).  Raises ``OpsError`` naming the op and parameter.  Parameters that are not in the
+    table (the free properties of ``modifier``) are not checked here."""
+    spec = CORE_PARAM_KINDS.get(op, {}).get(param)
+    if spec is None:
+        return
+    kind, low, high, nullable = spec
+    label = "%s %s" % (op, param)
+    if value is None:
+        if nullable:
+            return
+        raise OpsError("%s is required (not None)" % label)
+    if kind == "enum":
+        if not isinstance(value, str) or value not in low:
+            raise OpsError("%s must be one of: %s" % (label, ", ".join(low)))
+    elif kind == "num":
+        if not _is_number(value) or not low <= value <= high:
+            hint = " (ONE number; for a box use scale=(x, y, z))" if (op, param) == ("primitive", "size") else ""
+            raise OpsError("%s must be one number between %g and %g, not %s%s" % (label, low, high, _kind_of(value), hint))
+    elif kind == "int":
+        if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+            raise OpsError("%s must be a whole number between %d and %d, not %s" % (label, low, high, _kind_of(value)))
+    elif kind == "vec3":
+        items = [value, value, value] if _is_number(value) else value
+        if not isinstance(items, list) or len(items) != 3 or not all(_is_number(i) and low <= i <= high for i in items):
+            raise OpsError("%s must be one number or three numbers between %g and %g, not %s"
+                           % (label, low, high, _kind_of(value)))
+        if param == "rot" and _is_number(value):
+            raise OpsError("%s must be three numbers (degrees), for example rot=(0, 90, 0)" % label)
+    elif kind == "text" or kind == "modtype" or kind == "colour":
+        if not isinstance(value, str):
+            raise OpsError("%s must be a string, not %s" % (label, _kind_of(value)))
+    elif kind == "bool":
+        if not isinstance(value, bool):
+            raise OpsError("%s must be true or false, not %s" % (label, _kind_of(value)))
+    elif kind == "obj":
+        if not (isinstance(value, dict) and set(value) == {"$ref"}):
+            raise OpsError("%s must be the result of an earlier kit/core call, not %s" % (label, _kind_of(value)))
+    elif kind == "objs":
+        if not (isinstance(value, list) and 1 <= len(value) <= MAX_OPS and all(
+                isinstance(item, dict) and set(item) == {"$ref"} for item in value)):
+            raise OpsError("%s must be a non-empty list of results of earlier kit/core calls" % label)
+    elif kind == "pred":
+        if not (isinstance(value, dict) and set(value) == {"$pred"}):
+            raise OpsError("%s must be an inline lambda" % label)
+    elif kind == "verts":
+        if not (isinstance(value, list) and 1 <= len(value) <= MAX_VERTS):
+            raise OpsError("%s must be a list of 1 to %d points" % (label, MAX_VERTS))
+        for point in value:
+            if not (isinstance(point, list) and len(point) == 3 and all(
+                    _is_number(i) and -MAX_COORD <= i <= MAX_COORD for i in point)):
+                raise OpsError("%s: every vertex must be three numbers (x, y, z), not %s"
+                               % (label, _kind_of(point) if not isinstance(point, list) else "%d values" % len(point)))
+    elif kind == "faces":
+        if not (isinstance(value, list) and 1 <= len(value) <= MAX_FACES):
+            raise OpsError("%s must be a list of 1 to %d faces" % (label, MAX_FACES))
+        for face in value:
+            if not (isinstance(face, list) and 3 <= len(face) <= 8 and all(
+                    isinstance(i, int) and not isinstance(i, bool) and i >= 0 for i in face)):
+                raise OpsError("%s: each face needs 3 to 8 vertex indices (whole numbers, 0 or more)" % label)
+            if len(set(face)) != len(face):
+                raise OpsError("%s: a face may not repeat a vertex index" % label)
+
+
+def check_core_call(op, args, kwargs):
+    """Check every argument of one core op call (JSON form); ``mesh`` also checks that face indices exist."""
+    names = CORE_SIGS[op][0]
+    given = {}
+    for position, value in enumerate(args):
+        if position < len(names):
+            given[names[position]] = value
+    given.update(kwargs)
+    for param, value in given.items():
+        check_core_arg(op, param, value)
+    if op == "mesh" and isinstance(given.get("verts"), list) and isinstance(given.get("faces"), list):
+        count = len(given["verts"])
+        for face in given["faces"]:
+            if max(face) >= count:
+                raise OpsError("mesh faces: vertex index %d does not exist (there are %d vertices)" % (max(face), count))
+
 
 _FACE_ATTRS = {"center": ("x", "y", "z"), "normal": ("x", "y", "z"), "index": (), "area": (), "material_index": ()}
 PRED_MATH = frozenset({"sin", "cos", "tan", "asin", "acos", "atan", "atan2", "sqrt", "radians", "degrees", "floor",
@@ -219,7 +359,12 @@ def validate_ops(doc, kit_names=frozenset()):
             if not isinstance(key, str) or not key.isidentifier() or len(key) > MAX_KEY or key.startswith("__"):
                 _fail(where, "bad keyword name")
             _value(item, 1, ctx, where)
+        if kind == "core":
+            try:
+                check_core_call(short, op["args"], op["kwargs"])
+            except OpsError as exc:
+                _fail(where, str(exc))
 
 
-__all__ = ["CORE_PREDICATE_PARAMS", "CORE_SIGS", "MAX_JSON_BYTES", "MAX_OPS", "OpsError", "PRED_BUILTINS", "PRED_MATH",
+__all__ = ["CORE_PARAM_KINDS", "CORE_PREDICATE_PARAMS", "CORE_SIGS", "check_core_arg", "check_core_call", "MAX_JSON_BYTES", "MAX_OPS", "OpsError", "PRED_BUILTINS", "PRED_MATH",
            "validate_ops", "validate_pred"]

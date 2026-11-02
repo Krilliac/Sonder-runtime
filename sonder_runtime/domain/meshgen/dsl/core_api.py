@@ -4,7 +4,7 @@ from __future__ import annotations
 from .opschema import CORE_SIGS
 
 CORE_DIGEST = """\
-primitive(kind, name="", size=1, radius=1, depth=2, segments=32, rings=16, subdivisions=2, major_radius=1, minor_radius=0.25, loc=(0,0,0), rot=(0,0,0), scale=1)  # kind: cube, uv_sphere, ico_sphere, cylinder, cone, torus, plane, circle, grid; segments<=256, rings<=128, subdivisions<=5
+primitive(kind, name="", size=1, radius=1, depth=2, segments=32, rings=16, subdivisions=2, major_radius=1, minor_radius=0.25, loc=(0,0,0), rot=(0,0,0), scale=1)  # size is ONE number (a box: scale=(x, y, z)); kind: cube, uv_sphere, ico_sphere, cylinder, cone, torus, plane, circle, grid; segments<=256, rings<=128, subdivisions<=5
 mesh(name, verts, faces, loc=(0,0,0), rot=(0,0,0), scale=1)  # verts [(x,y,z),...], faces [(i,j,k[,l...]),...] (3 to 8 indices each)
 transform(obj, loc=None, rot=None, scale=None)  # sets absolute location / rotation (DEGREES) / scale
 shade_smooth(obj, smooth=True, angle=None)

@@ -176,6 +176,9 @@ def run(request: MeshRequest, *, generate, build, critique, map_parallel, record
         if not result.get("ok"):
             attempt["status"] = "build_error"
             attempt["error"] = _clip(result.get("error"), 400)
+            crash_tail = [_clip(line, 160) for line in (result.get("tail") or [])[-6:]]
+            if crash_tail:
+                attempt["tail"] = crash_tail
             failure = _failure_text(result)
             if recording.log:
                 failure = _clip(failure + "\nYour print() output while recording:\n" + "\n".join(recording.log[-10:]))
@@ -270,12 +273,25 @@ def run(request: MeshRequest, *, generate, build, critique, map_parallel, record
     winner = pick_best(ranked)
     if winner is not None and not winner.get("built"):
         winner = None
+    within_budget = bool(winner and winner.get("within_budget"))
+    warning = ""
+    if winner is not None and not within_budget:
+        warning = "winner is %s/%s tris and was never critiqued" % (winner.get("tris"), request.max_tris)
     if request.vision and not vision_off["reason"]:
-        vision = "on" if vision_off["used"] else "unavailable: no candidate reached the critique step"
+        if vision_off["used"]:
+            vision = "on"
+        elif any(c.get("best") for c in candidates):
+            vision = ("unavailable: no build was within the %d triangle budget, so none reached the critique step"
+                      % request.max_tris)
+        else:
+            vision = "unavailable: no candidate reached the critique step"
     else:
         vision = "unavailable: %s" % (vision_off["reason"] or "disabled by the caller")
-    return {"ok": winner is not None, "winner": winner, "candidates": candidates, "vision": vision,
-            "elapsed_s": round(time.monotonic() - started, 2)}
+    report = {"ok": winner is not None, "within_budget": within_budget, "winner": winner,
+              "candidates": candidates, "vision": vision, "elapsed_s": round(time.monotonic() - started, 2)}
+    if warning:
+        report["warning"] = warning
+    return report
 
 
 __all__ = ["MeshRequest", "run"]

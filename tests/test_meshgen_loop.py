@@ -297,3 +297,25 @@ def test_the_no_progress_note_sits_before_the_closing_instruction():
     assert third.rstrip().splitlines()[-1].startswith("Return ONLY")
     note = third.lower().rindex("no progress") if "no progress" in third.lower() else third.lower().rindex("same")
     assert 0 < note < third.rindex("Return ONLY")
+
+
+def test_an_over_budget_winner_is_flagged_and_says_it_was_never_critiqued():
+    rig = Rig(builds=[ok_build(tris=1076, within=False)] * 3)
+    report = rig.go(candidates=1, rounds=3, max_tris=800)
+    assert report["ok"] is True and report["within_budget"] is False
+    assert report["winner"]["tris"] == 1076 and report["winner"]["within_budget"] is False
+    assert report["warning"] == "winner is 1076/800 tris and was never critiqued"
+    assert "no build was within the 800 triangle budget" in report["vision"]
+    assert rig.critiques == [] and json.dumps(report)
+
+
+def test_a_within_budget_winner_has_no_warning():
+    report = Rig(critiques=[verdict(9)]).go(candidates=1, rounds=1)
+    assert report["within_budget"] is True and "warning" not in report
+
+
+def test_a_blender_crash_keeps_a_short_tail_on_the_attempt():
+    lines = ["line %d" % n for n in range(20)]
+    rig = Rig(builds=[{"ok": False, "error": "no result; rc=-1073741819", "tail": lines}])
+    attempt = rig.go(candidates=1, rounds=1)["candidates"][0]["attempts"][0]
+    assert attempt["status"] == "build_error" and attempt["tail"] == lines[-6:]

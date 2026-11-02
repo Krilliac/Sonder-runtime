@@ -786,3 +786,124 @@ def test_a_none_colour_is_refused_for_core_and_kit_calls():
     for call in ("propkit.box('b', 1, hexcol=None)", "propkit.box('b', 1, 0.0, None)"):
         message = reject("import propkit\ndef build():\n    %s\n" % call)
         assert "is required" in message and "not None" in message, message
+
+
+# --- core op arguments are type- and range-checked when the script is recorded ---
+
+BAD_CORE_CALLS = [
+    ('primitive("plane", "P", size=(0.8, 0.4))', "size"),
+    ('primitive("cube", "P", size="big")', "size"),
+    ('primitive("cube", "P", size=0)', "size"),
+    ('primitive("cube", "P", size=1e9)', "size"),
+    ('primitive("uv_sphere", "P", segments=8.5)', "segments"),
+    ('primitive("uv_sphere", "P", segments=2)', "segments"),
+    ('primitive("uv_sphere", "P", rings=1000)', "rings"),
+    ('primitive("ico_sphere", "P", subdivisions=9)', "subdivisions"),
+    ('primitive("blob", "P")', "kind"),
+    ('primitive("cube", "P", loc=(1, 2))', "loc"),
+    ('primitive("cube", "P", rot=90)', "rot"),
+    ('primitive("cube", "P", scale=(1, 2, 3, 4))', "scale"),
+    ('primitive("cube", "P", loc=(1, 2, "z"))', "loc"),
+    ('mesh("M", [(0, 0), (1, 0), (0, 1)], [(0, 1, 2)])', "verts"),
+    ('mesh("M", [(0, 0, 0), (1, 0, 0), (0, 1, 0)], [(0, 1)])', "faces"),
+    ('mesh("M", [(0, 0, 0), (1, 0, 0), (0, 1, 0)], [(0, 1, 7)])', "faces"),
+    ('mesh("M", [(0, 0, 0), (1, 0, 0), (0, 1, 0)], [(0, 0, 1)])', "faces"),
+    ('mesh("M", [(0, 0, 0), (1, 0, 0), (0, 1, 0)], [(0, 1, 2.5)])', "faces"),
+    ('mesh("M", [(0, 0, 0), (1, 0, 0), (0, 1, 0)], [])', "faces"),
+]
+
+
+@pytest.mark.parametrize("call,needle", BAD_CORE_CALLS)
+def test_core_arguments_of_the_wrong_type_or_range_are_refused_when_recording(call, needle):
+    with pytest.raises(ScriptError) as info:
+        rec("def build():\n    %s\n" % call)
+    assert needle in str(info.value), str(info.value)
+
+
+def test_the_size_error_points_at_scale_for_a_box():
+    with pytest.raises(ScriptError) as info:
+        rec('def build():\n    primitive("cube", "P", size=(1, 2, 3))\n')
+    assert "scale=(x, y, z)" in str(info.value)
+
+
+def test_valid_core_arguments_still_record():
+    source = '''def build():
+    a = primitive("cube", "A", size=1.0, loc=(0, 0, 1), rot=(0, 0, 45), scale=(1, 2, 1))
+    b = primitive("uv_sphere", "B", radius=0.5, segments=8, rings=4, scale=2)
+    c = mesh("C", [(0, 0, 0), (1, 0, 0), (0, 1, 0)], [(0, 1, 2)])
+    transform(a, loc=(0, 0, 2))
+    shade_smooth(b, True, angle=30)
+    join([a, b, c], "All")
+'''
+    assert len(rec(source).ops) == 6
+
+
+def test_every_core_parameter_has_a_checked_kind():
+    for op, (names, _required, _extra) in opschema.CORE_SIGS.items():
+        kinds = opschema.CORE_PARAM_KINDS[op]
+        for name in names:
+            if op == "modifier" and name not in kinds:
+                continue
+            assert name in kinds, "%s.%s has no entry in CORE_PARAM_KINDS" % (op, name)
+        assert set(kinds) <= set(names), op
+
+
+# --- a handle that join or delete destroyed cannot be used afterwards ---
+
+JOIN_KIT = '''"""kit"""
+def box(name, size):
+    """A box."""
+
+def join(objs, name="Joined"):
+    """Join the objects."""
+'''
+JOIN_MANIFEST = build_manifest(JOIN_KIT, "joinkit")
+
+
+def test_using_a_joined_away_handle_is_refused_with_both_lines():
+    source = '''def build():
+    a = primitive("cube", "A", size=1.0)
+    b = primitive("cube", "B", size=1.0)
+    x = join([a, b], "X")
+    paint(b, "#ffffff")
+'''
+    with pytest.raises(ScriptError) as info:
+        rec(source)
+    message = str(info.value)
+    assert "line 5" in message and "joined" in message and "line 4" in message and "join result" in message
+
+
+def test_the_join_result_and_the_first_object_remain_usable():
+    source = '''def build():
+    a = primitive("cube", "A", size=1.0)
+    b = primitive("cube", "B", size=1.0)
+    x = join([a, b], "X")
+    paint(x, "#ffffff")
+    shade_smooth(x, True)
+'''
+    assert len(rec(source).ops) == 5
+
+
+def test_a_kit_function_named_join_consumes_the_others_too():
+    source = '''import joinkit
+def build():
+    a = joinkit.box("A", 1.0)
+    b = joinkit.box("B", 1.0)
+    x = joinkit.join([a, b])
+    shade_smooth(b, True)
+'''
+    with pytest.raises(ScriptError) as info:
+        rec(source, JOIN_MANIFEST)
+    assert "joined" in str(info.value)
+    assert len(rec(source.replace("shade_smooth(b, True)", "shade_smooth(x, True)"), JOIN_MANIFEST).ops) == 4
+
+
+def test_using_a_deleted_handle_is_refused():
+    source = '''def build():
+    a = primitive("cube", "A", size=1.0)
+    delete(a)
+    paint(a, "#ffffff")
+'''
+    with pytest.raises(ScriptError) as info:
+        rec(source)
+    assert "deleted at line 3" in str(info.value) and str(info.value).startswith("line 4")
