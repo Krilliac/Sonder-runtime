@@ -304,14 +304,14 @@ def test_an_over_budget_winner_is_flagged_and_says_it_was_never_critiqued():
     report = rig.go(candidates=1, rounds=3, max_tris=800)
     assert report["ok"] is True and report["within_budget"] is False
     assert report["winner"]["tris"] == 1076 and report["winner"]["within_budget"] is False
-    assert report["warning"] == "winner is 1076/800 tris and was never critiqued"
+    assert report["budget_warning"] == "winner is 1076/800 tris and was never critiqued"
     assert "no build was within the 800 triangle budget" in report["vision"]
     assert rig.critiques == [] and json.dumps(report)
 
 
 def test_a_within_budget_winner_has_no_warning():
     report = Rig(critiques=[verdict(9)]).go(candidates=1, rounds=1)
-    assert report["within_budget"] is True and "warning" not in report
+    assert report["within_budget"] is True and "budget_warning" not in report
 
 
 def test_a_blender_crash_keeps_a_short_tail_on_the_attempt():
@@ -319,3 +319,10 @@ def test_a_blender_crash_keeps_a_short_tail_on_the_attempt():
     rig = Rig(builds=[{"ok": False, "error": "no result; rc=-1073741819", "tail": lines}])
     attempt = rig.go(candidates=1, rounds=1)["candidates"][0]["attempts"][0]
     assert attempt["status"] == "build_error" and attempt["tail"] == lines[-6:]
+
+
+def test_a_within_budget_build_without_a_sheet_does_not_blame_the_budget():
+    rig = Rig(builds=[{"ok": True, "tris": 50, "within_budget": True, "files": {"model": "/x/m.glb"}}])
+    report = rig.go(candidates=1, rounds=1, max_tris=800)
+    assert "budget" not in report["vision"].replace("within-budget", "") and "contact sheet" in report["vision"]
+    assert report["within_budget"] is True and "budget_warning" not in report

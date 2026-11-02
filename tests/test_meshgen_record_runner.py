@@ -110,10 +110,13 @@ def test_a_wall_clock_bomb_that_gets_past_the_in_process_accounting_is_still_con
     assert time.monotonic() - started < 15 and "time limit" in str(info.value)
 
 
-def test_a_valid_recording_whose_json_escaping_is_large_is_not_refused():
-    """4,999 recorded calls with a 180-number argument (reviewer probe m03): valid, and bigger once escaped."""
-    source = "def build():@@    r = [(0, 0, 0)] * 60@@    for i in range(4999):@@        mesh('m', r, [(0, 1, 2)])@@".replace("@@", chr(10))
-    assert len(record_runner.record_script(source).ops) == 4999
+def test_a_recording_just_under_the_size_cap_compact_but_over_it_escaped_is_not_refused():
+    """4,999 mesh calls with 95 vertices each: 4,173,106 bytes compact, 4,243,106 once escaped (reviewer probe);
+    the compact size is what counts.  96 vertices is over the 4 MB cap and is refused."""
+    template = "def build():@@    r = [(0, 0, 0)] * %d@@    for i in range(4999):@@        mesh('m', r, [(0, 1, 2)])@@"
+    assert len(record_runner.record_script(template.replace("@@", chr(10)) % 95).ops) == 4999
+    with pytest.raises(ScriptError):
+        record_runner.record_script(template.replace("@@", chr(10)) % 96)
 
 
 def test_the_memory_cap_holds_on_every_start_not_just_most(tmp_path):

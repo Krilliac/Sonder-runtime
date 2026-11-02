@@ -249,8 +249,8 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
         "candidates": [_candidate_summary(item) for item in report["candidates"]],
     }
     winner = report.get("winner")
-    if report.get("warning"):
-        payload["warning"] = report["warning"]
+    if report.get("budget_warning"):
+        payload["budget_warning"] = report["budget_warning"]
     if winner:
         final = {}
         for key, suffix in (("model", ".%s" % export), ("sheet", "_sheet.png"), ("view", "_view.png"),

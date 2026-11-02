@@ -311,10 +311,22 @@ class OverBudgetRunner(FakeRunner):
 def test_an_over_budget_winner_is_reported_with_a_warning_and_within_budget_false(tmp_path):
     payload, _, rt = call(tmp_path, runner=OverBudgetRunner(), candidates=1, rounds=2, max_tris=800)
     assert payload["ok"] is True and payload["within_budget"] is False
-    assert payload["warning"] == "winner is 1076/800 tris and was never critiqued"
+    assert payload["budget_warning"] == "winner is 1076/800 tris and was never critiqued"
     assert "no build was within the 800 triangle budget" in payload["vision"] and rt.vision_calls == []
 
 
 def test_an_in_budget_winner_reports_within_budget_true_and_no_warning(tmp_path):
     payload, _, _ = call(tmp_path, candidates=1, rounds=1)
-    assert payload["within_budget"] is True and "warning" not in payload
+    assert payload["within_budget"] is True and "budget_warning" not in payload
+
+
+class PreflightOverBudgetRunner(OverBudgetRunner):
+    def preflight(self, blender):
+        return {"sandbox": "unsandboxed", "warning": "CANARY-SECURITY-WARNING"}
+
+
+def test_the_security_warning_and_the_budget_warning_both_survive(tmp_path):
+    payload, _, _ = call(tmp_path, runner=PreflightOverBudgetRunner(), candidates=1, rounds=1, max_tris=800)
+    assert payload["warning"] == "CANARY-SECURITY-WARNING"
+    assert payload["budget_warning"] == "winner is 1076/800 tris and was never critiqued"
+    assert payload["within_budget"] is False

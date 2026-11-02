@@ -274,12 +274,14 @@ def run(request: MeshRequest, *, generate, build, critique, map_parallel, record
     if winner is not None and not winner.get("built"):
         winner = None
     within_budget = bool(winner and winner.get("within_budget"))
-    warning = ""
+    budget_warning = ""
     if winner is not None and not within_budget:
-        warning = "winner is %s/%s tris and was never critiqued" % (winner.get("tris"), request.max_tris)
+        budget_warning = "winner is %s/%s tris and was never critiqued" % (winner.get("tris"), request.max_tris)
     if request.vision and not vision_off["reason"]:
         if vision_off["used"]:
             vision = "on"
+        elif any(c.get("best") and c["best"].get("within_budget") for c in candidates):
+            vision = "unavailable: no within-budget build produced a contact sheet to critique"
         elif any(c.get("best") for c in candidates):
             vision = ("unavailable: no build was within the %d triangle budget, so none reached the critique step"
                       % request.max_tris)
@@ -289,8 +291,8 @@ def run(request: MeshRequest, *, generate, build, critique, map_parallel, record
         vision = "unavailable: %s" % (vision_off["reason"] or "disabled by the caller")
     report = {"ok": winner is not None, "within_budget": within_budget, "winner": winner,
               "candidates": candidates, "vision": vision, "elapsed_s": round(time.monotonic() - started, 2)}
-    if warning:
-        report["warning"] = warning
+    if budget_warning:
+        report["budget_warning"] = budget_warning
     return report
 
 

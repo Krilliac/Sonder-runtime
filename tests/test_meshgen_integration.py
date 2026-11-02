@@ -189,7 +189,7 @@ def test_an_empty_scene_is_an_error(tmp_path):
     assert result["ok"] is False and "no mesh objects" in result["error"]
 
 
-def test_replay_caps_are_enforced_even_for_hand_crafted_ops(tmp_path):
+def test_validate_ops_in_the_harness_refuses_hand_crafted_ops_that_break_a_cap(tmp_path):
     big = _doc(("core.primitive", ["uv_sphere"], {"segments": 100000, "rings": 100000}))
     result = _run(tmp_path, big, render=False)
     assert result["ok"] is False and "op 1" in result["error"], result
@@ -314,7 +314,7 @@ def test_a_crafted_predicate_bomb_is_refused_or_bounded_quickly(tmp_path):
     assert time.monotonic() - started < 90 and isinstance(result, dict)
 
 
-def test_a_degenerate_face_is_refused_before_a_modifier_can_run_on_it(tmp_path):
+def test_validate_ops_refuses_a_degenerate_face_before_a_modifier_can_run_on_it(tmp_path):
     triangle = [[0, 0, 0], [1, 0, 0], [0, 1, 0]]
     for face in ([0, 0, 1], [0, 1, 1], [2, 2, 2]):
         ops = _doc(("core.mesh", ["Tri", triangle, [face]], {}),

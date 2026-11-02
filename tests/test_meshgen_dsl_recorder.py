@@ -907,3 +907,44 @@ def test_using_a_deleted_handle_is_refused():
     with pytest.raises(ScriptError) as info:
         rec(source)
     assert "deleted at line 3" in str(info.value) and str(info.value).startswith("line 4")
+
+
+# --- handles are tracked per object: an alias made by a passthrough op dies with its object ---
+
+ALIAS_KIT = '''"""kit"""
+PALETTE = {"red": "#ff0000"}
+def paint(obj, hexcol="red"):
+    """Paint."""
+'''
+ALIAS_MANIFEST = build_manifest(ALIAS_KIT, "kk")
+ALIAS_HEAD = "import kk\ndef build():\n    a = primitive('cube')\n    b = primitive('cube')\n    c = primitive('cube')\n"
+
+
+@pytest.mark.parametrize("body,needle", [
+    ("    a2 = transform(a, loc=(1, 0, 0))\n    join([b, a], 'j')\n    paint(a2, '#ff0000')\n", "joined"),
+    ("    j = join([a, b], 'j')\n    join([c, j], 'k')\n    paint(a, '#ff0000')\n", "joined"),
+    ("    t = transform(a, loc=(0, 0, 1))\n    delete(t)\n    paint(a, '#ff0000')\n", "deleted"),
+    ("    a2 = paint(a, '#ff0000')\n    delete(a)\n    shade_smooth(a2, True)\n", "deleted"),
+    ("    a2 = shade_smooth(a, True)\n    a3 = modifier(a2, 'BEVEL')\n    delete(a3)\n    paint(a, '#ff0000')\n",
+     "deleted"),
+])
+def test_an_alias_of_a_destroyed_object_is_refused(body, needle):
+    with pytest.raises(ScriptError) as info:
+        rec(ALIAS_HEAD + body, ALIAS_MANIFEST)
+    assert needle in str(info.value)
+
+
+@pytest.mark.parametrize("body", [
+    "    join([a, a], 'j')\n    paint(a, '#ff0000')\n",
+    "    j = join([a, b], 'j')\n    paint(a, '#ff0000')\n    paint(j, '#ff0000')\n",
+    "    whole = join([a, b, c], 'w')\n    whole = transform(whole, rot=(0, 90, 0))\n    paint(whole, '#ff0000')\n",
+    "    a = transform(a, loc=(1, 0, 0))\n    a = paint(a, '#ff0000')\n    join([a, b], 'j')\n",
+])
+def test_valid_aliasing_and_reassignment_still_record(body):
+    assert rec(ALIAS_HEAD + body, ALIAS_MANIFEST).ops
+
+
+def test_a_kit_passthrough_is_treated_as_a_new_object():
+    """Conservative: the recorder cannot tell from the manifest that a kit function returns its input."""
+    body = "    a2 = kk.paint(a, 'red')\n    delete(a)\n    transform(a2, loc=(1, 0, 0))\n"
+    assert rec(ALIAS_HEAD + body, ALIAS_MANIFEST).ops

@@ -148,7 +148,7 @@ def test_the_host_refuses_a_result_that_names_a_junction_target_outside_the_outp
     out = tmp_path / "out"
     out.mkdir()
     _winapi.CreateJunction(canary["canary_dir"], str(out / "j"))
-    refused = blender_runner.confine_files({"ok": True, "files": {"model": str(out / "j" / "canary.txt")}}, out)
+    refused = blender_runner.confine_files({"ok": True, "files": {"model": str(out / "j" / "canary.txt")}}, out, "canary")
     assert refused["ok"] is False and "outside the output directory" in refused["error"]
 
 

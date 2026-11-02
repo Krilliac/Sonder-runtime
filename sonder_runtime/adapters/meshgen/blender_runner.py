@@ -266,19 +266,62 @@ def read_result(result_path: Path) -> dict | None:
     return sanitize_result(value) if isinstance(value, dict) else None
 
 
-def confine_files(result: dict, out_dir: Path) -> dict:
-    """Refuse a result whose ``files`` entries are not existing files inside ``out_dir``."""
+def expected_files(name: str, export: str) -> dict:
+    """The files the harness writes, by result key: the model, the contact sheet and the single view."""
+    kind = "fbx" if str(export).lower() == "fbx" else "glb"
+    return {"model": "%s.%s" % (name, kind), "sheet": "%s_sheet.png" % name, "view": "%s_view.png" % name}
+
+
+def _bad_path_shape(value: str) -> str:
+    """Why a result path cannot be one the harness wrote ('' when it looks fine): an alternate data stream or any
+    colon after a drive letter, or a segment ending in a dot or a space (Windows folds those away)."""
+    rest = value[2:] if len(value) > 1 and value[1] == ":" and value[0].isalpha() else value
+    if ":" in rest:
+        return "a colon after the drive letter (an alternate data stream)"
+    for segment in value.replace(chr(92), "/").split("/"):
+        if segment not in (".", "..") and segment[-1:] in (".", " "):
+            return "a segment ending in a dot or a space"
+    return ""
+
+
+def _lexically_in(value: str, root_forms) -> bool:
+    """True when ``value`` is a direct child of one of the directories, judged on the text alone (no filesystem
+    access, so a UNC path cannot make the host open a network connection)."""
+    folded = os.path.normpath(value).replace(chr(92), "/").casefold()
+    parent = folded.rsplit("/", 1)[0] if "/" in folded else ""
+    return any(parent == os.path.normpath(root).replace(chr(92), "/").casefold() for root in root_forms)
+
+
+def confine_files(result: dict, out_dir: Path, name: str, export: str = "glb") -> dict:
+    """Refuse a result whose ``files`` are not exactly the files the harness writes for ``name`` and ``export``,
+    as existing regular files directly inside ``out_dir``.
+
+    The textual checks run first and never touch the filesystem; only a path that passes them is resolved (to
+    catch a junction or symlink pointing elsewhere)."""
+    expected = expected_files(name, export)
+    roots = [os.path.abspath(out_dir), os.path.realpath(out_dir)]
     root = os.path.realpath(out_dir)
     for key, value in (result.get("files") or {}).items():
-        real = os.path.realpath(str(value))
+        shown = bound_text(str(value)[:200], 240) if value else "(missing, too long or not text)"
+        outside = {"ok": False, "error": "result names a file outside the output directory: %s = %s (output "
+                                         "directory %s)" % (key, shown, str(out_dir)[:200])}
+        if not isinstance(value, str) or not value:
+            return outside
+        if not _lexically_in(value, roots):
+            return outside
+        reason = _bad_path_shape(value)
+        if reason:
+            return {"ok": False, "error": "result names a file with %s: %s = %s" % (reason, key, shown)}
+        if key not in expected or os.path.basename(value.replace(chr(92), "/")) != expected[key]:
+            return {"ok": False, "error": "result names a file the harness does not write: %s = %s (expected %s)"
+                                          % (key, shown, expected.get(key, "no such key"))}
+        real = os.path.realpath(value)
         try:
             inside = os.path.commonpath([root, real]) == root and real != root
         except ValueError:
             inside = False
-        shown = bound_text(str(value)[:200], 240) if value else "(missing, too long or not text)"
         if not inside:
-            return {"ok": False, "error": "result names a file outside the output directory: %s = %s (output "
-                                          "directory %s)" % (key, shown, str(out_dir)[:200])}
+            return outside
         if not os.path.isfile(real):
             return {"ok": False, "error": "result names a file that does not exist: %s = %s" % (key, shown)}
     return result
@@ -378,7 +421,7 @@ def _sandboxed(blender, ops_path, out, *, name, kit_path, kit_allowed, max_tris,
                 result = {"ok": False, "error": "no result; rc=%s" % outcome.returncode,
                           "tail": _tail(tail_text)}
             else:
-                result = confine_files(result, run_out)
+                result = confine_files(result, run_out, name, export)
                 if result.get("ok"):
                     used = sandbox_win.tree_size(run)
                     if used > sandbox_win.MAX_TREE_BYTES:
@@ -428,7 +471,7 @@ def _unsandboxed(blender, ops_path, out, *, name, kit_path, kit_allowed, max_tri
     if result is None:
         return {"ok": False, "error": "no result; rc=%s" % returncode,
                 "tail": _tail(stdout + "\n" + stderr)}
-    return confine_files(result, out)
+    return confine_files(result, out, name, export)
 
 
 def build_candidate(blender, ops_path, out_dir, *, name, kit_path=None, kit_allowed=(), max_tris,

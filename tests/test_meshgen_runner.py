@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -72,8 +73,8 @@ def test_build_candidate_runs_without_a_shell_and_reads_the_result_file(tmp_path
     def fake_run(argv, **kwargs):
         seen["argv"], seen["kwargs"], seen["job"] = argv, kwargs, _job(argv)
         out = Path(seen["job"]["out_dir"])
-        (out / "m.glb").write_bytes(_glb({"asset": {"version": "2.0"}, "nodes": [{"name": "Cube"}]}))
-        _write_result(argv, {"ok": True, "tris": 12, "files": {"model": str(out / "m.glb")}})
+        (out / "n.fbx").write_bytes(_glb({"asset": {"version": "2.0"}, "nodes": [{"name": "Cube"}]}))
+        _write_result(argv, {"ok": True, "tris": 12, "files": {"model": str(out / "n.fbx")}})
         return _completed("hello\n")
 
     _patch_run(monkeypatch, fake_run)
@@ -117,7 +118,7 @@ def test_result_file_names_must_resolve_inside_the_output_directory(tmp_path, mo
 
 def test_dotdot_and_missing_files_are_refused(tmp_path, monkeypatch):
     (tmp_path / "secret.txt").write_text("s")
-    payloads = [{"files": {"model": "OUT/../secret.txt"}}, {"files": {"model": "OUT/absent.glb"}}]
+    payloads = [{"files": {"model": "OUT/../secret.txt"}}, {"files": {"model": "OUT/n.glb"}}]
 
     def fake_run(argv, **kwargs):
         out = _job(argv)["out_dir"]
@@ -262,28 +263,77 @@ def test_run_limited_caps_memory_where_the_platform_can(tmp_path):
 
 # --- output paths are never redacted or truncated (a long slug is a legitimate directory name) ---
 
-def _files_result(path):
-    return {"ok": True, "tris": 1, "files": {"model": path}}
+def _files_result(path, key="model"):
+    return {"ok": True, "tris": 1, "files": {key: path}}
 
 
-def test_long_slug_paths_survive_sanitising_and_confinement(tmp_path):
+def test_long_slug_and_long_segment_paths_survive_sanitising_and_confinement(tmp_path):
     slug = "a-very-long-asset-slug-ab"  # 25 characters, as produced from a long asset name
-    assert len(slug) >= 24
     folder = tmp_path / ("%s-20261101T120000Z" % slug)
     folder.mkdir()
-    long_segment = "x" * 60
-    (folder / long_segment).mkdir()
-    model = folder / long_segment / "model.glb"
-    model.write_text("g")
-    for target in (folder / "model.glb", model):
+    long_name = "x" * 60
+    for name, key, target in ((slug, "model", folder / (slug + ".glb")), (long_name, "model", folder / (long_name + ".glb")),
+                              (long_name, "sheet", folder / (long_name + "_sheet.png"))):
         target.write_text("g")
-        cleaned = runner.sanitize_result(_files_result(str(target)))
-        assert cleaned["files"]["model"] == str(target)
-        assert runner.confine_files(cleaned, folder) == cleaned
+        cleaned = runner.sanitize_result(_files_result(str(target), key))
+        assert cleaned["files"][key] == str(target)
+        assert runner.confine_files(cleaned, folder, name) == cleaned
 
 
 def test_over_long_or_nul_paths_are_refused_with_the_key_named(tmp_path):
-    for bad in ("p" * (runner.MAX_PATH_CHARS + 1), str(tmp_path / "m.glb") + chr(0), 12345):
-        cleaned = runner.sanitize_result(_files_result(bad))
-        refused = runner.confine_files(cleaned, tmp_path)
+    for bad in ("p" * (runner.MAX_PATH_CHARS + 1), str(tmp_path / "n.glb") + chr(0), 12345):
+        refused = runner.confine_files(runner.sanitize_result(_files_result(bad)), tmp_path, "n")
         assert refused["ok"] is False and "model" in refused["error"]
+
+
+def _confine(tmp_path, value, key="model", name="n", export="glb"):
+    return runner.confine_files({"ok": True, "files": {key: value}}, tmp_path, name, export)
+
+
+def test_only_the_files_the_harness_writes_are_accepted(tmp_path):
+    for fname in ("n.glb", "n_sheet.png", "n_view.png"):
+        (tmp_path / fname).write_text("x")
+    assert _confine(tmp_path, str(tmp_path / "n.glb"))["ok"] is True
+    assert _confine(tmp_path, str(tmp_path / "n_sheet.png"), "sheet")["ok"] is True
+    assert _confine(tmp_path, str(tmp_path / "n_view.png"), "view")["ok"] is True
+    (tmp_path / "n.fbx").write_text("x")
+    assert _confine(tmp_path, str(tmp_path / "n.fbx"), export="fbx")["ok"] is True
+    refused = _confine(tmp_path, str(tmp_path / "n.glb"), export="fbx")
+    assert refused["ok"] is False and "does not write" in refused["error"]
+    assert _confine(tmp_path, str(tmp_path / "n_sheet.png"), "model")["ok"] is False  # right file, wrong key
+    assert _confine(tmp_path, str(tmp_path / "n.glb"), "extra")["ok"] is False  # a key the harness never sets
+
+
+def test_a_secret_shaped_file_name_is_refused_not_redacted(tmp_path):
+    secret = tmp_path / "sk-CANARYCANARYCANARY0000.glb"
+    secret.write_text("g")
+    refused = _confine(tmp_path, str(secret))
+    assert refused["ok"] is False and "does not write" in refused["error"]
+
+
+def test_a_path_that_is_not_lexically_inside_the_output_dir_is_refused_before_any_filesystem_access(tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    out.mkdir()
+    touched = []
+    monkeypatch.setattr(runner.os.path, "realpath", lambda value, *a, **k: touched.append(value) or value)
+    for value in (chr(92) * 2 + "attacker.example" + chr(92) + "share" + chr(92) + "n.glb", "//attacker.example/share/n.glb",
+                  "n.glb", str(tmp_path / "n.glb"), str(out / ".." / "n.glb")):
+        refused = runner.confine_files({"ok": True, "files": {"model": value}}, out, "n")
+        assert refused["ok"] is False and "outside the output directory" in refused["error"], value
+    assert all(str(item) == str(out) for item in touched)  # only the trusted output directory is resolved
+
+
+def test_the_lexical_prefix_check_ignores_case(tmp_path):
+    (tmp_path / "n.glb").write_text("x")
+    shouted = str(tmp_path).upper() + chr(92) + "n.glb" if os.name == "nt" else str(tmp_path / "n.glb")
+    assert _confine(tmp_path, shouted)["ok"] is True
+
+
+def test_alternate_data_streams_and_trailing_dots_or_spaces_are_refused(tmp_path):
+    (tmp_path / "n.glb").write_text("x")
+    base = str(tmp_path / "n.glb")
+    for value in (base + ":hidden", base + "::$DATA", base + ".", base + " ", str(tmp_path) + "/ " + "/n.glb"):
+        refused = _confine(tmp_path, value)
+        assert refused["ok"] is False, value
+    assert "colon" in _confine(tmp_path, base + ":hidden")["error"]
+    assert "dot or a space" in _confine(tmp_path, base + ".")["error"]

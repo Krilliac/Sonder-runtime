@@ -75,7 +75,13 @@ Core operation arguments are type- and range-checked when the script is recorded
 number, a box uses `scale=(x, y, z)`; `segments` is an integer 3..256; a mesh needs 3-number vertices
 and in-range, distinct face indices), so a bad argument is a `script_error` with the line, not a
 Blender failure. `join` keeps the first object and destroys the rest, and `delete` destroys its
-object: using such a handle afterwards is refused with the line of the join or delete. Output file
+object: using such a handle afterwards is refused with the line of the join or delete. The recorder tracks
+the object behind each handle, so an alias made by `transform`, `paint`, `paint_faces`, `shade_smooth` or
+`modifier` dies with its object, a join result is its first element, and the first element stays usable;
+`join([a, a])` is allowed. A kit function's result (for example `lf_kit.paint`) is treated as a new object,
+so using the original after deleting it through such an alias is only caught in Blender. `shade_smooth`'s
+`smooth` must be true or false, not a number. Result files must be exactly `<name>.<export>`,
+`<name>_sheet.png` and `<name>_view.png` directly inside the output directory. Output file
 paths are returned exactly as written (never redacted or shortened); a path longer than 1024
 characters or containing a NUL is refused.
 

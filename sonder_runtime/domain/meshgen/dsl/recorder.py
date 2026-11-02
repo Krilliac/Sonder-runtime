@@ -185,7 +185,8 @@ class _Interp:
         self.work_done = 0
         self.deadline = time.monotonic() + MAX_SECONDS
         self.json_size = 0
-        self.consumed = {}  # handle id -> (how, line, op) for results that join or delete destroyed
+        self.consumed = {}  # object id -> (how, line, op) for objects that join or delete destroyed
+        self.objects = {}  # handle id -> object id: passthrough ops and a join result share their input's object
         self.probe = None
         self.core_names = frozenset(opschema.CORE_SIGS)
 
@@ -404,9 +405,12 @@ class _Interp:
         self.consume(op, args, kwargs, ident)
         return Handle(ident, origin)
 
+    def object_of(self, handle):
+        return self.objects.get(handle.id, handle.id)
+
     def check_alive(self, handle):
-        """A result that join merged away or delete removed cannot be used again."""
-        gone = self.consumed.get(handle.id)
+        """An object that join merged away or delete removed cannot be used again, under any handle for it."""
+        gone = self.consumed.get(self.object_of(handle))
         if gone is not None:
             how, line, into = gone
             made = self.ops[handle.id - 1]
@@ -416,19 +420,38 @@ class _Interp:
             raise self.err("the result of %s (line %d) was joined into the result of %s at line %d and no longer "
                            "exists; use the join result instead" % (made["op"], made["line"], into, line))
 
+    # core ops that return their first argument's object under a new handle
+    _PASSTHROUGH = frozenset({"core.transform", "core.paint", "core.paint_faces", "core.shade_smooth",
+                              "core.modifier"})
+
     def consume(self, op, args, kwargs, ident):
-        """Remember which results this call destroyed: all but the first of a join's list, or the deleted one."""
-        if op == "core.delete":
-            for value in list(args) + list(kwargs.values()):
+        """Track which object each handle stands for and which objects this call destroyed.
+
+        A passthrough op's result is its input's object; a join result is its first element's object and every
+        other distinct object in the list is destroyed; delete destroys its object.  Kit functions other than
+        ``join`` return a new object as far as the recorder can tell (conservative: no false refusals)."""
+        values = list(args) + list(kwargs.values())
+        objid = ident
+        if op in self._PASSTHROUGH:
+            first = args[0] if args else kwargs.get("obj")
+            if isinstance(first, Handle):
+                objid = self.object_of(first)
+        elif op == "core.delete":
+            for value in values:
                 if isinstance(value, Handle):
-                    self.consumed[value.id] = ("deleted", self.line, op)
+                    self.consumed[self.object_of(value)] = ("deleted", self.line, op)
         elif op == "core.join" or op == "kit.join":
-            for value in list(args) + list(kwargs.values()):
+            for value in values:
                 if isinstance(value, (list, tuple)):
                     handles = [item for item in value if isinstance(item, Handle)]
-                    for item in handles[1:]:
-                        self.consumed[item.id] = ("joined", self.line, op)
+                    if handles:
+                        objid = self.object_of(handles[0])
+                        for item in handles[1:]:
+                            other = self.object_of(item)
+                            if other != objid:
+                                self.consumed[other] = ("joined", self.line, op)
                     break
+        self.objects[ident] = objid
 
     # ------------------------------------------------------------------ expression dispatch
     def ev(self, node):
