@@ -54,19 +54,48 @@ Useful arguments: `candidates` (1-6, default 3), `rounds` (1-6, default 3), `tie
 `mesh_generate` runs **model-written Python**. It is graded as an execution tool, the same
 trust level as `run_code`, and asks or is denied in the same permission modes.
 
-Three layers reduce accidents, but they are defence in depth, **not a sandbox**:
+Four layers reduce accidents, but they are defence in depth, **not a sandbox**:
 
-- **AST gate** (`sonder_runtime/domain/meshgen/script_safety.py`): imports limited to `bpy`,
-  `bmesh`, `mathutils`, `math`, `random` and the kit module; no `open`, `exec`, `eval`,
-  `getattr` and friends; no names or attributes starting with `_`; no `bpy.ops.wm`, `bpy.app`,
-  `bpy.utils`, file/import/export/render operators, preferences or text datablocks.
+- **AST gate** (`sonder_runtime/domain/meshgen/script_safety.py`). It is an allow-list for
+  Blender, not a deny list of paths:
+  - `bpy` may be imported only as plain `import bpy`, and is usable only as
+    `bpy.ops.<category>.<operator>(...)` with category `mesh`, `object`, `transform` or `curve`;
+    `bpy.data.<collection>` with `objects`, `meshes`, `materials`, `collections`, `curves`; and
+    `bpy.context.<member>` (scene, view_layer, active/selected objects, depsgraph). `bpy`,
+    `bpy.ops`, `bpy.data` and `bpy.context` cannot be assigned, passed, stored, defaulted or
+    returned, so there is no alias to launder a path through. Operator names containing
+    import/export/save/load/open/write/script/python/bake/browse/file are refused.
+  - A fixed list of attribute names is refused on any object, including as keyword arguments:
+    `as_module`, `blend_data`, `texts`, `text`, `libraries`, `filepath`, `filepath_raw`, `save*`,
+    `write`, `driver*`, `expression`, `utils`, `app`, `handlers`, `preferences`, `window_manager`,
+    `types`, `rna_type`, `id_data`, `os`, `sys`, `subprocess`, `shutil`, `importlib`, `io`,
+    `socket`, `ctypes` and more (see `FORBIDDEN_ATTRIBUTES`). `write` is refused even on
+    non-bpy objects. A few string literals naming data blocks (`"texts"`, `"blend_data"`, ...)
+    are refused too.
+  - Imports are limited to `bpy`, `bmesh`, `mathutils`, `math`, `random` and the kit module;
+    `open`, `exec`, `eval`, `getattr`, `type`, `dir` and friends and every name or attribute
+    starting with `_` (except a bare `_`) are refused.
+  - The kit module is reachable only through the public top-level functions, classes and
+    constants of the kit source (imports and re-exports such as `kit.Vector` are not
+    available). A kit's own private helpers are therefore unusable by model scripts.
 - **Restricted builtins** inside Blender (`harness.py`): a small safe subset, and `__import__`
-  limited to the same allow-list.
-- **Blender flags**: `--factory-startup --disable-autoexec`, no shell, `cwd` the output directory,
-  a per-build timeout.
+  limited to the same module allow-list.
+- **Harness hardening**: before the script runs, `Text.as_module` and `bpy.utils.execfile`
+  are replaced with functions that refuse, so a script that somehow reached a text block
+  still cannot execute it with unrestricted builtins.
+- **Blender flags and plumbing**: `--factory-startup --disable-autoexec`, no shell, `cwd` the
+  output directory, a per-build timeout. The harness reports its result through a
+  per-job, unguessable file (not stdout, which the script can write to), and every file the
+  result names must resolve inside the candidate's output directory.
 
-A determined script can still harm the machine through `bpy` itself. Run the tool only where
-`run_code` would be acceptable.
+What is NOT guaranteed: an allowed operator or a Blender bug can still do harm, a script can
+burn CPU or memory until the timeout, and nothing here limits what Blender itself can reach.
+Run the tool only where `run_code` would be acceptable.
+
+Reads are guarded: `kit_path` and `api_doc_path` go through the same guarded reader as the
+file tools (`file_ops.require_read_access`), so they must sit inside the allowed file roots
+(`SONDER_FILE_ROOTS`) and credential stores such as `.ssh` are refused before anything can
+reach a prompt.
 
 ## Troubleshooting
 

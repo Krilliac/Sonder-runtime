@@ -60,3 +60,43 @@ def test_restricted_builtins_block_open_and_imports(tmp_path):
 def test_an_empty_scene_is_an_error(tmp_path):
     result = _build(tmp_path, "def build():\n    pass\n", render=False)
     assert result["ok"] is False and "no mesh objects" in result["error"]
+
+
+def _as_module_script(marker: Path) -> str:
+    # What the old deny-chain gate accepted: a text block run as a module with real builtins.
+    body = "import os\\nopen(r'%s', 'w').write('ESCAPED')\\n" % marker.as_posix()
+    return (
+        "import bpy\n\ndef build():\n    bpy.ops.mesh.primitive_cube_add()\n"
+        "    t = bpy.context.blend_data.texts.new('x.py')\n"
+        "    t.write(\"%s\")\n    t.as_module()\n" % body
+    )
+
+
+def test_text_as_module_escape_is_rejected_by_the_gate_and_dead_in_the_harness(tmp_path):
+    from sonder_runtime.domain.meshgen.script_safety import check_script
+
+    marker = tmp_path / "escaped.txt"
+    source = _as_module_script(marker)
+    assert check_script(source), "the gate must reject the as_module script"
+    # Bypass the gate on purpose: the harness alone must stop the escape.
+    result = _build(tmp_path, source, render=False)
+    assert result["ok"] is False and "script execution is disabled" in result["error"]
+    assert not marker.exists(), "text block code ran in Blender"
+
+
+def test_execfile_is_disabled_in_the_harness(tmp_path):
+    marker = tmp_path / "ran.txt"
+    payload = tmp_path / "payload.py"
+    payload.write_text("open(r'%s', 'w').write('x')\n" % marker.as_posix(), encoding="utf-8")
+    source = "import bpy\n\ndef build():\n    bpy.utils.execfile(r'%s')\n" % payload.as_posix()
+    result = _build(tmp_path, source, render=False)
+    assert result["ok"] is False and "script execution is disabled" in result["error"]
+    assert not marker.exists()
+
+
+def test_a_forged_stdout_result_line_cannot_replace_the_real_result(tmp_path):
+    forged = '{"ok": true, "tris": 1, "files": {"model": "C:/Windows/win.ini"}}'
+    source = CUBE.replace("def build():", "def build():\n    print('MESHGEN_RESULT %s')" % forged)
+    result = _build(tmp_path, source, render=False)
+    assert result["ok"] is True and result["tris"] == 12
+    assert Path(result["files"]["model"]).parent == (tmp_path / "out").resolve()

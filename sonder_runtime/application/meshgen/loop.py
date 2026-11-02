@@ -32,6 +32,7 @@ class MeshRequest:
     max_tris: int = 3000
     height_m: float = 0.0
     kit_module: str | None = None
+    kit_names: frozenset = frozenset()
     api_doc: str = ""
     candidates: int = 3
     rounds: int = 3
@@ -66,7 +67,7 @@ def run(request: MeshRequest, *, generate, build, critique, map_parallel) -> dic
         request.brief, max_tris=request.max_tris, height_m=request.height_m,
         kit_module=request.kit_module, api_doc=request.api_doc,
     )
-    vision_off = {"reason": "" if request.vision else "disabled by the caller"}
+    vision_off = {"reason": "" if request.vision else "disabled by the caller", "used": 0}
 
     def attempt_round(index, tier, round_index, prompt, attempt, versions):
         """One round; returns ``(stop, next_prompt)`` (``next_prompt`` None = keep the prompt)."""
@@ -77,7 +78,7 @@ def run(request: MeshRequest, *, generate, build, critique, map_parallel) -> dic
             attempt["error"] = _clip("%s: %s" % (type(exc).__name__, exc), 400)
             return False, None
         code = extract_code(reply)
-        reasons = check_script(code, request.kit_module)
+        reasons = check_script(code, request.kit_module, request.kit_names)
         if reasons:
             attempt["status"] = "rejected"
             attempt["issues"] = reasons[:8]
@@ -103,6 +104,7 @@ def run(request: MeshRequest, *, generate, build, critique, map_parallel) -> dic
             return False, repair_prompt(base, code, _over_budget_text(result, request.max_tris))
         sheet = files.get("sheet")
         if request.vision and not vision_off["reason"] and sheet:
+            vision_off["used"] += 1
             try:
                 verdict = critique(sheet)
             except Exception as exc:  # noqa: BLE001 - lost vision degrades to build-only
@@ -159,7 +161,7 @@ def run(request: MeshRequest, *, generate, build, critique, map_parallel) -> dic
     if winner is not None and not winner.get("built"):
         winner = None
     if request.vision and not vision_off["reason"]:
-        vision = "on"
+        vision = "on" if vision_off["used"] else "unavailable: no candidate reached the critique step"
     else:
         vision = "unavailable: %s" % (vision_off["reason"] or "disabled by the caller")
     return {"ok": winner is not None, "winner": winner, "candidates": candidates, "vision": vision,

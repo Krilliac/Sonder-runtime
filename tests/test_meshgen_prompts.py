@@ -112,3 +112,13 @@ def test_rank_key_orders_built_budget_score_then_tris():
     assert pick_best([failed, over, low, high, lean]) is lean
     assert pick_best([high, dict(high)]) is high
     assert pick_best([]) is None
+
+
+def test_critique_prompt_has_an_orientation_and_attachment_checklist_before_scoring():
+    prompt = critique_prompt("a wheelbarrow")
+    assert prompt.index("ORIENTATION") < prompt.index("Reply with ONLY a JSON object")
+    assert prompt.index("ATTACHMENT") < prompt.index("Reply with ONLY a JSON object")
+    assert "lying flat" in prompt and "axle" in prompt and "z=0" in prompt
+    assert "caps the score at 5" in prompt and "first" in prompt and "issues" in prompt
+    # the JSON output contract is unchanged
+    assert '"score": <integer 0-10>' in prompt and '"recognizable"' in prompt and '"issues"' in prompt

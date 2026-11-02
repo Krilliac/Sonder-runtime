@@ -186,3 +186,19 @@ def test_report_is_json_able_and_has_no_code_bodies():
     report = rig.go(candidates=1, rounds=1)
     text = json.dumps(report)
     assert "def build" not in text and report["elapsed_s"] >= 0
+
+
+def test_vision_is_not_reported_on_when_no_candidate_reached_the_critique():
+    rig = Rig(builds=[{"ok": False, "error": "bad"}] * 2)
+    report = rig.go(candidates=1, rounds=2)
+    assert report["vision"] == "unavailable: no candidate reached the critique step"
+    rig = Rig(builds=[ok_build(tris=9000, within=False)] * 2)
+    assert rig.go(candidates=1, rounds=2, max_tris=10)["vision"].startswith("unavailable")
+
+
+def test_the_safety_gate_receives_the_kit_names():
+    kit_code = fence("import bpy\nimport propkit\n\ndef build():\n    propkit.os.system('x')\n")
+    rig = Rig(replies=[kit_code, fence("import bpy\nimport propkit\n\ndef build():\n    propkit.wheel(1)\n")],
+              critiques=[verdict(9)])
+    report = rig.go(candidates=1, rounds=2, kit_module="propkit", kit_names=frozenset({"wheel"}))
+    assert [a["status"] for a in report["candidates"][0]["attempts"]] == ["rejected", "accepted"]

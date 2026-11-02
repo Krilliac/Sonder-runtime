@@ -26,9 +26,30 @@ RENDER_PX = 512
 DEFAULT_GREY = (0.69, 0.69, 0.69)
 
 
+RESULT_PATH = ""
+
+
 def _emit(payload):
-    sys.stdout.write("\nMESHGEN_RESULT " + json.dumps(payload) + "\n")
-    sys.stdout.flush()
+    """Write the result where the runner told us to; stdout is never trusted by the runner."""
+    if not RESULT_PATH:
+        return
+    tmp = RESULT_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle)
+    os.replace(tmp, RESULT_PATH)
+
+
+def _neuter_script_execution():
+    """Disable the two Python entry points that run text blocks (belt and braces).
+
+    The AST gate already refuses these names; this keeps a script that slipped past it from
+    executing a Text datablock with unrestricted builtins.
+    """
+    def refuse(*_args, **_kwargs):
+        raise RuntimeError("script execution is disabled by the mesh harness")
+
+    bpy.utils.execfile = refuse
+    bpy.types.Text.as_module = refuse
 
 
 def _job():
@@ -73,10 +94,7 @@ def _safe_builtins(allowed):
 
     names = (
         "abs all any bool dict enumerate float int isinstance len list map max min pow print "
-        "range reversed round set sorted str sum tuple zip filter divmod object super "
-        "staticmethod classmethod property "
-        "ValueError Exception TypeError KeyError IndexError ZeroDivisionError "
-        "__build_class__"
+        "range reversed round set sorted str sum tuple zip ValueError Exception __build_class__"
     ).split()
     safe = {name: getattr(builtins, name) for name in names}
     real_import = builtins.__import__
@@ -275,7 +293,10 @@ def _compose_sheet(paths, sheet_path, single_path, keep_dir_name):
 
 
 def main():
+    global RESULT_PATH
     job = _job()
+    RESULT_PATH = job["result_path"]
+    _neuter_script_execution()
     out_dir = job["out_dir"]
     name = job["name"]
     os.makedirs(out_dir, exist_ok=True)

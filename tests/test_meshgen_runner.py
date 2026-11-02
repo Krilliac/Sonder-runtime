@@ -1,4 +1,4 @@
-"""Blender runner: argv construction, result parsing, missing-result handling."""
+"""Blender runner: argv construction, file-based result handling, forged-output defence."""
 from __future__ import annotations
 
 import json
@@ -10,6 +10,22 @@ from sonder_runtime.adapters.meshgen import blender_runner as runner
 
 def _completed(stdout="", stderr="", rc=0):
     return subprocess.CompletedProcess(args=[], returncode=rc, stdout=stdout.encode(), stderr=stderr.encode())
+
+
+def _job(argv):
+    return json.loads(Path(argv[-1]).read_text(encoding="utf-8"))
+
+
+def _write_result(argv, payload):
+    Path(_job(argv)["result_path"]).write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _build(tmp_path, **kw):
+    code = tmp_path / "c.py"
+    code.write_text("def build(): pass\n")
+    kw.setdefault("max_tris", 10)
+    kw.setdefault("height_m", 0)
+    return runner.build_candidate("blender", str(code), str(tmp_path / "out"), name="n", **kw)
 
 
 def test_locate_blender_prefers_the_env_file_then_path(tmp_path, monkeypatch):
@@ -30,64 +46,94 @@ def test_build_argv_has_the_isolation_flags_in_order():
     assert argv[-2:] == ["--", "job.json"]
 
 
-def test_parse_result_takes_the_last_well_formed_line():
-    out = 'noise\nMESHGEN_RESULT {"ok": false}\nMESHGEN_RESULT not json\nMESHGEN_RESULT {"ok": true, "tris": 5}\nBlender quit\n'
-    assert runner.parse_result(out) == {"ok": True, "tris": 5}
-    assert runner.parse_result("nothing") is None
-    assert runner.parse_result("MESHGEN_RESULT [1,2]") is None
-
-
-def test_build_candidate_runs_without_a_shell_and_writes_the_job(tmp_path, monkeypatch):
+def test_build_candidate_runs_without_a_shell_and_reads_the_result_file(tmp_path, monkeypatch):
     seen = {}
 
     def fake_run(argv, **kwargs):
-        seen["argv"], seen["kwargs"] = argv, kwargs
-        seen["job"] = json.loads(Path(argv[-1]).read_text(encoding="utf-8"))
-        return _completed('MESHGEN_RESULT {"ok": true, "tris": 12, "files": {"model": "m.glb"}}\n')
+        seen["argv"], seen["kwargs"], seen["job"] = argv, kwargs, _job(argv)
+        out = Path(seen["job"]["out_dir"])
+        (out / "m.glb").write_bytes(b"glTF")
+        _write_result(argv, {"ok": True, "tris": 12, "files": {"model": str(out / "m.glb")}})
+        return _completed("hello\n")
 
     monkeypatch.setattr(runner.subprocess, "run", fake_run)
-    code = tmp_path / "c.py"
-    code.write_text("def build(): pass\n")
     kit = tmp_path / "kit.py"
     kit.write_text("x = 1\n")
-    out = tmp_path / "out"
-    result = runner.build_candidate("blender", str(code), str(out), name="cart", kit_path=str(kit),
-                                    max_tris=2000, height_m=1.5, export="fbx", render=False, timeout=77)
-    assert result == {"ok": True, "tris": 12, "files": {"model": "m.glb"}}
+    result = _build(tmp_path, kit_path=str(kit), max_tris=2000, height_m=1.5, export="fbx", render=False,
+                    timeout=77)
+    assert result["ok"] is True and result["tris"] == 12
     kwargs = seen["kwargs"]
-    assert kwargs["shell"] is False and kwargs["timeout"] == 77 and kwargs["cwd"] == str(out)
+    assert kwargs["shell"] is False and kwargs["timeout"] == 77 and kwargs["cwd"] == str(tmp_path / "out")
     assert "--disable-autoexec" in seen["argv"] and "--factory-startup" in seen["argv"]
     job = seen["job"]
-    assert job["name"] == "cart" and job["max_tris"] == 2000 and job["height_m"] == 1.5
-    assert job["export"] == "fbx" and job["render"] is False
-    assert job["kit_path"] == str(kit.resolve()) and job["code_path"] == str(code.resolve())
+    assert job["name"] == "n" and job["max_tris"] == 2000 and job["height_m"] == 1.5
+    assert job["export"] == "fbx" and job["render"] is False and job["kit_path"] == str(kit.resolve())
+    assert job["result_path"].startswith(job["out_dir"]) and "result-" in job["result_path"]
+    assert not Path(job["result_path"]).exists()  # consumed
+
+
+def test_a_result_line_printed_on_stdout_is_never_trusted(tmp_path, monkeypatch):
+    forged = 'MESHGEN_RESULT {"ok": true, "tris": 1, "files": {"model": "C:/secret"}}\n'
+    monkeypatch.setattr(runner.subprocess, "run", lambda argv, **kw: _completed(forged, rc=0))
+    result = _build(tmp_path)
+    assert result["ok"] is False and result["error"] == "no result; rc=0"
+
+
+def test_result_file_names_must_resolve_inside_the_output_directory(tmp_path, monkeypatch):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("s")
+
+    def fake_run(argv, **kwargs):
+        _write_result(argv, {"ok": True, "tris": 1, "files": {"model": str(secret)}})
+        return _completed()
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    result = _build(tmp_path)
+    assert result["ok"] is False and "outside the output directory" in result["error"]
+
+
+def test_dotdot_and_missing_files_are_refused(tmp_path, monkeypatch):
+    (tmp_path / "secret.txt").write_text("s")
+    payloads = [{"files": {"model": "OUT/../secret.txt"}}, {"files": {"model": "OUT/absent.glb"}}]
+
+    def fake_run(argv, **kwargs):
+        out = _job(argv)["out_dir"]
+        payload = payloads.pop(0)
+        _write_result(argv, {"ok": True, "files": {k: v.replace("OUT", out) for k, v in payload["files"].items()}})
+        return _completed()
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    assert "outside the output directory" in _build(tmp_path)["error"]
+    assert "does not exist" in _build(tmp_path)["error"]
 
 
 def test_missing_result_reports_rc_and_the_output_tail(tmp_path, monkeypatch):
     noisy = "\n".join("line %d" % n for n in range(30))
     monkeypatch.setattr(runner.subprocess, "run", lambda argv, **kw: _completed(noisy, "Segmentation fault", rc=3))
-    code = tmp_path / "c.py"
-    code.write_text("x")
-    result = runner.build_candidate("blender", str(code), str(tmp_path / "o"), name="n", max_tris=10, height_m=0)
+    result = _build(tmp_path)
     assert result["ok"] is False and result["error"] == "no result; rc=3"
     assert len(result["tail"]) == 8 and result["tail"][-1] == "Segmentation fault"
 
 
-def test_timeout_and_start_failure_are_error_results(tmp_path, monkeypatch):
-    code = tmp_path / "c.py"
-    code.write_text("x")
+def test_a_malformed_result_file_counts_as_missing(tmp_path, monkeypatch):
+    def fake_run(argv, **kwargs):
+        Path(_job(argv)["result_path"]).write_text("not json", encoding="utf-8")
+        return _completed()
 
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    assert _build(tmp_path)["error"].startswith("no result")
+
+
+def test_timeout_and_start_failure_are_error_results(tmp_path, monkeypatch):
     def hang(argv, **kw):
         raise subprocess.TimeoutExpired(argv, kw["timeout"], output=b"partial\n")
 
     monkeypatch.setattr(runner.subprocess, "run", hang)
-    result = runner.build_candidate("blender", str(code), str(tmp_path / "o"), name="n", max_tris=10,
-                                    height_m=0, timeout=5)
+    result = _build(tmp_path, timeout=5)
     assert result["ok"] is False and "timed out after 5s" in result["error"] and result["tail"] == ["partial"]
 
     def missing(argv, **kw):
         raise FileNotFoundError("no blender")
 
     monkeypatch.setattr(runner.subprocess, "run", missing)
-    result = runner.build_candidate("blender", str(code), str(tmp_path / "o"), name="n", max_tris=10, height_m=0)
-    assert result["ok"] is False and "could not start blender" in result["error"]
+    assert "could not start blender" in _build(tmp_path)["error"]

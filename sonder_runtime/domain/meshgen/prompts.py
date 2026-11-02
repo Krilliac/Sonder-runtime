@@ -79,6 +79,10 @@ def generation_prompt(brief: str, *, max_tris: int, height_m: float,
         "- Nothing animated, no lights or cameras, no materials or textures.",
         "- Define `def build():` which creates the objects in the current scene and returns nothing. "
         "Do not call build() yourself. Do not use files, the network, or names starting with an underscore.",
+        "- Use `import bpy` plainly and spell every path out: only bpy.ops.mesh/object/transform/curve "
+        "operators, bpy.data.objects/meshes/materials/collections/curves and bpy.context.scene/view_layer/"
+        "active_object/selected_objects are available. Never assign `bpy` or `bpy.ops`/`bpy.data`/"
+        "`bpy.context` to a variable, and never touch save/write/filepath/text/driver/preferences APIs.",
         colour,
         "- Output ONLY one ```python code block and nothing else.",
     ]

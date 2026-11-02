@@ -12,9 +12,9 @@ import json
 import os
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
 
-RESULT_MARKER = "MESHGEN_RESULT "
 HARNESS_PATH = Path(__file__).with_name("harness.py")
 _TAIL_LINES = 8
 
@@ -37,17 +37,29 @@ def _tail(text: str) -> list[str]:
     return lines[-_TAIL_LINES:]
 
 
-def parse_result(stdout: str) -> dict | None:
-    """The last well-formed ``MESHGEN_RESULT`` object in ``stdout``, if any."""
-    for line in reversed(str(stdout or "").splitlines()):
-        if line.startswith(RESULT_MARKER):
-            try:
-                value = json.loads(line[len(RESULT_MARKER):])
-            except ValueError:
-                continue
-            if isinstance(value, dict):
-                return value
-    return None
+def read_result(result_path: Path) -> dict | None:
+    """The harness' result object, or ``None`` when it is missing or malformed."""
+    try:
+        value = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def confine_files(result: dict, out_dir: Path) -> dict:
+    """Refuse a result whose ``files`` entries are not existing files inside ``out_dir``."""
+    root = os.path.realpath(out_dir)
+    for key, value in (result.get("files") or {}).items():
+        real = os.path.realpath(str(value))
+        try:
+            inside = os.path.commonpath([root, real]) == root and real != root
+        except ValueError:
+            inside = False
+        if not inside:
+            return {"ok": False, "error": "result names a file outside the output directory: %s" % key}
+        if not os.path.isfile(real):
+            return {"ok": False, "error": "result names a file that does not exist: %s" % key}
+    return result
 
 
 def build_candidate(blender, code_path, out_dir, *, name, kit_path=None, max_tris,
@@ -66,7 +78,9 @@ def build_candidate(blender, code_path, out_dir, *, name, kit_path=None, max_tri
         "height_m": float(height_m or 0.0),
         "export": "fbx" if str(export).lower() == "fbx" else "glb",
         "render": bool(render),
+        "result_path": str(out.resolve() / ("%s.result-%s.json" % (name, uuid.uuid4().hex))),
     }
+    result_path = Path(job["result_path"])
     job_path = out / ("%s.job.json" % name)
     job_path.write_text(json.dumps(job), encoding="utf-8")
     argv = build_argv(str(blender), str(job_path), str(harness))
@@ -82,8 +96,12 @@ def build_candidate(blender, code_path, out_dir, *, name, kit_path=None, max_tri
         return {"ok": False, "error": "could not start blender: %s: %s" % (type(exc).__name__, exc)}
     stdout = completed.stdout.decode("utf-8", "replace")
     stderr = completed.stderr.decode("utf-8", "replace")
-    result = parse_result(stdout)
+    result = read_result(result_path)
+    try:
+        result_path.unlink()
+    except OSError:
+        pass
     if result is None:
         return {"ok": False, "error": "no result; rc=%s" % completed.returncode,
                 "tail": _tail(stdout + "\n" + stderr)}
-    return result
+    return confine_files(result, out)

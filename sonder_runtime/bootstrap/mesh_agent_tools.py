@@ -20,11 +20,13 @@ import threading
 import time
 from pathlib import Path
 
+from ..adapters.filesystem import file_ops
 from ..adapters.meshgen import blender_runner
 from ..application.meshgen.loop import MeshRequest, run as run_loop
 from ..domain.common.errors import SonderError
 from ..domain.meshgen.critique import critique_prompt
 from ..domain.meshgen.prompts import kit_api_digest
+from ..domain.meshgen.script_safety import kit_public_names
 from ..platform.runtime_threads import ThreadPoolExecutor
 from .legacy_root import runtime
 
@@ -33,6 +35,7 @@ MAX_API_DOC_CHARS = 12_000
 MAX_KIT_BYTES = 512_000
 _GENERATE_TIMEOUT_CAP = 600
 _BUILD_TIMEOUT = 180
+MIN_BUILD_SECONDS = 5
 
 
 def _json(payload) -> str:
@@ -51,12 +54,22 @@ def _clamp(value, low, high, default):
         return default
 
 
-def _read_text(path: Path, limit: int, label: str) -> str:
-    if not path.is_file():
-        raise SonderError("%s not found: %s" % (label, path))
-    if path.stat().st_size > limit:
-        raise SonderError("%s is larger than %d bytes: %s" % (label, limit, path))
-    return path.read_text(encoding="utf-8", errors="replace")
+def _read_text(path: str, limit: int, label: str) -> tuple[Path, str]:
+    """Read a caller-named file through the same guard the file tools use.
+
+    ``require_read_access`` confines the path to the allowed roots and refuses credential
+    stores and Sonder control-plane files, so a kit or API doc path cannot smuggle a secret
+    into a model prompt.
+    """
+    try:
+        resolved = file_ops.require_read_access(path)
+    except (PermissionError, ValueError, OSError) as exc:
+        raise SonderError("%s refused: %s" % (label, exc)) from exc
+    if not resolved.is_file():
+        raise SonderError("%s not found: %s" % (label, resolved))
+    if resolved.stat().st_size > limit:
+        raise SonderError("%s is larger than %d bytes: %s" % (label, limit, resolved))
+    return resolved, resolved.read_text(encoding="utf-8", errors="replace")
 
 
 def _output_root(rt, output_dir: str, slug: str) -> Path:
@@ -71,6 +84,15 @@ def _output_root(rt, output_dir: str, slug: str) -> Path:
     if real != workspace and workspace not in real.parents:
         raise SonderError("mesh output must stay inside the asset workspace: %s" % output_dir)
     return target
+
+
+def _inside(path, root: Path) -> bool:
+    real = os.path.realpath(str(path))
+    base = os.path.realpath(str(root))
+    try:
+        return os.path.commonpath([base, real]) == base
+    except ValueError:
+        return False
 
 
 def _candidate_summary(candidate: dict) -> dict:
@@ -116,17 +138,17 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
     slug = _slug(name or brief)
 
     kit_module = None
+    kit_names = frozenset()
     api_doc = ""
     kit_file = None
     if str(kit_path or "").strip():
-        kit_file = Path(kit_path.strip()).expanduser().resolve()
-        kit_source = _read_text(kit_file, MAX_KIT_BYTES, "kit")
+        kit_file, kit_source = _read_text(kit_path.strip(), MAX_KIT_BYTES, "kit")
         kit_module = kit_file.stem
         if kit_file.suffix != ".py" or not kit_module.isidentifier() or kit_module.startswith("_"):
             raise SonderError("kit_path must be a .py file with a plain module name: %s" % kit_file)
+        kit_names = kit_public_names(kit_source)
         if str(api_doc_path or "").strip():
-            api_doc = _read_text(Path(api_doc_path.strip()).expanduser().resolve(), MAX_API_DOC_CHARS * 4,
-                                 "api doc")[:MAX_API_DOC_CHARS]
+            api_doc = _read_text(api_doc_path.strip(), MAX_API_DOC_CHARS * 4, "api doc")[1][:MAX_API_DOC_CHARS]
         else:
             api_doc = kit_api_digest(kit_source)
 
@@ -148,13 +170,15 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
 
     def build(index, round_index, code):
         left = remaining()
+        if left < MIN_BUILD_SECONDS:
+            raise TimeoutError("mesh_generate has under %ds left" % MIN_BUILD_SECONDS)
         stem = "c%d_r%d" % (index, round_index)
         code_path = root / (stem + ".py")
         code_path.write_text(code, encoding="utf-8")
         result = runner.build_candidate(
             blender, str(code_path), str(root / stem), name=slug,
             kit_path=str(kit_file) if kit_file else None, max_tris=max_tris, height_m=height,
-            export=export, render=True, timeout=int(min(left, _BUILD_TIMEOUT)),
+            export=export, render=True, timeout=int(max(MIN_BUILD_SECONDS, min(left, _BUILD_TIMEOUT))),
         )
         files = dict(result.get("files") or {})
         files["code"] = str(code_path)
@@ -183,7 +207,7 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
             return list(pool.map(guarded, items))
 
     request = MeshRequest(
-        brief=brief, max_tris=max_tris, height_m=height, kit_module=kit_module, api_doc=api_doc,
+        brief=brief, max_tris=max_tris, height_m=height, kit_module=kit_module, kit_names=kit_names, api_doc=api_doc,
         candidates=candidates, rounds=rounds, tiers=tier_list, target_score=target_score, vision=bool(vision),
     )
     report = run_loop(request, generate=generate, build=build, critique=critique, map_parallel=map_parallel)
@@ -201,7 +225,7 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
         for key, suffix in (("model", ".%s" % export), ("sheet", "_sheet.png"), ("view", "_view.png"),
                             ("code", ".py")):
             source = (winner.get("files") or {}).get(key)
-            if source and os.path.isfile(source):
+            if source and _inside(source, root) and os.path.isfile(source):
                 target = root / (slug + suffix)
                 shutil.copyfile(source, target)
                 final[key] = str(target)

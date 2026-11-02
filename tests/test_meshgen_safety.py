@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import pytest
 
-from sonder_runtime.domain.meshgen.script_safety import MAX_SOURCE_CHARS, check_script
+from sonder_runtime.domain.meshgen.script_safety import MAX_SOURCE_CHARS, check_script, kit_public_names
 
 GOOD = '''import bpy
+import bmesh
 import math
 from mathutils import Vector
 
@@ -14,8 +15,35 @@ def build():
         bpy.ops.mesh.primitive_cube_add(size=1.0, location=(i, 0, 0.5))
         obj = bpy.context.active_object
         obj.rotation_euler = (0, math.radians(10), 0)
+        obj.scale = Vector((1, 2, 1))
         paint(obj, "#ff0000")
         bpy.ops.object.modifier_apply(modifier="Bevel")
+    mesh = bpy.data.meshes.new("m")
+    ob = bpy.data.objects.new("o", mesh)
+    bpy.context.scene.collection.objects.link(ob)
+    bm = bmesh.new()
+    bmesh.ops.create_cube(bm, size=1.0)
+    bm.to_mesh(mesh)
+    bm.free()
+    mat = bpy.data.materials.new("mat")
+    if ob.type == "MESH":
+        ob.data.materials.append(mat)
+    dg = bpy.context.evaluated_depsgraph_get()
+    bpy.context.view_layer.update()
+'''
+
+KIT = '''"""kit"""
+import os
+PALETTE = {"a": "#fff"}
+
+def wheel(r):
+    """Make a wheel."""
+
+def _private():
+    pass
+
+class Part:
+    pass
 '''
 
 
@@ -31,12 +59,36 @@ def test_accepts_a_throwaway_underscore_loop_variable():
     assert check_script("import bpy\ndef build():\n    for _ in range(2):\n        pass\n") == []
 
 
-def test_accepts_kit_import_only_when_named():
-    source = "import bpy\nimport propkit\nfrom propkit import wheel\n\ndef build():\n    wheel()\n"
-    assert check_script(source, "propkit") == []
-    reasons = check_script(source, None)
-    assert reasons and all(r.startswith("line ") for r in reasons)
-    assert "propkit" in _joined(reasons)
+def test_kit_public_names_exclude_imports_and_private_names():
+    assert kit_public_names(KIT) == {"PALETTE", "wheel", "Part"}
+    assert kit_public_names("def (broken") == frozenset()
+
+
+def test_accepts_kit_use_only_through_public_names_and_aliases():
+    names = kit_public_names(KIT)
+    plain = "import bpy\nimport propkit\n\ndef build():\n    propkit.wheel(propkit.PALETTE['a'])\n"
+    aliased = "import propkit as pk\nfrom propkit import wheel\n\ndef build():\n    pk.wheel(1)\n    wheel(2)\n"
+    assert check_script(plain, "propkit", names) == []
+    assert check_script(aliased, "propkit", names) == []
+    assert check_script(plain, None, None)  # no kit named: the import itself is refused
+
+
+@pytest.mark.parametrize("body,needle", [
+    ("import propkit\ndef build():\n    propkit.os.system('x')\n", "kit"),
+    ("import propkit\ndef build():\n    propkit._private()\n", "_private"),
+    ("import propkit\ndef build():\n    x = propkit\n", "kit"),
+    ("import propkit\ndef build():\n    f(propkit)\n", "kit"),
+    ("import propkit as pk\ndef build():\n    pk.sys\n", "kit"),
+    ("from propkit import os\ndef build():\n    pass\n", "not a public name"),
+    ("from propkit import *\ndef build():\n    pass\n", "not a public name"),
+])
+def test_kit_attribute_access_is_limited_to_public_defs(body, needle):
+    reasons = check_script(body, "propkit", kit_public_names(KIT))
+    assert reasons and needle in _joined(reasons), reasons
+
+
+def test_a_kit_module_without_names_allows_no_attribute():
+    assert check_script("import propkit\ndef build():\n    propkit.wheel(1)\n", "propkit")
 
 
 @pytest.mark.parametrize("source,line,needle", [
@@ -47,8 +99,8 @@ def test_accepts_kit_import_only_when_named():
     ("import bpy\n\ndef build():\n    x = bpy.__class__\n", 4, "__class__"),
     ("import bpy\n\ndef build():\n    y = getattr(bpy, 'ops')\n", 4, "getattr"),
     ("import bpy\n\ndef build():\n    exec('1')\n", 4, "exec"),
-    ("import bpy\n\ndef build():\n    bpy.ops.wm.quit_blender()\n", 4, "bpy.ops.wm"),
-    ("import bpy\n\ndef build():\n    bpy.app.handlers.load_post.append(None)\n", 4, "bpy.app"),
+    ("import bpy\n\ndef build():\n    bpy.ops.wm.quit_blender()\n", 4, "bpy.ops"),
+    ("import bpy\n\ndef build():\n    bpy.app.handlers.load_post.append(None)\n", 4, ".app"),
     ("import bpy\n\ndef build():\n    bpy.context.preferences.view.ui_scale = 2\n", 4, "preferences"),
     ("import bpy\n\ndef build():\n    bpy.ops.export_scene.fbx(filepath='x')\n", 4, "export_scene"),
     ("import bpy\nfrom . import sibling\n\ndef build():\n    pass\n", 2, "relative"),
@@ -60,10 +112,58 @@ def test_rejects_with_a_reason_naming_the_line(source, line, needle):
     assert any(r.startswith("line %d:" % line) and needle in r for r in reasons), reasons
 
 
-def test_rejects_through_import_aliases():
-    reasons = check_script("import bpy as b\nfrom bpy import app\n\ndef build():\n    b.ops.wm.quit_blender()\n    app.handlers\n")
-    text = _joined(reasons)
-    assert "line 5" in text and "line 6" in text
+# Each of these passed the previous, deny-chain gate (or is a close variant).  The first was run
+# in real Blender 5.2 and executed arbitrary code with real os/sys.
+EXPLOITS = {
+    "text_as_module": (
+        "import bpy\ndef build():\n    bpy.ops.mesh.primitive_cube_add()\n"
+        "    t = bpy.context.blend_data.texts.new('x.py'); t.write(\"import os\\nprint('ESCAPED')\\n\"); t.as_module()\n"),
+    "alias_ops": "import bpy\ndef build():\n    o = bpy.ops\n    o.wm.save_as_mainfile(filepath='x')\n",
+    "alias_bpy": "import bpy\ndef build():\n    b = bpy\n    b.utils.execfile('x.py')\n",
+    "alias_data": "import bpy\ndef build():\n    d = bpy.data\n    d.libraries.write('x')\n",
+    "list_laundering": "import bpy\ndef build():\n    [bpy.ops][0].text.run_script()\n",
+    "dict_laundering": "import bpy\ndef build():\n    m = {'k': bpy}\n    m['k'].app\n",
+    "bpy_as_argument": "import bpy\ndef f(x):\n    return x\ndef build():\n    f(bpy).utils\n",
+    "bpy_as_default": "import bpy\ndef build(m=bpy):\n    pass\n",
+    "bpy_returned": "import bpy\ndef g():\n    return bpy\ndef build():\n    g()\n",
+    "bpy_import_alias": "import bpy as b\ndef build():\n    b.ops.mesh.primitive_cube_add()\n",
+    "bpy_from_import": "from bpy import ops\ndef build():\n    ops.wm.quit_blender()\n",
+    "bpy_submodule_import": "import bpy.utils\ndef build():\n    bpy.utils.execfile('x')\n",
+    "image_save": "import bpy\ndef build():\n    img = bpy.data.images.new('i', 4, 4)\n    img.filepath_raw = 'C:/x.png'\n    img.save()\n",
+    "mesh_save": "import bpy\ndef build():\n    o = bpy.context.object\n    o.data.save()\n",
+    "driver_expression": (
+        "import bpy\ndef build():\n    o = bpy.context.object\n    d = o.driver_add('location', 0)\n"
+        "    d.driver.expression = '__import__(\"os\")'\n"),
+    "context_copy_lookup": "import bpy\ndef build():\n    c = bpy.context.copy()\n    c['blend_data'].texts\n",
+    "string_data_block": "import bpy\ndef build():\n    k = 'texts'\n",
+    "window_manager": "import bpy\ndef build():\n    bpy.context.window_manager.popup_menu(None)\n",
+    "ops_text_category": "import bpy\ndef build():\n    bpy.ops.text.run_script()\n",
+    "ops_script_category": "import bpy\ndef build():\n    bpy.ops.script.python_file_run(filepath='x')\n",
+    "ops_not_called": "import bpy\ndef build():\n    f = bpy.ops.object.join\n    f()\n",
+    "ops_bake_operator": "import bpy\ndef build():\n    bpy.ops.object.bake_image()\n",
+    "ops_load_operator": "import bpy\ndef build():\n    bpy.ops.object.load_reference_image(filepath='x')\n",
+    "filepath_keyword": "import bpy\ndef build():\n    bpy.ops.mesh.primitive_cube_add(filepath='x')\n",
+    "library_write": "import bpy\ndef build():\n    bpy.data.objects['a'].library.write()\n",
+    "types_subclass": "import bpy\nclass Op(bpy.types.Operator):\n    pass\ndef build():\n    pass\n",
+    "id_data": "import bpy\ndef build():\n    bpy.context.object.id_data.rna_type\n",
+    "data_unlisted_collection": "import bpy\ndef build():\n    bpy.data.images\n",
+    "context_unlisted_member": "import bpy\ndef build():\n    bpy.context.screen\n",
+    "bpy_rebound": "import bpy\ndef build():\n    bpy = 1\n",
+    "bpy_parameter": "import bpy\ndef build(bpy):\n    pass\n",
+    "kit_os": "import propkit\ndef build():\n    propkit.os.system('x')\n",
+}
+
+
+@pytest.mark.parametrize("name", sorted(EXPLOITS))
+def test_known_exploits_are_rejected(name):
+    reasons = check_script(EXPLOITS[name], "propkit", kit_public_names(KIT))
+    assert reasons, "exploit %s was accepted" % name
+    assert all(r.startswith("line ") or r.startswith("no top-level") for r in reasons)
+
+
+def test_every_exploit_is_rejected_without_a_kit_too():
+    for name, source in EXPLOITS.items():
+        assert check_script(source), name
 
 
 def test_rejects_missing_build_function():

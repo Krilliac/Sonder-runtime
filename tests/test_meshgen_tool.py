@@ -59,6 +59,12 @@ class FakeRunner:
                 "files": {k: str(v) for k, v in files.items()}}
 
 
+@pytest.fixture(autouse=True)
+def _file_roots(tmp_path, monkeypatch):
+    """The guarded reader only reads inside allowed roots; allow the test directory."""
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(tmp_path))
+
+
 def fake_runtime(tmp_path, vision_error=None, score=9):
     rt = types.SimpleNamespace()
     rt.assetgen = FakeAssetgen(tmp_path)
@@ -135,10 +141,10 @@ def test_end_to_end_with_fakes_writes_final_files_and_clamps(tmp_path):
 
 def test_vision_failure_is_caught_once_and_reported(tmp_path):
     rt = fake_runtime(tmp_path, vision_error="vision tier is not set")
-    payload, _, _ = call(tmp_path, rt=rt, candidates=2, rounds=2)
+    payload, _, _ = call(tmp_path, rt=rt, candidates=1, rounds=3)
     assert payload["ok"] is True
     assert payload["vision"].startswith("unavailable") and "vision tier is not set" in payload["vision"]
-    assert len(rt.vision_calls) == 1 or len(rt.vision_calls) == 2  # at most one call per racing candidate
+    assert len(rt.vision_calls) == 1
 
 
 def test_failed_builds_return_an_error_payload(tmp_path):
@@ -166,3 +172,78 @@ def test_output_dir_outside_the_workspace_is_refused(tmp_path):
     rt = fake_runtime(inside)
     with pytest.raises(mesh_agent_tools.SonderError, match="inside the asset workspace"):
         call(tmp_path, rt=rt, output_dir=str(tmp_path / "elsewhere"))
+
+
+def test_kit_and_api_doc_reads_go_through_the_guarded_reader(tmp_path):
+    ssh = tmp_path / ".ssh"
+    ssh.mkdir()
+    (ssh / "id_rsa").write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n", encoding="utf-8")
+    kit = tmp_path / "propkit.py"
+    kit.write_text("def wheel(r):\n    pass\n", encoding="utf-8")
+    with pytest.raises(mesh_agent_tools.SonderError, match="kit refused"):
+        call(tmp_path, kit_path=str(ssh / "id_rsa"))
+    with pytest.raises(mesh_agent_tools.SonderError, match="api doc refused"):
+        call(tmp_path, kit_path=str(kit), api_doc_path=str(ssh / "id_rsa"))
+
+
+def test_a_kit_outside_the_allowed_roots_is_refused(tmp_path, monkeypatch):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    kit = elsewhere / "propkit.py"
+    kit.write_text("def wheel(r):\n    pass\n", encoding="utf-8")
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(allowed))
+    with pytest.raises(mesh_agent_tools.SonderError, match="outside allowed roots"):
+        call(tmp_path, kit_path=str(kit))
+
+
+def test_the_safety_gate_gets_the_kit_names_end_to_end(tmp_path):
+    kit = tmp_path / "propkit.py"
+    kit.write_text("import os\ndef wheel(r):\n    pass\n", encoding="utf-8")
+    rt = fake_runtime(tmp_path)
+    rt._generate_text = lambda prompt, **kw: "```python\nimport propkit\n\ndef build():\n    propkit.os.getcwd()\n```"
+    payload, runner, _ = call(tmp_path, rt=rt, kit_path=str(kit), candidates=1, rounds=1)
+    assert payload["ok"] is False and runner.calls == []
+    assert payload["candidates"][0]["attempts"][0]["status"] == "rejected"
+
+
+@pytest.mark.parametrize("output_dir", ["../..", "../../escape", "sub/../../.."])
+def test_relative_output_dir_traversal_is_refused(tmp_path, output_dir):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    with pytest.raises(mesh_agent_tools.SonderError, match="inside the asset workspace"):
+        call(tmp_path, rt=fake_runtime(workspace), output_dir=output_dir)
+
+
+def test_a_result_naming_a_file_outside_the_output_root_is_not_copied(tmp_path):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("TOP SECRET", encoding="utf-8")
+
+    class Forging(FakeRunner):
+        def build_candidate(self, blender, code_path, out_dir, **kw):
+            result = super().build_candidate(blender, code_path, out_dir, **kw)
+            result["files"]["model"] = str(secret)
+            return result
+
+    payload, _, _ = call(tmp_path, runner=Forging(), candidates=1, rounds=1, name="thing")
+    assert "model" not in payload["final"]
+    for path in payload["final"].values():
+        assert "TOP SECRET" not in open(path, "rb").read().decode("latin-1")
+
+
+def test_the_remaining_deadline_never_gives_blender_a_zero_timeout(tmp_path, monkeypatch):
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(mesh_agent_tools.time, "monotonic", lambda: clock["now"])
+    rt = fake_runtime(tmp_path)
+    original = rt._generate_text
+
+    def slow(prompt, **kw):
+        clock["now"] += 28  # leaves 2 s of a 30 s budget
+        return original(prompt, **kw)
+
+    rt._generate_text = slow
+    payload, runner, _ = call(tmp_path, rt=rt, candidates=1, rounds=1, timeout=30)
+    assert runner.calls == []  # under MIN_BUILD_SECONDS left: no Blender with a 0-1 s timeout
+    assert payload["candidates"][0]["attempts"][0]["status"] == "build_error"
+    assert "under 5s" in payload["candidates"][0]["attempts"][0]["error"]

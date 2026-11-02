@@ -15,9 +15,16 @@ def critique_prompt(brief: str) -> str:
         "",
         "The model is meant to be: %s" % (brief or "").strip(),
         "",
-        "Judge whether a stranger would recognise it, whether the parts are in the right places and "
-        "orientations, and whether any part floats detached, lies the wrong way, is missing, or is "
-        "the wrong size relative to the rest.",
+        "Before scoring, work through this checklist using all four views:",
+        "1. ORIENTATION: for each part the brief names or implies, is it oriented as described? "
+        "For example wheels stand upright with a horizontal axle (a wheel seen as a flat disc from the "
+        "top, with a vertical axle, is lying flat and is WRONG), things rest on the ground plane (z=0), "
+        "and the front faces the front view.",
+        "2. ATTACHMENT: is every part attached to or touching the rest, rather than floating or "
+        "detached with a gap visible in any view?",
+        "3. Only then judge recognisability, missing parts and relative size.",
+        "Any wrong orientation or detached part caps the score at 5 or lower, and it MUST be the first "
+        "entry in issues.",
         "",
         'Reply with ONLY a JSON object: {"score": <integer 0-10>, "recognizable": <true|false>, '
         '"issues": [<up to 8 short concrete fixes that name the part and the direction, '
