@@ -59,9 +59,10 @@ def _private():
 def test_io_functions_and_transitive_users_are_excluded():
     allowed, excluded = analyse_kit(KIT)
     assert {"box", "lathe", "PALETTE", "SCALE", "reset_scene"} <= allowed  # reset_scene only resets Blender
-    for name in ("export_it", "run_prop", "makes_dir", "uses_excluded_const", "render_preview", "writes",
+    for name in ("export_it", "run_prop", "makes_dir", "uses_excluded_const", "render_preview",
                  "REPO_ROOT", "OUT", "COL"):
         assert name in excluded and name not in allowed, name
+    assert "writes" in allowed  # plain file writes are confined by the OS sandbox, not by this policy
     assert not any(name.startswith("_") for name in allowed | excluded)
 
 

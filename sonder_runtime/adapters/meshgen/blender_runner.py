@@ -21,7 +21,8 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from . import sandbox_win
+from ...domain.meshgen.secret_guard import REDACTED, SecretGuard, SecretGuardUnavailable
+from . import sandbox_win, secret_sources
 
 HARNESS_PATH = Path(__file__).with_name("harness.py")
 _TAIL_LINES = 8
@@ -187,13 +188,15 @@ _SECRET_PATTERNS = (
 )
 
 
-def redact_and_bound(value, limit: int = MAX_TEXT_CHARS) -> str:
+def redact_and_bound(value, limit: int = MAX_TEXT_CHARS, guard: SecretGuard | None = None) -> str:
     """Text safe to hand to a prompt or payload: secret-looking runs removed, length capped.
 
     The sandbox is what keeps secrets out of the build process; this is the host-side backstop for
     anything that still comes back through a script-controlled string (an exception message).
     """
     text = str(value if value is not None else "")
+    if guard is not None and guard.hit(text):
+        return REDACTED  # judged on the full text, before any truncation can cut a secret in half
     for pattern in _SECRET_PATTERNS:
         text = pattern.sub(lambda match: "[redacted]", text)
     if len(text) > limit:
@@ -201,7 +204,7 @@ def redact_and_bound(value, limit: int = MAX_TEXT_CHARS) -> str:
     return text
 
 
-def sanitize_result(result: dict) -> dict:
+def sanitize_result(result: dict, guard: SecretGuard | None = None) -> dict:
     """Keep only the keys the loop understands, with bounded, typed values.
 
     The result file is written by code the model controls, so every field is treated as hostile.
@@ -210,10 +213,10 @@ def sanitize_result(result: dict) -> dict:
     for key in _ALLOWED_RESULT_KEYS & set(result):
         value = result[key]
         if key in ("error", "render_error"):
-            clean[key] = redact_and_bound(value)
+            clean[key] = redact_and_bound(value, guard=guard)
         elif key in ("tail", "traceback"):
             lines = value if isinstance(value, list) else [value]
-            clean[key] = [redact_and_bound(line, MAX_TAIL_LINE_CHARS) for line in lines[-_TAIL_LINES:]]
+            clean[key] = [redact_and_bound(line, MAX_TAIL_LINE_CHARS, guard) for line in lines[-_TAIL_LINES:]]
         elif key == "tris":
             clean[key] = int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
         elif key in ("ok", "within_budget"):
@@ -222,24 +225,48 @@ def sanitize_result(result: dict) -> dict:
             seq = value if isinstance(value, list) else []
             clean[key] = [float(v) for v in seq[:3] if isinstance(v, (int, float)) and not isinstance(v, bool)]
         elif key == "files":
-            clean[key] = {str(k)[:20]: str(v) for k, v in (value.items() if isinstance(value, dict) else [])}
+            clean[key] = {str(k)[:20]: redact_and_bound(v, 600, guard)
+                          for k, v in (value.items() if isinstance(value, dict) else [])}
         elif key == "parts":
             parts = []
             for part in (value if isinstance(value, list) else [])[:8]:
                 if isinstance(part, dict):
                     tris = part.get("tris")
-                    parts.append({"name": redact_and_bound(part.get("name"), 40),
+                    parts.append({"name": redact_and_bound(part.get("name"), 40, guard),
                                   "tris": int(tris) if isinstance(tris, (int, float)) and not isinstance(tris, bool) else 0})
             clean[key] = parts
     return clean
 
 
-def _tail(text: str) -> list[str]:
+def _tail(text: str, guard: SecretGuard | None = None) -> list[str]:
     lines = [line.rstrip() for line in str(text or "").splitlines() if line.strip()]
-    return [redact_and_bound(line, MAX_TAIL_LINE_CHARS) for line in lines[-_TAIL_LINES:]]
+    return [redact_and_bound(line, MAX_TAIL_LINE_CHARS, guard) for line in lines[-_TAIL_LINES:]]
 
 
-def read_result(result_path: Path) -> dict | None:
+def has_redaction(value) -> bool:
+    """True when a result structure contains the redaction marker (something matched the secret guard)."""
+    if isinstance(value, str):
+        return REDACTED in value
+    if isinstance(value, dict):
+        return any(has_redaction(k) or has_redaction(v) for k, v in value.items())
+    if isinstance(value, (list, tuple)):
+        return any(has_redaction(item) for item in value)
+    return False
+
+
+def blocked_result(result: dict) -> dict:
+    """A leaking build reduced to a failure: its files are dropped, the offending field stays redacted."""
+    clean = {key: value for key, value in result.items() if key != "files"}
+    clean.update(ok=False, secret_leak_blocked=True)
+    clean["error"] = REDACTED
+    return clean
+
+
+def _model_files(result: dict) -> list[str]:
+    return [str(path) for key, path in (result.get("files") or {}).items() if key == "model"]
+
+
+def read_result(result_path: Path, guard: SecretGuard | None = None) -> dict | None:
     """The harness' result object, or ``None`` when it is missing, oversized or malformed."""
     try:
         if result_path.stat().st_size > MAX_RESULT_BYTES:
@@ -247,7 +274,7 @@ def read_result(result_path: Path) -> dict | None:
         value = json.loads(result_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    return sanitize_result(value) if isinstance(value, dict) else None
+    return sanitize_result(value, guard) if isinstance(value, dict) else None
 
 
 def confine_files(result: dict, out_dir: Path) -> dict:
@@ -313,7 +340,7 @@ def _copy_back(files: dict, destination: Path) -> dict:
 
 
 def _sandboxed(blender, code_path, out, *, name, kit_path, kit_excluded, max_tris, height_m, export, render,
-               timeout, memory_mb):
+               timeout, memory_mb, guard):
     blender = os.path.realpath(str(blender))
     blender_dir = os.path.dirname(blender)
     kit_file = Path(kit_path).resolve() if kit_path else None
@@ -339,21 +366,25 @@ def _sandboxed(blender, code_path, out, *, name, kit_path, kit_excluded, max_tri
                                             memory_mb=memory_mb)
         tail_text = outcome.stdout.decode("utf-8", "replace") + "\n" + outcome.stderr.decode("utf-8", "replace")
         if outcome.timed_out:
-            result = {"ok": False, "error": "blender timed out after %ss" % timeout, "tail": _tail(tail_text)}
+            result = {"ok": False, "error": "blender timed out after %ss" % timeout, "tail": _tail(tail_text, guard)}
         else:
-            result = read_result(result_path)
+            result = read_result(result_path, guard)
             failed = result is None or not result.get("ok")
             # Evidence for "memory limit": the job reached its limit AND the build failed in a way that fits
             # (no result at all, or the script/harness reported MemoryError).
             oom_marked = result is None or "MemoryError" in str(result.get("error", ""))
             if outcome.memory_exceeded and failed and oom_marked:
                 result = {"ok": False, "error": "memory limit exceeded (%d MB)" % outcome.memory_limit_mb,
-                          "tail": _tail(tail_text)}
+                          "tail": _tail(tail_text, guard)}
             elif result is None:
-                result = {"ok": False, "error": "no result; rc=%s" % outcome.returncode, "tail": _tail(tail_text)}
+                result = {"ok": False, "error": "no result; rc=%s" % outcome.returncode,
+                          "tail": _tail(tail_text, guard)}
             else:
                 result = confine_files(result, run_out)
-                if result.get("ok"):
+                if has_redaction(result) or (result.get("ok") and any(
+                        guard.model_hit(path) for path in _model_files(result))):
+                    result = blocked_result(result)  # nothing is copied out of the run directory
+                elif result.get("ok"):
                     used = sandbox_win.tree_size(run)
                     if used > sandbox_win.MAX_TREE_BYTES:
                         result = {"ok": False, "error": "the build wrote more than %d MB into its run directory"
@@ -369,7 +400,7 @@ def _sandboxed(blender, code_path, out, *, name, kit_path, kit_excluded, max_tri
 
 
 def _unsandboxed(blender, code_path, out, *, name, kit_path, kit_excluded, max_tris, height_m, export, render,
-                 timeout, memory_mb):
+                 timeout, memory_mb, guard):
     harness = HARNESS_PATH
     result_path = out.resolve() / ("%s.result-%s.json" % (name, uuid.uuid4().hex))
     job = _job_dict(Path(code_path).resolve(), out.resolve(), name, Path(kit_path).resolve() if kit_path else None,
@@ -384,38 +415,53 @@ def _unsandboxed(blender, code_path, out, *, name, kit_path, kit_excluded, max_t
             memory_mb=memory_mb)
     except subprocess.TimeoutExpired as exc:
         partial = exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-        return {"ok": False, "error": "blender timed out after %ss" % timeout, "tail": _tail(partial)}
+        return {"ok": False, "error": "blender timed out after %ss" % timeout, "tail": _tail(partial, guard)}
     except OSError as exc:
         return {"ok": False, "error": "could not start blender: %s: %s" % (type(exc).__name__, exc)}
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
     stdout = raw_out.decode("utf-8", "replace")[-sandbox_win.OUTPUT_TAIL_BYTES:]
     stderr = raw_err.decode("utf-8", "replace")[-sandbox_win.OUTPUT_TAIL_BYTES:]
-    result = read_result(result_path)
+    result = read_result(result_path, guard)
     try:
         result_path.unlink()
     except OSError:
         pass
     if result is None:
         return {"ok": False, "error": "no result; rc=%s" % returncode,
-                "tail": _tail(stdout + "\n" + stderr)}
-    return confine_files(result, out)
+                "tail": _tail(stdout + "\n" + stderr, guard)}
+    result = confine_files(result, out)
+    if has_redaction(result) or (result.get("ok") and any(guard.model_hit(path) for path in _model_files(result))):
+        for path in (result.get("files") or {}).values():  # unsandboxed output is already in place: discard it
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        result = blocked_result(result)
+    return result
 
 
 def build_candidate(blender, code_path, out_dir, *, name, kit_path=None, kit_excluded=(), max_tris,
-                    height_m, export="glb", render=True, timeout=180, memory_mb=None, sandbox=None) -> dict:
+                    height_m, export="glb", render=True, timeout=180, memory_mb=None, sandbox=None, guard=None) -> dict:
     """Build one candidate.
 
     ``sandbox`` is ``None`` (decide from the environment) or an explicit mode.  ``memory_mb`` is the
     memory ceiling for this build; ``None`` means ``SONDER_MESHGEN_MEM_MB``/4096 when sandboxed and
-    8192 on the unsandboxed path.
+    8192 on the unsandboxed path.  ``guard`` is the ``SecretGuard`` every returned string and every
+    exported model is checked against (``None`` builds it from the host environment and the user
+    registry environment); a guard that cannot be built refuses the build.
     """
+    if guard is None:
+        try:
+            guard = secret_sources.load_guard()
+        except SecretGuardUnavailable as exc:
+            return {"ok": False, "error": "secret guard unavailable, build refused: %s" % exc}
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     if not HARNESS_PATH.is_file():
         return {"ok": False, "error": "harness missing: %s" % HARNESS_PATH}
     common = dict(name=name, kit_path=kit_path, kit_excluded=kit_excluded, max_tris=max_tris, height_m=height_m,
-                  export=export, render=render, timeout=timeout)
+                  export=export, render=render, timeout=timeout, guard=guard)
     mode = sandbox or sandbox_win.UNSANDBOXED
     try:
         mode = sandbox or sandbox_mode()
@@ -430,4 +476,7 @@ def build_candidate(blender, code_path, out_dir, *, name, kit_path=None, kit_exc
     result = dict(result, sandbox=mode)
     if mode != sandbox_win.SANDBOXED:
         result["warning"] = "built UNSANDBOXED"
-    return result
+    clean, hits = guard.scrub(result)  # last line: nothing leaves this function unchecked
+    if hits and not clean.get("secret_leak_blocked"):
+        clean = blocked_result(clean)
+    return clean

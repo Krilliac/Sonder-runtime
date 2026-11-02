@@ -56,13 +56,23 @@ def test_build_argv_has_the_isolation_flags_in_order():
     assert argv[-2:] == ["--", "job.json"]
 
 
+def _glb(document: dict) -> bytes:
+    """A minimal valid GLB (header plus one padded JSON chunk)."""
+    import json
+    import struct
+
+    body = json.dumps(document).encode("utf-8")
+    body += b" " * (-len(body) % 4)
+    return b"glTF" + struct.pack("<II", 2, 20 + len(body)) + struct.pack("<II", len(body), 0x4E4F534A) + body
+
+
 def test_build_candidate_runs_without_a_shell_and_reads_the_result_file(tmp_path, monkeypatch):
     seen = {}
 
     def fake_run(argv, **kwargs):
         seen["argv"], seen["kwargs"], seen["job"] = argv, kwargs, _job(argv)
         out = Path(seen["job"]["out_dir"])
-        (out / "m.glb").write_bytes(b"glTF")
+        (out / "m.glb").write_bytes(_glb({"asset": {"version": "2.0"}, "nodes": [{"name": "Cube"}]}))
         _write_result(argv, {"ok": True, "tris": 12, "files": {"model": str(out / "m.glb")}})
         return _completed("hello\n")
 

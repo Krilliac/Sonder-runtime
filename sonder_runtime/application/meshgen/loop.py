@@ -154,6 +154,12 @@ def run(request: MeshRequest, *, generate, build, critique, map_parallel) -> dic
             attempt["status"] = "build_error"
             attempt["error"] = _clip(result.get("error"), 400)
             failure = _failure_text(result)
+            if result.get("secret_leak_blocked"):
+                attempt["secret_leak_blocked"] = True
+                failure = ("The build was discarded because its output contained data that looks like a "
+                           "credential. Build the geometry from numbers and the allowed APIs only; never "
+                           "read the registry, environment variables or files, and never put such data in "
+                           "object, mesh or material names or in error messages.")
             hint = repair_hint(failure, request.kit_module, request.kit_names, request.kit_excluded)
             return False, lambda stuck: repair_prompt(base, code, failure, hint=hint, stuck=stuck)
         within = bool(result.get("within_budget"))

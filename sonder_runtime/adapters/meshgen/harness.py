@@ -334,6 +334,9 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     kit_path = job.get("kit_path") or ""
     allowed = set(ALLOWED_ROOTS)
+    # Test hook: the job file is written by the host, never by the model.  Tests use it to hand a
+    # script a module (winreg) the gate would refuse, to prove the secret guard still holds.
+    allowed.update(str(root) for root in (job.get("extra_import_roots") or []))
     if kit_path:
         sys.path.insert(0, os.path.dirname(os.path.abspath(kit_path)))
         allowed.add(os.path.splitext(os.path.basename(kit_path))[0])

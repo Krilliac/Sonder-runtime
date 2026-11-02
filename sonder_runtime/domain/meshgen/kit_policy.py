@@ -1,18 +1,21 @@
 """Which kit names a model-written script may touch.  Pure; stdlib only.
 
 A kit is trusted Python the operator supplies, but its *public functions* are reachable from
-untrusted scripts, and some of them write files (export, preview render, "run the whole prop").
-This policy is a first filter (and keeps the prompt honest about what the harness does); the
-OS sandbox in ``adapters/meshgen/sandbox_win.py`` is the real boundary.  Exposure is an
-allow-list derived from the kit's own source:
+untrusted scripts.  The OS sandbox confines what any of them can do to files, network and
+processes, and ``secret_guard`` stops credentials leaving, so this policy no longer excludes
+functions merely because they read or write files.  It excludes only what would break the
+harness flow or reach secrets/processes.  Exposure is an allow-list derived from the kit's source:
 
-* a function or class is EXCLUDED when anything in it (body, defaults, decorators, nested
-  code) touches I/O or process control: ``open``/``exec``/``eval``, the ``os``, ``sys``,
-  ``shutil``, ``pathlib``, ``subprocess``, ``io``, ``json``, ``socket``, ``ctypes`` modules,
-  ``Path``, attribute names such as ``save``, ``write``, ``filepath``, ``makedirs``, ``exit``,
-  ``export_scene``, ``import_scene``, ``render``, ``wm``, or any name the gate itself refuses;
+* a function or class is EXCLUDED when anything in it touches scene-level export/render/save
+  (``export_scene``, ``import_scene``, ``save*``, the render operator, ``open_mainfile``,
+  ``read_homefile``...: the harness exports and renders itself, and a kit helper that does it
+  too would clobber the harness' output), process control (``exit``/``quit``, ``exec``/``eval``/
+  ``compile``/``__import__``, ``input``/``breakpoint``) or one of the modules that read
+  secrets or spawn processes (``os`` except path-string helpers, ``sys``, ``subprocess``,
+  ``socket``, ``ctypes``, ``winreg``, ``importlib``, ``builtins``, ``pickle``, ``marshal``,
+  ``urllib``, ``http``);
 * a module-level constant is excluded when it is a string/f-string/bytes literal, or built from
-  anything excluded (``KIT_DIR``, ``REPO_ROOT``, ``PREVIEW_DIR`` ...);
+  anything excluded (``KIT_DIR``, ``REPO_ROOT``, ``PREVIEW_DIR`` ...: locations are never shown);
 * exclusion is transitive: a function that uses an excluded kit name is excluded too;
 * the operator may override the derivation inside the kit with module-level literals:
   ``MESHGEN_ALLOW = ["box", "lathe"]`` replaces the derived allow-list (only public names the
@@ -24,25 +27,19 @@ from __future__ import annotations
 import ast
 
 DANGEROUS_MODULES = frozenset({
-    "os", "sys", "shutil", "pathlib", "subprocess", "io", "socket", "ctypes", "json", "tempfile",
-    "glob", "importlib", "builtins", "pickle", "marshal", "zipfile", "urllib", "http",
+    "os", "sys", "subprocess", "socket", "ctypes", "winreg", "_winreg", "_winapi", "msvcrt", "importlib",
+    "builtins", "pickle", "marshal", "urllib", "http", "multiprocessing", "signal",
 })
-# Narrower than the script gate on purpose: the kit is trusted code that legitimately uses
-# ``type()``, ``bmesh.types`` or ``bpy.data.objects.remove``.  Only file, process and
-# script-execution touch points matter here.
-_IO_NAMES = frozenset({
-    "open", "exec", "eval", "compile", "__import__", "input", "breakpoint", "exit", "quit", "Path", "PurePath",
-})
+_IO_NAMES = frozenset({"exec", "eval", "compile", "__import__", "input", "breakpoint", "exit", "quit"})
 # Attributes of a dangerous module (``os``...) that do no I/O: pure path-string manipulation and
 # constants.  Every other use of such a module marks the function (``os.system``, ``os.remove``...),
 # while ``thing.system`` on an ordinary object does not: the receiver decides, not the bare name.
 _SAFE_MODULE_ATTRIBUTES = frozenset({"path", "sep", "linesep", "pathsep", "curdir", "pardir", "name"})
+# Scene-level export/import/save/render touch points: the harness owns those steps.
 _IO_ATTRIBUTES = frozenset({
-    "save", "save_as", "save_render", "save_as_mainfile", "save_mainfile", "write", "writelines", "filepath",
-    "filepath_raw", "filename", "directory", "export_scene", "import_scene", "open_mainfile", "read_homefile",
-    "recover_last_session", "makedirs", "mkdir", "rmtree",
-    "exit", "write_text", "write_bytes", "read_text", "read_bytes", "copyfile", "copy2",
-    "load", "unpack", "execfile", "as_module", "texts", "libraries", "preferences", "handlers",
+    "save", "save_as", "save_render", "save_as_mainfile", "save_mainfile", "export_scene", "import_scene",
+    "open_mainfile", "read_homefile", "recover_last_session", "exit", "as_module", "execfile",
+    "texts", "preferences", "handlers",
 })
 
 

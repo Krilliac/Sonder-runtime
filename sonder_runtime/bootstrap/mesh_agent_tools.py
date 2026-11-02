@@ -21,12 +21,13 @@ import time
 from pathlib import Path
 
 from ..adapters.filesystem import file_ops
-from ..adapters.meshgen import blender_runner
+from ..adapters.meshgen import blender_runner, secret_sources
 from ..application.meshgen.loop import MeshRequest, run as run_loop
 from ..domain.common.errors import SonderError
 from ..domain.meshgen.critique import critique_prompt
 from ..domain.meshgen.prompts import kit_api_digest
 from ..domain.meshgen.kit_policy import analyse_kit
+from ..domain.meshgen.secret_guard import REDACTED, SecretGuardUnavailable
 from ..platform.runtime_threads import ThreadPoolExecutor
 from .legacy_root import runtime
 
@@ -106,16 +107,23 @@ def _candidate_summary(candidate: dict) -> dict:
     }
     if candidate.get("error"):
         summary["error"] = candidate["error"]
+    if any(item.get("secret_leak_blocked") for item in candidate.get("attempts", [])):
+        summary["secret_leak_blocked"] = True
     return summary
 
 
 def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, height_m=0.0,
                   candidates=3, rounds=3, tiers="general,code", vision=True, target_score=8,
-                  export="glb", output_dir="", timeout=1200, *, rt=None, runner=blender_runner) -> dict:
+                  export="glb", output_dir="", timeout=1200, *, rt=None, runner=blender_runner, guard=None) -> dict:
     """Run the loop and return the compact report; raises ``SonderError`` on bad input."""
     brief = str(brief or "").strip()
     if not brief:
         raise SonderError("brief is required")
+    if guard is None:
+        try:
+            guard = secret_sources.load_guard()
+        except SecretGuardUnavailable as exc:
+            raise SonderError("mesh_generate refuses to run: the secret guard could not be initialised (%s)" % exc) from exc
     blender = runner.locate_blender()
     if not blender:
         raise SonderError("Blender not found: set SONDER_BLENDER to blender.exe or put blender on PATH "
@@ -169,6 +177,7 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
     deadline = time.monotonic() + timeout
     critique_text = critique_prompt(brief, max_tris=max_tris)
     vision_state = {"lock": threading.Lock(), "dead": "", "disabled": not vision}
+    security = {"lock": threading.Lock(), "critic_blocked": 0, "code_blocked": 0}
 
     def remaining() -> float:
         left = deadline - time.monotonic()
@@ -185,12 +194,17 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
         if left < MIN_BUILD_SECONDS:
             raise TimeoutError("mesh_generate has under %ds left" % MIN_BUILD_SECONDS)
         stem = "c%d_r%d" % (index, round_index)
+        if guard.hit(code):  # a script that carries a credential is never written to disk or returned
+            with security["lock"]:
+                security["code_blocked"] += 1
+            return {"ok": False, "error": REDACTED, "secret_leak_blocked": True}
         code_path = root / (stem + ".py")
         code_path.write_text(code, encoding="utf-8")
         result = runner.build_candidate(
             blender, str(code_path), str(root / stem), name=slug,
             kit_path=str(kit_file) if kit_file else None, kit_excluded=kit_excluded, max_tris=max_tris, height_m=height,
             export=export, render=True, timeout=int(max(MIN_BUILD_SECONDS, min(left, _BUILD_TIMEOUT))),
+            guard=guard,
         )
         files = dict(result.get("files") or {})
         files["code"] = str(code_path)
@@ -201,7 +215,12 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
             if vision_state["dead"]:
                 return None
         try:
-            return rt._vision_analyze_impl(sheet, critique_text, extra_roots=str(root))
+            reply = rt._vision_analyze_impl(sheet, critique_text, extra_roots=str(root))
+            if reply is not None and guard.hit(reply):
+                with security["lock"]:
+                    security["critic_blocked"] += 1
+                return REDACTED
+            return reply
         except Exception as exc:  # noqa: BLE001 - vision is optional; report why it is off
             with vision_state["lock"]:
                 vision_state["dead"] = vision_state["dead"] or "%s: %s" % (type(exc).__name__, str(exc)[:200])
@@ -244,6 +263,15 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
         payload["final"] = final
     else:
         payload["error"] = "no candidate produced a model; see candidates[].attempts for the failures"
+    payload, scrubbed = guard.scrub(payload)  # the egress chokepoint: nothing secret-shaped leaves in the result
+    blocked = sum(1 for item in payload["candidates"] if item.get("secret_leak_blocked"))
+    if scrubbed or blocked or security["critic_blocked"] or security["code_blocked"]:
+        payload["security"] = {
+            "secret_leak_blocked": True,
+            "note": "Output that looked like a credential was blocked: %d candidate(s) discarded, %d field(s) "
+                    "redacted as %s. The matched names and values are never reported."
+                    % (max(blocked, security["code_blocked"]), scrubbed + security["critic_blocked"], REDACTED),
+        }
     return payload
 
 

@@ -102,7 +102,6 @@ def test_a_kit_module_without_names_allows_no_attribute():
     ("import bpy\n\ndef build():\n    bpy.ops.wm.quit_blender()\n", 4, "bpy.ops"),
     ("import bpy\n\ndef build():\n    bpy.app.handlers.load_post.append(None)\n", 4, ".app"),
     ("import bpy\n\ndef build():\n    bpy.context.preferences.view.ui_scale = 2\n", 4, "preferences"),
-    ("import bpy\n\ndef build():\n    bpy.ops.export_scene.fbx(filepath='x')\n", 4, "export_scene"),
     ("import bpy\nfrom . import sibling\n\ndef build():\n    pass\n", 2, "relative"),
     ("import bpy\n\ndef build(_x=1):\n    pass\n", 3, "_x"),
 ])
@@ -129,8 +128,6 @@ EXPLOITS = {
     "bpy_import_alias": "import bpy as b\ndef build():\n    b.ops.mesh.primitive_cube_add()\n",
     "bpy_from_import": "from bpy import ops\ndef build():\n    ops.wm.quit_blender()\n",
     "bpy_submodule_import": "import bpy.utils\ndef build():\n    bpy.utils.execfile('x')\n",
-    "image_save": "import bpy\ndef build():\n    img = bpy.data.images.new('i', 4, 4)\n    img.filepath_raw = 'C:/x.png'\n    img.save()\n",
-    "mesh_save": "import bpy\ndef build():\n    o = bpy.context.object\n    o.data.save()\n",
     "driver_expression": (
         "import bpy\ndef build():\n    o = bpy.context.object\n    d = o.driver_add('location', 0)\n"
         "    d.driver.expression = '__import__(\"os\")'\n"),
@@ -140,13 +137,9 @@ EXPLOITS = {
     "ops_text_category": "import bpy\ndef build():\n    bpy.ops.text.run_script()\n",
     "ops_script_category": "import bpy\ndef build():\n    bpy.ops.script.python_file_run(filepath='x')\n",
     "ops_not_called": "import bpy\ndef build():\n    f = bpy.ops.object.join\n    f()\n",
-    "ops_bake_operator": "import bpy\ndef build():\n    bpy.ops.object.bake_image()\n",
-    "ops_load_operator": "import bpy\ndef build():\n    bpy.ops.object.load_reference_image(filepath='x')\n",
-    "filepath_keyword": "import bpy\ndef build():\n    bpy.ops.mesh.primitive_cube_add(filepath='x')\n",
-    "library_write": "import bpy\ndef build():\n    bpy.data.objects['a'].library.write()\n",
     "types_subclass": "import bpy\nclass Op(bpy.types.Operator):\n    pass\ndef build():\n    pass\n",
     "id_data": "import bpy\ndef build():\n    bpy.context.object.id_data.rna_type\n",
-    "data_unlisted_collection": "import bpy\ndef build():\n    bpy.data.images\n",
+    "data_unlisted_collection": "import bpy\ndef build():\n    bpy.data.window_managers\n",
     "context_unlisted_member": "import bpy\ndef build():\n    bpy.context.screen\n",
     "bpy_rebound": "import bpy\ndef build():\n    bpy = 1\n",
     "bpy_parameter": "import bpy\ndef build(bpy):\n    pass\n",
@@ -263,25 +256,41 @@ def _mod(call):
     return "import bpy\n\ndef build():\n    obj = bpy.context.active_object\n    %s\n" % call
 
 
-def test_modifier_types_must_be_allow_listed_literals():
-    assert check_script(_mod("obj.modifiers.new('m', 'SUBSURF')")) == []
-    assert check_script(_mod("obj.modifiers.new(name='m', type='BEVEL')")) == []
+def test_any_modifier_is_allowed_including_geometry_nodes():
     for call in ("obj.modifiers.new('m', 'NODES')", "obj.modifiers.new('m', 'DISPLACE')",
-                 "kind = 'BEVEL'\n    obj.modifiers.new('m', kind)", "obj.modifiers.new('m', 'BE' + 'VEL')",
-                 "obj.modifiers.new('m')"):
+                 "kind = 'BEVEL'\n    obj.modifiers.new('m', kind)", "obj.modifiers.new('m')",
+                 "bpy.ops.object.modifier_add(type='NODES')", "obj.modifiers.new(**{'name': 'x', 'type': 'NODES'})"):
+        assert check_script(_mod(call)) == [], call
+
+
+def test_file_level_constructs_are_left_to_the_sandbox():
+    for call in ("bpy.ops.export_scene.fbx(filepath='x')", "bpy.ops.mesh.primitive_cube_add(filepath='x')",
+                 "bpy.ops.object.bake_image()", "bpy.ops.object.load_reference_image(filepath='x')",
+                 "img = bpy.data.images.new('i', 4, 4)\n    img.filepath_raw = 'x.png'\n    img.save()",
+                 "obj.data.save()", "obj.path_resolve('data')", "bpy.ops.mesh.primitive_cube_add(*[1.0])",
+                 "bpy.ops.mesh.primitive_cube_add(**{'size': 1})"):
+        assert check_script(_mod(call)) == [], call
+
+
+def test_script_execution_and_secret_routes_are_still_refused():
+    for call in ("bpy.ops.node.add_node()", "bpy.ops.wm.context_set_value(value='1')",
+                 "bpy.ops.script.python_file_run(filepath='x')", "bpy.ops.object.python_thing()",
+                 "bpy.data.texts.new('x')", "bpy.app.timers", "obj.driver_add('location')",
+                 "winreg.OpenKey(0, 'x')", "ctypes.windll", "x = '__class__'", "__import__('winreg')",
+                 "getattr(obj, 'name')", "'{0.__class__}'.format(obj)"):
         assert check_script(_mod(call)), call
+    for module in ("winreg", "_winreg", "ctypes", "_ctypes", "_winapi", "msvcrt", "socket", "subprocess",
+                   "multiprocessing", "os", "nt", "posix", "sys", "importlib", "builtins", "marshal", "pickle",
+                   "code", "codeop", "pty", "signal"):
+        assert check_script("import %s\nimport bpy\n\ndef build():\n    pass\n" % module), module
+        assert check_script(_mod("x = %s" % module)), module
+        assert check_script(_mod("x = obj.%s" % module)), module
 
 
-def test_splat_arguments_are_refused_on_bpy_calls():
-    assert check_script(_mod("bpy.ops.mesh.primitive_cube_add(**{'size': 1})"))
-    assert check_script(_mod("bpy.ops.mesh.primitive_cube_add(*[1.0])"))
-    assert check_script(_mod("obj.modifiers.new(**{'name': 'x', 'type': 'NODES'})"))
-
-
-def test_path_resolve_and_node_group_operators_are_refused():
-    assert check_script(_mod("obj.path_resolve('data')"))
-    assert check_script(_mod("bpy.ops.object.modifier_add(type='NODES')"))
-    assert check_script(_mod("bpy.ops.node.add_node()"))
+def test_huge_literal_ranges_are_refused():
+    assert check_script(_mod("for i in range(100):\n        pass")) == []
+    assert check_script(_mod("for i in range(10 ** 9):\n        pass")) == []  # not a literal: bounded at run time
+    assert check_script(_mod("for i in range(1000000000):\n        pass"))
 
 
 def test_literal_size_caps_stop_single_argument_memory_bombs():

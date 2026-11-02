@@ -54,10 +54,9 @@ Useful arguments: `candidates` (1-6, default 3), `rounds` (1-6, default 3), `tie
 
 `max_tris` is a target to use, not just a ceiling: the prompt asks for roughly 60-90% of it, with
 bevels on hard edges, enough segments that round parts read round (about 10 below 500 triangles,
-12 below 2000, 16 below 6000, 24 below 20000, 32 above) and smooth shading on organic parts. Modifiers
-(`BEVEL`, `SUBSURF`, `SOLIDIFY`, `MIRROR`, `ARRAY`, `WEIGHTED_NORMAL`, `TRIANGULATE`, `DECIMATE`,
-`BOOLEAN`, `EDGE_SPLIT`, `SMOOTH`, `WELD`, `SCREW`) are allowed as literal type strings only (any other
-type, or a computed one, is refused: `NODES`, `DISPLACE`, `WAVE`, `HOOK` ... can reach other data); the harness bakes them and counts triangles after modifiers. The default is
+12 below 2000, 16 below 6000, 24 below 20000, 32 above) and smooth shading on organic parts. Any
+modifier type is allowed (including `NODES`); the harness bakes them and counts triangles after
+modifiers, and literal counts such as subdivision `levels` are capped. The default is
 3000. For hero assets pass 8000-20000 or more (the clamp is 50..200000); generation allows 8192 reply
 tokens. An over-budget result is repaired with the biggest parts named. The critic also flags blocky,
 low-effort results when the budget allowed more.
@@ -73,16 +72,60 @@ tier that produced its version, and each candidate reports `tiers_used`.
 `mesh_generate` runs **model-written Python**. It is graded as an execution tool, the same
 trust level as `run_code`, and asks or is denied in the same permission modes.
 
-### Threat model: the OS sandbox is the boundary
+### Threat model: three layers, each with one job
 
-On Windows every Blender build runs inside a **zero-capability AppContainer** with a Job Object
-(`sonder_runtime/adapters/meshgen/sandbox_win.py`). That sandbox is the security boundary. The AST
-gate, the kit policy and the harness' restricted builtins below are *first filters*: they catch
-mistakes cheaply, give the model repair feedback and keep the prompt honest, but a static check
-can always be bypassed and none of it is relied on to contain a hostile script.
+| Layer | Job |
+| --- | --- |
+| **OS sandbox** (`sandbox_win.py`: zero-capability AppContainer, Job Object, private desktop) | **files, network, processes and the screen.** Model-written code can read and write only its run directory (and read the Blender install), has no network and cannot start a process. |
+| **Secret guard** (`domain/meshgen/secret_guard.py`) | **key egress.** The model is local, so the only way a secret can leave the machine is text returned from a build in the tool result (which goes to the Claude API) or written to a log or file. Every such string and every exported model is checked; a match fails closed. |
+| **AST gate** (`script_safety.py`) and harness builtins | **secret access and DoS.** Stops a script from reaching the registry or the environment (`winreg`, `ctypes`, `os`, `sys`, `subprocess` ..., and every route to unrestricted Python: text blocks, script operators, drivers, `eval`-style reflection) and from asking for absurd literal sizes. It is a first filter that turns mistakes into repair feedback, not a boundary against a determined script. |
+
+**Known gap: the registry stays readable.** Every AppContainer is in ALL APPLICATION PACKAGES, which the
+user's HKCU keys (for example `HKCU\Environment` and `RecentDocs`) grant read, so a script that gets past
+the gate can read them. Closing it was tried and abandoned: LPAC (opting out of that group) makes Blender
+exit with 0xC0000022 because side-by-side manifest activation needs `HKLM\...\SideBySide`, which grants
+only that group and the `registryRead` capability, and with that capability added rendering crashes (no
+GPU/OpenGL access) while HKCU is still readable through the same capability; a DENY ACE for the package
+SID has no effect. `preflight` measures it (`registry: readable` plus a warning) and the strict-xfail test
+`test_hkcu_environment_and_recentdocs_are_unreadable_from_the_sandbox` records it. The compensating control
+is the secret guard below, which makes the egress path fail closed instead.
+
+#### Secret guard
+
+The guard builds a secret set on the host from (a) the server's `os.environ` and (b) `HKCU\Environment`
+(read with `winreg`; names and values are never logged or put in an error). An entry counts when its NAME
+contains KEY, TOKEN, SECRET, PASS, PWD, AUTH, CRED, SESSION, COOKIE or PRIVATE, or its VALUE has the shape
+of a credential; values under 12 characters are ignored (and the shell's `PWD`/`OLDPWD`, which hold a
+path, are not treated as secrets). Each secret is also matched as base64 (all three byte alignments,
+standard and URL-safe), hex, reversed, URL-encoded and lowercased. Independently of the set, text with a
+credential shape is a hit: `sk-ant-`, `sk-`, `ghp_`/`gho_`/`github_pat_`, `AKIA...`, `xox[bpas]-`, `AIza...`,
+`-----BEGIN`, JWTs (`eyJ...`), `hf_...` and 32+ character mixed-case high-entropy tokens (hex ids and
+plain lowercase slugs are not flagged).
+
+It is applied to everything that leaves a build toward the host, the tool payload or a log: the result
+JSON fields, error strings, stdout/stderr excerpts (judged before truncation), part, object, mesh and
+material names, the critic's text, the model script itself, and the string metadata of the exported
+GLB (the whole glTF JSON chunk: names, extras, asset) or FBX (printable runs). Vertex data is not scanned.
+On a match the field becomes `[REDACTED:secret]`, the candidate gets `secret_leak_blocked: true`, its
+exported files are discarded (never copied out of the run directory), the repair prompt tells the model
+why, and the report gets a top-level `security` note. Neither the matched name nor the value appears
+anywhere. A final pass scrubs the whole tool payload, which carries only structured fields (status, score,
+tris, size, tier, round, critic issues, an error class plus a guarded, capped message); raw stderr goes only
+into the local repair prompt, after the guard. If the guard cannot be built (for example the registry
+environment cannot be read) `mesh_generate` refuses to run.
+
+**Authorising a name.** `SONDER_MESHGEN_SECRET_ALLOW` is a comma-separated list of variable NAMES whose
+values (in every encoding) are exempt, for example a token a particular kit legitimately prints. It is
+empty by default and nothing is exempt unless listed. Only the environment variable is supported;
+there is no permission-rule form of this authorisation.
+
+**Residual risks.** Secrets embedded in vertex data stay on this machine (they are neither scanned nor
+returned). The guard is pattern matching, so there is no guarantee against exotic encodings (a custom
+cipher, a secret split across several fields, text rendered into an image). A secret the guard does not
+know and that has no credential shape (a short password) is not detected.
 
 Inside the sandbox the process can read and write only its own per-build run directory and read the
-Blender install directory. User files, repositories and credential stores on disk are unreadable; there is
+Blender install directory. User files, repositories, `.ssh` and credential files on disk are unreadable; there is
 no network (loopback included); no second process can be started (`ActiveProcessLimit=1`); the job
 has a memory limit (default 4096 MB) and is killed when its handle closes. The process is created
 suspended and resumed only after `AssignProcessToJobObject` succeeded; if that or any other setup
@@ -100,23 +143,7 @@ desktop) all fail in the sandbox. Two concurrent builds use different AppContain
 slots, a cross-process mutex per slot) and cannot open each other's processes; the AppContainer's
 own storage is wiped before every build so nothing persists between builds.
 
-**KNOWN GAP (review B1): the sandbox can READ the user's `HKCU` registry** (for example
-`HKCU\Environment`, which may hold API keys the user set as user environment variables, and
-`RecentDocs`). Every AppContainer is a member of ALL APPLICATION PACKAGES, which the user's HKCU keys
-grant read. Measured: a Blender script can read these values and could leak them through an exception
-message; the host redacts secret-looking text and caps every returned string at about 2 KB, which is a
-backstop, not a boundary. What was tried: LPAC (opting out of ALL APPLICATION PACKAGES) makes Blender
-exit with 0xC0000022 because side-by-side manifest activation needs `HKLM\...\SideBySide`, which
-grants only that group and the `registryRead` capability; adding that capability restores startup but
-the same capability is also in the user's HKCU key ACLs (so HKCU stays readable) and rendering then
-crashes (no GPU/OpenGL driver access). A DENY ACE for the package SID on a key had no effect. The
-test `test_hkcu_environment_and_recentdocs_are_unreadable_from_the_sandbox` is a strict xfail that
-will start failing the day this is fixed. Options for the operator: keep secrets out of user-level
-environment variables and the HKCU hive while using this tool; run the server under a separate
-low-privilege Windows account (or a VM) with an empty HKCU; or deny ALL APPLICATION PACKAGES on the
-HKCU keys yourself (invasive, breaks UWP apps). `preflight` reports `registry: readable` with a warning.
-
-Probed and not fixable from inside this design: `GetAsyncKeyState` returned 0 in both modes with no
+Probed and not fixable from inside this design (see also the registry gap above): `GetAsyncKeyState` returned 0 in both modes with no
 key pressed (inconclusive; the private desktop is the mitigation); the POSIX `prlimit` path was not
 run on this machine.
 
@@ -153,6 +180,7 @@ Environment variables:
 | --- | --- |
 | `SONDER_MESHGEN_MEM_MB` | job-wide memory limit in MB (default 4096, clamped 256..65536); a build that hits it is reported as `memory limit exceeded (N MB)` |
 | `SONDER_MESHGEN_UNSANDBOXED=1` | explicit opt-out: run Blender with the server's authority. The report then carries `sandbox: "unsandboxed"` and a `warning`; use only where `run_code` would be acceptable |
+| `SONDER_MESHGEN_SECRET_ALLOW` | comma-separated variable NAMES exempt from the secret guard (default empty; see "Secret guard") |
 | `SONDER_BLENDER` | path to `blender.exe` |
 
 If the sandbox cannot be set up (for example the Blender grant needs an account that may edit its
@@ -166,36 +194,34 @@ harness, script and kit into the run directory).
 
 ### Defence-in-depth layers (not the boundary)
 
-- **AST gate** (`sonder_runtime/domain/meshgen/script_safety.py`). It is an allow-list for
-  Blender, not a deny list of paths:
+- **AST gate** (`sonder_runtime/domain/meshgen/script_safety.py`). It no longer polices files or
+  network (the sandbox does); it stops secret access and DoS:
   - `bpy` may be imported only as plain `import bpy`, and is usable only as
-    `bpy.ops.<category>.<operator>(...)` with category `mesh`, `object`, `transform` or `curve`;
-    `bpy.data.<collection>` with `objects`, `meshes`, `materials`, `collections`, `curves`; and
-    `bpy.context.<member>` (scene, view_layer, active/selected objects, depsgraph). `bpy`,
-    `bpy.ops`, `bpy.data` and `bpy.context` cannot be assigned, passed, stored, defaulted or
-    returned, so there is no alias to launder a path through. Operator names containing
-    import/export/save/load/open/write/script/python/bake/browse/file are refused.
-  - A fixed list of attribute names is refused on any object, including as keyword arguments:
-    `as_module`, `blend_data`, `texts`, `text`, `libraries`, `filepath`, `filepath_raw`, `save*`,
-    `write`, `driver*`, `expression`, `utils`, `app`, `handlers`, `preferences`, `window_manager`,
-    `types`, `rna_type`, `id_data`, `os`, `sys`, `subprocess`, `shutil`, `importlib`, `io`,
-    `socket`, `ctypes` and more (see `FORBIDDEN_ATTRIBUTES`). `write` is refused even on
-    non-bpy objects. A few string literals naming data blocks (`"texts"`, `"blend_data"`, ...)
-    are refused too.
-  - Imports are limited to `bpy`, `bmesh`, `mathutils`, `math`, `random` and the kit module;
-    `open`, `exec`, `eval`, `getattr`, `type`, `dir` and friends and every name or attribute
-    starting with `_` (except a bare `_`) are refused.
-  - The kit module is reachable only through the exposed names described under "Kit exposure"
-    (imports and re-exports such as `kit.Vector` are not available, and private helpers are
-    unusable by model scripts).
-  - `**` and `*` argument unpacking is refused on `bpy` calls, `path_resolve` is refused, operator
-    names containing node_group/asset/library are refused, and literal numeric arguments or
-    assignments named `segments`, `ring_count`, `vertices`, `levels`, `count`, `cuts`, `steps`,
-    `resolution`, `iterations` ... are capped (see `ARGUMENT_CAPS`) so one literal cannot request
-    a mesh that exhausts memory.
-  - `str.format` and `format_map` (they resolve attribute chains from string text, e.g. a format
-    field reaching a function's globals) and any string literal containing `__` are refused;
-    `%` and f-string formatting stay available.
+    `bpy.ops.<category>.<operator>(...)` with a category that cannot run Python (`mesh`, `object`,
+    `transform`, `curve`, `material`, `uv`, `collection`, `image`, `render`, `export_scene`,
+    `import_scene`; `wm`, `script`, `text`, `preferences`, `node`, `console` and `screen` are refused
+    because their operators `eval` strings, run files or enable add-ons); `bpy.data.<collection>`
+    (everything except text blocks, libraries, window managers, screens, workspaces); and
+    `bpy.context.<member>` (scene, view_layer, active/selected objects, depsgraph). `bpy`, `bpy.ops`,
+    `bpy.data` and `bpy.context` cannot be assigned, passed, stored, defaulted or returned, so there is
+    no alias to launder a path through. Operators whose name contains `script` or `python` are refused.
+    Any modifier type, node group, file path, save/load/export/import call and `path_resolve` is allowed.
+  - Imports are limited to `bpy`, `bmesh`, `mathutils`, `math`, `random` and the kit module, and
+    `winreg`, `_winreg`, `ctypes`, `_ctypes`, `_winapi`, `msvcrt`, `socket`, `subprocess`,
+    `multiprocessing`, `os`/`nt`/`posix`/`sys`, `importlib`, `builtins`, `marshal`, `pickle`, `code`,
+    `codeop`, `pty` and `signal` are refused as imports, names, attributes and strings.
+  - Routes to unrestricted Python are refused as attributes, keyword arguments and strings:
+    `as_module`, `blend_data`, `texts`, `text`, `driver*`, `expression`, `utils`, `app`, `handlers`,
+    `preferences`, `window_manager`, `types`, `rna_type`, `id_data` and more (see
+    `FORBIDDEN_ATTRIBUTES`). `open`, `exec`, `eval`, `compile`, `globals`, `vars`, `getattr`, `type`,
+    `dir`, `format` and every name or attribute starting with `_` (except a bare `_`) are refused.
+  - The kit module is reachable only through the exposed names described under "Kit exposure".
+  - Literal numeric arguments or assignments named `segments`, `ring_count`, `vertices`, `levels`,
+    `count`, `cuts`, `steps`, `resolution`, `iterations` ... are capped (see `ARGUMENT_CAPS`) and a
+    literal `range()` bound above 1,000,000 is refused, so one literal cannot request a mesh or loop
+    that exhausts memory or time.
+  - `str.format` and `format_map` (they resolve attribute chains from string text) and any string
+    literal containing `__` are refused; `%` and f-string formatting stay available.
 - **Restricted builtins** inside Blender (`harness.py`): a small safe subset, and `__import__`
   limited to the same module allow-list.
 - **Environment scrub**: Blender is started with an explicit allow-list environment, never a copy
@@ -204,22 +230,25 @@ harness, script and kit into the run directory).
   plus the system directories; `TEMP`/`TMP`/`HOME`/`USERPROFILE`/`APPDATA`/`LOCALAPPDATA` point at a
   per-build scratch directory (`<candidate dir>/.blender_profile`, deleted after every build) on the unsandboxed path (the sandbox uses the run directory). API keys, tokens and `SONDER_*` values never reach the process.
 - **Kit exposure** (`sonder_runtime/domain/meshgen/kit_policy.py`). A kit is trusted code, but its
-  public functions are reachable from untrusted scripts and some of them write files (export,
-  preview render, "run the whole prop"). Exposure is therefore an allow-list derived from the kit
-  source: a function or class is excluded when anything in it touches `open`/`exec`/`eval`, the
-  `os`/`sys`/`shutil`/`pathlib`/`subprocess`/`io`/`json`... modules, `Path`, file-ish attributes
-  (`save`, `write`, `filepath`, `makedirs`, `export_scene`, `open_mainfile`, `ops.render`, ...; `system`/`popen` only on `os`/`subprocess`-like receivers); text
-  constants (`KIT_DIR`, `REPO_ROOT`, ...) are never exposed; and exclusion is transitive (a function
-  that uses an excluded kit name is excluded). For the Lanternfall `lf_kit.py` this excludes
-  `COL`, `KIT_DIR`, `PREVIEW_DIR`, `PROPS_OUT_ROOT`, `REPO_ROOT`, `finalize_and_export`,
-  `render_preview`, `result_line` and `run_prop` (`reset_scene` stays available). The operator can override the
-  derivation with module-level literals in the kit: `MESHGEN_ALLOW = ["box", "lathe"]` replaces the
-  derived list (only public names the kit defines count) and `MESHGEN_EXCLUDE = ["helper"]` removes
-  names from it. Excluded names never appear in the API digest or repair hints; the prompt tells the
-  model that the harness exports and renders. As defence in depth the harness replaces every
-  excluded *function* in the loaded kit module with a stub that raises (constants are left alone,
-  because exposed kit functions read them, e.g. `COL`), so a gate bug still cannot reach kit code that writes files. A user-supplied `api_doc_path`
-  text is passed through unchanged and is the operator's responsibility.
+  public functions are reachable from untrusted scripts. Plain file reads and writes no longer
+  exclude a function (the sandbox confines them). Exposure is an allow-list derived from the kit
+  source: a function or class is excluded when anything in it touches scene-level export/import/save
+  or render (`export_scene`, `import_scene`, `save*`, `ops.render`, `open_mainfile`, `read_homefile`...:
+  the harness exports and renders itself, and a kit helper doing it too would clobber the harness'
+  output), process control (`exit`, `exec`/`eval`/`compile`/`__import__`), or one of the modules that read
+  secrets or spawn processes (`os` except path-string helpers like `os.path`, `sys`, `subprocess`, `socket`,
+  `ctypes`, `winreg`, `importlib`, `builtins`, `pickle`, `marshal`, `urllib`, `http`; `system`/`popen`
+  only on such receivers); location constants (`KIT_DIR`, `REPO_ROOT`, ...) and text constants are
+  never exposed, and exclusion is transitive (a function that uses an excluded location is excluded).
+  For the Lanternfall `lf_kit.py` this excludes `COL`, `KIT_DIR`, `PREVIEW_DIR`, `PROPS_OUT_ROOT`,
+  `REPO_ROOT`, `finalize_and_export`, `render_preview`, `result_line` and `run_prop` (`reset_scene` stays
+  available). The operator can override the derivation with module-level literals in the kit:
+  `MESHGEN_ALLOW = ["box", "lathe"]` replaces the derived list (only public names the kit defines
+  count) and `MESHGEN_EXCLUDE = ["helper"]` removes names from it. Excluded names never appear in the
+  API digest or repair hints; the prompt tells the model that the harness exports and renders. As
+  defence in depth the harness replaces every excluded *function* in the loaded kit module with a stub
+  that raises (constants are left alone, because exposed kit functions read them, e.g. `COL`). A
+  user-supplied `api_doc_path` text is passed through unchanged and is the operator's responsibility.
 - **Minimal helper globals**: the injected `paint` helper is built in a fresh namespace holding five
   harmless builtins, so reflection on it reaches nothing of the harness.
 - **Harness hardening**: before the script runs, `Text.as_module` and `bpy.utils.execfile`

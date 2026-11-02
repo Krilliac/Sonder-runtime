@@ -1,36 +1,39 @@
 """AST gate for model-written Blender build scripts.
 
-THIS GATE IS NOT THE SECURITY BOUNDARY.  It is a cheap first filter that rejects mistakes and
-obvious abuse early (and turns them into repair feedback for the model).  A determined script
-can find ways a static check misses; what contains it is the OS sandbox the build runs in
-(``adapters/meshgen/sandbox_win.py``: a zero-capability AppContainer plus a Job Object).
+Division of labour (see ``docs/runbooks/mesh-generation.md``):
 
-What this enforces (and nothing more is claimed):
+* the OS sandbox (``adapters/meshgen/sandbox_win.py``: zero-capability AppContainer, Job Object,
+  private desktop) handles FILES, NETWORK, PROCESSES and the SCREEN, so this gate no longer tries to
+  stop file or network access: file paths, save/export/import, operator names, modifier types and
+  node groups are free;
+* ``domain/meshgen/secret_guard.py`` handles secrets leaving the machine (key egress);
+* this gate's job is to stop the two things the sandbox cannot: reaching SECRETS from inside the
+  build (the registry and the environment: ``winreg``, ``ctypes``, ``os``/``sys``, ``subprocess`` and
+  friends, and every route to unrestricted Python such as text blocks, script operators, drivers and
+  ``eval``-style reflection) and cheap DoS (huge literal counts).  It is not a boundary against a
+  determined script; it turns honest mistakes into repair feedback.
+
+What it enforces:
 
 * the script parses, defines a top-level ``def build``, and is at most 60 000 characters;
-* imports come only from ``bpy``, ``bmesh``, ``mathutils``, ``math``, ``random`` and the
-  optional kit module; ``bpy`` may only be imported as plain ``import bpy``;
-* ``bpy`` is reachable ONLY through three spellings, each followed directly by an
-  allow-listed member: ``bpy.ops.<category>.<operator>(...)`` (categories ``mesh``,
-  ``object``, ``transform``, ``curve``), ``bpy.data.<collection>`` (``objects``, ``meshes``,
-  ``materials``, ``collections``, ``curves``) and ``bpy.context.<member>`` (scene, view layer,
-  active/selected objects, depsgraph).  ``bpy``, ``bpy.ops``, ``bpy.data`` and
-  ``bpy.context`` can never be bound to a name, stored in a container, passed, returned or
-  used as a default, so there is no alias to launder a denied path through;
-* a fixed list of dangerous attribute names (text blocks, libraries, file paths, save/write,
-  drivers, preferences, window manager, os/sys/subprocess/...) is refused wherever it
-  appears as an attribute or keyword argument, whatever object it hangs off, and string
-  literals equal to the data-block names are refused too;
+* imports come only from ``bpy``, ``bmesh``, ``mathutils``, ``math``, ``random`` and the optional
+  kit module; ``bpy`` may only be imported as plain ``import bpy``; ``winreg``, ``_winreg``,
+  ``ctypes``, ``_ctypes``, ``_winapi``, ``msvcrt``, ``socket``, ``subprocess``, ``multiprocessing``,
+  ``os``/``nt``/``posix``/``sys``, ``importlib``, ``builtins``, ``marshal``, ``pickle``, ``code``,
+  ``codeop``, ``pty`` and ``signal`` are refused by name as well, wherever they appear;
+* ``bpy`` is reachable ONLY through ``bpy.ops.<category>.<operator>(...)`` (categories that cannot
+  run Python: geometry, material, uv, image, render, import/export ...), ``bpy.data.<collection>``
+  (no text blocks, libraries, window managers) and ``bpy.context.<member>``; it can never be bound
+  to a name, stored, passed, returned or used as a default, so there is no alias to launder a
+  denied path through;
+* operators whose name contains ``script`` or ``python``, text blocks, drivers, ``bpy.app`` and
+  ``bpy.utils`` (the routes to unrestricted Python) are refused;
 * the kit module is reachable only through its public top-level defs/constants;
-* ``str.format`` / ``format_map`` (they resolve attribute chains from string text) and any
-  string literal containing ``__`` are refused;
-* dynamic-code builtins, dunder/underscore names and ``getattr`` style reflection are refused.
+* ``str.format`` / ``format_map``, any string literal containing ``__``, dynamic-code builtins,
+  dunder/underscore names and ``getattr`` style reflection are refused;
+* literal numeric arguments are capped (subdivision levels, counts, segments, ``range`` bounds).
 
-This is a screen against honest mistakes and obvious escapes, defence in depth next to the
-harness' restricted builtins, the harness' neutering of ``Text.as_module`` and
-``bpy.utils.execfile``, and Blender's ``--factory-startup --disable-autoexec``.  It is NOT a
-sandbox: an allowed operator or a Blender bug can still do harm, and the tool has the same
-trust level as ``run_code``.  Pure; stdlib only.
+Pure; stdlib only.
 """
 from __future__ import annotations
 
@@ -45,24 +48,25 @@ FORBIDDEN_NAMES = frozenset({
     "getattr", "setattr", "delattr", "input", "breakpoint", "memoryview", "help",
     "exit", "quit", "type", "dir", "format",
 })
-
-# bpy.ops categories: geometry creation/editing only.  Everything else (wm, script, text,
-# file, export_scene, import_scene, render, image, material, scene, ...) is refused.
-ALLOWED_OPS_CATEGORIES = frozenset({"mesh", "object", "transform", "curve"})
-# Operator names containing one of these are refused even inside an allowed category
-# (e.g. object.bake_image, object.load_reference_image).
-FORBIDDEN_OPERATOR_FRAGMENTS = (
-    "import", "export", "save", "load", "open", "write", "script", "python", "bake", "browse", "file",
-    "node_group", "asset", "library",
-)
-
-# Modifier types a script may create (literal strings only).  Excluded on purpose: NODES (runs
-# geometry-node graphs), DISPLACE/WAVE/etc. (can load textures), CURVE/HOOK/SURFACE_DEFORM (reach
-# other data) and anything not listed.
-ALLOWED_MODIFIERS = frozenset({
-    "BEVEL", "SUBSURF", "SOLIDIFY", "MIRROR", "ARRAY", "WEIGHTED_NORMAL", "TRIANGULATE", "DECIMATE",
-    "BOOLEAN", "EDGE_SPLIT", "SMOOTH", "WELD", "SCREW",
+# Modules that read secrets (registry, environment), spawn processes or reach the network.  Refused
+# as imports (the import allow-list already excludes them), as bare names and as attributes.
+DANGEROUS_MODULES = frozenset({
+    "winreg", "_winreg", "ctypes", "_ctypes", "_winapi", "msvcrt", "socket", "subprocess", "multiprocessing",
+    "os", "nt", "posix", "sys", "importlib", "builtins", "marshal", "pickle", "code", "codeop", "pty", "signal",
 })
+
+# bpy.ops categories a script may call.  Left out on purpose because they can run Python (and so
+# reach the registry or the environment): ``wm`` (``context_*`` operators eval their value),
+# ``script`` and ``text`` (run files / text blocks), ``preferences`` (enable add-ons), ``node``
+# (``add_node`` evaluates setting strings), ``console`` and ``screen``.  File and export/import
+# operators are fine: the OS sandbox confines what they can touch.
+ALLOWED_OPS_CATEGORIES = frozenset({
+    "mesh", "object", "transform", "curve", "material", "uv", "collection", "image", "render",
+    "export_scene", "import_scene",
+})
+# Operator names containing one of these are refused even inside an allowed category: they run Python.
+FORBIDDEN_OPERATOR_FRAGMENTS = ("script", "python")
+
 # Upper bounds for literal numeric arguments or assignments with these names, so a script cannot
 # ask for a mesh that exhausts memory with a single literal.  Non-literal values are bounded at
 # run time by the harness' process memory limit instead.
@@ -72,25 +76,25 @@ ARGUMENT_CAPS = {
     "subdivisions": 6, "steps": 256, "resolution": 256, "resolution_u": 64, "resolution_v": 64,
     "iterations": 16,
 }
-ALLOWED_DATA_COLLECTIONS = frozenset({"objects", "meshes", "materials", "collections", "curves"})
+MAX_RANGE_LITERAL = 1_000_000  # a literal range() bound above this is a DoS, not a model
+# Everything except text blocks, libraries, window managers, screens and workspaces.
+ALLOWED_DATA_COLLECTIONS = frozenset({
+    "objects", "meshes", "materials", "collections", "curves", "images", "textures", "node_groups", "lights",
+    "cameras", "worlds", "lattices", "armatures", "shape_keys", "scenes",
+})
 ALLOWED_CONTEXT_MEMBERS = frozenset({
     "scene", "view_layer", "active_object", "object", "selected_objects",
     "selected_editable_objects", "collection", "evaluated_depsgraph_get", "temp_override",
 })
 
-# Refused as an attribute name (``x.NAME``) or keyword argument name regardless of what ``x``
-# is.  Errs on the side of denying: a legitimate build script only needs
-# mesh/object/transform/material/bmesh/mathutils work.  ``write`` is refused outright (also on
-# non-bpy objects), since a text block or file handle is the usual way to use it.
+# Refused as an attribute name (``x.NAME``) or keyword argument name regardless of what ``x`` is:
+# the routes to unrestricted Python (text blocks, script execution, drivers, application state) and
+# the modules that read secrets or spawn processes.  File-path attributes (``filepath``, ``save``,
+# ``write``, ``load`` ...) are not listed: the OS sandbox confines file access.
 FORBIDDEN_ATTRIBUTES = frozenset({
     # text blocks / script execution
     "as_module", "blend_data", "texts", "text", "run_script", "script", "scripts", "execfile",
-    "exec_module", "register_class", "unregister_class",
-    # libraries and files
-    "libraries", "library", "override_library", "filepath", "filepath_raw", "filename", "directory",
-    "filepath_from_user", "save", "save_as", "save_render", "save_as_mainfile", "save_mainfile",
-    "write", "writelines", "read", "load", "unpack", "pack", "reload", "file", "wm",
-    "export_scene", "import_scene", "render",
+    "exec_module", "register_class", "unregister_class", "wm",
     # drivers and animation scripting
     "driver_add", "driver_remove", "drivers", "driver", "expression", "animation_data",
     "animation_data_create",
@@ -98,21 +102,18 @@ FORBIDDEN_ATTRIBUTES = frozenset({
     "utils", "app", "handlers", "preferences", "window_manager", "window", "screen", "area",
     "types", "props", "msgbus", "rna_type", "bl_rna", "id_data",
     # python modules and process access
-    "os", "sys", "subprocess", "shutil", "pathlib", "importlib", "builtins", "io", "socket",
-    "ctypes", "system", "popen", "exec", "eval", "compile", "open", "getattr", "setattr",
+    "shutil", "pathlib", "io", "system", "popen", "exec", "eval", "compile", "open", "getattr", "setattr",
     "delattr", "globals", "locals", "vars",
-    "path_resolve",
     # str.format / format_map resolve attribute chains from a string literal (for example
     # "{0.__globals__[os]}"), which no AST rule over names can see.
     "format", "format_map",
-})
+}) | DANGEROUS_MODULES
 
 # String literals equal to one of these are refused (they name data blocks or properties
 # that could be reached through a mapping lookup such as ``bpy.context.copy()[...]``).
 FORBIDDEN_STRINGS = frozenset({
-    "texts", "blend_data", "libraries", "window_manager", "preferences", "filepath", "filepath_raw",
-    "as_module", "utils", "app", "handlers",
-})
+    "texts", "blend_data", "window_manager", "preferences", "as_module", "utils", "app", "handlers",
+}) | DANGEROUS_MODULES
 
 
 def kit_public_names(kit_source: str) -> frozenset[str]:
@@ -250,31 +251,15 @@ def check_script(source: str, kit_module: str | None = None,
         if limit is not None and value is not None and value > limit:
             reject(where, "'%s=%s' is above the allowed maximum of %d" % (name, value, limit))
 
-    def check_modifier_type(type_node, where):
-        if not (isinstance(type_node, ast.Constant) and isinstance(type_node.value, str)
-                and type_node.value in ALLOWED_MODIFIERS):
-            reject(where, "modifier type must be a literal string from: %s" % ", ".join(sorted(ALLOWED_MODIFIERS)))
-
     def check_call(node):
         for kw in node.keywords:
-            if kw.arg is None:
-                reject(node, "'**' argument unpacking is not allowed")
-            else:
+            if kw.arg is not None:
                 check_cap(kw.arg, kw.value, kw)
-        root = node.func
-        while isinstance(root, ast.Attribute):
-            root = root.value
-        if isinstance(root, ast.Name) and root.id == "bpy" and any(isinstance(a, ast.Starred) for a in node.args):
-            reject(node, "'*' argument unpacking is not allowed in bpy calls")
-        func = node.func
-        if not isinstance(func, ast.Attribute):
-            return
-        keywords = {kw.arg: kw.value for kw in node.keywords if kw.arg}
-        if func.attr == "new" and isinstance(func.value, ast.Attribute) and func.value.attr == "modifiers":
-            type_node = keywords.get("type") or (node.args[1] if len(node.args) > 1 else None)
-            check_modifier_type(type_node, node)
-        elif func.attr == "modifier_add":
-            check_modifier_type(keywords.get("type"), node)
+        if isinstance(node.func, ast.Name) and node.func.id == "range":
+            for arg in node.args:
+                value = literal_number(arg)
+                if value is not None and abs(value) > MAX_RANGE_LITERAL:
+                    reject(node, "range bound %s is above the allowed maximum of %d" % (value, MAX_RANGE_LITERAL))
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
@@ -293,7 +278,7 @@ def check_script(source: str, kit_module: str | None = None,
                 parent = attr_parent(node)
                 if not isinstance(node.ctx, ast.Load) or parent is None or parent.attr not in kit_allowed:
                     reject(node, "the kit '%s' may only be used through its public names" % node.id)
-            if node.id in FORBIDDEN_NAMES:
+            if node.id in FORBIDDEN_NAMES or node.id in DANGEROUS_MODULES:
                 reject(node, "use of '%s' is not allowed" % node.id)
             elif _private(node.id):
                 reject(node, "names starting with '_' are not allowed ('%s')" % node.id)
@@ -329,6 +314,7 @@ def check_script(source: str, kit_module: str | None = None,
 
 
 __all__ = [
-    "ALLOWED_DATA_COLLECTIONS", "ALLOWED_IMPORT_ROOTS", "ALLOWED_OPS_CATEGORIES", "FORBIDDEN_ATTRIBUTES",
+    "ALLOWED_DATA_COLLECTIONS", "ALLOWED_IMPORT_ROOTS", "ALLOWED_OPS_CATEGORIES", "DANGEROUS_MODULES",
+    "FORBIDDEN_ATTRIBUTES",
     "FORBIDDEN_NAMES", "MAX_SOURCE_CHARS", "check_script", "kit_public_names",
 ]
