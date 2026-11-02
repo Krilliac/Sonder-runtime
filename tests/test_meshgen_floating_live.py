@@ -126,7 +126,7 @@ def test_a_join_is_reported_at_the_line_of_the_join(tmp_path):
     both = join([a, b], "Pair")
 '''
     entries = floating_of(build(tmp_path, source))
-    assert len(entries) == 1 and entries[0]["parts"] == ["Pair"] and entries[0]["lines"] == [5]
+    assert len(entries) == 1 and entries[0]["parts"] == ["Pair (piece 1)", "Pair (piece 2)"] and entries[0]["lines"] == [5]
 
 
 def test_the_tolerance_scales_with_the_height_of_the_prop(tmp_path):
@@ -245,7 +245,7 @@ def test_the_nearest_part_named_is_one_that_stands_on_the_ground_not_another_flo
 
 def test_the_detached_parts_are_listed_in_the_geometry_block(tmp_path):
     source = BASE + '    ball = primitive("uv_sphere", "Ball", radius=0.2, loc=(0, 0, 1.5))\n    detached(ball)\n'
-    assert build(tmp_path, source)["geometry"]["detached"] == [{"name": "Ball", "line": 3}]
+    assert build(tmp_path, source)["geometry"]["detached"] == [{"name": "Ball", "line": 3, "box": [-0.2, -0.2, 1.3, 0.2, 0.2, 1.7]}]
     assert build(tmp_path / "none", BASE)["geometry"]["detached"] == []
 
 
@@ -302,3 +302,108 @@ def test_a_copy_made_by_a_kit_gets_its_own_line_and_is_not_detached_because_its_
     assert result["ok"], result
     entries = floating_of(result)
     assert [(e["parts"], e["lines"]) for e in entries] == [(["C"], [6])]      # B is detached, its copy C is not
+
+
+# ---------------------------------------------------------------------------------------------- islands, open meshes, reopening
+TABLE = '''def build():
+    leg = primitive("cube", "Leg", size=1.0, loc=(0, 0, 0.4), scale=(0.1, 0.1, 0.8))
+    top = primitive("cube", "Top", size=1.0, loc=(0, 0, %s), scale=(1, 1, 0.05))
+%s'''
+
+
+def test_a_join_does_not_hide_a_floating_piece_behind_a_grounded_one(tmp_path):
+    joined = TABLE % ("1.2", '    table = join([leg, top], "Table")\n')
+    entries = floating_of(build(tmp_path, joined))
+    assert len(entries) == 1 and entries[0]["lines"] == [4]                       # the line of the join
+    assert entries[0]["parts"] == ["Table (piece 2)"] and entries[0]["nearest"] == "Table (piece 1)"
+    assert entries[0]["gap_vec"][2] > 0.3
+    # the control: the same join with the top seated on the leg is one connected whole
+    seated = TABLE % ("0.825", '    table = join([leg, top], "Table")\n')
+    assert floating_of(build(tmp_path / "seated", seated)) == []
+
+
+def test_a_part_with_a_single_island_keeps_its_plain_name(tmp_path):
+    result = build(tmp_path, BASE + '    ball = primitive("uv_sphere", "Ball", radius=0.2, loc=(0, 0, 1.5))\n')
+    assert floating_of(result)[0]["parts"] == ["Ball"]
+
+
+TRAY = '''def build():
+    v = [(-0.5, -0.5, 0), (0.5, -0.5, 0), (0.5, 0.5, 0), (-0.5, 0.5, 0), (-0.5, -0.5, 0.6), (0.5, -0.5, 0.6),
+         (0.5, 0.5, 0.6), (-0.5, 0.5, 0.6)]
+    f = [(0, 3, 2, 1), (0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)]
+    tray = mesh("Tray", v, f)
+    apple = primitive("cube", "Apple", size=0.1, loc=(%s, 0.0, 0.3))
+'''
+
+
+def test_a_part_inside_an_open_tray_is_not_connected_by_the_inside_test(tmp_path):
+    entries = floating_of(build(tmp_path, TRAY % "0.3"))
+    assert [entry["parts"] for entry in entries] == [["Apple"]] and entries[0]["nearest"] == "Tray"
+    # the control: an apple resting against the wall touches it, and the closed shell test above still holds
+    assert floating_of(build(tmp_path / "touching", TRAY % "0.45")) == []
+
+
+def round_geometry(tmp_path, source):
+    return build(tmp_path, source)["geometry"]
+
+
+def remembered(tmp_path):
+    from sonder_runtime.domain.meshgen.critique import remember_floating
+
+    memory = {"lines": set(), "names": set(), "boxes": []}
+    first = round_geometry(tmp_path / "round0", TABLE % ("1.2", ""))
+    assert len(first["floating"]) == 1 and first["floating"][0]["box"]            # the floater and where it was
+    remember_floating(memory, first)
+    return memory
+
+
+def test_detaching_a_floater_after_renaming_it_and_moving_its_line_is_still_reopened(tmp_path):
+    from sonder_runtime.domain.meshgen.critique import reopened_issues
+
+    memory = remembered(tmp_path)
+    renamed = '''def build():
+    # a sturdy table, honest
+
+    leg = primitive("cube", "Leg", size=1.0, loc=(0, 0, 0.4), scale=(0.1, 0.1, 0.8))
+    slab = primitive("cube", "Tabletop", size=1.0, loc=(0, 0, 1.2), scale=(1, 1, 0.05))
+    detached(slab)
+'''
+    geometry = round_geometry(tmp_path / "renamed", renamed)
+    assert geometry["floating"] == [] and geometry["detached"][0]["name"] == "Tabletop"
+    assert geometry["detached"][0]["line"] == 5 and "Tabletop" not in memory["names"] and 5 not in memory["lines"]
+    assert reopened_issues(geometry, memory)
+    # the control: a mote hovering elsewhere is a legitimate detached part
+    far = TABLE % ("0.825", '    mote = primitive("uv_sphere", "Mote", radius=0.05, loc=(0, 0, 2.5))\n    detached(mote)\n')
+    assert reopened_issues(round_geometry(tmp_path / "far", far), memory) == []
+
+
+def test_detaching_a_floater_after_splitting_it_into_two_parts_is_still_reopened(tmp_path):
+    from sonder_runtime.domain.meshgen.critique import reopened_issues
+
+    memory = remembered(tmp_path)
+    split = '''def build():
+    leg = primitive("cube", "Leg", size=1.0, loc=(0, 0, 0.4), scale=(0.1, 0.1, 0.8))
+    left = primitive("cube", "HalfL", size=1.0, loc=(-0.25, 0, 1.2), scale=(0.5, 1, 0.05))
+    right = primitive("cube", "HalfR", size=1.0, loc=(0.25, 0, 1.2), scale=(0.5, 1, 0.05))
+    detached(left)
+    detached(right)
+'''
+    geometry = round_geometry(tmp_path / "split", split)
+    assert geometry["floating"] == [] and len(geometry["detached"]) == 2
+    assert len(reopened_issues(geometry, memory)) == 2
+
+
+def test_detaching_a_floater_after_joining_it_into_a_new_part_is_still_reopened(tmp_path):
+    from sonder_runtime.domain.meshgen.critique import reopened_issues
+
+    memory = remembered(tmp_path)
+    joined = '''def build():
+    leg = primitive("cube", "Leg", size=1.0, loc=(0, 0, 0.4), scale=(0.1, 0.1, 0.8))
+    top = primitive("cube", "Top", size=1.0, loc=(0, 0, 1.2), scale=(1, 1, 0.05))
+    knob = primitive("uv_sphere", "Knob", radius=0.05, loc=(0, 0, 1.25))
+    lid = join([top, knob], "Lid")
+    detached(lid)
+'''
+    geometry = round_geometry(tmp_path / "joined", joined)
+    assert geometry["floating"] == [] and geometry["detached"][0]["name"] == "Lid"
+    assert reopened_issues(geometry, memory)

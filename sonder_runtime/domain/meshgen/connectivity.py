@@ -21,6 +21,7 @@ SAMPLE_CAP = 256            # vertices sampled per part for the gap measurement
 CONTACT_SAMPLE_CAP = 1024   # surface samples per part and direction for the touch test
 MAX_PAIRS = 200_000         # candidate pairs above which the whole check is skipped
 MAX_DETACHED = 20           # detached parts listed in a report
+MAX_ISLANDS = 64            # loose pieces one part may be split into; more and it stays a single node
 MAX_FLOATING = 20           # floating entries kept in a report
 MAX_NAMES = 8               # part names / lines kept per entry
 MAX_NAME_CHARS = 40
@@ -85,6 +86,54 @@ def candidate_pairs(boxes, tol, limit=None) -> list:
                     raise TooManyPairs("more than %d candidate pairs" % limit)
     pairs.sort()
     return pairs
+
+
+def split_islands(triangles, limit=MAX_ISLANDS):
+    """Group triangle indices into loose islands (triangles that share a vertex, directly or through others).
+
+    A part made of several separate pieces (a join, or a kit mesh with detached bits) is several nodes of the
+    touching graph, otherwise one grounded piece would hide a floating one.  Returns lists of triangle indices
+    ordered by their first triangle, or ``None`` when there are more than ``limit`` islands (the part is then
+    treated as one node, which bounds the cost of a mesh with unwelded faces)."""
+    parent = {}
+
+    def find(item):
+        while parent[item] != item:
+            parent[item] = parent[parent[item]]
+            item = parent[item]
+        return item
+
+    for tri in triangles:
+        for vertex in tri:
+            parent.setdefault(vertex, vertex)
+        root = find(tri[0])
+        for vertex in tri[1:]:
+            other = find(vertex)
+            if other != root:
+                parent[max(root, other)] = min(root, other)
+                root = min(root, other)
+    groups = {}
+    for index, tri in enumerate(triangles):
+        groups.setdefault(find(tri[0]), []).append(index)
+        if len(groups) > limit:
+            return None
+    return [groups[key] for key in sorted(groups, key=lambda key: groups[key][0])]
+
+
+def is_closed_manifold(triangles) -> bool:
+    """True when every edge is shared by exactly two triangles (a watertight surface, so "inside" means something)."""
+    edges = {}
+    for tri in triangles:
+        for index in range(3):
+            a, b = tri[index], tri[(index + 1) % 3]
+            key = (a, b) if a < b else (b, a)
+            edges[key] = edges.get(key, 0) + 1
+    return bool(edges) and all(count == 2 for count in edges.values())
+
+
+def boxes_near(a, b, tol) -> bool:
+    """True when two boxes overlap or lie within ``tol`` of each other."""
+    return box_distance(a, b) <= tol
 
 
 def box_contains(outer, inner) -> bool:
@@ -194,7 +243,12 @@ def _rounded(values, digits=4) -> list:
     return [round(float(value), digits) if math.isfinite(float(value)) else 0.0 for value in values]
 
 
-def floating_entry(names, lines, centre, gap, gap_vec, nearest) -> dict:
+def _valid_box(box):
+    return (isinstance(box, (list, tuple)) and len(box) == 6
+            and all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in box))
+
+
+def floating_entry(names, lines, centre, gap, gap_vec, nearest, box=None) -> dict:
     """One report entry for a floating component.
 
     ``names``/``lines``: its parts and the script lines that created them (0 = unknown).  ``centre``: the
@@ -203,7 +257,7 @@ def floating_entry(names, lines, centre, gap, gap_vec, nearest) -> dict:
     component, so a positive Z means it floats above.  ``nearest``: that other part's name, or ``None`` for
     the ground."""
     known = sorted({int(line) for line in lines if isinstance(line, int) and line > 0})
-    return {
+    entry = {
         "parts": [str(name)[:MAX_NAME_CHARS] for name in list(names)[:MAX_NAMES]],
         "part_count": len(names),
         "lines": known[:MAX_NAMES],
@@ -212,20 +266,29 @@ def floating_entry(names, lines, centre, gap, gap_vec, nearest) -> dict:
         "gap_vec": _rounded(gap_vec),
         "nearest": None if nearest is None else str(nearest)[:MAX_NAME_CHARS],
     }
+    if _valid_box(box):
+        entry["box"] = _rounded(box)
+    return entry
 
 
 def geometry_block(part_count, entries, height, dims, detached=()) -> dict:
     """The ``geometry`` object of the harness result (at most ``MAX_FLOATING`` entries).
 
-    ``detached`` lists ``(name, line)`` of the parts the script marked ``detached(...)``, so the loop can show the
-    model, and the report, which parts were excluded from the check."""
+    ``detached`` lists ``(name, line, box)`` of the parts the script marked ``detached(...)`` (``box`` optional), so
+    the loop can show the model, and the report, which parts were excluded from the check."""
+    listed = []
+    for item in list(detached)[:MAX_DETACHED]:
+        name, line = item[0], item[1]
+        record = {"name": str(name)[:MAX_NAME_CHARS], "line": int(line) if isinstance(line, int) else 0}
+        if len(item) > 2 and _valid_box(item[2]):
+            record["box"] = _rounded(item[2])
+        listed.append(record)
     return {"parts": int(part_count), "floating": list(entries)[:MAX_FLOATING],
-            "height": _rounded([height])[0], "dims": _rounded(dims),
-            "detached": [{"name": str(name)[:MAX_NAME_CHARS], "line": int(line) if isinstance(line, int) else 0}
-                         for name, line in list(detached)[:MAX_DETACHED]]}
+            "height": _rounded([height])[0], "dims": _rounded(dims), "detached": listed}
 
 
-__all__ = ["CONTACT_SAMPLE_CAP", "MAX_DETACHED", "MAX_FLOATING", "MAX_NAMES", "MAX_NAME_CHARS", "MAX_PAIRS",
+__all__ = ["CONTACT_SAMPLE_CAP", "MAX_DETACHED", "MAX_FLOATING", "MAX_ISLANDS", "MAX_NAMES", "MAX_NAME_CHARS",
+           "MAX_PAIRS", "boxes_near", "is_closed_manifold", "split_islands",
            "SAMPLE_CAP", "TOL_FLOOR", "TOL_FRACTION", "TooManyPairs", "box_contains", "box_distance",
            "candidate_pairs", "clip_polygon", "contact_samples", "floating_components", "floating_entry",
            "geometry_block", "is_grounded", "sample_indices", "tolerance", "triangle_boxes"]

@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import json
 
+from .connectivity import boxes_near, tolerance
+
 MAX_ISSUES = 8
 _MAX_ISSUE_CHARS = 300
+MAX_REMEMBERED_BOXES = 200
 FLOATING_SCORE_CAP = 6          # a candidate with a measured floating part never scores above this
 MAX_GEOMETRY_ISSUES = 8
 # (axis, sign of the gap vector) -> (where the floating part sits relative to what it should touch, how to move it).
@@ -84,12 +87,22 @@ def floating_entries(geometry) -> list:
             if isinstance(entry, dict) and _names(entry)]
 
 
+def _box(value):
+    ok = (isinstance(value, (list, tuple)) and len(value) == 6
+          and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value))
+    return tuple(float(v) for v in value) if ok else None
+
+
+def _detached_items(geometry) -> list:
+    found = geometry.get("detached") if isinstance(geometry, dict) else None
+    return [item for item in (found if isinstance(found, list) else [])
+            if isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"].strip()]
+
+
 def detached_parts(geometry) -> list:
     """``(name, line)`` of every part the script marked ``detached(...)``, from a ``geometry`` block."""
-    found = geometry.get("detached") if isinstance(geometry, dict) else None
     return [(item["name"], item["line"] if isinstance(item.get("line"), int) and item["line"] > 0 else 0)
-            for item in (found if isinstance(found, list) else [])
-            if isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"].strip()]
+            for item in _detached_items(geometry)]
 
 
 def remember_floating(memory, geometry) -> None:
@@ -97,6 +110,9 @@ def remember_floating(memory, geometry) -> None:
     for entry in floating_entries(geometry):
         memory["names"].update(_names(entry))
         memory["lines"].update(line for line in (entry.get("lines") or []) if isinstance(line, int) and line > 0)
+        box = _box(entry.get("box"))
+        if box is not None and len(memory.setdefault("boxes", [])) < MAX_REMEMBERED_BOXES:
+            memory["boxes"].append(box)
 
 
 def detached_notes(geometry) -> list:
@@ -107,12 +123,21 @@ def detached_notes(geometry) -> list:
 
 
 def reopened_issues(geometry, memory) -> list:
-    """Issues for a part that was reported floating in an earlier round and is now marked detached (matched by script
-    line, or by name when the line moved).  Detaching a part is not a way round the floating check, so these count as
-    floating parts: they cap the score and block acceptance."""
+    """Issues for a part that was reported floating in an earlier round and is now marked detached.
+
+    Matched by place first: a detached part whose bounding box overlaps, or lies within the tolerance of, a box
+    remembered from a floating component counts, whatever it is now called or which line makes it (renaming,
+    splitting or joining it does not move it).  Script line and name are extra signals.  Detaching a part is not a
+    way round the floating check, so these count as floating parts: they cap the score and block acceptance."""
     issues = []
-    for name, line in detached_parts(geometry)[:MAX_GEOMETRY_ISSUES]:
-        if (line and line in memory["lines"]) or name in memory["names"]:
+    tol = tolerance(geometry.get("height") if isinstance(geometry, dict) else None)
+    remembered = memory.get("boxes", [])
+    for item in _detached_items(geometry)[:MAX_GEOMETRY_ISSUES]:
+        name = item["name"]
+        line = item["line"] if isinstance(item.get("line"), int) and item["line"] > 0 else 0
+        box = _box(item.get("box"))
+        here = box is not None and any(boxes_near(box, old, tol) for old in remembered)
+        if here or (line and line in memory["lines"]) or name in memory["names"]:
             issues.append(("line %d: " % line if line else "") + "'%s' was floating in an earlier round and you now mark "
                           "it detached; the brief did not ask for it to float, so attach it to the model instead"
                           % name)
@@ -151,6 +176,8 @@ def geometry_issues(geometry) -> list:
                 head, target, pronoun, "it touches it" if not plural else "they touch it")
         if plural:
             text += " (together they touch each other but nothing that stands on the ground)"
+        if gap < 3 * tolerance(geometry.get("height") if isinstance(geometry, dict) else None):
+            text += " (the gap may be from low-poly faceting; overlap the parts slightly)"
         issues.append(text[:_MAX_ISSUE_CHARS])
     return issues
 

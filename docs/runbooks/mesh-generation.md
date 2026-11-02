@@ -82,6 +82,9 @@ fixed; straw tufts off a scarecrow's sleeves scored 10), so the harness measures
 process, after the build and the normalisation and before the export. It costs about 0.1 s for 80 parts and
 10000 triangles.
 
+- **Nodes.** Every part is split into its loose islands (triangles sharing vertices) and the islands are the nodes,
+  so a `join` or a kit mesh with separate pieces cannot hide a floating piece behind a grounded one. A part with
+  several islands is reported as `"<name> (piece k)"`; a part with more than 64 islands stays a single node.
 - **Touching.** Tolerance `tol = max(0.01 m, 1.5% of the prop's final height)`. Two parts touch when their
   BVH trees overlap, when one lies wholly inside the other, or when a surface sample of either part is within
   `tol` of the other. The samples are not just vertices: each triangle is clipped to the other part's bounding
@@ -91,7 +94,9 @@ process, after the build and the normalisation and before the export. It costs a
   other. Pairs are pruned first by bounding boxes expanded by `tol`.
 - **Limits.** The check is skipped (no `geometry` block) for a build over `max_tris`, which is discarded anyway.
   It is also skipped, with `geometry_error` set, when more than 200000 candidate pairs overlap
-  (`skipped: too many parts`) or it runs past 5 s (`skipped: over the time budget`).
+  (`skipped: too many parts`) or it runs past 5 s (`skipped: over the time budget`). A script that floods the
+  build with thousands of overlapping parts can therefore switch the check off for that build on purpose; it
+  is a known limit, bounded by the op and triangle caps, not something the check can prevent.
 - **Grounded.** A part whose lowest point is `<= tol` above `z = 0` (the harness stands every build on the
   ground, so the lowest part of a prop is always grounded). The touching graph is union-found; every
   component with no grounded part is floating.
@@ -100,8 +105,10 @@ process, after the build and the normalisation and before the export. It costs a
   handle (refused when recording and by the grammar). Joining parts makes a new part: detach the result.
   Detaching is accountable: the block lists the detached parts (`detached`: name and line), they appear in the
   attempt report and the revise prompt ("you marked X detached; only do that if the brief says it floats"), and a
-  part that was reported floating in an earlier round of the same candidate (matched by script line, or by name
-  when the line moved) and is detached now still counts as floating: it caps the score and blocks acceptance.
+  part that was reported floating in an earlier round of the same candidate and is detached now still counts as
+  floating: it caps the score and blocks acceptance. It is matched by place first (the detached part's bounding
+  box overlaps or lies within the tolerance of a remembered floating box, so renaming, splitting or joining it
+  does not help), then by script line, then by name.
 - **Result.** The harness result gains `"geometry": {"parts", "floating", "height", "dims"}`. Each `floating`
   entry (at most 20) has `parts` (names, at most 8), `part_count`, `lines` (the script lines that made them,
   a join is the line of the `join`), `centre`, `gap` (distance to the nearest other part, or to the ground
@@ -109,7 +116,8 @@ process, after the build and the normalisation and before the export. It costs a
   A harness without the block, or one that failed to measure (`geometry_error`), changes nothing.
 - **Loop.** Each entry becomes a deterministic issue, for example `line 34: 'loaf' floats 0.12 m above the
   nearest part ('plate'); move it down to rest on it` (direction words from `gap_vec`: above/below, left/right
-  in X, front (-Y)/behind (+Y)). These go first in the revision prompt, ahead of the critic's issues. The score
+  in X, front (-Y)/behind (+Y)); a gap under three tolerances adds "(the gap may be from low-poly faceting;
+  overlap the parts slightly)". These go first in the revision prompt, ahead of the critic's issues. The score
   is `min(score, 6)` even when the critic says 10, so a floating candidate cannot reach a `target_score` of 7
   or more, and it is not accepted at any target; with vision off or unavailable it still gets a revision
   round (its prompt says "no reviewer scored it" rather than quoting a score). Attempts and the winner carry the

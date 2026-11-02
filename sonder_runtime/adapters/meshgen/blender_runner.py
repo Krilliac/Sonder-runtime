@@ -237,6 +237,14 @@ def _triple(value) -> list:
     return [_finite(item) for item in (seq + [0.0, 0.0, 0.0])[:3]]
 
 
+def _box(value) -> list | None:
+    """A six-number bounding box with every number clamped, or ``None`` when it is not one."""
+    if not isinstance(value, list) or len(value) != 6 or not all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) for v in value):
+        return None
+    return [_finite(v) for v in value]
+
+
 def _sanitize_geometry(value) -> dict | None:
     """The harness' ``geometry`` block with every field typed and bounded, or ``None`` when it is not a block."""
     if not isinstance(value, dict) or not isinstance(value.get("floating"), list):
@@ -251,6 +259,7 @@ def _sanitize_geometry(value) -> dict | None:
             continue   # an entry that names no part cannot be acted on, here or in the loop
         lines = item.get("lines") if isinstance(item.get("lines"), list) else []
         nearest = item.get("nearest")
+        box = _box(item.get("box"))
         entries.append({
             "parts": names,
             "part_count": max(_count(item.get("part_count"), len(names)), len(names)),
@@ -259,11 +268,14 @@ def _sanitize_geometry(value) -> dict | None:
             "centre": _triple(item.get("centre")), "gap": _finite(item.get("gap")),
             "gap_vec": _triple(item.get("gap_vec")),
             "nearest": bound_text(nearest, 40) if isinstance(nearest, str) and nearest else None,
+            **({"box": box} if box else {}),
         })
     detached = []
     for item in (value.get("detached") if isinstance(value.get("detached"), list) else [])[:MAX_FLOATING_ENTRIES]:
         if isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"].strip():
-            detached.append({"name": bound_text(item["name"], 40), "line": _count(item.get("line"))})
+            box = _box(item.get("box"))
+            detached.append({"name": bound_text(item["name"], 40), "line": _count(item.get("line")),
+                             **({"box": box} if box else {})})
     return {"parts": _count(value.get("parts")), "floating": entries, "height": _finite(value.get("height")),
             "dims": _triple(value.get("dims")), "detached": detached}
 

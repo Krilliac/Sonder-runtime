@@ -146,18 +146,33 @@ def _normalise(obj, height_m):
     return [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]], lo, hi
 
 
-def _part_view(part, scale, shift):
-    """One part in final (normalised) space: points, bounding box and, built on demand, a BVH tree."""
-    flat = part["verts"]
-    points = [(flat[i] * scale + shift[0], flat[i + 1] * scale + shift[1], flat[i + 2] * scale + shift[2])
-              for i in range(0, len(flat), 3)]
-    triangles = [tuple(part["tris"][i:i + 3]) for i in range(0, len(part["tris"]), 3)]
+def _node(points, triangles, name, line, detached):
     box = None
     if points:
         xs, ys, zs = [p[0] for p in points], [p[1] for p in points], [p[2] for p in points]
         box = (min(xs), min(ys), min(zs), max(xs), max(ys), max(zs))
-    return {"points": points, "triangles": triangles, "bvh": None, "tri_boxes": None, "name": part["name"],
-            "line": part["line"], "detached": part["detached"], "box": box}
+    return {"points": points, "triangles": triangles, "bvh": None, "tri_boxes": None, "closed": None, "name": name,
+            "line": line, "detached": detached, "box": box}
+
+
+def _part_views(part, scale, shift):
+    """The graph nodes of one part in final (normalised) space: one per loose island, so a join or a kit mesh with
+    separate pieces cannot hide a floating piece behind a grounded one.  A part with several islands names them
+    ``"<name> (piece k)"``; one with more than ``MAX_ISLANDS`` stays a single node."""
+    flat = part["verts"]
+    points = [(flat[i] * scale + shift[0], flat[i + 1] * scale + shift[1], flat[i + 2] * scale + shift[2])
+              for i in range(0, len(flat), 3)]
+    triangles = [tuple(part["tris"][i:i + 3]) for i in range(0, len(part["tris"]), 3)]
+    islands = connectivity.split_islands(triangles) if triangles else None
+    if not islands or len(islands) == 1:
+        return [_node(points, triangles, part["name"], part["line"], part["detached"])]
+    nodes = []
+    for number, members in enumerate(islands, start=1):
+        used = sorted({vertex for index in members for vertex in triangles[index]})
+        remap = {old: new for new, old in enumerate(used)}
+        nodes.append(_node([points[i] for i in used], [tuple(remap[v] for v in triangles[index]) for index in members],
+                           "%s (piece %d)" % (part["name"], number), part["line"], part["detached"]))
+    return nodes
 
 
 def _bvh(view):
@@ -196,17 +211,24 @@ def _nearest(source, target):
     return best
 
 
+RAY_DIRECTIONS = ((0.5773, 0.3711, 0.7273), (-0.3127, 0.8219, -0.4731), (0.2417, -0.5309, -0.8128))
+
+
 def _inside(bvh, point):
-    """True when ``point`` is inside the closed mesh of ``bvh`` (odd number of ray crossings)."""
-    direction = mathutils.Vector((0.5773, 0.3711, 0.7273)).normalized()
-    origin, crossings = mathutils.Vector(point), 0
-    for _ in range(64):
-        hit = bvh.ray_cast(origin, direction)
-        if hit[0] is None:
-            break
-        crossings += 1
-        origin = hit[0] + direction * 1e-5
-    return crossings % 2 == 1
+    """True when ``point`` is inside the mesh of ``bvh``: three rays in different directions each cross it an odd
+    number of times (they must all agree, so one ray slipping through an edge cannot decide)."""
+    for raw in RAY_DIRECTIONS:
+        direction = mathutils.Vector(raw).normalized()
+        origin, crossings = mathutils.Vector(point), 0
+        for _ in range(64):
+            hit = bvh.ray_cast(origin, direction)
+            if hit[0] is None:
+                break
+            crossings += 1
+            origin = hit[0] + direction * 1e-5
+        if crossings % 2 != 1:
+            return False
+    return True
 
 
 def _touch(a, b, tol, deadline):
@@ -227,7 +249,12 @@ def _touch(a, b, tol, deadline):
         if time.monotonic() > deadline:
             raise _Skipped("skipped: over the time budget")
     for inner, outer in ((a, b), (b, a)):
-        if connectivity.box_contains(outer["box"], inner["box"]) and _inside(_bvh(outer), inner["points"][0]):
+        if not connectivity.box_contains(outer["box"], inner["box"]):
+            continue
+        if outer["closed"] is None:
+            outer["closed"] = connectivity.is_closed_manifold(outer["triangles"])
+        # "inside" only means something for a watertight outer part; an open tray does not enclose what is in it
+        if outer["closed"] and _inside(_bvh(outer), inner["points"][0]):
             return True
     return False
 
@@ -261,7 +288,7 @@ def _geometry_report(height_m):
         return None
     lo, hi = _extent(flat)
     scale, shift = _normal_transform(lo, hi, height_m)
-    views = [_part_view(part, scale, shift) for part in GEOM_PARTS]
+    views = [node for part in GEOM_PARTS for node in _part_views(part, scale, shift)]
     dims = [(hi[k] - lo[k]) * scale for k in range(3)]
     tol = connectivity.tolerance(dims[2])
     eligible = [v["box"] is not None and bool(v["triangles"]) and not v["detached"] for v in views]
@@ -291,8 +318,14 @@ def _geometry_report(height_m):
         else:
             gap, vector, nearest = best[0], best[1], best[2]["name"]
         entries.append(connectivity.floating_entry([m["name"] for m in members], [m["line"] for m in members],
-                                                   centre, gap, vector, nearest))
-    detached = [(v["name"], v["line"]) for v in views if v["detached"]]
+                                                   centre, gap, vector, nearest, box))
+    detached = []
+    for part in GEOM_PARTS:
+        if part["detached"]:
+            nodes = [v for v in views if v["name"] == part["name"] or v["name"].startswith(part["name"] + " (piece ")]
+            boxes = [n["box"] for n in nodes if n["box"] is not None]
+            whole = [min(b[k] for b in boxes) if k < 3 else max(b[k] for b in boxes) for k in range(6)] if boxes else None
+            detached.append((part["name"], part["line"], whole))
     return connectivity.geometry_block(len(views), entries, dims[2], dims, detached)
 
 

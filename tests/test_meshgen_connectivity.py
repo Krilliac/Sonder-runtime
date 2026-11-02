@@ -334,3 +334,75 @@ def test_the_revise_prompt_does_not_claim_a_reviewer_when_there_is_no_score():
     assert "Notes:\n- you marked 'a' detached" in measured.replace("\r\n", "\n")
     scored = revise_prompt("BASE", "code", {"score": 6, "issues": ["x"]})
     assert "a reviewer looked" in scored and "Score: 6/10" in scored and "Notes:" not in scored
+
+
+# ---------------------------------------------------------------------------------------------- islands, closed meshes, boxes
+def test_split_islands_groups_triangles_that_share_vertices():
+    quad = [(0, 1, 2), (0, 2, 3)]
+    other = [(10, 11, 12), (12, 11, 13)]
+    assert cx.split_islands(quad + other) == [[0, 1], [2, 3]]
+    assert cx.split_islands(other + quad) == [[0, 1], [2, 3]]
+    assert cx.split_islands(quad) == [[0, 1]] and cx.split_islands([]) == []
+    chain = [(0, 1, 2), (2, 3, 4), (4, 5, 6)]                       # joined only through shared corners
+    assert cx.split_islands(chain) == [[0, 1, 2]]
+
+
+def test_split_islands_gives_up_past_the_limit():
+    many = [(3 * i, 3 * i + 1, 3 * i + 2) for i in range(cx.MAX_ISLANDS + 1)]
+    assert cx.split_islands(many) is None
+    assert len(cx.split_islands(many[:cx.MAX_ISLANDS])) == cx.MAX_ISLANDS
+    assert cx.MAX_ISLANDS == 64
+
+
+def test_only_a_watertight_mesh_is_closed_and_manifold():
+    tetra = [(0, 1, 2), (0, 3, 1), (1, 3, 2), (0, 2, 3)]
+    assert cx.is_closed_manifold(tetra)
+    assert not cx.is_closed_manifold(tetra[:3])                      # one face missing: an open shell
+    assert not cx.is_closed_manifold([])
+    assert not cx.is_closed_manifold(tetra + [(0, 1, 2)])           # an edge shared by three triangles
+
+
+def test_boxes_near_is_inclusive_of_the_tolerance():
+    assert cx.boxes_near((0, 0, 0, 1, 1, 1), (1.5, 0, 0, 2, 1, 1), 0.5)
+    assert not cx.boxes_near((0, 0, 0, 1, 1, 1), (1.75, 0, 0, 2, 1, 1), 0.5)
+    assert cx.boxes_near((0, 0, 0, 1, 1, 1), (0.5, 0.5, 0.5, 2, 2, 2), 0.0)
+
+
+def test_entries_and_detached_parts_carry_a_valid_box_only():
+    box = (0, 0, 1, 1, 1, 2)
+    assert cx.floating_entry(["a"], [1], (0, 0, 1), 1, (0, 0, 1), None, box)["box"] == [0.0, 0.0, 1.0, 1.0, 1.0, 2.0]
+    assert "box" not in cx.floating_entry(["a"], [1], (0, 0, 1), 1, (0, 0, 1), None, (1, 2))
+    block = cx.geometry_block(2, [], 1, (1, 1, 1), [("m", 3, box), ("n", 4)])
+    assert block["detached"] == [{"name": "m", "line": 3, "box": [0.0, 0.0, 1.0, 1.0, 1.0, 2.0]},
+                                 {"name": "n", "line": 4}]
+
+
+def test_a_detached_part_in_the_place_of_an_earlier_floater_is_reopened_whatever_it_is_called():
+    memory = {"lines": set(), "names": set(), "boxes": []}
+    remember_floating(memory, {"floating": [dict(entry(), box=[0, 0, 1, 1, 1, 1.1])]})
+    assert memory["boxes"] == [(0.0, 0.0, 1.0, 1.0, 1.0, 1.1)]
+    renamed = {"height": 2.0, "detached": [{"name": "other", "line": 99, "box": [0.2, 0.2, 1.05, 0.8, 0.8, 1.2]}]}
+    assert reopened_issues(renamed, memory)
+    close = {"height": 2.0, "detached": [{"name": "other", "line": 99, "box": [0, 0, 1.12, 1, 1, 1.2]}]}
+    assert reopened_issues(close, memory)                                      # 0.02 m away, tolerance is 0.03
+    far = {"height": 2.0, "detached": [{"name": "other", "line": 99, "box": [0, 0, 1.5, 1, 1, 1.6]}]}
+    assert reopened_issues(far, memory) == []
+    assert reopened_issues({"detached": [{"name": "other", "line": 99}]}, memory) == []     # no box, no match
+
+
+def test_a_small_gap_gets_the_faceting_hint_and_a_large_one_does_not():
+    hint = "the gap may be from low-poly faceting; overlap the parts slightly"
+    assert hint in issues_for(entry(gap=0.01, vec=(0, 0, 0.01)))[0]
+    assert hint not in issues_for(entry(gap=0.12))[0]
+    tall = {"height": 10.0, "floating": [entry(gap=0.3, vec=(0, 0, 0.3))]}          # tolerance 0.15: 0.3 < 0.45
+    assert hint in geometry_issues(tall)[0]
+
+
+def test_the_runner_keeps_boxes_only_when_they_are_six_numbers():
+    block = {"parts": 2, "height": 1, "dims": [1, 1, 1],
+             "floating": [dict(entry(), box=[0, 0, 1, 1, 1, HUGE]), dict(entry(), box=[1, 2]), entry()],
+             "detached": [{"name": "m", "line": 1, "box": [0, 0, 0, 1, 1, 1]}, {"name": "n", "box": "x"}]}
+    clean = runner.sanitize_result({"ok": True, "geometry": block})["geometry"]
+    assert clean["floating"][0]["box"] == [0.0, 0.0, 1.0, 1.0, 1.0, runner.MAX_NUMBER]
+    assert "box" not in clean["floating"][1] and "box" not in clean["floating"][2]
+    assert clean["detached"][0]["box"] == [0.0, 0.0, 0.0, 1.0, 1.0, 1.0] and "box" not in clean["detached"][1]

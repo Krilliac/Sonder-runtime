@@ -446,3 +446,18 @@ def test_the_measured_revise_prompt_without_a_reviewer_says_so():
     rig = Rig(builds=[floating_build(), ok_build()])
     rig.go(candidates=1, rounds=2, vision=False)
     assert "reviewer looked" not in rig.prompts[1] and "No reviewer scored it" in rig.prompts[1]
+
+
+def test_detaching_a_renamed_floater_on_another_line_is_caught_by_where_it_is():
+    first = dict(LOAF, box=[0.0, 0.0, 1.0, 0.5, 0.5, 1.1])
+    moved = detached_build("tabletop", 77)
+    moved["geometry"]["detached"][0]["box"] = [0.0, 0.0, 1.0, 0.5, 0.5, 1.1]
+    rig = Rig(builds=[floating_build(first), moved], critiques=[verdict(7), verdict(10)])
+    attempts = rig.go(candidates=1, rounds=2, target_score=8)["candidates"][0]["attempts"]
+    assert attempts[1]["status"] == "revise" and attempts[1]["score"] == 6 and attempts[1]["reopened"]
+    # the control: the same detached part somewhere else is legitimate
+    elsewhere = detached_build("tabletop", 77)
+    elsewhere["geometry"]["detached"][0]["box"] = [3.0, 3.0, 5.0, 3.5, 3.5, 5.1]
+    rig = Rig(builds=[floating_build(first), elsewhere], critiques=[verdict(7), verdict(10)])
+    attempts = rig.go(candidates=1, rounds=2, target_score=8)["candidates"][0]["attempts"]
+    assert attempts[1]["status"] == "accepted" and attempts[1]["score"] == 10

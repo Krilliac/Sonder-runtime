@@ -259,7 +259,7 @@ def run(request: MeshRequest, *, generate, build, critique, map_parallel, record
         attempts: list[dict] = []
         versions: list[dict] = []
         prompt = base
-        memory = {"lines": set(), "names": set()}   # parts reported floating in this candidate's earlier rounds
+        memory = {"lines": set(), "names": set(), "boxes": []}   # parts reported floating in this candidate's earlier rounds
         for round_index in range(max(1, int(request.rounds))):
             began = time.monotonic()
             attempt = {"tier": tier, "round": round_index, "status": "", "tris": None,
