@@ -276,7 +276,7 @@ def test_served_scope_carries_http_identity_to_single_completion(tmp_path, monke
         assert kwargs["capture_session"] is False
         return dispatch_provider("ollama", "/api/chat", {"model": "fixture"}, lambda: "answer")
 
-    monkeypatch.setattr(serve.server, "answer_with_history", answer)
+    monkeypatch.setattr(serve._legacy_runtime(), "answer_with_history", answer)
     turn = serve._run_prompt("hello", session="http-session", return_result=True, capture_request_id="http-request", capture_turn_id="http-turn")
     events = repository.read_range("http-session")
     assert [e.event_type for e in events] == ["model.requested", "user.message", "provider.requested", "provider.responded"]
@@ -298,7 +298,7 @@ def test_served_scope_carries_http_identity_to_single_completion(tmp_path, monke
 def test_served_cache_hit_has_no_provider_admission(tmp_path, monkeypatch):
     from sonder_runtime.interfaces.http import serve
 
-    monkeypatch.setattr(serve.server, "answer_with_history", lambda *a, **k: "cached answer")
+    monkeypatch.setattr(serve._legacy_runtime(), "answer_with_history", lambda *a, **k: "cached answer")
     turn = serve._run_prompt("hello", session="http-session", return_result=True, capture_request_id="http-request", capture_turn_id="http-turn")
     assert turn.provider_capture is None
 

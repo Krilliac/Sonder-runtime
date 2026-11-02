@@ -525,7 +525,7 @@ def test_an_unknown_keyword_never_reaches_the_handler(monkeypatch):
     def never_runs(**_kwargs):
         raise AssertionError("handler must not run for a rejected argument")
 
-    monkeypatch.setattr(serve.server, "file_read", never_runs)
+    monkeypatch.setattr(serve._legacy_runtime(), "file_read", never_runs)
     out = serve._dispatch_catalogued_tool(
         "/file_read path=x bogus_key=1", serve.ConversationState(),
         context=_context("user"),
