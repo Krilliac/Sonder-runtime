@@ -28,6 +28,36 @@ def setup_function():
     master_orchestrator.reset_for_tests()
 
 
+# Bounds only a hung or broken run. The run_delegated controls below observe
+# production handshakes (worker entry, coordinator return); none of their
+# assertions is produced by one of these clocks running out on a slow runner.
+HANDSHAKE_GUARD_SECONDS = 60.0
+# The stall control's coordinator join. Its worker stays blocked until after
+# the join, so the join proves the coordinator did not wait for it at any
+# bound; the injected diagnostic child shortens this to fail fast.
+COORDINATOR_JOIN_GUARD_SECONDS = HANDSHAKE_GUARD_SECONDS
+
+
+def _await_handshake(event, *, alive, guard=HANDSHAKE_GUARD_SECONDS):
+    """Wait for ``event`` while ``alive()``; the clock is only a hang guard."""
+    deadline = time.monotonic() + guard
+    while not event.wait(0.05):
+        if not alive() or time.monotonic() >= deadline:
+            return event.is_set()
+    return True
+
+
+def _pin_capacity_probes(monkeypatch):
+    """Keep capacity()'s cold GPU/model/host probes out of run_delegated controls."""
+    monkeypatch.setattr(master_orchestrator.os, "cpu_count", lambda: 16)
+    monkeypatch.setattr(
+        master_orchestrator, "physical_memory_bytes", lambda: (16 * 1024 ** 3, 10 * 1024 ** 3),
+    )
+    monkeypatch.setattr(master_orchestrator, "gpu_memory_bytes", lambda: (0, 0))
+    monkeypatch.setattr(master_orchestrator, "fleet_model_bytes", lambda: 0)
+    monkeypatch.setattr(master_orchestrator, "ollama_parallel_limit", lambda: 16)
+
+
 def _run(policy, outcomes, state=None, resources=None):
     state = state or ac.initial_state(policy)
     decisions = []
@@ -501,13 +531,7 @@ def test_run_delegated_stall_is_uncertain_and_retains_child_capacity(
     monkeypatch.setattr(fleet_store, "MODEL_CALL_PROGRESS_MARGIN_SECONDS", 0)
     # This synthetic stall control exercises real ledger/dispatch work, not
     # cold native GPU or local-model discovery before the worker-entry gate.
-    monkeypatch.setattr(master_orchestrator.os, "cpu_count", lambda: 16)
-    monkeypatch.setattr(
-        master_orchestrator, "physical_memory_bytes", lambda: (16 * 1024 ** 3, 10 * 1024 ** 3),
-    )
-    monkeypatch.setattr(master_orchestrator, "gpu_memory_bytes", lambda: (0, 0))
-    monkeypatch.setattr(master_orchestrator, "fleet_model_bytes", lambda: 0)
-    monkeypatch.setattr(master_orchestrator, "ollama_parallel_limit", lambda: 16)
+    _pin_capacity_probes(monkeypatch)
     monkeypatch.setattr(master_orchestrator, "parallel_worker_slots", lambda requested: 1)
     release = threading.Event()
     entered = threading.Event()
@@ -516,10 +540,11 @@ def test_run_delegated_stall_is_uncertain_and_retains_child_capacity(
 
     def entry_armed_deadline(row, deadline):
         # This control measures a hung model call, not scheduler/DB startup.
-        # Keep the same five-second startup bound until the worker enters;
-        # then retain the real short model-call deadline and strict joins.
+        # Until the worker enters, only the hang guard bounds startup (ledger
+        # writes on a loaded runner can take seconds); then retain the real
+        # short model-call deadline.
         value = original_deadline(row, deadline)
-        return value if entered.is_set() else max(5.0, value)
+        return value if entered.is_set() else max(HANDSHAKE_GUARD_SECONDS, value)
 
     monkeypatch.setattr(fleet_store, "lane_progress_deadline", entry_armed_deadline)
     result_box = {}
@@ -528,7 +553,9 @@ def test_run_delegated_stall_is_uncertain_and_retains_child_capacity(
     def worker(_prompt):
         checkpoints["worker_entered_ns"] = time.monotonic_ns()
         entered.set()
-        release.wait(5)
+        # Held until after the coordinator join: the stall must surface while
+        # this worker is provably still inside its call.
+        release.wait(HANDSHAKE_GUARD_SECONDS)
         checkpoints["worker_returned_ns"] = time.monotonic_ns()
         return "late"
 
@@ -546,12 +573,14 @@ def test_run_delegated_stall_is_uncertain_and_retains_child_capacity(
     thread.start()
     phase = "worker-entry"
     try:
-        assert entered.wait(5)
+        assert _await_handshake(entered, alive=thread.is_alive)
         phase = "coordinator-join"
         checkpoints["join_started_ns"] = time.monotonic_ns()
-        thread.join(5)
+        thread.join(COORDINATOR_JOIN_GUARD_SECONDS)
         checkpoints["join_finished_ns"] = time.monotonic_ns()
         assert not thread.is_alive()
+        # The coordinator returned while the hung worker was still blocked.
+        assert "worker_returned_ns" not in checkpoints
         phase = "stalled-result"
         result = result_box["result"]
         assert result["stalled"] is True
@@ -572,9 +601,10 @@ def test_run_delegated_stall_is_uncertain_and_retains_child_capacity(
         raise
     finally:
         release.set()
-    for _ in range(50):
-        if master_orchestrator.reserved_slot_count() == 0:
-            break
+    # The released worker closes its own row; poll that, bounded only by the
+    # hang guard, so a slow ledger write is not reported as leaked capacity.
+    deadline = time.monotonic() + HANDSHAKE_GUARD_SECONDS
+    while master_orchestrator.reserved_slot_count() and time.monotonic() < deadline:
         threading.Event().wait(0.1)
     assert master_orchestrator.reserved_slot_count() == 0
 
@@ -894,6 +924,9 @@ def test_p3_scheduler_counts_one_retry_per_lane():
 
 
 def test_p3_cancel_return_path_reports_concurrency(monkeypatch):
+    # capacity() still runs with slots pinned; its cold host probes took most
+    # of the old five-second worker-entry window on a loaded machine.
+    _pin_capacity_probes(monkeypatch)
     monkeypatch.setattr(master_orchestrator, "parallel_worker_slots", lambda requested: 1)
     started = threading.Event()
     release = threading.Event()
@@ -901,7 +934,7 @@ def test_p3_cancel_return_path_reports_concurrency(monkeypatch):
 
     def worker(prompt):
         started.set()
-        assert release.wait(5)
+        assert release.wait(HANDSHAKE_GUARD_SECONDS)
         return "late"
 
     def run():
@@ -911,13 +944,16 @@ def test_p3_cancel_return_path_reports_concurrency(monkeypatch):
 
     thread = threading.Thread(target=run)
     thread.start()
-    assert started.wait(5)
-    snap = master_orchestrator.snapshot(include_finished=False, limit=20)
-    master_id = next(row["id"] for row in snap["agents"] if row["role"] == "master")
-    master_orchestrator.request_cancel(master_id)
-    release.set()
-    thread.join(5)
+    try:
+        assert _await_handshake(started, alive=thread.is_alive)
+        snap = master_orchestrator.snapshot(include_finished=False, limit=20)
+        master_id = next(row["id"] for row in snap["agents"] if row["role"] == "master")
+        master_orchestrator.request_cancel(master_id)
+    finally:
+        release.set()
+        thread.join(HANDSHAKE_GUARD_SECONDS)
 
+    assert not thread.is_alive()
     assert box["result"]["output"] == "CANCELLED"
     assert box["result"]["concurrency"]["ceiling"] == 1
 

@@ -245,9 +245,13 @@ _GATED_CHILD = textwrap.dedent(r'''
 
     class MasterFinishGate:
         @pytest.fixture(autouse=True)
-        def hold_master_finish(self, monkeypatch):
+        def hold_master_finish(self, monkeypatch, request):
             # Import after the repository conftest pins its disposable ledger.
             import master_orchestrator
+
+            # The gate holds the coordinator forever; fail its join quickly
+            # instead of waiting out the original test's hang guard.
+            monkeypatch.setattr(request.module, "COORDINATOR_JOIN_GUARD_SECONDS", 2.0)
 
             original_finish = master_orchestrator._finish
             original_start = master_orchestrator._start_agent
@@ -292,7 +296,7 @@ _GATED_CHILD = textwrap.dedent(r'''
                 gate.set()
                 coordinator = held.get("coordinator")
                 if coordinator is not None:
-                    coordinator.join(5)
+                    coordinator.join(60)
                     assert not coordinator.is_alive(), "gated coordinator cleanup did not finish"
 
     raise SystemExit(pytest.main([
@@ -316,7 +320,9 @@ def test_original_stall_failure_retains_coordinator_stack_before_cleanup(tmp_pat
             [sys.executable, "-c", _GATED_CHILD, str(coordinator_receipt),
              str(evidence_directory), str(junit_path), TARGET_NODE, str(startup_delay)],
             cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding="utf-8", errors="replace", timeout=30, check=False,
+            # Contains a lost child only: a full pytest start on a loaded
+            # runner took up to 113s locally, and the gate decides the result.
+            text=True, encoding="utf-8", errors="replace", timeout=240, check=False,
         )
         (tmp_path / "child-pytest.log").write_text(completed.stdout, encoding="utf-8")
 

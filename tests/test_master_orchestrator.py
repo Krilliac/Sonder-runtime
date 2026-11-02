@@ -1,6 +1,7 @@
 import importlib
 import sys
 import threading
+import time
 from dataclasses import replace
 from datetime import timedelta
 from types import SimpleNamespace
@@ -1005,6 +1006,25 @@ def test_natural_language_worker_cap_rejects_negation_and_ambiguity():
     ) is None
 
 
+# Bounds only a hung or broken run. Every concurrency observation below comes
+# from a production handshake, never from this clock running out.
+HANDSHAKE_GUARD_SECONDS = 60.0
+
+
+def _await_handshake(event, *, abort, guard=HANDSHAKE_GUARD_SECONDS):
+    """Wait for ``event``; give up early once ``abort`` shows it cannot come.
+
+    The clock is a hang guard, not a latency budget: a loaded runner may take
+    any time to reach the handshake, and a broken run sets ``abort`` long
+    before the guard expires.
+    """
+    deadline = time.monotonic() + guard
+    while not event.wait(0.05):
+        if abort.is_set() or time.monotonic() >= deadline:
+            return event.is_set()
+    return True
+
+
 def test_delegated_fleet_limits_actual_concurrency(monkeypatch):
     # run_delegated calls capacity() even when worker slots are pinned. Keep
     # its cold model-size and hardware probes outside this scheduling test.
@@ -1015,8 +1035,15 @@ def test_delegated_fleet_limits_actual_concurrency(monkeypatch):
     initial_batch_submitted = threading.Event()
     third_worker_entered = threading.Event()
     release = threading.Event()
+    run_finished = threading.Event()
     current = {"active": 0, "maximum": 0}
     observation = {}
+    started = time.monotonic()
+    timeline = {}
+
+    def mark(phase):
+        timeline.setdefault(phase, round(time.monotonic() - started, 3))
+
     original_wait = master_orchestrator.wait
 
     def observe_dispatch_wait(futures, **kwargs):
@@ -1025,6 +1052,7 @@ def test_delegated_fleet_limits_actual_concurrency(monkeypatch):
         # first two real workers stay blocked until the batch is inspected.
         if not initial_batch_submitted.is_set():
             observation["initial_in_flight"] = len(futures)
+            mark("batch_submitted")
             initial_batch_submitted.set()
         return original_wait(futures, **kwargs)
 
@@ -1035,25 +1063,41 @@ def test_delegated_fleet_limits_actual_concurrency(monkeypatch):
             current["active"] += 1
             current["maximum"] = max(current["maximum"], current["active"])
             if current["active"] == 2:
+                mark("two_active")
                 first_two_active.set()
             elif current["active"] > 2:
                 third_worker_entered.set()
         try:
-            # Release is an explicit handshake. The timeout only bounds a
+            # Release is an explicit handshake. The guard only bounds a
             # broken test; it never creates the concurrency observation.
-            assert release.wait(30)
+            assert release.wait(HANDSHAKE_GUARD_SECONDS)
         finally:
             with lock:
                 current["active"] -= 1
         return "ok"
 
     def observe_and_release():
+        # No deadline runs during fleet startup (owner registration, ledger
+        # writes, lane claims): its latency is unbounded on a loaded runner
+        # and says nothing about the limit. Observe in production order.
         try:
-            observation["two_workers_started"] = first_two_active.wait(10)
-            observation["batch_submitted"] = initial_batch_submitted.wait(10)
+            observation["batch_submitted"] = _await_handshake(
+                initial_batch_submitted, abort=run_finished,
+            )
+            if observation.get("initial_in_flight", 0) >= 2:
+                # Two lanes are already submitted to the pool and cannot
+                # complete before release, so both must enter eventually.
+                observation["two_workers_started"] = _await_handshake(
+                    first_two_active, abort=run_finished,
+                )
+            else:
+                # Under-admission: two workers can never overlap here. Fail
+                # fast on the admitted count instead of waiting out a guard.
+                observation["two_workers_started"] = first_two_active.is_set()
             with lock:
                 observation["held_active"] = current["active"]
         finally:
+            mark("released")
             release.set()
 
     controller = Thread(target=observe_and_release)
@@ -1063,19 +1107,22 @@ def test_delegated_fleet_limits_actual_concurrency(monkeypatch):
             "fan out", worker_fn=worker, audit_fn=lambda prompt: "merged", agents=6,
         )
     finally:
+        mark("run_finished")
+        run_finished.set()
         release.set()
-        controller.join(10)
+        controller.join(HANDSHAKE_GUARD_SECONDS)
 
-    assert not controller.is_alive()
-    assert observation["two_workers_started"]
-    assert observation["batch_submitted"]
-    assert observation["initial_in_flight"] == 2
-    assert observation["held_active"] == 2
+    evidence = {"observation": observation, "timeline_s": timeline, **current}
+    assert not controller.is_alive(), evidence
+    assert observation["batch_submitted"], evidence
+    assert observation["initial_in_flight"] == 2, evidence
+    assert observation["two_workers_started"], evidence
+    assert observation["held_active"] == 2, evidence
     assert len(result["agents"]) == 6
     assert result["worker_slots"] == 2
-    assert not third_worker_entered.is_set()
-    assert current["maximum"] == 2
-    assert current["active"] == 0
+    assert not third_worker_entered.is_set(), evidence
+    assert current["maximum"] == 2, evidence
+    assert current["active"] == 0, evidence
 
 
 def test_start_delegated_returns_before_background_workers_finish(monkeypatch):
