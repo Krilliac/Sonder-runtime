@@ -83,30 +83,43 @@ process, after the build and the normalisation and before the export. It costs a
 10000 triangles.
 
 - **Touching.** Tolerance `tol = max(0.01 m, 1.5% of the prop's final height)`. Two parts touch when their
-  BVH trees overlap, or when the nearest distance from a sample of at most 256 vertices of one to the other's
-  surface is `<= tol`, in either direction. Pairs are pruned first by bounding boxes expanded by `tol`.
+  BVH trees overlap, when one lies wholly inside the other, or when a surface sample of either part is within
+  `tol` of the other. The samples are not just vertices: each triangle is clipped to the other part's bounding
+  box grown by `tol` and sampled there (clipped corners, edge midpoints, centroids), at most 1024 per part and
+  direction, nearest the box centre first. A face, line or small patch contact (crossed planks, a log across a
+  stump, a board on two rails, a box on its edge) therefore counts even though neither part has a vertex on the
+  other. Pairs are pruned first by bounding boxes expanded by `tol`.
+- **Limits.** The check is skipped (no `geometry` block) for a build over `max_tris`, which is discarded anyway.
+  It is also skipped, with `geometry_error` set, when more than 200000 candidate pairs overlap
+  (`skipped: too many parts`) or it runs past 5 s (`skipped: over the time budget`).
 - **Grounded.** A part whose lowest point is `<= tol` above `z = 0` (the harness stands every build on the
   ground, so the lowest part of a prop is always grounded). The touching graph is union-found; every
   component with no grounded part is floating.
 - **`detached(part)`.** A core op for parts the brief says float (motes, wisps, orbs). A detached part is not a
   node at all: never reported, and it neither grounds nor bridges its neighbours. The argument must be a
   handle (refused when recording and by the grammar). Joining parts makes a new part: detach the result.
+  Detaching is accountable: the block lists the detached parts (`detached`: name and line), they appear in the
+  attempt report and the revise prompt ("you marked X detached; only do that if the brief says it floats"), and a
+  part that was reported floating in an earlier round of the same candidate (matched by script line, or by name
+  when the line moved) and is detached now still counts as floating: it caps the score and blocks acceptance.
 - **Result.** The harness result gains `"geometry": {"parts", "floating", "height", "dims"}`. Each `floating`
   entry (at most 20) has `parts` (names, at most 8), `part_count`, `lines` (the script lines that made them,
   a join is the line of the `join`), `centre`, `gap` (distance to the nearest other part, or to the ground
-  when there is none), `gap_vec` (from that part to the floating one) and `nearest` (`null` for the ground).
+  when there is none; the target is a part that stands on the ground, never another floater), `gap_vec` (from that part to the floating one) and `nearest` (`null` for the ground).
   A harness without the block, or one that failed to measure (`geometry_error`), changes nothing.
 - **Loop.** Each entry becomes a deterministic issue, for example `line 34: 'loaf' floats 0.12 m above the
   nearest part ('plate'); move it down to rest on it` (direction words from `gap_vec`: above/below, left/right
   in X, front (-Y)/behind (+Y)). These go first in the revision prompt, ahead of the critic's issues. The score
   is `min(score, 6)` even when the critic says 10, so a floating candidate cannot reach a `target_score` of 7
   or more, and it is not accepted at any target; with vision off or unavailable it still gets a revision
-  round. Attempts and the winner carry the `geometry` block. Ranking puts any version without floating parts above
+  round (its prompt says "no reviewer scored it" rather than quoting a score). Attempts and the winner carry the
+  `geometry` block. Ranking puts any version without floating parts above
   every version with floating parts, whatever their scores; between two floating versions the higher score wins.
 - **Known limits.** The check sees the exported geometry: a detached part that is the lowest point of the prop
-  becomes the ground reference, and the rest then floats above it. Vertex sampling can miss a near approach
-  between two large, coarse parts that neither overlap nor have a vertex within `tol` of the other. A
-  duplicated part (copy made inside a kit) inherits the line of its source.
+  becomes the ground reference, and the rest then floats above it. The 1024-sample cap can miss a contact
+  patch in a very dense overlap of large parts. Objects a kit call creates (including copies of tagged or
+  detached parts) are tagged with the line of that call and never inherit the source's detached flag. Every
+  number in the result file is clamped to +-1e9 by the host sanitiser, and entries that name no part are dropped.
 
 ## Safety model
 

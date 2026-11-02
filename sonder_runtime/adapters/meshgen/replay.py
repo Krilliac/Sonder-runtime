@@ -443,19 +443,19 @@ CORE = {
 
 
 # ---------------------------------------------------------------------------------------------- driver
-def _tag_line(value, line, force=False):
-    """Record on the object(s) in value the script line that made them, for the floating-part report."""
-    items = value if isinstance(value, (list, tuple)) else [value]
-    for item in items[:64]:
-        if isinstance(item, bpy.types.Object) and (force or LINE_TAG not in item):
-            item[LINE_TAG] = int(line)
+def _tag_new(known, line):
+    """Give every object that did not exist before this op the op's script line, for the floating-part report.
 
-
-def _tag_unreturned(line):
-    """Objects a kit call created without returning them get the line too (scans only when the count changed)."""
+    New means its ``session_uid`` is not in ``known`` (never reused, unlike a memory address or a name), so an
+    object a kit call created and deleted, or one it copied from a tagged or detached part, is still tagged afresh:
+    the line is overwritten and the copied detached flag removed."""
     for obj in bpy.data.objects:
-        if LINE_TAG not in obj:
+        uid = obj.session_uid
+        if uid not in known:
+            known.add(uid)
             obj[LINE_TAG] = int(line)
+            if DETACHED_TAG in obj:
+                del obj[DETACHED_TAG]
 
 
 def _resolve(value, store):
@@ -474,21 +474,22 @@ def run(doc, kit_name, kit_allowed):
     kit = importlib.import_module(kit_name) if kit_name else None
     allowed = frozenset(kit_allowed)
     store = {}
+    known = {obj.session_uid for obj in bpy.data.objects}
     for op in doc["ops"]:
         kind, _, short = op["op"].partition(".")
         try:
             args = [_resolve(item, store) for item in op["args"]]
             kwargs = {key: _resolve(item, store) for key, item in op["kwargs"].items()}
-            before = len(bpy.data.objects)
             if kind == "core":
                 result = CORE[short](kit, *args, **kwargs)
             elif kind == "kit" and kit is not None and short in allowed:
                 result = getattr(kit, short)(*args, **kwargs)
             else:
                 raise ValueError("op not permitted")
-            _tag_line(result, op["line"], force=(short == "join"))
-            if kind == "kit" and len(bpy.data.objects) != before:
-                _tag_unreturned(op["line"])
+            if kind == "kit" or short in ("primitive", "mesh"):
+                _tag_new(known, op["line"])
+            elif short == "join" and isinstance(result, bpy.types.Object):
+                result[LINE_TAG] = int(op["line"])  # the joined object is a new part made by the join
         except Exception as exc:  # noqa: BLE001 - every failure becomes a line-numbered error for the repair loop
             label = ("%s.%s" % (kit_name, short)) if kind == "kit" else short
             raise ReplayError("line %d: %s(...) failed in Blender: %s: %s"

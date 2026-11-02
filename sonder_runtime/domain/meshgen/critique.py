@@ -70,18 +70,64 @@ def _number(value) -> float:
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
 
 
+def _names(entry) -> list:
+    return [str(name) for name in (entry.get("parts") if isinstance(entry.get("parts"), list) else [])
+            if isinstance(name, str) and name.strip()]
+
+
+def floating_entries(geometry) -> list:
+    """The well-formed entries of a ``geometry`` block's ``floating`` list: dicts that name at least one part.
+
+    The one definition of "something floats" for the issue text, the ranking and the loop, so they cannot disagree."""
+    entries = geometry.get("floating") if isinstance(geometry, dict) else None
+    return [entry for entry in (entries if isinstance(entries, list) else [])
+            if isinstance(entry, dict) and _names(entry)]
+
+
+def detached_parts(geometry) -> list:
+    """``(name, line)`` of every part the script marked ``detached(...)``, from a ``geometry`` block."""
+    found = geometry.get("detached") if isinstance(geometry, dict) else None
+    return [(item["name"], item["line"] if isinstance(item.get("line"), int) and item["line"] > 0 else 0)
+            for item in (found if isinstance(found, list) else [])
+            if isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"].strip()]
+
+
+def remember_floating(memory, geometry) -> None:
+    """Add the lines and part names reported floating in ``geometry`` to a candidate's ``memory`` (two sets)."""
+    for entry in floating_entries(geometry):
+        memory["names"].update(_names(entry))
+        memory["lines"].update(line for line in (entry.get("lines") or []) if isinstance(line, int) and line > 0)
+
+
+def detached_notes(geometry) -> list:
+    """One reminder per detached part for the revise prompt: detach only what the brief says floats."""
+    return ["you marked '%s'%s detached; only do that if the brief says it floats (motes, wisps, orbs), otherwise "
+            "attach it to the model" % (name, " (line %d)" % line if line else "")
+            for name, line in detached_parts(geometry)[:MAX_GEOMETRY_ISSUES]]
+
+
+def reopened_issues(geometry, memory) -> list:
+    """Issues for a part that was reported floating in an earlier round and is now marked detached (matched by script
+    line, or by name when the line moved).  Detaching a part is not a way round the floating check, so these count as
+    floating parts: they cap the score and block acceptance."""
+    issues = []
+    for name, line in detached_parts(geometry)[:MAX_GEOMETRY_ISSUES]:
+        if (line and line in memory["lines"]) or name in memory["names"]:
+            issues.append(("line %d: " % line if line else "") + "'%s' was floating in an earlier round and you now mark "
+                          "it detached; the brief did not ask for it to float, so attach it to the model instead"
+                          % name)
+    return issues
+
+
 def geometry_issues(geometry) -> list:
     """One concrete, deterministic issue per floating component of a harness ``geometry`` block (else ``[]``).
 
     Reads ``floating`` entries (``parts``, ``part_count``, ``lines``, ``gap``, ``gap_vec`` from the nearest other
     part to the floating one, ``nearest`` part name or ``None`` for the ground).  Pure and tolerant: anything
     that is not a well-formed entry is skipped."""
-    entries = geometry.get("floating") if isinstance(geometry, dict) else None
     issues = []
-    for entry in (entries if isinstance(entries, list) else [])[:MAX_GEOMETRY_ISSUES]:
-        if not isinstance(entry, dict) or not isinstance(entry.get("parts"), list) or not entry["parts"]:
-            continue
-        names = [str(name) for name in entry["parts"]]
+    for entry in floating_entries(geometry)[:MAX_GEOMETRY_ISSUES]:
+        names = _names(entry)
         count = entry.get("part_count") if isinstance(entry.get("part_count"), int) else len(names)
         lines = [line for line in (entry.get("lines") or []) if isinstance(line, int) and line > 0][:3]
         where = ("line%s %s: " % ("s" if len(lines) > 1 else "", ", ".join(str(line) for line in lines))) if lines else ""

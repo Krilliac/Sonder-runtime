@@ -1,9 +1,14 @@
 """The floating-part check without Blender: tolerance, pruning, union-find, report entries, issue wording."""
 from __future__ import annotations
 
+import pytest
+
 from sonder_runtime.adapters.meshgen import blender_runner as runner
 from sonder_runtime.domain.meshgen import connectivity as cx
-from sonder_runtime.domain.meshgen.critique import FLOATING_SCORE_CAP, cap_score, geometry_issues
+from sonder_runtime.domain.meshgen.critique import (
+    FLOATING_SCORE_CAP, cap_score, detached_notes, detached_parts, geometry_issues, remember_floating,
+    reopened_issues,)
+from sonder_runtime.domain.meshgen.selection import has_floating
 
 
 def box(x0, z0, x1, z1):
@@ -207,3 +212,125 @@ def test_the_runner_drops_a_geometry_block_that_is_not_one_and_neutralises_bad_n
     assert clean["parts"] == 0 and clean["height"] == 0.0 and clean["dims"] == [0.0, 0.0, 0.0]
     assert len(clean["floating"]) == 1 and clean["floating"][0]["gap"] == 0.0
     assert clean["floating"][0]["gap_vec"] == [0.0, 0.0, 1e9]
+
+
+# ---------------------------------------------------------------------------------------------- contact sampling
+TOP = [(-1.0, -0.05, 0.1), (1.0, -0.05, 0.1), (1.0, 0.05, 0.1), (-1.0, 0.05, 0.1)]      # a 2.0 x 0.1 plank top
+TOP_TRIANGLES = [(0, 1, 2), (0, 2, 3)]
+CROSSING_BOX = (-0.05, -1.0, 0.1, 0.05, 1.0, 0.2)                                       # the plank lying across it
+
+
+def test_clip_polygon_keeps_the_part_inside_the_box():
+    box = (0.0, 0.0, 0.0, 1.0, 1.0, 1.0)
+    inside = [(0.2, 0.2, 0.5), (0.8, 0.2, 0.5), (0.5, 0.8, 0.5)]
+    assert cx.clip_polygon(inside, box) == inside
+    assert cx.clip_polygon([(2.0, 2.0, 0.5), (3.0, 2.0, 0.5), (2.5, 3.0, 0.5)], box) == []
+    clipped = cx.clip_polygon([(-1.0, 0.5, 0.5), (3.0, 0.5, 0.5), (1.0, 0.9, 0.5)], box)
+    assert clipped and all(0.0 <= p[0] <= 1.0 + 1e-9 for p in clipped)
+    assert min(p[0] for p in clipped) == 0.0 and max(p[0] for p in clipped) <= 1.0 + 1e-9
+
+
+def test_contact_samples_land_in_a_flush_contact_patch_that_has_no_vertex_in_it():
+    samples = cx.contact_samples(TOP, TOP_TRIANGLES, CROSSING_BOX, 0.01)
+    assert samples and all(abs(point[0]) <= 0.06 + 1e-9 for point in samples)       # none of the far vertices
+    assert any(abs(point[0]) <= 0.05 and abs(point[1]) <= 0.05 for point in samples)
+    # the control: the part's own vertices are 1 m away, so vertex sampling alone would find nothing
+    assert min(abs(point[0]) for point in TOP) == 1.0
+
+
+def test_contact_samples_ignore_triangles_away_from_the_box_and_respect_the_cap():
+    assert cx.contact_samples(TOP, TOP_TRIANGLES, (5.0, 5.0, 5.0, 6.0, 6.0, 6.0), 0.01) == []
+    near_flush = (-1.0, -1.0, 0.0, 1.0, 1.0, 0.1)
+    assert len(cx.contact_samples(TOP, TOP_TRIANGLES, near_flush, 0.01, cap=5)) == 5
+    assert cx.CONTACT_SAMPLE_CAP == 1024
+
+
+def test_box_contains_and_the_pair_limit():
+    assert cx.box_contains((0, 0, 0, 2, 2, 2), (0.5, 0.5, 0.5, 1, 1, 1))
+    assert not cx.box_contains((0, 0, 0, 2, 2, 2), (0.5, 0.5, 0.5, 3, 1, 1))
+    crowd = [(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)] * 30                                   # 435 pairs
+    assert len(cx.candidate_pairs(crowd, 0.01)) == 435
+    assert len(cx.candidate_pairs(crowd, 0.01, 435)) == 435
+    with pytest.raises(cx.TooManyPairs):
+        cx.candidate_pairs(crowd, 0.01, 434)
+    assert cx.MAX_PAIRS == 200_000
+
+
+def test_the_geometry_block_lists_detached_parts_bounded():
+    block = cx.geometry_block(3, [], 1.0, (1, 1, 1), [("mote%d" % i, i + 1) for i in range(30)])
+    assert len(block["detached"]) == 20 and block["detached"][0] == {"name": "mote0", "line": 1}
+    assert cx.geometry_block(1, [], 1.0, (1, 1, 1))["detached"] == []
+
+
+# ---------------------------------------------------------------------------------------------- one definition of floating
+JUNK_FIRST = [{"parts": []}, {"parts": ["", "  "]}, {"parts": "x"}, 5] * 3
+
+
+def test_has_floating_and_geometry_issues_agree_on_malformed_entries():
+    for floating_list in ([], JUNK_FIRST, JUNK_FIRST + [entry()], [entry()], [{"parts": [], "gap": 1}]):
+        geometry = {"floating": floating_list}
+        assert bool(geometry_issues(geometry)) == has_floating({"geometry": geometry}), floating_list
+    assert not has_floating({}) and not has_floating({"geometry": "x"})
+    assert has_floating({"reopened": ["x"]})
+
+
+def test_the_runner_drops_entries_that_name_no_part_and_keeps_the_detached_list():
+    block = {"parts": 3, "height": 1, "dims": [1, 1, 1], "floating": [entry(parts=[]), entry(parts=["", 3]), entry()],
+             "detached": [{"name": "mote", "line": 4}, {"name": "", "line": 2}, "junk", {"name": "wisp"}]}
+    clean = runner.sanitize_result({"ok": True, "geometry": block})["geometry"]
+    assert [e["parts"] for e in clean["floating"]] == [["loaf"]]
+    assert clean["detached"] == [{"name": "mote", "line": 4}, {"name": "wisp", "line": 0}]
+
+
+# ---------------------------------------------------------------------------------------------- hostile numbers
+HUGE = 10 ** 400
+
+
+def test_the_runner_survives_and_clamps_enormous_numbers_everywhere():
+    block = {"parts": HUGE, "height": HUGE, "dims": [HUGE, -HUGE, 2], "detached": [{"name": "m", "line": HUGE}],
+             "floating": [dict(entry(), gap=HUGE, part_count=10 ** 300, lines=[10 ** 300, 7],
+                               centre=[HUGE, 0, 0], gap_vec=[-HUGE, 1e300, float("nan")])]}
+    result = runner.sanitize_result({"ok": True, "tris": HUGE, "size": [HUGE, float("inf"), 1.5], "geometry": block,
+                                     "parts": [{"name": "p", "tris": HUGE}]})
+    big = runner.MAX_NUMBER
+    assert result["tris"] == big and result["size"] == [big, 0.0, 1.5] and result["parts"][0]["tris"] == big
+    geometry = result["geometry"]
+    assert geometry["parts"] == big and geometry["height"] == big and geometry["dims"] == [big, -big, 2.0]
+    assert geometry["detached"] == [{"name": "m", "line": big}]
+    kept = geometry["floating"][0]
+    assert kept["gap"] == big and kept["part_count"] == big and kept["lines"] == [7]
+    assert kept["centre"] == [big, 0.0, 0.0] and kept["gap_vec"] == [-big, big, 0.0]
+    assert geometry_issues(geometry)                                           # and the loop can still use it
+    assert runner.sanitize_result({"ok": True, "tris": float("inf")})["tris"] == 0
+    assert runner.sanitize_result({"ok": True, "tris": float("nan")})["tris"] == 0
+
+
+# ---------------------------------------------------------------------------------------------- detached accountability
+def test_detached_parts_are_read_and_reminded_about():
+    geometry = {"floating": [], "detached": [{"name": "wisp", "line": 12}, {"name": "orb", "line": 0}, {"name": ""}]}
+    assert detached_parts(geometry) == [("wisp", 12), ("orb", 0)]
+    notes = detached_notes(geometry)
+    assert notes[0].startswith("you marked 'wisp' (line 12) detached; only do that if the brief says it floats")
+    assert "(line" not in notes[1]
+    assert detached_parts(None) == [] and detached_notes({}) == []
+
+
+def test_a_part_that_floated_before_and_is_detached_now_is_reported_again_by_line_or_by_name():
+    memory = {"lines": set(), "names": set()}
+    remember_floating(memory, {"floating": [entry(parts=["loaf"], lines=[34])]})
+    assert memory == {"lines": {34}, "names": {"loaf"}}
+    again = {"detached": [{"name": "renamed", "line": 34}]}
+    assert "line 34: 'renamed' was floating in an earlier round" in reopened_issues(again, memory)[0]
+    assert reopened_issues({"detached": [{"name": "loaf", "line": 90}]}, memory)               # the line moved
+    assert reopened_issues({"detached": [{"name": "mote", "line": 5}]}, memory) == []           # never floated
+    assert reopened_issues({}, memory) == []
+
+
+def test_the_revise_prompt_does_not_claim_a_reviewer_when_there_is_no_score():
+    from sonder_runtime.domain.meshgen.prompts import revise_prompt
+
+    measured = revise_prompt("BASE", "code", {"score": None, "issues": ["line 3: x"]}, notes=["you marked 'a' detached"])
+    assert "reviewer looked" not in measured and "No reviewer scored it" in measured and "Score" not in measured
+    assert "Notes:\n- you marked 'a' detached" in measured.replace("\r\n", "\n")
+    scored = revise_prompt("BASE", "code", {"score": 6, "issues": ["x"]})
+    assert "a reviewer looked" in scored and "Score: 6/10" in scored and "Notes:" not in scored

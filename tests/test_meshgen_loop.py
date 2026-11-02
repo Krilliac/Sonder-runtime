@@ -393,3 +393,56 @@ def test_the_winner_is_the_clean_version_even_when_the_floating_one_scored_highe
     rig = Rig(builds=[floating_build(), ok_build(tris=300)], critiques=[verdict(10), verdict(5, "too plain")])
     report = rig.go(candidates=1, rounds=2, target_score=8)
     assert report["winner"]["score"] == 5 and "geometry" not in report["winner"]
+
+
+# ---------------------------------------------------------------------------------------------- detached accountability
+def detached_build(name="loaf", line=34, floating_entries=()):
+    block = geometry(*floating_entries)
+    block["detached"] = [{"name": name, "line": line}]
+    return dict(ok_build(), geometry=block)
+
+
+def test_detached_parts_reach_the_report_and_the_revise_prompt():
+    rig = Rig(builds=[detached_build("wisp", 12), ok_build()], critiques=[verdict(5, "too plain"), verdict(9)])
+    report = rig.go(candidates=1, rounds=2, target_score=8)
+    attempt = report["candidates"][0]["attempts"][0]
+    assert attempt["detached"] == [{"name": "wisp", "line": 12}] and attempt["status"] == "revise"
+    assert "you marked 'wisp' (line 12) detached; only do that if the brief says it floats" in rig.prompts[1]
+    assert "reopened" not in attempt
+
+
+def test_a_detached_part_is_not_a_floating_one_when_it_never_floated():
+    rig = Rig(builds=[detached_build("wisp", 12)], critiques=[verdict(10)])
+    attempt = rig.go(candidates=1, rounds=1, target_score=8)["candidates"][0]["attempts"][0]
+    assert attempt["status"] == "accepted" and attempt["score"] == 10
+
+
+def test_detaching_a_part_that_floated_last_round_keeps_the_cap_and_blocks_acceptance():
+    rig = Rig(builds=[floating_build(), detached_build("loaf", 34), detached_build("loaf", 34)],
+              critiques=[verdict(7), verdict(10), verdict(10)])
+    report = rig.go(candidates=1, rounds=3, target_score=8)
+    attempts = report["candidates"][0]["attempts"]
+    assert [a["status"] for a in attempts] == ["revise", "revise", "revise"]
+    assert attempts[1]["score"] == 6 and attempts[2]["score"] == 6                  # the critic said 10 both times
+    assert "'loaf' was floating in an earlier round and you now mark it detached" in attempts[1]["issues"][0]
+    assert attempts[1]["reopened"] and report["winner"]["score"] == 6
+    assert "was floating in an earlier round" in rig.prompts[2]
+
+
+def test_the_line_moving_does_not_hide_it_the_name_still_matches():
+    rig = Rig(builds=[floating_build(), detached_build("loaf", 90)], critiques=[verdict(7), verdict(10)])
+    attempts = rig.go(candidates=1, rounds=2, target_score=8)["candidates"][0]["attempts"]
+    assert attempts[1]["status"] == "revise" and attempts[1]["score"] == 6
+
+
+def test_a_version_that_reopened_a_floating_part_ranks_below_a_clean_one():
+    rig = Rig(builds=[floating_build(), detached_build("loaf", 34), ok_build(tris=500)],
+              critiques=[verdict(7), verdict(10), verdict(4, "plain")])
+    report = rig.go(candidates=1, rounds=3, target_score=8)
+    assert report["winner"]["score"] == 4 and not report["winner"].get("reopened")
+
+
+def test_the_measured_revise_prompt_without_a_reviewer_says_so():
+    rig = Rig(builds=[floating_build(), ok_build()])
+    rig.go(candidates=1, rounds=2, vision=False)
+    assert "reviewer looked" not in rig.prompts[1] and "No reviewer scored it" in rig.prompts[1]

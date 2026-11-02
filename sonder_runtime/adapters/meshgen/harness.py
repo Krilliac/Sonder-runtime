@@ -12,6 +12,7 @@ import json
 import math
 import os
 import sys
+import time
 import traceback
 
 import importlib
@@ -29,6 +30,7 @@ DEFAULT_GREY = (0.69, 0.69, 0.69)
 
 RESULT_PATH = ""
 PARTS = []
+GEOM_BUDGET_S = 5.0   # wall time the floating-part check may use before it is skipped
 GEOM_PARTS = []   # per baked part: name, creating script line, detached flag, world-space vertices and triangles
 
 
@@ -154,8 +156,8 @@ def _part_view(part, scale, shift):
     if points:
         xs, ys, zs = [p[0] for p in points], [p[1] for p in points], [p[2] for p in points]
         box = (min(xs), min(ys), min(zs), max(xs), max(ys), max(zs))
-    return {"points": points, "triangles": triangles, "bvh": None, "name": part["name"], "line": part["line"],
-            "detached": part["detached"], "box": box}
+    return {"points": points, "triangles": triangles, "bvh": None, "tri_boxes": None, "name": part["name"],
+            "line": part["line"], "detached": part["detached"], "box": box}
 
 
 def _bvh(view):
@@ -164,9 +166,13 @@ def _bvh(view):
     return view["bvh"]
 
 
-def _nearest(source, target, limit):
-    """Smallest distance from a bounded sample of ``source``'s vertices to ``target``'s surface, stopping early
-    once it is within ``limit``.  Returns ``(distance, point_on_source, point_on_target)`` or ``None``."""
+class _Skipped(Exception):
+    """The floating-part check was skipped on purpose (too many parts, out of time); the message says why."""
+
+
+def _nearest(source, target):
+    """Smallest distance from a bounded sample of ``source``'s vertices to ``target``'s surface.  Returns
+    ``(distance, point_on_source, point_on_target)`` or ``None``."""
     bvh = _bvh(target)
     best = None
     for index in connectivity.sample_indices(len(source["points"])):
@@ -176,23 +182,57 @@ def _nearest(source, target, limit):
             continue
         if best is None or hit[3] < best[0]:
             best = (hit[3], point, tuple(hit[0]))
-            if best[0] <= limit:
-                break
+    if best is None:
+        return None
+    # the vertices only bound the distance: anything closer lies in the other part's box grown by that bound, so
+    # sample the source surface there too (a flush or edge contact has no vertex at the closest point)
+    if source["tri_boxes"] is None:
+        source["tri_boxes"] = connectivity.triangle_boxes(source["points"], source["triangles"])
+    for point in connectivity.contact_samples(source["points"], source["triangles"], target["box"], best[0],
+                                              tri_boxes=source["tri_boxes"]):
+        hit = bvh.find_nearest(point)
+        if hit[0] is not None and hit[3] < best[0]:
+            best = (hit[3], point, tuple(hit[0]))
     return best
 
 
-def _touch(a, b, tol):
-    """True when the two parts' surfaces overlap, or a sampled vertex of either lies within ``tol`` of the other."""
+def _inside(bvh, point):
+    """True when ``point`` is inside the closed mesh of ``bvh`` (odd number of ray crossings)."""
+    direction = mathutils.Vector((0.5773, 0.3711, 0.7273)).normalized()
+    origin, crossings = mathutils.Vector(point), 0
+    for _ in range(64):
+        hit = bvh.ray_cast(origin, direction)
+        if hit[0] is None:
+            break
+        crossings += 1
+        origin = hit[0] + direction * 1e-5
+    return crossings % 2 == 1
+
+
+def _touch(a, b, tol, deadline):
+    """True when the two parts overlap, one lies inside the other, or a surface sample of either is within ``tol`` of
+    the other.  The samples (``connectivity.contact_samples``) are clipped to the other part's box, so a flush face
+    or a line contact is found even when neither part has a vertex there."""
     if _bvh(a).overlap(_bvh(b)):
         return True
     for source, target in ((a, b), (b, a)):
-        found = _nearest(source, target, tol)
-        if found is not None and found[0] <= tol:
+        if source["tri_boxes"] is None:
+            source["tri_boxes"] = connectivity.triangle_boxes(source["points"], source["triangles"])
+        bvh = _bvh(target)
+        for point in connectivity.contact_samples(source["points"], source["triangles"], target["box"], tol,
+                                                  tri_boxes=source["tri_boxes"]):
+            hit = bvh.find_nearest(point)
+            if hit[0] is not None and hit[3] <= tol:
+                return True
+        if time.monotonic() > deadline:
+            raise _Skipped("skipped: over the time budget")
+    for inner, outer in ((a, b), (b, a)):
+        if connectivity.box_contains(outer["box"], inner["box"]) and _inside(_bvh(outer), inner["points"][0]):
             return True
     return False
 
 
-def _closest(members, others):
+def _closest(members, others, deadline):
     """The nearest approach of any member to any other part: ``(distance, vector, other)``.  ``vector`` points from
     the other part's closest point to the member's.  Pairs are tried nearest-box first and the search stops
     once a box is farther than the best distance found."""
@@ -202,11 +242,13 @@ def _closest(members, others):
     for lower, mi, oi in ordered:
         if best is not None and lower >= best[0]:
             break
+        if time.monotonic() > deadline:
+            raise _Skipped("skipped: over the time budget")
         member, other = members[mi], others[oi]
-        found = _nearest(member, other, 0.0)
+        found = _nearest(member, other)
         if found is not None and (best is None or found[0] < best[0]):
             best = (found[0], tuple(found[1][k] - found[2][k] for k in range(3)), other)
-        found = _nearest(other, member, 0.0)
+        found = _nearest(other, member)
         if found is not None and (best is None or found[0] < best[0]):
             best = (found[0], tuple(found[2][k] - found[1][k] for k in range(3)), other)
     return best
@@ -224,23 +266,34 @@ def _geometry_report(height_m):
     tol = connectivity.tolerance(dims[2])
     eligible = [v["box"] is not None and bool(v["triangles"]) and not v["detached"] for v in views]
     boxes = [v["box"] if eligible[i] else None for i, v in enumerate(views)]
-    touching = [(i, j) for i, j in connectivity.candidate_pairs(boxes, tol) if _touch(views[i], views[j], tol)]
+    deadline = time.monotonic() + GEOM_BUDGET_S
+    try:
+        pairs = connectivity.candidate_pairs(boxes, tol, connectivity.MAX_PAIRS)
+    except connectivity.TooManyPairs:
+        raise _Skipped("skipped: too many parts") from None
+    touching = []
+    for i, j in pairs:
+        if _touch(views[i], views[j], tol, deadline):
+            touching.append((i, j))
     grounded = [boxes[i] is not None and connectivity.is_grounded(boxes[i][2], tol) for i in range(len(views))]
     groups = connectivity.floating_components(len(views), touching, grounded, [not e for e in eligible])
     entries = []
+    floating_parts = {i for group in groups for i in group}
     for group in groups[:connectivity.MAX_FLOATING]:
         members = [views[i] for i in group]
-        others = [views[i] for i in range(len(views)) if eligible[i] and i not in group]
+        # the target is a part that stands on the ground (not another floater), else the ground itself
+        others = [views[i] for i in range(len(views)) if eligible[i] and i not in floating_parts]
         box = [min(m["box"][k] for m in members) if k < 3 else max(m["box"][k] for m in members) for k in range(6)]
         centre = [(box[k] + box[k + 3]) / 2.0 for k in range(3)]
-        best = _closest(members, others) if others else None
+        best = _closest(members, others, deadline) if others else None
         if best is None:
             gap, vector, nearest = box[2], (0.0, 0.0, box[2]), None
         else:
             gap, vector, nearest = best[0], best[1], best[2]["name"]
         entries.append(connectivity.floating_entry([m["name"] for m in members], [m["line"] for m in members],
                                                    centre, gap, vector, nearest))
-    return connectivity.geometry_block(len(views), entries, dims[2], dims)
+    detached = [(v["name"], v["line"]) for v in views if v["detached"]]
+    return connectivity.geometry_block(len(views), entries, dims[2], dims, detached)
 
 
 def _export(obj, path, kind):
@@ -384,13 +437,16 @@ def main():
     replay.run(doc, kit_name, kit_allowed)
     obj = _bake_and_join(name)
     size, lo, hi = _normalise(obj, float(job.get("height_m") or 0.0))
-    geometry, geometry_error = None, ""
-    try:
-        geometry = _geometry_report(float(job.get("height_m") or 0.0))
-    except Exception as exc:  # noqa: BLE001 - the model is fine; a failed measurement only drops the geometry block
-        geometry_error = "%s: %s" % (type(exc).__name__, exc)
     mesh = obj.data
     tris = sum(len(poly.vertices) - 2 for poly in mesh.polygons)
+    geometry, geometry_error = None, ""
+    if tris <= int(job.get("max_tris") or 0):  # an over-budget build is discarded, so it is not worth measuring
+        try:
+            geometry = _geometry_report(float(job.get("height_m") or 0.0))
+        except _Skipped as exc:
+            geometry_error = str(exc)
+        except Exception as exc:  # noqa: BLE001 - the model is fine; a failed measurement only drops the geometry block
+            geometry_error = "%s: %s" % (type(exc).__name__, exc)
     kind = "fbx" if str(job.get("export", "glb")).lower() == "fbx" else "glb"
     model_path = os.path.join(out_dir, "%s.%s" % (name, kind))
     _export(obj, model_path, kind)

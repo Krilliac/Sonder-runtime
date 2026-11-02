@@ -5,11 +5,13 @@ A result is a dict with ``built`` (bool), ``within_budget`` (bool),
 """
 from __future__ import annotations
 
+from .critique import floating_entries
+
 
 def has_floating(result: dict) -> bool:
-    """True when the result carries a harness ``geometry`` block that lists a floating part."""
-    geometry = result.get("geometry")
-    return isinstance(geometry, dict) and bool(geometry.get("floating"))
+    """True when the result carries a harness ``geometry`` block that lists a floating part, or a detached part that
+    was floating in an earlier round (``reopened``)."""
+    return bool(floating_entries(result.get("geometry"))) or bool(result.get("reopened"))
 
 
 def rank_key(result: dict) -> tuple:

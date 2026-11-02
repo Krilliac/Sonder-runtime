@@ -26,14 +26,14 @@ BASE = '''def build():
 '''
 
 
-def build(tmp_path, source, **kw):
+def build(tmp_path, source, max_tris=5000, **kw):
     recording = compile_script(source)
     tmp_path.mkdir(parents=True, exist_ok=True)
     ops = tmp_path / "ops.json"
     ops.write_text(recording.text, encoding="utf-8")
     kw.setdefault("render", False)
     result = blender_runner.build_candidate(
-        BLENDER, str(ops), str(tmp_path / "out"), name="thing", max_tris=5000, height_m=kw.pop("height_m", 0),
+        BLENDER, str(ops), str(tmp_path / "out"), name="thing", max_tris=max_tris, height_m=kw.pop("height_m", 0),
         timeout=240, **kw)
     assert result.get("ok"), result
     return result
@@ -181,3 +181,124 @@ def test_the_result_carries_the_geometry_block_and_no_error(tmp_path):
     result = build(tmp_path, BASE)
     assert "geometry_error" not in result
     assert Path(result["files"]["model"]).is_file()
+
+
+# ---------------------------------------------------------------------------------------------- flush contacts
+# Layouts where parts rest on each other with no vertex of either part on the other: a face, a line or a patch.
+# Each is built touching (lift 0) and lifted by 0.05 m, more than three times the tolerance of a prop this size.
+FLUSH = {
+    "crossed planks": ('''def build():
+    a = primitive("cube", "A", size=1.0, loc=(0, 0, 0.05), scale=(2.0, 0.1, 0.1))
+    b = primitive("cube", "B", size=1.0, loc=(0, 0, 0.15 + %s), scale=(0.1, 2.0, 0.1))
+''', "B"),
+    "log across a stump": ('''def build():
+    stump = primitive("cube", "Stump", size=0.4, loc=(0, 0, 0.2))
+    log = primitive("cylinder", "Log", radius=0.2, depth=2.0, loc=(0, 0, 0.6 + %s), rot=(0, 90, 0))
+''', "Log"),
+    "board on two rails": ('''def build():
+    r1 = primitive("cube", "RailL", size=1.0, loc=(-0.8, 0, 0.2), scale=(0.1, 0.6, 0.4))
+    r2 = primitive("cube", "RailR", size=1.0, loc=(0.8, 0, 0.2), scale=(0.1, 0.6, 0.4))
+    board = primitive("cube", "Board", size=1.0, loc=(0, 0, 0.425 + %s), scale=(2.0, 0.4, 0.05))
+''', "Board"),
+    "box resting on its edge": ('''def build():
+    a = primitive("cube", "A", size=1.0, loc=(0, 0, 0.5))
+    b = primitive("cube", "B", size=0.5, loc=(0, 0, 1.35355339 + %s), rot=(45, 0, 0), scale=(4, 1, 1))
+''', "B"),
+}
+
+
+@pytest.mark.parametrize("layout", sorted(FLUSH))
+def test_parts_resting_flush_on_each_other_are_not_floating(tmp_path, layout):
+    template, mover = FLUSH[layout]
+    resting = build(tmp_path, template % "0.0")
+    assert floating_of(resting) == [] and resting["geometry"]["parts"] >= 2
+    # the twin: the same layout lifted by 0.05 m must report the part that moved
+    lifted = floating_of(build(tmp_path / "lifted", template % "0.05"))
+    assert [entry["parts"] for entry in lifted] == [[mover]]
+    assert 0.03 < lifted[0]["gap"] < 0.07
+
+
+def test_a_true_floater_at_a_gap_of_35_centimetres_is_still_caught(tmp_path):
+    source = BASE + '    b = primitive("cube", "B", size=0.5, loc=(0, 0, 1.6))\n'
+    entry = floating_of(build(tmp_path, source))[0]
+    assert entry["parts"] == ["B"] and abs(entry["gap"] - 0.35) < 0.01 and entry["gap_vec"][2] > 0.3
+
+
+def test_a_part_wholly_inside_another_is_connected_to_it(tmp_path):
+    inside = '''def build():
+    shell = primitive("cube", "Shell", size=2.0, loc=(0, 0, 1.0))
+    core = primitive("cube", "Core", size=0.5, loc=(0, 0, %s))
+'''
+    assert floating_of(build(tmp_path, inside % "1.0")) == []
+    assert [e["parts"] for e in floating_of(build(tmp_path / "out", inside % "3.0"))] == [["Core"]]
+
+
+def test_the_nearest_part_named_is_one_that_stands_on_the_ground_not_another_floater(tmp_path):
+    source = BASE + '''    low = primitive("uv_sphere", "Low", radius=0.2, loc=(0, 0, 1.5))
+    high = primitive("uv_sphere", "High", radius=0.2, loc=(0, 0, 2.15))
+'''
+    entries = {entry["parts"][0]: entry for entry in floating_of(build(tmp_path, source))}
+    assert sorted(entries) == ["High", "Low"]
+    assert entries["Low"]["nearest"] == "Box" and abs(entries["Low"]["gap"] - 0.3) < 0.01
+    assert entries["High"]["nearest"] == "Box" and abs(entries["High"]["gap"] - 0.95) < 0.02   # not Low, 0.25 away
+
+
+def test_the_detached_parts_are_listed_in_the_geometry_block(tmp_path):
+    source = BASE + '    ball = primitive("uv_sphere", "Ball", radius=0.2, loc=(0, 0, 1.5))\n    detached(ball)\n'
+    assert build(tmp_path, source)["geometry"]["detached"] == [{"name": "Ball", "line": 3}]
+    assert build(tmp_path / "none", BASE)["geometry"]["detached"] == []
+
+
+def test_an_over_budget_build_is_not_measured(tmp_path):
+    source = BASE + '    ball = primitive("uv_sphere", "Ball", radius=0.2, loc=(0, 0, 1.5))\n'
+    result = build(tmp_path, source, max_tris=100)
+    assert result["within_budget"] is False and "geometry" not in result and "geometry_error" not in result
+    assert "geometry" in build(tmp_path / "fits", source)       # the control: within budget it is measured
+
+
+def test_a_pile_of_overlapping_parts_skips_the_check_instead_of_running_away(tmp_path):
+    lines = ["def build():"] + ['    primitive("cube", "C%d", size=0.1, loc=(0, 0, %f))' % (i, i * 1e-5) for i in range(700)]
+    result = build(tmp_path, "\n".join(lines) + "\n", max_tris=100000)
+    assert "geometry" not in result and result["geometry_error"] == "skipped: too many parts"
+    small = build(tmp_path / "few", "\n".join(lines[:30]) + "\n", max_tris=100000)
+    assert small["geometry"]["parts"] == 29 and "geometry_error" not in small
+
+
+COPY_KIT = '''"""A trusted test kit that copies objects."""
+
+def box(name, size, loc):
+    import bpy
+    bpy.ops.mesh.primitive_cube_add(size=size, location=loc)
+    obj = bpy.context.active_object
+    obj.name = name
+    return obj
+
+def clone(obj, name, loc):
+    import bpy
+    copy = obj.copy()
+    copy.data = obj.data.copy()
+    copy.name = name
+    copy.location = loc
+    bpy.context.scene.collection.objects.link(copy)
+    return copy
+'''
+
+
+def test_a_copy_made_by_a_kit_gets_its_own_line_and_is_not_detached_because_its_source_was(tmp_path):
+    from sonder_runtime.domain.meshgen.dsl.manifest import build_manifest
+
+    kit = tmp_path / "kit" / "copykit.py"
+    kit.parent.mkdir()
+    kit.write_text(COPY_KIT, encoding="utf-8")
+    source = ("import copykit\ndef build():\n    a = copykit.box('A', 1.0, (0, 0, 0.5))\n"
+              "    b = copykit.box('B', 0.2, (0, 0, 3.0))\n    detached(b)\n    c = copykit.clone(b, 'C', (2.0, 0, 3.0))\n")
+    manifest = build_manifest(kit.read_text(encoding="utf-8"), "copykit")
+    recording = compile_script(source, manifest)
+    ops = tmp_path / "ops.json"
+    ops.write_text(recording.text, encoding="utf-8")
+    result = blender_runner.build_candidate(BLENDER, str(ops), str(tmp_path / "out"), name="thing", max_tris=5000,
+                                            height_m=0, kit_path=str(kit), kit_allowed=sorted(manifest.exposed),
+                                            timeout=240, render=False)
+    assert result["ok"], result
+    entries = floating_of(result)
+    assert [(e["parts"], e["lines"]) for e in entries] == [(["C"], [6])]      # B is detached, its copy C is not

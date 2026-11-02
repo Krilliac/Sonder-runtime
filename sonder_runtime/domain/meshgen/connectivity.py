@@ -17,7 +17,10 @@ import math
 
 TOL_FLOOR = 0.01            # metres
 TOL_FRACTION = 0.015        # of the overall height
-SAMPLE_CAP = 256            # vertices sampled per part for the nearest-distance test
+SAMPLE_CAP = 256            # vertices sampled per part for the gap measurement
+CONTACT_SAMPLE_CAP = 1024   # surface samples per part and direction for the touch test
+MAX_PAIRS = 200_000         # candidate pairs above which the whole check is skipped
+MAX_DETACHED = 20           # detached parts listed in a report
 MAX_FLOATING = 20           # floating entries kept in a report
 MAX_NAMES = 8               # part names / lines kept per entry
 MAX_NAME_CHARS = 40
@@ -32,6 +35,10 @@ def tolerance(height) -> float:
     if not math.isfinite(height) or height < 0:
         return TOL_FLOOR
     return max(TOL_FLOOR, TOL_FRACTION * height)
+
+
+class TooManyPairs(ValueError):
+    """More candidate pairs than ``MAX_PAIRS``: the check is skipped rather than allowed to run away."""
 
 
 def is_grounded(min_z, tol) -> bool:
@@ -58,11 +65,12 @@ def box_distance(a, b) -> float:
     return math.sqrt(total)
 
 
-def candidate_pairs(boxes, tol) -> list:
+def candidate_pairs(boxes, tol, limit=None) -> list:
     """Pairs ``(i, j)``, ``i < j``, whose boxes expanded by ``tol`` overlap: the only pairs worth a BVH test.
 
     ``boxes[i]`` is a box or ``None`` for a part that takes no part in the check.  Sweeps along X, so a
-    prop of a few hundred parts costs far less than all pairs."""
+    prop of a few hundred parts costs far less than all pairs.  With ``limit``, raises ``TooManyPairs`` as soon as
+    more pairs than that are found."""
     order = sorted((i for i, box in enumerate(boxes) if box is not None), key=lambda i: boxes[i][0])
     pairs = []
     for position, i in enumerate(order):
@@ -73,8 +81,86 @@ def candidate_pairs(boxes, tol) -> list:
                 break
             if b[1] <= a[4] + tol and a[1] <= b[4] + tol and b[2] <= a[5] + tol and a[2] <= b[5] + tol:
                 pairs.append((min(i, j), max(i, j)))
+                if limit is not None and len(pairs) > limit:
+                    raise TooManyPairs("more than %d candidate pairs" % limit)
     pairs.sort()
     return pairs
+
+
+def box_contains(outer, inner) -> bool:
+    """True when the box ``inner`` lies entirely inside the box ``outer``."""
+    return all(outer[axis] <= inner[axis] and inner[axis + 3] <= outer[axis + 3] for axis in range(3))
+
+
+def _clip_plane(polygon, axis, bound, keep_above):
+    out = []
+    for index, current in enumerate(polygon):
+        following = polygon[(index + 1) % len(polygon)]
+        inside = current[axis] >= bound if keep_above else current[axis] <= bound
+        next_inside = following[axis] >= bound if keep_above else following[axis] <= bound
+        if inside:
+            out.append(current)
+        if inside != next_inside:
+            t = (bound - current[axis]) / (following[axis] - current[axis])
+            out.append(tuple(current[k] + t * (following[k] - current[k]) for k in range(3)))
+    return out
+
+
+def clip_polygon(polygon, box) -> list:
+    """The part of a convex polygon (list of 3-tuples) inside an axis-aligned box (Sutherland-Hodgman); ``[]`` if none."""
+    for axis in range(3):
+        for keep_above, bound in ((True, box[axis]), (False, box[axis + 3])):
+            polygon = _clip_plane(polygon, axis, bound, keep_above)
+            if not polygon:
+                return []
+    return polygon
+
+
+def _mean(points):
+    count = float(len(points))
+    return tuple(sum(point[k] for point in points) / count for k in range(3))
+
+
+def triangle_boxes(points, triangles) -> list:
+    """Axis-aligned box of every triangle (``points`` are 3-tuples, ``triangles`` index triples)."""
+    boxes = []
+    for tri in triangles:
+        corners = [points[i] for i in tri]
+        boxes.append(tuple(min(c[k] for c in corners) for k in range(3)) + tuple(max(c[k] for c in corners)
+                                                                                for k in range(3)))
+    return boxes
+
+
+def contact_samples(points, triangles, box, tol, cap=CONTACT_SAMPLE_CAP, tri_boxes=None) -> list:
+    """Points on a part's surface that could lie within ``tol`` of something inside ``box`` (the other part's box).
+
+    Anything within ``tol`` of that part lies inside ``box`` grown by ``tol``, so each triangle is clipped to the
+    grown box and sampled where it matters: the clipped polygon's corners, its edge midpoints, its centroid and, for
+    polygons with four or more corners, the centroids of a fan of triangles.  A flush face, a line contact or a
+    contact patch smaller than the part's own vertex spacing therefore still gets samples in the contact region.
+    Triangles nearest the box centre come first and at most ``cap`` points are returned."""
+    region = tuple(box[k] - tol if k < 3 else box[k] + tol for k in range(6))
+    centre = [(box[k] + box[k + 3]) / 2.0 for k in range(3)]
+    if tri_boxes is None:
+        tri_boxes = triangle_boxes(points, triangles)
+    ranked = []
+    for index, tb in enumerate(tri_boxes):
+        if all(tb[k] <= region[k + 3] and region[k] <= tb[k + 3] for k in range(3)):
+            ranked.append((sum(((tb[k] + tb[k + 3]) / 2.0 - centre[k]) ** 2 for k in range(3)), index))
+    ranked.sort()
+    samples = []
+    for _distance, index in ranked:
+        polygon = clip_polygon([points[i] for i in triangles[index]], region)
+        if not polygon:
+            continue
+        samples.extend(polygon)
+        samples.extend(_mean([polygon[i], polygon[(i + 1) % len(polygon)]]) for i in range(len(polygon)))
+        samples.append(_mean(polygon))
+        if len(polygon) >= 4:
+            samples.extend(_mean([polygon[0], polygon[i], polygon[i + 1]]) for i in range(1, len(polygon) - 1))
+        if len(samples) >= cap:
+            break
+    return samples[:cap]
 
 
 def floating_components(count, touching, grounded, detached) -> list:
@@ -128,12 +214,18 @@ def floating_entry(names, lines, centre, gap, gap_vec, nearest) -> dict:
     }
 
 
-def geometry_block(part_count, entries, height, dims) -> dict:
-    """The ``geometry`` object of the harness result (at most ``MAX_FLOATING`` entries)."""
+def geometry_block(part_count, entries, height, dims, detached=()) -> dict:
+    """The ``geometry`` object of the harness result (at most ``MAX_FLOATING`` entries).
+
+    ``detached`` lists ``(name, line)`` of the parts the script marked ``detached(...)``, so the loop can show the
+    model, and the report, which parts were excluded from the check."""
     return {"parts": int(part_count), "floating": list(entries)[:MAX_FLOATING],
-            "height": _rounded([height])[0], "dims": _rounded(dims)}
+            "height": _rounded([height])[0], "dims": _rounded(dims),
+            "detached": [{"name": str(name)[:MAX_NAME_CHARS], "line": int(line) if isinstance(line, int) else 0}
+                         for name, line in list(detached)[:MAX_DETACHED]]}
 
 
-__all__ = ["MAX_FLOATING", "MAX_NAMES", "MAX_NAME_CHARS", "SAMPLE_CAP", "TOL_FLOOR", "TOL_FRACTION", "box_distance",
-           "candidate_pairs", "floating_components", "floating_entry", "geometry_block", "is_grounded",
-           "sample_indices", "tolerance"]
+__all__ = ["CONTACT_SAMPLE_CAP", "MAX_DETACHED", "MAX_FLOATING", "MAX_NAMES", "MAX_NAME_CHARS", "MAX_PAIRS",
+           "SAMPLE_CAP", "TOL_FLOOR", "TOL_FRACTION", "TooManyPairs", "box_contains", "box_distance",
+           "candidate_pairs", "clip_polygon", "contact_samples", "floating_components", "floating_entry",
+           "geometry_block", "is_grounded", "sample_indices", "tolerance", "triangle_boxes"]

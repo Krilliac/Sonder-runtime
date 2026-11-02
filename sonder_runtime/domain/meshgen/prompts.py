@@ -216,18 +216,25 @@ def repair_prompt(base_prompt: str, code: str, failure: str, hint: str = "", stu
     return "\n".join(lines)
 
 
-def revise_prompt(base_prompt: str, code: str, critique: dict, stuck: str = "") -> str:
+def revise_prompt(base_prompt: str, code: str, critique: dict, stuck: str = "", notes=()) -> str:
     score = critique.get("score")
     issues = [str(item) for item in (critique.get("issues") or [])]
     listing = "\n".join("- " + item for item in issues) or (
         "- (no specific issues listed; improve overall recognisability)")
+    if score is None:
+        opening = ("Your script built. No reviewer scored it; the issues below were measured on the built "
+                   "geometry.")
+    else:
+        opening = ("Your script built, and a reviewer looked at renders from the front, right side, "
+                   "three-quarter view and top. Score: %s/10." % score)
     lines = [
         base_prompt, "",
-        "Your script built, and a reviewer looked at renders from the front, right side, "
-        "three-quarter view and top. Score: %s/10." % ("?" if score is None else score),
+        opening,
         "", "Previous script:", _code_block(code),
         "", "Issues to fix:", listing,
     ]
+    if notes:
+        lines += ["", "Notes:"] + ["- " + str(note) for note in notes]
     guidance = orientation_guidance(issues)
     if guidance:
         lines += ["", guidance]

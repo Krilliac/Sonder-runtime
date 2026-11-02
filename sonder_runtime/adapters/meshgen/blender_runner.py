@@ -209,9 +209,27 @@ def bound_text(value, limit: int = MAX_TEXT_CHARS) -> str:
     return text
 
 
+MAX_NUMBER = 1e9    # any number from the result file is clamped to +-this (a 400-digit int must not get through)
+
+
 def _finite(value) -> float:
-    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) \
-        and math.isfinite(value) else 0.0
+    """A bounded float: ``0.0`` for anything that is not a real finite number, clamped to +-``MAX_NUMBER``."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    if isinstance(value, int):
+        return float(max(-MAX_NUMBER, min(MAX_NUMBER, value)))   # compared as ints: float(10**400) would overflow
+    if not math.isfinite(value):
+        return 0.0
+    return max(-MAX_NUMBER, min(MAX_NUMBER, value))
+
+
+def _count(value, default=0) -> int:
+    """A whole number between 0 and ``MAX_NUMBER``: clamped when over, ``default`` when not a number."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    if isinstance(value, float) and not math.isfinite(value):
+        return default
+    return int(max(0, min(MAX_NUMBER, value)))
 
 
 def _triple(value) -> list:
@@ -223,27 +241,31 @@ def _sanitize_geometry(value) -> dict | None:
     """The harness' ``geometry`` block with every field typed and bounded, or ``None`` when it is not a block."""
     if not isinstance(value, dict) or not isinstance(value.get("floating"), list):
         return None
-    count = value.get("parts")
     entries = []
     for item in value["floating"][:MAX_FLOATING_ENTRIES]:
         if not isinstance(item, dict):
             continue
-        names = item.get("parts") if isinstance(item.get("parts"), list) else []
+        names = [bound_text(name, 40) for name in (item.get("parts") if isinstance(item.get("parts"), list) else [])
+                 if isinstance(name, str) and name.strip()][:MAX_ENTRY_NAMES]
+        if not names:
+            continue   # an entry that names no part cannot be acted on, here or in the loop
         lines = item.get("lines") if isinstance(item.get("lines"), list) else []
-        total = item.get("part_count")
         nearest = item.get("nearest")
         entries.append({
-            "parts": [bound_text(name, 40) for name in names[:MAX_ENTRY_NAMES]],
-            "part_count": int(total) if isinstance(total, int) and not isinstance(total, bool) and total >= 0
-            else len(names),
-            "lines": [line for line in lines[:MAX_ENTRY_NAMES]
-                      if isinstance(line, int) and not isinstance(line, bool) and line > 0],
+            "parts": names,
+            "part_count": max(_count(item.get("part_count"), len(names)), len(names)),
+            "lines": [_count(line) for line in lines[:MAX_ENTRY_NAMES]
+                      if isinstance(line, int) and not isinstance(line, bool) and 0 < line <= MAX_NUMBER],
             "centre": _triple(item.get("centre")), "gap": _finite(item.get("gap")),
             "gap_vec": _triple(item.get("gap_vec")),
-            "nearest": bound_text(nearest, 40) if isinstance(nearest, str) else None,
+            "nearest": bound_text(nearest, 40) if isinstance(nearest, str) and nearest else None,
         })
-    return {"parts": int(count) if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else 0,
-            "floating": entries, "height": _finite(value.get("height")), "dims": _triple(value.get("dims"))}
+    detached = []
+    for item in (value.get("detached") if isinstance(value.get("detached"), list) else [])[:MAX_FLOATING_ENTRIES]:
+        if isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"].strip():
+            detached.append({"name": bound_text(item["name"], 40), "line": _count(item.get("line"))})
+    return {"parts": _count(value.get("parts")), "floating": entries, "height": _finite(value.get("height")),
+            "dims": _triple(value.get("dims")), "detached": detached}
 
 
 def sanitize_result(result: dict) -> dict:
@@ -264,12 +286,12 @@ def sanitize_result(result: dict) -> dict:
             lines = value if isinstance(value, list) else [value]
             clean[key] = [bound_text(line, MAX_TAIL_LINE_CHARS) for line in lines[-_TAIL_LINES:]]
         elif key == "tris":
-            clean[key] = int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
+            clean[key] = _count(value)
         elif key in ("ok", "within_budget"):
             clean[key] = bool(value)
         elif key == "size":
             seq = value if isinstance(value, list) else []
-            clean[key] = [float(v) for v in seq[:3] if isinstance(v, (int, float)) and not isinstance(v, bool)]
+            clean[key] = [_finite(v) for v in seq[:3] if isinstance(v, (int, float)) and not isinstance(v, bool)]
         elif key == "files":
             clean[key] = {str(k)[:20]: bound_text(v, 600)
                           for k, v in (value.items() if isinstance(value, dict) else [])}
@@ -278,8 +300,7 @@ def sanitize_result(result: dict) -> dict:
             for part in (value if isinstance(value, list) else [])[:8]:
                 if isinstance(part, dict):
                     tris = part.get("tris")
-                    parts.append({"name": bound_text(part.get("name"), 40),
-                                  "tris": int(tris) if isinstance(tris, (int, float)) and not isinstance(tris, bool) else 0})
+                    parts.append({"name": bound_text(part.get("name"), 40), "tris": _count(tris)})
             clean[key] = parts
     return clean
 

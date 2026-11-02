@@ -31,7 +31,8 @@ import re
 import time
 from dataclasses import dataclass
 
-from ...domain.meshgen.critique import cap_score, geometry_issues, parse_critique
+from ...domain.meshgen.critique import (
+    cap_score, detached_notes, detached_parts, geometry_issues, parse_critique, remember_floating, reopened_issues,)
 from ...domain.meshgen.dsl.errors import ScriptError
 from ...domain.meshgen.dsl.recorder import compile_script
 from ...domain.meshgen.prompts import (
@@ -150,7 +151,7 @@ def run(request: MeshRequest, *, generate, build, critique, map_parallel, record
     )
     vision_off = {"reason": "" if request.vision else "disabled by the caller", "used": 0}
 
-    def attempt_round(index, tier, round_index, prompt, attempt, versions):
+    def attempt_round(index, tier, round_index, prompt, attempt, versions, memory):
         """One round; returns ``(stop, build_prompt)``.
 
         ``build_prompt(stuck)`` renders the next prompt (``None`` = keep the current one), so a
@@ -197,6 +198,15 @@ def run(request: MeshRequest, *, generate, build, critique, map_parallel, record
         if geometry is not None:
             version["geometry"] = attempt["geometry"] = geometry
         floating = geometry_issues(geometry)
+        # a part reported floating earlier and marked detached now is still a floating part
+        reopened = reopened_issues(geometry, memory)
+        floating = floating + reopened
+        if reopened:
+            version["reopened"] = attempt["reopened"] = reopened
+        if detached_parts(geometry):
+            attempt["detached"] = [{"name": name, "line": line} for name, line in detached_parts(geometry)]
+        notes = detached_notes(geometry)
+        remember_floating(memory, geometry)
         versions.append(version)
         if not within:
             attempt["status"] = "over_budget"
@@ -224,13 +234,14 @@ def run(request: MeshRequest, *, generate, build, critique, map_parallel, record
             version["score"] = attempt["score"] = capped
             version["issues"] = attempt["issues"] = issues
             attempt["status"] = "revise"
-            return False, lambda stuck: revise_prompt(base, code, {"score": capped, "issues": issues}, stuck=stuck)
+            return False, lambda stuck: revise_prompt(base, code, {"score": capped, "issues": issues}, stuck=stuck,
+                                                      notes=notes)
         if parsed is not None and parsed["score"] is not None:
             if parsed["score"] >= request.target_score:
                 attempt["status"] = "accepted"
                 return True, None
             attempt["status"] = "revise"
-            return False, lambda stuck: revise_prompt(base, code, parsed, stuck=stuck)
+            return False, lambda stuck: revise_prompt(base, code, parsed, stuck=stuck, notes=notes)
         attempt["status"] = "built"
         return True, None
 
@@ -248,13 +259,14 @@ def run(request: MeshRequest, *, generate, build, critique, map_parallel, record
         attempts: list[dict] = []
         versions: list[dict] = []
         prompt = base
+        memory = {"lines": set(), "names": set()}   # parts reported floating in this candidate's earlier rounds
         for round_index in range(max(1, int(request.rounds))):
             began = time.monotonic()
             attempt = {"tier": tier, "round": round_index, "status": "", "tris": None,
                        "score": None, "issues": [], "seconds": 0.0}
             attempts.append(attempt)
             try:
-                stop, build_prompt = attempt_round(index, tier, round_index, prompt, attempt, versions)
+                stop, build_prompt = attempt_round(index, tier, round_index, prompt, attempt, versions, memory)
             finally:
                 attempt["seconds"] = round(time.monotonic() - began, 2)
             previous = attempts[-2] if len(attempts) > 1 else None
