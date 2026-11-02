@@ -594,6 +594,9 @@ EXECUTION_TOOLS = frozenset({
     # Desktop input (bootstrap/computer_use_tools.py): each call injects mouse
     # or keyboard input into a live application window.
     "ui_action", "computer_task",
+    # Model-written Blender Python (bootstrap/mesh_agent_tools.py): runs in a
+    # headless Blender subprocess at run_code trust, not a sandbox.
+    "mesh_generate",
 })
 
 # The same class, for work that no *registered tool* fronts. ``EXECUTION_TOOLS``

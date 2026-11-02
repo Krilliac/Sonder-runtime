@@ -51,7 +51,8 @@ _CAPTURED_LIVE_PROVIDER_ENV = {
 
 # Test-harness controls, not runtime configuration: they survive the ambient
 # scrub so a developer can capture timings or rewrite REPL screen goldens.
-_HARNESS_VARIABLES = frozenset({"SONDER_TEST_TIMINGS", "SONDER_UPDATE_GOLDENS"})
+# SONDER_BLENDER lets the real-Blender integration tests (tests/test_meshgen_integration.py) run.
+_HARNESS_VARIABLES = frozenset({"SONDER_TEST_TIMINGS", "SONDER_UPDATE_GOLDENS", "SONDER_BLENDER"})
 
 
 def _clear_ambient_deployment_variables() -> None:

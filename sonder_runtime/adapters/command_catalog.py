@@ -207,6 +207,7 @@ _CATEGORY_BY_TOOL = {
     "ground_artifact": "creative",
     "weather_lookup": "web",
     "openrouter_models": "web",
+    "mesh_generate": "execution",
     "openrouter_account": "web",
     "approximate_location_lookup": "web",
     "local_service_probe": "system",

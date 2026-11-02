@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "eb29a4a5113035a990201a7387738d0461482de93593b4d728a52bf40b684f19",
+    "catalog_digest": "a394a6a5075f8ad483951bdd87c3253d61453ea7965bff3cb7dc0510c08ed63a",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "eb29a4a5113035a990201a7387738d0461482de93593b4d728a52bf40b684f19",
+      "catalog_digest": "a394a6a5075f8ad483951bdd87c3253d61453ea7965bff3cb7dc0510c08ed63a",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -4300,6 +4300,90 @@
             "type": "object"
           },
           "name": "memory_search"
+        },
+        {
+          "description": "Generate a low-poly 3D model (GLB/FBX) from a brief with a model-written Blender script. Runs candidates through build, render, vision critique and revision, and keeps the best. Needs Blender (SONDER_BLENDER); executes model-written Python like run_code.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "api_doc_path": {
+                "default": "",
+                "title": "Api Doc Path",
+                "type": "string"
+              },
+              "brief": {
+                "title": "Brief",
+                "type": "string"
+              },
+              "candidates": {
+                "default": 3,
+                "title": "Candidates",
+                "type": "integer"
+              },
+              "export": {
+                "default": "glb",
+                "title": "Export",
+                "type": "string"
+              },
+              "height_m": {
+                "default": 0.0,
+                "title": "Height M",
+                "type": "number"
+              },
+              "kit_path": {
+                "default": "",
+                "title": "Kit Path",
+                "type": "string"
+              },
+              "max_tris": {
+                "default": 3000,
+                "title": "Max Tris",
+                "type": "integer"
+              },
+              "name": {
+                "default": "",
+                "title": "Name",
+                "type": "string"
+              },
+              "output_dir": {
+                "default": "",
+                "title": "Output Dir",
+                "type": "string"
+              },
+              "rounds": {
+                "default": 3,
+                "title": "Rounds",
+                "type": "integer"
+              },
+              "target_score": {
+                "default": 8,
+                "title": "Target Score",
+                "type": "integer"
+              },
+              "tiers": {
+                "default": "general,code",
+                "title": "Tiers",
+                "type": "string"
+              },
+              "timeout": {
+                "default": 1200,
+                "title": "Timeout",
+                "type": "integer"
+              },
+              "vision": {
+                "default": true,
+                "title": "Vision",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "brief"
+            ],
+            "title": "mesh_generateArguments",
+            "type": "object"
+          },
+          "name": "mesh_generate"
         },
         {
           "description": "Start a composed mission: set a goal, optionally decompose into tasks, optionally launch autopilot.\n\n    Bridges Goal, Task, and Autopilot subsystems into unified execution.\n    Use --auto to immediately launch autopilot toward the goal.\n    Use --plan to decompose goal criteria into a task plan.\n    ",
@@ -13069,6 +13153,101 @@
     },
     {
       "aliases": [],
+      "category": "execution",
+      "name": "/mesh_generate",
+      "native": false,
+      "params": [
+        {
+          "default": null,
+          "name": "brief",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "name",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "kit_path",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "api_doc_path",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": 3000,
+          "name": "max_tris",
+          "required": false,
+          "type": "int"
+        },
+        {
+          "default": 0.0,
+          "name": "height_m",
+          "required": false,
+          "type": "num"
+        },
+        {
+          "default": 3,
+          "name": "candidates",
+          "required": false,
+          "type": "int"
+        },
+        {
+          "default": 3,
+          "name": "rounds",
+          "required": false,
+          "type": "int"
+        },
+        {
+          "default": "general,code",
+          "name": "tiers",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": true,
+          "name": "vision",
+          "required": false,
+          "type": "bool"
+        },
+        {
+          "default": 8,
+          "name": "target_score",
+          "required": false,
+          "type": "int"
+        },
+        {
+          "default": "glb",
+          "name": "export",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "output_dir",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": 1200,
+          "name": "timeout",
+          "required": false,
+          "type": "int"
+        }
+      ],
+      "risk": "execution",
+      "summary": "Generate a low-poly 3D model (GLB/FBX) from a brief with a model-written Blender script.",
+      "tool": "mesh_generate"
+    },
+    {
+      "aliases": [],
       "category": "agents",
       "name": "/mission",
       "native": true,
@@ -19017,15 +19196,15 @@
   ],
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES plus sonder_runtime.platform.memory_replication_config",
   "counts": {
-    "capabilities": 229,
-    "commands": 347,
+    "capabilities": 230,
+    "commands": 348,
     "configuration": 249,
     "events": 43,
     "native_tools": 68,
     "schemas": 4,
-    "tools": 229
+    "tools": 230
   },
-  "digest": "3dfee5b04e6d21b5756d8412ab62dc1bcdc682294cab30aac7faa3d13f015e53",
+  "digest": "03e0b9b625a928a44963e9cdcda86e40fef4f2166b8c501d03802742ecebec1f",
   "events": [
     {
       "name": "session.started",
@@ -21687,9 +21866,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "eb29a4a5113035a990201a7387738d0461482de93593b4d728a52bf40b684f19",
+    "catalog_digest": "a394a6a5075f8ad483951bdd87c3253d61453ea7965bff3cb7dc0510c08ed63a",
     "client": {
-      "digest": "eb29a4a5113035a990201a7387738d0461482de93593b4d728a52bf40b684f19",
+      "digest": "a394a6a5075f8ad483951bdd87c3253d61453ea7965bff3cb7dc0510c08ed63a",
       "events": [
         {
           "name": "approval.denied",
@@ -22979,6 +23158,7 @@
           "memory_quality_repair",
           "memory_quality_report",
           "memory_search",
+          "mesh_generate",
           "mission_start",
           "mission_status",
           "model_fanout",
@@ -23707,6 +23887,11 @@
             "name": "memory_search",
             "schema_available": true,
             "summary": "Search local lessons, facts, sessions, and recent interactions."
+          },
+          {
+            "name": "mesh_generate",
+            "schema_available": true,
+            "summary": "Generate a low-poly 3D model (GLB/FBX) from a brief with a model-written Blender script. Runs candidates through build, render, vision critique and revision, and keeps the best. Needs Blender (SONDER_BLENDER); executes model-written Python like run_code."
           },
           {
             "name": "mission_start",
@@ -28457,6 +28642,90 @@
             "type": "object"
           },
           "name": "memory_search"
+        },
+        {
+          "description": "Generate a low-poly 3D model (GLB/FBX) from a brief with a model-written Blender script. Runs candidates through build, render, vision critique and revision, and keeps the best. Needs Blender (SONDER_BLENDER); executes model-written Python like run_code.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "api_doc_path": {
+                "default": "",
+                "title": "Api Doc Path",
+                "type": "string"
+              },
+              "brief": {
+                "title": "Brief",
+                "type": "string"
+              },
+              "candidates": {
+                "default": 3,
+                "title": "Candidates",
+                "type": "integer"
+              },
+              "export": {
+                "default": "glb",
+                "title": "Export",
+                "type": "string"
+              },
+              "height_m": {
+                "default": 0.0,
+                "title": "Height M",
+                "type": "number"
+              },
+              "kit_path": {
+                "default": "",
+                "title": "Kit Path",
+                "type": "string"
+              },
+              "max_tris": {
+                "default": 3000,
+                "title": "Max Tris",
+                "type": "integer"
+              },
+              "name": {
+                "default": "",
+                "title": "Name",
+                "type": "string"
+              },
+              "output_dir": {
+                "default": "",
+                "title": "Output Dir",
+                "type": "string"
+              },
+              "rounds": {
+                "default": 3,
+                "title": "Rounds",
+                "type": "integer"
+              },
+              "target_score": {
+                "default": 8,
+                "title": "Target Score",
+                "type": "integer"
+              },
+              "tiers": {
+                "default": "general,code",
+                "title": "Tiers",
+                "type": "string"
+              },
+              "timeout": {
+                "default": 1200,
+                "title": "Timeout",
+                "type": "integer"
+              },
+              "vision": {
+                "default": true,
+                "title": "Vision",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "brief"
+            ],
+            "title": "mesh_generateArguments",
+            "type": "object"
+          },
+          "name": "mesh_generate"
         },
         {
           "description": "Start a composed mission: set a goal, optionally decompose into tasks, optionally launch autopilot.\n\n    Bridges Goal, Task, and Autopilot subsystems into unified execution.\n    Use --auto to immediately launch autopilot toward the goal.\n    Use --plan to decompose goal criteria into a task plan.\n    ",
@@ -37154,6 +37423,88 @@
           "name": "memory_search"
         },
         {
+          "description": "Generate a low-poly 3D model (GLB/FBX) from a brief with a model-written Blender script. Runs candidates through build, render, vision critique and revision, and keeps the best. Needs Blender (SONDER_BLENDER); executes model-written Python like run_code.",
+          "inputSchema": {
+            "properties": {
+              "api_doc_path": {
+                "default": "",
+                "title": "Api Doc Path",
+                "type": "string"
+              },
+              "brief": {
+                "title": "Brief",
+                "type": "string"
+              },
+              "candidates": {
+                "default": 3,
+                "title": "Candidates",
+                "type": "integer"
+              },
+              "export": {
+                "default": "glb",
+                "title": "Export",
+                "type": "string"
+              },
+              "height_m": {
+                "default": 0.0,
+                "title": "Height M",
+                "type": "number"
+              },
+              "kit_path": {
+                "default": "",
+                "title": "Kit Path",
+                "type": "string"
+              },
+              "max_tris": {
+                "default": 3000,
+                "title": "Max Tris",
+                "type": "integer"
+              },
+              "name": {
+                "default": "",
+                "title": "Name",
+                "type": "string"
+              },
+              "output_dir": {
+                "default": "",
+                "title": "Output Dir",
+                "type": "string"
+              },
+              "rounds": {
+                "default": 3,
+                "title": "Rounds",
+                "type": "integer"
+              },
+              "target_score": {
+                "default": 8,
+                "title": "Target Score",
+                "type": "integer"
+              },
+              "tiers": {
+                "default": "general,code",
+                "title": "Tiers",
+                "type": "string"
+              },
+              "timeout": {
+                "default": 1200,
+                "title": "Timeout",
+                "type": "integer"
+              },
+              "vision": {
+                "default": true,
+                "title": "Vision",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "brief"
+            ],
+            "title": "mesh_generateArguments",
+            "type": "object"
+          },
+          "name": "mesh_generate"
+        },
+        {
           "description": "Start a composed mission: set a goal, optionally decompose into tasks, optionally launch autopilot.\n\n    Bridges Goal, Task, and Autopilot subsystems into unified execution.\n    Use --auto to immediately launch autopilot toward the goal.\n    Use --plan to decompose goal criteria into a task plan.\n    ",
           "inputSchema": {
             "properties": {
@@ -44846,6 +45197,91 @@
         },
         {
           "function": {
+            "description": "Generate a low-poly 3D model (GLB/FBX) from a brief with a model-written Blender script. Runs candidates through build, render, vision critique and revision, and keeps the best. Needs Blender (SONDER_BLENDER); executes model-written Python like run_code.",
+            "name": "mesh_generate",
+            "parameters": {
+              "properties": {
+                "api_doc_path": {
+                  "default": "",
+                  "title": "Api Doc Path",
+                  "type": "string"
+                },
+                "brief": {
+                  "title": "Brief",
+                  "type": "string"
+                },
+                "candidates": {
+                  "default": 3,
+                  "title": "Candidates",
+                  "type": "integer"
+                },
+                "export": {
+                  "default": "glb",
+                  "title": "Export",
+                  "type": "string"
+                },
+                "height_m": {
+                  "default": 0.0,
+                  "title": "Height M",
+                  "type": "number"
+                },
+                "kit_path": {
+                  "default": "",
+                  "title": "Kit Path",
+                  "type": "string"
+                },
+                "max_tris": {
+                  "default": 3000,
+                  "title": "Max Tris",
+                  "type": "integer"
+                },
+                "name": {
+                  "default": "",
+                  "title": "Name",
+                  "type": "string"
+                },
+                "output_dir": {
+                  "default": "",
+                  "title": "Output Dir",
+                  "type": "string"
+                },
+                "rounds": {
+                  "default": 3,
+                  "title": "Rounds",
+                  "type": "integer"
+                },
+                "target_score": {
+                  "default": 8,
+                  "title": "Target Score",
+                  "type": "integer"
+                },
+                "tiers": {
+                  "default": "general,code",
+                  "title": "Tiers",
+                  "type": "string"
+                },
+                "timeout": {
+                  "default": 1200,
+                  "title": "Timeout",
+                  "type": "integer"
+                },
+                "vision": {
+                  "default": true,
+                  "title": "Vision",
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "brief"
+              ],
+              "title": "mesh_generateArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
             "description": "Start a composed mission: set a goal, optionally decompose into tasks, optionally launch autopilot.\n\n    Bridges Goal, Task, and Autopilot subsystems into unified execution.\n    Use --auto to immediately launch autopilot toward the goal.\n    Use --plan to decompose goal criteria into a task plan.\n    ",
             "name": "mission_start",
             "parameters": {
@@ -52494,6 +52930,88 @@
           "query"
         ],
         "title": "memory_searchArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Generate a low-poly 3D model (GLB/FBX) from a brief with a model-written Blender script. Runs candidates through build, render, vision critique and revision, and keeps the best. Needs Blender (SONDER_BLENDER); executes model-written Python like run_code.",
+      "name": "mesh_generate",
+      "parameters": {
+        "properties": {
+          "api_doc_path": {
+            "default": "",
+            "title": "Api Doc Path",
+            "type": "string"
+          },
+          "brief": {
+            "title": "Brief",
+            "type": "string"
+          },
+          "candidates": {
+            "default": 3,
+            "title": "Candidates",
+            "type": "integer"
+          },
+          "export": {
+            "default": "glb",
+            "title": "Export",
+            "type": "string"
+          },
+          "height_m": {
+            "default": 0.0,
+            "title": "Height M",
+            "type": "number"
+          },
+          "kit_path": {
+            "default": "",
+            "title": "Kit Path",
+            "type": "string"
+          },
+          "max_tris": {
+            "default": 3000,
+            "title": "Max Tris",
+            "type": "integer"
+          },
+          "name": {
+            "default": "",
+            "title": "Name",
+            "type": "string"
+          },
+          "output_dir": {
+            "default": "",
+            "title": "Output Dir",
+            "type": "string"
+          },
+          "rounds": {
+            "default": 3,
+            "title": "Rounds",
+            "type": "integer"
+          },
+          "target_score": {
+            "default": 8,
+            "title": "Target Score",
+            "type": "integer"
+          },
+          "tiers": {
+            "default": "general,code",
+            "title": "Tiers",
+            "type": "string"
+          },
+          "timeout": {
+            "default": 1200,
+            "title": "Timeout",
+            "type": "integer"
+          },
+          "vision": {
+            "default": true,
+            "title": "Vision",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "brief"
+        ],
+        "title": "mesh_generateArguments",
         "type": "object"
       }
     },
