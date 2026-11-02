@@ -6,8 +6,8 @@ import pytest
 from sonder_runtime.adapters.meshgen import blender_runner as runner
 from sonder_runtime.domain.meshgen import connectivity as cx
 from sonder_runtime.domain.meshgen.critique import (
-    FLOATING_SCORE_CAP, brief_allows_floating, cap_score, brief_allows_floating, detached_notes, detached_parts, geometry_issues, remember_floating, reopened_parts,
-    reopened_issues, reopened_parts,)
+    FLOATING_SCORE_CAP, brief_allows_floating, cap_score, detached_notes, detached_parts, geometry_issues,
+    remember_floating, reopened_issues, reopened_parts,)
 from sonder_runtime.domain.meshgen.selection import has_floating
 
 
