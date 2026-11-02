@@ -26,7 +26,8 @@ is also in the user's HKCU ACLs) and, even with that capability, cannot create a
 measures the gap and ``preflight`` reports it in the tool's result.  A DENY ACE for the slot's
 package SID on the registry key does NOT help (tested on a scratch key: the AppContainer access
 check still reads it).  Closing it needs a different identity (a separate low-privilege Windows
-account or VM with an empty HKCU).  The host also bounds and redacts every string that flows back
+account or VM with an empty HKCU).  Model-written code never runs in the sandbox (it is recorded as data on the host), so the
+gap is only reachable through the trusted replay and kit code.  The host bounds every string that flows back
 from the build.
 
 Not proven or not covered: disk consumption inside the run directory during a build is not
@@ -438,8 +439,8 @@ def preflight(blender_dir) -> dict:
     state = registry_isolation(blender_dir)
     info = {"registry": state}
     if state != "isolated":
-        info["warning"] = ("sandboxed code can READ the user's HKCU registry (environment variables, recent "
-                           "documents, application settings); see the mesh-generation runbook")
+        info["warning"] = ("HKCU is readable by the Blender process; no model-written code runs in it "
+                           "(see the mesh-generation runbook)")
     return info
 
 

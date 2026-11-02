@@ -58,7 +58,7 @@ def test_generation_prompt_is_generic_and_states_the_contract():
     for needle in ("a handcart", "1500", "1.20 metres", "Z is up", "-Y", "def build():", 'paint(obj, "#RRGGBB")',
                    "ONLY one ```python"):
         assert needle in prompt
-    assert "import propkit" not in prompt and "kit" not in prompt.lower().replace("kit api", "")
+    assert "import propkit" not in prompt and "helper kit" not in prompt.lower()
 
 
 def test_generation_prompt_with_kit_includes_api_and_import_instruction():
@@ -129,7 +129,7 @@ def test_generation_prompt_pushes_the_budget_and_gives_segment_guidance():
     high = generation_prompt("a crate", max_tris=12000, height_m=0, kit_module=None, api_doc="")
     assert "target to USE" in high and "7200 to 10800 triangles" in high
     assert "about 24 segments" in high and "about 10 segments" in low
-    for needle in ("BEVEL", "SUBSURF", "shade_smooth", "rotation_euler=(0, math.pi/2, 0)", "already empty"):
+    for needle in ("BEVEL", "SUBSURF", "shade_smooth", "rot=(0, 90, 0)", "already empty"):
         assert needle in high
 
 
@@ -151,7 +151,7 @@ def test_repair_hint_qualifies_kit_names_and_drops_reset_scene():
 
 def test_revise_prompt_turns_orientation_issues_into_rotation_instructions():
     flat = revise_prompt("B", "code", {"score": 5, "issues": ["Front wheel lies flat in the top view"]})
-    assert "rotation_euler=(0, math.pi/2, 0)" in flat and "z=0" in flat
+    assert "rot=(0, 90, 0)" in flat and "z=0" in flat and "degrees" in flat
     other = revise_prompt("B", "code", {"score": 5, "issues": ["handle is too short"]})
     assert "Orientation help" not in other
     stuck = revise_prompt("B", "code", {"score": 5, "issues": ["x"]}, stuck="DID NOT FIX IT")
@@ -164,3 +164,19 @@ def test_critique_prompt_states_conventions_and_asks_for_a_detail_check():
     assert "NOT to make the axle vertical" in prompt
     assert "DETAIL" in prompt and "8000 triangles" in prompt
     assert "DETAIL" in critique_prompt("x")
+
+
+def test_generation_prompt_describes_the_recorded_dialect_not_bpy():
+    prompt = generation_prompt("a crate", max_tris=1000, height_m=0, kit_module="propkit", api_doc="def f()")
+    for needle in ("RECORDED", "DEGREES", "def build()", "primitive(", "paint_faces(", "modifier(", "handle",
+                   "no bpy", "lambda p: p.center.z"):
+        assert needle in prompt, needle
+    assert "bpy.ops" not in prompt and "rotation_euler" not in prompt
+
+
+def test_repair_hint_covers_the_recorder_messages():
+    from sonder_runtime.domain.meshgen.prompts import repair_hint
+    handle = "line 3: the result of core.primitive(...) can only be passed to other kit/core functions; measurements"
+    assert "opaque handles" in repair_hint(handle, "propkit", set())
+    assert "no bpy" in repair_hint("line 1: import bpy: bpy is not available; use the kit", "propkit", set())
+    assert "propkit.name(" in repair_hint("line 2: os.x is not available in build scripts", "propkit", set())

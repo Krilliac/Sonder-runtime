@@ -149,13 +149,13 @@ def test_posix_memory_cap_does_not_use_preexec_fn():
 
 # ---- review round 5: host-side caps, redaction, grant validation, wipe, memory plumbing -------------
 
-def test_redaction_removes_secret_shapes_and_bounds_length():
-    text = runner.redact_and_bound("ValueError: API_KEY=abcd1234 sk-" + "a" * 30 + " " + "Z" * 60)
+def test_bound_text_removes_secret_shapes_and_bounds_length():
+    text = runner.bound_text("ValueError: API_KEY=abcd1234 sk-" + "a" * 30 + " " + "Z" * 60)
     assert "abcd1234" not in text and "sk-aaaa" not in text and "ZZZZZZZZZZ" not in text
     assert "[redacted]" in text
-    long = runner.redact_and_bound("x " * 5000)
+    long = runner.bound_text("x " * 5000)
     assert len(long) <= runner.MAX_TEXT_CHARS + 20 and long.endswith("...[truncated]")
-    assert runner.redact_and_bound(None) == ""
+    assert runner.bound_text(None) == ""
 
 
 def test_sanitize_result_keeps_known_typed_keys_only():

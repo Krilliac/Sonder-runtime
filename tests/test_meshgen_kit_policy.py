@@ -1,10 +1,14 @@
 """Kit exposure policy: which kit names a model-written script may reach."""
 from __future__ import annotations
 
+import pytest
+
 from sonder_runtime.application.meshgen.loop import MeshRequest, run
 from sonder_runtime.domain.meshgen.kit_policy import analyse_kit
 from sonder_runtime.domain.meshgen.prompts import generation_prompt, kit_api_digest, repair_hint
-from sonder_runtime.domain.meshgen.script_safety import check_script
+from sonder_runtime.domain.meshgen.dsl.errors import ScriptError
+from sonder_runtime.domain.meshgen.dsl.manifest import build_manifest
+from sonder_runtime.domain.meshgen.dsl.recorder import compile_script
 
 KIT = '''"""A kit."""
 import os
@@ -81,17 +85,18 @@ def test_exclude_override_removes_names():
     assert "lathe" in excluded and "box" in allowed
 
 
-def test_gate_rejects_excluded_kit_names_and_accepts_allowed_ones():
-    allowed, _ = analyse_kit(KIT)
+def test_recorder_rejects_excluded_kit_names_and_accepts_allowed_ones():
+    manifest = build_manifest(KIT, "kit")
 
     def script(call):
-        return "import bpy\nimport kit\n\ndef build():\n    %s\n" % call
+        return "import kit\n\ndef build():\n    %s\n" % call
 
-    assert check_script(script("kit.box(1, 2)"), "kit", allowed) == []
-    assert check_script(script("kit.reset_scene()"), "kit", allowed) == []
+    assert compile_script(script("kit.box(1, 2)"), manifest).ops[0]["op"] == "kit.box"
+    assert compile_script(script("kit.reset_scene()"), manifest).ops[0]["op"] == "kit.reset_scene"
     for call in ("kit.run_prop('x')", "kit.export_it('p')", "kit.REPO_ROOT", "kit.render_preview()",
                  "getattr(kit, 'run_prop')()", "kit.__dict__"):
-        assert check_script(script(call), "kit", allowed), call
+        with pytest.raises(ScriptError):
+            compile_script(script(call), manifest)
 
 
 def test_digest_and_hint_never_mention_excluded_names():
@@ -117,13 +122,12 @@ def test_loop_passes_excluded_names_into_the_repair_hint():
 
     def generate(tier, prompt):
         seen.append(prompt)
-        return "```python\nimport bpy\n\ndef build():\n    pass\n```"
+        return "```python\nimport kit\n\ndef build():\n    run_prop('x')\n```"
 
-    results = [{"ok": False, "error": "NameError: name 'run_prop' is not defined", "tail": []},
-               {"ok": True, "tris": 5, "within_budget": True, "files": {"model": "/m.glb"}}]
     request = MeshRequest(brief="x", kit_module="kit", kit_names=allowed, kit_excluded=excluded,
-                          candidates=1, rounds=2, vision=False)
-    run(request, generate=generate, build=lambda i, r, c: results.pop(0), critique=lambda s: None,
+                          manifest=build_manifest(KIT, "kit"), candidates=1, rounds=2, vision=False)
+    run(request, generate=generate, build=lambda i, r, c, rec: {"ok": False, "error": "no build expected"},
+        critique=lambda s: None,
         map_parallel=lambda fn, items: [fn(i) for i in items])
     assert "not available in this tool" in seen[1]
 

@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "a394a6a5075f8ad483951bdd87c3253d61453ea7965bff3cb7dc0510c08ed63a",
+    "catalog_digest": "b10db751338d281db38d1502089f7b49feb55679be53f158af1d17a50a9e4caf",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "a394a6a5075f8ad483951bdd87c3253d61453ea7965bff3cb7dc0510c08ed63a",
+      "catalog_digest": "b10db751338d281db38d1502089f7b49feb55679be53f158af1d17a50a9e4caf",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -4302,7 +4302,7 @@
           "name": "memory_search"
         },
         {
-          "description": "Generate a low-poly 3D model (GLB/FBX) from a brief with a model-written Blender script. Runs candidates through build, render, vision critique and revision, and keeps the best. Needs Blender (SONDER_BLENDER); executes model-written Python like run_code.",
+          "description": "Generate a low-poly 3D model (GLB/FBX) from a brief with a model-written Blender script. Runs candidates through build, render, vision critique and revision, and keeps the best. Needs Blender (SONDER_BLENDER). The model's script is recorded as data and never executed.",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -19204,7 +19204,7 @@
     "schemas": 4,
     "tools": 230
   },
-  "digest": "03e0b9b625a928a44963e9cdcda86e40fef4f2166b8c501d03802742ecebec1f",
+  "digest": "53d39d1f3eeeb41dcda928cd49a8d657f9783e5b08a77d09872a9a2aa396fdfa",
   "events": [
     {
       "name": "session.started",
@@ -21866,9 +21866,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "a394a6a5075f8ad483951bdd87c3253d61453ea7965bff3cb7dc0510c08ed63a",
+    "catalog_digest": "b10db751338d281db38d1502089f7b49feb55679be53f158af1d17a50a9e4caf",
     "client": {
-      "digest": "a394a6a5075f8ad483951bdd87c3253d61453ea7965bff3cb7dc0510c08ed63a",
+      "digest": "b10db751338d281db38d1502089f7b49feb55679be53f158af1d17a50a9e4caf",
       "events": [
         {
           "name": "approval.denied",
@@ -23891,7 +23891,7 @@
           {
             "name": "mesh_generate",
             "schema_available": true,
-            "summary": "Generate a low-poly 3D model (GLB/FBX) from a brief with a model-written Blender script. Runs candidates through build, render, vision critique and revision, and keeps the best. Needs Blender (SONDER_BLENDER); executes model-written Python like run_code."
+            "summary": "Generate a low-poly 3D model (GLB/FBX) from a brief with a model-written Blender script. Runs candidates through build, render, vision critique and revision, and keeps the best. Needs Blender (SONDER_BLENDER). The model's script is recorded as data and never executed."
           },
           {
             "name": "mission_start",
@@ -28644,7 +28644,7 @@
           "name": "memory_search"
         },
         {
-          "description": "Generate a low-poly 3D model (GLB/FBX) from a brief with a model-written Blender script. Runs candidates through build, render, vision critique and revision, and keeps the best. Needs Blender (SONDER_BLENDER); executes model-written Python like run_code.",
+          "description": "Generate a low-poly 3D model (GLB/FBX) from a brief with a model-written Blender script. Runs candidates through build, render, vision critique and revision, and keeps the best. Needs Blender (SONDER_BLENDER). The model's script is recorded as data and never executed.",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -37423,7 +37423,7 @@
           "name": "memory_search"
         },
         {
-          "description": "Generate a low-poly 3D model (GLB/FBX) from a brief with a model-written Blender script. Runs candidates through build, render, vision critique and revision, and keeps the best. Needs Blender (SONDER_BLENDER); executes model-written Python like run_code.",
+          "description": "Generate a low-poly 3D model (GLB/FBX) from a brief with a model-written Blender script. Runs candidates through build, render, vision critique and revision, and keeps the best. Needs Blender (SONDER_BLENDER). The model's script is recorded as data and never executed.",
           "inputSchema": {
             "properties": {
               "api_doc_path": {
@@ -45197,7 +45197,7 @@
         },
         {
           "function": {
-            "description": "Generate a low-poly 3D model (GLB/FBX) from a brief with a model-written Blender script. Runs candidates through build, render, vision critique and revision, and keeps the best. Needs Blender (SONDER_BLENDER); executes model-written Python like run_code.",
+            "description": "Generate a low-poly 3D model (GLB/FBX) from a brief with a model-written Blender script. Runs candidates through build, render, vision critique and revision, and keeps the best. Needs Blender (SONDER_BLENDER). The model's script is recorded as data and never executed.",
             "name": "mesh_generate",
             "parameters": {
               "properties": {
@@ -52934,7 +52934,7 @@
       }
     },
     {
-      "description": "Generate a low-poly 3D model (GLB/FBX) from a brief with a model-written Blender script. Runs candidates through build, render, vision critique and revision, and keeps the best. Needs Blender (SONDER_BLENDER); executes model-written Python like run_code.",
+      "description": "Generate a low-poly 3D model (GLB/FBX) from a brief with a model-written Blender script. Runs candidates through build, render, vision critique and revision, and keeps the best. Needs Blender (SONDER_BLENDER). The model's script is recorded as data and never executed.",
       "name": "mesh_generate",
       "parameters": {
         "properties": {

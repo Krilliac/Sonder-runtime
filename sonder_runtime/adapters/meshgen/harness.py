@@ -1,12 +1,12 @@
 """Blender-side harness for mesh generation.  Runs INSIDE Blender, never imported.
 
 Invoked as ``blender -b --factory-startup --disable-autoexec --python harness.py -- job.json``.
-The job file is JSON: code_path, out_dir, name, kit_path, max_tris, height_m, export,
-render.  The harness builds the candidate script with restricted builtins, joins the
-parts into one mesh, normalises size/placement, exports GLB or FBX, renders a 2x2 sheet
-and prints one ``MESHGEN_RESULT {json}`` line.
-
-This is defence in depth alongside the AST gate, not a sandbox.
+The job file is JSON: ops_path, kit_allowed, out_dir, name, kit_path, max_tris, height_m, export, render,
+result_path.  No model-written code runs here: the host recorded the script into ``ops.json`` (a
+JSON op list); this harness validates that file against ``opschema`` (fail closed: anything outside
+the grammar, an unknown op or a bad reference refuses the whole build), has ``replay.py`` replay the
+ops with trusted code, then bakes and joins the parts, normalises size/placement, exports GLB or FBX,
+renders a 2x2 sheet and writes the result file.
 """
 import json
 import math
@@ -21,7 +21,6 @@ import importlib
 bpy = importlib.import_module("bpy")
 mathutils = importlib.import_module("mathutils")
 
-ALLOWED_ROOTS = {"bpy", "bmesh", "mathutils", "math", "random"}
 RENDER_PX = 512
 DEFAULT_GREY = (0.69, 0.69, 0.69)
 
@@ -40,103 +39,12 @@ def _emit(payload):
     os.replace(tmp, RESULT_PATH)
 
 
-def _neuter_script_execution():
-    """Disable the two Python entry points that run text blocks (belt and braces).
-
-    The AST gate already refuses these names; this keeps a script that slipped past it from
-    executing a Text datablock with unrestricted builtins.
-    """
-    def refuse(*_args, **_kwargs):
-        raise RuntimeError("script execution is disabled by the mesh harness")
-
-    bpy.utils.execfile = refuse
-    bpy.types.Text.as_module = refuse
-
-
 def _job():
     argv = sys.argv
     if "--" not in argv:
         raise RuntimeError("job file argument missing")
     with open(argv[argv.index("--") + 1], "r", encoding="utf-8") as handle:
         return json.load(handle)
-
-
-# ``paint`` is handed to untrusted scripts, and a function's ``__globals__`` is reachable by
-# reflection.  It is therefore built by exec into a fresh namespace holding nothing but a
-# handful of harmless builtins: no os, sys, json, bpy or this module.
-_PAINT_SOURCE = """
-def paint(obj, hex_colour):
-    "Give a mesh object a flat vertex colour (byte colour corner attribute Col)."
-    if obj.type != "MESH":
-        raise ValueError("paint() needs a mesh object")
-    text = str(hex_colour).strip().lstrip("#")
-    if len(text) == 3:
-        text = "".join([ch * 2 for ch in text])
-    if len(text) != 6:
-        raise ValueError("colour must be #RRGGBB")
-    linear = []
-    for i in range(0, 6, 2):
-        c = int(text[i:i + 2], 16) / 255.0
-        linear.append(c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4)
-    mesh = obj.data
-    attr = mesh.color_attributes.get("Col")
-    if attr is None:
-        attr = mesh.color_attributes.new(name="Col", type="BYTE_COLOR", domain="CORNER")
-    attr.data.foreach_set("color", [linear[0], linear[1], linear[2], 1.0] * len(attr.data))
-    mesh.color_attributes.active_color = attr
-    mesh.color_attributes.render_color_index = mesh.color_attributes.find("Col")
-    mesh.update()
-"""
-
-
-def _make_paint():
-    import builtins
-
-    namespace = {"__builtins__": {name: getattr(builtins, name)
-                                  for name in ("str", "len", "int", "range", "ValueError")}}
-    exec(compile(_PAINT_SOURCE, "meshgen_paint", "exec"), namespace)
-    return namespace["paint"]
-
-
-paint = _make_paint()
-
-
-def _safe_builtins(allowed):
-    import builtins
-
-    names = (
-        "abs all any bool dict enumerate float int isinstance len list map max min pow print "
-        "range reversed round set sorted str sum tuple zip ValueError Exception __build_class__"
-    ).split()
-    safe = {name: getattr(builtins, name) for name in names}
-    real_import = builtins.__import__
-
-    def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
-        if level != 0 or name.split(".")[0] not in allowed:
-            raise ImportError("import of %r is not allowed" % (name,))
-        return real_import(name, globals, locals, fromlist, level)
-
-    safe["__import__"] = guarded_import
-    return safe
-
-
-def _stub_excluded_kit_names(module_name, excluded):
-    """Defence in depth: replace kit *functions* the policy excludes (file/export/render helpers).
-
-    The AST gate already refuses them; if a script reached one anyway (a gate bug, a reflection
-    trick) it hits a stub instead of code that writes files.  Excluded names are, by
-    construction, not used by the names that stay exposed.
-    """
-    module = importlib.import_module(module_name)
-
-    def blocked(*_args, **_kwargs):
-        raise RuntimeError("this kit function is not available in mesh_generate; the harness exports and renders")
-
-    for attr in excluded:
-        if not hasattr(module, attr):
-            continue
-        if callable(getattr(module, attr)):  # constants stay: kit primitives read them (e.g. a colour table)
-            setattr(module, attr, blocked)
 
 
 def _clear_scene():
@@ -324,33 +232,34 @@ def _compose_sheet(paths, sheet_path, single_path, keep_dir_name):
             pass
 
 
+def _load_support():
+    """Import the sibling support modules (opschema, replay) that sit next to this file."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    return importlib.import_module("opschema"), importlib.import_module("replay")
+
+
 def main():
     global RESULT_PATH
     job = _job()
     RESULT_PATH = job["result_path"]
-    _neuter_script_execution()
     out_dir = job["out_dir"]
     name = job["name"]
     os.makedirs(out_dir, exist_ok=True)
+    opschema, replay = _load_support()
     kit_path = job.get("kit_path") or ""
-    allowed = set(ALLOWED_ROOTS)
-    # Test hook: the job file is written by the host, never by the model.  Tests use it to hand a
-    # script a module (winreg) the gate would refuse, to prove the secret guard still holds.
-    allowed.update(str(root) for root in (job.get("extra_import_roots") or []))
+    kit_name = os.path.splitext(os.path.basename(kit_path))[0] if kit_path else ""
+    kit_allowed = [str(item) for item in (job.get("kit_allowed") or [])] if kit_name else []
+    with open(job["ops_path"], "r", encoding="utf-8") as handle:
+        if os.fstat(handle.fileno()).st_size > opschema.MAX_JSON_BYTES:
+            raise RuntimeError("ops.json is larger than %d bytes" % opschema.MAX_JSON_BYTES)
+        doc = json.load(handle)
+    opschema.validate_ops(doc, frozenset(kit_allowed))
     if kit_path:
         sys.path.insert(0, os.path.dirname(os.path.abspath(kit_path)))
-        allowed.add(os.path.splitext(os.path.basename(kit_path))[0])
-    if kit_path:
-        _stub_excluded_kit_names(os.path.splitext(os.path.basename(kit_path))[0], job.get("kit_excluded") or [])
-    with open(job["code_path"], "r", encoding="utf-8") as handle:
-        source = handle.read()
     _clear_scene()
-    env = {"__builtins__": _safe_builtins(allowed), "__name__": "meshgen_candidate", "paint": paint}
-    exec(compile(source, job["code_path"], "exec"), env)
-    build = env.get("build")
-    if not callable(build):
-        raise RuntimeError("the script does not define build()")
-    build()
+    replay.run(doc, kit_name, kit_allowed)
     obj = _bake_and_join(name)
     size, lo, hi = _normalise(obj, float(job.get("height_m") or 0.0))
     mesh = obj.data

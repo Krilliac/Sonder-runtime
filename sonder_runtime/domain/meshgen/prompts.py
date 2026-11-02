@@ -1,18 +1,22 @@
 """Prompt construction and code extraction for the mesh generation loop.
 
 The wording is generic (no game or engine specifics): the caller's brief and
-an optional kit API digest carry everything project-specific.  Pure.
+an optional kit API digest carry everything project-specific.  The model writes a script in the
+recorded dialect (``dsl``): kit and core calls only, rotations in degrees.  Pure.
 """
 from __future__ import annotations
 
 import ast
 import re
 
+from .dsl.core_api import DIALECT_RULES, core_api_digest
+
 _FENCE = re.compile(r"```[ \t]*([A-Za-z0-9_+-]*)[ \t]*\r?\n(.*?)```", re.DOTALL)
 _OPEN_FENCE = re.compile(r"```[ \t]*(?:python|py)[ \t]*\r?\n(.*)\Z", re.DOTALL | re.IGNORECASE)
 _MAX_ERROR_CHARS = 3000
 _MAX_CODE_CHARS = 24_000
 _NAME_ERROR = re.compile(r"NameError: name '([A-Za-z_][A-Za-z0-9_]*)' is not defined")
+_HANDLE_USE = "can only be passed to other kit/core functions"
 _ORIENTATION_WORDS = ("flat", "upright", "axle", "lying", "lies", "orient", "rotate", "rotation", "tilt",
                       "sideways", "vertical", "horizontal", "facing")
 
@@ -68,57 +72,47 @@ def generation_prompt(brief: str, *, max_tris: int, height_m: float,
         "Overall height is about %.2f metres." % height_m if height_m and height_m > 0
         else "Pick a sensible real-world size (the harness can rescale later)."
     )
-    if kit_module:
-        rotation = ("- bpy rotations are in radians (use math.radians for degrees) unless the kit "
-                    "API below says otherwise.")
-        colour = ("- Colour each part with the provided helper `paint(obj, \"#RRGGBB\")` (already "
-                  "defined; do not import it) unless the kit API below provides its own colouring.")
-    else:
-        rotation = "- bpy rotations are in radians (use math.radians for degrees)."
-        colour = ("- Colour each part with the provided helper `paint(obj, \"#RRGGBB\")` (already "
-                  "defined; do not import it).")
     parts = [
-        "You write a Blender Python script that builds a 3D model of the subject below.",
+        "You write a short Python build script for a 3D model of the subject below. The script is "
+        "RECORDED, not run in Blender: it can only call the kit and core functions listed here.",
         "",
         "SUBJECT: %s" % (brief or "").strip(),
         "",
         "Rules:",
-        "- Blender 4/5 Python API (bpy, bmesh, mathutils, math, random). Units are metres; Z is up; "
-        "the front of the object faces -Y.",
-        rotation,
+        DIALECT_RULES.strip(),
+        "- Units are metres; Z is up; the front of the object faces -Y.",
         "- Budget: %d triangles in total, counted after modifiers. Treat it as a target to USE, not a "
         "ceiling to hide under: aim for roughly %d to %d triangles and spend them where they read "
         "(bevels on hard edges, about %d segments around wheels, barrels and other round parts so they "
-        "read round, smooth shading with bpy.ops.object.shade_smooth() on organic parts) while skipping "
-        "detail nobody would see. Modifiers are allowed: obj.modifiers.new(name=\"m\", type=\"BEVEL\") "
-        "(also SUBSURF, SOLIDIFY, MIRROR, ARRAY, WEIGHTED_NORMAL, TRIANGULATE, DECIMATE, BOOLEAN) and then "
-        "set its properties; they are baked automatically." % (
+        "read round, smooth shading on organic parts) while skipping detail nobody would see. Modifiers "
+        "are baked automatically." % (
             int(max_tris), int(max_tris * 0.6), int(max_tris * 0.9), _segments_for(max_tris)),
         "- %s" % height,
         "- Cylinders, cones, tori and lathes are created around the Z axis, so they lie flat. To stand a "
-        "wheel upright with its axle along X, rotate it 90 degrees about Y (rotation_euler=(0, math.pi/2, 0)); "
-        "for an axle along Y, rotate 90 degrees about X. Check every wheel, barrel and door this way.",
-        "- The scene is already empty when build() runs: do not clear or reset it yourself. The harness "
-        "exports and renders the result for you: never write export, render, save or preview code.",
-        "- Make each distinct part a separate mesh object; parts must touch or overlap so the model "
+        "wheel upright with its axle along X, rotate it 90 degrees about Y (rot=(0, 90, 0)); "
+        "for an axle along Y, rotate 90 degrees about X (rot=(90, 0, 0)). Check every wheel, barrel and door this way.",
+        "- The scene is already empty when the script is replayed. The harness exports and renders the "
+        "result for you: never write export, render, save or preview code.",
+        "- Make each distinct part its own object; parts must touch or overlap so the model "
         "is one connected whole, with every part in its correct position and orientation "
         "(for example wheels stand upright on their axle, not lying flat).",
-        "- Nothing animated, no lights or cameras, no materials or textures.",
-        "- Define `def build():` which creates the objects in the current scene and returns nothing. "
-        "Do not call build() yourself. Do not use files, the network, or names starting with an underscore.",
-        "- Use `import bpy` plainly and spell every path out: only bpy.ops.mesh/object/transform/curve "
-        "operators, bpy.data.objects/meshes/materials/collections/curves and bpy.context.scene/view_layer/"
-        "active_object/selected_objects are available. Never assign `bpy` or `bpy.ops`/`bpy.data`/"
-        "`bpy.context` to a variable, and never touch save/write/filepath/text/driver/preferences APIs.",
-        colour,
+        "- Nothing animated, no lights or cameras, no textures.",
+        "- Colour each part with `paint(obj, \"#RRGGBB\")` or `paint_faces(obj, lambda p: ..., \"#RRGGBB\")`, "
+        "or with the kit's own colour arguments.",
         "- Output ONLY one ```python code block and nothing else.",
+        "",
+        "Core functions (always available, plain names, no import):",
+        "```",
+        core_api_digest(),
+        "```",
     ]
     if kit_module:
         parts += [
             "",
             "A helper kit is available. Start the script with `import %s` and use it where it helps. "
             "Always call its functions qualified (`%s.name(...)`, never a bare `name(...)`). The scene is "
-            "already cleared, so do not call reset_scene(). Its public API:" % (kit_module, kit_module),
+            "already cleared, so do not call reset_scene(). Rotations passed to the kit are in degrees too. "
+            "Its public API:" % (kit_module, kit_module),
             "```",
             (api_doc or "").strip() or "(no API digest available)",
             "```",
@@ -137,7 +131,18 @@ def _code_block(code: str) -> str:
 
 def repair_hint(failure: str, kit_module: str | None, kit_names, kit_excluded=()) -> str:
     """A concrete extra instruction for failures the model keeps repeating (else empty)."""
-    match = _NAME_ERROR.search(str(failure or ""))
+    text = str(failure or "")
+    if _HANDLE_USE in text:
+        return ("Results of kit/core calls are opaque handles: only pass them to other kit/core functions "
+                "(paint, transform, join, a list of parts). Do not index, unpack, add, compare or read "
+                "attributes of them. Compute positions from the sizes you pass in instead of measuring.")
+    if "bpy is not available" in text:
+        return ("There is no bpy here. Build with the kit and core functions in the prompt only "
+                "(primitive, mesh, modifier, paint, transform, join).")
+    if "is not available in build scripts" in text:
+        return ("That name is not part of the build dialect. Use only the listed kit and core functions, "
+                "and call kit functions qualified, for example `%s.name(...)`." % (kit_module or "kit"))
+    match = _NAME_ERROR.search(text)
     if not match:
         return ""
     name = match.group(1)
@@ -160,8 +165,8 @@ def orientation_guidance(issues) -> str:
     if not any(word in text for word in _ORIENTATION_WORDS):
         return ""
     return ("Orientation help: cylinders, cones, tori and lathes are created around the Z axis, so they lie "
-            "flat. To stand a wheel upright with its axle along X, set rotation_euler=(0, math.pi/2, 0) "
-            "(rotate 90 degrees about Y); for an axle along Y use rotation_euler=(math.pi/2, 0, 0). "
+            "flat. To stand a wheel upright with its axle along X, set rot=(0, 90, 0) "
+            "(rotate 90 degrees about Y); for an axle along Y use rot=(90, 0, 0). Rotations are in degrees. "
             "When a kit function revolves about Z, rotate the returned object the same way, and move it so "
             "the rim touches the ground (z=0) again. A wheel seen as a flat disc from the TOP is lying "
             "flat; seen from the SIDE it should be a full circle.")

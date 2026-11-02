@@ -433,36 +433,52 @@ def test_an_allocation_above_the_job_limit_fails_and_succeeds_with_a_high_limit(
     assert _run_alloc(tmp_path, "high", 12288)["alloc"] == ["OK", "allocated"]
 
 
+HOG_KIT = ("def hog():\n    blob = [0] * 400000000\n    blob[::4096] = [1] * len(blob[::4096])\n\n"
+           "def fail():\n    raise ValueError('plain failure')\n")
+
+
+def _recorded(tmp_path, body, kit=True):
+    """Record ``body`` (the text of ``def build()``) against a trusted test kit; returns ``(ops_path, kit_path, allowed)``."""
+    from sonder_runtime.domain.meshgen.dsl.manifest import build_manifest
+    from sonder_runtime.domain.meshgen.dsl.recorder import compile_script
+
+    (tmp_path / "kit").mkdir(exist_ok=True)
+    kit_path = tmp_path / "kit" / "hogkit.py"
+    kit_path.write_text(HOG_KIT, encoding="utf-8")
+    manifest = build_manifest(HOG_KIT, "hogkit")
+    source = ("import hogkit\n" if kit else "") + "def build():\n" + body
+    ops = tmp_path / "ops.json"
+    ops.write_text(compile_script(source, manifest if kit else None).text, encoding="utf-8")
+    return ops, (kit_path if kit else None), sorted(manifest.exposed)
+
+
 def test_memory_limit_exceeded_is_reported_only_with_evidence(tmp_path, monkeypatch):
     monkeypatch.setenv("SONDER_MESHGEN_MEM_MB", "512")
-    code = tmp_path / "c.py"
-    code.write_text("import bpy\n\ndef build():\n    blob = [0] * 400000000\n    blob[::4096] = [1] * len(blob[::4096])\n",
-                    encoding="utf-8")
-    result = blender_runner.build_candidate(BLENDER, str(code), str(tmp_path / "out"), name="m", max_tris=100,
-                                            height_m=0, render=False, timeout=120)
+    ops, kit_path, allowed = _recorded(tmp_path, "    hogkit.hog()\n")
+    result = blender_runner.build_candidate(BLENDER, str(ops), str(tmp_path / "out"), name="m", kit_path=kit_path,
+                                            kit_allowed=allowed, max_tris=100, height_m=0, render=False, timeout=120)
     assert result["ok"] is False and "memory limit exceeded (512 MB)" in result["error"], result
     # A failing build that did not come near the limit must not be blamed on memory.
-    code.write_text("import bpy\n\ndef build():\n    raise ValueError('plain failure')\n", encoding="utf-8")
-    plain = blender_runner.build_candidate(BLENDER, str(code), str(tmp_path / "out2"), name="m", max_tris=100,
-                                           height_m=0, render=False, timeout=120)
+    ops, kit_path, allowed = _recorded(tmp_path, "    hogkit.fail()\n")
+    plain = blender_runner.build_candidate(BLENDER, str(ops), str(tmp_path / "out2"), name="m", kit_path=kit_path,
+                                           kit_allowed=allowed, max_tris=100, height_m=0, render=False, timeout=120)
     assert plain["ok"] is False and "plain failure" in plain["error"] and "memory" not in plain["error"]
+    assert plain["error"].startswith("ReplayError: line 3") or "line 3" in plain["error"], plain["error"]
 
 
 def test_the_explicit_memory_argument_is_honoured_on_the_sandboxed_path(tmp_path):
-    code = tmp_path / "c.py"
-    code.write_text("import bpy\n\ndef build():\n    blob = [0] * 400000000\n    blob[::4096] = [1] * len(blob[::4096])\n",
-                    encoding="utf-8")
-    result = blender_runner.build_candidate(BLENDER, str(code), str(tmp_path / "out"), name="m", max_tris=100,
-                                            height_m=0, render=False, timeout=120, memory_mb=384)
+    ops, kit_path, allowed = _recorded(tmp_path, "    hogkit.hog()\n")
+    result = blender_runner.build_candidate(BLENDER, str(ops), str(tmp_path / "out"), name="m", kit_path=kit_path,
+                                            kit_allowed=allowed, max_tris=100, height_m=0, render=False, timeout=120,
+                                            memory_mb=384)
     assert "memory limit exceeded (384 MB)" in result["error"], result
 
 
 # ---------------------------------------------------------------- sizes and cleanup
 
 def test_a_build_leaves_no_run_dir_grant_or_slot_behind(tmp_path):
-    code = tmp_path / "c.py"
-    code.write_text("import bpy\n\ndef build():\n    bpy.ops.mesh.primitive_cube_add()\n", encoding="utf-8")
-    result = blender_runner.build_candidate(BLENDER, str(code), str(tmp_path / "out"), name="m", max_tris=100,
+    ops, _, _ = _recorded(tmp_path, "    primitive('cube')\n", kit=False)
+    result = blender_runner.build_candidate(BLENDER, str(ops), str(tmp_path / "out"), name="m", max_tris=100,
                                             height_m=0, render=False, timeout=120)
     assert result["ok"] is True and "warnings" not in result, result
     assert not list((tmp_path / "out").glob(".run-*"))

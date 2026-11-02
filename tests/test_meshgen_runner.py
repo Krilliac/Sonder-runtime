@@ -31,8 +31,8 @@ def _write_result(argv, payload):
 
 def _build(tmp_path, **kw):
     kw.setdefault("sandbox", "unsandboxed")
-    code = tmp_path / "c.py"
-    code.write_text("def build(): pass\n")
+    code = tmp_path / "ops.json"
+    code.write_text('{"version": 1, "kit": "", "seed": 0, "ops": [], "log": []}')
     kw.setdefault("max_tris", 10)
     kw.setdefault("height_m", 0)
     return runner.build_candidate("blender", str(code), str(tmp_path / "out"), name="n", **kw)
@@ -90,7 +90,8 @@ def test_build_candidate_runs_without_a_shell_and_reads_the_result_file(tmp_path
     assert job["export"] == "fbx" and job["render"] is False and job["kit_path"] == str(kit.resolve())
     assert job["result_path"].startswith(job["out_dir"]) and "result-" in job["result_path"]
     assert not Path(job["result_path"]).exists()  # consumed
-    assert job["kit_excluded"] == []
+    assert job["kit_allowed"] == [] and job["ops_path"] == str((tmp_path / "ops.json").resolve())
+    assert "code_path" not in job and "kit_excluded" not in job
     assert not (tmp_path / "out" / runner.SCRATCH_NAME).exists()  # scratch profile removed after the build
 
 
@@ -188,7 +189,7 @@ def test_blender_gets_an_allow_listed_environment_only(tmp_path, monkeypatch):
     assert env["NUMBER_OF_PROCESSORS"] == "8" and env["SYSTEMROOT"] == "C:/Windows"
 
 
-def test_excluded_kit_names_travel_in_the_job_file(tmp_path, monkeypatch):
+def test_allowed_kit_names_travel_in_the_job_file(tmp_path, monkeypatch):
     seen = {}
 
     def fake_run(argv, **kwargs):
@@ -196,8 +197,25 @@ def test_excluded_kit_names_travel_in_the_job_file(tmp_path, monkeypatch):
         return _completed()
 
     _patch_run(monkeypatch, fake_run)
-    _build(tmp_path, kit_excluded=frozenset({"run_prop", "KIT_DIR"}))
-    assert seen["job"]["kit_excluded"] == ["KIT_DIR", "run_prop"]
+    _build(tmp_path, kit_allowed=frozenset({"box", "PALETTE"}))
+    assert seen["job"]["kit_allowed"] == ["PALETTE", "box"]
+
+
+def test_the_trusted_harness_files_are_staged_next_to_the_harness_and_removed_afterwards(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        harness = Path(argv[argv.index("--python") + 1])
+        seen["files"] = sorted(item.name for item in harness.parent.iterdir())
+        seen["same"] = [(harness.parent / source.name).read_bytes() == source.read_bytes()
+                        for source in runner.HARNESS_FILES]
+        seen["dir"] = harness.parent
+        return _completed()
+
+    _patch_run(monkeypatch, fake_run)
+    _build(tmp_path)
+    assert seen["files"] == ["harness.py", "opschema.py", "replay.py"] and all(seen["same"])
+    assert not seen["dir"].exists()
 
 
 def test_scratch_profile_is_removed_even_when_the_build_fails(tmp_path, monkeypatch):

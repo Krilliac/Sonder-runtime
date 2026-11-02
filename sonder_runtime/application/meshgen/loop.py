@@ -3,11 +3,14 @@
 All I/O is injected, so the loop is deterministic under test:
 
 * ``generate(tier, prompt) -> str``     one model completion
-* ``build(candidate_index, round_index, code) -> dict``  builds the script
-  (``ok``, ``tris``, ``within_budget``, ``error``, ``files`` with an optional
-  ``sheet``); it may raise, which is treated as a failed build
+* ``build(candidate_index, round_index, code, recording) -> dict``  replays the recorded script
+  (``recording.text`` is its ``ops.json``) and returns ``ok``, ``tris``, ``within_budget``,
+  ``error``, ``files`` with an optional ``sheet``; it may raise, which is treated as a failed build
 * ``critique(sheet_path) -> str | None``  vision reply; ``None`` = unavailable
 * ``map_parallel(fn, items) -> list``    ordered parallel map
+
+The model's script is never executed: ``compile_script`` records it into an op list (a
+``ScriptError`` is the failure the model sees, with a line number) and only that data is built.
 
 Each candidate runs on its own thread of control and keeps every attempt plus
 its best version; the overall winner is :func:`pick_best` over those.  The
@@ -20,9 +23,10 @@ import time
 from dataclasses import dataclass
 
 from ...domain.meshgen.critique import parse_critique
+from ...domain.meshgen.dsl.errors import ScriptError
+from ...domain.meshgen.dsl.recorder import compile_script
 from ...domain.meshgen.prompts import (
     extract_code, generation_prompt, repair_hint, repair_prompt, revise_prompt,)
-from ...domain.meshgen.script_safety import check_script
 from ...domain.meshgen.selection import pick_best
 
 _ERROR_CLIP = 1500
@@ -36,6 +40,7 @@ class MeshRequest:
     kit_module: str | None = None
     kit_names: frozenset = frozenset()
     kit_excluded: frozenset = frozenset()
+    manifest: object = None
     api_doc: str = ""
     candidates: int = 3
     rounds: int = 3
@@ -85,7 +90,7 @@ def _same_problem(previous, current) -> bool:
     if status == "build_error":
         return bool(_first_line(current.get("error"))) and (
             _first_line(previous.get("error")) == _first_line(current.get("error")))
-    if status == "rejected":
+    if status == "script_error":
         def strip(issue):
             return re.sub(r"^line \d+:", "", str(issue)).strip()
         return bool(current["issues"]) and bool(previous["issues"]) and (
@@ -112,8 +117,9 @@ def _stuck_note(attempt) -> str:
         return ("Your last revision did not fix: %s. The score stayed at %s and the geometry barely changed. "
                 "Make a real, visible change to exactly that part, and verify the rotation or position "
                 "numerically before returning the script." % (attempt["issues"][0], attempt["score"]))
-    if status == "rejected":
-        return "Your last revision hit the same safety rejection again: %s." % attempt["issues"][0]
+    if status == "script_error":
+        return ("Your last revision hit the same script error again: %s. Change exactly that line."
+                % attempt["issues"][0])
     return ("Your last revision did not reduce the triangle count (%s). Remove or simplify the biggest "
             "parts instead of adjusting small ones." % attempt["tris"])
 
@@ -140,26 +146,24 @@ def run(request: MeshRequest, *, generate, build, critique, map_parallel) -> dic
             attempt["error"] = _clip("%s: %s" % (type(exc).__name__, exc), 400)
             return False, None
         code = extract_code(reply)
-        reasons = check_script(code, request.kit_module, request.kit_names)
-        if reasons:
-            attempt["status"] = "rejected"
-            attempt["issues"] = reasons[:8]
-            failure = "The safety check rejected the script:\n- " + "\n- ".join(reasons[:8])
-            return False, lambda stuck: repair_prompt(base, code, failure, stuck=stuck)
         try:
-            result = build(index, round_index, code)
+            recording = compile_script(code, request.manifest, seed=index * 100 + round_index)
+        except ScriptError as exc:
+            attempt["status"] = "script_error"
+            attempt["issues"] = [str(exc)]
+            failure = "The script could not be recorded:\n- " + str(exc)
+            hint = repair_hint(failure, request.kit_module, request.kit_names, request.kit_excluded)
+            return False, lambda stuck: repair_prompt(base, code, failure, hint=hint, stuck=stuck)
+        try:
+            result = build(index, round_index, code, recording)
         except Exception as exc:  # noqa: BLE001 - a builder crash is a failed build
             result = {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)}
         if not result.get("ok"):
             attempt["status"] = "build_error"
             attempt["error"] = _clip(result.get("error"), 400)
             failure = _failure_text(result)
-            if result.get("secret_leak_blocked"):
-                attempt["secret_leak_blocked"] = True
-                failure = ("The build was discarded because its output contained data that looks like a "
-                           "credential. Build the geometry from numbers and the allowed APIs only; never "
-                           "read the registry, environment variables or files, and never put such data in "
-                           "object, mesh or material names or in error messages.")
+            if recording.log:
+                failure = _clip(failure + "\nYour print() output while recording:\n" + "\n".join(recording.log[-10:]))
             hint = repair_hint(failure, request.kit_module, request.kit_names, request.kit_excluded)
             return False, lambda stuck: repair_prompt(base, code, failure, hint=hint, stuck=stuck)
         within = bool(result.get("within_budget"))

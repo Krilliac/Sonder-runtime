@@ -5,8 +5,9 @@ import json
 import threading
 
 from sonder_runtime.application.meshgen.loop import MeshRequest, run
+from sonder_runtime.domain.meshgen.dsl.manifest import build_manifest
 
-GOOD_CODE = "import bpy\n\ndef build():\n    pass\n"
+GOOD_CODE = "def build():\n    primitive('cube')\n"
 
 
 def fence(code=GOOD_CODE):
@@ -34,7 +35,7 @@ class Rig:
             self.prompts.append(prompt)
             return self.replies.pop(0) if self.replies else fence()
 
-    def build(self, index, round_index, code):
+    def build(self, index, round_index, code, recording=None):
         with self.lock:
             result = self.builds.pop(0) if self.builds else ok_build()
         if isinstance(result, Exception):
@@ -76,17 +77,17 @@ def test_builder_exception_is_a_failed_build_not_a_crash():
     assert "blender exploded" in rig.prompts[1]
 
 
-def test_repair_after_a_safety_rejection_never_reaches_the_builder():
+def test_repair_after_a_script_error_never_reaches_the_builder():
     bad = fence("import os\n\ndef build():\n    os.system('x')\n")
     rig = Rig(replies=[bad, fence()], critiques=[verdict(9)])
     built = []
     original = rig.build
-    rig.build = lambda i, r, c: built.append(c) or original(i, r, c)
+    rig.build = lambda i, r, c, rec: built.append(c) or original(i, r, c, rec)
     report = rig.go(candidates=1, rounds=3)
     attempts = report["candidates"][0]["attempts"]
-    assert [a["status"] for a in attempts] == ["rejected", "accepted"]
+    assert [a["status"] for a in attempts] == ["script_error", "accepted"]
     assert attempts[0]["issues"] and "line 1" in attempts[0]["issues"][0]
-    assert "safety check rejected" in rig.prompts[1] and "import os" in rig.prompts[1]
+    assert "could not be recorded" in rig.prompts[1] and "import os" in rig.prompts[1]
     assert len(built) == 1 and "os.system" not in built[0]
 
 
@@ -196,12 +197,29 @@ def test_vision_is_not_reported_on_when_no_candidate_reached_the_critique():
     assert rig.go(candidates=1, rounds=2, max_tris=10)["vision"].startswith("unavailable")
 
 
-def test_the_safety_gate_receives_the_kit_names():
-    kit_code = fence("import bpy\nimport propkit\n\ndef build():\n    propkit.os.system('x')\n")
-    rig = Rig(replies=[kit_code, fence("import bpy\nimport propkit\n\ndef build():\n    propkit.wheel(1)\n")],
-              critiques=[verdict(9)])
-    report = rig.go(candidates=1, rounds=2, kit_module="propkit", kit_names=frozenset({"wheel"}))
-    assert [a["status"] for a in report["candidates"][0]["attempts"]] == ["rejected", "accepted"]
+def test_the_recorder_receives_the_kit_manifest():
+    bad = fence("import propkit\n\ndef build():\n    propkit.os.system('x')\n")
+    good = fence("import propkit\n\ndef build():\n    propkit.wheel(1)\n")
+    rig = Rig(replies=[bad, good], critiques=[verdict(9)])
+    manifest = build_manifest("def wheel(r):\n    pass\n", "propkit")
+    report = rig.go(candidates=1, rounds=2, kit_module="propkit", kit_names=frozenset({"wheel"}), manifest=manifest)
+    assert [a["status"] for a in report["candidates"][0]["attempts"]] == ["script_error", "accepted"]
+
+
+def test_the_build_receives_the_recording_and_print_output_reaches_the_repair_prompt():
+    seen = []
+    rig = Rig(replies=[fence("def build():\n    primitive('cube')\n    print('probe-line')\n"), fence()],
+              builds=[{"ok": False, "error": "boom"}, ok_build()], critiques=[verdict(9)])
+    original = rig.build
+
+    def build(i, r, c, rec):
+        seen.append(rec)
+        return original(i, r, c, rec)
+
+    rig.build = build
+    rig.go(candidates=1, rounds=2)
+    assert seen[0].ops[0]["op"] == "core.primitive" and seen[0].text.startswith("{")
+    assert "probe-line" in rig.prompts[1]
 
 
 def test_repeated_build_error_escalates_with_a_note_and_switches_tier():

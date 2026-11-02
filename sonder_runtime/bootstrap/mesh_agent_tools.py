@@ -1,13 +1,11 @@
 """``mesh_generate``: model-driven 3D asset generation in headless Blender.
 
-Closed loop over several candidates: the model writes a Blender build script,
-a safety gate screens it, headless Blender builds and renders it, a vision
-model critiques the render, and the script is repaired or revised.  The best
-candidate wins.  See ``docs/runbooks/mesh-generation.md``.
+Closed loop over several candidates: the model writes a build script in a small Python dialect,
+the host records it into a JSON op list (the script itself never executes), headless Blender
+replays the ops with trusted code and renders them, a vision model critiques the render, and the
+script is repaired or revised.  The best candidate wins.  See ``docs/runbooks/mesh-generation.md``.
 
-The tool executes model-written Python inside Blender, so it is graded like
-``run_code`` (the AST gate and restricted builtins are defence in depth, not a
-sandbox).  server.py is size-capped, so the tool registers itself from here.
+server.py is size-capped, so the tool registers itself from here.
 """
 from __future__ import annotations
 
@@ -21,13 +19,13 @@ import time
 from pathlib import Path
 
 from ..adapters.filesystem import file_ops
-from ..adapters.meshgen import blender_runner, secret_sources
+from ..adapters.meshgen import blender_runner
 from ..application.meshgen.loop import MeshRequest, run as run_loop
 from ..domain.common.errors import SonderError
 from ..domain.meshgen.critique import critique_prompt
 from ..domain.meshgen.prompts import kit_api_digest
+from ..domain.meshgen.dsl.manifest import build_manifest
 from ..domain.meshgen.kit_policy import analyse_kit
-from ..domain.meshgen.secret_guard import REDACTED, SecretGuardUnavailable
 from ..platform.runtime_threads import ThreadPoolExecutor
 from .legacy_root import runtime
 
@@ -107,23 +105,16 @@ def _candidate_summary(candidate: dict) -> dict:
     }
     if candidate.get("error"):
         summary["error"] = candidate["error"]
-    if any(item.get("secret_leak_blocked") for item in candidate.get("attempts", [])):
-        summary["secret_leak_blocked"] = True
     return summary
 
 
 def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, height_m=0.0,
                   candidates=3, rounds=3, tiers="general,code", vision=True, target_score=8,
-                  export="glb", output_dir="", timeout=1200, *, rt=None, runner=blender_runner, guard=None) -> dict:
+                  export="glb", output_dir="", timeout=1200, *, rt=None, runner=blender_runner) -> dict:
     """Run the loop and return the compact report; raises ``SonderError`` on bad input."""
     brief = str(brief or "").strip()
     if not brief:
         raise SonderError("brief is required")
-    if guard is None:
-        try:
-            guard = secret_sources.load_guard()
-        except SecretGuardUnavailable as exc:
-            raise SonderError("mesh_generate refuses to run: the secret guard could not be initialised (%s)" % exc) from exc
     blender = runner.locate_blender()
     if not blender:
         raise SonderError("Blender not found: set SONDER_BLENDER to blender.exe or put blender on PATH "
@@ -135,7 +126,7 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
             sandbox_info = dict(check(blender))
         except blender_runner.sandbox_win.SandboxUnavailable as exc:
             raise SonderError("mesh_generate refuses to run: the Blender sandbox is unavailable (%s). Fix it or, "
-                              "accepting that model-written code then runs with this server's authority, set %s=1."
+                              "accepting that Blender then runs with this server's authority, set %s=1."
                               % (exc, blender_runner.sandbox_win.OPT_OUT_ENV)) from exc
     rt = rt or runtime()
     candidates = _clamp(candidates, 1, 6, 3)
@@ -161,12 +152,14 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
     kit_excluded = frozenset()
     api_doc = ""
     kit_file = None
+    manifest = None
     if str(kit_path or "").strip():
         kit_file, kit_source = _read_text(kit_path.strip(), MAX_KIT_BYTES, "kit")
         kit_module = kit_file.stem
         if kit_file.suffix != ".py" or not kit_module.isidentifier() or kit_module.startswith("_"):
             raise SonderError("kit_path must be a .py file with a plain module name: %s" % kit_file)
         kit_names, kit_excluded = analyse_kit(kit_source)
+        manifest = build_manifest(kit_source, kit_module)
         if str(api_doc_path or "").strip():
             api_doc = _read_text(api_doc_path.strip(), MAX_API_DOC_CHARS * 4, "api doc")[1][:MAX_API_DOC_CHARS]
         else:
@@ -177,7 +170,6 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
     deadline = time.monotonic() + timeout
     critique_text = critique_prompt(brief, max_tris=max_tris)
     vision_state = {"lock": threading.Lock(), "dead": "", "disabled": not vision}
-    security = {"lock": threading.Lock(), "critic_blocked": 0, "code_blocked": 0}
 
     def remaining() -> float:
         left = deadline - time.monotonic()
@@ -189,25 +181,24 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
         return rt._generate_text(prompt, tier=tier, temperature=0.3, num_predict=GENERATE_NUM_PREDICT, num_ctx=GENERATE_NUM_CTX,
                                  timeout=int(min(remaining(), _GENERATE_TIMEOUT_CAP)))
 
-    def build(index, round_index, code):
+    def build(index, round_index, code, recording):
         left = remaining()
         if left < MIN_BUILD_SECONDS:
             raise TimeoutError("mesh_generate has under %ds left" % MIN_BUILD_SECONDS)
         stem = "c%d_r%d" % (index, round_index)
-        if guard.hit(code):  # a script that carries a credential is never written to disk or returned
-            with security["lock"]:
-                security["code_blocked"] += 1
-            return {"ok": False, "error": REDACTED, "secret_leak_blocked": True}
         code_path = root / (stem + ".py")
         code_path.write_text(code, encoding="utf-8")
+        ops_path = root / (stem + ".ops.json")
+        ops_path.write_text(recording.text, encoding="utf-8")
         result = runner.build_candidate(
-            blender, str(code_path), str(root / stem), name=slug,
-            kit_path=str(kit_file) if kit_file else None, kit_excluded=kit_excluded, max_tris=max_tris, height_m=height,
+            blender, str(ops_path), str(root / stem), name=slug,
+            kit_path=str(kit_file) if kit_file else None, kit_allowed=sorted(manifest.exposed) if manifest else (),
+            max_tris=max_tris, height_m=height,
             export=export, render=True, timeout=int(max(MIN_BUILD_SECONDS, min(left, _BUILD_TIMEOUT))),
-            guard=guard,
         )
         files = dict(result.get("files") or {})
         files["code"] = str(code_path)
+        files["ops"] = str(ops_path)
         return dict(result, files=files)
 
     def critique(sheet):
@@ -215,12 +206,7 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
             if vision_state["dead"]:
                 return None
         try:
-            reply = rt._vision_analyze_impl(sheet, critique_text, extra_roots=str(root))
-            if reply is not None and guard.hit(reply):
-                with security["lock"]:
-                    security["critic_blocked"] += 1
-                return REDACTED
-            return reply
+            return rt._vision_analyze_impl(sheet, critique_text, extra_roots=str(root))
         except Exception as exc:  # noqa: BLE001 - vision is optional; report why it is off
             with vision_state["lock"]:
                 vision_state["dead"] = vision_state["dead"] or "%s: %s" % (type(exc).__name__, str(exc)[:200])
@@ -238,7 +224,7 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
             return list(pool.map(guarded, items))
 
     request = MeshRequest(
-        brief=brief, max_tris=max_tris, height_m=height, kit_module=kit_module, kit_names=kit_names, kit_excluded=kit_excluded, api_doc=api_doc,
+        brief=brief, max_tris=max_tris, height_m=height, kit_module=kit_module, kit_names=kit_names, kit_excluded=kit_excluded, manifest=manifest, api_doc=api_doc,
         candidates=candidates, rounds=rounds, tiers=tier_list, target_score=target_score, vision=bool(vision),
     )
     report = run_loop(request, generate=generate, build=build, critique=critique, map_parallel=map_parallel)
@@ -254,7 +240,7 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
     if winner:
         final = {}
         for key, suffix in (("model", ".%s" % export), ("sheet", "_sheet.png"), ("view", "_view.png"),
-                            ("code", ".py")):
+                            ("code", ".py"), ("ops", ".ops.json")):
             source = (winner.get("files") or {}).get(key)
             if source and _inside(source, root) and os.path.isfile(source):
                 target = root / (slug + suffix)
@@ -263,15 +249,6 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
         payload["final"] = final
     else:
         payload["error"] = "no candidate produced a model; see candidates[].attempts for the failures"
-    payload, scrubbed = guard.scrub(payload)  # the egress chokepoint: nothing secret-shaped leaves in the result
-    blocked = sum(1 for item in payload["candidates"] if item.get("secret_leak_blocked"))
-    if scrubbed or blocked or security["critic_blocked"] or security["code_blocked"]:
-        payload["security"] = {
-            "secret_leak_blocked": True,
-            "note": "Output that looked like a credential was blocked: %d candidate(s) discarded, %d field(s) "
-                    "redacted as %s. The matched names and values are never reported."
-                    % (max(blocked, security["code_blocked"]), scrubbed + security["critic_blocked"], REDACTED),
-        }
     return payload
 
 
@@ -296,7 +273,7 @@ def register(mcp, record) -> None:
                       max_tris: int = 3000, height_m: float = 0.0, candidates: int = 3, rounds: int = 3,
                       tiers: str = "general,code", vision: bool = True, target_score: int = 8,
                       export: str = "glb", output_dir: str = "", timeout: int = 1200) -> str:
-        """Generate a low-poly 3D model (GLB/FBX) from a brief with a model-written Blender script. Runs candidates through build, render, vision critique and revision, and keeps the best. Needs Blender (SONDER_BLENDER); executes model-written Python like run_code."""
+        """Generate a low-poly 3D model (GLB/FBX) from a brief with a model-written Blender script. Runs candidates through build, render, vision critique and revision, and keeps the best. Needs Blender (SONDER_BLENDER). The model's script is recorded as data and never executed."""
         args = {"brief": brief, "name": name, "kit_path": kit_path, "api_doc_path": api_doc_path,
                 "max_tris": max_tris, "height_m": height_m, "candidates": candidates, "rounds": rounds,
                 "tiers": tiers, "vision": vision, "target_score": target_score, "export": export,

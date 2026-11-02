@@ -1,10 +1,11 @@
-"""Which kit names a model-written script may touch.  Pure; stdlib only.
+"""Which kit names a recorded build script may call.  Pure; stdlib only.
 
-A kit is trusted Python the operator supplies, but its *public functions* are reachable from
-untrusted scripts.  The OS sandbox confines what any of them can do to files, network and
-processes, and ``secret_guard`` stops credentials leaving, so this policy no longer excludes
-functions merely because they read or write files.  It excludes only what would break the
-harness flow or reach secrets/processes.  Exposure is an allow-list derived from the kit's source:
+A kit is trusted Python the operator supplies.  Model-written scripts never execute: the recorder
+(``dsl``) only records calls to the names this policy exposes, and the sandboxed replay calls them with
+plain data.  The OS sandbox confines what any kit function can do to files, network and processes, so
+this policy does not exclude functions merely because they read or write files.  It excludes only what
+would break the harness flow (export, render, save) or touch secrets/processes.  Exposure is an
+allow-list derived from the kit's source:
 
 * a function or class is EXCLUDED when anything in it touches scene-level export/render/save
   (``export_scene``, ``import_scene``, ``save*``, the render operator, ``open_mainfile``,

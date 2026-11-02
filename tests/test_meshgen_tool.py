@@ -8,7 +8,7 @@ import pytest
 
 from sonder_runtime.bootstrap import agent_help_tools, mesh_agent_tools
 
-GOOD = "```python\nimport bpy\n\ndef build():\n    pass\n```"
+GOOD = "```python\ndef build():\n    primitive('cube')\n```"
 
 
 class FakeMcp:
@@ -44,9 +44,9 @@ class FakeRunner:
     def locate_blender(self):
         return self.located
 
-    def build_candidate(self, blender, code_path, out_dir, **kw):
+    def build_candidate(self, blender, ops_path, out_dir, **kw):
         from pathlib import Path
-        self.calls.append((code_path, out_dir, kw))
+        self.calls.append((ops_path, out_dir, kw))
         if self.fail:
             return {"ok": False, "error": "boom"}
         out = Path(out_dir)
@@ -132,7 +132,7 @@ def test_end_to_end_with_fakes_writes_final_files_and_clamps(tmp_path):
                                 for _, kw in rt.generated)
     assert rt.vision_calls and all(kw["extra_roots"] == payload["output_dir"] for _, kw in rt.vision_calls)
     final = payload["final"]
-    assert set(final) == {"model", "sheet", "view", "code"}
+    assert set(final) == {"model", "sheet", "view", "code", "ops"}
     assert final["model"].endswith("hand-cart.glb")
     out = json.dumps(payload)
     assert "def build" not in out
@@ -164,6 +164,7 @@ def test_kit_is_imported_by_name_and_digested(tmp_path):
     payload, runner, _ = call(tmp_path, runner=runner, rt=rt, kit_path=str(kit), candidates=1, rounds=1)
     assert "import propkit" in prompts[0] and "def wheel(r)" in prompts[0]
     assert runner.calls[0][2]["kit_path"] == str(kit.resolve())
+    assert runner.calls[0][2]["kit_allowed"] == ["wheel"]
 
 
 def test_output_dir_outside_the_workspace_is_refused(tmp_path):
@@ -198,14 +199,24 @@ def test_a_kit_outside_the_allowed_roots_is_refused(tmp_path, monkeypatch):
         call(tmp_path, kit_path=str(kit))
 
 
-def test_the_safety_gate_gets_the_kit_names_end_to_end(tmp_path):
+def test_the_recorder_gets_the_kit_manifest_end_to_end(tmp_path):
     kit = tmp_path / "propkit.py"
     kit.write_text("import os\ndef wheel(r):\n    pass\n", encoding="utf-8")
     rt = fake_runtime(tmp_path)
     rt._generate_text = lambda prompt, **kw: "```python\nimport propkit\n\ndef build():\n    propkit.os.getcwd()\n```"
     payload, runner, _ = call(tmp_path, rt=rt, kit_path=str(kit), candidates=1, rounds=1)
     assert payload["ok"] is False and runner.calls == []
-    assert payload["candidates"][0]["attempts"][0]["status"] == "rejected"
+    assert payload["candidates"][0]["attempts"][0]["status"] == "script_error"
+
+
+def test_the_recorded_ops_are_saved_and_handed_to_the_runner(tmp_path):
+    payload, runner, _ = call(tmp_path, candidates=1, rounds=1)
+    ops_path, _, kw = runner.calls[0]
+    assert ops_path.endswith(".ops.json") and kw["kit_allowed"] == ()
+    doc = json.loads(open(ops_path, encoding="utf-8").read())
+    assert doc["ops"][0]["op"] == "core.primitive"
+    assert payload["final"]["ops"].endswith(".ops.json")
+    assert "secret" not in json.dumps(payload) and "security" not in payload
 
 
 @pytest.mark.parametrize("output_dir", ["../..", "../../escape", "sub/../../.."])
@@ -249,7 +260,7 @@ def test_the_remaining_deadline_never_gives_blender_a_zero_timeout(tmp_path, mon
     assert "under 5s" in payload["candidates"][0]["attempts"][0]["error"]
 
 
-def test_kit_exposure_policy_reaches_the_prompt_the_gate_and_the_runner(tmp_path):
+def test_kit_exposure_policy_reaches_the_prompt_the_recorder_and_the_runner(tmp_path):
     kit = tmp_path / "propkit.py"
     kit.write_text('import bpy\n\ndef wheel(r):\n    """Make a wheel."""\n\n'
                    'def run_prop(name):\n    """Export it."""\n    bpy.ops.wm.save_as_mainfile(filepath=name)\n',
@@ -260,5 +271,5 @@ def test_kit_exposure_policy_reaches_the_prompt_the_gate_and_the_runner(tmp_path
                                               "```python\nimport propkit\n\ndef build():\n    propkit.run_prop('x')\n```")
     payload, runner, _ = call(tmp_path, rt=rt, kit_path=str(kit), candidates=1, rounds=2)
     assert "run_prop" not in prompts[0] and "wheel" in prompts[0]
-    assert not runner.calls  # the gate refused the excluded call before any build
-    assert payload["candidates"][0]["attempts"][0]["status"] == "rejected"
+    assert not runner.calls  # the recorder refused the excluded call before any build
+    assert payload["candidates"][0]["attempts"][0]["status"] == "script_error"

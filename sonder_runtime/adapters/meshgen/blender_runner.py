@@ -1,15 +1,16 @@
-"""Run a model-written build script in headless Blender.
+"""Replay a recorded build script in headless Blender.
 
-On Windows the build runs inside a zero-capability AppContainer (``sandbox_win``), which is the
-security boundary; the AST gate and the harness' restricted builtins are only first filters.  If
-the sandbox cannot be set up the build fails closed.  ``SONDER_MESHGEN_UNSANDBOXED=1`` is the one
-explicit opt-out; results then carry ``sandbox: "unsandboxed"`` and a warning.
+Model-written code never executes.  The host records the script into a JSON op list
+(``domain/meshgen/dsl``); this module stages ``ops.json`` plus the trusted ``harness.py``,
+``replay.py`` and ``opschema.py`` and runs Blender over them.  On Windows the run happens inside a
+zero-capability AppContainer (``sandbox_win``), which bounds what even the trusted code can do with
+hostile *data*; if the sandbox cannot be set up the build fails closed.
+``SONDER_MESHGEN_UNSANDBOXED=1`` is the one explicit opt-out; results then carry
+``sandbox: "unsandboxed"`` and a warning.
 
-``build_candidate`` writes a JSON job file, runs ``blender -b --factory-startup
---disable-autoexec --python harness.py -- job.json`` (no shell, bounded by a
-timeout, ``cwd`` the output directory) and parses the harness' final
-``MESHGEN_RESULT {json}`` stdout line.  The harness is defence in depth, not a
-sandbox: it runs with the same authority as ``run_code``.
+``build_candidate`` writes a JSON job file, runs ``blender -b --factory-startup --disable-autoexec
+--python harness.py -- job.json`` (no shell, bounded by a timeout) and reads the harness' result
+file, which is treated as untrusted input (``sanitize_result``).
 """
 from __future__ import annotations
 
@@ -21,10 +22,12 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from ...domain.meshgen.secret_guard import REDACTED, SecretGuard, SecretGuardUnavailable
-from . import sandbox_win, secret_sources
+from . import sandbox_win
 
 HARNESS_PATH = Path(__file__).with_name("harness.py")
+REPLAY_PATH = Path(__file__).with_name("replay.py")
+OPSCHEMA_PATH = Path(__file__).resolve().parents[2] / "domain" / "meshgen" / "dsl" / "opschema.py"
+HARNESS_FILES = (HARNESS_PATH, REPLAY_PATH, OPSCHEMA_PATH)
 _TAIL_LINES = 8
 DEFAULT_MEMORY_MB = 8192
 SCRATCH_NAME = ".blender_profile"
@@ -188,15 +191,13 @@ _SECRET_PATTERNS = (
 )
 
 
-def redact_and_bound(value, limit: int = MAX_TEXT_CHARS, guard: SecretGuard | None = None) -> str:
-    """Text safe to hand to a prompt or payload: secret-looking runs removed, length capped.
+def bound_text(value, limit: int = MAX_TEXT_CHARS) -> str:
+    """Text for a prompt or payload: length capped, secret-looking runs removed (a free residual filter).
 
-    The sandbox is what keeps secrets out of the build process; this is the host-side backstop for
-    anything that still comes back through a script-controlled string (an exception message).
+    No model code runs in Blender, so nothing script-controlled reaches here; this only bounds what the
+    trusted harness and Blender themselves print.
     """
     text = str(value if value is not None else "")
-    if guard is not None and guard.hit(text):
-        return REDACTED  # judged on the full text, before any truncation can cut a secret in half
     for pattern in _SECRET_PATTERNS:
         text = pattern.sub(lambda match: "[redacted]", text)
     if len(text) > limit:
@@ -204,19 +205,19 @@ def redact_and_bound(value, limit: int = MAX_TEXT_CHARS, guard: SecretGuard | No
     return text
 
 
-def sanitize_result(result: dict, guard: SecretGuard | None = None) -> dict:
+def sanitize_result(result: dict) -> dict:
     """Keep only the keys the loop understands, with bounded, typed values.
 
-    The result file is written by code the model controls, so every field is treated as hostile.
+    The result file is written inside the sandbox, so every field is treated as untrusted data.
     """
     clean: dict = {}
     for key in _ALLOWED_RESULT_KEYS & set(result):
         value = result[key]
         if key in ("error", "render_error"):
-            clean[key] = redact_and_bound(value, guard=guard)
+            clean[key] = bound_text(value)
         elif key in ("tail", "traceback"):
             lines = value if isinstance(value, list) else [value]
-            clean[key] = [redact_and_bound(line, MAX_TAIL_LINE_CHARS, guard) for line in lines[-_TAIL_LINES:]]
+            clean[key] = [bound_text(line, MAX_TAIL_LINE_CHARS) for line in lines[-_TAIL_LINES:]]
         elif key == "tris":
             clean[key] = int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
         elif key in ("ok", "within_budget"):
@@ -225,48 +226,25 @@ def sanitize_result(result: dict, guard: SecretGuard | None = None) -> dict:
             seq = value if isinstance(value, list) else []
             clean[key] = [float(v) for v in seq[:3] if isinstance(v, (int, float)) and not isinstance(v, bool)]
         elif key == "files":
-            clean[key] = {str(k)[:20]: redact_and_bound(v, 600, guard)
+            clean[key] = {str(k)[:20]: bound_text(v, 600)
                           for k, v in (value.items() if isinstance(value, dict) else [])}
         elif key == "parts":
             parts = []
             for part in (value if isinstance(value, list) else [])[:8]:
                 if isinstance(part, dict):
                     tris = part.get("tris")
-                    parts.append({"name": redact_and_bound(part.get("name"), 40, guard),
+                    parts.append({"name": bound_text(part.get("name"), 40),
                                   "tris": int(tris) if isinstance(tris, (int, float)) and not isinstance(tris, bool) else 0})
             clean[key] = parts
     return clean
 
 
-def _tail(text: str, guard: SecretGuard | None = None) -> list[str]:
+def _tail(text: str) -> list[str]:
     lines = [line.rstrip() for line in str(text or "").splitlines() if line.strip()]
-    return [redact_and_bound(line, MAX_TAIL_LINE_CHARS, guard) for line in lines[-_TAIL_LINES:]]
+    return [bound_text(line, MAX_TAIL_LINE_CHARS) for line in lines[-_TAIL_LINES:]]
 
 
-def has_redaction(value) -> bool:
-    """True when a result structure contains the redaction marker (something matched the secret guard)."""
-    if isinstance(value, str):
-        return REDACTED in value
-    if isinstance(value, dict):
-        return any(has_redaction(k) or has_redaction(v) for k, v in value.items())
-    if isinstance(value, (list, tuple)):
-        return any(has_redaction(item) for item in value)
-    return False
-
-
-def blocked_result(result: dict) -> dict:
-    """A leaking build reduced to a failure: its files are dropped, the offending field stays redacted."""
-    clean = {key: value for key, value in result.items() if key != "files"}
-    clean.update(ok=False, secret_leak_blocked=True)
-    clean["error"] = REDACTED
-    return clean
-
-
-def _model_files(result: dict) -> list[str]:
-    return [str(path) for key, path in (result.get("files") or {}).items() if key == "model"]
-
-
-def read_result(result_path: Path, guard: SecretGuard | None = None) -> dict | None:
+def read_result(result_path: Path) -> dict | None:
     """The harness' result object, or ``None`` when it is missing, oversized or malformed."""
     try:
         if result_path.stat().st_size > MAX_RESULT_BYTES:
@@ -274,7 +252,7 @@ def read_result(result_path: Path, guard: SecretGuard | None = None) -> dict | N
         value = json.loads(result_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    return sanitize_result(value, guard) if isinstance(value, dict) else None
+    return sanitize_result(value) if isinstance(value, dict) else None
 
 
 def confine_files(result: dict, out_dir: Path) -> dict:
@@ -306,16 +284,17 @@ def preflight(blender) -> dict:
         info.update(sandbox_win.preflight(os.path.dirname(os.path.realpath(str(blender)))))
         return info
     reason = "explicit opt-out via %s" % sandbox_win.OPT_OUT_ENV
-    return {"sandbox": mode, "warning": "Blender runs UNSANDBOXED (%s); model-written code has the server's authority" % reason}
+    return {"sandbox": mode, "warning": "Blender runs UNSANDBOXED (%s); no model-written code runs in it, but the "
+            "trusted replay has this server's authority over the recorded data" % reason}
 
 
-def _job_dict(code_path, out_dir, name, kit_path, kit_excluded, max_tris, height_m, export, render, result_path):
+def _job_dict(ops_path, out_dir, name, kit_path, kit_allowed, max_tris, height_m, export, render, result_path):
     return {
-        "code_path": str(code_path),
+        "ops_path": str(ops_path),
         "out_dir": str(out_dir),
         "name": name,
         "kit_path": str(kit_path) if kit_path else "",
-        "kit_excluded": sorted(str(item) for item in (kit_excluded or ())),
+        "kit_allowed": sorted(str(item) for item in (kit_allowed or ())),
         "max_tris": int(max_tris),
         "height_m": float(height_m or 0.0),
         "export": "fbx" if str(export).lower() == "fbx" else "glb",
@@ -339,17 +318,23 @@ def _copy_back(files: dict, destination: Path) -> dict:
     return moved
 
 
-def _sandboxed(blender, code_path, out, *, name, kit_path, kit_excluded, max_tris, height_m, export, render,
-               timeout, memory_mb, guard):
+def _stage_support(directory: Path) -> Path:
+    """Copy the trusted harness files into ``directory``; returns the harness path."""
+    for source in HARNESS_FILES:
+        shutil.copyfile(source, directory / source.name)
+    return directory / HARNESS_PATH.name
+
+
+def _sandboxed(blender, ops_path, out, *, name, kit_path, kit_allowed, max_tris, height_m, export, render,
+               timeout, memory_mb):
     blender = os.path.realpath(str(blender))
     blender_dir = os.path.dirname(blender)
     kit_file = Path(kit_path).resolve() if kit_path else None
     with sandbox_win.granted_run_dir(out, blender_dir, kit_file.parent if kit_file else None) as build:
         run = build.run
-        harness = run / "harness.py"
-        shutil.copyfile(HARNESS_PATH, harness)
-        script = run / "script.py"
-        shutil.copyfile(code_path, script)
+        harness = _stage_support(run)
+        ops = run / "ops.json"
+        shutil.copyfile(ops_path, ops)
         run_kit = None
         if kit_file:
             (run / "kit").mkdir()
@@ -357,7 +342,7 @@ def _sandboxed(blender, code_path, out, *, name, kit_path, kit_excluded, max_tri
             shutil.copyfile(kit_file, run_kit)
         run_out = run / "out"
         result_path = run / ("result-%s.json" % uuid.uuid4().hex)
-        job = _job_dict(script, run_out, name, run_kit, kit_excluded, max_tris, height_m, export, render, result_path)
+        job = _job_dict(ops, run_out, name, run_kit, kit_allowed, max_tris, height_m, export, render, result_path)
         job_path = run / "job.json"
         job_path.write_text(json.dumps(job), encoding="utf-8")
         argv = build_argv(blender, str(job_path), str(harness))
@@ -366,25 +351,22 @@ def _sandboxed(blender, code_path, out, *, name, kit_path, kit_excluded, max_tri
                                             memory_mb=memory_mb)
         tail_text = outcome.stdout.decode("utf-8", "replace") + "\n" + outcome.stderr.decode("utf-8", "replace")
         if outcome.timed_out:
-            result = {"ok": False, "error": "blender timed out after %ss" % timeout, "tail": _tail(tail_text, guard)}
+            result = {"ok": False, "error": "blender timed out after %ss" % timeout, "tail": _tail(tail_text)}
         else:
-            result = read_result(result_path, guard)
+            result = read_result(result_path)
             failed = result is None or not result.get("ok")
             # Evidence for "memory limit": the job reached its limit AND the build failed in a way that fits
             # (no result at all, or the script/harness reported MemoryError).
             oom_marked = result is None or "MemoryError" in str(result.get("error", ""))
             if outcome.memory_exceeded and failed and oom_marked:
                 result = {"ok": False, "error": "memory limit exceeded (%d MB)" % outcome.memory_limit_mb,
-                          "tail": _tail(tail_text, guard)}
+                          "tail": _tail(tail_text)}
             elif result is None:
                 result = {"ok": False, "error": "no result; rc=%s" % outcome.returncode,
-                          "tail": _tail(tail_text, guard)}
+                          "tail": _tail(tail_text)}
             else:
                 result = confine_files(result, run_out)
-                if has_redaction(result) or (result.get("ok") and any(
-                        guard.model_hit(path) for path in _model_files(result))):
-                    result = blocked_result(result)  # nothing is copied out of the run directory
-                elif result.get("ok"):
+                if result.get("ok"):
                     used = sandbox_win.tree_size(run)
                     if used > sandbox_win.MAX_TREE_BYTES:
                         result = {"ok": False, "error": "the build wrote more than %d MB into its run directory"
@@ -395,16 +377,18 @@ def _sandboxed(blender, code_path, out, *, name, kit_path, kit_excluded, max_tri
                         except (OSError, ValueError) as exc:
                             result = {"ok": False, "error": "cannot copy the build output back: %s" % exc}
     if build.problems:
-        result = dict(result, warnings=[redact_and_bound(item, 300) for item in build.problems[:3]])
+        result = dict(result, warnings=[bound_text(item, 300) for item in build.problems[:3]])
     return result
 
 
-def _unsandboxed(blender, code_path, out, *, name, kit_path, kit_excluded, max_tris, height_m, export, render,
-                 timeout, memory_mb, guard):
-    harness = HARNESS_PATH
+def _unsandboxed(blender, ops_path, out, *, name, kit_path, kit_allowed, max_tris, height_m, export, render,
+                 timeout, memory_mb):
+    stage = out.resolve() / (".stage-%s" % uuid.uuid4().hex[:12])
+    stage.mkdir()
+    harness = _stage_support(stage)
     result_path = out.resolve() / ("%s.result-%s.json" % (name, uuid.uuid4().hex))
-    job = _job_dict(Path(code_path).resolve(), out.resolve(), name, Path(kit_path).resolve() if kit_path else None,
-                    kit_excluded, max_tris, height_m, export, render, result_path)
+    job = _job_dict(Path(ops_path).resolve(), out.resolve(), name, Path(kit_path).resolve() if kit_path else None,
+                    kit_allowed, max_tris, height_m, export, render, result_path)
     job_path = out / ("%s.job.json" % name)
     job_path.write_text(json.dumps(job), encoding="utf-8")
     argv = build_argv(str(blender), str(job_path), str(harness))
@@ -415,68 +399,52 @@ def _unsandboxed(blender, code_path, out, *, name, kit_path, kit_excluded, max_t
             memory_mb=memory_mb)
     except subprocess.TimeoutExpired as exc:
         partial = exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-        return {"ok": False, "error": "blender timed out after %ss" % timeout, "tail": _tail(partial, guard)}
+        return {"ok": False, "error": "blender timed out after %ss" % timeout, "tail": _tail(partial)}
     except OSError as exc:
         return {"ok": False, "error": "could not start blender: %s: %s" % (type(exc).__name__, exc)}
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+        shutil.rmtree(stage, ignore_errors=True)
     stdout = raw_out.decode("utf-8", "replace")[-sandbox_win.OUTPUT_TAIL_BYTES:]
     stderr = raw_err.decode("utf-8", "replace")[-sandbox_win.OUTPUT_TAIL_BYTES:]
-    result = read_result(result_path, guard)
+    result = read_result(result_path)
     try:
         result_path.unlink()
     except OSError:
         pass
     if result is None:
         return {"ok": False, "error": "no result; rc=%s" % returncode,
-                "tail": _tail(stdout + "\n" + stderr, guard)}
-    result = confine_files(result, out)
-    if has_redaction(result) or (result.get("ok") and any(guard.model_hit(path) for path in _model_files(result))):
-        for path in (result.get("files") or {}).values():  # unsandboxed output is already in place: discard it
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
-        result = blocked_result(result)
-    return result
+                "tail": _tail(stdout + "\n" + stderr)}
+    return confine_files(result, out)
 
 
-def build_candidate(blender, code_path, out_dir, *, name, kit_path=None, kit_excluded=(), max_tris,
-                    height_m, export="glb", render=True, timeout=180, memory_mb=None, sandbox=None, guard=None) -> dict:
-    """Build one candidate.
+def build_candidate(blender, ops_path, out_dir, *, name, kit_path=None, kit_allowed=(), max_tris,
+                    height_m, export="glb", render=True, timeout=180, memory_mb=None, sandbox=None) -> dict:
+    """Replay one recorded candidate (``ops_path`` is its ``ops.json``) and build, export and render it.
 
     ``sandbox`` is ``None`` (decide from the environment) or an explicit mode.  ``memory_mb`` is the
     memory ceiling for this build; ``None`` means ``SONDER_MESHGEN_MEM_MB``/4096 when sandboxed and
-    8192 on the unsandboxed path.  ``guard`` is the ``SecretGuard`` every returned string and every
-    exported model is checked against (``None`` builds it from the host environment and the user
-    registry environment); a guard that cannot be built refuses the build.
+    8192 on the unsandboxed path.  ``kit_allowed`` are the kit function names the ops may call.
     """
-    if guard is None:
-        try:
-            guard = secret_sources.load_guard()
-        except SecretGuardUnavailable as exc:
-            return {"ok": False, "error": "secret guard unavailable, build refused: %s" % exc}
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    if not HARNESS_PATH.is_file():
-        return {"ok": False, "error": "harness missing: %s" % HARNESS_PATH}
-    common = dict(name=name, kit_path=kit_path, kit_excluded=kit_excluded, max_tris=max_tris, height_m=height_m,
-                  export=export, render=render, timeout=timeout, guard=guard)
+    missing = [str(path) for path in HARNESS_FILES if not path.is_file()]
+    if missing:
+        return {"ok": False, "error": "harness files missing: %s" % ", ".join(missing)}
+    common = dict(name=name, kit_path=kit_path, kit_allowed=kit_allowed, max_tris=max_tris, height_m=height_m,
+                  export=export, render=render, timeout=timeout)
     mode = sandbox or sandbox_win.UNSANDBOXED
     try:
         mode = sandbox or sandbox_mode()
         if mode == sandbox_win.SANDBOXED:
             limit = int(memory_mb) if memory_mb else sandbox_win.memory_limit_mb(os.environ)
-            result = _sandboxed(blender, code_path, out, memory_mb=limit, **common)
+            result = _sandboxed(blender, ops_path, out, memory_mb=limit, **common)
         else:
-            result = _unsandboxed(blender, code_path, out, memory_mb=int(memory_mb or DEFAULT_MEMORY_MB), **common)
+            result = _unsandboxed(blender, ops_path, out, memory_mb=int(memory_mb or DEFAULT_MEMORY_MB), **common)
     except sandbox_win.SandboxUnavailable as exc:
         return {"ok": False, "error": "sandbox unavailable, build refused (not falling back to unsandboxed): %s"
-                % redact_and_bound(exc, 400), "sandbox": mode}
+                % bound_text(exc, 400), "sandbox": mode}
     result = dict(result, sandbox=mode)
     if mode != sandbox_win.SANDBOXED:
         result["warning"] = "built UNSANDBOXED"
-    clean, hits = guard.scrub(result)  # last line: nothing leaves this function unchecked
-    if hits and not clean.get("secret_leak_blocked"):
-        clean = blocked_result(clean)
-    return clean
+    return result
