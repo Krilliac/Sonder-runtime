@@ -87,7 +87,8 @@ SECOND = {
     'str_of_aliased_dict_150k': 'def build():\n    d = dict([(str(i), 0) for i in range(150000)])\n    L = [d]\n    for j in range(100):\n        for i in range(1000):\n            s = str(L)\n',
 }
 
-SECOND_BOUNDS = {"c09_print_dict": 4.5}
+# c09 takes 2.2 s alone and 5.2 s with 20 copies running at once (CI runs -n auto): keep a wide margin
+SECOND_BOUNDS = {"c09_print_dict": 8.0}
 MUST_BE_WORK = ("insert_pop_front", "seed_long_string", "split_long_separator",
                 "startswith_tuple_4000_literal", "str_of_aliased_dict_150k", "c01_startswith_literal_1call",
                 "c03_startswith_append200k_loop", "c04_show_dict_literal", "c09_print_dict", "c07_seed_str")
@@ -255,9 +256,10 @@ def test_weight_charges_its_own_walk():
     assert "too much work" in str(info.value) and time.monotonic() - started < 6.0
 
 
-def test_predicate_nodes_are_charged_as_work_before_the_size_estimate_can_refuse_them():
-    """Each lambda has about 1,990 cheap nodes (4 KB of JSON): 700 of them stay under 4 MB but cost 2 x 1,990 units
-    each, so the work budget, not the size estimate, must be what stops the script."""
+def test_predicate_nodes_are_charged_as_work_and_the_size_estimate_never_fires_first():
+    """Each lambda has about 1,990 cheap nodes (about 4 KB of JSON) and costs 2 x 1,990 work units. All 1,000 calls
+    would come to about 4.1 MB estimated, under the 4 MB + 64 KB threshold, so the size estimate cannot refuse
+    this script; only the work budget can, and it must."""
     lam = "p.index > 0" + " and 1" * 1990
     source = chr(10).join(["def build():", "    c = primitive('cube')", "    for i in range(1000):",
                            "        paint_faces(c, lambda p: " + lam + ", '#ff0000')", ""])

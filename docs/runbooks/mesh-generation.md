@@ -106,8 +106,8 @@ digits, every predicate node), so a recording that is probably over 4 MB usually
 file is built; the exact size check after the build is authoritative. Predicate trees are charged per node as work and as leaves. A `key in dict` costs the key, not the
 dict, and `seq * 0` costs nothing. Colour parameters (`colour` of `paint`/`paint_faces`, a kit's `hexcol`) must be
 `'#RRGGBB'`/`'#RGB'` or a name in the kit's `PALETTE`; a tuple colour is a `script_error` with its line number
-instead of a failed Blender build. `None` is refused for the core colour (replay would reject it) and passed
-through to a kit function as its own "no colour". Extra positional arguments of a kit's `*args` are not
+instead of a failed Blender build. `None` is refused for core and kit colours alike (lf_kit calls `_rgb(hexcol)` on it,
+which raises, and the manifest records no defaults). Extra positional arguments of a kit's `*args` are not
 validated, because their meaning is unknown.
 
 **Hard backstop.** The in-process accounting is not trusted to be complete, so the host records the script in

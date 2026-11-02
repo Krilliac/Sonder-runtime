@@ -952,9 +952,9 @@ class _Interp:
     def check_colour(self, origin, name, value, node):
         """Colour parameters take '#RRGGBB' / '#RGB' or a palette name; anything else fails at record time."""
         if value is None:
-            if origin.startswith("core."):
-                raise self.err("%s: %s is required: pass '#RRGGBB' or a palette name, not None" % (origin, name), node)
-            return  # a kit function receives None as its own "no colour"
+            # not accepted for kit functions either: the manifest records no defaults, and lf_kit's shapes call
+            # _rgb(hexcol) on whatever they get, so None would only fail later inside Blender
+            raise self.err("%s: %s is required: pass '#RRGGBB' or a palette name, not None" % (origin, name), node)
         if isinstance(value, str):
             text = value.strip()
             palette = self.manifest.constants.get("PALETTE")

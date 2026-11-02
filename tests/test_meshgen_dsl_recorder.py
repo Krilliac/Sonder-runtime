@@ -756,7 +756,7 @@ def test_colour_arguments_must_be_hex_or_a_palette_name(call):
 
 @pytest.mark.parametrize("call", [
     "paint(primitive('cube'), '#cc3333')", "paint(primitive('cube'), '#fff')", "paint(primitive('cube'), 'red')",
-    "propkit.box('b', 1, hexcol='blue')", "propkit.box('b', 1, hexcol='#112233')", "propkit.box('b', 1, hexcol=None)",
+    "propkit.box('b', 1, hexcol='blue')", "propkit.box('b', 1, hexcol='#112233')",
 ])
 def test_valid_colour_arguments_are_accepted(call):
     rec("import propkit\ndef build():\n    %s\n" % call)
@@ -780,6 +780,9 @@ def test_a_name_that_is_neither_kit_nor_core_is_still_refused():
     assert "is not available" in reject("import propkit\ndef build():\n    propkit.bogus(1)\n")
 
 
-def test_core_colour_none_is_refused_on_the_host_but_a_kit_hexcol_none_is_passed_through():
+def test_a_none_colour_is_refused_for_core_and_kit_calls():
+    """lf_kit's shapes call _rgb(hexcol) on whatever they get, so None would only fail later inside Blender."""
     assert "is required" in reject("def build():\n    paint(primitive('cube'), None)\n")
-    rec("import propkit\ndef build():\n    propkit.box('b', 1, hexcol=None)\n")
+    for call in ("propkit.box('b', 1, hexcol=None)", "propkit.box('b', 1, 0.0, None)"):
+        message = reject("import propkit\ndef build():\n    %s\n" % call)
+        assert "is required" in message and "not None" in message, message

@@ -166,9 +166,11 @@ def repair_hint(failure: str, kit_module: str | None, kit_names, kit_excluded=()
 
 
 # whole words only ("entire" is not "tire"); steering, ship's, water, valve and similar wheels are not road wheels
-_WHEEL_WORDS = re.compile(r"\b(wheels?|axles?|tyres?|tires?|hubcaps?)\b")
-_OTHER_WHEELS = re.compile(r"\b(steering|ship'?s?|helm|water ?wheels?|valve|hand ?wheels?|potter'?s?|spinning|"
-                           r"mill ?wheels?|ferris|cog|gear|roulette|wheel of)\b")
+_WHEEL_WORDS = re.compile(r"\b(?:cart)?wheels?\b|\b(?:axles?|tyres?|tires?|hubcaps?)\b")
+# a different kind of wheel, named right next to the word "wheel" (a stray "gear housing" elsewhere in the
+# sentence does not count)
+_OTHER_WHEELS = re.compile(r"\b(?:steering|ship'?s?|helm|valve|hand|potter'?s?|spinning|mill|water|ferris|roulette|"
+                           r"cog|gear|fly)[ -]?wheels?\b|\bwheel of fortune\b")
 _QUALIFIED_UNAVAILABLE = re.compile(r"(\w+)\.(\w+) is not available in build scripts")
 
 
@@ -178,13 +180,21 @@ def orientation_guidance(issues) -> str:
     if not any(word in text for word in _ORIENTATION_WORDS):
         return ""
     override = ""
-    if _WHEEL_WORDS.search(text) and not _OTHER_WHEELS.search(text):
+    # decided per issue: one issue about a ship's wheel must not hide a cart wheel named in another
+    cart_rule = any(_WHEEL_WORDS.search(item) and not _OTHER_WHEELS.search(item)
+                    for item in (str(entry).lower() for entry in (issues or [])))
+    if cart_rule:
         override = ("For a cart, barrow or vehicle wheel the axle runs along X (side to side, perpendicular to the "
                     "direction of travel) because the front of the object faces -Y: build the cylinder, then "
                     "rot=(0, 90, 0). Rotating such a wheel about X puts its axle along Y, which is sideways and "
                     "wrong; if an issue above says to rotate it about X, use rot=(0, 90, 0) instead. ")
+    if not cart_rule:
+        return ("Orientation help: cylinders, cones, tori and lathes are created around the Z axis, so they lie "
+                "flat. Rotate them with rot=(x, y, z) in degrees about the world axes, choosing the axis the brief "
+                "calls for for that particular part. When a kit function revolves about Z, rotate the returned object the same way, and "
+                "move it so it still rests where the brief says.")
     return (override + "Orientation help: cylinders, cones, tori and lathes are created around the Z axis, so they lie "
-            "flat. To stand a wheel upright with its axle along X, set rot=(0, 90, 0) "
+            "flat. To stand a cart or vehicle wheel upright with its axle along X, set rot=(0, 90, 0) "
             "(rotate 90 degrees about Y); for an axle along Y use rot=(90, 0, 0). Rotations are in degrees. "
             "When a kit function revolves about Z, rotate the returned object the same way, and move it so "
             "the rim touches the ground (z=0) again. A wheel seen as a flat disc from the TOP is lying "

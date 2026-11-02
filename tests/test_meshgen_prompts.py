@@ -220,3 +220,27 @@ def test_a_cart_wheel_lying_flat_still_gets_the_cart_rule():
     for issue in ("the cart wheel lies flat", "Wheels are lying flat; rotate 90 degrees about X", "front tyre is flat"):
         text = orientation_guidance([issue])
         assert "axle runs along X" in text and "rot=(0, 90, 0)" in text, issue
+
+
+def test_the_wheel_rule_is_decided_per_issue_not_on_the_joined_text():
+    from sonder_runtime.domain.meshgen.prompts import orientation_guidance
+    assert "axle runs along X" in orientation_guidance(["the cart wheel lies flat", "the ship mast is tilted"])
+    assert "axle runs along X" in orientation_guidance(["the ship's wheel lies flat", "the cart wheels lie flat"])
+    assert "axle runs along X" in orientation_guidance(["the cart's wheels lie flat; the steering pole is tilted"])
+    assert "axle runs along X" in orientation_guidance(["wagon wheels lie flat; the gear housing is tilted"])
+
+
+def test_wheel_of_the_cart_and_cartwheel_get_the_cart_rule():
+    from sonder_runtime.domain.meshgen.prompts import orientation_guidance
+    for issue in ("the front wheel of the cart lies flat", "the wheel of the wagon is lying flat",
+                  "the cartwheel lies flat", "the cartwheels are tilted", "the wheels are flat and spinning"):
+        assert "axle runs along X" in orientation_guidance([issue]), issue
+    assert "axle runs along X" not in orientation_guidance(["the wheel of fortune lies flat"])
+
+
+def test_excluded_wheels_get_no_wheel_rotation_at_all():
+    from sonder_runtime.domain.meshgen.prompts import orientation_guidance
+    for issue in ("the ship's wheel lies flat", "the gearwheel lies flat", "the spinning wheel is tilted",
+                  "the water wheel is tilted", "the steering wheel is tilted"):
+        text = orientation_guidance([issue])
+        assert text and "rot=(0, 90, 0)" not in text and "axle" not in text, issue
