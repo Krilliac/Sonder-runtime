@@ -23,6 +23,10 @@ def _range(op, param):
     """(low, high) of a core parameter, from the shared table."""
     spec = opschema.CORE_PARAM_KINDS[op][param]
     return spec[1], spec[2]
+
+
+LINE_TAG = "meshgen_line"            # custom property: the script line that created the object (0 = unknown)
+DETACHED_TAG = "meshgen_detached"    # custom property: the script marked this part as intentionally free-floating
 # modifier type -> {property: (kind, low, high)}; kinds: float int angle(degrees) enum bool bools3 vec3 object
 MODIFIERS = {
     "BEVEL": {"width": ("float", 0.0, 10.0), "segments": ("int", 1, 16), "limit_method": ("enum",),
@@ -427,6 +431,8 @@ def core_join(kit, objs, name):
     name = _text(name, "name", "joined")
     first.name = name
     first.data.name = name
+    if DETACHED_TAG in first:
+        del first[DETACHED_TAG]  # the joined object is a new part: detach it again after joining if wanted
     return first
 
 
@@ -436,14 +442,36 @@ def core_delete(kit, obj):
     return None
 
 
+def core_detached(kit, obj):
+    """Mark a part as intentionally free-floating: the harness' floating-part check leaves it out."""
+    obj = _object(obj, "obj")
+    obj[DETACHED_TAG] = 1
+    return None
+
+
 CORE = {
     "primitive": core_primitive, "mesh": core_mesh, "transform": core_transform, "shade_smooth": core_shade_smooth,
     "modifier": core_modifier, "paint": core_paint, "paint_faces": core_paint_faces, "join": core_join,
-    "delete": core_delete,
+    "delete": core_delete, "detached": core_detached,
 }
 
 
 # ---------------------------------------------------------------------------------------------- driver
+def _tag_new(known, line):
+    """Give every object that did not exist before this op the op's script line, for the floating-part report.
+
+    New means its ``session_uid`` is not in ``known`` (never reused, unlike a memory address or a name), so an
+    object a kit call created and deleted, or one it copied from a tagged or detached part, is still tagged afresh:
+    the line is overwritten and the copied detached flag removed."""
+    for obj in bpy.data.objects:
+        uid = obj.session_uid
+        if uid not in known:
+            known.add(uid)
+            obj[LINE_TAG] = int(line)
+            if DETACHED_TAG in obj:
+                del obj[DETACHED_TAG]
+
+
 def _resolve(value, store):
     if isinstance(value, list):
         return [_resolve(item, store) for item in value]
@@ -460,6 +488,7 @@ def run(doc, kit_name, kit_allowed):
     kit = importlib.import_module(kit_name) if kit_name else None
     allowed = frozenset(kit_allowed)
     store = {}
+    known = {obj.session_uid for obj in bpy.data.objects}
     for op in doc["ops"]:
         kind, _, short = op["op"].partition(".")
         try:
@@ -471,6 +500,10 @@ def run(doc, kit_name, kit_allowed):
                 result = getattr(kit, short)(*args, **kwargs)
             else:
                 raise ValueError("op not permitted")
+            if kind == "kit" or short in ("primitive", "mesh"):
+                _tag_new(known, op["line"])
+            elif short == "join" and isinstance(result, bpy.types.Object):
+                result[LINE_TAG] = int(op["line"])  # the joined object is a new part made by the join
         except Exception as exc:  # noqa: BLE001 - every failure becomes a line-numbered error for the repair loop
             label = ("%s.%s" % (kit_name, short)) if kind == "kit" else short
             raise ReplayError("line %d: %s(...) failed in Blender: %s: %s"

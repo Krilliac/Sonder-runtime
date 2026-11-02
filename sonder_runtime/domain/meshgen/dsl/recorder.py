@@ -997,6 +997,11 @@ class _Interp:
         if missing:
             raise self.err("%s is missing %s; its parameters are: %s" % (origin, ", ".join(repr(m) for m in missing), real),
                            node)
+        for name in opschema.CORE_HANDLE_PARAMS.get(op[5:], ()) if op.startswith("core.") else ():
+            value = args[params.index(name)] if params.index(name) < len(args) else kwargs.get(name)
+            if not isinstance(value, Handle):
+                raise self.err("%s: %s must be a part made by an earlier kit/core call (a number, string or list is "
+                               "not a part)" % (origin, name), node)
         self.line = _lineno(node) or self.line
         for position, value in enumerate(args):
             if position < len(params) and params[position] in _COLOUR_PARAMS:

@@ -192,3 +192,20 @@ def test_every_core_sig_parameter_has_a_kind():
     for op, (names, _required, extra) in opschema.CORE_SIGS.items():
         for name in names:
             assert name in opschema.CORE_PARAM_KINDS[op] or (extra and name == "type"), (op, name)
+
+
+def test_detached_is_a_core_op_that_takes_one_handle():
+    assert opschema.CORE_SIGS["detached"] == (("obj",), 1, False)
+    made = ("core.primitive", ["cube"], {})
+    validate_ops(doc(made, ("core.detached", [{"$ref": 1}], {})), KIT)
+    validate_ops(doc(made, ("core.detached", [], {"obj": {"$ref": 1}})), KIT)
+
+
+def test_detached_refuses_anything_that_is_not_a_reference_to_an_earlier_op():
+    made = ("core.primitive", ["cube"], {})
+    for value in (5, 1.5, "cube", None, True, [1], [{"$ref": 1}], {"$pred": ["f", "index"]}):
+        bad(doc(made, ("core.detached", [value], {})), "earlier call")
+    bad(doc(made, ("core.detached", [], {"obj": 3})), "earlier call")
+    bad(doc(made, ("core.detached", [], {})), "earlier call")
+    bad(doc(("core.detached", [{"$ref": 1}], {})), "$ref")           # a reference to itself is not an earlier op
+    bad(doc(made, ("core.detached", [{"$ref": 2}], {})), "$ref")

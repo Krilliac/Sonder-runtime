@@ -215,7 +215,7 @@ def test_the_trusted_harness_files_are_staged_next_to_the_harness_and_removed_af
 
     _patch_run(monkeypatch, fake_run)
     _build(tmp_path)
-    assert seen["files"] == ["harness.py", "opschema.py", "replay.py"] and all(seen["same"])
+    assert seen["files"] == ["connectivity.py", "harness.py", "opschema.py", "replay.py"] and all(seen["same"])
     assert not seen["dir"].exists()
 
 
@@ -337,3 +337,18 @@ def test_alternate_data_streams_and_trailing_dots_or_spaces_are_refused(tmp_path
         assert refused["ok"] is False, value
     assert "colon" in _confine(tmp_path, base + ":hidden")["error"]
     assert "dot or a space" in _confine(tmp_path, base + ".")["error"]
+
+
+def test_a_floater_report_survives_sanitising_and_lexical_confinement_alongside_the_result_files(tmp_path):
+    """The connectivity harness reports through ``geometry`` (a result key, not a file): it must come out of
+    ``sanitize_result`` and ``confine_files`` intact next to the exact-name result files."""
+    for fname in ("n.glb", "n_sheet.png"):
+        (tmp_path / fname).write_text("x")
+    geometry = {"parts": 2, "height": 1.0, "dims": [1.0, 1.0, 1.0], "detached": [],
+                "floating": [{"parts": ["loaf"], "part_count": 1, "lines": [34], "centre": [0.0, 0.0, 1.0],
+                              "gap": 0.12, "gap_vec": [0.0, 0.0, 0.12], "nearest": "plate"}]}
+    raw = {"ok": True, "tris": 10, "within_budget": True, "geometry": geometry,
+           "files": {"model": str(tmp_path / "n.glb"), "sheet": str(tmp_path / "n_sheet.png")}}
+    cleaned = runner.confine_files(runner.sanitize_result(raw), tmp_path, "n")
+    assert cleaned.get("ok") is True and cleaned["geometry"] == geometry
+    assert cleaned["files"] == raw["files"]

@@ -948,3 +948,32 @@ def test_a_kit_passthrough_is_treated_as_a_new_object():
     """Conservative: the recorder cannot tell from the manifest that a kit function returns its input."""
     body = "    a2 = kk.paint(a, 'red')\n    delete(a)\n    transform(a2, loc=(1, 0, 0))\n"
     assert rec(ALIAS_HEAD + body, ALIAS_MANIFEST).ops
+
+
+def test_detached_records_a_handle_positionally_or_by_keyword():
+    positional = rec("def build():\n    a = primitive('cube')\n    detached(a)\n")
+    assert positional.ops[-1] == {"id": 2, "line": 3, "op": "core.detached", "args": [{"$ref": 1}], "kwargs": {}}
+    keyword = rec("def build():\n    a = primitive('cube')\n    detached(obj=a)\n")
+    assert keyword.ops[-1]["kwargs"] == {"obj": {"$ref": 1}} and keyword.ops[-1]["args"] == []
+    opschema.validate_ops(json.loads(positional.text), MANIFEST.exposed)
+    opschema.validate_ops(json.loads(keyword.text), MANIFEST.exposed)
+
+
+@pytest.mark.parametrize("argument", ["5", "'cube'", "None", "[1, 2]", "(0, 0, 1)", "1.5", "True"])
+def test_detached_refuses_a_value_that_is_not_a_handle(argument):
+    with pytest.raises(ScriptError) as info:
+        rec("def build():\n    a = primitive('cube')\n    detached(%s)\n" % argument)
+    assert "earlier kit/core call" in str(info.value) and str(info.value).startswith("line 3")
+    with pytest.raises(ScriptError) as info:
+        rec("def build():\n    a = primitive('cube')\n    detached(obj=%s)\n" % argument)
+    assert "earlier kit/core call" in str(info.value)
+
+
+def test_detached_takes_exactly_one_argument():
+    for call, needle in (("detached()", "missing"), ("detached(a, a)", "at most 1"), ("detached(a, extra=1)", "no parameter")):
+        with pytest.raises(ScriptError) as info:
+            rec("def build():\n    a = primitive('cube')\n    %s\n" % call)
+        assert needle in str(info.value), call
+    # a list of parts is not one part
+    with pytest.raises(ScriptError):
+        rec("def build():\n    a = primitive('cube')\n    detached([a])\n")

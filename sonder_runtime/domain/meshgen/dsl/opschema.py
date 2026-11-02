@@ -38,8 +38,11 @@ CORE_SIGS = {
     "paint_faces": (("obj", "predicate", "colour"), 3, False),
     "join": (("objs", "name"), 2, False),
     "delete": (("obj",), 1, False),
+    "detached": (("obj",), 1, False),
 }
 CORE_PREDICATE_PARAMS = {"paint_faces": ("predicate",)}
+# core parameters that must be a handle (an earlier call's result), checked when recording and when validating
+CORE_HANDLE_PARAMS = {"detached": ("obj",)}
 
 # core op -> parameter -> (kind, low, high, may be null).  The recorder checks these when a script is recorded and
 # the Blender harness checks them again; replay takes its ranges from here, so the two cannot drift.
@@ -72,6 +75,7 @@ CORE_PARAM_KINDS = {
                     "colour": ("colour", None, None, False)},
     "join": {"objs": ("objs", None, None, False), "name": ("text", None, None, True)},
     "delete": {"obj": ("obj", None, None, False)},
+    "detached": {"obj": ("obj", None, None, False)},
 }
 
 
@@ -359,6 +363,11 @@ def validate_ops(doc, kit_names=frozenset()):
             if not isinstance(key, str) or not key.isidentifier() or len(key) > MAX_KEY or key.startswith("__"):
                 _fail(where, "bad keyword name")
             _value(item, 1, ctx, where)
+        for param in CORE_HANDLE_PARAMS.get(short, ()) if kind == "core" else ():
+            position = CORE_SIGS[short][0].index(param)
+            value = op["args"][position] if position < len(op["args"]) else op["kwargs"].get(param)
+            if not (isinstance(value, dict) and "$ref" in value):
+                _fail(where, "%s of %s must be the result of an earlier call" % (param, short))
         if kind == "core":
             try:
                 check_core_call(short, op["args"], op["kwargs"])
@@ -366,5 +375,5 @@ def validate_ops(doc, kit_names=frozenset()):
                 _fail(where, str(exc))
 
 
-__all__ = ["CORE_PARAM_KINDS", "CORE_PREDICATE_PARAMS", "CORE_SIGS", "check_core_arg", "check_core_call", "MAX_JSON_BYTES", "MAX_OPS", "OpsError", "PRED_BUILTINS", "PRED_MATH",
+__all__ = ["CORE_HANDLE_PARAMS", "CORE_PARAM_KINDS", "CORE_PREDICATE_PARAMS", "CORE_SIGS", "check_core_arg", "check_core_call", "MAX_JSON_BYTES", "MAX_OPS", "OpsError", "PRED_BUILTINS", "PRED_MATH",
            "validate_ops", "validate_pred"]

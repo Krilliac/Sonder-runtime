@@ -13,6 +13,7 @@ paint(obj, colour)  # "#RRGGBB" (or a kit palette key)
 paint_faces(obj, predicate, colour)  # predicate: lambda p: p.center.z > 0.5  (p.center/p.normal .x .y .z in OBJECT-LOCAL coordinates, p.index, p.area; numbers captured by value)
 join(objs, name)  # objs: a list of results
 delete(obj)
+detached(obj)  # use detached(part) only for parts the brief says float (motes, wisps, orbs)
 """
 
 DIALECT_RULES = """\

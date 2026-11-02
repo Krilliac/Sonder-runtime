@@ -2,7 +2,7 @@
 
 Model-written code never executes.  The host records the script into a JSON op list
 (``domain/meshgen/dsl``); this module stages ``ops.json`` plus the trusted ``harness.py``,
-``replay.py`` and ``opschema.py`` and runs Blender over them.  On Windows the run happens inside a
+``replay.py``, ``opschema.py`` and ``connectivity.py`` and runs Blender over them.  On Windows the run happens inside a
 zero-capability AppContainer (``sandbox_win``), which bounds what even the trusted code can do with
 hostile *data*; if the sandbox cannot be set up the build fails closed.
 ``SONDER_MESHGEN_UNSANDBOXED=1`` is the one explicit opt-out; results then carry
@@ -15,6 +15,7 @@ file, which is treated as untrusted input (``sanitize_result``).
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -27,7 +28,8 @@ import sonder_runtime.adapters.meshgen.sandbox_win as sandbox_win  # exact modul
 HARNESS_PATH = Path(__file__).with_name("harness.py")
 REPLAY_PATH = Path(__file__).with_name("replay.py")
 OPSCHEMA_PATH = Path(__file__).resolve().parents[2] / "domain" / "meshgen" / "dsl" / "opschema.py"
-HARNESS_FILES = (HARNESS_PATH, REPLAY_PATH, OPSCHEMA_PATH)
+CONNECTIVITY_PATH = Path(__file__).resolve().parents[2] / "domain" / "meshgen" / "connectivity.py"
+HARNESS_FILES = (HARNESS_PATH, REPLAY_PATH, OPSCHEMA_PATH, CONNECTIVITY_PATH)
 _TAIL_LINES = 8
 DEFAULT_MEMORY_MB = 8192
 SCRATCH_NAME = ".blender_profile"
@@ -182,8 +184,10 @@ MAX_IMAGE_BYTES = 64 * 1024 * 1024      # a copied-back render
 MAX_TEXT_CHARS = 2000                   # any text that can reach a prompt or a payload
 MAX_TAIL_LINE_CHARS = 300
 MAX_PATH_CHARS = 1024                  # a file path in a result; longer is refused, never shortened
+MAX_FLOATING_ENTRIES = 20               # floating-part entries kept from the harness' geometry block
+MAX_ENTRY_NAMES = 8
 _ALLOWED_RESULT_KEYS = frozenset({"ok", "error", "tris", "within_budget", "size", "files", "parts",
-                                  "render_error", "tail", "traceback"})
+                                  "render_error", "tail", "traceback", "geometry", "geometry_error"})
 _SECRET_PATTERNS = (
     re.compile(r"(?i)\b[\w.-]*(?:api[_-]?key|access[_-]?key|secret|token|passw(?:or)?d|credential)[\w.-]*\s*[=:]\s*\S+"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{12,}"),
@@ -214,6 +218,78 @@ def _keep_path(value) -> str:
     return ""
 
 
+MAX_NUMBER = 1e9    # any number from the result file is clamped to +-this (a 400-digit int must not get through)
+
+
+def _finite(value) -> float:
+    """A bounded float: ``0.0`` for anything that is not a real finite number, clamped to +-``MAX_NUMBER``."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    if isinstance(value, int):
+        return float(max(-MAX_NUMBER, min(MAX_NUMBER, value)))   # compared as ints: float(10**400) would overflow
+    if not math.isfinite(value):
+        return 0.0
+    return max(-MAX_NUMBER, min(MAX_NUMBER, value))
+
+
+def _count(value, default=0) -> int:
+    """A whole number between 0 and ``MAX_NUMBER``: clamped when over, ``default`` when not a number."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    if isinstance(value, float) and not math.isfinite(value):
+        return default
+    return int(max(0, min(MAX_NUMBER, value)))
+
+
+def _triple(value) -> list:
+    seq = value if isinstance(value, list) else []
+    return [_finite(item) for item in (seq + [0.0, 0.0, 0.0])[:3]]
+
+
+def _box(value) -> list | None:
+    """A six-number bounding box with every number clamped, or ``None`` when it is not one (or is inside out)."""
+    if not isinstance(value, list) or len(value) != 6 or not all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) for v in value):
+        return None
+    box = [_finite(v) for v in value]
+    return box if all(box[k] <= box[k + 3] for k in range(3)) else None
+
+
+def _sanitize_geometry(value) -> dict | None:
+    """The harness' ``geometry`` block with every field typed and bounded, or ``None`` when it is not a block."""
+    if not isinstance(value, dict) or not isinstance(value.get("floating"), list):
+        return None
+    entries = []
+    for item in value["floating"][:MAX_FLOATING_ENTRIES]:
+        if not isinstance(item, dict):
+            continue
+        names = [bound_text(name, 40) for name in (item.get("parts") if isinstance(item.get("parts"), list) else [])
+                 if isinstance(name, str) and name.strip()][:MAX_ENTRY_NAMES]
+        if not names:
+            continue   # an entry that names no part cannot be acted on, here or in the loop
+        lines = item.get("lines") if isinstance(item.get("lines"), list) else []
+        nearest = item.get("nearest")
+        box = _box(item.get("box"))
+        entries.append({
+            "parts": names,
+            "part_count": max(_count(item.get("part_count"), len(names)), len(names)),
+            "lines": [_count(line) for line in lines[:MAX_ENTRY_NAMES]
+                      if isinstance(line, int) and not isinstance(line, bool) and 0 < line <= MAX_NUMBER],
+            "centre": _triple(item.get("centre")), "gap": _finite(item.get("gap")),
+            "gap_vec": _triple(item.get("gap_vec")),
+            "nearest": bound_text(nearest, 40) if isinstance(nearest, str) and nearest else None,
+            **({"box": box} if box else {}),
+        })
+    detached = []
+    for item in (value.get("detached") if isinstance(value.get("detached"), list) else [])[:MAX_FLOATING_ENTRIES]:
+        if isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"].strip():
+            box = _box(item.get("box"))
+            detached.append({"name": bound_text(item["name"], 40), "line": _count(item.get("line")),
+                             **({"box": box} if box else {})})
+    return {"parts": _count(value.get("parts")), "floating": entries, "height": _finite(value.get("height")),
+            "dims": _triple(value.get("dims")), "detached": detached}
+
+
 def sanitize_result(result: dict) -> dict:
     """Keep only the keys the loop understands, with bounded, typed values.
 
@@ -222,18 +298,22 @@ def sanitize_result(result: dict) -> dict:
     clean: dict = {}
     for key in _ALLOWED_RESULT_KEYS & set(result):
         value = result[key]
-        if key in ("error", "render_error"):
+        if key == "geometry":
+            geometry = _sanitize_geometry(value)
+            if geometry is not None:
+                clean[key] = geometry
+        elif key in ("error", "render_error", "geometry_error"):
             clean[key] = bound_text(value)
         elif key in ("tail", "traceback"):
             lines = value if isinstance(value, list) else [value]
             clean[key] = [bound_text(line, MAX_TAIL_LINE_CHARS) for line in lines[-_TAIL_LINES:]]
         elif key == "tris":
-            clean[key] = int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
+            clean[key] = _count(value)
         elif key in ("ok", "within_budget"):
             clean[key] = bool(value)
         elif key == "size":
             seq = value if isinstance(value, list) else []
-            clean[key] = [float(v) for v in seq[:3] if isinstance(v, (int, float)) and not isinstance(v, bool)]
+            clean[key] = [_finite(v) for v in seq[:3] if isinstance(v, (int, float)) and not isinstance(v, bool)]
         elif key == "files":
             # a path is not prose: redacting long runs would corrupt it (a 40-character folder name is not a
             # secret), and truncating it would point somewhere else.  Keep it whole or refuse it; confine_files
@@ -244,8 +324,7 @@ def sanitize_result(result: dict) -> dict:
             for part in (value if isinstance(value, list) else [])[:8]:
                 if isinstance(part, dict):
                     tris = part.get("tris")
-                    parts.append({"name": bound_text(part.get("name"), 40),
-                                  "tris": int(tris) if isinstance(tris, (int, float)) and not isinstance(tris, bool) else 0})
+                    parts.append({"name": bound_text(part.get("name"), 40), "tris": _count(tris)})
             clean[key] = parts
     return clean
 
