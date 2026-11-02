@@ -28,7 +28,7 @@ def _drive(monkeypatch, lines):
     monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
     monkeypatch.setattr(
-        sonder_repl.server, "sonder",
+        sonder_repl._legacy_runtime, "sonder",
         lambda *_a, **_k: pytest.fail("file commands must not run a model turn"),
     )
     sonder_repl.main()

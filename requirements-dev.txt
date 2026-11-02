@@ -1,5 +1,7 @@
 -r requirements-runtime.txt
-pytest
+# Minor-bounded: pytest 9.2 changed MonkeyPatch.setattr undo semantics for instances,
+# so a new minor must be adopted deliberately, not picked up silently by CI.
+pytest>=9.2,<9.3
 pytest-xdist>=3.2
 # The REPL screen tests drive the real REPL in a pseudo-terminal. pexpect's
 # spawn needs a POSIX pty, so these are not installed on Windows, where the

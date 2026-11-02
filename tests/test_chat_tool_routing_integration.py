@@ -303,6 +303,6 @@ def test_http_inspection_preserves_receipts_and_authorization(guarded_host, monk
 
 def test_http_default_file_project_avoids_opaque_storage_namespace(monkeypatch):
     from sonder_runtime.interfaces.http import serve
-    monkeypatch.setattr(serve.server, "served_work_project", lambda _p: "")
+    monkeypatch.setattr(serve._legacy_runtime(), "served_work_project", lambda _p: "")
     assert serve._work_project_for_request("default", "opaque-owner-project", "save primes.py") == "default"
     assert serve._work_project_for_request("default", "opaque-owner-project", "Hello") == "opaque-owner-project"

@@ -303,7 +303,7 @@ def test_uncatalogued_slash_still_falls_through_to_the_model():
 def test_fallback_dispatches_a_catalogued_read_only_tool(monkeypatch):
     calls = []
     monkeypatch.setattr(
-        ts.server,
+        ts._legacy_runtime(),
         "tool_manifest",
         lambda **kwargs: calls.append(kwargs) or "manifest text",
     )
@@ -315,7 +315,7 @@ def test_fallback_dispatches_a_catalogued_read_only_tool(monkeypatch):
 def test_fallback_binds_named_and_positional_arguments(monkeypatch):
     calls = []
     monkeypatch.setattr(
-        ts.server,
+        ts._legacy_runtime(),
         "text_search",
         lambda **kwargs: calls.append(kwargs) or "searched",
     )
@@ -328,7 +328,7 @@ def test_fallback_reports_an_unknown_key_instead_of_500ing(monkeypatch):
     def explode(**kwargs):
         raise AssertionError("the tool must not run with a dropped argument")
 
-    monkeypatch.setattr(ts.server, "tool_manifest", explode)
+    monkeypatch.setattr(ts._legacy_runtime(), "tool_manifest", explode)
 
     out = ts._handle_slash("/tool_manifest bogus=1")
 
@@ -340,7 +340,7 @@ def test_fallback_surfaces_a_tool_fault_as_text(monkeypatch):
     def boom(**kwargs):
         raise RuntimeError("ollama is not running")
 
-    monkeypatch.setattr(ts.server, "tool_manifest", boom)
+    monkeypatch.setattr(ts._legacy_runtime(), "tool_manifest", boom)
 
     out = ts._handle_slash("/tool_manifest")
 
@@ -351,7 +351,7 @@ def test_fallback_surfaces_a_tool_fault_as_text(monkeypatch):
 def test_fallback_never_shadows_an_explicit_branch(monkeypatch):
     """/read has its own branch; the fallback must not reach file_read first."""
     monkeypatch.setattr(
-        ts.server, "file_read", lambda **kwargs: "explicit branch: %s" % kwargs["path"]
+        ts._legacy_runtime(), "file_read", lambda **kwargs: "explicit branch: %s" % kwargs["path"]
     )
 
     assert ts._handle_slash("/read README.md") == "explicit branch: README.md"
