@@ -410,6 +410,10 @@ class _Interp:
 
     def check_alive(self, handle):
         """An object that join merged away or delete removed cannot be used again, under any handle for it."""
+        made_op = self.ops[handle.id - 1]
+        if made_op["op"] in self._NO_RESULT:
+            raise self.err("%s (line %d) returns nothing to use; call it on its own line and keep using the part you "
+                           "passed to it" % (made_op["op"][5:], made_op["line"]))
         gone = self.consumed.get(self.object_of(handle))
         if gone is not None:
             how, line, into = gone
@@ -419,6 +423,9 @@ class _Interp:
                                % (made["op"], made["line"], line))
             raise self.err("the result of %s (line %d) was joined into the result of %s at line %d and no longer "
                            "exists; use the join result instead" % (made["op"], made["line"], into, line))
+
+    # core ops whose replayed result is None, so their recorded handle must not be used as a part
+    _NO_RESULT = frozenset({"core.delete", "core.detached"})
 
     # core ops that return their first argument's object under a new handle
     _PASSTHROUGH = frozenset({"core.transform", "core.paint", "core.paint_faces", "core.shade_smooth",

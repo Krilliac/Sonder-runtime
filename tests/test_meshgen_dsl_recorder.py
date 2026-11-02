@@ -909,6 +909,29 @@ def test_using_a_deleted_handle_is_refused():
     assert "deleted at line 3" in str(info.value) and str(info.value).startswith("line 4")
 
 
+@pytest.mark.parametrize("call,name", [("delete(a)", "delete"), ("detached(a)", "detached")])
+def test_the_result_of_delete_or_detached_cannot_be_used_as_a_part(call, name):
+    source = """def build():
+    a = primitive('cube', 'A', size=1.0)
+    d = %s
+    transform(d, loc=(0, 0, 1))
+""" % call
+    with pytest.raises(ScriptError) as info:
+        rec(source)
+    message = str(info.value)
+    assert message.startswith("line 4") and "%s (line 3) returns nothing to use" % name in message
+
+
+def test_delete_and_detached_on_their_own_line_still_record():
+    source = """def build():
+    a = primitive('cube', 'A', size=1.0)
+    detached(a)
+    b = primitive('cube', 'B', size=1.0)
+    delete(b)
+"""
+    assert [op["op"] for op in rec(source).ops] == ["core.primitive", "core.detached", "core.primitive", "core.delete"]
+
+
 # --- handles are tracked per object: an alias made by a passthrough op dies with its object ---
 
 ALIAS_KIT = '''"""kit"""

@@ -6,6 +6,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from sonder_runtime.adapters.meshgen import blender_runner as runner
 
 
@@ -321,6 +323,33 @@ def test_a_path_that_is_not_lexically_inside_the_output_dir_is_refused_before_an
         refused = runner.confine_files({"ok": True, "files": {"model": value}}, out, "n")
         assert refused["ok"] is False and "outside the output directory" in refused["error"], value
     assert all(str(item) == str(out) for item in touched)  # only the trusted output directory is resolved
+
+
+def _symlink_or_skip(link, target):
+    try:
+        os.symlink(str(target), str(link))
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip("cannot create a file symlink here (%s)" % exc.__class__.__name__)
+
+
+def test_an_expected_name_that_is_a_symlink_to_a_file_outside_the_output_dir_is_refused(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    canary = tmp_path / "canary.txt"
+    canary.write_text("secret")
+    for fname, key in (("n.glb", "model"), ("n_sheet.png", "sheet"), ("n_view.png", "view")):
+        _symlink_or_skip(out / fname, canary)
+        # passes the lexical check (direct child of out, exact expected name); only the realpath containment refuses it
+        refused = runner.confine_files({"ok": True, "files": {key: str(out / fname)}}, out, "n")
+        assert refused["ok"] is False and "outside the output directory" in refused["error"], key
+
+
+def test_a_symlink_to_a_file_inside_the_output_dir_is_still_accepted(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "real.bin").write_text("x")
+    _symlink_or_skip(out / "n.glb", out / "real.bin")
+    assert runner.confine_files({"ok": True, "files": {"model": str(out / "n.glb")}}, out, "n")["ok"] is True
 
 
 def test_the_lexical_prefix_check_ignores_case(tmp_path):
