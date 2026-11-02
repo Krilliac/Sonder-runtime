@@ -295,7 +295,7 @@ def test_a_recorder_that_hits_its_hard_limit_is_a_script_error_for_the_model(tmp
     from sonder_runtime.domain.meshgen.dsl.errors import ScriptError
 
     def boom(*args, **kwargs):
-        raise ScriptError(0, mesh_agent_tools.record_runner.LIMIT_MESSAGE)
+        raise ScriptError(0, "the script did too much work (time limit of 15 s exceeded)")
 
     monkeypatch.setattr(mesh_agent_tools.record_runner, "record_script", boom)
     payload, runner, _ = call(tmp_path, candidates=1, rounds=1)

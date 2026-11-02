@@ -739,3 +739,42 @@ def test_work_is_charged_for_each_big_operation_not_just_for_loops():
                   "        x = %s\n" % body)
         message = _capped(source)
         assert "too much work" in message or "too large" in message, (body, message)
+
+
+KIT_COLOUR = KIT.replace('def box(name, size, radius=0.0, hexcol="#888888"', 'def box(name, size, radius=0.0, hexcol="#888888"')
+
+
+@pytest.mark.parametrize("call", [
+    "paint(primitive('cube'), (1, 0, 0, 1))", "paint(primitive('cube'), 0.5)", "paint(primitive('cube'), 'notacolour')",
+    "propkit.box('b', 1, hexcol=(0.2, 0.3, 0.4))", "propkit.box('b', 1, 0.0, [1, 2, 3])",
+    "paint_faces(primitive('cube'), lambda p: p.index > 1, (1, 0, 0))",
+])
+def test_colour_arguments_must_be_hex_or_a_palette_name(call):
+    message = reject("import propkit\ndef build():\n    %s\n" % call)
+    assert LINE.match(message) and "colour" in message.lower() or "hexcol" in message, message
+
+
+@pytest.mark.parametrize("call", [
+    "paint(primitive('cube'), '#cc3333')", "paint(primitive('cube'), '#fff')", "paint(primitive('cube'), 'red')",
+    "propkit.box('b', 1, hexcol='blue')", "propkit.box('b', 1, hexcol='#112233')", "propkit.box('b', 1, hexcol=None)",
+])
+def test_valid_colour_arguments_are_accepted(call):
+    rec("import propkit\ndef build():\n    %s\n" % call)
+
+
+def test_a_core_function_called_through_the_kit_alias_is_recorded_as_the_core_op():
+    result = rec("import propkit\ndef build():\n    c = propkit.primitive('cube', size=2.0)\n"
+                 "    propkit.shade_smooth(c)\n    propkit.transform(c, loc=(0, 0, 1))\n")
+    assert [op["op"] for op in result.ops] == ["core.primitive", "core.shade_smooth", "core.transform"]
+    assert result.ops[0]["kwargs"]["size"] == 2.0
+
+
+def test_the_kit_function_wins_over_a_core_function_of_the_same_name():
+    kit = KIT + "\ndef paint(obj, hexcol):\n    '''kit paint'''\n"
+    manifest = build_manifest(kit, "propkit")
+    result = rec("import propkit\ndef build():\n    propkit.paint(primitive('cube'), '#fff')\n", manifest)
+    assert result.ops[-1]["op"] == "kit.paint"
+
+
+def test_a_name_that_is_neither_kit_nor_core_is_still_refused():
+    assert "is not available" in reject("import propkit\ndef build():\n    propkit.bogus(1)\n")

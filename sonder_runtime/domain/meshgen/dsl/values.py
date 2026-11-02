@@ -32,10 +32,12 @@ class Handle:
 class Pred:
     """A serialised predicate tree (see ``predicates``); only ever produced from a lambda in a predicate position."""
 
-    __slots__ = ("tree",)
+    __slots__ = ("tree", "nodes", "size")
 
-    def __init__(self, tree):
+    def __init__(self, tree, nodes=0, size=0):
         self.tree = tree
+        self.nodes = nodes  # number of values in the tree (charged as work and leaves)
+        self.size = size    # an upper bound of its JSON text in bytes
 
 
 def is_domain(value, depth: int = 0) -> bool:

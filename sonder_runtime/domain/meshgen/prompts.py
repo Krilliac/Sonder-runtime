@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import re
 
+from .dsl import opschema
 from .dsl.core_api import DIALECT_RULES, core_api_digest
 
 _FENCE = re.compile(r"```[ \t]*([A-Za-z0-9_+-]*)[ \t]*\r?\n(.*?)```", re.DOTALL)
@@ -139,6 +140,11 @@ def repair_hint(failure: str, kit_module: str | None, kit_names, kit_excluded=()
     if "bpy is not available" in text:
         return ("There is no bpy here. Build with the kit and core functions in the prompt only "
                 "(primitive, mesh, modifier, paint, transform, join).")
+    core = _QUALIFIED_UNAVAILABLE.search(text)
+    if core and core.group(2) in opschema.CORE_SIGS:
+        return ("`%s` is a core function: call it as `%s(...)` without the `%s.` prefix (core functions are plain "
+                "names such as primitive, mesh, transform, shade_smooth, modifier, paint, paint_faces, join, delete)."
+                % (core.group(2), core.group(2), core.group(1)))
     if "is not available in build scripts" in text:
         return ("That name is not part of the build dialect. Use only the listed kit and core functions, "
                 "and call kit functions qualified, for example `%s.name(...)`." % (kit_module or "kit"))
@@ -159,12 +165,22 @@ def repair_hint(failure: str, kit_module: str | None, kit_names, kit_excluded=()
             "the call." % name)
 
 
+_QUALIFIED_UNAVAILABLE = re.compile(r"(\w+)\.(\w+) is not available in build scripts")
+
+
 def orientation_guidance(issues) -> str:
     """Turn orientation complaints into concrete rotation instructions (else empty)."""
     text = " ".join(str(item).lower() for item in (issues or []))
     if not any(word in text for word in _ORIENTATION_WORDS):
         return ""
-    return ("Orientation help: cylinders, cones, tori and lathes are created around the Z axis, so they lie "
+    wheel = any(word in text for word in ("wheel", "axle", "tyre", "tire"))
+    override = ""
+    if wheel:
+        override = ("A wheel's axle runs along X (side to side) because the front of the object faces -Y: build "
+                    "the cylinder, then rot=(0, 90, 0). Rotating a wheel about X puts its axle along Y, which is "
+                    "sideways and wrong; if an issue above says to rotate a wheel about X, use rot=(0, 90, 0) "
+                    "instead. ")
+    return (override + "Orientation help: cylinders, cones, tori and lathes are created around the Z axis, so they lie "
             "flat. To stand a wheel upright with its axle along X, set rot=(0, 90, 0) "
             "(rotate 90 degrees about Y); for an axle along Y use rot=(90, 0, 0). Rotations are in degrees. "
             "When a kit function revolves about Z, rotate the returned object the same way, and move it so "

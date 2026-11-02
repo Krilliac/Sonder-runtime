@@ -1,6 +1,7 @@
 """The recorder subprocess backstop: a hard wall-clock kill, a memory cap, a bounded answer, fail closed."""
 from __future__ import annotations
 
+import os
 import time
 
 import pytest
@@ -123,3 +124,37 @@ def test_the_memory_cap_holds_on_every_start_not_just_most(tmp_path):
         with pytest.raises(ScriptError) as info:
             record_runner.record_script(GOOD, timeout=30, memory_mb=256, worker=worker)
         assert "memory limit" in str(info.value), str(info.value)
+
+
+def test_a_deeply_nested_answer_is_a_script_error_not_a_recursion_crash(tmp_path):
+    deep = "[" * 100000 + "]" * 100000
+    worker = _worker(tmp_path, "open(result, 'w').write(json.dumps({'ok': True}))\nopen('ops.json', 'w').write(" + repr(deep) + ")\n")
+    with pytest.raises(ScriptError):
+        record_runner.record_script(GOOD, timeout=20, worker=worker)
+
+
+@pytest.mark.skipif(os.environ.get("MESHGEN_STRESS") != "1", reason="opt in with MESHGEN_STRESS=1")
+def test_the_memory_cap_holds_in_fifty_starts_under_full_cpu_load(tmp_path):
+    """Stress for the window between starting the child and putting it in its Job Object."""
+    import multiprocessing
+    stop = multiprocessing.Event()
+    burners = [multiprocessing.Process(target=_burn, args=(stop,)) for _ in range(os.cpu_count() or 4)]
+    for burner in burners:
+        burner.start()
+    worker = _worker(tmp_path, "blocks = []\nfor _ in range(64):\n    blocks.append(bytearray(64 * 1024 * 1024))\n"
+                               "open(result, 'w').write(json.dumps({'ok': False, 'line': 1, 'message': 'SURVIVED'}))\n")
+    try:
+        for _ in range(50):
+            with pytest.raises(ScriptError) as info:
+                record_runner.record_script(GOOD, timeout=30, memory_mb=256, worker=worker)
+            assert "memory limit" in str(info.value), str(info.value)
+    finally:
+        stop.set()
+        for burner in burners:
+            burner.join(timeout=30)
+
+
+def _burn(stop):
+    count = 0
+    while not stop.is_set():
+        count += 1

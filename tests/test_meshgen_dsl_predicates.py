@@ -152,3 +152,9 @@ def test_constant_arithmetic_is_folded_and_refused_at_record_time(expr):
 def test_literal_arithmetic_is_computed_on_the_host():
     assert pred_of("p.index > 2 * 3 + 1") == [">", ["f", "index"], 7]
     assert pred_of("p.center.z < 2 ** -1") == ["<", ["f", "center", "z"], 0.5]
+
+
+def test_a_complex_constant_has_its_own_message():
+    with pytest.raises(ScriptError) as info:
+        pred_of("p.index > (-8) ** 0.5")
+    assert "not a real number" in str(info.value), str(info.value)

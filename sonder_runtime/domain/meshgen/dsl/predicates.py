@@ -91,7 +91,10 @@ def compile_predicate(node, capture, math_aliases=("math",)):
             raise err(sub, "division by zero in a constant part of the predicate") from None
         except (OverflowError, ValueError):
             raise err(sub, "a constant part of the predicate is too large to compute") from None
-        if isinstance(value, complex) or (isinstance(value, float) and not math.isfinite(value)) or (
+        if isinstance(value, complex):
+            raise err(sub, "a constant part of the predicate is not a real number (a negative base with a fractional "
+                      "exponent gives a complex number)")
+        if (isinstance(value, float) and not math.isfinite(value)) or (
                 isinstance(value, int) and not -MAX_INT < value < MAX_INT):
             raise err(sub, "a constant part of the predicate is out of range (whole numbers must stay below 2**63)")
         return value

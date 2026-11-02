@@ -39,6 +39,7 @@ MAX_TOTAL_ELEMENTS = 10_000_000
 MAX_TOTAL_CHARS = 50_000_000
 MAX_WORK = 3_000_000          # elements an operation walks or copies, summed over the whole run
 _WEIGHT_CAP = 2 ** 40
+_SIZE_SLACK = 64 * 1024
 _RECURSION_MESSAGE = ("the script is nested too deeply (functions may call each other at most %d levels deep and "
                       "expressions %d levels)" % (MAX_CALL_DEPTH, MAX_EXPR_DEPTH))
 MAX_PRINT_LINES = opschema.MAX_LOG_LINES
@@ -183,6 +184,7 @@ class _Interp:
         self.leaves = 0
         self.work_done = 0
         self.deadline = time.monotonic() + MAX_SECONDS
+        self.json_size = 0
         self.probe = None
         self.core_names = frozenset(opschema.CORE_SIGS)
 
@@ -252,6 +254,9 @@ class _Interp:
             children = item.values() if isinstance(item, dict) else item
             if leaving:
                 total = 1
+                if isinstance(item, dict):
+                    for name in item:
+                        total += 1 + (len(name) >> 6)  # the keys are part of what a walk costs
                 for child in children:
                     if isinstance(child, (list, tuple, dict)):
                         total += memo.get(id(child), 1)
@@ -270,6 +275,7 @@ class _Interp:
             for child in children:
                 if isinstance(child, (list, tuple, dict)) and id(child) not in memo:
                     stack.append((child, False))
+        self.work(steps)  # the walk above is itself work
         return memo[id(value)]
 
     def reaches(self, value, target):
@@ -341,32 +347,48 @@ class _Interp:
     # ------------------------------------------------------------------ recording
     def encode(self, value, depth=1):
         """A domain value as JSON-grammar data (handles become ``$ref``)."""
-        self.leaves += 1
-        self.work(1)
+        extra = value.nodes if isinstance(value, Pred) else 1
+        self.leaves += extra
+        self.work(extra)
         if self.leaves > opschema.MAX_LEAVES:
             raise self.err("the recorded calls hold more than %d values" % opschema.MAX_LEAVES)
         if value is None or isinstance(value, bool):
+            self.add_size(6)
             return value
         if isinstance(value, (int, float)):
+            self.add_size(len(repr(value)) + 1)
             return self.checked(value)
         if isinstance(value, str):
             if len(value) > opschema.MAX_STRING:
                 raise self.err("a string passed to a kit/core function is longer than %d characters"
                                % opschema.MAX_STRING)
+            self.work(len(value) >> 6)
+            self.add_size(_json_text_size(value) + 1)
             return value
         if isinstance(value, Handle):
+            self.add_size(18)
             return {"$ref": value.id}
         if isinstance(value, Pred):
+            self.add_size(value.size + 10)
             return {"$pred": value.tree}
         if isinstance(value, (list, tuple)):
             if depth > opschema.MAX_NESTING:
                 raise self.err("a value passed to a kit/core function is nested deeper than %d" % opschema.MAX_NESTING)
+            self.add_size(2)
             return [self.encode(item, depth + 1) for item in value]
         raise self.err("a dict cannot be passed to a kit/core function; use a list or tuple")
+
+    def add_size(self, count):
+        """Keep a running upper bound of the ``ops.json`` text, so an oversized recording fails before it is built."""
+        self.json_size += count
+        if self.json_size > opschema.MAX_JSON_BYTES + _SIZE_SLACK:  # an estimate; the exact check follows the build
+            raise self.err("the recorded calls are larger than %d MB of JSON; pass fewer or smaller values"
+                           % (opschema.MAX_JSON_BYTES >> 20))
 
     def record(self, op, origin, args, kwargs):
         if len(self.ops) >= opschema.MAX_OPS:
             raise self.err("the script makes more than %d kit/core calls; build fewer, larger parts" % opschema.MAX_OPS)
+        self.add_size(53 + len(op) + sum(len(key) + 4 for key in kwargs))
         ident = len(self.ops) + 1
         entry = {"id": ident, "line": self.line, "op": op, "args": [self.encode(a) for a in args],
                  "kwargs": {key: self.encode(val) for key, val in kwargs.items()}}
@@ -532,10 +554,15 @@ class _Interp:
         if isinstance(op, ast.Mult):
             seq, count = (left, right) if not _is_number(left) else (right, left)
             if isinstance(seq, (str, list, tuple)) and isinstance(count, int):
+                if count <= 0:
+                    return seq[:0]
                 if isinstance(seq, str):
-                    self.charge_text(len(seq) * max(count, 0))
+                    self.charge_text(len(seq) * count)
                 else:
-                    self.charge((self.weight(seq) - 1) * max(count, 0))  # deep size: aliased rows count each time
+                    self.charge(len(seq) * count)  # the elements of the result, against the container cap
+                    inner = self.weight(seq) - 1 - len(seq)  # what the elements themselves hold, per copy
+                    if inner > 0:
+                        self.work(inner * count)  # deep size: aliased rows count each time, as work
                 return seq * count
         if isinstance(op, ast.Mod) and isinstance(left, str):
             return self.percent(left, right, node)
@@ -571,7 +598,9 @@ class _Interp:
             same = left is right
             return same if isinstance(op, ast.Is) else not same
         self.reject_handle(left, right, node=node)
-        if not (isinstance(left, (int, float)) and isinstance(right, (int, float))):
+        if isinstance(op, (ast.In, ast.NotIn)) and isinstance(right, dict):
+            self.work(self.weight(left) + 1)  # a dict lookup hashes the key; it does not walk the dict
+        elif not (isinstance(left, (int, float)) and isinstance(right, (int, float))):
             self.work(self.weight(left) + self.weight(right))  # a comparison may walk both values
         try:
             if isinstance(op, ast.Eq):
@@ -798,6 +827,10 @@ class _Interp:
             if sig is None:
                 if attr in self.manifest.constants:
                     raise self.err("%s.%s is a constant, not a function" % (alias, attr), node)
+                if attr in self.core_names and not self.lookup(attr)[0]:
+                    # `lf_kit.primitive(...)` is a common slip: primitive is a core function, so record it as one
+                    return self.call_recorded("core." + attr, "core." + attr, opschema.CORE_SIGS[attr],
+                                              opschema.CORE_PREDICATE_PARAMS.get(attr, ()), node)
                 raise self.err("%s.%s is not available in build scripts; the harness exports and renders, and only "
                                "the functions in the kit API list can be called" % (alias, attr[:40]), node)
             signature = (sig.params + sig.kwonly, sig.required, sig.varkw or sig.varargs)
@@ -865,7 +898,10 @@ class _Interp:
                 raise self.err("a lambda is only supported as the predicate argument of paint_faces", argument)
             self.tick(argument)
             aliases = tuple(name for name, kind in self.modules.items() if kind == "math")
-            return Pred(compile_predicate(argument, self.capture, aliases))
+            tree = compile_predicate(argument, self.capture, aliases)
+            nodes, size = _tree_stats(tree)
+            self.work(nodes)
+            return Pred(tree, nodes, size)
         if is_predicate:
             raise self.err("the predicate argument must be written inline as a lambda, "
                            "for example lambda p: p.center.z > 0.5", argument)
@@ -904,7 +940,29 @@ class _Interp:
             raise self.err("%s is missing %s; its parameters are: %s" % (origin, ", ".join(repr(m) for m in missing), real),
                            node)
         self.line = _lineno(node) or self.line
+        for position, value in enumerate(args):
+            if position < len(params) and params[position] in _COLOUR_PARAMS:
+                self.check_colour(origin, params[position], value, node)
+        for key, value in kwargs.items():
+            if key in _COLOUR_PARAMS:
+                self.check_colour(origin, key, value, node)
         return self.record(op, origin, args, kwargs)
+
+    def check_colour(self, origin, name, value, node):
+        """Colour parameters take '#RRGGBB' / '#RGB' or a palette name; anything else fails at record time."""
+        if value is None:
+            return
+        if isinstance(value, str):
+            text = value.strip()
+            palette = self.manifest.constants.get("PALETTE")
+            body = text.lstrip("#")
+            if (isinstance(palette, dict) and text in palette) or (
+                    len(body) in (3, 6) and all(char in "0123456789abcdefABCDEF" for char in body)):
+                return
+            raise self.err("%s: %s=%r is not a colour; use '#RRGGBB' or a palette name" % (origin, name, value[:30]),
+                           node)
+        raise self.err("%s: %s must be a '#RRGGBB' string or a palette name, not %s (a tuple or number is not a "
+                       "colour)" % (origin, name, _kind_name(value)), node)
 
     def call_user(self, func, node):
         if any(isinstance(arg, ast.Starred) for arg in node.args) or any(kw.arg is None for kw in node.keywords):
@@ -1392,13 +1450,17 @@ def method_call(interp, receiver, name, args, kwargs, node):
         interp.work((len(receiver) >> 6) + 1)
         if name in ("upper", "lower"):
             need(0, 0)
-            return receiver.upper() if name == "upper" else receiver.lower()
+            text = receiver.upper() if name == "upper" else receiver.lower()
+            interp.charge_text(len(text))  # case changes can lengthen a string ('ß'.upper())
+            return text
         if name == "strip":
             need(0, 1)
             if args and not isinstance(args[0], str):
                 raise interp.err("strip() takes a string of characters", node)
             interp.work(sum(len(a) for a in args) >> 6)
-            return receiver.strip(*args)
+            text = receiver.strip(*args)
+            interp.charge_text(len(text))
+            return text
         if name == "join":
             need(1, 1)
             items = interp.iterable(args[0], node)
@@ -1504,6 +1566,33 @@ def method_call(interp, receiver, name, args, kwargs, node):
     raise interp.err("%s has no supported method .%s(); supported: str join/upper/lower/strip/replace/startswith/"
                      "endswith/split/zfill, list append/extend/pop/insert/sort/reverse/index/count, dict "
                      "get/keys/values/items" % (_kind_name(receiver), name[:40]), node)
+
+
+_COLOUR_PARAMS = frozenset({"colour", "hexcol"})
+
+
+def _json_text_size(text):
+    """An upper bound of the JSON text of a string: quotes, escapes, and 6 bytes for anything not plain ASCII."""
+    if text.isascii() and text.isprintable():
+        return len(text) + 2 + text.count(chr(34)) + text.count(chr(92))
+    return 6 * len(text) + 2
+
+
+def _tree_stats(tree):
+    """(values in a predicate tree, an upper bound of its JSON bytes); iterative."""
+    nodes = size = 0
+    stack = [tree]
+    while stack:
+        item = stack.pop()
+        nodes += 1
+        if isinstance(item, list):
+            size += 2 + len(item)
+            stack.extend(item)
+        elif isinstance(item, str):
+            size += _json_text_size(item) + 1
+        else:
+            size += len(repr(item)) + 1
+    return nodes, size
 
 
 def _kind_name(value):

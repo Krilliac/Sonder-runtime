@@ -180,3 +180,23 @@ def test_repair_hint_covers_the_recorder_messages():
     assert "opaque handles" in repair_hint(handle, "propkit", set())
     assert "no bpy" in repair_hint("line 1: import bpy: bpy is not available; use the kit", "propkit", set())
     assert "propkit.name(" in repair_hint("line 2: os.x is not available in build scripts", "propkit", set())
+
+
+def test_a_wheel_is_rotated_about_y_and_a_critic_saying_x_is_overridden():
+    from sonder_runtime.domain.meshgen.critique import critique_prompt
+    from sonder_runtime.domain.meshgen.prompts import orientation_guidance
+    text = orientation_guidance(["wheel axle is vertical; rotate 90 degrees about X"])
+    assert "axle runs along X" in text and "rot=(0, 90, 0)" in text
+    assert "Rotating a wheel about X puts its axle along Y" in text
+    assert "axle runs along X" not in orientation_guidance(["the roof is too flat"])
+    prompt = critique_prompt("a wheelbarrow") if callable(critique_prompt) else ""
+    assert "rot=(0, 90, 0)" in prompt and "about X or Y" not in prompt
+
+
+def test_a_core_function_called_with_the_kit_prefix_gets_a_specific_hint():
+    from sonder_runtime.domain.meshgen.prompts import repair_hint
+    hint = repair_hint("line 5: lf_kit.primitive is not available in build scripts; only the functions in the kit API "
+                       "list can be called", "lf_kit", {"box"})
+    assert "primitive is a core function" in hint or "`primitive` is a core function" in hint
+    assert "without the `lf_kit.` prefix" in hint
+    assert "is a core function" not in repair_hint("line 5: lf_kit.bogus is not available in build scripts", "lf_kit", {"box"})

@@ -27,7 +27,6 @@ from .blender_runner import run_limited
 WORKER_PATH = Path(__file__).with_name("recorder_worker.py")
 DEFAULT_TIMEOUT_S = 15.0
 DEFAULT_MEMORY_MB = 1024
-LIMIT_MESSAGE = "the script did too much work (time/memory limit)"
 _MAX_RESULT_BYTES = 64 * 1024
 
 
@@ -77,7 +76,7 @@ def record_script(source, *, kit_source=None, kit_module=None, seed=0, timeout=D
                 raise _failure("the recorder process stopped without an answer (exit code %s)" % code)
             if result.stat().st_size > _MAX_RESULT_BYTES:
                 raise _failure("the recorder's answer was larger than %d KB" % (_MAX_RESULT_BYTES >> 10))
-            answer = json.loads(result.read_text(encoding="utf-8"))
+            answer = json.loads(result.read_text(encoding="utf-8"))  # RecursionError is handled below
             if not isinstance(answer, dict):
                 raise _failure("the recorder's answer was not a JSON object")
             if answer.get("memory") is True:
@@ -94,14 +93,14 @@ def record_script(source, *, kit_source=None, kit_module=None, seed=0, timeout=D
             if ops.stat().st_size > opschema.MAX_JSON_BYTES:
                 raise _failure("the recording is larger than %d MB" % (opschema.MAX_JSON_BYTES >> 20))
             text = ops.read_text(encoding="utf-8")
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             raise _failure("the recorder's answer could not be read") from None
     try:
         document = json.loads(text)
         opschema.validate_ops(document, manifest.functions)  # the host re-checks what the child produced
-    except (ValueError, opschema.OpsError):
+    except (ValueError, RecursionError, opschema.OpsError):
         raise ScriptError(0, "the recorder returned an invalid recording") from None
     return Recording(document, text)
 
 
-__all__ = ["DEFAULT_MEMORY_MB", "DEFAULT_TIMEOUT_S", "LIMIT_MESSAGE", "WORKER_PATH", "record_script"]
+__all__ = ["DEFAULT_MEMORY_MB", "DEFAULT_TIMEOUT_S", "WORKER_PATH", "record_script"]
