@@ -121,7 +121,7 @@ def _safe_builtins(allowed):
 
 
 def _stub_excluded_kit_names(module_name, excluded):
-    """Defence in depth: replace kit names the policy excludes (file/export/render helpers).
+    """Defence in depth: replace kit *functions* the policy excludes (file/export/render helpers).
 
     The AST gate already refuses them; if a script reached one anyway (a gate bug, a reflection
     trick) it hits a stub instead of code that writes files.  Excluded names are, by
@@ -135,8 +135,8 @@ def _stub_excluded_kit_names(module_name, excluded):
     for attr in excluded:
         if not hasattr(module, attr):
             continue
-        current = getattr(module, attr)
-        setattr(module, attr, blocked if callable(current) else None)
+        if callable(getattr(module, attr)):  # constants stay: kit primitives read them (e.g. a colour table)
+            setattr(module, attr, blocked)
 
 
 def _clear_scene():

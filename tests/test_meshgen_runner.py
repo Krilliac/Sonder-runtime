@@ -30,6 +30,7 @@ def _write_result(argv, payload):
 
 
 def _build(tmp_path, **kw):
+    kw.setdefault("sandbox", "unsandboxed")
     code = tmp_path / "c.py"
     code.write_text("def build(): pass\n")
     kw.setdefault("max_tris", 10)

@@ -73,7 +73,69 @@ tier that produced its version, and each candidate reports `tiers_used`.
 `mesh_generate` runs **model-written Python**. It is graded as an execution tool, the same
 trust level as `run_code`, and asks or is denied in the same permission modes.
 
-Several layers reduce accidents, but they are defence in depth, **not a sandbox**:
+### Threat model: the OS sandbox is the boundary
+
+On Windows every Blender build runs inside a **zero-capability AppContainer** with a Job Object
+(`sonder_runtime/adapters/meshgen/sandbox_win.py`). That sandbox is the security boundary. The AST
+gate, the kit policy and the harness' restricted builtins below are *first filters*: they catch
+mistakes cheaply, give the model repair feedback and keep the prompt honest, but a static check
+can always be bypassed and none of it is relied on to contain a hostile script.
+
+Inside the sandbox the process can read and write only its own per-build run directory and read the
+Blender install directory. User files, repositories and credential stores are unreadable; there is
+no network (loopback included); no second process can be started (`ActiveProcessLimit=1`); the job
+has a memory limit (default 4096 MB) and is killed when its handle closes. The process is created
+suspended and resumed only after `AssignProcessToJobObject` succeeded; if that or any other setup
+step fails the build is refused. **Fail closed**: there is no silent fallback to running unsandboxed.
+
+Verified with real Blender 5.2 in `tests/test_meshgen_integration.py`, each with an unsandboxed
+control showing the probe really would succeed: reading a canary file outside the run dir, a TCP
+connection to a loopback listener, and `wm.obj_import` of a canary file all fail in the sandbox; the
+Lanternfall `lf_kit.box` builds, exports and renders through it.
+
+What the sandbox does not claim: it does not stop CPU use until the timeout, nor a Windows
+AppContainer escape; the opt-out and non-Windows platforms have no sandbox at all.
+
+**ACL footprint** (everything the sandbox changes on the machine, and how to undo it):
+
+- an AppContainer profile `Sonder.MeshGen` for the current user (created on first use);
+- one persistent grant, added once and only if missing: `(OI)(CI)(RX)` for that profile's SID on the
+  Blender install directory. Undo: `icacls "<blender dir>" /remove:g *<SID>` (the SID is printed by
+  `icacls "<blender dir>"`; the profile itself can be removed with `DeleteAppContainerProfile`);
+- per build, a fresh run directory `<candidate dir>/.run-<id>` with a `(OI)(CI)(M)` grant that is
+  removed, and the directory deleted, when the build ends (also on failure/timeout). Builds run in
+  parallel, each with its own run directory, grant, job and handles.
+
+No grant is ever placed on the kit's source directory, the repository or any user directory; a run
+directory that would overlap the kit's directory (or contain the user's home) is refused. The kit
+file, the harness and the script are *copied* into the run directory (only the single kit file is
+copied, so a kit that imports sibling modules will not work in the sandbox). Outputs are copied back
+to the candidate directory afterwards.
+
+The sandboxed process gets a minimal environment: `SYSTEMROOT`/`WINDIR`, a `PATH` of the Blender and
+system directories, `TEMP`/`TMP`/`HOME`/`USERPROFILE`/`APPDATA`/`LOCALAPPDATA` and
+`BLENDER_USER_{CONFIG,SCRIPTS,DATAFILES,EXTENSIONS}` all inside the run directory, and nothing from the
+server's environment. (Blender 5.2 has no `--temp-dir` option; it honours `TEMP`, which points into
+the run directory.)
+
+Environment variables:
+
+| Variable | Meaning |
+| --- | --- |
+| `SONDER_MESHGEN_MEM_MB` | job-wide memory limit in MB (default 4096, clamped 256..65536); a build that hits it is reported as `memory limit exceeded (N MB)` |
+| `SONDER_MESHGEN_UNSANDBOXED=1` | explicit opt-out: run Blender with the server's authority. The report then carries `sandbox: "unsandboxed"` and a `warning`; use only where `run_code` would be acceptable |
+| `SONDER_BLENDER` | path to `blender.exe` |
+
+If the sandbox cannot be set up (for example the Blender grant needs an account that may edit its
+ACL, run the printed `icacls ... /grant` once) `mesh_generate` returns an error naming the cause and
+the opt-out; it never starts a build first. Non-Windows hosts have no sandbox here: they report
+`unsandboxed`, and the POSIX memory ceiling is a best-effort `prlimit` on Linux only (no
+`preexec_fn`, which is unsafe with threads).
+
+Cost: roughly 2 s extra per build (profile and ACL work, a second process launch, copying the
+harness, script and kit into the run directory).
+
+### Defence-in-depth layers (not the boundary)
 
 - **AST gate** (`sonder_runtime/domain/meshgen/script_safety.py`). It is an allow-list for
   Blender, not a deny list of paths:
@@ -111,23 +173,23 @@ Several layers reduce accidents, but they are defence in depth, **not a sandbox*
   of the server's. Only `SYSTEMROOT`, `WINDIR`, `SYSTEMDRIVE`, `PATHEXT`, `PROCESSOR_ARCHITECTURE`,
   `NUMBER_OF_PROCESSORS`, `OS`, `LANG`, `LC_ALL` are copied; `PATH` is just the Blender directory
   plus the system directories; `TEMP`/`TMP`/`HOME`/`USERPROFILE`/`APPDATA`/`LOCALAPPDATA` point at a
-  per-build scratch directory (`<candidate dir>/.blender_profile`, deleted after every build). API keys, tokens and `SONDER_*` values never reach the process.
+  per-build scratch directory (`<candidate dir>/.blender_profile`, deleted after every build) on the unsandboxed path (the sandbox uses the run directory). API keys, tokens and `SONDER_*` values never reach the process.
 - **Kit exposure** (`sonder_runtime/domain/meshgen/kit_policy.py`). A kit is trusted code, but its
   public functions are reachable from untrusted scripts and some of them write files (export,
   preview render, "run the whole prop"). Exposure is therefore an allow-list derived from the kit
   source: a function or class is excluded when anything in it touches `open`/`exec`/`eval`, the
   `os`/`sys`/`shutil`/`pathlib`/`subprocess`/`io`/`json`... modules, `Path`, file-ish attributes
-  (`save`, `write`, `filepath`, `makedirs`, `export_scene`, `wm`, `ops.render`, ...); text
+  (`save`, `write`, `filepath`, `makedirs`, `export_scene`, `open_mainfile`, `ops.render`, ...; `system`/`popen` only on `os`/`subprocess`-like receivers); text
   constants (`KIT_DIR`, `REPO_ROOT`, ...) are never exposed; and exclusion is transitive (a function
   that uses an excluded kit name is excluded). For the Lanternfall `lf_kit.py` this excludes
   `COL`, `KIT_DIR`, `PREVIEW_DIR`, `PROPS_OUT_ROOT`, `REPO_ROOT`, `finalize_and_export`,
-  `render_preview`, `reset_scene`, `result_line` and `run_prop`. The operator can override the
+  `render_preview`, `result_line` and `run_prop` (`reset_scene` stays available). The operator can override the
   derivation with module-level literals in the kit: `MESHGEN_ALLOW = ["box", "lathe"]` replaces the
   derived list (only public names the kit defines count) and `MESHGEN_EXCLUDE = ["helper"]` removes
   names from it. Excluded names never appear in the API digest or repair hints; the prompt tells the
   model that the harness exports and renders. As defence in depth the harness replaces every
-  excluded name in the loaded kit module with a stub that raises (functions) or `None` (constants),
-  so a gate bug still cannot reach kit code that writes files. A user-supplied `api_doc_path`
+  excluded *function* in the loaded kit module with a stub that raises (constants are left alone,
+  because exposed kit functions read them, e.g. `COL`), so a gate bug still cannot reach kit code that writes files. A user-supplied `api_doc_path`
   text is passed through unchanged and is the operator's responsibility.
 - **Minimal helper globals**: the injected `paint` helper is built in a fresh namespace holding five
   harmless builtins, so reflection on it reaches nothing of the harness.
@@ -139,16 +201,15 @@ Several layers reduce accidents, but they are defence in depth, **not a sandbox*
   per-job, unguessable file (not stdout, which the script can write to), and every file the
   result names must resolve inside the candidate's output directory.
 
-- **Memory ceiling** (best effort, `blender_runner.run_limited`): Windows places Blender in a Job
-  Object with a per-process committed-memory cap (default 8192 MB, killed with the job; there is a
-  brief window between process start and assignment); POSIX sets `RLIMIT_AS` (three times the cap,
-  because it counts address space) before exec. The POSIX path is written but was not exercised on
-  this Windows host.
+- **Memory ceiling for the unsandboxed path** (best effort, `blender_runner.run_limited`): a Job
+  Object with a per-process committed-memory cap (default 8192 MB; brief window between start and
+  assignment), or on Linux `prlimit(RLIMIT_AS)` right after start (three times the cap). The Linux
+  path is written but was not exercised on this Windows host.
 
-What is NOT guaranteed: an allowed operator or a Blender bug can still do harm, a script can
-burn CPU until the timeout, memory is bounded only by the ceiling above, and nothing else limits
-what Blender itself can reach.
-Run the tool only where `run_code` would be acceptable.
+Without the sandbox (opt-out or a non-Windows host) none of the above is a boundary: an allowed
+operator or a Blender bug can still do harm, a script can burn CPU until the timeout, and nothing
+else limits what Blender itself can reach. Run the tool unsandboxed only where `run_code` would be
+acceptable.
 
 Reads are guarded: `kit_path` and `api_doc_path` go through the same guarded reader as the
 file tools (`file_ops.require_read_access`), so they must sit inside the allowed file roots

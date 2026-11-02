@@ -1,5 +1,10 @@
 """AST gate for model-written Blender build scripts.
 
+THIS GATE IS NOT THE SECURITY BOUNDARY.  It is a cheap first filter that rejects mistakes and
+obvious abuse early (and turns them into repair feedback for the model).  A determined script
+can find ways a static check misses; what contains it is the OS sandbox the build runs in
+(``adapters/meshgen/sandbox_win.py``: a zero-capability AppContainer plus a Job Object).
+
 What this enforces (and nothing more is claimed):
 
 * the script parses, defines a top-level ``def build``, and is at most 60 000 characters;

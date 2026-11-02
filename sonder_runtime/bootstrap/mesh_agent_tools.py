@@ -120,6 +120,15 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
     if not blender:
         raise SonderError("Blender not found: set SONDER_BLENDER to blender.exe or put blender on PATH "
                           "(see docs/runbooks/mesh-generation.md)")
+    sandbox_info = {}
+    check = getattr(runner, "preflight", None)
+    if check is not None:
+        try:
+            sandbox_info = dict(check(blender))
+        except blender_runner.sandbox_win.SandboxUnavailable as exc:
+            raise SonderError("mesh_generate refuses to run: the Blender sandbox is unavailable (%s). Fix it or, "
+                              "accepting that model-written code then runs with this server's authority, set %s=1."
+                              % (exc, blender_runner.sandbox_win.OPT_OUT_ENV)) from exc
     rt = rt or runtime()
     candidates = _clamp(candidates, 1, 6, 3)
     rounds = _clamp(rounds, 1, 6, 3)
@@ -218,7 +227,7 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
         report["vision"] = "unavailable: %s" % vision_state["dead"]
     payload = {
         "ok": bool(report.get("ok")), "name": slug, "output_dir": str(root), "blender": blender,
-        "vision": report["vision"], "elapsed_s": report["elapsed_s"],
+        "vision": report["vision"], "elapsed_s": report["elapsed_s"], **sandbox_info,
         "winner": report.get("winner"),
         "candidates": [_candidate_summary(item) for item in report["candidates"]],
     }

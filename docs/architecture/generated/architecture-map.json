@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 415,
+      "file_count": 416,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -260,6 +260,7 @@
         "sonder_runtime/adapters/meshgen/__init__.py",
         "sonder_runtime/adapters/meshgen/blender_runner.py",
         "sonder_runtime/adapters/meshgen/harness.py",
+        "sonder_runtime/adapters/meshgen/sandbox_win.py",
         "sonder_runtime/adapters/model_bootstrap.py",
         "sonder_runtime/adapters/model_error_details.py",
         "sonder_runtime/adapters/model_error_formatting.py",

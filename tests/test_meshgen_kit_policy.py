@@ -58,9 +58,9 @@ def _private():
 
 def test_io_functions_and_transitive_users_are_excluded():
     allowed, excluded = analyse_kit(KIT)
-    assert {"box", "lathe", "PALETTE", "SCALE"} <= allowed
+    assert {"box", "lathe", "PALETTE", "SCALE", "reset_scene"} <= allowed  # reset_scene only resets Blender
     for name in ("export_it", "run_prop", "makes_dir", "uses_excluded_const", "render_preview", "writes",
-                 "reset_scene", "REPO_ROOT", "OUT", "COL"):
+                 "REPO_ROOT", "OUT", "COL"):
         assert name in excluded and name not in allowed, name
     assert not any(name.startswith("_") for name in allowed | excluded)
 
@@ -87,8 +87,9 @@ def test_gate_rejects_excluded_kit_names_and_accepts_allowed_ones():
         return "import bpy\nimport kit\n\ndef build():\n    %s\n" % call
 
     assert check_script(script("kit.box(1, 2)"), "kit", allowed) == []
+    assert check_script(script("kit.reset_scene()"), "kit", allowed) == []
     for call in ("kit.run_prop('x')", "kit.export_it('p')", "kit.REPO_ROOT", "kit.render_preview()",
-                 "kit.reset_scene()", "getattr(kit, 'run_prop')()", "kit.__dict__"):
+                 "getattr(kit, 'run_prop')()", "kit.__dict__"):
         assert check_script(script(call), "kit", allowed), call
 
 
@@ -124,3 +125,18 @@ def test_loop_passes_excluded_names_into_the_repair_hint():
     run(request, generate=generate, build=lambda i, r, c: results.pop(0), critique=lambda s: None,
         map_parallel=lambda fn, items: [fn(i) for i in items])
     assert "not available in this tool" in seen[1]
+
+
+def test_system_and_popen_exclude_only_on_dangerous_receivers():
+    source = (
+        "import os\nimport bpy\n"
+        "def shell():\n    os.system('x')\n"
+        "def harmless(thing):\n    thing.system = 1\n    thing.popen()\n"
+    )
+    allowed, excluded = analyse_kit(source)
+    assert "shell" in excluded and "harmless" in allowed
+
+
+def test_a_colour_constant_is_not_a_callable_and_stays_usable_inside_the_kit():
+    allowed, excluded = analyse_kit("COL = 'Col'\n\ndef paint_it():\n    return COL\n")
+    assert "COL" in excluded and "paint_it" in allowed

@@ -1,5 +1,10 @@
 """Run a model-written build script in headless Blender.
 
+On Windows the build runs inside a zero-capability AppContainer (``sandbox_win``), which is the
+security boundary; the AST gate and the harness' restricted builtins are only first filters.  If
+the sandbox cannot be set up the build fails closed.  ``SONDER_MESHGEN_UNSANDBOXED=1`` is the one
+explicit opt-out; results then carry ``sandbox: "unsandboxed"`` and a warning.
+
 ``build_candidate`` writes a JSON job file, runs ``blender -b --factory-startup
 --disable-autoexec --python harness.py -- job.json`` (no shell, bounded by a
 timeout, ``cwd`` the output directory) and parses the harness' final
@@ -14,6 +19,8 @@ import shutil
 import subprocess
 import uuid
 from pathlib import Path
+
+from . import sandbox_win
 
 HARNESS_PATH = Path(__file__).with_name("harness.py")
 _TAIL_LINES = 8
@@ -100,12 +107,17 @@ def _windows_job(limit_bytes: int):
     return assign, close
 
 
-def _posix_limit(limit_bytes: int):
-    """``preexec_fn`` capping the child's address space (virtual, so deliberately generous)."""
-    def apply():
+def _posix_limit(process, limit_bytes: int) -> None:
+    """Cap the child's address space after it started (Linux ``prlimit``); no ``preexec_fn``.
+
+    ``preexec_fn`` runs Python code between fork and exec, which is unsafe in a threaded server.
+    ``resource.prlimit`` is Linux-only, so elsewhere the cap is simply not applied (documented gap).
+    """
+    try:
         import resource
-        resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, limit_bytes))
-    return apply
+        resource.prlimit(process.pid, resource.RLIMIT_AS, (limit_bytes, limit_bytes))
+    except (ImportError, AttributeError, OSError, ValueError):
+        pass
 
 
 def run_limited(argv, *, cwd, env, timeout, memory_mb=DEFAULT_MEMORY_MB):
@@ -113,7 +125,7 @@ def run_limited(argv, *, cwd, env, timeout, memory_mb=DEFAULT_MEMORY_MB):
 
     Windows: the child is placed in a Job Object (per-process committed-memory cap, killed with
     the job).  There is a short window between start and assignment; the cap is a backstop for
-    runaway allocation, not a sandbox.  POSIX: ``RLIMIT_AS`` is set before exec.  Raises
+    runaway allocation, not a sandbox.  Linux: ``RLIMIT_AS`` via ``prlimit`` right after start.  Raises
     ``subprocess.TimeoutExpired`` (carrying the partial stdout) on timeout.
     """
     limit = max(256, int(memory_mb)) * 1024 * 1024
@@ -124,13 +136,13 @@ def run_limited(argv, *, cwd, env, timeout, memory_mb=DEFAULT_MEMORY_MB):
             job = _windows_job(limit)
         except Exception:  # noqa: BLE001 - the cap is best effort; the build still runs
             job = None
-    else:
-        kwargs["preexec_fn"] = _posix_limit(limit * 3)
     process = subprocess.Popen(argv, cwd=cwd, shell=False, env=env, stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs)
     try:
         if job is not None:
             job[0](process)
+        elif os.name != "nt":
+            _posix_limit(process, limit * 3)
         try:
             stdout, stderr = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -189,26 +201,88 @@ def confine_files(result: dict, out_dir: Path) -> dict:
     return result
 
 
-def build_candidate(blender, code_path, out_dir, *, name, kit_path=None, kit_excluded=(), max_tris,
-                    height_m, export="glb", render=True, timeout=180, memory_mb=DEFAULT_MEMORY_MB) -> dict:
-    out = Path(out_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    harness = HARNESS_PATH
-    if not harness.is_file():
-        return {"ok": False, "error": "harness missing: %s" % harness}
-    job = {
-        "code_path": str(Path(code_path).resolve()),
-        "out_dir": str(out.resolve()),
+def sandbox_mode(env=None) -> str:
+    return sandbox_win.decide_mode(os.environ if env is None else env, os.name)
+
+
+def preflight(blender) -> dict:
+    """Verify the sandbox before any model time is spent; raises ``SandboxUnavailable`` (fail closed)."""
+    mode = sandbox_mode()
+    if mode == sandbox_win.SANDBOXED:
+        sandbox_win.prepare(os.path.dirname(os.path.abspath(str(blender))))
+        return {"sandbox": mode}
+    if os.name == "nt":
+        reason = "explicit opt-out via %s" % sandbox_win.OPT_OUT_ENV
+    else:
+        reason = "no sandbox implementation on this platform"
+    return {"sandbox": mode, "warning": "Blender runs UNSANDBOXED (%s); model-written code has the server's authority" % reason}
+
+
+def _job_dict(code_path, out_dir, name, kit_path, kit_excluded, max_tris, height_m, export, render, result_path):
+    return {
+        "code_path": str(code_path),
+        "out_dir": str(out_dir),
         "name": name,
-        "kit_path": str(Path(kit_path).resolve()) if kit_path else "",
+        "kit_path": str(kit_path) if kit_path else "",
         "kit_excluded": sorted(str(item) for item in (kit_excluded or ())),
         "max_tris": int(max_tris),
         "height_m": float(height_m or 0.0),
         "export": "fbx" if str(export).lower() == "fbx" else "glb",
         "render": bool(render),
-        "result_path": str(out.resolve() / ("%s.result-%s.json" % (name, uuid.uuid4().hex))),
+        "result_path": str(result_path),
     }
-    result_path = Path(job["result_path"])
+
+
+def _sandboxed(blender, code_path, out, *, name, kit_path, kit_excluded, max_tris, height_m, export, render, timeout):
+    blender_dir = os.path.dirname(os.path.abspath(str(blender)))
+    kit_file = Path(kit_path).resolve() if kit_path else None
+    memory_mb = sandbox_win.memory_limit_mb(os.environ)
+    protected = [Path.home()]
+    with sandbox_win.granted_run_dir(out, blender_dir, kit_file.parent if kit_file else None, protected) as (run, sid):
+        harness = run / "harness.py"
+        shutil.copyfile(HARNESS_PATH, harness)
+        script = run / "script.py"
+        shutil.copyfile(code_path, script)
+        run_kit = None
+        if kit_file:
+            (run / "kit").mkdir()
+            run_kit = run / "kit" / kit_file.name
+            shutil.copyfile(kit_file, run_kit)
+        run_out = run / "out"
+        result_path = run / ("result-%s.json" % uuid.uuid4().hex)
+        job = _job_dict(script, run_out, name, run_kit, kit_excluded, max_tris, height_m, export, render, result_path)
+        job_path = run / "job.json"
+        job_path.write_text(json.dumps(job), encoding="utf-8")
+        argv = build_argv(str(blender), str(job_path), str(harness))
+        env = sandbox_win.sandbox_env(run, blender_dir, os.environ.get("SystemRoot") or os.environ.get("SYSTEMROOT") or "")
+        outcome = sandbox_win.run_sandboxed(argv, cwd=run, env=env, timeout=timeout,
+                                            sid_ptr=sandbox_win.container_sid()[0], memory_mb=memory_mb)
+        tail_text = outcome.stdout.decode("utf-8", "replace") + "\n" + outcome.stderr.decode("utf-8", "replace")
+        if outcome.timed_out:
+            return {"ok": False, "error": "blender timed out after %ss" % timeout, "tail": _tail(tail_text)}
+        result = read_result(result_path)
+        if outcome.memory_exceeded and (result is None or not result.get("ok")):
+            return {"ok": False, "error": "memory limit exceeded (%d MB)" % outcome.memory_limit_mb,
+                    "tail": _tail(tail_text)}
+        if result is None:
+            return {"ok": False, "error": "no result; rc=%s" % outcome.returncode, "tail": _tail(tail_text)}
+        result = confine_files(result, run_out)
+        if not result.get("ok"):
+            return result
+        moved = {}
+        for key, value in (result.get("files") or {}).items():
+            target = out / os.path.basename(str(value))
+            shutil.copyfile(str(value), target)
+            moved[key] = str(target)
+        return dict(result, files=moved)
+
+
+def _unsandboxed(blender, code_path, out, *, name, kit_path, kit_excluded, max_tris, height_m, export, render,
+                 timeout, memory_mb):
+    harness = HARNESS_PATH
+    result_path = out.resolve() / ("%s.result-%s.json" % (name, uuid.uuid4().hex))
+    job = _job_dict(Path(code_path).resolve(), out.resolve(), name, Path(kit_path).resolve() if kit_path else None,
+                    kit_excluded, max_tris, height_m, export, render, result_path)
     job_path = out / ("%s.job.json" % name)
     job_path.write_text(json.dumps(job), encoding="utf-8")
     argv = build_argv(str(blender), str(job_path), str(harness))
@@ -235,3 +309,28 @@ def build_candidate(blender, code_path, out_dir, *, name, kit_path=None, kit_exc
         return {"ok": False, "error": "no result; rc=%s" % returncode,
                 "tail": _tail(stdout + "\n" + stderr)}
     return confine_files(result, out)
+
+
+def build_candidate(blender, code_path, out_dir, *, name, kit_path=None, kit_excluded=(), max_tris,
+                    height_m, export="glb", render=True, timeout=180, memory_mb=DEFAULT_MEMORY_MB,
+                    sandbox=None) -> dict:
+    """Build one candidate.  ``sandbox`` is ``None`` (decide from the environment) or an explicit mode."""
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    if not HARNESS_PATH.is_file():
+        return {"ok": False, "error": "harness missing: %s" % HARNESS_PATH}
+    mode = sandbox or sandbox_mode()
+    common = dict(name=name, kit_path=kit_path, kit_excluded=kit_excluded, max_tris=max_tris, height_m=height_m,
+                  export=export, render=render, timeout=timeout)
+    try:
+        if mode == sandbox_win.SANDBOXED:
+            result = _sandboxed(blender, code_path, out, **common)
+        else:
+            result = _unsandboxed(blender, code_path, out, memory_mb=memory_mb, **common)
+    except sandbox_win.SandboxUnavailable as exc:
+        return {"ok": False, "error": "sandbox unavailable, build refused (not falling back to unsandboxed): %s" % exc,
+                "sandbox": mode}
+    result = dict(result, sandbox=mode)
+    if mode != sandbox_win.SANDBOXED:
+        result["warning"] = "built UNSANDBOXED"
+    return result

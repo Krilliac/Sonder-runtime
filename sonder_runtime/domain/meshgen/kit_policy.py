@@ -2,7 +2,8 @@
 
 A kit is trusted Python the operator supplies, but its *public functions* are reachable from
 untrusted scripts, and some of them write files (export, preview render, "run the whole prop").
-Exposing every public name would let a script write anywhere the kit can.  So exposure is an
+This policy is a first filter (and keeps the prompt honest about what the harness does); the
+OS sandbox in ``adapters/meshgen/sandbox_win.py`` is the real boundary.  Exposure is an
 allow-list derived from the kit's own source:
 
 * a function or class is EXCLUDED when anything in it (body, defaults, decorators, nested
@@ -32,10 +33,14 @@ DANGEROUS_MODULES = frozenset({
 _IO_NAMES = frozenset({
     "open", "exec", "eval", "compile", "__import__", "input", "breakpoint", "exit", "quit", "Path", "PurePath",
 })
+# Attribute names that are only I/O on a dangerous receiver (``os.system``); generic elsewhere
+# (``bpy.types.Operator.system`` style names must not exclude a harmless kit function).
+_RECEIVER_ATTRIBUTES = frozenset({"system", "popen", "spawn", "startfile", "walk", "listdir", "remove", "unlink"})
 _IO_ATTRIBUTES = frozenset({
     "save", "save_as", "save_render", "save_as_mainfile", "save_mainfile", "write", "writelines", "filepath",
-    "filepath_raw", "filename", "directory", "export_scene", "import_scene", "wm", "makedirs", "mkdir", "rmtree",
-    "exit", "write_text", "write_bytes", "read_text", "read_bytes", "copyfile", "copy2", "system", "popen",
+    "filepath_raw", "filename", "directory", "export_scene", "import_scene", "open_mainfile", "read_homefile",
+    "recover_last_session", "makedirs", "mkdir", "rmtree",
+    "exit", "write_text", "write_bytes", "read_text", "read_bytes", "copyfile", "copy2",
     "load", "unpack", "execfile", "as_module", "texts", "libraries", "preferences", "handlers",
 })
 
@@ -91,6 +96,8 @@ def analyse_kit(kit_source: str) -> tuple[frozenset[str], frozenset[str]]:
                 return True
             if isinstance(sub, ast.Attribute):
                 if sub.attr in _IO_ATTRIBUTES:
+                    return True
+                if sub.attr in _RECEIVER_ATTRIBUTES and isinstance(sub.value, ast.Name) and sub.value.id in dangerous:
                     return True
                 if sub.attr == "render" and isinstance(sub.value, ast.Attribute) and sub.value.attr == "ops":
                     return True
