@@ -114,6 +114,8 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
     brief = str(brief or "").strip()
     if not brief:
         raise SonderError("brief is required")
+    if rt is None:
+        raise SonderError("mesh_generate has no runtime bound: the server composition must pass runtime= to register()")
     blender = runner.locate_blender()
     if not blender:
         raise SonderError("Blender not found: set SONDER_BLENDER to blender.exe or put blender on PATH "
@@ -127,8 +129,6 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
             raise SonderError("mesh_generate refuses to run: the Blender sandbox is unavailable (%s). Fix it or, "
                               "accepting that Blender then runs with this server's authority, set %s=1."
                               % (exc, blender_runner.sandbox_win.OPT_OUT_ENV)) from exc
-    if rt is None:
-        raise SonderError("mesh_generate has no runtime bound: the server composition must pass runtime= to register()")
     candidates = _clamp(candidates, 1, 6, 3)
     rounds = _clamp(rounds, 1, 6, 3)
     max_tris = _clamp(max_tris, 50, 200_000, 3000)
@@ -271,6 +271,8 @@ def register(mcp, record, runtime=None) -> None:
 
     ``runtime`` is a zero-argument provider of the runtime object (injected by the server composition) and is
     called per request, so registering never touches the host."""
+    if runtime is not None and not callable(runtime):
+        raise TypeError("runtime must be a callable returning the runtime object, got %s" % type(runtime).__name__)
 
     def run(name, args, body):
         started = time.time()

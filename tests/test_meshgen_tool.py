@@ -97,13 +97,64 @@ def call(tmp_path, runner=None, rt=None, **kw):
 def test_register_exposes_mesh_generate_and_records_the_call(tmp_path, monkeypatch):
     recorded = []
     mcp = FakeMcp()
-    mesh_agent_tools.register(mcp, lambda name, args, **kw: recorded.append((name, kw["ok"])))
+    mesh_agent_tools.register(mcp, lambda name, args, **kw: recorded.append((name, kw["ok"])), runtime=lambda: fake_runtime(tmp_path))
     assert set(mcp.tools) == {"mesh_generate"}
     monkeypatch.setattr(mesh_agent_tools.blender_runner, "locate_blender", lambda env=None: None)
     monkeypatch.delenv("SONDER_BLENDER", raising=False)
     payload = json.loads(mcp.tools["mesh_generate"]("a cart"))
     assert payload["ok"] is False and "SONDER_BLENDER" in payload["error"]
     assert recorded == [("mesh_generate", False)]
+
+
+def test_the_registered_tool_runs_end_to_end_through_the_runtime_provider(tmp_path, monkeypatch):
+    fake = FakeRunner()
+    for attr in ("locate_blender", "build_candidate"):
+        monkeypatch.setattr(mesh_agent_tools.blender_runner, attr, getattr(fake, attr))
+    monkeypatch.setattr(mesh_agent_tools.blender_runner, "preflight", lambda blender: {}, raising=False)
+    provided = []
+    recorded = []
+    mcp = FakeMcp()
+
+    def provider():
+        provided.append(1)
+        return fake_runtime(tmp_path)
+
+    mesh_agent_tools.register(mcp, lambda name, args, **kw: recorded.append((name, kw["ok"])), runtime=provider)
+    payload = json.loads(mcp.tools["mesh_generate"]("a handcart", name="cart", candidates=1, rounds=1))
+    assert payload["ok"] is True, payload
+    assert provided == [1] and recorded == [("mesh_generate", True)]
+    assert fake.calls
+
+
+def test_a_missing_runtime_provider_is_a_wiring_error_not_a_blender_error(tmp_path):
+    mcp = FakeMcp()
+    mesh_agent_tools.register(mcp, lambda *a, **k: None)
+    payload = json.loads(mcp.tools["mesh_generate"]("a cart"))
+    assert payload["ok"] is False and "no runtime bound" in payload["error"]
+
+
+def test_a_non_callable_runtime_is_rejected_at_registration():
+    with pytest.raises(TypeError, match="callable"):
+        mesh_agent_tools.register(FakeMcp(), lambda *a, **k: None, runtime=object())
+
+
+def test_the_registrar_loop_passes_runtime_only_to_registrars_that_declare_it():
+    from sonder_runtime.bootstrap import code_check_agent_tools
+    seen = {}
+
+    def spy(name, registrar):
+        def wrapper(*args, **kwargs):
+            seen[name] = (args, kwargs)
+        wrapper.__signature__ = __import__("inspect").signature(registrar)
+        return name, wrapper
+
+    registrars = [spy("mesh", mesh_agent_tools.register), spy("help", agent_help_tools.register),
+                  spy("code_check", code_check_agent_tools.register)]
+    provider = lambda: None  # noqa: E731
+    agent_help_tools.register_agent_tools("mcp", "record", provider, registrars)
+    assert seen["mesh"] == (("mcp", "record"), {"runtime": provider})
+    assert seen["help"] == (("mcp", "record"), {})
+    assert seen["code_check"] == (("mcp", "record"), {})
 
 
 def test_the_tool_is_auto_discovered():
