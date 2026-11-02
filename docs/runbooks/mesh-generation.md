@@ -49,12 +49,27 @@ Useful arguments: `candidates` (1-6, default 3), `rounds` (1-6, default 3), `tie
   attempts (status, triangles, score, issues, seconds) and the `vision` state. Code bodies are
   never returned; the script paths are.
 
+## Budgets and quality
+
+`max_tris` is a target to use, not just a ceiling: the prompt asks for roughly 60-90% of it, with
+bevels on hard edges, enough segments that round parts read round (about 10 below 500 triangles,
+12 below 2000, 16 below 6000, 24 below 20000, 32 above) and smooth shading on organic parts. Modifiers
+(`BEVEL`, `SUBSURF`, `SOLIDIFY`, `MIRROR`, `ARRAY`, `WEIGHTED_NORMAL`, `TRIANGULATE`, `DECIMATE`,
+`BOOLEAN`) are allowed; the harness bakes them and counts triangles after modifiers. The default is
+3000. For hero assets pass 8000-20000 or more (the clamp is 50..200000); generation allows 8192 reply
+tokens. An over-budget result is repaired with the biggest parts named. The critic also flags blocky,
+low-effort results when the budget allowed more.
+
+If a candidate repeats the same build error, or the same top critique issue with the same score and
+about the same triangle count, the next prompt says so explicitly and, with more than one tier, the
+remaining rounds of that candidate move to the next tier.
+
 ## Safety model
 
 `mesh_generate` runs **model-written Python**. It is graded as an execution tool, the same
 trust level as `run_code`, and asks or is denied in the same permission modes.
 
-Four layers reduce accidents, but they are defence in depth, **not a sandbox**:
+Several layers reduce accidents, but they are defence in depth, **not a sandbox**:
 
 - **AST gate** (`sonder_runtime/domain/meshgen/script_safety.py`). It is an allow-list for
   Blender, not a deny list of paths:
@@ -78,8 +93,18 @@ Four layers reduce accidents, but they are defence in depth, **not a sandbox**:
   - The kit module is reachable only through the public top-level functions, classes and
     constants of the kit source (imports and re-exports such as `kit.Vector` are not
     available). A kit's own private helpers are therefore unusable by model scripts.
+  - `str.format` and `format_map` (they resolve attribute chains from string text, e.g. a format
+    field reaching a function's globals) and any string literal containing `__` are refused;
+    `%` and f-string formatting stay available.
 - **Restricted builtins** inside Blender (`harness.py`): a small safe subset, and `__import__`
   limited to the same module allow-list.
+- **Environment scrub**: Blender is started with an explicit allow-list environment, never a copy
+  of the server's. Only `SYSTEMROOT`, `WINDIR`, `SYSTEMDRIVE`, `PATHEXT`, `PROCESSOR_ARCHITECTURE`,
+  `NUMBER_OF_PROCESSORS`, `OS`, `LANG`, `LC_ALL` are copied; `PATH` is just the Blender directory
+  plus the system directories; `TEMP`/`TMP`/`HOME`/`USERPROFILE`/`APPDATA`/`LOCALAPPDATA` point at a
+  per-build scratch directory. API keys, tokens and `SONDER_*` values never reach the process.
+- **Minimal helper globals**: the injected `paint` helper is built in a fresh namespace holding five
+  harmless builtins, so reflection on it reaches nothing of the harness.
 - **Harness hardening**: before the script runs, `Text.as_module` and `bpy.utils.execfile`
   are replaced with functions that refuse, so a script that somehow reached a text block
   still cannot execute it with unrestricted builtins.

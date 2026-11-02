@@ -36,6 +36,8 @@ MAX_KIT_BYTES = 512_000
 _GENERATE_TIMEOUT_CAP = 600
 _BUILD_TIMEOUT = 180
 MIN_BUILD_SECONDS = 5
+GENERATE_NUM_PREDICT = 8192
+GENERATE_NUM_CTX = 24576  # room for the previous script plus an 8k-token reply
 
 
 def _json(payload) -> str:
@@ -155,7 +157,7 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
     root = _output_root(rt, str(output_dir or ""), slug)
     root.mkdir(parents=True, exist_ok=True)
     deadline = time.monotonic() + timeout
-    critique_text = critique_prompt(brief)
+    critique_text = critique_prompt(brief, max_tris=max_tris)
     vision_state = {"lock": threading.Lock(), "dead": "", "disabled": not vision}
 
     def remaining() -> float:
@@ -165,7 +167,7 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
         return left
 
     def generate(tier, prompt):
-        return rt._generate_text(prompt, tier=tier, temperature=0.3, num_predict=4096, num_ctx=16384,
+        return rt._generate_text(prompt, tier=tier, temperature=0.3, num_predict=GENERATE_NUM_PREDICT, num_ctx=GENERATE_NUM_CTX,
                                  timeout=int(min(remaining(), _GENERATE_TIMEOUT_CAP)))
 
     def build(index, round_index, code):

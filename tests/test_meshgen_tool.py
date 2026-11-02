@@ -128,7 +128,7 @@ def test_end_to_end_with_fakes_writes_final_files_and_clamps(tmp_path):
     assert payload["ok"] is True and payload["name"] == "hand-cart" and payload["vision"] == "on"
     assert len(payload["candidates"]) == 6
     assert all(kw["max_tris"] == 50 for _, _, kw in runner.calls)
-    assert rt.generated and all(kw["num_predict"] == 4096 and kw["num_ctx"] == 16384 and kw["temperature"] == 0.3
+    assert rt.generated and all(kw["num_predict"] == 8192 and kw["num_ctx"] == 24576 and kw["temperature"] == 0.3
                                 for _, kw in rt.generated)
     assert rt.vision_calls and all(kw["extra_roots"] == payload["output_dir"] for _, kw in rt.vision_calls)
     final = payload["final"]

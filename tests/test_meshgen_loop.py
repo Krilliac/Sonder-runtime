@@ -202,3 +202,57 @@ def test_the_safety_gate_receives_the_kit_names():
               critiques=[verdict(9)])
     report = rig.go(candidates=1, rounds=2, kit_module="propkit", kit_names=frozenset({"wheel"}))
     assert [a["status"] for a in report["candidates"][0]["attempts"]] == ["rejected", "accepted"]
+
+
+def test_repeated_build_error_escalates_with_a_note_and_switches_tier():
+    err = {"ok": False, "error": "NameError: name 'reset_scene' is not defined"}
+    rig = Rig(builds=[err, err, ok_build()], critiques=[verdict(9)])
+    request = MeshRequest(brief="a cart", candidates=1, rounds=3, tiers=("code", "general"),
+                          kit_module="propkit", kit_names=frozenset({"reset_scene"}))
+    report = run(request, generate=rig.generate, build=rig.build, critique=rig.critique, map_parallel=serial)
+    attempts = report["candidates"][0]["attempts"]
+    assert [a["status"] for a in attempts] == ["build_error", "build_error", "accepted"]
+    assert not attempts[0].get("stuck") and attempts[1]["stuck"] is True
+    assert attempts[1]["escalated_to"] == "general"
+    assert rig.tiers == ["code", "code", "general"]
+    assert "Delete that call" in rig.prompts[1]              # NameError hint on the first repair
+    assert "did not fix: NameError: name 'reset_scene'" in rig.prompts[2]
+    assert "Change exactly that line" in rig.prompts[2]
+
+
+def test_repeated_revision_with_the_same_top_issue_and_score_escalates():
+    issue = "Front wheel is a flat disc in the top view"
+    rig = Rig(builds=[ok_build(tris=2000), ok_build(tris=2014), ok_build(tris=2010)],
+              critiques=[verdict(5, issue), verdict(5, "front wheel still a flat disc in top view"), verdict(8)])
+    report = rig.go(candidates=1, rounds=3, tiers=("general", "code"))
+    attempts = report["candidates"][0]["attempts"]
+    assert [a["status"] for a in attempts] == ["revise", "revise", "accepted"]
+    assert attempts[1]["stuck"] is True and attempts[1]["escalated_to"] == "code"
+    assert rig.tiers == ["general", "general", "code"]
+    assert "Orientation help" in rig.prompts[1]
+    assert "did not fix: front wheel still a flat disc" in rig.prompts[2]
+    assert "score stayed at 5" in rig.prompts[2]
+
+
+def test_a_changed_score_or_issue_is_progress_not_stuck():
+    rig = Rig(critiques=[verdict(4, "wheel lies flat"), verdict(6, "handle is too short"), verdict(8)])
+    report = rig.go(candidates=1, rounds=3)
+    assert not any(a.get("stuck") for a in report["candidates"][0]["attempts"])
+    assert rig.tiers == ["general"] * 3
+
+
+def test_single_tier_stuck_adds_the_note_without_switching():
+    err = {"ok": False, "error": "ValueError: boom"}
+    rig = Rig(builds=[err, err, err])
+    report = rig.go(candidates=1, rounds=3, tiers=("general",))
+    assert report["candidates"][0]["attempts"][1]["stuck"] is True
+    assert "escalated_to" not in report["candidates"][0]["attempts"][1]
+    assert rig.tiers == ["general"] * 3
+
+
+def test_over_budget_repair_names_the_biggest_parts():
+    big = ok_build(tris=9000, within=False)
+    big["parts"] = [{"name": "wheel", "tris": 6000}, {"name": "tray", "tris": 2000}]
+    rig = Rig(builds=[big, ok_build(tris=500)], critiques=[verdict(9)])
+    rig.go(candidates=1, rounds=2, max_tris=1000)
+    assert "wheel (6000 tris), tray (2000 tris)" in rig.prompts[1]

@@ -27,6 +27,7 @@ DEFAULT_GREY = (0.69, 0.69, 0.69)
 
 
 RESULT_PATH = ""
+PARTS = []
 
 
 def _emit(payload):
@@ -60,33 +61,44 @@ def _job():
         return json.load(handle)
 
 
-def _hex_to_linear(value):
-    text = str(value).strip().lstrip("#")
+# ``paint`` is handed to untrusted scripts, and a function's ``__globals__`` is reachable by
+# reflection.  It is therefore built by exec into a fresh namespace holding nothing but a
+# handful of harmless builtins: no os, sys, json, bpy or this module.
+_PAINT_SOURCE = """
+def paint(obj, hex_colour):
+    "Give a mesh object a flat vertex colour (byte colour corner attribute Col)."
+    if obj.type != "MESH":
+        raise ValueError("paint() needs a mesh object")
+    text = str(hex_colour).strip().lstrip("#")
     if len(text) == 3:
-        text = "".join(ch * 2 for ch in text)
+        text = "".join([ch * 2 for ch in text])
     if len(text) != 6:
-        raise ValueError("colour must be #RRGGBB, got %r" % (value,))
-    channels = [int(text[i:i + 2], 16) / 255.0 for i in (0, 2, 4)]
-    return tuple(c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in channels)
-
-
-def _set_colour(obj, rgb_linear):
+        raise ValueError("colour must be #RRGGBB")
+    linear = []
+    for i in range(0, 6, 2):
+        c = int(text[i:i + 2], 16) / 255.0
+        linear.append(c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4)
     mesh = obj.data
     attr = mesh.color_attributes.get("Col")
     if attr is None:
         attr = mesh.color_attributes.new(name="Col", type="BYTE_COLOR", domain="CORNER")
-    count = len(attr.data)
-    attr.data.foreach_set("color", [rgb_linear[0], rgb_linear[1], rgb_linear[2], 1.0] * count)
+    attr.data.foreach_set("color", [linear[0], linear[1], linear[2], 1.0] * len(attr.data))
     mesh.color_attributes.active_color = attr
     mesh.color_attributes.render_color_index = mesh.color_attributes.find("Col")
     mesh.update()
+"""
 
 
-def paint(obj, hex_colour):
-    """Give a mesh object a flat vertex colour (byte colour corner attribute ``Col``)."""
-    if getattr(obj, "type", None) != "MESH":
-        raise ValueError("paint() needs a mesh object")
-    _set_colour(obj, _hex_to_linear(hex_colour))
+def _make_paint():
+    import builtins
+
+    namespace = {"__builtins__": {name: getattr(builtins, name)
+                                  for name in ("str", "len", "int", "range", "ValueError")}}
+    exec(compile(_PAINT_SOURCE, "meshgen_paint", "exec"), namespace)
+    return namespace["paint"]
+
+
+paint = _make_paint()
 
 
 def _safe_builtins(allowed):
@@ -139,6 +151,7 @@ def _bake_and_join(name):
             attr.data.foreach_set("color", [*DEFAULT_GREY, 1.0] * len(attr.data))
         baked.color_attributes.active_color = baked.color_attributes.get("Col")
         baked.update()
+        PARTS.append({"name": str(obj.name)[:40], "tris": sum(len(poly.vertices) - 2 for poly in baked.polygons)})
     view_layer.update()
     bpy.ops.object.select_all(action="DESELECT")
     for obj in objs:
@@ -323,7 +336,8 @@ def main():
     _export(obj, model_path, kind)
     files = {"model": model_path}
     result = {"ok": True, "tris": tris, "within_budget": tris <= int(job.get("max_tris") or 0),
-              "size": [round(v, 4) for v in size], "files": files}
+              "size": [round(v, 4) for v in size], "files": files,
+              "parts": sorted(PARTS, key=lambda part: -part["tris"])[:8]}
     if job.get("render", True):
         try:
             paths = _render_views(obj, out_dir, name, size, lo, hi)

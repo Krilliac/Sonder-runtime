@@ -17,6 +17,8 @@ What this enforces (and nothing more is claimed):
   appears as an attribute or keyword argument, whatever object it hangs off, and string
   literals equal to the data-block names are refused too;
 * the kit module is reachable only through its public top-level defs/constants;
+* ``str.format`` / ``format_map`` (they resolve attribute chains from string text) and any
+  string literal containing ``__`` are refused;
 * dynamic-code builtins, dunder/underscore names and ``getattr`` style reflection are refused.
 
 This is a screen against honest mistakes and obvious escapes, defence in depth next to the
@@ -36,7 +38,7 @@ ALLOWED_IMPORT_ROOTS = frozenset({"bpy", "bmesh", "mathutils", "math", "random"}
 FORBIDDEN_NAMES = frozenset({
     "open", "exec", "eval", "compile", "__import__", "globals", "locals", "vars",
     "getattr", "setattr", "delattr", "input", "breakpoint", "memoryview", "help",
-    "exit", "quit", "type", "dir",
+    "exit", "quit", "type", "dir", "format",
 })
 
 # bpy.ops categories: geometry creation/editing only.  Everything else (wm, script, text,
@@ -76,6 +78,9 @@ FORBIDDEN_ATTRIBUTES = frozenset({
     "os", "sys", "subprocess", "shutil", "pathlib", "importlib", "builtins", "io", "socket",
     "ctypes", "system", "popen", "exec", "eval", "compile", "open", "getattr", "setattr",
     "delattr", "globals", "locals", "vars",
+    # str.format / format_map resolve attribute chains from a string literal (for example
+    # "{0.__globals__[os]}"), which no AST rule over names can see.
+    "format", "format_map",
 })
 
 # String literals equal to one of these are refused (they name data blocks or properties
@@ -248,6 +253,10 @@ def check_script(source: str, kit_module: str | None = None,
         elif isinstance(node, ast.Constant):
             if isinstance(node.value, str) and node.value in FORBIDDEN_STRINGS:
                 reject(node, "the string '%s' is not allowed" % node.value)
+            elif isinstance(node.value, str) and "__" in node.value:
+                reject(node, "string literals containing '__' are not allowed")
+            elif isinstance(node.value, bytes) and b"__" in node.value:
+                reject(node, "byte literals containing '__' are not allowed")
         elif isinstance(node, ast.arg):
             if _private(node.arg) or node.arg == "bpy" or node.arg in kit_aliases:
                 reject(node, "parameter name '%s' is not allowed" % node.arg)

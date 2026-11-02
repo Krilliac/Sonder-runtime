@@ -12,6 +12,18 @@ _FENCE = re.compile(r"```[ \t]*([A-Za-z0-9_+-]*)[ \t]*\r?\n(.*?)```", re.DOTALL)
 _OPEN_FENCE = re.compile(r"```[ \t]*(?:python|py)[ \t]*\r?\n(.*)\Z", re.DOTALL | re.IGNORECASE)
 _MAX_ERROR_CHARS = 3000
 _MAX_CODE_CHARS = 24_000
+_NAME_ERROR = re.compile(r"NameError: name '([A-Za-z_][A-Za-z0-9_]*)' is not defined")
+_ORIENTATION_WORDS = ("flat", "upright", "axle", "lying", "lies", "orient", "rotate", "rotation", "tilt",
+                      "sideways", "vertical", "horizontal", "facing")
+
+
+def _segments_for(max_tris) -> int:
+    """Rough segment count for round parts, scaled to the triangle budget."""
+    budget = int(max_tris)
+    for limit, segments in ((500, 10), (2000, 12), (6000, 16), (20000, 24)):
+        if budget < limit:
+            return segments
+    return 32
 
 
 def kit_api_digest(kit_source: str, max_chars: int = 6000) -> str:
@@ -70,9 +82,19 @@ def generation_prompt(brief: str, *, max_tris: int, height_m: float,
         "- Blender 4/5 Python API (bpy, bmesh, mathutils, math, random). Units are metres; Z is up; "
         "the front of the object faces -Y.",
         rotation,
-        "- Low poly: stay under %d triangles in total. Prefer few segments on cylinders and spheres "
-        "(8 to 16) and skip detail nobody would see." % int(max_tris),
+        "- Budget: %d triangles in total, counted after modifiers. Treat it as a target to USE, not a "
+        "ceiling to hide under: aim for roughly %d to %d triangles and spend them where they read "
+        "(bevels on hard edges, about %d segments around wheels, barrels and other round parts so they "
+        "read round, smooth shading with bpy.ops.object.shade_smooth() on organic parts) while skipping "
+        "detail nobody would see. Modifiers are allowed: obj.modifiers.new(name=\"m\", type=\"BEVEL\") "
+        "(also SUBSURF, SOLIDIFY, MIRROR, ARRAY, WEIGHTED_NORMAL, TRIANGULATE, DECIMATE, BOOLEAN) and then "
+        "set its properties; they are baked automatically." % (
+            int(max_tris), int(max_tris * 0.6), int(max_tris * 0.9), _segments_for(max_tris)),
         "- %s" % height,
+        "- Cylinders, cones, tori and lathes are created around the Z axis, so they lie flat. To stand a "
+        "wheel upright with its axle along X, rotate it 90 degrees about Y (rotation_euler=(0, math.pi/2, 0)); "
+        "for an axle along Y, rotate 90 degrees about X. Check every wheel, barrel and door this way.",
+        "- The scene is already empty when build() runs: do not clear or reset it yourself.",
         "- Make each distinct part a separate mesh object; parts must touch or overlap so the model "
         "is one connected whole, with every part in its correct position and orientation "
         "(for example wheels stand upright on their axle, not lying flat).",
@@ -90,7 +112,8 @@ def generation_prompt(brief: str, *, max_tris: int, height_m: float,
         parts += [
             "",
             "A helper kit is available. Start the script with `import %s` and use it where it helps. "
-            "Its public API:" % kit_module,
+            "Always call its functions qualified (`%s.name(...)`, never a bare `name(...)`). The scene is "
+            "already cleared, so do not call reset_scene(). Its public API:" % (kit_module, kit_module),
             "```",
             (api_doc or "").strip() or "(no API digest available)",
             "```",
@@ -107,30 +130,70 @@ def _code_block(code: str) -> str:
     return "```python\n%s\n```" % _clip(code, _MAX_CODE_CHARS)
 
 
-def repair_prompt(base_prompt: str, code: str, failure: str) -> str:
-    return "\n".join([
+def repair_hint(failure: str, kit_module: str | None, kit_names) -> str:
+    """A concrete extra instruction for failures the model keeps repeating (else empty)."""
+    match = _NAME_ERROR.search(str(failure or ""))
+    if not match:
+        return ""
+    name = match.group(1)
+    if name == "reset_scene":
+        return ("`reset_scene` is not defined here and is not needed: the scene is already empty when "
+                "build() runs. Delete that call.")
+    if kit_module and name in set(kit_names or ()):
+        return ("`%s` is a function of the kit module, not a builtin. Call it as `%s.%s(...)` "
+                "after `import %s`." % (name, kit_module, name, kit_module))
+    return ("`%s` is not defined. Define it before use, import it from an allowed module, or remove "
+            "the call." % name)
+
+
+def orientation_guidance(issues) -> str:
+    """Turn orientation complaints into concrete rotation instructions (else empty)."""
+    text = " ".join(str(item).lower() for item in (issues or []))
+    if not any(word in text for word in _ORIENTATION_WORDS):
+        return ""
+    return ("Orientation help: cylinders, cones, tori and lathes are created around the Z axis, so they lie "
+            "flat. To stand a wheel upright with its axle along X, set rotation_euler=(0, math.pi/2, 0) "
+            "(rotate 90 degrees about Y); for an axle along Y use rotation_euler=(math.pi/2, 0, 0). "
+            "When a kit function revolves about Z, rotate the returned object the same way, and move it so "
+            "the rim touches the ground (z=0) again. A wheel seen as a flat disc from the TOP is lying "
+            "flat; seen from the SIDE it should be a full circle.")
+
+
+def repair_prompt(base_prompt: str, code: str, failure: str, hint: str = "", stuck: str = "") -> str:
+    lines = [
         base_prompt, "",
         "Your previous script failed. Fix it and return the complete corrected script.",
         "", "Previous script:", _code_block(code),
         "", "Failure:", _clip(failure, _MAX_ERROR_CHARS),
-        "", "Return ONLY one ```python code block.",
-    ])
+    ]
+    if hint:
+        lines += ["", "How to fix it: " + hint]
+    if stuck:
+        lines += ["", stuck]
+    lines += ["", "Return ONLY one ```python code block."]
+    return "\n".join(lines)
 
 
-def revise_prompt(base_prompt: str, code: str, critique: dict) -> str:
+def revise_prompt(base_prompt: str, code: str, critique: dict, stuck: str = "") -> str:
     score = critique.get("score")
     issues = [str(item) for item in (critique.get("issues") or [])]
     listing = "\n".join("- " + item for item in issues) or (
         "- (no specific issues listed; improve overall recognisability)")
-    return "\n".join([
+    lines = [
         base_prompt, "",
         "Your script built, and a reviewer looked at renders from the front, right side, "
         "three-quarter view and top. Score: %s/10." % ("?" if score is None else score),
         "", "Previous script:", _code_block(code),
         "", "Issues to fix:", listing,
-        "", "Return the complete revised script, fixing these issues while keeping what already works. "
-        "Return ONLY one ```python code block.",
-    ])
+    ]
+    guidance = orientation_guidance(issues)
+    if guidance:
+        lines += ["", guidance]
+    if stuck:
+        lines += ["", stuck]
+    lines += ["", "Return the complete revised script, fixing these issues while keeping what already works. "
+              "Return ONLY one ```python code block."]
+    return "\n".join(lines)
 
 
 def extract_code(text: str) -> str:

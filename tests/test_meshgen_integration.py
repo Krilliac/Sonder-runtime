@@ -100,3 +100,52 @@ def test_a_forged_stdout_result_line_cannot_replace_the_real_result(tmp_path):
     result = _build(tmp_path, source, render=False)
     assert result["ok"] is True and result["tris"] == 12
     assert Path(result["files"]["model"]).parent == (tmp_path / "out").resolve()
+
+
+def test_format_reflection_payload_is_rejected_and_leaks_nothing_even_without_the_gate(tmp_path, monkeypatch):
+    from sonder_runtime.domain.meshgen.script_safety import check_script
+
+    secret = "sk-ant-FAKE-live-key-do-not-leak"
+    monkeypatch.setenv("SONDER_TEST_SECRET", secret)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", secret)
+    source = (
+        "import bpy\ndef build():\n    leaked = \"{0.__globals__[os].environ}\".format(paint)\n"
+        "    bpy.ops.mesh.primitive_cube_add()\n    raise ValueError(leaked[:400])\n"
+    )
+    assert check_script(source), "the gate must reject str.format reflection"
+    result = _build(tmp_path, source, render=False)   # gate bypassed on purpose
+    assert result["ok"] is False
+    blob = repr(result)
+    assert secret not in blob and "ANTHROPIC_API_KEY" not in blob and "SONDER_TEST_SECRET" not in blob
+
+
+def test_the_injected_paint_helper_reaches_nothing_but_harmless_builtins(tmp_path):
+    source = (
+        "import bpy\ndef build():\n    g = paint.__globals__\n    bpy.ops.mesh.primitive_cube_add()\n"
+        "    raise ValueError(','.join(sorted(g.keys())) + '|' + ','.join(sorted(g['__builtins__'].keys())))\n"
+    )
+    result = _build(tmp_path, source, render=False)   # gate bypassed on purpose
+    keys, builtins_keys = result["error"].split(": ", 1)[1].split("|")
+    assert set(keys.split(",")) == {"__builtins__", "paint"}
+    assert set(builtins_keys.split(",")) == {"int", "len", "range", "str", "ValueError"}
+
+
+def test_modifiers_are_baked_and_triangles_counted_after_them(tmp_path):
+    from sonder_runtime.domain.meshgen.script_safety import check_script
+
+    source = (
+        "import bpy\n\ndef build():\n"
+        "    bpy.ops.mesh.primitive_cube_add(size=1.0, location=(0, 0, 0.5))\n"
+        "    box = bpy.context.active_object\n"
+        "    bevel = box.modifiers.new(name='Bevel', type='BEVEL')\n"
+        "    bevel.width = 0.05\n    bevel.segments = 2\n"
+        "    sub = box.modifiers.new(name='Sub', type='SUBSURF')\n    sub.levels = 1\n"
+        "    bpy.ops.object.shade_smooth()\n"
+        "    paint(box, '#8899aa')\n"
+    )
+    assert check_script(source) == []
+    result = _build(tmp_path, source, max_tris=5000, render=True)
+    assert result["ok"] is True, result
+    assert result["tris"] > 100, result["tris"]      # a bare cube is 12
+    assert result["parts"] and result["parts"][0]["tris"] == result["tris"]
+    assert Path(result["files"]["sheet"]).is_file()

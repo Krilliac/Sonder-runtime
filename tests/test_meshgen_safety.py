@@ -181,3 +181,79 @@ def test_rejects_empty_and_oversized_sources():
     assert check_script("   ") == ["script is empty"]
     big = "x = 1\n" * (MAX_SOURCE_CHARS // 3)
     assert "limit" in _joined(check_script(big))
+
+
+FORMAT_EXPLOITS = {
+    "format_globals_literal": (
+        "import bpy\ndef build():\n    leaked = \"{0.__globals__[os].environ}\".format(paint)\n"
+        "    bpy.ops.mesh.primitive_cube_add()\n    raise ValueError(leaked[:400])\n"),
+    "format_map": "import bpy\ndef build():\n    x = '{p.__globals__}'.format_map({'p': paint})\n",
+    "format_plain": "import bpy\ndef build():\n    x = '{0}'.format(1)\n",
+    "dunder_literal_alone": "import bpy\ndef build():\n    x = '{0.__globals__}'\n",
+    "dunder_bytes": "import bpy\ndef build():\n    x = b'__class__'\n",
+    "format_builtin": "import bpy\ndef build():\n    x = format(1, 'd')\n",
+    "kit_globals_via_format": "import propkit\ndef build():\n    x = '{0.__globals__}'.format(propkit.wheel)\n",
+}
+
+
+@pytest.mark.parametrize("name", sorted(FORMAT_EXPLOITS))
+def test_str_format_reflection_is_rejected(name):
+    assert check_script(FORMAT_EXPLOITS[name], "propkit", kit_public_names(KIT)), name
+
+
+def test_percent_and_fstring_formatting_stay_available():
+    source = ("import bpy\ndef build():\n    n = 3\n    label = 'part %d of %s' % (n, 'cart')\n"
+              "    other = f'{n:03d}-{label}'\n    bpy.ops.mesh.primitive_cube_add()\n")
+    assert check_script(source) == []
+
+
+QUALITY_SCRIPT = '''import bpy
+import bmesh
+import math
+
+def build():
+    bpy.ops.mesh.primitive_cube_add(size=1.0, location=(0, 0, 0.5))
+    box = bpy.context.active_object
+    bevel = box.modifiers.new(name="Bevel", type="BEVEL")
+    bevel.width = 0.05
+    bevel.segments = 3
+    bevel.limit_method = "ANGLE"
+    sub = box.modifiers.new(name="Sub", type="SUBSURF")
+    sub.levels = 1
+    sub.render_levels = 1
+    box.modifiers.new(name="Wn", type="WEIGHTED_NORMAL")
+    box.modifiers.new(name="Tri", type="TRIANGULATE")
+    mirror = box.modifiers.new(name="Mir", type="MIRROR")
+    mirror.use_axis[0] = True
+    arr = box.modifiers.new(name="Arr", type="ARRAY")
+    arr.count = 1
+    solid = box.modifiers.new(name="Sol", type="SOLIDIFY")
+    solid.thickness = 0.01
+    dec = box.modifiers.new(name="Dec", type="DECIMATE")
+    dec.ratio = 1.0
+    bpy.ops.object.shade_smooth()
+    bpy.ops.object.shade_flat()
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.mesh.select_all(action="SELECT")
+    bpy.ops.mesh.subdivide(number_cuts=1)
+    bpy.ops.mesh.inset(thickness=0.02)
+    bpy.ops.object.mode_set(mode="OBJECT")
+    bm = bmesh.new()
+    bmesh.ops.create_cube(bm, size=0.5)
+    bmesh.ops.bevel(bm, geom=list(bm.edges), offset=0.02, segments=2, affect="EDGES")
+    bmesh.ops.subdivide_edges(bm, edges=list(bm.edges), cuts=1)
+    mesh = bpy.data.meshes.new("extra")
+    bm.to_mesh(mesh)
+    bm.free()
+    other = bpy.data.objects.new("extra", mesh)
+    bpy.context.scene.collection.objects.link(other)
+    cut = other.modifiers.new(name="Cut", type="BOOLEAN")
+    cut.operation = "DIFFERENCE"
+    cut.object = box
+    paint(box, "#8899aa")
+    paint(other, "#aa9988")
+'''
+
+
+def test_quality_modifiers_shading_and_bmesh_ops_pass_the_gate():
+    assert check_script(QUALITY_SCRIPT) == []

@@ -122,3 +122,45 @@ def test_critique_prompt_has_an_orientation_and_attachment_checklist_before_scor
     assert "caps the score at 5" in prompt and "first" in prompt and "issues" in prompt
     # the JSON output contract is unchanged
     assert '"score": <integer 0-10>' in prompt and '"recognizable"' in prompt and '"issues"' in prompt
+
+
+def test_generation_prompt_pushes_the_budget_and_gives_segment_guidance():
+    low = generation_prompt("a crate", max_tris=400, height_m=0, kit_module=None, api_doc="")
+    high = generation_prompt("a crate", max_tris=12000, height_m=0, kit_module=None, api_doc="")
+    assert "target to USE" in high and "7200 to 10800 triangles" in high
+    assert "about 24 segments" in high and "about 10 segments" in low
+    for needle in ("BEVEL", "SUBSURF", "shade_smooth", "rotation_euler=(0, math.pi/2, 0)", "already empty"):
+        assert needle in high
+
+
+def test_generation_prompt_tells_kit_users_to_qualify_calls_and_skip_reset_scene():
+    prompt = generation_prompt("a crate", max_tris=1000, height_m=0, kit_module="propkit", api_doc="def f()")
+    assert "propkit.name(" in prompt and "do not call reset_scene()" in prompt
+
+
+def test_repair_hint_qualifies_kit_names_and_drops_reset_scene():
+    from sonder_runtime.domain.meshgen.prompts import repair_hint
+    err = "NameError: name 'lathe' is not defined"
+    assert "propkit.lathe(" in repair_hint(err, "propkit", {"lathe"})
+    assert "Delete that call" in repair_hint("NameError: name 'reset_scene' is not defined", "propkit", {"reset_scene"})
+    assert "is not defined" in repair_hint("NameError: name 'zzz' is not defined", "propkit", {"lathe"})
+    assert repair_hint("ValueError: x", "propkit", {"lathe"}) == ""
+    prompt = repair_prompt("BASE", "code", err, hint=repair_hint(err, "propkit", {"lathe"}))
+    assert "How to fix it:" in prompt and "propkit.lathe(" in prompt
+
+
+def test_revise_prompt_turns_orientation_issues_into_rotation_instructions():
+    flat = revise_prompt("B", "code", {"score": 5, "issues": ["Front wheel lies flat in the top view"]})
+    assert "rotation_euler=(0, math.pi/2, 0)" in flat and "z=0" in flat
+    other = revise_prompt("B", "code", {"score": 5, "issues": ["handle is too short"]})
+    assert "Orientation help" not in other
+    stuck = revise_prompt("B", "code", {"score": 5, "issues": ["x"]}, stuck="DID NOT FIX IT")
+    assert "DID NOT FIX IT" in stuck
+
+
+def test_critique_prompt_states_conventions_and_asks_for_a_detail_check():
+    prompt = critique_prompt("a wheelbarrow", max_tris=8000)
+    assert "Z is up" in prompt and "-Y" in prompt and "AXLE IS HORIZONTAL" in prompt
+    assert "NOT to make the axle vertical" in prompt
+    assert "DETAIL" in prompt and "8000 triangles" in prompt
+    assert "DETAIL" in critique_prompt("x")

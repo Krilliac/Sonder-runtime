@@ -137,3 +137,30 @@ def test_timeout_and_start_failure_are_error_results(tmp_path, monkeypatch):
 
     monkeypatch.setattr(runner.subprocess, "run", missing)
     assert "could not start blender" in _build(tmp_path)["error"]
+
+
+def test_blender_gets_an_allow_listed_environment_only(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen["env"] = kwargs["env"]
+        return _completed()
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    parent = {
+        "PATH": "C:/Python;C:/secret-tools", "SYSTEMROOT": "C:/Windows", "WINDIR": "C:/Windows",
+        "ANTHROPIC_API_KEY": "sk-ant-x", "OPENAI_API_KEY": "sk-o", "SONDER_TEST_SECRET": "s",
+        "GITHUB_TOKEN": "t", "AWS_SECRET_ACCESS_KEY": "a", "USERPROFILE": "C:/Users/real",
+        "APPDATA": "C:/Users/real/AppData", "HOME": "/home/real", "NUMBER_OF_PROCESSORS": "8",
+    }
+    monkeypatch.setattr(runner.os, "environ", parent)
+    _build(tmp_path)
+    env = seen["env"]
+    out = str(tmp_path / "out")
+    assert not [k for k in env if k.upper() not in (runner.ENV_ALLOWLIST | {"PATH"} | set(runner._SCRATCH_VARIABLES))]
+    assert "ANTHROPIC_API_KEY" not in env and "SONDER_TEST_SECRET" not in env and "GITHUB_TOKEN" not in env
+    assert "secret-tools" not in env["PATH"] and env["PATH"].startswith(str(Path("blender").resolve().parent))
+    assert env["PATH"].split(runner.os.pathsep)[1:] == [runner.os.path.join("C:/Windows", "System32"), "C:/Windows"]
+    for key in ("USERPROFILE", "APPDATA", "HOME", "TEMP", "TMP"):
+        assert env[key].startswith(out), key        # profile and temp redirected into the build directory
+    assert env["NUMBER_OF_PROCESSORS"] == "8" and env["SYSTEMROOT"] == "C:/Windows"

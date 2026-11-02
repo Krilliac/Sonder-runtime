@@ -15,11 +15,13 @@ report contains no code bodies.
 """
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 
 from ...domain.meshgen.critique import parse_critique
-from ...domain.meshgen.prompts import extract_code, generation_prompt, repair_prompt, revise_prompt
+from ...domain.meshgen.prompts import (
+    extract_code, generation_prompt, repair_hint, repair_prompt, revise_prompt,)
 from ...domain.meshgen.script_safety import check_script
 from ...domain.meshgen.selection import pick_best
 
@@ -55,9 +57,64 @@ def _failure_text(result: dict) -> str:
 
 
 def _over_budget_text(result: dict, max_tris: int) -> str:
-    return ("The model built but has %s triangles; the budget is %d. Cut segments on round parts, "
+    text = ("The model built but has %s triangles; the budget is %d. Cut segments on round parts, "
             "merge or drop small details, and simplify until it is clearly under %d triangles "
             "while keeping it recognisable." % (result.get("tris"), max_tris, max_tris))
+    parts = [part for part in (result.get("parts") or []) if isinstance(part, dict)][:5]
+    if parts:
+        text += " Biggest contributors: " + ", ".join(
+            "%s (%s tris)" % (part.get("name"), part.get("tris")) for part in parts) + "."
+    return text
+
+
+def _first_line(text) -> str:
+    lines = str(text or "").strip().splitlines()
+    return lines[0].strip() if lines else ""
+
+
+def _words(text) -> set:
+    return set(re.findall(r"[a-z]{3,}", str(text or "").lower()))
+
+
+def _same_problem(previous, current) -> bool:
+    """True when ``current`` repeats ``previous`` (same error, same top issue, same score)."""
+    if not previous or previous["status"] != current["status"]:
+        return False
+    status = current["status"]
+    if status == "build_error":
+        return bool(_first_line(current.get("error"))) and (
+            _first_line(previous.get("error")) == _first_line(current.get("error")))
+    if status == "rejected":
+        def strip(issue):
+            return re.sub(r"^line \d+:", "", str(issue)).strip()
+        return bool(current["issues"]) and bool(previous["issues"]) and (
+            strip(previous["issues"][0]) == strip(current["issues"][0]))
+    if status == "over_budget":
+        return bool(previous["tris"]) and bool(current["tris"]) and current["tris"] >= previous["tris"] * 0.95
+    if status == "revise":
+        if previous["score"] != current["score"] or not previous["issues"] or not current["issues"]:
+            return False
+        if not previous["tris"] or not current["tris"] or abs(current["tris"] - previous["tris"]) > 0.15 * previous["tris"]:
+            return False
+        first, second = _words(previous["issues"][0]), _words(current["issues"][0])
+        return bool(first and second) and len(first & second) / len(first | second) >= 0.6
+    return False
+
+
+def _stuck_note(attempt) -> str:
+    status = attempt["status"]
+    if status == "build_error":
+        return ("Your last revision did not fix: %s. The identical failure happened again, so changing "
+                "other parts of the script achieves nothing. Change exactly that line this time."
+                % _first_line(attempt.get("error")))
+    if status == "revise":
+        return ("Your last revision did not fix: %s. The score stayed at %s and the geometry barely changed. "
+                "Make a real, visible change to exactly that part, and verify the rotation or position "
+                "numerically before returning the script." % (attempt["issues"][0], attempt["score"]))
+    if status == "rejected":
+        return "Your last revision hit the same safety rejection again: %s." % attempt["issues"][0]
+    return ("Your last revision did not reduce the triangle count (%s). Remove or simplify the biggest "
+            "parts instead of adjusting small ones." % attempt["tris"])
 
 
 def run(request: MeshRequest, *, generate, build, critique, map_parallel) -> dict:
@@ -91,7 +148,8 @@ def run(request: MeshRequest, *, generate, build, critique, map_parallel) -> dic
         if not result.get("ok"):
             attempt["status"] = "build_error"
             attempt["error"] = _clip(result.get("error"), 400)
-            return False, repair_prompt(base, code, _failure_text(result))
+            return False, repair_prompt(base, code, _failure_text(result), hint=repair_hint(
+                _failure_text(result), request.kit_module, request.kit_names))
         within = bool(result.get("within_budget"))
         attempt["tris"] = int(result.get("tris") or 0)
         files = dict(result.get("files") or {})
@@ -139,12 +197,19 @@ def run(request: MeshRequest, *, generate, build, critique, map_parallel) -> dic
                 stop, next_prompt = attempt_round(index, tier, round_index, prompt, attempt, versions)
             finally:
                 attempt["seconds"] = round(time.monotonic() - began, 2)
+            previous = attempts[-2] if len(attempts) > 1 else None
             if next_prompt is not None:
+                if _same_problem(previous, attempt):
+                    next_prompt += "\n\n" + _stuck_note(attempt)
+                    attempt["stuck"] = True
+                    if len(tiers) > 1:
+                        tier = tiers[(tiers.index(tier) + 1) % len(tiers)]
+                        attempt["escalated_to"] = tier
                 prompt = next_prompt
             if stop:
                 break
         best = pick_best(versions)
-        return {"index": index, "tier": tier, "attempts": attempts, "best": best,
+        return {"index": index, "tier": tiers[index % len(tiers)], "attempts": attempts, "best": best,
                 "built": best is not None}
 
     outcomes = map_parallel(run_candidate, list(range(max(1, int(request.candidates)))))

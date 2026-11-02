@@ -19,6 +19,39 @@ HARNESS_PATH = Path(__file__).with_name("harness.py")
 _TAIL_LINES = 8
 
 
+# Variables copied from the parent environment into the Blender subprocess.  Everything else
+# (API keys, tokens, SONDER_*, cloud credentials, ...) is dropped: model-written scripts run
+# in that process, and any value in its environment is one reflection bug from a result string.
+ENV_ALLOWLIST = frozenset({
+    "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "PATHEXT", "PROCESSOR_ARCHITECTURE",
+    "NUMBER_OF_PROCESSORS", "OS", "LANG", "LC_ALL",
+})
+# Profile and temp locations are redirected to a per-build scratch directory so Blender neither
+# reads nor writes the real user profile.
+_SCRATCH_VARIABLES = ("TEMP", "TMP", "TMPDIR", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+                      "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME")
+
+
+def build_env(parent, scratch: Path, blender: str) -> dict:
+    """Explicit allow-list environment for the Blender subprocess."""
+    env = {}
+    for key, value in parent.items():
+        if key.upper() in ENV_ALLOWLIST:
+            env[key.upper() if os.name == "nt" else key] = value
+    system_root = env.get("SYSTEMROOT") or env.get("WINDIR") or ""
+    if system_root:
+        system_dirs = [os.path.join(system_root, "System32"), system_root]
+    else:
+        system_dirs = ["/usr/bin", "/bin"]
+    env["PATH"] = os.pathsep.join([os.path.dirname(os.path.abspath(blender))] + system_dirs)
+    scratch.mkdir(parents=True, exist_ok=True)
+    for key in _SCRATCH_VARIABLES:
+        target = scratch if key in ("TEMP", "TMP", "TMPDIR") else scratch / key.lower()
+        target.mkdir(parents=True, exist_ok=True)
+        env[key] = str(target)
+    return env
+
+
 def locate_blender(env=os.environ) -> str | None:
     """``SONDER_BLENDER`` when it names an existing file, else ``blender`` on PATH."""
     configured = str(env.get("SONDER_BLENDER", "") or "").strip().strip('"')
@@ -88,6 +121,7 @@ def build_candidate(blender, code_path, out_dir, *, name, kit_path=None, max_tri
         completed = subprocess.run(
             argv, cwd=str(out), shell=False, capture_output=True, timeout=timeout,
             stdin=subprocess.DEVNULL, check=False,
+            env=build_env(os.environ, out / ".env", str(blender)),
         )
     except subprocess.TimeoutExpired as exc:
         partial = exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
