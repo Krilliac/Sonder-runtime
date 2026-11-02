@@ -41,7 +41,8 @@ Useful arguments: `candidates` (1-6, default 3), `rounds` (1-6, default 3), `tie
 
 - `kit_path` names a Python helper module that candidate scripts may `import` (its directory
   is put on Blender's `sys.path`). Without `api_doc_path` the prompt carries a digest of the
-  kit's public functions and first docstring lines.
+  kit's exposed functions and first docstring lines. Which kit names are exposed is a policy, see
+  "Kit exposure" below.
 - Output goes under the asset workspace (`artifacts/generated/meshgen/<name>-<UTC stamp>` by
   default; `output_dir` must stay inside `SONDER_ASSET_WORKSPACE`/the checkout). Each round of each
   candidate keeps its script, model and renders in `c<candidate>_r<round>/`.
@@ -55,14 +56,17 @@ Useful arguments: `candidates` (1-6, default 3), `rounds` (1-6, default 3), `tie
 bevels on hard edges, enough segments that round parts read round (about 10 below 500 triangles,
 12 below 2000, 16 below 6000, 24 below 20000, 32 above) and smooth shading on organic parts. Modifiers
 (`BEVEL`, `SUBSURF`, `SOLIDIFY`, `MIRROR`, `ARRAY`, `WEIGHTED_NORMAL`, `TRIANGULATE`, `DECIMATE`,
-`BOOLEAN`) are allowed; the harness bakes them and counts triangles after modifiers. The default is
+`BOOLEAN`, `EDGE_SPLIT`, `SMOOTH`, `WELD`, `SCREW`) are allowed as literal type strings only (any other
+type, or a computed one, is refused: `NODES`, `DISPLACE`, `WAVE`, `HOOK` ... can reach other data); the harness bakes them and counts triangles after modifiers. The default is
 3000. For hero assets pass 8000-20000 or more (the clamp is 50..200000); generation allows 8192 reply
 tokens. An over-budget result is repaired with the biggest parts named. The critic also flags blocky,
 low-effort results when the budget allowed more.
 
 If a candidate repeats the same build error, or the same top critique issue with the same score and
-about the same triangle count, the next prompt says so explicitly and, with more than one tier, the
-remaining rounds of that candidate move to the next tier.
+about the same triangle count, the next prompt says so explicitly (placed before the closing
+"Return ONLY ..." line) and, with more than one tier, the remaining rounds of that candidate move to
+a different tier, preferring one that candidate has not used yet. The winner is credited with the
+tier that produced its version, and each candidate reports `tiers_used`.
 
 ## Safety model
 
@@ -90,9 +94,14 @@ Several layers reduce accidents, but they are defence in depth, **not a sandbox*
   - Imports are limited to `bpy`, `bmesh`, `mathutils`, `math`, `random` and the kit module;
     `open`, `exec`, `eval`, `getattr`, `type`, `dir` and friends and every name or attribute
     starting with `_` (except a bare `_`) are refused.
-  - The kit module is reachable only through the public top-level functions, classes and
-    constants of the kit source (imports and re-exports such as `kit.Vector` are not
-    available). A kit's own private helpers are therefore unusable by model scripts.
+  - The kit module is reachable only through the exposed names described under "Kit exposure"
+    (imports and re-exports such as `kit.Vector` are not available, and private helpers are
+    unusable by model scripts).
+  - `**` and `*` argument unpacking is refused on `bpy` calls, `path_resolve` is refused, operator
+    names containing node_group/asset/library are refused, and literal numeric arguments or
+    assignments named `segments`, `ring_count`, `vertices`, `levels`, `count`, `cuts`, `steps`,
+    `resolution`, `iterations` ... are capped (see `ARGUMENT_CAPS`) so one literal cannot request
+    a mesh that exhausts memory.
   - `str.format` and `format_map` (they resolve attribute chains from string text, e.g. a format
     field reaching a function's globals) and any string literal containing `__` are refused;
     `%` and f-string formatting stay available.
@@ -102,7 +111,24 @@ Several layers reduce accidents, but they are defence in depth, **not a sandbox*
   of the server's. Only `SYSTEMROOT`, `WINDIR`, `SYSTEMDRIVE`, `PATHEXT`, `PROCESSOR_ARCHITECTURE`,
   `NUMBER_OF_PROCESSORS`, `OS`, `LANG`, `LC_ALL` are copied; `PATH` is just the Blender directory
   plus the system directories; `TEMP`/`TMP`/`HOME`/`USERPROFILE`/`APPDATA`/`LOCALAPPDATA` point at a
-  per-build scratch directory. API keys, tokens and `SONDER_*` values never reach the process.
+  per-build scratch directory (`<candidate dir>/.blender_profile`, deleted after every build). API keys, tokens and `SONDER_*` values never reach the process.
+- **Kit exposure** (`sonder_runtime/domain/meshgen/kit_policy.py`). A kit is trusted code, but its
+  public functions are reachable from untrusted scripts and some of them write files (export,
+  preview render, "run the whole prop"). Exposure is therefore an allow-list derived from the kit
+  source: a function or class is excluded when anything in it touches `open`/`exec`/`eval`, the
+  `os`/`sys`/`shutil`/`pathlib`/`subprocess`/`io`/`json`... modules, `Path`, file-ish attributes
+  (`save`, `write`, `filepath`, `makedirs`, `export_scene`, `wm`, `ops.render`, ...); text
+  constants (`KIT_DIR`, `REPO_ROOT`, ...) are never exposed; and exclusion is transitive (a function
+  that uses an excluded kit name is excluded). For the Lanternfall `lf_kit.py` this excludes
+  `COL`, `KIT_DIR`, `PREVIEW_DIR`, `PROPS_OUT_ROOT`, `REPO_ROOT`, `finalize_and_export`,
+  `render_preview`, `reset_scene`, `result_line` and `run_prop`. The operator can override the
+  derivation with module-level literals in the kit: `MESHGEN_ALLOW = ["box", "lathe"]` replaces the
+  derived list (only public names the kit defines count) and `MESHGEN_EXCLUDE = ["helper"]` removes
+  names from it. Excluded names never appear in the API digest or repair hints; the prompt tells the
+  model that the harness exports and renders. As defence in depth the harness replaces every
+  excluded name in the loaded kit module with a stub that raises (functions) or `None` (constants),
+  so a gate bug still cannot reach kit code that writes files. A user-supplied `api_doc_path`
+  text is passed through unchanged and is the operator's responsibility.
 - **Minimal helper globals**: the injected `paint` helper is built in a fresh namespace holding five
   harmless builtins, so reflection on it reaches nothing of the harness.
 - **Harness hardening**: before the script runs, `Text.as_module` and `bpy.utils.execfile`
@@ -113,8 +139,15 @@ Several layers reduce accidents, but they are defence in depth, **not a sandbox*
   per-job, unguessable file (not stdout, which the script can write to), and every file the
   result names must resolve inside the candidate's output directory.
 
+- **Memory ceiling** (best effort, `blender_runner.run_limited`): Windows places Blender in a Job
+  Object with a per-process committed-memory cap (default 8192 MB, killed with the job; there is a
+  brief window between process start and assignment); POSIX sets `RLIMIT_AS` (three times the cap,
+  because it counts address space) before exec. The POSIX path is written but was not exercised on
+  this Windows host.
+
 What is NOT guaranteed: an allowed operator or a Blender bug can still do harm, a script can
-burn CPU or memory until the timeout, and nothing here limits what Blender itself can reach.
+burn CPU until the timeout, memory is bounded only by the ceiling above, and nothing else limits
+what Blender itself can reach.
 Run the tool only where `run_code` would be acceptable.
 
 Reads are guarded: `kit_path` and `api_doc_path` go through the same guarded reader as the

@@ -35,6 +35,7 @@ class MeshRequest:
     height_m: float = 0.0
     kit_module: str | None = None
     kit_names: frozenset = frozenset()
+    kit_excluded: frozenset = frozenset()
     api_doc: str = ""
     candidates: int = 3
     rounds: int = 3
@@ -127,7 +128,11 @@ def run(request: MeshRequest, *, generate, build, critique, map_parallel) -> dic
     vision_off = {"reason": "" if request.vision else "disabled by the caller", "used": 0}
 
     def attempt_round(index, tier, round_index, prompt, attempt, versions):
-        """One round; returns ``(stop, next_prompt)`` (``next_prompt`` None = keep the prompt)."""
+        """One round; returns ``(stop, build_prompt)``.
+
+        ``build_prompt(stuck)`` renders the next prompt (``None`` = keep the current one), so a
+        no-progress note can be placed inside it, before the closing instruction.
+        """
         try:
             reply = generate(tier, prompt)
         except Exception as exc:  # noqa: BLE001 - a model failure ends the round, not the run
@@ -139,8 +144,8 @@ def run(request: MeshRequest, *, generate, build, critique, map_parallel) -> dic
         if reasons:
             attempt["status"] = "rejected"
             attempt["issues"] = reasons[:8]
-            return False, repair_prompt(
-                base, code, "The safety check rejected the script:\n- " + "\n- ".join(reasons[:8]))
+            failure = "The safety check rejected the script:\n- " + "\n- ".join(reasons[:8])
+            return False, lambda stuck: repair_prompt(base, code, failure, stuck=stuck)
         try:
             result = build(index, round_index, code)
         except Exception as exc:  # noqa: BLE001 - a builder crash is a failed build
@@ -148,18 +153,20 @@ def run(request: MeshRequest, *, generate, build, critique, map_parallel) -> dic
         if not result.get("ok"):
             attempt["status"] = "build_error"
             attempt["error"] = _clip(result.get("error"), 400)
-            return False, repair_prompt(base, code, _failure_text(result), hint=repair_hint(
-                _failure_text(result), request.kit_module, request.kit_names))
+            failure = _failure_text(result)
+            hint = repair_hint(failure, request.kit_module, request.kit_names, request.kit_excluded)
+            return False, lambda stuck: repair_prompt(base, code, failure, hint=hint, stuck=stuck)
         within = bool(result.get("within_budget"))
         attempt["tris"] = int(result.get("tris") or 0)
         files = dict(result.get("files") or {})
-        version = {"round": round_index, "built": True, "within_budget": within,
+        version = {"round": round_index, "built": True, "within_budget": within, "tier": tier,
                    "tris": attempt["tris"], "score": None, "issues": [], "files": files,
                    "size": result.get("size")}
         versions.append(version)
         if not within:
             attempt["status"] = "over_budget"
-            return False, repair_prompt(base, code, _over_budget_text(result, request.max_tris))
+            failure = _over_budget_text(result, request.max_tris)
+            return False, lambda stuck: repair_prompt(base, code, failure, stuck=stuck)
         sheet = files.get("sheet")
         if request.vision and not vision_off["reason"] and sheet:
             vision_off["used"] += 1
@@ -179,12 +186,21 @@ def run(request: MeshRequest, *, generate, build, critique, map_parallel) -> dic
                         attempt["status"] = "accepted"
                         return True, None
                     attempt["status"] = "revise"
-                    return False, revise_prompt(base, code, parsed)
+                    return False, lambda stuck: revise_prompt(base, code, parsed, stuck=stuck)
         attempt["status"] = "built"
         return True, None
 
+    def next_tier(current, used):
+        """A tier different from ``current``, preferring one this candidate has not used yet."""
+        others = [name for name in tiers if name != current]
+        if not others:
+            return current
+        fresh = [name for name in others if name not in used]
+        return (fresh or others)[0]
+
     def run_candidate(index: int) -> dict:
         tier = tiers[index % len(tiers)]
+        used = [tier]
         attempts: list[dict] = []
         versions: list[dict] = []
         prompt = base
@@ -194,23 +210,27 @@ def run(request: MeshRequest, *, generate, build, critique, map_parallel) -> dic
                        "score": None, "issues": [], "seconds": 0.0}
             attempts.append(attempt)
             try:
-                stop, next_prompt = attempt_round(index, tier, round_index, prompt, attempt, versions)
+                stop, build_prompt = attempt_round(index, tier, round_index, prompt, attempt, versions)
             finally:
                 attempt["seconds"] = round(time.monotonic() - began, 2)
             previous = attempts[-2] if len(attempts) > 1 else None
-            if next_prompt is not None:
+            if build_prompt is not None:
+                stuck = ""
                 if _same_problem(previous, attempt):
-                    next_prompt += "\n\n" + _stuck_note(attempt)
+                    stuck = _stuck_note(attempt)
                     attempt["stuck"] = True
-                    if len(tiers) > 1:
-                        tier = tiers[(tiers.index(tier) + 1) % len(tiers)]
+                    switched = next_tier(tier, used)
+                    if switched != tier:
+                        tier = switched
                         attempt["escalated_to"] = tier
-                prompt = next_prompt
+                        if tier not in used:
+                            used.append(tier)
+                prompt = build_prompt(stuck)
             if stop:
                 break
         best = pick_best(versions)
-        return {"index": index, "tier": tiers[index % len(tiers)], "attempts": attempts, "best": best,
-                "built": best is not None}
+        return {"index": index, "tier": attempts[0]["tier"], "tiers_used": used, "attempts": attempts,
+                "best": best, "built": best is not None}
 
     outcomes = map_parallel(run_candidate, list(range(max(1, int(request.candidates)))))
     candidates = []
@@ -220,7 +240,7 @@ def run(request: MeshRequest, *, generate, build, critique, map_parallel) -> dic
         else:
             candidates.append({"index": position, "tier": tiers[position % len(tiers)], "attempts": [],
                                "best": None, "built": False, "error": _clip(outcome, 400)})
-    ranked = [dict(c["best"], candidate=c["index"], tier=c["tier"]) if c.get("best") else
+    ranked = [dict(c["best"], candidate=c["index"], tier=c["best"].get("tier", c["tier"])) if c.get("best") else
               {"built": False, "candidate": c["index"], "tier": c["tier"]} for c in candidates]
     winner = pick_best(ranked)
     if winner is not None and not winner.get("built"):

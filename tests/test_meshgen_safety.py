@@ -257,3 +257,35 @@ def build():
 
 def test_quality_modifiers_shading_and_bmesh_ops_pass_the_gate():
     assert check_script(QUALITY_SCRIPT) == []
+
+
+def _mod(call):
+    return "import bpy\n\ndef build():\n    obj = bpy.context.active_object\n    %s\n" % call
+
+
+def test_modifier_types_must_be_allow_listed_literals():
+    assert check_script(_mod("obj.modifiers.new('m', 'SUBSURF')")) == []
+    assert check_script(_mod("obj.modifiers.new(name='m', type='BEVEL')")) == []
+    for call in ("obj.modifiers.new('m', 'NODES')", "obj.modifiers.new('m', 'DISPLACE')",
+                 "kind = 'BEVEL'\n    obj.modifiers.new('m', kind)", "obj.modifiers.new('m', 'BE' + 'VEL')",
+                 "obj.modifiers.new('m')"):
+        assert check_script(_mod(call)), call
+
+
+def test_splat_arguments_are_refused_on_bpy_calls():
+    assert check_script(_mod("bpy.ops.mesh.primitive_cube_add(**{'size': 1})"))
+    assert check_script(_mod("bpy.ops.mesh.primitive_cube_add(*[1.0])"))
+    assert check_script(_mod("obj.modifiers.new(**{'name': 'x', 'type': 'NODES'})"))
+
+
+def test_path_resolve_and_node_group_operators_are_refused():
+    assert check_script(_mod("obj.path_resolve('data')"))
+    assert check_script(_mod("bpy.ops.object.modifier_add(type='NODES')"))
+    assert check_script(_mod("bpy.ops.node.add_node()"))
+
+
+def test_literal_size_caps_stop_single_argument_memory_bombs():
+    assert check_script(_mod("bpy.ops.mesh.primitive_uv_sphere_add(segments=32, ring_count=16)")) == []
+    assert check_script(_mod("bpy.ops.mesh.primitive_uv_sphere_add(segments=100000000)"))
+    assert check_script(_mod("obj.modifiers.new('m', 'SUBSURF').levels = 12"))
+    assert check_script(_mod("m = obj.modifiers.new('m', 'ARRAY')\n    m.count = 10_000_000"))

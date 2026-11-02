@@ -48,7 +48,25 @@ ALLOWED_OPS_CATEGORIES = frozenset({"mesh", "object", "transform", "curve"})
 # (e.g. object.bake_image, object.load_reference_image).
 FORBIDDEN_OPERATOR_FRAGMENTS = (
     "import", "export", "save", "load", "open", "write", "script", "python", "bake", "browse", "file",
+    "node_group", "asset", "library",
 )
+
+# Modifier types a script may create (literal strings only).  Excluded on purpose: NODES (runs
+# geometry-node graphs), DISPLACE/WAVE/etc. (can load textures), CURVE/HOOK/SURFACE_DEFORM (reach
+# other data) and anything not listed.
+ALLOWED_MODIFIERS = frozenset({
+    "BEVEL", "SUBSURF", "SOLIDIFY", "MIRROR", "ARRAY", "WEIGHTED_NORMAL", "TRIANGULATE", "DECIMATE",
+    "BOOLEAN", "EDGE_SPLIT", "SMOOTH", "WELD", "SCREW",
+})
+# Upper bounds for literal numeric arguments or assignments with these names, so a script cannot
+# ask for a mesh that exhausts memory with a single literal.  Non-literal values are bounded at
+# run time by the harness' process memory limit instead.
+ARGUMENT_CAPS = {
+    "segments": 256, "ring_count": 256, "rings": 256, "vertices": 256, "u_segments": 256,
+    "v_segments": 256, "levels": 3, "render_levels": 3, "count": 200, "number_cuts": 32, "cuts": 32,
+    "subdivisions": 6, "steps": 256, "resolution": 256, "resolution_u": 64, "resolution_v": 64,
+    "iterations": 16,
+}
 ALLOWED_DATA_COLLECTIONS = frozenset({"objects", "meshes", "materials", "collections", "curves"})
 ALLOWED_CONTEXT_MEMBERS = frozenset({
     "scene", "view_layer", "active_object", "object", "selected_objects",
@@ -78,6 +96,7 @@ FORBIDDEN_ATTRIBUTES = frozenset({
     "os", "sys", "subprocess", "shutil", "pathlib", "importlib", "builtins", "io", "socket",
     "ctypes", "system", "popen", "exec", "eval", "compile", "open", "getattr", "setattr",
     "delattr", "globals", "locals", "vars",
+    "path_resolve",
     # str.format / format_map resolve attribute chains from a string literal (for example
     # "{0.__globals__[os]}"), which no AST rule over names can see.
     "format", "format_map",
@@ -92,22 +111,10 @@ FORBIDDEN_STRINGS = frozenset({
 
 
 def kit_public_names(kit_source: str) -> frozenset[str]:
-    """Public top-level defs, classes and constants of a kit module (imports excluded)."""
-    try:
-        tree = ast.parse(kit_source or "")
-    except (SyntaxError, ValueError):
-        return frozenset()
-    names: set[str] = set()
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
-            names.add(node.name)
-        elif isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    names.add(target.id)
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            names.add(node.target.id)
-    return frozenset(name for name in names if not name.startswith("_") and name not in FORBIDDEN_ATTRIBUTES)
+    """Kit names a script may use: public, side-effect free (see ``kit_policy.analyse_kit``)."""
+    from .kit_policy import analyse_kit
+
+    return analyse_kit(kit_source)[0]
 
 
 def _private(name: str) -> bool:
@@ -227,7 +234,50 @@ def check_script(source: str, kit_module: str | None = None,
             reject(first, "bpy.context may only be followed by one of: %s"
                    % ", ".join(sorted(ALLOWED_CONTEXT_MEMBERS)))
 
+    def literal_number(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+            return node.value
+        return None
+
+    def check_cap(name, value_node, where):
+        limit = ARGUMENT_CAPS.get(name)
+        value = literal_number(value_node)
+        if limit is not None and value is not None and value > limit:
+            reject(where, "'%s=%s' is above the allowed maximum of %d" % (name, value, limit))
+
+    def check_modifier_type(type_node, where):
+        if not (isinstance(type_node, ast.Constant) and isinstance(type_node.value, str)
+                and type_node.value in ALLOWED_MODIFIERS):
+            reject(where, "modifier type must be a literal string from: %s" % ", ".join(sorted(ALLOWED_MODIFIERS)))
+
+    def check_call(node):
+        for kw in node.keywords:
+            if kw.arg is None:
+                reject(node, "'**' argument unpacking is not allowed")
+            else:
+                check_cap(kw.arg, kw.value, kw)
+        root = node.func
+        while isinstance(root, ast.Attribute):
+            root = root.value
+        if isinstance(root, ast.Name) and root.id == "bpy" and any(isinstance(a, ast.Starred) for a in node.args):
+            reject(node, "'*' argument unpacking is not allowed in bpy calls")
+        func = node.func
+        if not isinstance(func, ast.Attribute):
+            return
+        keywords = {kw.arg: kw.value for kw in node.keywords if kw.arg}
+        if func.attr == "new" and isinstance(func.value, ast.Attribute) and func.value.attr == "modifiers":
+            type_node = keywords.get("type") or (node.args[1] if len(node.args) > 1 else None)
+            check_modifier_type(type_node, node)
+        elif func.attr == "modifier_add":
+            check_modifier_type(keywords.get("type"), node)
+
     for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            check_call(node)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Attribute):
+                    check_cap(target.attr, node.value, node)
         if isinstance(node, ast.Name):
             if node.id == "bpy":
                 if isinstance(node.ctx, ast.Load):

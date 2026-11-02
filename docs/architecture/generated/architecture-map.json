@@ -959,7 +959,7 @@
       ]
     },
     {
-      "file_count": 282,
+      "file_count": 283,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1133,6 +1133,7 @@
         "sonder_runtime/domain/memory/write_quality.py",
         "sonder_runtime/domain/meshgen/__init__.py",
         "sonder_runtime/domain/meshgen/critique.py",
+        "sonder_runtime/domain/meshgen/kit_policy.py",
         "sonder_runtime/domain/meshgen/prompts.py",
         "sonder_runtime/domain/meshgen/script_safety.py",
         "sonder_runtime/domain/meshgen/selection.py",

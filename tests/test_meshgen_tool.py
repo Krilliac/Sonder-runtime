@@ -247,3 +247,18 @@ def test_the_remaining_deadline_never_gives_blender_a_zero_timeout(tmp_path, mon
     assert runner.calls == []  # under MIN_BUILD_SECONDS left: no Blender with a 0-1 s timeout
     assert payload["candidates"][0]["attempts"][0]["status"] == "build_error"
     assert "under 5s" in payload["candidates"][0]["attempts"][0]["error"]
+
+
+def test_kit_exposure_policy_reaches_the_prompt_the_gate_and_the_runner(tmp_path):
+    kit = tmp_path / "propkit.py"
+    kit.write_text('import bpy\n\ndef wheel(r):\n    """Make a wheel."""\n\n'
+                   'def run_prop(name):\n    """Export it."""\n    bpy.ops.wm.save_as_mainfile(filepath=name)\n',
+                   encoding="utf-8")
+    prompts = []
+    rt = fake_runtime(tmp_path)
+    rt._generate_text = lambda prompt, **kw: (prompts.append(prompt) or
+                                              "```python\nimport propkit\n\ndef build():\n    propkit.run_prop('x')\n```")
+    payload, runner, _ = call(tmp_path, rt=rt, kit_path=str(kit), candidates=1, rounds=2)
+    assert "run_prop" not in prompts[0] and "wheel" in prompts[0]
+    assert not runner.calls  # the gate refused the excluded call before any build
+    assert payload["candidates"][0]["attempts"][0]["status"] == "rejected"

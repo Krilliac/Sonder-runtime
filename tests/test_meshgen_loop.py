@@ -256,3 +256,24 @@ def test_over_budget_repair_names_the_biggest_parts():
     rig = Rig(builds=[big, ok_build(tris=500)], critiques=[verdict(9)])
     rig.go(candidates=1, rounds=2, max_tris=1000)
     assert "wheel (6000 tris), tray (2000 tris)" in rig.prompts[1]
+
+
+def test_a_stuck_candidate_moves_to_a_tier_it_has_not_used_and_the_winner_is_credited_with_it():
+    same = {"ok": False, "error": "Same: boom", "tail": []}
+    rig = Rig(builds=[dict(same), dict(same), ok_build()], critiques=[verdict(9)])
+    report = rig.go(candidates=1, rounds=4, tiers=("a", "b", "c"))
+    assert rig.tiers[:2] == ["a", "a"] and rig.tiers[2] == "b"
+    attempts = report["candidates"][0]["attempts"]
+    assert attempts[1]["stuck"] is True and attempts[1]["escalated_to"] == "b"
+    assert report["winner"]["tier"] == "b"
+    assert report["candidates"][0]["tiers_used"] == ["a", "b"]
+
+
+def test_the_no_progress_note_sits_before_the_closing_instruction():
+    same = {"ok": False, "error": "Same: boom", "tail": []}
+    rig = Rig(builds=[dict(same), dict(same), ok_build()], critiques=[verdict(9)])
+    rig.go(candidates=1, rounds=3, tiers=("general",))
+    third = rig.prompts[2]
+    assert third.rstrip().splitlines()[-1].startswith("Return ONLY")
+    note = third.lower().rindex("no progress") if "no progress" in third.lower() else third.lower().rindex("same")
+    assert 0 < note < third.rindex("Return ONLY")

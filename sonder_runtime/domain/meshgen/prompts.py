@@ -26,8 +26,12 @@ def _segments_for(max_tris) -> int:
     return 32
 
 
-def kit_api_digest(kit_source: str, max_chars: int = 6000) -> str:
-    """Public top-level signatures plus the first docstring line of a kit module."""
+def kit_api_digest(kit_source: str, max_chars: int = 6000, allowed=None) -> str:
+    """Public top-level signatures plus the first docstring line of a kit module.
+
+    With ``allowed`` (the names the safety policy exposes) every other name is omitted, so the
+    model is never shown a function it may not call.
+    """
     try:
         tree = ast.parse(kit_source or "")
     except (SyntaxError, ValueError):
@@ -35,13 +39,13 @@ def kit_api_digest(kit_source: str, max_chars: int = 6000) -> str:
     lines: list[str] = []
     for node in tree.body:
         if isinstance(node, ast.FunctionDef):
-            if node.name.startswith("_"):
+            if node.name.startswith("_") or (allowed is not None and node.name not in allowed):
                 continue
             head = "def %s(%s)" % (node.name, ast.unparse(node.args))
             if node.returns is not None:
                 head += " -> " + ast.unparse(node.returns)
         elif isinstance(node, ast.ClassDef):
-            if node.name.startswith("_"):
+            if node.name.startswith("_") or (allowed is not None and node.name not in allowed):
                 continue
             head = "class %s" % node.name
         else:
@@ -94,7 +98,8 @@ def generation_prompt(brief: str, *, max_tris: int, height_m: float,
         "- Cylinders, cones, tori and lathes are created around the Z axis, so they lie flat. To stand a "
         "wheel upright with its axle along X, rotate it 90 degrees about Y (rotation_euler=(0, math.pi/2, 0)); "
         "for an axle along Y, rotate 90 degrees about X. Check every wheel, barrel and door this way.",
-        "- The scene is already empty when build() runs: do not clear or reset it yourself.",
+        "- The scene is already empty when build() runs: do not clear or reset it yourself. The harness "
+        "exports and renders the result for you: never write export, render, save or preview code.",
         "- Make each distinct part a separate mesh object; parts must touch or overlap so the model "
         "is one connected whole, with every part in its correct position and orientation "
         "(for example wheels stand upright on their axle, not lying flat).",
@@ -130,7 +135,7 @@ def _code_block(code: str) -> str:
     return "```python\n%s\n```" % _clip(code, _MAX_CODE_CHARS)
 
 
-def repair_hint(failure: str, kit_module: str | None, kit_names) -> str:
+def repair_hint(failure: str, kit_module: str | None, kit_names, kit_excluded=()) -> str:
     """A concrete extra instruction for failures the model keeps repeating (else empty)."""
     match = _NAME_ERROR.search(str(failure or ""))
     if not match:
@@ -139,6 +144,9 @@ def repair_hint(failure: str, kit_module: str | None, kit_names) -> str:
     if name == "reset_scene":
         return ("`reset_scene` is not defined here and is not needed: the scene is already empty when "
                 "build() runs. Delete that call.")
+    if name in set(kit_excluded or ()) or (kit_module and name.startswith(kit_module + ".")):
+        return ("`%s` is not available in this tool; the harness exports and renders for you. Delete "
+                "that call and only build geometry." % name)
     if kit_module and name in set(kit_names or ()):
         return ("`%s` is a function of the kit module, not a builtin. Call it as `%s.%s(...)` "
                 "after `import %s`." % (name, kit_module, name, kit_module))

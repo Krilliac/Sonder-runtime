@@ -17,6 +17,8 @@ from pathlib import Path
 
 HARNESS_PATH = Path(__file__).with_name("harness.py")
 _TAIL_LINES = 8
+DEFAULT_MEMORY_MB = 8192
+SCRATCH_NAME = ".blender_profile"
 
 
 # Variables copied from the parent environment into the Blender subprocess.  Everything else
@@ -50,6 +52,98 @@ def build_env(parent, scratch: Path, blender: str) -> dict:
         target.mkdir(parents=True, exist_ok=True)
         env[key] = str(target)
     return env
+
+
+def _windows_job(limit_bytes: int):
+    """A Job Object that caps committed memory per process and dies with its handle, or ``None``."""
+    import ctypes
+    from ctypes import wintypes
+
+    class Basic(ctypes.Structure):
+        _fields_ = [("PerProcessUserTimeLimit", ctypes.c_longlong), ("PerJobUserTimeLimit", ctypes.c_longlong),
+                    ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+                    ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD),
+                    ("SchedulingClass", wintypes.DWORD)]
+
+    class Counters(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_ulonglong) for name in (
+            "ReadOps", "WriteOps", "OtherOps", "ReadBytes", "WriteBytes", "OtherBytes")]
+
+    class Extended(ctypes.Structure):
+        _fields_ = [("Basic", Basic), ("Io", Counters), ("ProcessMemoryLimit", ctypes.c_size_t),
+                    ("JobMemoryLimit", ctypes.c_size_t), ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                    ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+    kernel.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+    kernel.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel.CreateJobObjectW(None, None)
+    if not handle:
+        return None
+    info = Extended()
+    info.Basic.LimitFlags = 0x100 | 0x2000  # PROCESS_MEMORY | KILL_ON_JOB_CLOSE
+    info.ProcessMemoryLimit = int(limit_bytes)
+    if not kernel.SetInformationJobObject(handle, 9, ctypes.byref(info), ctypes.sizeof(info)):
+        kernel.CloseHandle(handle)
+        return None
+
+    def assign(process) -> bool:
+        return bool(kernel.AssignProcessToJobObject(handle, wintypes.HANDLE(int(process._handle))))
+
+    def close():
+        kernel.CloseHandle(handle)
+
+    return assign, close
+
+
+def _posix_limit(limit_bytes: int):
+    """``preexec_fn`` capping the child's address space (virtual, so deliberately generous)."""
+    def apply():
+        import resource
+        resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, limit_bytes))
+    return apply
+
+
+def run_limited(argv, *, cwd, env, timeout, memory_mb=DEFAULT_MEMORY_MB):
+    """``subprocess.run`` equivalent with a memory ceiling; returns ``(returncode, stdout, stderr)``.
+
+    Windows: the child is placed in a Job Object (per-process committed-memory cap, killed with
+    the job).  There is a short window between start and assignment; the cap is a backstop for
+    runaway allocation, not a sandbox.  POSIX: ``RLIMIT_AS`` is set before exec.  Raises
+    ``subprocess.TimeoutExpired`` (carrying the partial stdout) on timeout.
+    """
+    limit = max(256, int(memory_mb)) * 1024 * 1024
+    job = None
+    kwargs = {}
+    if os.name == "nt":
+        try:
+            job = _windows_job(limit)
+        except Exception:  # noqa: BLE001 - the cap is best effort; the build still runs
+            job = None
+    else:
+        kwargs["preexec_fn"] = _posix_limit(limit * 3)
+    process = subprocess.Popen(argv, cwd=cwd, shell=False, env=env, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs)
+    try:
+        if job is not None:
+            job[0](process)
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate()
+            raise subprocess.TimeoutExpired(argv, timeout, output=stdout, stderr=stderr) from None
+        return process.returncode, stdout, stderr
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        if job is not None:
+            job[1]()
 
 
 def locate_blender(env=os.environ) -> str | None:
@@ -95,8 +189,8 @@ def confine_files(result: dict, out_dir: Path) -> dict:
     return result
 
 
-def build_candidate(blender, code_path, out_dir, *, name, kit_path=None, max_tris,
-                    height_m, export="glb", render=True, timeout=180) -> dict:
+def build_candidate(blender, code_path, out_dir, *, name, kit_path=None, kit_excluded=(), max_tris,
+                    height_m, export="glb", render=True, timeout=180, memory_mb=DEFAULT_MEMORY_MB) -> dict:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     harness = HARNESS_PATH
@@ -107,6 +201,7 @@ def build_candidate(blender, code_path, out_dir, *, name, kit_path=None, max_tri
         "out_dir": str(out.resolve()),
         "name": name,
         "kit_path": str(Path(kit_path).resolve()) if kit_path else "",
+        "kit_excluded": sorted(str(item) for item in (kit_excluded or ())),
         "max_tris": int(max_tris),
         "height_m": float(height_m or 0.0),
         "export": "fbx" if str(export).lower() == "fbx" else "glb",
@@ -117,25 +212,26 @@ def build_candidate(blender, code_path, out_dir, *, name, kit_path=None, max_tri
     job_path = out / ("%s.job.json" % name)
     job_path.write_text(json.dumps(job), encoding="utf-8")
     argv = build_argv(str(blender), str(job_path), str(harness))
+    scratch = out / SCRATCH_NAME
     try:
-        completed = subprocess.run(
-            argv, cwd=str(out), shell=False, capture_output=True, timeout=timeout,
-            stdin=subprocess.DEVNULL, check=False,
-            env=build_env(os.environ, out / ".env", str(blender)),
-        )
+        returncode, raw_out, raw_err = run_limited(
+            argv, cwd=str(out), env=build_env(os.environ, scratch, str(blender)), timeout=timeout,
+            memory_mb=memory_mb)
     except subprocess.TimeoutExpired as exc:
         partial = exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
         return {"ok": False, "error": "blender timed out after %ss" % timeout, "tail": _tail(partial)}
     except OSError as exc:
         return {"ok": False, "error": "could not start blender: %s: %s" % (type(exc).__name__, exc)}
-    stdout = completed.stdout.decode("utf-8", "replace")
-    stderr = completed.stderr.decode("utf-8", "replace")
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    stdout = raw_out.decode("utf-8", "replace")
+    stderr = raw_err.decode("utf-8", "replace")
     result = read_result(result_path)
     try:
         result_path.unlink()
     except OSError:
         pass
     if result is None:
-        return {"ok": False, "error": "no result; rc=%s" % completed.returncode,
+        return {"ok": False, "error": "no result; rc=%s" % returncode,
                 "tail": _tail(stdout + "\n" + stderr)}
     return confine_files(result, out)

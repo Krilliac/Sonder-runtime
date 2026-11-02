@@ -26,7 +26,7 @@ from ..application.meshgen.loop import MeshRequest, run as run_loop
 from ..domain.common.errors import SonderError
 from ..domain.meshgen.critique import critique_prompt
 from ..domain.meshgen.prompts import kit_api_digest
-from ..domain.meshgen.script_safety import kit_public_names
+from ..domain.meshgen.kit_policy import analyse_kit
 from ..platform.runtime_threads import ThreadPoolExecutor
 from .legacy_root import runtime
 
@@ -141,6 +141,7 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
 
     kit_module = None
     kit_names = frozenset()
+    kit_excluded = frozenset()
     api_doc = ""
     kit_file = None
     if str(kit_path or "").strip():
@@ -148,11 +149,11 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
         kit_module = kit_file.stem
         if kit_file.suffix != ".py" or not kit_module.isidentifier() or kit_module.startswith("_"):
             raise SonderError("kit_path must be a .py file with a plain module name: %s" % kit_file)
-        kit_names = kit_public_names(kit_source)
+        kit_names, kit_excluded = analyse_kit(kit_source)
         if str(api_doc_path or "").strip():
             api_doc = _read_text(api_doc_path.strip(), MAX_API_DOC_CHARS * 4, "api doc")[1][:MAX_API_DOC_CHARS]
         else:
-            api_doc = kit_api_digest(kit_source)
+            api_doc = kit_api_digest(kit_source, allowed=kit_names)
 
     root = _output_root(rt, str(output_dir or ""), slug)
     root.mkdir(parents=True, exist_ok=True)
@@ -179,7 +180,7 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
         code_path.write_text(code, encoding="utf-8")
         result = runner.build_candidate(
             blender, str(code_path), str(root / stem), name=slug,
-            kit_path=str(kit_file) if kit_file else None, max_tris=max_tris, height_m=height,
+            kit_path=str(kit_file) if kit_file else None, kit_excluded=kit_excluded, max_tris=max_tris, height_m=height,
             export=export, render=True, timeout=int(max(MIN_BUILD_SECONDS, min(left, _BUILD_TIMEOUT))),
         )
         files = dict(result.get("files") or {})
@@ -209,7 +210,7 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
             return list(pool.map(guarded, items))
 
     request = MeshRequest(
-        brief=brief, max_tris=max_tris, height_m=height, kit_module=kit_module, kit_names=kit_names, api_doc=api_doc,
+        brief=brief, max_tris=max_tris, height_m=height, kit_module=kit_module, kit_names=kit_names, kit_excluded=kit_excluded, api_doc=api_doc,
         candidates=candidates, rounds=rounds, tiers=tier_list, target_score=target_score, vision=bool(vision),
     )
     report = run_loop(request, generate=generate, build=build, critique=critique, map_parallel=map_parallel)

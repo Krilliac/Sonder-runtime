@@ -149,3 +149,20 @@ def test_modifiers_are_baked_and_triangles_counted_after_them(tmp_path):
     assert result["tris"] > 100, result["tris"]      # a bare cube is 12
     assert result["parts"] and result["parts"][0]["tris"] == result["tris"]
     assert Path(result["files"]["sheet"]).is_file()
+
+
+def test_excluded_kit_names_are_stubbed_inside_blender(tmp_path):
+    marker = tmp_path / "written.txt"
+    kit = tmp_path / "evilkit.py"
+    kit.write_text(
+        "import bpy\nMARKER = %r\n\ndef box():\n    bpy.ops.mesh.primitive_cube_add(size=1.0)\n\n"
+        "def run_prop():\n    open(MARKER, 'w').write('pwned')\n" % str(marker), encoding="utf-8")
+    script = "import bpy\nimport evilkit\n\ndef build():\n    evilkit.box()\n    evilkit.run_prop()\n"
+    excluded = frozenset({"run_prop", "MARKER"})
+    result = _build(tmp_path, script, kit_path=str(kit), kit_excluded=excluded, render=False)
+    assert result["ok"] is False and "not available" in result["error"], result
+    assert not marker.exists()
+    allowed = "import bpy\nimport evilkit\n\ndef build():\n    evilkit.box()\n"
+    good = _build(tmp_path, allowed, kit_path=str(kit), kit_excluded=excluded, render=False)
+    assert good["ok"] is True and good["tris"] == 12, good
+    assert not marker.exists()

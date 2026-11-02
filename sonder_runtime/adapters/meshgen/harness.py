@@ -120,6 +120,25 @@ def _safe_builtins(allowed):
     return safe
 
 
+def _stub_excluded_kit_names(module_name, excluded):
+    """Defence in depth: replace kit names the policy excludes (file/export/render helpers).
+
+    The AST gate already refuses them; if a script reached one anyway (a gate bug, a reflection
+    trick) it hits a stub instead of code that writes files.  Excluded names are, by
+    construction, not used by the names that stay exposed.
+    """
+    module = importlib.import_module(module_name)
+
+    def blocked(*_args, **_kwargs):
+        raise RuntimeError("this kit function is not available in mesh_generate; the harness exports and renders")
+
+    for attr in excluded:
+        if not hasattr(module, attr):
+            continue
+        current = getattr(module, attr)
+        setattr(module, attr, blocked if callable(current) else None)
+
+
 def _clear_scene():
     for obj in list(bpy.data.objects):
         bpy.data.objects.remove(obj, do_unlink=True)
@@ -318,6 +337,8 @@ def main():
     if kit_path:
         sys.path.insert(0, os.path.dirname(os.path.abspath(kit_path)))
         allowed.add(os.path.splitext(os.path.basename(kit_path))[0])
+    if kit_path:
+        _stub_excluded_kit_names(os.path.splitext(os.path.basename(kit_path))[0], job.get("kit_excluded") or [])
     with open(job["code_path"], "r", encoding="utf-8") as handle:
         source = handle.read()
     _clear_scene()

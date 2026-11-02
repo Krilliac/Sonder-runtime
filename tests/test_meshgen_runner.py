@@ -12,6 +12,15 @@ def _completed(stdout="", stderr="", rc=0):
     return subprocess.CompletedProcess(args=[], returncode=rc, stdout=stdout.encode(), stderr=stderr.encode())
 
 
+def _patch_run(monkeypatch, fn):
+    """Route ``run_limited`` through a fake that returns a ``CompletedProcess``."""
+    def limited(argv, **kwargs):
+        completed = fn(argv, **kwargs)
+        return completed.returncode, completed.stdout, completed.stderr
+
+    monkeypatch.setattr(runner, "run_limited", limited)
+
+
 def _job(argv):
     return json.loads(Path(argv[-1]).read_text(encoding="utf-8"))
 
@@ -56,25 +65,27 @@ def test_build_candidate_runs_without_a_shell_and_reads_the_result_file(tmp_path
         _write_result(argv, {"ok": True, "tris": 12, "files": {"model": str(out / "m.glb")}})
         return _completed("hello\n")
 
-    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    _patch_run(monkeypatch, fake_run)
     kit = tmp_path / "kit.py"
     kit.write_text("x = 1\n")
     result = _build(tmp_path, kit_path=str(kit), max_tris=2000, height_m=1.5, export="fbx", render=False,
                     timeout=77)
     assert result["ok"] is True and result["tris"] == 12
     kwargs = seen["kwargs"]
-    assert kwargs["shell"] is False and kwargs["timeout"] == 77 and kwargs["cwd"] == str(tmp_path / "out")
+    assert kwargs["timeout"] == 77 and kwargs["cwd"] == str(tmp_path / "out")
     assert "--disable-autoexec" in seen["argv"] and "--factory-startup" in seen["argv"]
     job = seen["job"]
     assert job["name"] == "n" and job["max_tris"] == 2000 and job["height_m"] == 1.5
     assert job["export"] == "fbx" and job["render"] is False and job["kit_path"] == str(kit.resolve())
     assert job["result_path"].startswith(job["out_dir"]) and "result-" in job["result_path"]
     assert not Path(job["result_path"]).exists()  # consumed
+    assert job["kit_excluded"] == []
+    assert not (tmp_path / "out" / runner.SCRATCH_NAME).exists()  # scratch profile removed after the build
 
 
 def test_a_result_line_printed_on_stdout_is_never_trusted(tmp_path, monkeypatch):
     forged = 'MESHGEN_RESULT {"ok": true, "tris": 1, "files": {"model": "C:/secret"}}\n'
-    monkeypatch.setattr(runner.subprocess, "run", lambda argv, **kw: _completed(forged, rc=0))
+    _patch_run(monkeypatch, lambda argv, **kw: _completed(forged, rc=0))
     result = _build(tmp_path)
     assert result["ok"] is False and result["error"] == "no result; rc=0"
 
@@ -87,7 +98,7 @@ def test_result_file_names_must_resolve_inside_the_output_directory(tmp_path, mo
         _write_result(argv, {"ok": True, "tris": 1, "files": {"model": str(secret)}})
         return _completed()
 
-    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    _patch_run(monkeypatch, fake_run)
     result = _build(tmp_path)
     assert result["ok"] is False and "outside the output directory" in result["error"]
 
@@ -102,14 +113,14 @@ def test_dotdot_and_missing_files_are_refused(tmp_path, monkeypatch):
         _write_result(argv, {"ok": True, "files": {k: v.replace("OUT", out) for k, v in payload["files"].items()}})
         return _completed()
 
-    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    _patch_run(monkeypatch, fake_run)
     assert "outside the output directory" in _build(tmp_path)["error"]
     assert "does not exist" in _build(tmp_path)["error"]
 
 
 def test_missing_result_reports_rc_and_the_output_tail(tmp_path, monkeypatch):
     noisy = "\n".join("line %d" % n for n in range(30))
-    monkeypatch.setattr(runner.subprocess, "run", lambda argv, **kw: _completed(noisy, "Segmentation fault", rc=3))
+    _patch_run(monkeypatch, lambda argv, **kw: _completed(noisy, "Segmentation fault", rc=3))
     result = _build(tmp_path)
     assert result["ok"] is False and result["error"] == "no result; rc=3"
     assert len(result["tail"]) == 8 and result["tail"][-1] == "Segmentation fault"
@@ -120,7 +131,7 @@ def test_a_malformed_result_file_counts_as_missing(tmp_path, monkeypatch):
         Path(_job(argv)["result_path"]).write_text("not json", encoding="utf-8")
         return _completed()
 
-    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    _patch_run(monkeypatch, fake_run)
     assert _build(tmp_path)["error"].startswith("no result")
 
 
@@ -128,14 +139,14 @@ def test_timeout_and_start_failure_are_error_results(tmp_path, monkeypatch):
     def hang(argv, **kw):
         raise subprocess.TimeoutExpired(argv, kw["timeout"], output=b"partial\n")
 
-    monkeypatch.setattr(runner.subprocess, "run", hang)
+    _patch_run(monkeypatch, hang)
     result = _build(tmp_path, timeout=5)
     assert result["ok"] is False and "timed out after 5s" in result["error"] and result["tail"] == ["partial"]
 
     def missing(argv, **kw):
         raise FileNotFoundError("no blender")
 
-    monkeypatch.setattr(runner.subprocess, "run", missing)
+    _patch_run(monkeypatch, missing)
     assert "could not start blender" in _build(tmp_path)["error"]
 
 
@@ -146,7 +157,7 @@ def test_blender_gets_an_allow_listed_environment_only(tmp_path, monkeypatch):
         seen["env"] = kwargs["env"]
         return _completed()
 
-    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    _patch_run(monkeypatch, fake_run)
     parent = {
         "PATH": "C:/Python;C:/secret-tools", "SYSTEMROOT": "C:/Windows", "WINDIR": "C:/Windows",
         "ANTHROPIC_API_KEY": "sk-ant-x", "OPENAI_API_KEY": "sk-o", "SONDER_TEST_SECRET": "s",
@@ -164,3 +175,57 @@ def test_blender_gets_an_allow_listed_environment_only(tmp_path, monkeypatch):
     for key in ("USERPROFILE", "APPDATA", "HOME", "TEMP", "TMP"):
         assert env[key].startswith(out), key        # profile and temp redirected into the build directory
     assert env["NUMBER_OF_PROCESSORS"] == "8" and env["SYSTEMROOT"] == "C:/Windows"
+
+
+def test_excluded_kit_names_travel_in_the_job_file(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen["job"] = _job(argv)
+        return _completed()
+
+    _patch_run(monkeypatch, fake_run)
+    _build(tmp_path, kit_excluded=frozenset({"run_prop", "KIT_DIR"}))
+    assert seen["job"]["kit_excluded"] == ["KIT_DIR", "run_prop"]
+
+
+def test_scratch_profile_is_removed_even_when_the_build_fails(tmp_path, monkeypatch):
+    def start_fails(argv, **kwargs):
+        runner.build_env({}, Path(kwargs["env"]["TEMP"]), "blender")
+        raise FileNotFoundError("no blender")
+
+    _patch_run(monkeypatch, start_fails)
+    assert "could not start blender" in _build(tmp_path)["error"]
+    assert not (tmp_path / "out" / runner.SCRATCH_NAME).exists()
+
+
+def test_run_limited_runs_without_a_shell_and_returns_the_output(tmp_path):
+    import sys
+
+    code, out, err = runner.run_limited([sys.executable, "-c", "print('hi'); import sys; sys.stderr.write('e')"],
+                                         cwd=str(tmp_path), env=dict(runner.os.environ), timeout=30)
+    assert code == 0 and out.strip() == b"hi" and err == b"e"
+
+
+def test_run_limited_times_out_and_kills_the_child(tmp_path):
+    import sys
+    import time
+
+    began = time.monotonic()
+    try:
+        runner.run_limited([sys.executable, "-c", "import time; print('x', flush=True); time.sleep(60)"],
+                           cwd=str(tmp_path), env=dict(runner.os.environ), timeout=2)
+    except subprocess.TimeoutExpired as exc:
+        assert exc.stdout.strip() == b"x"
+    else:
+        raise AssertionError("expected a timeout")
+    assert time.monotonic() - began < 30
+
+
+def test_run_limited_caps_memory_where_the_platform_can(tmp_path):
+    import sys
+
+    grab = "b = bytearray(1500 * 1024 * 1024); b[::4096] = b'x' * len(b[::4096]); print('allocated')"
+    code, out, err = runner.run_limited([sys.executable, "-c", grab], cwd=str(tmp_path),
+                                         env=dict(runner.os.environ), timeout=60, memory_mb=512)
+    assert b"allocated" not in out and code != 0
