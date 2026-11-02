@@ -217,7 +217,7 @@ def test_external_tcp_to_a_non_loopback_address_is_denied(tmp_path, canary):
     address = _non_loopback_address()
     if not address:
         pytest.skip("this host has no non-loopback IPv4 address to listen on")
-    listener = Listener("0.0.0.0")
+    listener = Listener(address)
     try:
         args = dict(canary, host=address, port=listener.port)
         boxed, _ = run_probe(tmp_path, "boxed", CONNECT, args, boxed=True)
