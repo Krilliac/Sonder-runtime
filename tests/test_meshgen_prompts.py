@@ -250,3 +250,18 @@ def test_the_generation_prompt_tells_the_model_when_detached_is_allowed():
     prompt = generation_prompt("a lantern with motes", max_tris=1500, height_m=1.0, kit_module=None, api_doc="")
     assert "detached(obj)" in prompt
     assert "use detached(part) only for parts the brief says float (motes, wisps, orbs)" in prompt
+
+
+def test_a_version_without_floating_parts_outranks_any_floating_version():
+    flo = {"floating": [{"parts": ["loaf"]}]}
+    clean5 = {"built": True, "within_budget": True, "score": 5, "tris": 900, "geometry": {"floating": []}}
+    no_block5 = {"built": True, "within_budget": True, "score": 5, "tris": 900}
+    floating6 = {"built": True, "within_budget": True, "score": 6, "tris": 100, "geometry": flo}
+    floating4 = {"built": True, "within_budget": True, "score": 4, "tris": 100, "geometry": flo}
+    assert rank_key(floating6) < rank_key(clean5) and rank_key(floating6) < rank_key(no_block5)
+    assert pick_best([floating6, clean5]) is clean5 and pick_best([clean5, floating6]) is clean5
+    assert rank_key(floating4) < rank_key(floating6) and pick_best([floating4, floating6]) is floating6
+    # built and within budget still come first
+    over_clean = {"built": True, "within_budget": False, "score": 9, "geometry": {"floating": []}}
+    assert rank_key(over_clean) < rank_key(floating4)
+    assert rank_key({"built": False}) < rank_key(floating4)

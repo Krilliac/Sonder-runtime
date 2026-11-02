@@ -21,7 +21,7 @@ several candidates:
    score and issues go back to the model as a revision prompt; at or above it the candidate stops.
    A measured floating part overrides this: its issues go first in the revision prompt, the score is
    capped at 6 and the candidate is never accepted as it stands (see "Floating parts").
-6. Candidates are ranked: built, then within budget, then vision score (the capped one), then fewer triangles.
+6. Candidates are ranked: built, then within budget, then free of floating parts, then vision score, then fewer triangles.
    The best one wins and is copied to `<output_dir>/<name>.glb` (or `.fbx`), `<name>_sheet.png`,
    `<name>_view.png`, `<name>.py` and `<name>.ops.json`.
 
@@ -101,7 +101,8 @@ process, after the build and the normalisation and before the export. It costs a
   in X, front (-Y)/behind (+Y)). These go first in the revision prompt, ahead of the critic's issues. The score
   is `min(score, 6)` even when the critic says 10, so a floating candidate cannot reach a `target_score` of 7
   or more, and it is not accepted at any target; with vision off or unavailable it still gets a revision
-  round. Attempts and the winner carry the `geometry` block.
+  round. Attempts and the winner carry the `geometry` block. Ranking puts any version without floating parts above
+  every version with floating parts, whatever their scores; between two floating versions the higher score wins.
 - **Known limits.** The check sees the exported geometry: a detached part that is the lowest point of the prop
   becomes the ground reference, and the rest then floats above it. Vertex sampling can miss a near approach
   between two large, coarse parts that neither overlap nor have a vertex within `tol` of the other. A

@@ -387,3 +387,9 @@ def test_malformed_geometry_is_ignored():
         rig = Rig(builds=[dict(ok_build(), geometry=junk)], critiques=[verdict(10)])
         attempt = rig.go(candidates=1, rounds=1)["candidates"][0]["attempts"][0]
         assert attempt["status"] == "accepted" and attempt["score"] == 10
+
+
+def test_the_winner_is_the_clean_version_even_when_the_floating_one_scored_higher():
+    rig = Rig(builds=[floating_build(), ok_build(tris=300)], critiques=[verdict(10), verdict(5, "too plain")])
+    report = rig.go(candidates=1, rounds=2, target_score=8)
+    assert report["winner"]["score"] == 5 and "geometry" not in report["winner"]

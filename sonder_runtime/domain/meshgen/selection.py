@@ -6,14 +6,22 @@ A result is a dict with ``built`` (bool), ``within_budget`` (bool),
 from __future__ import annotations
 
 
+def has_floating(result: dict) -> bool:
+    """True when the result carries a harness ``geometry`` block that lists a floating part."""
+    geometry = result.get("geometry")
+    return isinstance(geometry, dict) and bool(geometry.get("floating"))
+
+
 def rank_key(result: dict) -> tuple:
-    """Higher is better: built, then within budget, then vision score, then fewer tris."""
+    """Higher is better: built, then within budget, then free of floating parts (whatever the scores), then
+    vision score, then fewer tris."""
     built = bool(result.get("built"))
     score = result.get("score")
     tris = result.get("tris")
     return (
         1 if built else 0,
         1 if built and result.get("within_budget") else 0,
+        0 if has_floating(result) else 1,
         score if isinstance(score, (int, float)) and not isinstance(score, bool) else -1,
         -(tris if isinstance(tris, (int, float)) else 0),
     )
