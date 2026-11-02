@@ -6,12 +6,27 @@ sums, joins).  The recorder charges work in proportion to the elements touched, 
 """
 from __future__ import annotations
 
+import os
 import time
 
 import pytest
 
 from sonder_runtime.domain.meshgen.dsl.errors import ScriptError
 from sonder_runtime.domain.meshgen.dsl.recorder import compile_script
+
+# Observed CI overruns under `-n auto` on shared runners were 1.02x-1.37x of the local bound.
+_IN_CI = os.environ.get("CI", "").lower() in ("true", "1")
+TIME_SLACK = float(os.environ.get("MESHGEN_DOS_TIME_SLACK", "1.5" if _IN_CI else "1.0"))
+# Capped so the largest scaled bound (8 s x slack) stays under the 120 s clock that no_clock installs.
+if not 0 < TIME_SLACK <= 10:
+    raise ValueError("MESHGEN_DOS_TIME_SLACK must be a number in (0, 10], got %r" % TIME_SLACK)
+
+
+@pytest.fixture
+def no_clock(monkeypatch):
+    """Only the work/step/size caps may stop a probe; the 10 s sandbox clock would hide a missing cap behind the slack."""
+    from sonder_runtime.domain.meshgen.dsl import recorder
+    monkeypatch.setattr(recorder, "MAX_SECONDS", 120.0)
 
 PROBES = {
     'd01_shuffle': 'import random\ndef build():\n    l = list(range(150000))\n    for i in range(200):\n        for j in range(200):\n            random.shuffle(l)\n',
@@ -42,13 +57,14 @@ CAP_WORDS = ("too large", "too long", "too much work", "too many", "at most", "t
 
 
 @pytest.mark.parametrize("name", sorted(PROBES))
-def test_reviewer_probe_hits_a_cap_within_two_seconds(name):
+def test_reviewer_probe_hits_a_cap_within_two_seconds(name, no_clock):
     started = time.monotonic()
     with pytest.raises(ScriptError) as info:
         compile_script(PROBES[name])
     elapsed = time.monotonic() - started
     message = str(info.value)
-    assert elapsed < 2.0, "%s took %.2fs" % (name, elapsed)
+    bound = 2.0 * TIME_SLACK
+    assert elapsed < bound, "%s took %.2fs (bound %.2fs)" % (name, elapsed, bound)
     assert "internal error" not in message and any(word in message for word in CAP_WORDS), message
 
 # ---- second review
@@ -95,7 +111,7 @@ MUST_BE_WORK = ("insert_pop_front", "seed_long_string", "split_long_separator",
 
 
 @pytest.mark.parametrize("name", sorted(SECOND))
-def test_second_review_probe_stops_within_three_seconds(name):
+def test_second_review_probe_stops_within_three_seconds(name, no_clock):
     started = time.monotonic()
     try:
         compile_script(SECOND[name])
@@ -103,7 +119,8 @@ def test_second_review_probe_stops_within_three_seconds(name):
     except ScriptError as exc:
         outcome = str(exc)
     elapsed = time.monotonic() - started
-    assert elapsed < SECOND_BOUNDS.get(name, 4.0), "%s took %.2fs" % (name, elapsed)
+    bound = SECOND_BOUNDS.get(name, 4.0) * TIME_SLACK
+    assert elapsed < bound, "%s took %.2fs (bound %.2fs)" % (name, elapsed, bound)
     if name in MUST_BE_WORK:
         assert outcome is not None and "too much work" in outcome, (name, outcome)
         assert "work units" in outcome and "seconds" in outcome and "steps" in outcome
@@ -158,7 +175,7 @@ SLOW_BOUNDS = {"r9_d07_comp_filter": 6.0, "r9_d05_sort_floats": 6.0, "r9_d14_in_
 
 
 @pytest.mark.parametrize("name", sorted(THIRD))
-def test_third_review_probe_stops_with_margin(name):
+def test_third_review_probe_stops_with_margin(name, no_clock):
     started = time.monotonic()
     try:
         compile_script(THIRD[name])
@@ -166,7 +183,8 @@ def test_third_review_probe_stops_with_margin(name):
     except ScriptError as exc:
         outcome = str(exc)
     elapsed = time.monotonic() - started
-    assert elapsed < SLOW_BOUNDS.get(name, 3.0), "%s took %.2fs" % (name, elapsed)
+    bound = SLOW_BOUNDS.get(name, 3.0) * TIME_SLACK
+    assert elapsed < bound, "%s took %.2fs (bound %.2fs)" % (name, elapsed, bound)
     if name in SIZE_PROBES:
         assert outcome is not None and "larger than 4 MB of JSON" in outcome, (name, outcome)
     if outcome is not None:
@@ -180,13 +198,14 @@ def test_a_tuple_colour_is_refused_before_the_size_check_so_the_original_p01_fai
     assert "not a colour" in str(info.value) or "must be a '#RRGGBB'" in str(info.value)
 
 
-def test_multiplying_by_zero_or_a_negative_count_walks_nothing():
+def test_multiplying_by_zero_or_a_negative_count_walks_nothing(no_clock):
     for count in ("0", "-5"):
         source = chr(10).join(["def build():", "    rows = [list(range(100000)) for i in range(7)]",
                                "    for i in range(2000):", "        x = rows * " + count, "        y = " + count + " * rows", ""])
         started = time.monotonic()
         compile_script(source)
-        assert time.monotonic() - started < 3.0
+        elapsed = time.monotonic() - started
+        assert elapsed < 3.0 * TIME_SLACK, "count %s took %.2fs (bound %.2fs)" % (count, elapsed, 3.0 * TIME_SLACK)
 
 
 def test_a_list_of_small_tuples_can_be_repeated_to_the_element_limit():
@@ -236,27 +255,30 @@ def test_the_clock_is_read_on_a_work_charge_below_the_old_threshold(monkeypatch)
 
 
 # ---- charges that no other test pinned down (each has a RED proof against a reverted copy of the fix)
-def test_dict_membership_costs_the_key_not_the_whole_dict():
+def test_dict_membership_costs_the_key_not_the_whole_dict(no_clock):
     """20,000 `in` lookups on a 20,000-key dict: fine at one unit each, over the work limit at 20,000 each."""
     source = chr(10).join(["def build():", "    d = {}", "    for i in range(20000):", "        d['k%d' % i] = i",
                            "    n = 0", "    for j in range(20000):", "        if 'k5' in d:", "            n += 1",
                            "    print(n)", ""])
     started = time.monotonic()
     assert compile_script(source).log == ["20000"]
-    assert time.monotonic() - started < 6.0
+    elapsed = time.monotonic() - started
+    assert elapsed < 6.0 * TIME_SLACK, "took %.2fs (bound %.2fs)" % (elapsed, 6.0 * TIME_SLACK)
 
 
-def test_weight_charges_its_own_walk():
+def test_weight_charges_its_own_walk(no_clock):
     """`pts * 1` walks 50,000 distinct tuples (200,000 nodes) per call; ten calls must exceed the work budget."""
     source = chr(10).join(["def build():", "    pts = [(i, 0, 0) for i in range(50000)]", "    for j in range(10):",
                            "        x = pts * 1", ""])
     started = time.monotonic()
     with pytest.raises(ScriptError) as info:
         compile_script(source)
-    assert "too much work" in str(info.value) and time.monotonic() - started < 6.0
+    elapsed = time.monotonic() - started
+    assert "too much work" in str(info.value)
+    assert elapsed < 6.0 * TIME_SLACK, "took %.2fs (bound %.2fs)" % (elapsed, 6.0 * TIME_SLACK)
 
 
-def test_predicate_nodes_are_charged_as_work_and_the_size_estimate_never_fires_first():
+def test_predicate_nodes_are_charged_as_work_and_the_size_estimate_never_fires_first(no_clock):
     """Each lambda has about 1,990 cheap nodes (about 4 KB of JSON) and costs 2 x 1,990 work units. All 1,000 calls
     would come to about 4.1 MB estimated, under the 4 MB + 64 KB threshold, so the size estimate cannot refuse
     this script; only the work budget can, and it must."""
@@ -267,4 +289,6 @@ def test_predicate_nodes_are_charged_as_work_and_the_size_estimate_never_fires_f
     with pytest.raises(ScriptError) as info:
         compile_script(source)
     assert "too much work" in str(info.value), str(info.value)
-    assert "larger than 4 MB" not in str(info.value) and time.monotonic() - started < 6.0
+    elapsed = time.monotonic() - started
+    assert "larger than 4 MB" not in str(info.value)
+    assert elapsed < 6.0 * TIME_SLACK, "took %.2fs (bound %.2fs)" % (elapsed, 6.0 * TIME_SLACK)
