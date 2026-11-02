@@ -32,6 +32,9 @@ CONNECTIVITY_PATH = Path(__file__).resolve().parents[2] / "domain" / "meshgen" /
 HARNESS_FILES = (HARNESS_PATH, REPLAY_PATH, OPSCHEMA_PATH, CONNECTIVITY_PATH)
 _TAIL_LINES = 8
 DEFAULT_MEMORY_MB = 8192
+# Linux caps address space (RLIMIT_AS), which always exceeds committed memory (mappings, shared libs),
+# so the cap handed to prlimit is this multiple of the requested memory_mb.
+POSIX_ADDRESS_SPACE_FACTOR = 3
 SCRATCH_NAME = ".blender_profile"
 
 
@@ -149,7 +152,7 @@ def run_limited(argv, *, cwd, env, timeout, memory_mb=DEFAULT_MEMORY_MB):
         if job is not None:
             job[0](process)
         elif os.name != "nt":
-            _posix_limit(process, limit * 3)
+            _posix_limit(process, limit * POSIX_ADDRESS_SPACE_FACTOR)
         try:
             stdout, stderr = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:

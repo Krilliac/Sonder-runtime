@@ -173,8 +173,9 @@ def test_blender_gets_an_allow_listed_environment_only(tmp_path, monkeypatch):
         return _completed()
 
     _patch_run(monkeypatch, fake_run)
+    sysroot = "C:/Windows" if os.name == "nt" else "/mnt/c/Windows"  # a root the host can spell
     parent = {
-        "PATH": "C:/Python;C:/secret-tools", "SYSTEMROOT": "C:/Windows", "WINDIR": "C:/Windows",
+        "PATH": os.pathsep.join(["/opt/python", "/opt/secret-tools"]), "SYSTEMROOT": sysroot, "WINDIR": sysroot,
         "ANTHROPIC_API_KEY": "sk-ant-x", "OPENAI_API_KEY": "sk-o", "SONDER_TEST_SECRET": "s",
         "GITHUB_TOKEN": "t", "AWS_SECRET_ACCESS_KEY": "a", "USERPROFILE": "C:/Users/real",
         "APPDATA": "C:/Users/real/AppData", "HOME": "/home/real", "NUMBER_OF_PROCESSORS": "8",
@@ -186,10 +187,10 @@ def test_blender_gets_an_allow_listed_environment_only(tmp_path, monkeypatch):
     assert not [k for k in env if k.upper() not in (runner.ENV_ALLOWLIST | {"PATH"} | set(runner._SCRATCH_VARIABLES))]
     assert "ANTHROPIC_API_KEY" not in env and "SONDER_TEST_SECRET" not in env and "GITHUB_TOKEN" not in env
     assert "secret-tools" not in env["PATH"] and env["PATH"].startswith(str(Path("blender").resolve().parent))
-    assert env["PATH"].split(runner.os.pathsep)[1:] == [runner.os.path.join("C:/Windows", "System32"), "C:/Windows"]
+    assert env["PATH"].split(runner.os.pathsep)[1:] == [runner.os.path.join(sysroot, "System32"), sysroot]
     for key in ("USERPROFILE", "APPDATA", "HOME", "TEMP", "TMP"):
         assert env[key].startswith(out), key        # profile and temp redirected into the build directory
-    assert env["NUMBER_OF_PROCESSORS"] == "8" and env["SYSTEMROOT"] == "C:/Windows"
+    assert env["NUMBER_OF_PROCESSORS"] == "8" and env["SYSTEMROOT"] == sysroot
 
 
 def test_allowed_kit_names_travel_in_the_job_file(tmp_path, monkeypatch):
@@ -257,7 +258,8 @@ def test_run_limited_times_out_and_kills_the_child(tmp_path):
 def test_run_limited_caps_memory_where_the_platform_can(tmp_path):
     import sys
 
-    grab = "b = bytearray(1500 * 1024 * 1024); b[::4096] = b'x' * len(b[::4096]); print('allocated')"
+    # On Linux the cap is RLIMIT_AS = memory_mb * POSIX_ADDRESS_SPACE_FACTOR, so allocate well above that.
+    grab = "b = bytearray(%d * 1024 * 1024); b[::4096] = b'x' * len(b[::4096]); print('allocated')" % (512 * runner.POSIX_ADDRESS_SPACE_FACTOR + 1024)
     code, out, err = runner.run_limited([sys.executable, "-c", grab], cwd=str(tmp_path),
                                          env=dict(runner.os.environ), timeout=60, memory_mb=512)
     assert b"allocated" not in out and code != 0

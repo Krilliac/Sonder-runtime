@@ -27,7 +27,6 @@ from ..domain.meshgen.prompts import kit_api_digest
 from ..domain.meshgen.dsl.manifest import build_manifest
 from ..domain.meshgen.kit_policy import analyse_kit
 from ..platform.runtime_threads import ThreadPoolExecutor
-from .legacy_root import runtime
 
 MAX_PARALLEL_BUILDS = 3
 MAX_API_DOC_CHARS = 12_000
@@ -128,7 +127,8 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
             raise SonderError("mesh_generate refuses to run: the Blender sandbox is unavailable (%s). Fix it or, "
                               "accepting that Blender then runs with this server's authority, set %s=1."
                               % (exc, blender_runner.sandbox_win.OPT_OUT_ENV)) from exc
-    rt = rt or runtime()
+    if rt is None:
+        raise SonderError("mesh_generate has no runtime bound: the server composition must pass runtime= to register()")
     candidates = _clamp(candidates, 1, 6, 3)
     rounds = _clamp(rounds, 1, 6, 3)
     max_tris = _clamp(max_tris, 50, 200_000, 3000)
@@ -266,8 +266,11 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
     return payload
 
 
-def register(mcp, record) -> None:
-    """Register ``mesh_generate``; ``record`` is the server's ``_record_direct_tool``."""
+def register(mcp, record, runtime=None) -> None:
+    """Register ``mesh_generate``; ``record`` is the server's ``_record_direct_tool``.
+
+    ``runtime`` is a zero-argument provider of the runtime object (injected by the server composition) and is
+    called per request, so registering never touches the host."""
 
     def run(name, args, body):
         started = time.time()
@@ -292,7 +295,7 @@ def register(mcp, record) -> None:
                 "max_tris": max_tris, "height_m": height_m, "candidates": candidates, "rounds": rounds,
                 "tiers": tiers, "vision": vision, "target_score": target_score, "export": export,
                 "output_dir": output_dir, "timeout": timeout}
-        return run("mesh_generate", args, lambda: generate_mesh(**args))
+        return run("mesh_generate", args, lambda: generate_mesh(rt=runtime() if callable(runtime) else None, **args))
 
 
 __all__ = ["generate_mesh", "register"]

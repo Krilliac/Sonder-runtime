@@ -119,7 +119,7 @@ def sandbox_env(run_dir, blender_dir, system_root: str) -> dict:
     root = system_root or r"C:\Windows"
     return {
         "SYSTEMROOT": root, "WINDIR": root,
-        "PATH": os.pathsep.join([str(blender_dir), root + r"\System32", root]),
+        "PATH": ";".join([str(blender_dir), root + r"\System32", root]),
         "TEMP": str(tmp), "TMP": str(tmp),
         "HOME": str(home), "USERPROFILE": str(home),
         "APPDATA": str(home / "AppData" / "Roaming"), "LOCALAPPDATA": str(home / "AppData" / "Local"),

@@ -42,7 +42,7 @@ def test_environment_is_minimal_and_points_inside_the_run_dir(tmp_path):
     for key in ("TEMP", "TMP", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA") + tuple(
             k for k in env if k.startswith("BLENDER_USER_")):
         assert str(run) in env[key], key
-    assert env["PATH"].split(os.pathsep)[0] == r"D:\Blender"
+    assert env["PATH"].split(";")[0] == r"D:\Blender"
     assert "SONDER" not in "".join(env) and not any("KEY" in k or "TOKEN" in k for k in env)
     for directory in sandbox_win.environment_directories(run):
         assert run in directory.parents
