@@ -17,7 +17,7 @@ import sonder_health
 def _isolate_http_model_discovery(monkeypatch, _configure_http_legacy_boundary):
     # Contract tests supply their own model fakes. Default discovery must not
     # contact a host Ollama worker or depend on a prior request's live cache.
-    monkeypatch.setattr(ts.server, "discovered_model_records", lambda: [])
+    monkeypatch.setattr(ts._legacy_runtime(), "discovered_model_records", lambda: [])
 
 
 @pytest.mark.parametrize("mode,role,key,allowed", [
@@ -30,7 +30,7 @@ def test_pool_admin_http_detail_obeys_administrator_boundary(monkeypatch, mode, 
     from sonder_runtime.adapters.inference.ollama_pool import OllamaWorkerPool
     probes = []
     pool = OllamaWorkerPool("http://127.0.0.1:11434", capability_prober=lambda origin: probes.append(origin) or {"models": ()})
-    monkeypatch.setattr(ts.server, "OLLAMA_POOL", pool)
+    monkeypatch.setattr(ts._legacy_runtime(), "OLLAMA_POOL", pool)
     context = {"mode": mode, "authorized": True, "api_key": key,
                "account": {"username": "caller", "role": role} if role else None}
     monkeypatch.setattr(ts.Handler, "_request_auth_context", lambda self: context)
@@ -59,7 +59,7 @@ def test_pool_admin_generic_tool_cannot_bypass_role_gate():
 def test_pool_admin_http_rejects_probe_overrides_and_bad_cursors_without_io(monkeypatch):
     from sonder_runtime.adapters.inference.ollama_pool import OllamaWorkerPool
     pool = OllamaWorkerPool("http://127.0.0.1:11434", capability_prober=lambda _: pytest.fail("unexpected probe"))
-    monkeypatch.setattr(ts.server, "OLLAMA_POOL", pool)
+    monkeypatch.setattr(ts._legacy_runtime(), "OLLAMA_POOL", pool)
     context = {"mode": "account", "authorized": True, "api_key": False,
                "account": {"username": "owner", "role": "admin"}}
     monkeypatch.setattr(ts.Handler, "_request_auth_context", lambda self: context)
@@ -75,7 +75,7 @@ def test_pool_http_cached_pages_bind_cursors_to_current_admin_before_refresh(mon
     from sonder_runtime.adapters.inference.ollama_pool import OllamaWorkerPool
     pool = OllamaWorkerPool("http://127.0.0.1:11434", ("http://127.0.0.1:11435",),
                            capability_prober=lambda _: pytest.fail("unexpected probe"))
-    monkeypatch.setattr(ts.server, "OLLAMA_POOL", pool)
+    monkeypatch.setattr(ts._legacy_runtime(), "OLLAMA_POOL", pool)
     context = {"mode": "account", "authorized": True, "api_key": False,
                "account": {"username": "owner-a", "role": "admin"}}
     monkeypatch.setattr(ts.Handler, "_request_auth_context", lambda self: context)
@@ -106,7 +106,7 @@ def test_logout_revokes_only_explicit_session_with_safe_retry(monkeypatch, tmp_p
     first, _ = admin_auth.login(conn, 'owner', 'password123')
     second, _ = admin_auth.login(conn, 'owner', 'password123')
     conn.close()
-    monkeypatch.setattr(ts.server, '_open_db', lambda: memory_store.connect(path))
+    monkeypatch.setattr(ts._legacy_runtime(), '_open_db', lambda: memory_store.connect(path))
     monkeypatch.setattr(ts, 'AUTH_MODE', mode)
     monkeypatch.setattr(ts, 'API_KEY', '' if mode == 'local-open' else 'deployment-key')
     monkeypatch.setattr(ts, 'REQUIRE_ACCOUNT', False)
@@ -145,7 +145,7 @@ def test_logout_refuses_missing_deployment_key_or_body_target(monkeypatch, body,
     monkeypatch.setattr(ts, 'REQUIRE_ACCOUNT', False)
     monkeypatch.setattr(ts, '_auth_account', lambda header: None)
     monkeypatch.setattr(ts.Handler, '_auth_rate_limited', lambda self: False)
-    monkeypatch.setattr(ts.server, '_open_db', lambda: pytest.fail('must not open revocation store'))
+    monkeypatch.setattr(ts._legacy_runtime(), '_open_db', lambda: pytest.fail('must not open revocation store'))
     with _http_server(monkeypatch) as port:
         status, response_headers, _ = _request(port, 'POST', '/v1/sonder/logout',
                                               body=body, headers={
@@ -161,7 +161,7 @@ def test_logout_store_unavailable_is_controlled_and_does_not_authenticate_target
     monkeypatch.setattr(ts.Handler, '_auth_rate_limited', lambda self: pytest.fail('no failed-auth bucket'))
     def unavailable():
         raise OSError('private database failure details')
-    monkeypatch.setattr(ts.server, '_open_db', unavailable)
+    monkeypatch.setattr(ts._legacy_runtime(), '_open_db', unavailable)
     with _http_server(monkeypatch) as port:
         status, headers, body = _request(port, 'POST', '/v1/sonder/logout', body='{}',
                                         headers={'Content-Type': 'application/json',
@@ -179,7 +179,7 @@ def test_logout_admission_is_bounded_and_released_after_failure(monkeypatch):
     monkeypatch.setattr(ts, 'REQUIRE_ACCOUNT', False)
     def unavailable():
         raise OSError('unavailable')
-    monkeypatch.setattr(ts.server, '_open_db', unavailable)
+    monkeypatch.setattr(ts._legacy_runtime(), '_open_db', unavailable)
     headers = {'Content-Type': 'application/json', 'X-Sonder-Account-Token': 'session'}
     with _http_server(monkeypatch) as port:
         assert gate.acquire(blocking=False)
@@ -223,7 +223,7 @@ def test_admin_account_rejection_is_structured_http_error(monkeypatch):
     }
     monkeypatch.setattr(ts.Handler, "_request_auth_context", lambda _self: admin)
     monkeypatch.setattr(
-        ts.server, "admin_set_account",
+        ts._legacy_runtime(), "admin_set_account",
         lambda **_kwargs: "ERROR: unknown account",
     )
     request = json.dumps({"username": "missing"}).encode("utf-8")
@@ -245,9 +245,9 @@ def test_query_string_does_not_change_openai_route_or_terminal_metric(monkeypatc
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
-    monkeypatch.setattr(ts.server, "available_tiers", lambda: {})
-    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
-    monkeypatch.setattr(ts.server, "answer_with_history", lambda *args, **kwargs: "answer")
+    monkeypatch.setattr(ts._legacy_runtime(), "available_tiers", lambda: {})
+    monkeypatch.setattr(ts._legacy_runtime(), "chat_web_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", lambda *args, **kwargs: "answer")
     request = json.dumps({
         "model": "sonder", "messages": [{"role": "user", "content": "hello"}],
     }).encode("utf-8")
@@ -270,13 +270,13 @@ def test_chat_content_excludes_terminal_activity_block(monkeypatch):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
-    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "chat_web_response", lambda *args, **kwargs: None)
     answer = (
         "pin-ok\n\n=== ACTIVITY (observable work) ===\n"
         "response: complete\n=== END ACTIVITY ===\n\n"
         + ts.server.FOOTER_PREFIX + "r000001]"
     )
-    monkeypatch.setattr(ts.server, "answer_with_history", lambda *args, **kwargs: answer)
+    monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", lambda *args, **kwargs: answer)
     request = json.dumps({
         "model": "sonder", "messages": [{"role": "user", "content": "hello"}],
     }).encode("utf-8")
@@ -297,7 +297,7 @@ def test_chat_usage_comes_from_the_current_request_span(monkeypatch):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
-    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "chat_web_response", lambda *args, **kwargs: None)
 
     def answer(*_args, **_kwargs):
         ts.server.activity_tracker.record_model_call(
@@ -305,7 +305,7 @@ def test_chat_usage_comes_from_the_current_request_span(monkeypatch):
         )
         return "answer"
 
-    monkeypatch.setattr(ts.server, "answer_with_history", answer)
+    monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", answer)
     request = json.dumps({
         "model": "sonder", "messages": [{"role": "user", "content": "hello"}],
     }).encode("utf-8")
@@ -342,7 +342,7 @@ def test_stream_options_include_current_request_usage_in_terminal_chunk(monkeypa
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
-    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "chat_web_response", lambda *args, **kwargs: None)
 
     def answer(*_args, **_kwargs):
         ts.server.activity_tracker.record_model_call(
@@ -350,7 +350,7 @@ def test_stream_options_include_current_request_usage_in_terminal_chunk(monkeypa
         )
         return "answer"
 
-    monkeypatch.setattr(ts.server, "answer_with_history", answer)
+    monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", answer)
     request = json.dumps({
         "model": "sonder", "stream": True,
         "stream_options": {"include_usage": True},
@@ -378,13 +378,13 @@ def test_stream_includes_the_current_request_activity_in_terminal_chunk(monkeypa
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
-    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "chat_web_response", lambda *args, **kwargs: None)
 
     def answer(*_args, **_kwargs):
         ts.server.activity_tracker.record_model_call("model:latest")
         return "answer"
 
-    monkeypatch.setattr(ts.server, "answer_with_history", answer)
+    monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", answer)
     request = json.dumps({
         "model": "sonder", "stream": True,
         "messages": [{"role": "user", "content": "hello"}],
@@ -491,7 +491,7 @@ def test_http_rejects_duplicate_json_object_keys_before_chat_routing(monkeypatch
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
     monkeypatch.setattr(
-        ts.server, "answer_with_history",
+        ts._legacy_runtime(), "answer_with_history",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not route malformed JSON")),
     )
     with _http_server(monkeypatch) as port:
@@ -550,8 +550,8 @@ def test_chat_rejects_invalid_response_format_before_routing(monkeypatch, respon
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
     calls = []
-    monkeypatch.setattr(ts.server, "prewarm_model", lambda *_args: calls.append("prewarm"))
-    monkeypatch.setattr(ts.server, "answer_with_history", lambda *_args, **_kwargs: calls.append("model") or "answer")
+    monkeypatch.setattr(ts._legacy_runtime(), "prewarm_model", lambda *_args: calls.append("prewarm"))
+    monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", lambda *_args, **_kwargs: calls.append("model") or "answer")
     request = json.dumps({
         "model": "sonder",
         "response_format": response_format,
@@ -606,12 +606,12 @@ def test_chat_response_format_uses_isolated_direct_model_path(monkeypatch):
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
     seen = {}
-    monkeypatch.setattr(ts.server, "prewarm_model", lambda *_args: None)
-    monkeypatch.setattr(ts.server, "structured_answer_with_history", lambda prompt, history, schema, **kwargs: (
+    monkeypatch.setattr(ts._legacy_runtime(), "prewarm_model", lambda *_args: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "structured_answer_with_history", lambda prompt, history, schema, **kwargs: (
         seen.update(prompt=prompt, history=history, schema=schema, kwargs=kwargs) or '{"ok":true}'
     ))
     monkeypatch.setattr(ts, "_handle_slash", lambda *_args, **_kwargs: pytest.fail("control path ran"))
-    monkeypatch.setattr(ts.server, "chat_web_response", lambda *_args, **_kwargs: pytest.fail("web path ran"))
+    monkeypatch.setattr(ts._legacy_runtime(), "chat_web_response", lambda *_args, **_kwargs: pytest.fail("web path ran"))
     request = json.dumps({
         "model": "sonder", "response_format": {"type": "json_object"},
         "messages": [{"role": "user", "content": "return json"}],
@@ -630,7 +630,7 @@ def test_chat_response_format_rejects_slash_route_without_model_call(monkeypatch
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
-    monkeypatch.setattr(ts.server, "prewarm_model", lambda *_args: pytest.fail("prewarm ran"))
+    monkeypatch.setattr(ts._legacy_runtime(), "prewarm_model", lambda *_args: pytest.fail("prewarm ran"))
     request = json.dumps({
         "model": "sonder", "response_format": {"type": "json_object"},
         "messages": [{"role": "user", "content": "/status"}],
@@ -647,8 +647,8 @@ def test_chat_response_format_streams_the_validated_direct_model_content(monkeyp
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
-    monkeypatch.setattr(ts.server, "prewarm_model", lambda *_args: None)
-    monkeypatch.setattr(ts.server, "structured_answer_with_history", lambda *_args, **_kwargs: '{"answer":"yes"}')
+    monkeypatch.setattr(ts._legacy_runtime(), "prewarm_model", lambda *_args: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "structured_answer_with_history", lambda *_args, **_kwargs: '{"answer":"yes"}')
     request = json.dumps({
         "model": "sonder", "stream": True,
         "response_format": {"type": "json_schema", "json_schema": {
@@ -670,8 +670,8 @@ def test_chat_false_stream_returns_json_not_sse(monkeypatch):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
-    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
-    monkeypatch.setattr(ts.server, "answer_with_history", lambda *args, **kwargs: "answer")
+    monkeypatch.setattr(ts._legacy_runtime(), "chat_web_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", lambda *args, **kwargs: "answer")
     request = json.dumps({
         "model": "sonder",
         "stream": False,
@@ -694,10 +694,10 @@ def test_chat_normal_assistant_content_is_not_character_truncated(monkeypatch):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
-    monkeypatch.setattr(ts.server, "prewarm_model", lambda *_args: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "prewarm_model", lambda *_args: None)
     answer = "begin:" + ("x" * 32_000) + ":end"
-    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
-    monkeypatch.setattr(ts.server, "answer_with_history", lambda *args, **kwargs: answer)
+    monkeypatch.setattr(ts._legacy_runtime(), "chat_web_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", lambda *args, **kwargs: answer)
     request = json.dumps({
         "model": "sonder", "messages": [{"role": "user", "content": "long reply"}],
     }).encode("utf-8")
@@ -718,8 +718,8 @@ def test_chat_null_stream_uses_non_streaming_default(monkeypatch):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
-    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
-    monkeypatch.setattr(ts.server, "answer_with_history", lambda *args, **kwargs: "answer")
+    monkeypatch.setattr(ts._legacy_runtime(), "chat_web_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", lambda *args, **kwargs: "answer")
     request = json.dumps({
         "model": "sonder",
         "stream": None,
@@ -925,7 +925,7 @@ def test_shared_workflow_inventory_requires_lifecycle_authority(monkeypatch):
         "account": {"username": "developer", "role": "developer"},
     }
     calls = []
-    monkeypatch.setattr(ts.server, "workflow_list", lambda: calls.append(True) or "workflows")
+    monkeypatch.setattr(ts._legacy_runtime(), "workflow_list", lambda: calls.append(True) or "workflows")
 
     refused = ts._dispatch_catalogued_tool(
         "/workflow_list", ts.ConversationState(), context=ordinary,
@@ -1023,9 +1023,9 @@ def test_chat_keepalive_requests_receive_distinct_correlation_ids(monkeypatch):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
-    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "chat_web_response", lambda *args, **kwargs: None)
     monkeypatch.setattr(
-        ts.server, "answer_with_history", lambda *args, **kwargs: "answer",
+        ts._legacy_runtime(), "answer_with_history", lambda *args, **kwargs: "answer",
     )
     # BaseHTTPRequestHandler defaults to HTTP/1.0, but deployments can opt
     # into HTTP/1.1 keep-alive (and its handler reuse) by setting this normal
@@ -1101,7 +1101,7 @@ def test_served_source_update_requires_admin_but_check_remains_read_only(every_t
         "mode": "account", "authorized": True, "api_key": False,
         "account": {"username": "admin", "role": "admin"},
     }
-    monkeypatch.setattr(ts.server, "control_command", lambda prompt, **_kwargs: "ran " + prompt)
+    monkeypatch.setattr(ts._legacy_runtime(), "control_command", lambda prompt, **_kwargs: "ran " + prompt)
 
     for command in ("/update", "/updatesource apply"):
         refused = ts._handle_slash(command, context=developer)
@@ -1121,7 +1121,7 @@ def test_served_runtime_stash_aliases_delegate_after_action_sensitive_gates(ever
         "mode": "account", "authorized": True, "api_key": False,
         "account": {"username": "admin", "role": "admin"},
     }
-    monkeypatch.setattr(ts.server, "control_command", lambda prompt, **_kwargs: "ran " + prompt)
+    monkeypatch.setattr(ts._legacy_runtime(), "control_command", lambda prompt, **_kwargs: "ran " + prompt)
 
     assert ts._handle_slash("/stash", context=developer) == "ran /stash"
     for command in ("/stash save", "/runtime-stash pop"):
@@ -1169,23 +1169,23 @@ def test_system_status_uses_projected_activity_and_shared_feed(
                     handler_state="handled",
                     raw_error="C:\\private\\model token=npu-secret",
                 )
-    monkeypatch.setattr(ts.server, "status", lambda: "ready")
-    monkeypatch.setattr(ts.server, "sonder_stats", lambda: "stats")
-    monkeypatch.setattr(ts.server, "learn_tiers", lambda: "tiers")
-    monkeypatch.setattr(ts.server, "system_improvement_report", lambda: "ok")
-    monkeypatch.setattr(ts.server, "context_health_data", lambda: {})
+    monkeypatch.setattr(ts._legacy_runtime(), "status", lambda: "ready")
+    monkeypatch.setattr(ts._legacy_runtime(), "sonder_stats", lambda: "stats")
+    monkeypatch.setattr(ts._legacy_runtime(), "learn_tiers", lambda: "tiers")
+    monkeypatch.setattr(ts._legacy_runtime(), "system_improvement_report", lambda: "ok")
+    monkeypatch.setattr(ts._legacy_runtime(), "context_health_data", lambda: {})
     monkeypatch.setattr(ts.server.context_policy, "policy", lambda *_: {})
     monkeypatch.setattr(ts.server.master_orchestrator, "snapshot", lambda: {
         "active_agents": 0, "running_agents": 0, "queued_agents": 0,
         "active_model_calls": 0,
     })
     monkeypatch.setattr(ts.server.autopilot_controller, "snapshot", lambda: {})
-    monkeypatch.setattr(ts.server, "runtime_policy_data", lambda: {})
+    monkeypatch.setattr(ts._legacy_runtime(), "runtime_policy_data", lambda: {})
     monkeypatch.setattr(ts.server.selfmod, "status_data", lambda: {})
-    monkeypatch.setattr(ts.server, "mcp_runtime_data", lambda: {})
-    monkeypatch.setattr(ts.server, "learning_health_data", lambda: {})
+    monkeypatch.setattr(ts._legacy_runtime(), "mcp_runtime_data", lambda: {})
+    monkeypatch.setattr(ts._legacy_runtime(), "learning_health_data", lambda: {})
     monkeypatch.setattr(ts.server.sonder_paths, "default_home", lambda: tmp_path)
-    monkeypatch.setattr(ts.server, "available_tiers", lambda: {})
+    monkeypatch.setattr(ts._legacy_runtime(), "available_tiers", lambda: {})
 
     class ComposedApplication:
         config = replace(
@@ -1204,7 +1204,7 @@ def test_system_status_uses_projected_activity_and_shared_feed(
             return True
 
     monkeypatch.setattr(bootstrap_app, "default_app", lambda: ComposedApplication())
-    monkeypatch.setattr(ts.server, "npu_fallback_status_data", lambda: {
+    monkeypatch.setattr(ts._legacy_runtime(), "npu_fallback_status_data", lambda: {
         "schema_version": 1,
         "known": True,
         "capabilities": {
@@ -1323,25 +1323,25 @@ def test_system_status_fails_closed_for_invalid_direct_artifact_mobility_config(
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
-    monkeypatch.setattr(ts.server, "status", lambda: "ready")
-    monkeypatch.setattr(ts.server, "sonder_stats", lambda: {})
-    monkeypatch.setattr(ts.server, "learn_tiers", lambda: {})
-    monkeypatch.setattr(ts.server, "system_improvement_report", lambda: {})
-    monkeypatch.setattr(ts.server, "context_health_data", lambda: {})
+    monkeypatch.setattr(ts._legacy_runtime(), "status", lambda: "ready")
+    monkeypatch.setattr(ts._legacy_runtime(), "sonder_stats", lambda: {})
+    monkeypatch.setattr(ts._legacy_runtime(), "learn_tiers", lambda: {})
+    monkeypatch.setattr(ts._legacy_runtime(), "system_improvement_report", lambda: {})
+    monkeypatch.setattr(ts._legacy_runtime(), "context_health_data", lambda: {})
     monkeypatch.setattr(ts.server.context_policy, "policy", lambda *_: {})
     monkeypatch.setattr(ts.server.master_orchestrator, "snapshot", lambda: {})
     monkeypatch.setattr(ts.server.autopilot_controller, "snapshot", lambda: {})
-    monkeypatch.setattr(ts.server, "runtime_policy_data", lambda: {})
+    monkeypatch.setattr(ts._legacy_runtime(), "runtime_policy_data", lambda: {})
     monkeypatch.setattr(ts.server.selfmod, "status_data", lambda: {})
-    monkeypatch.setattr(ts.server, "mcp_runtime_data", lambda: {})
-    monkeypatch.setattr(ts.server, "npu_fallback_status_data", lambda: {})
-    monkeypatch.setattr(ts.server, "learning_health_data", lambda: {})
-    monkeypatch.setattr(ts.server, "available_tiers", lambda: {})
+    monkeypatch.setattr(ts._legacy_runtime(), "mcp_runtime_data", lambda: {})
+    monkeypatch.setattr(ts._legacy_runtime(), "npu_fallback_status_data", lambda: {})
+    monkeypatch.setattr(ts._legacy_runtime(), "learning_health_data", lambda: {})
+    monkeypatch.setattr(ts._legacy_runtime(), "available_tiers", lambda: {})
     monkeypatch.setattr(ts.server.activity_tracker, "snapshot", lambda: {})
     monkeypatch.setattr(
         ts.server.activity_tracker, "public_snapshot", lambda *_args, **_kwargs: {},
     )
-    monkeypatch.setattr(ts.server, "execution_status_data", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(ts._legacy_runtime(), "execution_status_data", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(ts.server.OLLAMA_POOL, "summary", lambda: None)
 
     invalid_configs = (
@@ -1394,12 +1394,12 @@ def test_ordinary_hosted_account_cannot_read_global_operations_dashboard(monkeyp
             raise AssertionError("ordinary account read global " + name)
         return reject
 
-    monkeypatch.setattr(ts.server, "status", global_only("status"))
-    monkeypatch.setattr(ts.server, "sonder_stats", global_only("stats"))
+    monkeypatch.setattr(ts._legacy_runtime(), "status", global_only("status"))
+    monkeypatch.setattr(ts._legacy_runtime(), "sonder_stats", global_only("stats"))
     monkeypatch.setattr(ts.server.master_orchestrator, "snapshot", global_only("agents"))
     monkeypatch.setattr(ts.server.autopilot_controller, "snapshot", global_only("autopilot"))
     monkeypatch.setattr(ts.server.activity_tracker, "snapshot", global_only("activity"))
-    monkeypatch.setattr(ts.server, "available_tiers", lambda: {"code": "local-code"})
+    monkeypatch.setattr(ts._legacy_runtime(), "available_tiers", lambda: {"code": "local-code"})
 
     with _http_server(monkeypatch) as port:
         status, _, body = _request(
@@ -1476,16 +1476,16 @@ def test_chat_accepts_valid_text_messages_and_forwards_history(monkeypatch):
         def close(self):
             pass
 
-    monkeypatch.setattr(ts.server, "_open_db", lambda: FakeConnection())
+    monkeypatch.setattr(ts._legacy_runtime(), "_open_db", lambda: FakeConnection())
     monkeypatch.setattr(ts.admin_auth, "rate_limit", lambda conn, account: (True, ""))
-    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "chat_web_response", lambda *args, **kwargs: None)
     forwarded = []
 
     def fake_answer(prompt, history, **kwargs):
         forwarded.append((prompt, history))
         return "VALID ANSWER"
 
-    monkeypatch.setattr(ts.server, "answer_with_history", fake_answer)
+    monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", fake_answer)
     messages = [
         {"role": "system", "content": "Be concise."},
         {"role": "user", "content": "first question"},
@@ -1529,15 +1529,15 @@ def test_chat_success_receipt_uses_actual_generation_target(monkeypatch):
         def close(self):
             pass
 
-    monkeypatch.setattr(ts.server, "_open_db", lambda: FakeConnection())
+    monkeypatch.setattr(ts._legacy_runtime(), "_open_db", lambda: FakeConnection())
     monkeypatch.setattr(ts.admin_auth, "rate_limit", lambda conn, account: (True, ""))
-    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "chat_web_response", lambda *args, **kwargs: None)
 
     def fake_answer(prompt, history, *, target_observer=None, **kwargs):
         target_observer("actual-model:latest", "code", False)
         return "receipt answer"
 
-    monkeypatch.setattr(ts.server, "answer_with_history", fake_answer)
+    monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", fake_answer)
     request = json.dumps({
         "model": "code", "messages": [{"role": "user", "content": "hello"}],
     }).encode("utf-8")
@@ -1563,7 +1563,7 @@ def test_models_response_includes_elapsed_header(monkeypatch):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
-    monkeypatch.setattr(ts.server, "available_tiers", lambda: {})
+    monkeypatch.setattr(ts._legacy_runtime(), "available_tiers", lambda: {})
 
     with _http_server(monkeypatch) as port:
         status, headers, body = _request(port, "GET", "/v1/models")
@@ -1577,9 +1577,9 @@ def test_models_response_lists_discovered_chat_models_not_nonchat_catalog_entrie
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
-    monkeypatch.setattr(ts.server, "cloud_allowed", lambda: False)
-    monkeypatch.setattr(ts.server, "available_tiers", lambda: {"code": "gemma3:12b"})
-    monkeypatch.setattr(ts.server, "discovered_model_records", lambda: [
+    monkeypatch.setattr(ts._legacy_runtime(), "cloud_allowed", lambda: False)
+    monkeypatch.setattr(ts._legacy_runtime(), "available_tiers", lambda: {"code": "gemma3:12b"})
+    monkeypatch.setattr(ts._legacy_runtime(), "discovered_model_records", lambda: [
         ("gemma3:12b", {"name": "gemma3:12b", "capabilities": ["chat"]}),
         ("cloud-code:cloud", {"name": "cloud-code:cloud", "capabilities": ["chat"]}),
         ("nomic-embed-text:latest", {"capabilities": "embedding"}),
@@ -1600,9 +1600,9 @@ def test_models_response_hides_discovered_cloud_models_without_opt_in(monkeypatc
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
-    monkeypatch.setattr(ts.server, "available_tiers", lambda: {})
-    monkeypatch.setattr(ts.server, "cloud_allowed", lambda: False)
-    monkeypatch.setattr(ts.server, "discovered_model_records", lambda: [
+    monkeypatch.setattr(ts._legacy_runtime(), "available_tiers", lambda: {})
+    monkeypatch.setattr(ts._legacy_runtime(), "cloud_allowed", lambda: False)
+    monkeypatch.setattr(ts._legacy_runtime(), "discovered_model_records", lambda: [
         ("local:latest", {"capabilities": ["chat"]}),
         ("provider-cloud:latest", {"capabilities": ["chat"]}),
     ])
@@ -1618,10 +1618,10 @@ def test_models_response_hides_tier_bound_to_declared_embedding_model(monkeypatc
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
-    monkeypatch.setattr(ts.server, "available_tiers", lambda: {
+    monkeypatch.setattr(ts._legacy_runtime(), "available_tiers", lambda: {
         "code": "nomic-embed-text:latest",
     })
-    monkeypatch.setattr(ts.server, "discovered_model_records", lambda: [
+    monkeypatch.setattr(ts._legacy_runtime(), "discovered_model_records", lambda: [
         ("nomic-embed-text:latest", {"capabilities": ["embedding"]}),
     ])
 
@@ -1639,19 +1639,19 @@ def test_models_rows_say_which_provider_serves_each_route(monkeypatch):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
-    monkeypatch.setattr(ts.server, "cloud_allowed", lambda: False)
-    monkeypatch.setattr(ts.server, "available_tiers", lambda: {
+    monkeypatch.setattr(ts._legacy_runtime(), "cloud_allowed", lambda: False)
+    monkeypatch.setattr(ts._legacy_runtime(), "available_tiers", lambda: {
         "general": "qwen3:14b", "code": "gemma3:12b",
     })
-    monkeypatch.setattr(ts.server, "discovered_model_records", lambda: [
+    monkeypatch.setattr(ts._legacy_runtime(), "discovered_model_records", lambda: [
         ("gemma3:12b", {"name": "gemma3:12b", "capabilities": ["chat"]}),
     ])
     targets = {"sonder": ("qwen3:14b", False, True, "general"),
                "general": ("qwen3:14b", False, False, "general"),
                "code": ("gemma3:12b", False, True, "code")}
-    monkeypatch.setattr(ts.server, "_serve_target", lambda tier, _strict: targets[tier])
+    monkeypatch.setattr(ts._legacy_runtime(), "_serve_target", lambda tier, _strict: targets[tier])
     monkeypatch.setattr(
-        ts.server, "_bridge_provider_for_tier",
+        ts._legacy_runtime(), "_bridge_provider_for_tier",
         lambda label, cloud=False: "sonder_inference" if label == "general" else None,
     )
     gateway = SimpleNamespace(served_tier_models=lambda: {
@@ -1691,13 +1691,13 @@ def test_chat_rejects_unusable_explicit_model_before_prewarm(monkeypatch, select
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
     monkeypatch.setattr(ts, "_request_model_selector", lambda _model: selector)
-    monkeypatch.setattr(ts.server, "_serve_target", lambda *_args: (None, False, False, None))
+    monkeypatch.setattr(ts._legacy_runtime(), "_serve_target", lambda *_args: (None, False, False, None))
     monkeypatch.setattr(
-        ts.server, "resolve_discovered_model_record",
+        ts._legacy_runtime(), "resolve_discovered_model_record",
         lambda _selector: (selector, record) if record is not None else None,
     )
     calls = []
-    monkeypatch.setattr(ts.server, "prewarm_model", lambda *_args: calls.append("prewarm"))
+    monkeypatch.setattr(ts._legacy_runtime(), "prewarm_model", lambda *_args: calls.append("prewarm"))
     request = json.dumps({
         "model": selector,
         "messages": [{"role": "user", "content": "hello"}],
@@ -1731,17 +1731,17 @@ def test_chat_rejects_disabled_cloud_or_catalog_outage_before_prewarm(
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
     monkeypatch.setattr(ts, "_request_model_selector", lambda _model: "selected:latest")
     if serve_target is not None:
-        monkeypatch.setattr(ts.server, "_serve_target", lambda *_args: serve_target)
+        monkeypatch.setattr(ts._legacy_runtime(), "_serve_target", lambda *_args: serve_target)
     else:
-        monkeypatch.setattr(ts.server, "_serve_target", lambda *_args: (None, False, False, None))
+        monkeypatch.setattr(ts._legacy_runtime(), "_serve_target", lambda *_args: (None, False, False, None))
     if isinstance(record_resolver, Exception):
         def fail_resolver(_selector):
             raise record_resolver
-        monkeypatch.setattr(ts.server, "resolve_discovered_model_record", fail_resolver)
+        monkeypatch.setattr(ts._legacy_runtime(), "resolve_discovered_model_record", fail_resolver)
     else:
-        monkeypatch.setattr(ts.server, "resolve_discovered_model_record", lambda _selector: None)
+        monkeypatch.setattr(ts._legacy_runtime(), "resolve_discovered_model_record", lambda _selector: None)
     calls = []
-    monkeypatch.setattr(ts.server, "prewarm_model", lambda *_args: calls.append("prewarm"))
+    monkeypatch.setattr(ts._legacy_runtime(), "prewarm_model", lambda *_args: calls.append("prewarm"))
     request = json.dumps({
         "model": "selected:latest",
         "messages": [{"role": "user", "content": "hello"}],
@@ -1769,11 +1769,11 @@ def test_http_developer_fanout_uses_authorized_internal_path(monkeypatch):
         def close(self):
             pass
 
-    monkeypatch.setattr(ts.server, "_open_db", lambda: FakeConnection())
+    monkeypatch.setattr(ts._legacy_runtime(), "_open_db", lambda: FakeConnection())
     monkeypatch.setattr(ts.admin_auth, "rate_limit", lambda conn, account: (True, ""))
     calls = []
     monkeypatch.setattr(
-        ts.server, "_model_fanout_authorized",
+        ts._legacy_runtime(), "_model_fanout_authorized",
         lambda prompt, scope, **_kwargs: calls.append((prompt, scope)) or '{"models_answered": 1}',
     )
     request = json.dumps({
@@ -1802,9 +1802,9 @@ def test_http_explicit_model_suppresses_natural_fanout_routing(monkeypatch):
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
     monkeypatch.setattr(ts, "_request_model_selector", lambda model: model)
     monkeypatch.setattr(ts, "_chat_model_selection_error", lambda _selector: None)
-    monkeypatch.setattr(ts.server, "prewarm_model", lambda *_args: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "prewarm_model", lambda *_args: None)
     monkeypatch.setattr(
-        ts.server,
+        ts._legacy_runtime(),
         "_model_fanout_authorized",
         lambda *_args, **_kwargs: pytest.fail("fanout routing must not run"),
     )
@@ -1814,7 +1814,7 @@ def test_http_explicit_model_suppresses_natural_fanout_routing(monkeypatch):
         seen.update(prompt=prompt, tier=kwargs["tier"])
         return "answer"
 
-    monkeypatch.setattr(ts.server, "answer_with_history", answer)
+    monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", answer)
     request = json.dumps({
         "model": "fast",
         "messages": [{"role": "user", "content": "ask all local models: summarize this"}],
@@ -1838,19 +1838,19 @@ def test_http_explicit_model_bypasses_control_dispatchers(monkeypatch):
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
     monkeypatch.setattr(ts, "_request_model_selector", lambda model: model)
     monkeypatch.setattr(ts, "_chat_model_selection_error", lambda _selector: None)
-    monkeypatch.setattr(ts.server, "prewarm_model", lambda *_args: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "prewarm_model", lambda *_args: None)
     monkeypatch.setattr(ts, "_handle_slash", lambda *_args, **_kwargs: pytest.fail("slash dispatch must not run"))
     monkeypatch.setattr(ts, "_handle_feedback", lambda *_args, **_kwargs: pytest.fail("feedback dispatch must not run"))
     monkeypatch.setattr(ts, "_handle_intent", lambda *_args, **_kwargs: pytest.fail("intent dispatch must not run"))
     monkeypatch.setattr(ts, "_handle_work_intent", lambda *_args, **_kwargs: pytest.fail("work dispatch must not run"))
-    monkeypatch.setattr(ts.server, "chat_web_response", lambda *_args, **_kwargs: pytest.fail("web dispatch must not run"))
+    monkeypatch.setattr(ts._legacy_runtime(), "chat_web_response", lambda *_args, **_kwargs: pytest.fail("web dispatch must not run"))
     seen = {}
 
     def answer(prompt, history, **kwargs):
         seen.update(prompt=prompt, tier=kwargs["tier"])
         return "selected-model answer"
 
-    monkeypatch.setattr(ts.server, "answer_with_history", answer)
+    monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", answer)
     request = json.dumps({
         "model": "cloud-general",
         "messages": [{"role": "user", "content": "/hardware"}],
@@ -1878,14 +1878,14 @@ def test_http_developer_natural_ensemble_uses_fixed_local_tiers(monkeypatch):
         def close(self):
             pass
 
-    monkeypatch.setattr(ts.server, "_open_db", lambda: FakeConnection())
+    monkeypatch.setattr(ts._legacy_runtime(), "_open_db", lambda: FakeConnection())
     monkeypatch.setattr(ts.admin_auth, "rate_limit", lambda conn, account: (True, ""))
-    monkeypatch.setattr(ts.server, "prewarm_model", lambda *_args: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "prewarm_model", lambda *_args: None)
     monkeypatch.setattr(ts, "_handle_feedback", lambda *_args, **_kwargs: pytest.fail("ensemble reached feedback"))
     monkeypatch.setattr(ts, "_handle_intent", lambda *_args, **_kwargs: pytest.fail("ensemble reached work intent"))
     calls = []
     monkeypatch.setattr(
-        ts.server, "ensemble_answer",
+        ts._legacy_runtime(), "ensemble_answer",
         lambda prompt, **kwargs: calls.append((prompt, kwargs)) or "two local answers",
     )
     request = json.dumps({
@@ -1917,7 +1917,7 @@ def test_http_fanout_wrapper_is_not_reclassified_as_work_or_feedback(monkeypatch
         def close(self):
             pass
 
-    monkeypatch.setattr(ts.server, "_open_db", lambda: FakeConnection())
+    monkeypatch.setattr(ts._legacy_runtime(), "_open_db", lambda: FakeConnection())
     monkeypatch.setattr(ts.admin_auth, "rate_limit", lambda conn, account: (True, ""))
     monkeypatch.setattr(ts, "_handle_feedback", lambda *_args, **_kwargs: (_ for _ in ()).throw(
         AssertionError("fanout must not reach feedback")))
@@ -1925,7 +1925,7 @@ def test_http_fanout_wrapper_is_not_reclassified_as_work_or_feedback(monkeypatch
         AssertionError("fanout must not reach work intent")))
     calls = []
     monkeypatch.setattr(
-        ts.server, "_model_fanout_authorized",
+        ts._legacy_runtime(), "_model_fanout_authorized",
         lambda prompt, scope, **_kwargs: calls.append((prompt, scope)) or '{"models_answered": 1}',
     )
     request = json.dumps({
@@ -1959,11 +1959,11 @@ def test_http_bare_interpreter_tags_stay_on_normal_work_route(monkeypatch, phras
         def close(self):
             pass
 
-    monkeypatch.setattr(ts.server, "_open_db", lambda: FakeConnection())
+    monkeypatch.setattr(ts._legacy_runtime(), "_open_db", lambda: FakeConnection())
     monkeypatch.setattr(ts.admin_auth, "rate_limit", lambda conn, account: (True, ""))
     prewarmed = []
-    monkeypatch.setattr(ts.server, "prewarm_model", lambda model: prewarmed.append(model))
-    monkeypatch.setattr(ts.server, "chat_web_response", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "prewarm_model", lambda model: prewarmed.append(model))
+    monkeypatch.setattr(ts._legacy_runtime(), "chat_web_response", lambda *_args, **_kwargs: None)
     intents = []
     monkeypatch.setattr(
         ts, "_handle_intent", lambda content, **_kwargs: intents.append(content) or None,
@@ -1971,7 +1971,7 @@ def test_http_bare_interpreter_tags_stay_on_normal_work_route(monkeypatch, phras
     monkeypatch.setattr(ts, "_handle_work_intent", lambda *_args, **_kwargs: None)
     seen = []
     monkeypatch.setattr(
-        ts.server, "answer_with_history",
+        ts._legacy_runtime(), "answer_with_history",
         lambda prompt, _history, **_kwargs: seen.append(prompt) or "answer",
     )
     request = json.dumps({
@@ -2002,7 +2002,7 @@ def test_http_fanout_lifecycle_is_owner_scoped(monkeypatch):
     owner_a = ts._fanout_request_owner({"account": {"username": "dev-a"}, "api_key": False})
     run = {"id": "fan-owned", "request_owner": owner_a}
     monkeypatch.setattr(ts.server.fanout_store, "get_run", lambda _run_id: run)
-    monkeypatch.setattr(ts.server, "_fanout_receipt", lambda run_id: {"run_id": run_id, "status": "completed"})
+    monkeypatch.setattr(ts._legacy_runtime(), "_fanout_receipt", lambda run_id: {"run_id": run_id, "status": "completed"})
 
     with _http_server(monkeypatch) as port:
         status, _, body = _request(
@@ -2117,7 +2117,7 @@ def test_http_fanout_cancel_requires_developer_and_uses_owned_run(monkeypatch):
     monkeypatch.setattr(ts.server.fanout_store, "get_run", lambda _run_id: {"id": "fan-owned", "request_owner": owner})
     cancelled = []
     monkeypatch.setattr(ts.server.fanout_store, "request_cancel", lambda run_id: cancelled.append(run_id) or {})
-    monkeypatch.setattr(ts.server, "_fanout_receipt", lambda run_id: {"run_id": run_id, "status": "cancelled"})
+    monkeypatch.setattr(ts._legacy_runtime(), "_fanout_receipt", lambda run_id: {"run_id": run_id, "status": "cancelled"})
     request = json.dumps({}).encode("utf-8")
 
     with _http_server(monkeypatch) as port:
@@ -2177,7 +2177,7 @@ def test_http_fanout_synthesis_requires_owned_developer_receipt(monkeypatch):
     monkeypatch.setattr(ts.server.fanout_store, "get_run", lambda _run_id: run)
     calls = []
     monkeypatch.setattr(
-        ts.server, "_fanout_synthesize_run",
+        ts._legacy_runtime(), "_fanout_synthesize_run",
         lambda received, model: calls.append((received, model)) or {
             "run_id": received["id"], "synth_model": model or "local-code", "answer": "local synthesis",
         },
@@ -2207,7 +2207,7 @@ def test_http_fanout_synthesis_rejects_untyped_or_extra_payload_before_generatio
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
     monkeypatch.setattr(ts.server.fanout_store, "get_run", lambda _run_id: {"id": "fan-local"})
     monkeypatch.setattr(
-        ts.server, "_fanout_synthesize_run",
+        ts._legacy_runtime(), "_fanout_synthesize_run",
         lambda *_args: (_ for _ in ()).throw(AssertionError("generation must not run")),
     )
 
@@ -2235,7 +2235,7 @@ def test_http_fanout_synthesis_maps_safe_model_failures(monkeypatch):
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
     monkeypatch.setattr(ts.server.fanout_store, "get_run", lambda _run_id: {"id": "fan-local"})
     monkeypatch.setattr(
-        ts.server, "_fanout_synthesize_run",
+        ts._legacy_runtime(), "_fanout_synthesize_run",
         lambda *_args: (_ for _ in ()).throw(ts.server.ModelCallError(
             "timeout", "local synthesis timed out", retry_after_seconds=0,
         )),
@@ -2271,7 +2271,7 @@ def test_http_fanout_synthesis_applies_account_rate_limit(monkeypatch):
         lambda _conn, received: rate_calls.append(received) or (False, "rate limit exceeded"),
     )
     monkeypatch.setattr(
-        ts.server, "_fanout_synthesize_run",
+        ts._legacy_runtime(), "_fanout_synthesize_run",
         lambda *_args: (_ for _ in ()).throw(AssertionError("generation must not run")),
     )
 
@@ -2290,9 +2290,9 @@ def test_http_todo_command_preserves_task_text_contract(monkeypatch, tmp_path):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
-    monkeypatch.setattr(ts.server, "_DB_PATH", str(tmp_path / "http-task.db"))
+    monkeypatch.setattr(ts._legacy_runtime(), "_DB_PATH", str(tmp_path / "http-task.db"))
     monkeypatch.setattr(ts.admin_auth, "rate_limit", lambda conn, account: (True, ""))
-    monkeypatch.setattr(ts.server, "prewarm_model", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "prewarm_model", lambda *args, **kwargs: None)
     request = json.dumps({
         "model": "sonder",
         "messages": [{"role": "user", "content": "/todo add HTTP visible task"}],
@@ -2361,11 +2361,11 @@ def test_chat_maps_typed_model_failures_to_http_errors(
         def close(self):
             pass
 
-    monkeypatch.setattr(ts.server, "_open_db", lambda: FakeConnection())
+    monkeypatch.setattr(ts._legacy_runtime(), "_open_db", lambda: FakeConnection())
     monkeypatch.setattr(ts.admin_auth, "rate_limit", lambda conn, account: (True, ""))
-    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "chat_web_response", lambda *args, **kwargs: None)
     monkeypatch.setattr(
-        ts.server,
+        ts._legacy_runtime(),
         "answer_with_history",
         lambda *args, **kwargs: (_ for _ in ()).throw(error),
     )
@@ -2549,9 +2549,9 @@ def test_chat_records_terminal_stream_failure_as_non_success(monkeypatch):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
-    monkeypatch.setattr(ts.server, "prewarm_model", lambda *_args: None)
-    monkeypatch.setattr(ts.server, "chat_web_response", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(ts.server, "answer_with_history", lambda *_args, **_kwargs: "answer")
+    monkeypatch.setattr(ts._legacy_runtime(), "prewarm_model", lambda *_args: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "chat_web_response", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", lambda *_args, **_kwargs: "answer")
     recorded = []
     monkeypatch.setattr(
         ts.Handler, "_record_chat_completion_metric",
@@ -2667,11 +2667,11 @@ def test_chat_forwards_hosted_throttle_delay_and_explanation(monkeypatch):
         def close(self):
             pass
 
-    monkeypatch.setattr(ts.server, "_open_db", lambda: FakeConnection())
+    monkeypatch.setattr(ts._legacy_runtime(), "_open_db", lambda: FakeConnection())
     monkeypatch.setattr(ts.admin_auth, "rate_limit", lambda conn, account: (True, ""))
-    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "chat_web_response", lambda *args, **kwargs: None)
     monkeypatch.setattr(
-        ts.server, "answer_with_history",
+        ts._legacy_runtime(), "answer_with_history",
         lambda *args, **kwargs: (_ for _ in ()).throw(error),
     )
     request = json.dumps({
@@ -3022,7 +3022,7 @@ def test_chat_rejects_non_object_location_hint(monkeypatch):
         def close(self):
             pass
 
-    monkeypatch.setattr(ts.server, "_open_db", lambda: FakeConnection())
+    monkeypatch.setattr(ts._legacy_runtime(), "_open_db", lambda: FakeConnection())
     monkeypatch.setattr(ts.admin_auth, "rate_limit", lambda conn, account: (True, ""))
     request = json.dumps({
         "messages": [{"role": "user", "content": "weather in my area"}],
@@ -3052,7 +3052,7 @@ def test_chat_forwards_consent_and_client_location_to_web_router(monkeypatch):
         def close(self):
             pass
 
-    monkeypatch.setattr(ts.server, "_open_db", lambda: FakeConnection())
+    monkeypatch.setattr(ts._legacy_runtime(), "_open_db", lambda: FakeConnection())
     monkeypatch.setattr(ts.admin_auth, "rate_limit", lambda conn, account: (True, ""))
     calls = []
 
@@ -3060,9 +3060,9 @@ def test_chat_forwards_consent_and_client_location_to_web_router(monkeypatch):
         calls.append((prompt, kwargs))
         return "GROUNDED WEATHER"
 
-    monkeypatch.setattr(ts.server, "chat_web_response", fake_web)
+    monkeypatch.setattr(ts._legacy_runtime(), "chat_web_response", fake_web)
     monkeypatch.setattr(
-        ts.server, "answer_with_history",
+        ts._legacy_runtime(), "answer_with_history",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("model called")),
     )
     hint = {
@@ -3106,7 +3106,7 @@ def test_chat_hosted_proxy_request_never_uses_server_ip_for_location(monkeypatch
         def close(self):
             pass
 
-    monkeypatch.setattr(ts.server, "_open_db", lambda: FakeConnection())
+    monkeypatch.setattr(ts._legacy_runtime(), "_open_db", lambda: FakeConnection())
     monkeypatch.setattr(ts.admin_auth, "rate_limit", lambda conn, account: (True, ""))
     calls = []
 
@@ -3114,7 +3114,7 @@ def test_chat_hosted_proxy_request_never_uses_server_ip_for_location(monkeypatch
         calls.append((prompt, kwargs))
         return "LOCATION REQUIRED"
 
-    monkeypatch.setattr(ts.server, "chat_web_response", fake_web)
+    monkeypatch.setattr(ts._legacy_runtime(), "chat_web_response", fake_web)
     request = json.dumps({
         "model": "sonder",
         "messages": [{"role": "user", "content": "weather in my area"}],
@@ -3241,12 +3241,12 @@ def test_ordinary_account_cannot_trigger_natural_control_intents(
         def close(self):
             pass
 
-    monkeypatch.setattr(ts.server, "_open_db", lambda: FakeConnection())
+    monkeypatch.setattr(ts._legacy_runtime(), "_open_db", lambda: FakeConnection())
     monkeypatch.setattr(
         ts.admin_auth, "rate_limit", lambda conn, account: (True, "")
     )
     monkeypatch.setattr(
-        ts.server,
+        ts._legacy_runtime(),
         "answer_with_history",
         lambda *args, **kwargs: "model answer\n\n[interaction_id: abc123]",
     )
@@ -3287,7 +3287,7 @@ def test_durable_session_and_project_ids_are_principal_scoped(monkeypatch):
         def close(self):
             pass
 
-    monkeypatch.setattr(ts.server, "_open_db", lambda: FakeConnection())
+    monkeypatch.setattr(ts._legacy_runtime(), "_open_db", lambda: FakeConnection())
     monkeypatch.setattr(
         ts.admin_auth, "rate_limit", lambda conn, account: (True, "")
     )
@@ -3297,7 +3297,7 @@ def test_durable_session_and_project_ids_are_principal_scoped(monkeypatch):
         forwarded.append((kwargs["session"], kwargs["project"], kwargs["augment"]))
         return "answer\n\n[interaction_id: abc123]"
 
-    monkeypatch.setattr(ts.server, "answer_with_history", fake_answer)
+    monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", fake_answer)
     request = json.dumps({
         "model": "sonder",
         "session": "common-session",
@@ -3555,7 +3555,7 @@ def test_bounded_idempotency_key_still_replays(
     # application graph is still cold. Build it before serving either request:
     # composing it inside the first response would replace the replay cache.
     bootstrap = isolated_default_runtime
-    monkeypatch.setattr(ts.server, "_APP_GRAPH", None)
+    monkeypatch.setattr(ts._legacy_runtime(), "_APP_GRAPH", None)
     monkeypatch.setattr(ts.sonder_lifecycle, "_instance", None)
     monkeypatch.setattr(ts.sonder_lifecycle, "_configured_config", None)
     if configured_lifecycle:
@@ -3595,7 +3595,7 @@ def test_http_register_forwards_hosted_bootstrap_policy(monkeypatch, tmp_path):
     secret = "bootstrap-secret-123456"
     monkeypatch.setenv("SONDER_BOOTSTRAP_SECRET", secret)
     path = str(tmp_path / "register.sqlite")
-    monkeypatch.setattr(ts.server, "_open_db", lambda: memory_store.connect(path))
+    monkeypatch.setattr(ts._legacy_runtime(), "_open_db", lambda: memory_store.connect(path))
     monkeypatch.setattr(ts, "AUTH_MODE", "account")
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)

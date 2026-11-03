@@ -37,7 +37,7 @@ def test_repl_login_sets_the_session_token_but_never_prints_it(monkeypatch, caps
     monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
     monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_a, **_k: None)
-    monkeypatch.setattr(sonder_repl.server, "admin_login", lambda *_args: LOGIN_OK)
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "admin_login", lambda *_args: LOGIN_OK)
     monkeypatch.setattr(sonder_repl, "CURRENT_TOKEN", "")
 
     sonder_repl.main()
@@ -50,8 +50,8 @@ def test_repl_login_sets_the_session_token_but_never_prints_it(monkeypatch, caps
 
 def test_served_console_login_masks_the_reply(monkeypatch):
     monkeypatch.setattr(ts, "_http_slash_refusal", lambda *_a, **_k: "")
-    monkeypatch.setattr(ts.server, "admin_login", lambda username, password: LOGIN_OK)
-    monkeypatch.setattr(ts.server, "_admin_account_from_token", lambda token: {"username": "alice"})
+    monkeypatch.setattr(ts._legacy_runtime(), "admin_login", lambda username, password: LOGIN_OK)
+    monkeypatch.setattr(ts._legacy_runtime(), "_admin_account_from_token", lambda token: {"username": "alice"})
     state = ts.ConversationState()
 
     out = ts._handle_slash("/login alice pw-value-123", state=state)

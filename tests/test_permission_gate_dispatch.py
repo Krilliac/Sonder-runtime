@@ -1243,7 +1243,7 @@ def broken_registry(monkeypatch):
             raise RuntimeError("registry not initialised")
 
     command_catalog.reset_cache()
-    monkeypatch.setattr(server.mcp, "_tool_manager", _Broken())
+    monkeypatch.setattr(server.mcp._lazy_materialize(), "_tool_manager", _Broken())
     try:
         yield
     finally:
@@ -1331,7 +1331,7 @@ def test_a_transient_catalog_failure_does_not_latch(monkeypatch):
             return real.list_tools()
 
     command_catalog.reset_cache()
-    monkeypatch.setattr(server.mcp, "_tool_manager", _BrokenOnce())
+    monkeypatch.setattr(server.mcp._lazy_materialize(), "_tool_manager", _BrokenOnce())
     try:
         with pytest.raises(command_catalog.CatalogUnavailable):
             command_catalog.console_tools()

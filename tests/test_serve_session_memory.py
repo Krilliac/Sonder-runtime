@@ -31,13 +31,13 @@ def test_server_side_history_rebuilds_from_stored_turns(monkeypatch):
         {"id": "2", "task": "Anything else?",
          "response": "No.\n\n--- footer ---"},
     ]
-    monkeypatch.setattr(sonder_serve.server, "_resolve_session", lambda s: "sid")
+    monkeypatch.setattr(sonder_serve._legacy_runtime(), "_resolve_session", lambda s: "sid")
 
     class _Conn:
         def close(self):
             pass
 
-    monkeypatch.setattr(sonder_serve.server, "_open_db", lambda: _Conn())
+    monkeypatch.setattr(sonder_serve._legacy_runtime(), "_open_db", lambda: _Conn())
     import memory_store
     monkeypatch.setattr(memory_store, "session_turns", lambda conn, sid: stored)
 
@@ -54,13 +54,13 @@ def test_server_side_history_limit_is_bounded(monkeypatch):
         {"id": str(i), "task": f"turn {i}", "response": f"resp {i}"}
         for i in range(50)
     ]
-    monkeypatch.setattr(sonder_serve.server, "_resolve_session", lambda s: "sid")
+    monkeypatch.setattr(sonder_serve._legacy_runtime(), "_resolve_session", lambda s: "sid")
 
     class _Conn:
         def close(self):
             pass
 
-    monkeypatch.setattr(sonder_serve.server, "_open_db", lambda: _Conn())
+    monkeypatch.setattr(sonder_serve._legacy_runtime(), "_open_db", lambda: _Conn())
     import memory_store
     monkeypatch.setattr(memory_store, "session_turns", lambda conn, sid: stored)
 
@@ -71,7 +71,7 @@ def test_server_side_history_limit_is_bounded(monkeypatch):
 
 
 def test_server_side_history_survives_store_errors(monkeypatch):
-    monkeypatch.setattr(sonder_serve.server, "_resolve_session",
+    monkeypatch.setattr(sonder_serve._legacy_runtime(), "_resolve_session",
                         lambda s: (_ for _ in ()).throw(RuntimeError("boom")))
     assert sonder_serve._server_side_history("demo") == []
 
@@ -87,13 +87,13 @@ def _durable_facade(tmp_path, session_id="demo"):
 
 
 def _legacy_turns(monkeypatch, turns):
-    monkeypatch.setattr(sonder_serve.server, "_resolve_session", lambda s: "sid")
+    monkeypatch.setattr(sonder_serve._legacy_runtime(), "_resolve_session", lambda s: "sid")
 
     class _Conn:
         def close(self):
             pass
 
-    monkeypatch.setattr(sonder_serve.server, "_open_db", lambda: _Conn())
+    monkeypatch.setattr(sonder_serve._legacy_runtime(), "_open_db", lambda: _Conn())
     import memory_store
     monkeypatch.setattr(memory_store, "session_turns", lambda conn, sid: list(turns))
 

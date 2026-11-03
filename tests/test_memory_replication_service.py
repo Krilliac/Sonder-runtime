@@ -436,7 +436,7 @@ def test_serve_main_uses_the_owned_service_before_listener_bind(tmp_path, monkey
     monkeypatch.setattr(serve, "_ARTIFACT_TRANSFER_BINDING", None)
     monkeypatch.setattr(serve, "_APP_CONTROL_BINDING", None)
     monkeypatch.setattr(serve.sonder_lifecycle, "get", lambda: lifecycle)
-    monkeypatch.setattr(serve.server, "runtime_source_update_status", lambda refresh=False: "ok")
+    monkeypatch.setattr(serve._legacy_runtime(), "runtime_source_update_status", lambda refresh=False: "ok")
     try:
         serve.main(_config(tmp_path, receiver_enabled=False), _server_factory=FakeServer)
         assert observed["service"] is not None
@@ -631,7 +631,7 @@ def test_serve_main_refuses_a_clean_shutdown_when_probe_remains(
         monkeypatch.setattr(serve, name, None)
     monkeypatch.setattr(serve.sonder_lifecycle, "get", lambda: lifecycle)
     monkeypatch.setattr(
-        serve.server, "runtime_source_update_status", lambda refresh=False: "ok",
+        serve._legacy_runtime(), "runtime_source_update_status", lambda refresh=False: "ok",
     )
     try:
         with pytest.raises(RuntimeError, match="ollama-probe"):
@@ -687,7 +687,7 @@ def test_serve_main_removes_exact_thin_handlers_before_a_later_restart(
     monkeypatch.setattr(serve, "_THIN_HANDLERS", {})
     monkeypatch.setattr(serve.sonder_lifecycle, "get", lambda: lifecycle)
     monkeypatch.setattr(
-        serve.server, "runtime_source_update_status", lambda refresh=False: "ok",
+        serve._legacy_runtime(), "runtime_source_update_status", lambda refresh=False: "ok",
     )
     marker = object()
     first_mapping = serve.configure_thin_handlers({"/v1/recall": marker})

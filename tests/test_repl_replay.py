@@ -23,7 +23,7 @@ def _drive(monkeypatch, lines):
     monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
     monkeypatch.setattr(
-        sonder_repl.server, "sonder",
+        sonder_repl._legacy_runtime, "sonder",
         lambda *_a, **_k: pytest.fail("replay must not run a model turn"),
     )
     sonder_repl.main()
@@ -31,7 +31,7 @@ def _drive(monkeypatch, lines):
 
 def test_replay_shows_the_current_thread_without_a_model_turn(
         monkeypatch, capsys):
-    monkeypatch.setattr(sonder_repl.server, "_open_db", lambda: _Conn())
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "_open_db", lambda: _Conn())
     monkeypatch.setattr(
         sonder_repl.memory_store, "session_turns",
         lambda _conn, _sid: [
@@ -60,7 +60,7 @@ def test_replay_resolves_a_named_thread_and_bounds_the_window(
         seen["prefix"] = prefix
         return "otherid"
 
-    monkeypatch.setattr(sonder_repl.server, "_open_db", lambda: _Conn())
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "_open_db", lambda: _Conn())
     monkeypatch.setattr(sonder_repl.memory_store, "find_session", _find)
     monkeypatch.setattr(
         sonder_repl.memory_store, "session_turns",
@@ -82,7 +82,7 @@ def test_replay_resolves_a_named_thread_and_bounds_the_window(
 
 def test_replay_reports_an_unknown_thread_instead_of_guessing(
         monkeypatch, capsys):
-    monkeypatch.setattr(sonder_repl.server, "_open_db", lambda: _Conn())
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "_open_db", lambda: _Conn())
     monkeypatch.setattr(
         sonder_repl.memory_store, "find_session", lambda _conn, _p: None,
     )

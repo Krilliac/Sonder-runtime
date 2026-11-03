@@ -292,9 +292,9 @@ def test_observatory_origin_is_scoped_to_the_telemetry_routes(monkeypatch, local
 
 
 def _open_chat(monkeypatch, fake_answer):
-    monkeypatch.setattr(ts.server, "chat_web_response", lambda *a, **k: None)
-    monkeypatch.setattr(ts.server, "answer_with_history", fake_answer)
-    monkeypatch.setattr(ts.server, "prewarm_model", lambda *a, **k: False)
+    monkeypatch.setattr(ts._legacy_runtime(), "chat_web_response", lambda *a, **k: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", fake_answer)
+    monkeypatch.setattr(ts._legacy_runtime(), "prewarm_model", lambda *a, **k: False)
 
 
 def test_http_chat_turn_is_exported_with_the_correlation_id(monkeypatch, local_open):

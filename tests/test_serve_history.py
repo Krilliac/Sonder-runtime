@@ -179,7 +179,7 @@ def test_run_rejects_invalid_timeout(unattended_effects_allowed):
 
 def test_passive_slash_records_copied(monkeypatch):
     seen = []
-    monkeypatch.setattr(ts.server, "record_outcome", lambda iid, signal: seen.append((iid, signal)) or "ok")
+    monkeypatch.setattr(ts._legacy_runtime(), "record_outcome", lambda iid, signal: seen.append((iid, signal)) or "ok")
     ts.LAST_IID = "abc123"
 
     out = ts._handle_slash("/copied")
@@ -190,7 +190,7 @@ def test_passive_slash_records_copied(monkeypatch):
 
 
 def test_improve_slash_returns_report(monkeypatch):
-    monkeypatch.setattr(ts.server, "system_improvement_report", lambda: "improve me")
+    monkeypatch.setattr(ts._legacy_runtime(), "system_improvement_report", lambda: "improve me")
 
     assert ts._handle_slash("/improve") == "improve me"
     assert ts._handle_slash("/improvements") == "improve me"
@@ -199,7 +199,7 @@ def test_improve_slash_returns_report(monkeypatch):
 def test_mcp_slash_routes_to_control_command(monkeypatch):
     calls = []
     monkeypatch.setattr(
-        ts.server,
+        ts._legacy_runtime(),
         "control_command",
         lambda command, project="": calls.append((command, project)) or "mcp current",
     )
@@ -211,7 +211,7 @@ def test_mcp_slash_routes_to_control_command(monkeypatch):
 def test_learning_slash_routes_to_control_command(monkeypatch):
     calls = []
     monkeypatch.setattr(
-        ts.server,
+        ts._legacy_runtime(),
         "control_command",
         lambda command, project="": calls.append((command, project)) or "healthy",
     )
@@ -223,7 +223,7 @@ def test_learning_slash_routes_to_control_command(monkeypatch):
 def test_artifactcheck_slash_routes_to_control_command(monkeypatch):
     calls = []
     monkeypatch.setattr(
-        ts.server,
+        ts._legacy_runtime(),
         "control_command",
         lambda command, project="": calls.append((command, project)) or "grounded",
     )
@@ -240,7 +240,7 @@ def test_master_slash_routes_modes(monkeypatch):
         ts.server.master_orchestrator, "capacity", lambda: {"worker_slots": 2},
     )
     monkeypatch.setattr(
-        ts.server,
+        ts._legacy_runtime(),
         "master_orchestrate",
         lambda **kwargs: calls.append(kwargs) or "mastered",
     )
@@ -258,7 +258,7 @@ def test_master_slash_routes_modes(monkeypatch):
 def test_capacity_and_cancel_slashes_route_to_control_command(monkeypatch):
     calls = []
     monkeypatch.setattr(
-        ts.server,
+        ts._legacy_runtime(),
         "control_command",
         lambda command, **kwargs: calls.append((command, kwargs)) or "controlled",
     )
@@ -274,7 +274,7 @@ def test_capacity_and_cancel_slashes_route_to_control_command(monkeypatch):
 
 
 def test_agents_slash_returns_master_status(monkeypatch):
-    monkeypatch.setattr(ts.server, "master_status", lambda: "agents live")
+    monkeypatch.setattr(ts._legacy_runtime(), "master_status", lambda: "agents live")
 
     assert ts._handle_slash("/agents") == "agents live"
 
@@ -282,7 +282,7 @@ def test_agents_slash_returns_master_status(monkeypatch):
 def test_weather_slash_routes_to_live_tool(monkeypatch):
     calls = []
     monkeypatch.setattr(
-        ts.server,
+        ts._legacy_runtime(),
         "weather_lookup",
         lambda location: calls.append(location) or "weather live",
     )
@@ -295,7 +295,7 @@ def test_weather_slash_routes_to_live_tool(monkeypatch):
 def test_workbench_slash_routes_project_and_task(monkeypatch):
     calls = []
     monkeypatch.setattr(
-        ts.server,
+        ts._legacy_runtime(),
         "workbench_agent",
         lambda **kwargs: calls.append(kwargs) or "work complete",
     )
@@ -313,7 +313,7 @@ def test_workbench_slash_routes_project_and_task(monkeypatch):
 def test_natural_execution_intent_requires_developer_authorization(monkeypatch):
     calls = []
     monkeypatch.setattr(
-        ts.server,
+        ts._legacy_runtime(),
         "route_work_request",
         lambda prompt, project="", **_kwargs: calls.append((prompt, project)) or "grounded work",
     )
@@ -326,21 +326,21 @@ def test_natural_execution_intent_requires_developer_authorization(monkeypatch):
 
 
 def test_contextsize_slash_shows_or_sets(monkeypatch):
-    monkeypatch.setattr(ts.server, "context_policy_status", lambda: "policy")
-    monkeypatch.setattr(ts.server, "set_context_size", lambda size: "set " + size)
+    monkeypatch.setattr(ts._legacy_runtime(), "context_policy_status", lambda: "policy")
+    monkeypatch.setattr(ts._legacy_runtime(), "set_context_size", lambda size: "set " + size)
 
     assert ts._handle_slash("/contextsize") == "policy"
     assert ts._handle_slash("/ctxsize 1m") == "set 1m"
 
 
 def test_claude_like_slash_controls_route(monkeypatch):
-    monkeypatch.setattr(ts.server, "context_compaction_plan", lambda: "compact")
-    monkeypatch.setattr(ts.server, "command_registry_list", lambda f: "commands " + f)
-    monkeypatch.setattr(ts.server, "permission_policy", lambda tool: "perms " + tool)
-    monkeypatch.setattr(ts.server, "task_list", lambda: "tasks")
-    monkeypatch.setattr(ts.server, "task_create", lambda title: "create " + title)
-    monkeypatch.setattr(ts.server, "task_update", lambda task_id, status: "update %s %s" % (task_id, status))
-    monkeypatch.setattr(ts.server, "task_show", lambda task_id: "show " + task_id)
+    monkeypatch.setattr(ts._legacy_runtime(), "context_compaction_plan", lambda: "compact")
+    monkeypatch.setattr(ts._legacy_runtime(), "command_registry_list", lambda f: "commands " + f)
+    monkeypatch.setattr(ts._legacy_runtime(), "permission_policy", lambda tool: "perms " + tool)
+    monkeypatch.setattr(ts._legacy_runtime(), "task_list", lambda: "tasks")
+    monkeypatch.setattr(ts._legacy_runtime(), "task_create", lambda title: "create " + title)
+    monkeypatch.setattr(ts._legacy_runtime(), "task_update", lambda task_id, status: "update %s %s" % (task_id, status))
+    monkeypatch.setattr(ts._legacy_runtime(), "task_show", lambda task_id: "show " + task_id)
 
     assert ts._handle_slash("/compact") == "compact"
     assert ts._handle_slash("/commands risk") == "commands risk"
@@ -360,10 +360,10 @@ def test_claude_like_slash_controls_route(monkeypatch):
 
 def test_dump_slash_writes_debug_file(monkeypatch, tmp_path):
     monkeypatch.setattr(ts.server.sonder_paths, "default_home", lambda: tmp_path)
-    monkeypatch.setattr(ts.server, "context_health", lambda: "context")
-    monkeypatch.setattr(ts.server, "memory_quality_report", lambda sample_limit=5: "quality")
-    monkeypatch.setattr(ts.server, "master_status", lambda limit=20: "agents")
-    monkeypatch.setattr(ts.server, "diagnostics", lambda: "diagnostics")
+    monkeypatch.setattr(ts._legacy_runtime(), "context_health", lambda: "context")
+    monkeypatch.setattr(ts._legacy_runtime(), "memory_quality_report", lambda sample_limit=5: "quality")
+    monkeypatch.setattr(ts._legacy_runtime(), "master_status", lambda limit=20: "agents")
+    monkeypatch.setattr(ts._legacy_runtime(), "diagnostics", lambda: "diagnostics")
     ts.CHAT_EVENTS[:] = [{"role": "user/message", "content": "hello"}]
     ts.LAST_RUN_SOURCE = "last answer"
 
@@ -382,7 +382,7 @@ def test_dump_slash_writes_debug_file(monkeypatch, tmp_path):
 
 def test_run_prompt_passes_context_size(monkeypatch):
     seen = {}
-    monkeypatch.setattr(ts.server, "parse_interaction_id", lambda out: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "parse_interaction_id", lambda out: None)
     monkeypatch.setattr(ts, "_strip_footer", lambda out: out)
 
     def fake_answer(
@@ -399,7 +399,7 @@ def test_run_prompt_passes_context_size(monkeypatch):
         seen["context_size"] = context_size
         return "ok"
 
-    monkeypatch.setattr(ts.server, "answer_with_history", fake_answer)
+    monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", fake_answer)
 
     assert ts._run_prompt("hi", context_size="1m") == "ok"
     assert seen["context_size"] == "1m"
@@ -407,7 +407,7 @@ def test_run_prompt_passes_context_size(monkeypatch):
 
 def test_run_prompt_passes_session_and_project(monkeypatch):
     seen = {}
-    monkeypatch.setattr(ts.server, "parse_interaction_id", lambda out: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "parse_interaction_id", lambda out: None)
     monkeypatch.setattr(ts, "_strip_footer", lambda out: out)
 
     def fake_answer(
@@ -425,7 +425,7 @@ def test_run_prompt_passes_session_and_project(monkeypatch):
         seen["project"] = project
         return "ok"
 
-    monkeypatch.setattr(ts.server, "answer_with_history", fake_answer)
+    monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", fake_answer)
 
     assert ts._run_prompt("hi", session="chat-1", project="app") == "ok"
     assert seen == {"session": "chat-1", "project": "app"}
@@ -444,8 +444,8 @@ def test_run_prompt_emits_bounded_primary_model_outcome(monkeypatch):
         return "ok"
 
     metrics = Metrics()
-    monkeypatch.setattr(ts.server, "answer_with_history", fake_answer)
-    monkeypatch.setattr(ts.server, "parse_interaction_id", lambda out: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", fake_answer)
+    monkeypatch.setattr(ts._legacy_runtime(), "parse_interaction_id", lambda out: None)
     monkeypatch.setattr(ts, "_strip_footer", lambda out: out)
 
     assert ts._run_prompt("hi", metrics=metrics) == "ok"
@@ -468,7 +468,7 @@ def test_run_prompt_records_error_outcome_after_target_selected(monkeypatch):
         raise RuntimeError("simulated backend failure")
 
     metrics = Metrics()
-    monkeypatch.setattr(ts.server, "answer_with_history", fake_answer)
+    monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", fake_answer)
 
     try:
         ts._run_prompt("hi", metrics=metrics)
@@ -492,7 +492,7 @@ def test_cot_slash_is_denied(monkeypatch):
     written for.
     """
     monkeypatch.setattr(
-        ts.server,
+        ts._legacy_runtime(),
         "admin_private_chain_of_thought",
         lambda token="": "DENIED: no",
     )
@@ -507,11 +507,11 @@ def test_cot_slash_is_denied(monkeypatch):
 
 def test_login_slash_requires_an_operator_approval(monkeypatch):
     monkeypatch.setattr(
-        ts.server,
+        ts._legacy_runtime(),
         "admin_login",
         lambda username, password: "login ok\ntoken: abc123",
     )
-    monkeypatch.setattr(ts.server, "_admin_account_from_token", lambda token: {"username": "u"})
+    monkeypatch.setattr(ts._legacy_runtime(), "_admin_account_from_token", lambda token: {"username": "u"})
     ts.CURRENT_TOKEN = ""
 
     out = ts._handle_slash("/login user password123")
@@ -533,9 +533,9 @@ def test_file_slash_commands_route_to_server(monkeypatch):
         permission_modes, "_rule_lookup",
         lambda tool: {"pattern": tool, "action": permission_modes.ALLOW, "note": "test"},
     )
-    monkeypatch.setattr(ts.server, "file_find", lambda **kwargs: "found")
-    monkeypatch.setattr(ts.server, "file_read", lambda **kwargs: "read")
-    monkeypatch.setattr(ts.server, "file_delete", lambda **kwargs: "dry delete")
+    monkeypatch.setattr(ts._legacy_runtime(), "file_find", lambda **kwargs: "found")
+    monkeypatch.setattr(ts._legacy_runtime(), "file_read", lambda **kwargs: "read")
+    monkeypatch.setattr(ts._legacy_runtime(), "file_delete", lambda **kwargs: "dry delete")
 
     assert ts._handle_slash("/files *.py") == "found"
     assert ts._handle_slash("/read README.md") == "read"
@@ -552,7 +552,7 @@ def test_the_shipped_delete_rule_binds_on_this_surface(monkeypatch):
     def _never_runs(**_kwargs):
         raise AssertionError("a refused tool was dispatched anyway")
 
-    monkeypatch.setattr(ts.server, "file_delete", _never_runs)
+    monkeypatch.setattr(ts._legacy_runtime(), "file_delete", _never_runs)
 
     reply = ts._handle_slash("/delete README.md")
 
@@ -563,22 +563,22 @@ def test_the_shipped_delete_rule_binds_on_this_surface(monkeypatch):
 def test_artifact_and_game_slash_commands_route_to_server(monkeypatch, unattended_effects_allowed):
     calls = []
     monkeypatch.setattr(
-        ts.server,
+        ts._legacy_runtime(),
         "artifact_generate",
         lambda **kwargs: calls.append(("asset", kwargs)) or "asset ok",
     )
     monkeypatch.setattr(
-        ts.server,
+        ts._legacy_runtime(),
         "game_reference_suite",
         lambda **kwargs: calls.append(("forge", kwargs)) or "forge ok",
     )
     monkeypatch.setattr(
-        ts.server,
+        ts._legacy_runtime(),
         "game_generate_and_test",
         lambda **kwargs: calls.append(("game", kwargs)) or "game ok",
     )
     monkeypatch.setattr(
-        ts.server,
+        ts._legacy_runtime(),
         "game_generation_campaign",
         lambda **kwargs: calls.append(("fleet", kwargs)) or "fleet ok",
     )
@@ -802,7 +802,7 @@ def test_concurrent_turn_results_keep_iids_request_local(monkeypatch):
         barrier.wait(timeout=3)
         return "answer-%s\n\n[interaction_id: %s]" % (prompt, ids[prompt])
 
-    monkeypatch.setattr(ts.server, "answer_with_history", fake_answer)
+    monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", fake_answer)
     alpha_state = ts.ConversationState()
     beta_state = ts.ConversationState()
 
@@ -865,7 +865,7 @@ def test_feedback_consumes_only_its_conversation_iid(monkeypatch):
     beta = ts.ConversationState(last_iid="bbb222")
     recorded = []
     monkeypatch.setattr(
-        ts.server,
+        ts._legacy_runtime(),
         "record_outcome",
         lambda iid, signal: recorded.append((iid, signal)) or "recorded",
     )

@@ -6,7 +6,11 @@ on:
 
 jobs:
   linux-container-boundary:
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: on ubuntu-26.04 (containerd image store) the
+    # compose_isolated_codegen_build refusal fires for the freshly built fixture
+    # image and the exact cause is not yet established (unproven from code).
+    # Follow-up: reproduce on 26.04 with a debug run, fix, then return to latest.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

@@ -164,9 +164,9 @@ def test_direct_fanout_synthesis_retry_runs_once_and_binds_model(monkeypatch):
     calls = []
     handler, sent = _fanout_handler(monkeypatch, {"id": "fan-1"})
     monkeypatch.setattr(serve.admin_auth, "rate_limit", lambda *_args: (True, ""))
-    monkeypatch.setattr(serve.server, "_open_db", lambda: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(serve._legacy_runtime(), "_open_db", lambda: SimpleNamespace(close=lambda: None))
     monkeypatch.setattr(
-        serve.server, "_fanout_synthesize_run",
+        serve._legacy_runtime(), "_fanout_synthesize_run",
         lambda run, model: calls.append((run["id"], model)) or {"answer": model},
     )
 
@@ -202,14 +202,14 @@ def test_direct_fanout_resume_and_cancel_retries_do_not_repeat_actions(monkeypat
     calls = []
     handler, _sent = _fanout_handler(monkeypatch, {"id": "fan-2"})
     monkeypatch.setattr(
-        serve.server, "fanout_store",
+        serve._legacy_runtime(), "fanout_store",
         SimpleNamespace(
             request_cancel=lambda run_id: calls.append(("cancel", run_id)) or {},
             resume_run=lambda run_id, **kwargs: calls.append(("resume", run_id, kwargs)) or {},
         ),
     )
-    monkeypatch.setattr(serve.server, "_execute_fanout_run", lambda run_id: calls.append(("execute", run_id)))
-    monkeypatch.setattr(serve.server, "_fanout_receipt", lambda _run_id: {"ok": True})
+    monkeypatch.setattr(serve._legacy_runtime(), "_execute_fanout_run", lambda run_id: calls.append(("execute", run_id)))
+    monkeypatch.setattr(serve._legacy_runtime(), "_fanout_receipt", lambda _run_id: {"ok": True})
 
     for _ in range(2):
         # One Idempotency-Key names one request; each action has its own.
@@ -388,14 +388,14 @@ def test_fanout_resume_and_cancel_refusals_are_not_success(monkeypatch, tmp_path
     calls = []
     handler, sent = _fanout_handler(monkeypatch, {"id": "fan-3"})
     monkeypatch.setattr(
-        serve.server, "fanout_store",
+        serve._legacy_runtime(), "fanout_store",
         SimpleNamespace(
             request_cancel=lambda run_id: calls.append(("cancel", run_id)) or {},
             resume_run=lambda run_id, **kwargs: calls.append(("resume", run_id)) or {},
         ),
     )
-    monkeypatch.setattr(serve.server, "_execute_fanout_run", lambda run_id: None)
-    monkeypatch.setattr(serve.server, "_fanout_receipt", lambda _run_id: {"ok": True})
+    monkeypatch.setattr(serve._legacy_runtime(), "_execute_fanout_run", lambda run_id: None)
+    monkeypatch.setattr(serve._legacy_runtime(), "_fanout_receipt", lambda _run_id: {"ok": True})
     context = _authorized_account("alice")
     # An interrupted earlier process left both receipts uncertain.
     for action in ("cancel", "resume\0include_failed=0\0retry_unknown=0"):

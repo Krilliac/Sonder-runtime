@@ -62,7 +62,7 @@ def test_cli_error_detail_is_never_emitted(monkeypatch, capsys):
 
 def test_repl_rejects_mutations_without_constructing_application(monkeypatch):
     from sonder_runtime.interfaces.repl import repl
-    monkeypatch.setattr(repl.server, '_application', lambda: pytest.fail('application accessed'))
+    monkeypatch.setattr(repl._legacy_runtime, '_application', lambda: pytest.fail('application accessed'))
     for command in ('send --source-artifact secret', 'resume aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'stage secret'):
         assert json.loads(repl._artifact_mobility_command(command)) == {'outcome_code': 'INVALID_REQUEST'}
 

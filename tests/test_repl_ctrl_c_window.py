@@ -37,7 +37,7 @@ def attended_repl(monkeypatch):
     monkeypatch.setattr(sonder_repl, "_drain_notices", lambda: None)
     monkeypatch.setattr(sonder_repl, "_composer_context", lambda *_args: {})
     monkeypatch.setattr(sonder_repl, "_permission_mode_snapshot", lambda: None)
-    monkeypatch.setattr(sonder_repl.server, "sonder",
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "sonder",
                         lambda *_a, **_k: pytest.fail("no model turn may run"))
     return monkeypatch, clock
 

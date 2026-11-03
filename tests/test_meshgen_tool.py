@@ -1,0 +1,383 @@
+"""``mesh_generate`` registration, input handling and end-to-end wiring with fakes."""
+from __future__ import annotations
+
+import json
+import types
+
+import pytest
+
+from sonder_runtime.bootstrap import agent_help_tools, mesh_agent_tools
+
+GOOD = "```python\ndef build():\n    primitive('cube')\n```"
+
+
+class FakeMcp:
+    def __init__(self):
+        self.tools = {}
+
+    def tool(self):
+        def decorate(fn):
+            self.tools[fn.__name__] = fn
+            return fn
+        return decorate
+
+
+class FakeAssetgen:
+    def __init__(self, root):
+        self.root = str(root)
+
+    def workspace_root(self):
+        return self.root
+
+    def default_asset_root(self):
+        return self.root + "/artifacts/generated"
+
+
+class FakeRunner:
+    """Stands in for blender_runner: finds 'blender' and writes real files."""
+
+    def __init__(self, located="blender", fail=False):
+        self.located = located
+        self.fail = fail
+        self.calls = []
+
+    def locate_blender(self):
+        return self.located
+
+    def build_candidate(self, blender, ops_path, out_dir, **kw):
+        from pathlib import Path
+        self.calls.append((ops_path, out_dir, kw))
+        if self.fail:
+            return {"ok": False, "error": "boom"}
+        out = Path(out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        files = {"model": out / (kw["name"] + ".glb"), "sheet": out / (kw["name"] + "_sheet.png"),
+                 "view": out / (kw["name"] + "_view.png")}
+        for path in files.values():
+            path.write_bytes(b"x")
+        return {"ok": True, "tris": 120, "within_budget": True, "size": [1, 1, 1],
+                "files": {k: str(v) for k, v in files.items()}}
+
+
+@pytest.fixture(autouse=True)
+def _file_roots(tmp_path, monkeypatch):
+    """The guarded reader only reads inside allowed roots; allow the test directory."""
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(tmp_path))
+
+
+def fake_runtime(tmp_path, vision_error=None, score=9):
+    rt = types.SimpleNamespace()
+    rt.assetgen = FakeAssetgen(tmp_path)
+    rt.TIERS = {"general": "m1", "code": "m2", "fast": "m3"}
+    rt.generated = []
+    rt.vision_calls = []
+
+    def generate(prompt, tier="fast", **kw):
+        rt.generated.append((tier, kw))
+        return GOOD
+
+    def vision(path, prompt, **kw):
+        rt.vision_calls.append((path, kw))
+        if vision_error:
+            raise RuntimeError(vision_error)
+        return json.dumps({"score": score, "recognizable": True, "issues": []})
+
+    rt._generate_text = generate
+    rt._vision_analyze_impl = vision
+    return rt
+
+
+def call(tmp_path, runner=None, rt=None, **kw):
+    runner = runner or FakeRunner()
+    rt = rt or fake_runtime(tmp_path)
+    kw.setdefault("brief", "a handcart")
+    return mesh_agent_tools.generate_mesh(rt=rt, runner=runner, **kw), runner, rt
+
+
+def test_register_exposes_mesh_generate_and_records_the_call(tmp_path, monkeypatch):
+    recorded = []
+    mcp = FakeMcp()
+    mesh_agent_tools.register(mcp, lambda name, args, **kw: recorded.append((name, kw["ok"])), runtime=lambda: fake_runtime(tmp_path))
+    assert set(mcp.tools) == {"mesh_generate"}
+    monkeypatch.setattr(mesh_agent_tools.blender_runner, "locate_blender", lambda env=None: None)
+    monkeypatch.delenv("SONDER_BLENDER", raising=False)
+    payload = json.loads(mcp.tools["mesh_generate"]("a cart"))
+    assert payload["ok"] is False and "SONDER_BLENDER" in payload["error"]
+    assert recorded == [("mesh_generate", False)]
+
+
+def test_the_registered_tool_runs_end_to_end_through_the_runtime_provider(tmp_path, monkeypatch):
+    fake = FakeRunner()
+    for attr in ("locate_blender", "build_candidate"):
+        monkeypatch.setattr(mesh_agent_tools.blender_runner, attr, getattr(fake, attr))
+    monkeypatch.setattr(mesh_agent_tools.blender_runner, "preflight", lambda blender: {}, raising=False)
+    provided = []
+    recorded = []
+    mcp = FakeMcp()
+
+    def provider():
+        provided.append(1)
+        return fake_runtime(tmp_path)
+
+    mesh_agent_tools.register(mcp, lambda name, args, **kw: recorded.append((name, kw["ok"])), runtime=provider)
+    payload = json.loads(mcp.tools["mesh_generate"]("a handcart", name="cart", candidates=1, rounds=1))
+    assert payload["ok"] is True, payload
+    assert provided == [1] and recorded == [("mesh_generate", True)]
+    assert fake.calls
+
+
+def test_a_missing_runtime_provider_is_a_wiring_error_not_a_blender_error(tmp_path):
+    mcp = FakeMcp()
+    mesh_agent_tools.register(mcp, lambda *a, **k: None)
+    payload = json.loads(mcp.tools["mesh_generate"]("a cart"))
+    assert payload["ok"] is False and "no runtime bound" in payload["error"]
+
+
+def test_a_non_callable_runtime_is_rejected_at_registration():
+    with pytest.raises(TypeError, match="callable"):
+        mesh_agent_tools.register(FakeMcp(), lambda *a, **k: None, runtime=object())
+
+
+def test_the_registrar_loop_passes_runtime_only_to_registrars_that_declare_it():
+    from sonder_runtime.bootstrap import code_check_agent_tools
+    seen = {}
+
+    def spy(name, registrar):
+        def wrapper(*args, **kwargs):
+            seen[name] = (args, kwargs)
+        wrapper.__signature__ = __import__("inspect").signature(registrar)
+        return name, wrapper
+
+    registrars = [spy("mesh", mesh_agent_tools.register), spy("help", agent_help_tools.register),
+                  spy("code_check", code_check_agent_tools.register)]
+    provider = lambda: None  # noqa: E731
+    agent_help_tools.register_agent_tools("mcp", "record", provider, registrars)
+    assert seen["mesh"] == (("mcp", "record"), {"runtime": provider})
+    assert seen["help"] == (("mcp", "record"), {})
+    assert seen["code_check"] == (("mcp", "record"), {})
+
+
+def test_the_tool_is_auto_discovered():
+    names = [name for name, _ in agent_help_tools.discover_agent_tool_registrars()]
+    assert "mesh_agent_tools" in names
+
+
+def test_blank_brief_is_an_error_payload_not_an_exception():
+    mcp = FakeMcp()
+    mesh_agent_tools.register(mcp, lambda *a, **k: None)
+    assert json.loads(mcp.tools["mesh_generate"](""))["ok"] is False
+
+
+def test_unknown_tier_is_refused(tmp_path):
+    with pytest.raises(mesh_agent_tools.SonderError, match="unknown tier"):
+        call(tmp_path, tiers="general,nonsense")
+
+
+def test_end_to_end_with_fakes_writes_final_files_and_clamps(tmp_path):
+    payload, runner, rt = call(tmp_path, name="Hand Cart", candidates=99, rounds=99, max_tris=1,
+                               timeout=5, target_score=9)
+    assert payload["ok"] is True and payload["name"] == "hand-cart" and payload["vision"] == "on"
+    assert len(payload["candidates"]) == 6
+    assert all(kw["max_tris"] == 50 for _, _, kw in runner.calls)
+    assert rt.generated and all(kw["num_predict"] == 8192 and kw["num_ctx"] == 24576 and kw["temperature"] == 0.3
+                                for _, kw in rt.generated)
+    assert rt.vision_calls and all(kw["extra_roots"] == payload["output_dir"] for _, kw in rt.vision_calls)
+    final = payload["final"]
+    assert set(final) == {"model", "sheet", "view", "code", "ops"}
+    assert final["model"].endswith("hand-cart.glb")
+    out = json.dumps(payload)
+    assert "def build" not in out
+    assert "meshgen" in payload["output_dir"].replace("\\", "/") and "hand-cart-" in payload["output_dir"]
+
+
+def test_vision_failure_is_caught_once_and_reported(tmp_path):
+    rt = fake_runtime(tmp_path, vision_error="vision tier is not set")
+    payload, _, _ = call(tmp_path, rt=rt, candidates=1, rounds=3)
+    assert payload["ok"] is True
+    assert payload["vision"].startswith("unavailable") and "vision tier is not set" in payload["vision"]
+    assert len(rt.vision_calls) == 1
+
+
+def test_failed_builds_return_an_error_payload(tmp_path):
+    payload, _, _ = call(tmp_path, runner=FakeRunner(fail=True), candidates=1, rounds=1)
+    assert payload["ok"] is False and "no candidate produced a model" in payload["error"]
+    assert payload["candidates"][0]["attempts"][0]["status"] == "build_error"
+
+
+def test_kit_is_imported_by_name_and_digested(tmp_path):
+    kit = tmp_path / "propkit.py"
+    kit.write_text('def wheel(r):\n    """Make a wheel."""\n', encoding="utf-8")
+    runner = FakeRunner()
+    rt = fake_runtime(tmp_path)
+    prompts = []
+    original = rt._generate_text
+    rt._generate_text = lambda prompt, **kw: prompts.append(prompt) or original(prompt, **kw)
+    payload, runner, _ = call(tmp_path, runner=runner, rt=rt, kit_path=str(kit), candidates=1, rounds=1)
+    assert "import propkit" in prompts[0] and "def wheel(r)" in prompts[0]
+    assert runner.calls[0][2]["kit_path"] == str(kit.resolve())
+    assert runner.calls[0][2]["kit_allowed"] == ["wheel"]
+
+
+def test_output_dir_outside_the_workspace_is_refused(tmp_path):
+    inside = tmp_path / "ws"
+    inside.mkdir()
+    rt = fake_runtime(inside)
+    with pytest.raises(mesh_agent_tools.SonderError, match="inside the asset workspace"):
+        call(tmp_path, rt=rt, output_dir=str(tmp_path / "elsewhere"))
+
+
+def test_kit_and_api_doc_reads_go_through_the_guarded_reader(tmp_path):
+    ssh = tmp_path / ".ssh"
+    ssh.mkdir()
+    (ssh / "id_rsa").write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n", encoding="utf-8")
+    kit = tmp_path / "propkit.py"
+    kit.write_text("def wheel(r):\n    pass\n", encoding="utf-8")
+    with pytest.raises(mesh_agent_tools.SonderError, match="kit refused"):
+        call(tmp_path, kit_path=str(ssh / "id_rsa"))
+    with pytest.raises(mesh_agent_tools.SonderError, match="api doc refused"):
+        call(tmp_path, kit_path=str(kit), api_doc_path=str(ssh / "id_rsa"))
+
+
+def test_a_kit_outside_the_allowed_roots_is_refused(tmp_path, monkeypatch):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    kit = elsewhere / "propkit.py"
+    kit.write_text("def wheel(r):\n    pass\n", encoding="utf-8")
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(allowed))
+    with pytest.raises(mesh_agent_tools.SonderError, match="outside allowed roots"):
+        call(tmp_path, kit_path=str(kit))
+
+
+def test_the_recorder_gets_the_kit_manifest_end_to_end(tmp_path):
+    kit = tmp_path / "propkit.py"
+    kit.write_text("import os\ndef wheel(r):\n    pass\n", encoding="utf-8")
+    rt = fake_runtime(tmp_path)
+    rt._generate_text = lambda prompt, **kw: "```python\nimport propkit\n\ndef build():\n    propkit.os.getcwd()\n```"
+    payload, runner, _ = call(tmp_path, rt=rt, kit_path=str(kit), candidates=1, rounds=1)
+    assert payload["ok"] is False and runner.calls == []
+    assert payload["candidates"][0]["attempts"][0]["status"] == "script_error"
+
+
+def test_the_recorded_ops_are_saved_and_handed_to_the_runner(tmp_path):
+    payload, runner, _ = call(tmp_path, candidates=1, rounds=1)
+    ops_path, _, kw = runner.calls[0]
+    assert ops_path.endswith(".ops.json") and kw["kit_allowed"] == ()
+    doc = json.loads(open(ops_path, encoding="utf-8").read())
+    assert doc["ops"][0]["op"] == "core.primitive"
+    assert payload["final"]["ops"].endswith(".ops.json")
+    assert "secret" not in json.dumps(payload) and "security" not in payload
+
+
+@pytest.mark.parametrize("output_dir", ["../..", "../../escape", "sub/../../.."])
+def test_relative_output_dir_traversal_is_refused(tmp_path, output_dir):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    with pytest.raises(mesh_agent_tools.SonderError, match="inside the asset workspace"):
+        call(tmp_path, rt=fake_runtime(workspace), output_dir=output_dir)
+
+
+def test_a_result_naming_a_file_outside_the_output_root_is_not_copied(tmp_path):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("TOP SECRET", encoding="utf-8")
+
+    class Forging(FakeRunner):
+        def build_candidate(self, blender, code_path, out_dir, **kw):
+            result = super().build_candidate(blender, code_path, out_dir, **kw)
+            result["files"]["model"] = str(secret)
+            return result
+
+    payload, _, _ = call(tmp_path, runner=Forging(), candidates=1, rounds=1, name="thing")
+    assert "model" not in payload["final"]
+    for path in payload["final"].values():
+        assert "TOP SECRET" not in open(path, "rb").read().decode("latin-1")
+
+
+def test_the_remaining_deadline_never_gives_blender_a_zero_timeout(tmp_path, monkeypatch):
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(mesh_agent_tools.time, "monotonic", lambda: clock["now"])
+    rt = fake_runtime(tmp_path)
+    original = rt._generate_text
+
+    def slow(prompt, **kw):
+        clock["now"] += 28  # leaves 2 s of a 30 s budget
+        return original(prompt, **kw)
+
+    rt._generate_text = slow
+    payload, runner, _ = call(tmp_path, rt=rt, candidates=1, rounds=1, timeout=30)
+    assert runner.calls == []  # under MIN_BUILD_SECONDS left: no Blender with a 0-1 s timeout
+    assert payload["candidates"][0]["attempts"][0]["status"] == "build_error"
+    assert "under 5s" in payload["candidates"][0]["attempts"][0]["error"]
+
+
+def test_kit_exposure_policy_reaches_the_prompt_the_recorder_and_the_runner(tmp_path):
+    kit = tmp_path / "propkit.py"
+    kit.write_text('import bpy\n\ndef wheel(r):\n    """Make a wheel."""\n\n'
+                   'def run_prop(name):\n    """Export it."""\n    bpy.ops.wm.save_as_mainfile(filepath=name)\n',
+                   encoding="utf-8")
+    prompts = []
+    rt = fake_runtime(tmp_path)
+    rt._generate_text = lambda prompt, **kw: (prompts.append(prompt) or
+                                              "```python\nimport propkit\n\ndef build():\n    propkit.run_prop('x')\n```")
+    payload, runner, _ = call(tmp_path, rt=rt, kit_path=str(kit), candidates=1, rounds=2)
+    assert "run_prop" not in prompts[0] and "wheel" in prompts[0]
+    assert not runner.calls  # the recorder refused the excluded call before any build
+    assert payload["candidates"][0]["attempts"][0]["status"] == "script_error"
+
+
+def test_only_kit_functions_are_allowed_to_the_runner_and_the_exception_class_is_not(tmp_path):
+    kit = tmp_path / "propkit.py"
+    kit.write_text('class LFError(Exception):\n    pass\n\n\ndef wheel(r):\n    """Make a wheel."""\n',
+                   encoding="utf-8")
+    rt = fake_runtime(tmp_path)
+    rt._generate_text = lambda prompt, **kw: "```python\nimport propkit\n\ndef build():\n    propkit.wheel(1)\n```"
+    payload, runner, _ = call(tmp_path, rt=rt, kit_path=str(kit), candidates=1, rounds=1)
+    assert payload["ok"] is True, payload
+    allowed = list(runner.calls[0][2]["kit_allowed"])
+    assert allowed == ["wheel"], allowed
+
+    rt._generate_text = lambda prompt, **kw: "```python\nimport propkit\n\ndef build():\n    propkit.LFError('x')\n```"
+    payload, runner, _ = call(tmp_path, rt=rt, kit_path=str(kit), candidates=1, rounds=1)
+    assert runner.calls == [] and payload["candidates"][0]["attempts"][0]["status"] == "script_error"
+
+
+def test_a_recorder_that_hits_its_hard_limit_is_a_script_error_for_the_model(tmp_path, monkeypatch):
+    from sonder_runtime.domain.meshgen.dsl.errors import ScriptError
+
+    def boom(*args, **kwargs):
+        raise ScriptError(0, "the script did too much work (time limit of 15 s exceeded)")
+
+    monkeypatch.setattr(mesh_agent_tools.record_runner, "record_script", boom)
+    payload, runner, _ = call(tmp_path, candidates=1, rounds=1)
+    assert runner.calls == []
+    assert payload["candidates"][0]["attempts"][0]["status"] == "script_error"
+
+
+class OverBudgetRunner(FakeRunner):
+    def build_candidate(self, blender, ops_path, out_dir, **kw):
+        return dict(super().build_candidate(blender, ops_path, out_dir, **kw), tris=1076, within_budget=False)
+
+
+def test_an_over_budget_winner_is_reported_with_a_warning_and_within_budget_false(tmp_path):
+    payload, _, rt = call(tmp_path, runner=OverBudgetRunner(), candidates=1, rounds=2, max_tris=800)
+    assert payload["ok"] is True and payload["within_budget"] is False
+    assert payload["budget_warning"] == "winner is 1076/800 tris and was never critiqued"
+    assert "no build was within the 800 triangle budget" in payload["vision"] and rt.vision_calls == []
+
+
+def test_an_in_budget_winner_reports_within_budget_true_and_no_warning(tmp_path):
+    payload, _, _ = call(tmp_path, candidates=1, rounds=1)
+    assert payload["within_budget"] is True and "budget_warning" not in payload
+
+
+class PreflightOverBudgetRunner(OverBudgetRunner):
+    def preflight(self, blender):
+        return {"sandbox": "unsandboxed", "warning": "CANARY-SECURITY-WARNING"}
+
+
+def test_the_security_warning_and_the_budget_warning_both_survive(tmp_path):
+    payload, _, _ = call(tmp_path, runner=PreflightOverBudgetRunner(), candidates=1, rounds=1, max_tris=800)
+    assert payload["warning"] == "CANARY-SECURITY-WARNING"
+    assert payload["budget_warning"] == "winner is 1076/800 tris and was never critiqued"
+    assert payload["within_budget"] is False

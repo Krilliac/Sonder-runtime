@@ -68,7 +68,7 @@ def test_native_clear_command_uses_terminal_clear_without_a_model_turn(monkeypat
     monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
     monkeypatch.setattr(sonder_repl, "_clear_terminal_scrollback", lambda: calls.append("clear"))
-    monkeypatch.setattr(sonder_repl.server, "sonder", lambda *_args, **_kwargs: pytest.fail("chat should not run"))
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "sonder", lambda *_args, **_kwargs: pytest.fail("chat should not run"))
 
     sonder_repl.main()
 
@@ -83,11 +83,11 @@ def test_cloud_command_changes_runtime_consent_without_a_model_turn(monkeypatch,
     monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
     monkeypatch.setattr(
-        sonder_repl.server,
+        sonder_repl._legacy_runtime,
         "cloud_opt_in",
         lambda action="status": calls.append(action) or ("cloud " + action),
     )
-    monkeypatch.setattr(sonder_repl.server, "sonder", lambda *_a, **_k: pytest.fail("chat should not run"))
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "sonder", lambda *_a, **_k: pytest.fail("chat should not run"))
 
     sonder_repl.main()
 
@@ -119,7 +119,7 @@ def test_recovery_posture_command_is_read_only_and_never_starts_a_model_turn(mon
 
     monkeypatch.setattr(lifecycle, "get", _ReadOnlyLifecycle)
     monkeypatch.setattr(
-        sonder_repl.server,
+        sonder_repl._legacy_runtime,
         "sonder",
         lambda *_args, **_kwargs: pytest.fail("recovery posture must not start a model turn"),
     )
@@ -358,7 +358,7 @@ def test_fanout_recent_uses_the_logged_in_repl_token(monkeypatch):
     captured = {}
     monkeypatch.setattr(sonder_repl, "CURRENT_TOKEN", "developer-session-token")
     monkeypatch.setattr(
-        sonder_repl.server, "model_fanout_recent",
+        sonder_repl._legacy_runtime, "model_fanout_recent",
         lambda **kwargs: captured.update(kwargs) or '{"runs": []}',
     )
 
@@ -405,7 +405,7 @@ def test_model_argument_completer_caches_discovery_and_keeps_tiers_first(monkeyp
             ("gemma3:12b", "8.0 GB"), ("code", "unexpected collision"),
         ],
     )
-    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "coder:7b", "fast": "small"})
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "TIERS", {"code": "coder:7b", "fast": "small"})
     completer = sonder_repl._ModelArgumentCompleter()
 
     assert completer("/model", "", limit=8) == ["code", "fast", "gemma3:12b"]
@@ -443,7 +443,7 @@ def test_catalogued_fanout_status_reuses_the_logged_in_repl_token(monkeypatch):
     )
     monkeypatch.setattr(sonder_repl, "_permission_gate", lambda _tool, _arguments=None: (True, ""))
     monkeypatch.setattr(
-        sonder_repl.server, "model_fanout_status",
+        sonder_repl._legacy_runtime, "model_fanout_status",
         lambda run_id, token="": captured.update(run_id=run_id, token=token) or "receipt",
     )
 
@@ -479,7 +479,7 @@ def test_banner_falls_back_to_ascii_when_the_console_cannot_encode_it(monkeypatc
     caps = sonder_repl.S.caps(env={"TERM": "xterm"}, stream=_Cp437(), platform="posix")
     assert caps.glyphs == "ascii"
     monkeypatch.setattr(sonder_repl.S, "_CACHED", caps)
-    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "x"}, raising=False)
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "TIERS", {"code": "x"}, raising=False)
     text = sonder_repl._startup_banner(None, "coder", "default")
     _strip(text).encode("ascii")  # must not raise
     assert "# sonder" in _strip(text)
@@ -489,7 +489,7 @@ def test_banner_falls_back_to_ascii_when_the_console_cannot_encode_it(monkeypatc
 def test_status_line_is_one_vocabulary_at_every_width(monkeypatch):
     # Spec 2.4 replaced the two composer vocabularies (P1-1).
     _caps(monkeypatch, color="none", glyphs="unicode")
-    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "sonder:latest"}, raising=False)
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "TIERS", {"code": "sonder:latest"}, raising=False)
     permission = {"mode": "manual"}
     status = {"known": True, "running_lanes": 0, "running_agents": 0}
     context = {"used": 64, "limit": 8192, "left": 8128}
@@ -515,7 +515,7 @@ def test_plain_prompt_is_the_gutter_glyph(monkeypatch):
 def test_startup_banner_reads_the_live_runtime_not_a_literal(monkeypatch):
     """The banner must not be able to claim a setup the process is not in."""
     _caps(monkeypatch, color="none", glyphs="unicode")
-    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "some-model:13b"},
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "TIERS", {"code": "some-model:13b"},
                         raising=False)
     # Pinned wide: at ~80 columns the identity line deliberately drops the
     # persona first (style._identity_line), which is not what this checks.
@@ -530,7 +530,7 @@ def test_startup_banner_reads_the_live_runtime_not_a_literal(monkeypatch):
 
 def test_startup_banner_is_one_design_on_every_platform(monkeypatch):
     _caps(monkeypatch, color="none", glyphs="unicode")
-    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "m"}, raising=False)
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "TIERS", {"code": "m"}, raising=False)
     for available in (True, False):
         monkeypatch.setattr(sonder_repl, "_composer_available", lambda a=available: a)
         text = sonder_repl._startup_banner(None, "coder", "default", width=160)
@@ -561,7 +561,7 @@ def test_shift_tab_hint_only_when_the_key_works(monkeypatch):
 
 def test_startup_banner_surfaces_permission_mode_and_elevation(monkeypatch):
     _caps(monkeypatch, color="none", glyphs="unicode")
-    monkeypatch.setattr(sonder_repl.server, "permission_mode_data", lambda: {
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "permission_mode_data", lambda: {
         "mode": "acceptEdits",
         "label": "Accept edits",
         "blurb": "file changes proceed; programs still ask",
@@ -578,7 +578,7 @@ def test_startup_banner_surfaces_permission_mode_and_elevation(monkeypatch):
 def test_startup_banner_omits_unknown_permission_state(monkeypatch):
     _caps(monkeypatch, color="none", glyphs="unicode")
     monkeypatch.setattr(
-        sonder_repl.server, "permission_mode_data",
+        sonder_repl._legacy_runtime, "permission_mode_data",
         lambda: (_ for _ in ()).throw(RuntimeError("not available")),
     )
 
@@ -619,7 +619,7 @@ def test_startup_banner_normalizes_wildcard_bind_for_dashboard_link(monkeypatch)
 
 def test_status_line_shows_live_agents_and_lanes_only_when_running(monkeypatch):
     _caps(monkeypatch, color="none", glyphs="unicode")
-    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "coder:14b"}, raising=False)
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "TIERS", {"code": "coder:14b"}, raising=False)
 
     busy = sonder_repl._status_text("code", width=100, permission={"mode": "manual"}, status={
         "known": True, "running_lanes": 2, "running_agents": 3, "queued_agents": 4,
@@ -634,7 +634,7 @@ def test_status_line_shows_live_agents_and_lanes_only_when_running(monkeypatch):
 
 def test_status_line_uses_live_tier_and_model(monkeypatch):
     _caps(monkeypatch, color="none", glyphs="unicode")
-    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "coder:14b"}, raising=False)
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "TIERS", {"code": "coder:14b"}, raising=False)
 
     title = sonder_repl._status_text("code", width=100, permission={"mode": "plan"},
                                      status={"known": True})
@@ -663,7 +663,7 @@ def test_status_line_surfaces_permission_mode_and_elevation(monkeypatch):
 def test_status_line_carries_context_but_never_per_turn_metrics(monkeypatch):
     # P1-2: the footer is the only place per-turn metrics appear.
     _caps(monkeypatch, color="none", glyphs="unicode")
-    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "coder:14b"}, raising=False)
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "TIERS", {"code": "coder:14b"}, raising=False)
 
     title = sonder_repl._status_text(
         "code", width=80, status={"known": True}, permission={"mode": "manual"},
@@ -676,7 +676,7 @@ def test_status_line_carries_context_but_never_per_turn_metrics(monkeypatch):
 
 def test_status_line_fits_every_width(monkeypatch):
     _caps(monkeypatch, color="16", glyphs="unicode")
-    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "x" * 120}, raising=False)
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "TIERS", {"code": "x" * 120}, raising=False)
     for width in (20, 30, 40, 50, 60, 80, 120):
         title = sonder_repl._status_text(
             "code", width=width, permission={"mode": "manual"},
@@ -689,7 +689,7 @@ def test_status_line_fits_every_width(monkeypatch):
 def test_status_line_never_invents_idle_when_status_is_unknown(monkeypatch):
     _caps(monkeypatch, color="none", glyphs="unicode")
     monkeypatch.setattr(
-        sonder_repl.server, "execution_status_data",
+        sonder_repl._legacy_runtime, "execution_status_data",
         lambda: {"known": False, "error": "status unavailable"},
     )
 
@@ -705,7 +705,7 @@ def test_status_line_never_invents_idle_when_status_is_unknown(monkeypatch):
 
 def test_status_long_form_names_every_field_and_the_pool_in_words(monkeypatch):
     _caps(monkeypatch, color="none", glyphs="unicode")
-    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "coder:14b"}, raising=False)
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "TIERS", {"code": "coder:14b"}, raising=False)
     monkeypatch.setattr(listener_probe, "port_open", lambda *_args: False)
 
     class _Pool:
@@ -714,7 +714,7 @@ def test_status_long_form_names_every_field_and_the_pool_in_words(monkeypatch):
             return {"worker_count": 1, "eligible_worker_count": 1,
                     "queue": {"waiting": 0, "limit": 8}}
 
-    monkeypatch.setattr(sonder_repl.server, "OLLAMA_POOL", _Pool, raising=False)
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "OLLAMA_POOL", _Pool, raising=False)
     state = sonder_repl._status_state("code", permission={"mode": "manual"},
                                       status={"known": True}, project="default")
 
@@ -728,7 +728,7 @@ def test_status_long_form_names_every_field_and_the_pool_in_words(monkeypatch):
 
 
 def test_composer_context_and_last_turn_degrade_without_a_fake_value(monkeypatch):
-    monkeypatch.setattr(sonder_repl.server, "context_health_data", lambda **_kwargs: (_ for _ in ()).throw(RuntimeError()))
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "context_health_data", lambda **_kwargs: (_ for _ in ()).throw(RuntimeError()))
     monkeypatch.setattr(sonder_repl.activity_tracker, "latest", lambda: {"surface": "chat-api"})
 
     assert sonder_repl._composer_context("session", "project") is None
@@ -767,7 +767,7 @@ def test_activity_watch_prints_each_sequence_once_and_stops_cleanly(
         },
     }
     monkeypatch.setattr(
-        sonder_repl.server,
+        sonder_repl._legacy_runtime,
         "execution_feed_data",
         lambda: {
             "known": True, "events": [event], "truncated": False,
@@ -831,7 +831,7 @@ def test_activity_formatter_explains_npu_fallback_without_raw_diagnostics():
 def test_model_tag_selection_pins_the_next_chat_without_leaving_code_route(monkeypatch):
     lines = iter(("/model gemma3:12b", "hello", "/exit"))
     seen = []
-    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "qwen2.5-coder:7b"})
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "TIERS", {"code": "qwen2.5-coder:7b"})
     monkeypatch.setattr(sonder_repl, "_installed_models", lambda: [("gemma3:12b", "8 GB")])
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
@@ -841,7 +841,7 @@ def test_model_tag_selection_pins_the_next_chat_without_leaving_code_route(monke
     monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
-        sonder_repl.server, "sonder",
+        sonder_repl._legacy_runtime, "sonder",
         lambda _prompt, **kwargs: seen.append(kwargs) or "answer",
     )
 
@@ -882,8 +882,8 @@ def test_status_line_never_carries_turn_metrics_before_or_after_resume(monkeypat
         lambda *_args, **_kwargs: {"tokens_in": 123, "tokens_out": 45, "elapsed_ms": 1000,
                                    "model_calls": 1, "tool_calls": 0},
     )
-    monkeypatch.setattr(sonder_repl.server, "sonder", lambda *_args, **_kwargs: "answer")
-    monkeypatch.setattr(sonder_repl.server, "_open_db", lambda: _Connection())
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "sonder", lambda *_args, **_kwargs: "answer")
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "_open_db", lambda: _Connection())
     monkeypatch.setattr(sonder_repl.memory_store, "find_session", lambda *_args: "other-session")
 
     sonder_repl.main()
@@ -898,7 +898,7 @@ def test_status_line_never_carries_turn_metrics_before_or_after_resume(monkeypat
 def test_model_selection_refuses_unverified_tag_when_catalog_is_unavailable(monkeypatch, capsys):
     lines = iter(("/model made-up:latest", "hello", "/exit"))
     seen = []
-    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "qwen2.5-coder:7b"})
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "TIERS", {"code": "qwen2.5-coder:7b"})
     monkeypatch.setattr(sonder_repl, "_installed_models", lambda: None)
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
@@ -908,7 +908,7 @@ def test_model_selection_refuses_unverified_tag_when_catalog_is_unavailable(monk
     monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
-        sonder_repl.server, "sonder",
+        sonder_repl._legacy_runtime, "sonder",
         lambda _prompt, **kwargs: seen.append(kwargs) or "answer",
     )
 
@@ -922,7 +922,7 @@ def test_model_selection_refuses_unverified_tag_when_catalog_is_unavailable(monk
 
 def test_model_selection_refuses_tag_when_verified_catalog_is_empty(monkeypatch, capsys):
     lines = iter(("/model made-up:latest", "/exit"))
-    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "qwen2.5-coder:7b"})
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "TIERS", {"code": "qwen2.5-coder:7b"})
     monkeypatch.setattr(sonder_repl, "_installed_models", lambda: [])
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
@@ -950,14 +950,14 @@ def test_model_completer_does_not_repeat_unavailable_discovery(monkeypatch):
 
 def _repl_with_cloud_tier(monkeypatch, lines, *, cloud_allowed, seen=None):
     """Drive `main()` over `lines` with one hosted tier configured."""
-    monkeypatch.setattr(sonder_repl.server, "TIERS", {
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "TIERS", {
         "code": "qwen2.5-coder:7b",
         "general": "qwen2.5-coder:7b",
         "cloud-code": "kimi-k2:cloud",
         "cloud-general": "kimi-k2:cloud",
     })
     monkeypatch.setattr(
-        sonder_repl.server,
+        sonder_repl._legacy_runtime,
         "_cloud_allowed_policy",
         lambda _environment: cloud_allowed,
     )
@@ -970,7 +970,7 @@ def _repl_with_cloud_tier(monkeypatch, lines, *, cloud_allowed, seen=None):
     monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_a, **_k: None)
     monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_a, **_k: None)
     monkeypatch.setattr(
-        sonder_repl.server, "sonder",
+        sonder_repl._legacy_runtime, "sonder",
         lambda _prompt, **kwargs: (seen if seen is not None else []).append(kwargs) or "answer",
     )
     sonder_repl.main()
@@ -1025,11 +1025,11 @@ def test_model_switch_selects_a_cloud_tier_when_cloud_is_enabled(monkeypatch, ca
 
 
 def test_model_completer_does_not_offer_a_disabled_cloud_tier(monkeypatch):
-    monkeypatch.setattr(sonder_repl.server, "TIERS", {
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "TIERS", {
         "code": "qwen2.5-coder:7b", "cloud-code": "kimi-k2:cloud",
     })
     monkeypatch.setattr(
-        sonder_repl.server, "_cloud_allowed_policy", lambda _environment: False,
+        sonder_repl._legacy_runtime, "_cloud_allowed_policy", lambda _environment: False,
     )
     completer = sonder_repl._ModelArgumentCompleter()
 
@@ -1050,11 +1050,11 @@ def test_route_does_not_recommend_a_disabled_cloud_tier(monkeypatch, capsys):
 
 def test_route_still_recommends_a_cloud_tier_when_cloud_is_enabled(monkeypatch, capsys):
     lines = iter(("/route what is the exact signature of memcpy", "/exit"))
-    monkeypatch.setattr(sonder_repl.server, "TIERS", {
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "TIERS", {
         "code": "qwen2.5-coder:7b", "cloud-general": "kimi-k2:cloud",
     })
     monkeypatch.setattr(
-        sonder_repl.server, "_cloud_allowed_policy", lambda _environment: True,
+        sonder_repl._legacy_runtime, "_cloud_allowed_policy", lambda _environment: True,
     )
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_a, **_k: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
@@ -1070,8 +1070,8 @@ def test_selectable_tiers_falls_back_to_the_raw_table_when_policy_raises(monkeyp
     def _raise():
         raise RuntimeError("policy unreadable")
 
-    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "qwen2.5-coder:7b"})
-    monkeypatch.setattr(sonder_repl.server, "available_tiers", _raise)
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "TIERS", {"code": "qwen2.5-coder:7b"})
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "available_tiers", _raise)
 
     assert sonder_repl._selectable_tiers() == {"code": "qwen2.5-coder:7b"}
     assert sonder_repl._unselectable_tier_reason("code") == ""
@@ -1090,11 +1090,11 @@ def test_explicit_web_search_bypasses_repl_workbench_route(monkeypatch):
     monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl.intents, "classify_work", lambda _prompt: True)
     monkeypatch.setattr(
-        sonder_repl.server, "workbench_agent",
+        sonder_repl._legacy_runtime, "workbench_agent",
         lambda **_kwargs: pytest.fail("explicit web search must not enter workbench"),
     )
     monkeypatch.setattr(
-        sonder_repl.server, "sonder",
+        sonder_repl._legacy_runtime, "sonder",
         lambda prompt, **kwargs: calls.append((prompt, kwargs)) or "web result",
     )
 
@@ -1116,11 +1116,11 @@ def test_mixed_web_search_and_workspace_action_stays_in_repl_workbench(monkeypat
     monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl.intents, "classify_work", lambda _prompt: True)
     monkeypatch.setattr(
-        sonder_repl.server, "workbench_agent",
+        sonder_repl._legacy_runtime, "workbench_agent",
         lambda **kwargs: calls.append(kwargs) or "work result",
     )
     monkeypatch.setattr(
-        sonder_repl.server, "sonder",
+        sonder_repl._legacy_runtime, "sonder",
         lambda *_args, **_kwargs: pytest.fail("mixed request must not use web-only route"),
     )
 
@@ -1144,8 +1144,8 @@ def test_mixed_web_search_destination_actions_stay_in_repl_workbench(monkeypatch
     monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(sonder_repl.server, "workbench_agent", lambda **kwargs: calls.append(kwargs) or "work result")
-    monkeypatch.setattr(sonder_repl.server, "sonder", lambda *_args, **_kwargs: pytest.fail("mixed request must not use web-only route"))
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "workbench_agent", lambda **kwargs: calls.append(kwargs) or "work result")
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "sonder", lambda *_args, **_kwargs: pytest.fail("mixed request must not use web-only route"))
 
     sonder_repl.main()
 
@@ -1168,8 +1168,8 @@ def test_repl_never_passes_a_login_password_to_session_recall(monkeypatch):
     monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(sonder_repl.server, "admin_login", lambda *_args: "logged in")
-    monkeypatch.setattr(sonder_repl.server, "sonder", lambda *_args, **_kwargs: "answer")
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "admin_login", lambda *_args: "logged in")
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "sonder", lambda *_args, **_kwargs: "answer")
 
     sonder_repl.main()
 
@@ -1193,11 +1193,11 @@ def test_interactive_login_reads_password_outside_the_composer(monkeypatch):
     monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
-        sonder_repl.server,
+        sonder_repl._legacy_runtime,
         "admin_login",
         lambda username, password: login.append((username, password)) or "logged in",
     )
-    monkeypatch.setattr(sonder_repl.server, "sonder", lambda *_args, **_kwargs: "answer")
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "sonder", lambda *_args, **_kwargs: "answer")
 
     sonder_repl.main()
 
@@ -1207,7 +1207,7 @@ def test_interactive_login_reads_password_outside_the_composer(monkeypatch):
 def test_model_selection_resolves_tiers_and_installed_tags_case_insensitively(monkeypatch):
     lines = iter(("/model CODE", "/model Gemma3:12B", "hello", "/exit"))
     seen = []
-    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "qwen2.5-coder:7b"})
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "TIERS", {"code": "qwen2.5-coder:7b"})
     monkeypatch.setattr(sonder_repl, "_installed_models", lambda: [("gemma3:12b", "8 GB")])
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
@@ -1217,7 +1217,7 @@ def test_model_selection_resolves_tiers_and_installed_tags_case_insensitively(mo
     monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
-        sonder_repl.server, "sonder",
+        sonder_repl._legacy_runtime, "sonder",
         lambda _prompt, **kwargs: seen.append(kwargs) or "answer",
     )
 
@@ -1232,13 +1232,13 @@ def test_model_selection_rejects_known_embedding_only_tag_before_next_chat(monke
     """`/model` must not claim a non-chat tag was successfully selected."""
     lines = iter(("/model nomic-embed-text:latest", "hello", "/exit"))
     seen = []
-    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "qwen2.5-coder:7b"})
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "TIERS", {"code": "qwen2.5-coder:7b"})
     monkeypatch.setattr(
         sonder_repl, "_installed_models",
         lambda: [("nomic-embed-text:latest", "0.3 GB")],
     )
     monkeypatch.setattr(
-        sonder_repl.server, "resolve_discovered_model_record",
+        sonder_repl._legacy_runtime, "resolve_discovered_model_record",
         lambda selector: (
             "nomic-embed-text:latest",
             {"name": "nomic-embed-text:latest", "capabilities": ["embedding"]},
@@ -1252,7 +1252,7 @@ def test_model_selection_rejects_known_embedding_only_tag_before_next_chat(monke
     monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
-        sonder_repl.server, "sonder",
+        sonder_repl._legacy_runtime, "sonder",
         lambda _prompt, **kwargs: seen.append(kwargs) or "answer",
     )
 
@@ -1270,7 +1270,7 @@ def test_model_selection_rejects_known_embedding_only_tag_before_next_chat(monke
 def test_model_tag_selection_is_used_by_consult(monkeypatch):
     lines = iter(("/model gemma3:12b", "/consult compare this", "/exit"))
     seen = {}
-    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "qwen2.5-coder:7b"})
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "TIERS", {"code": "qwen2.5-coder:7b"})
     monkeypatch.setattr(sonder_repl, "_installed_models", lambda: [("gemma3:12b", "8 GB")])
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
@@ -1292,7 +1292,7 @@ def test_model_tag_selection_is_used_by_consult(monkeypatch):
 def test_model_near_miss_suggestion_matches_case_insensitively(monkeypatch, capsys):
     """A capitalized tag typo still earns a suggestion, like resolution itself."""
     lines = iter(("/model Gemma3:7b", "/exit"))
-    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "qwen2.5-coder:7b"})
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "TIERS", {"code": "qwen2.5-coder:7b"})
     monkeypatch.setattr(sonder_repl, "_installed_models", lambda: [("gemma3:12b", "8 GB")])
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
@@ -1309,7 +1309,7 @@ def test_model_near_miss_suggestion_matches_case_insensitively(monkeypatch, caps
 def test_model_bare_tag_argument_does_not_suggest_every_installed_model(monkeypatch, capsys):
     """An empty base like ":latest" must not match the whole catalog."""
     lines = iter(("/model :latest", "/exit"))
-    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "qwen2.5-coder:7b"})
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "TIERS", {"code": "qwen2.5-coder:7b"})
     monkeypatch.setattr(
         sonder_repl, "_installed_models",
         lambda: [("gemma3:12b", "8 GB"), ("qwen2.5-coder:7b", "4 GB")],
@@ -1342,11 +1342,11 @@ def _drive_workspace_repl(monkeypatch, lines, seen):
     monkeypatch.setattr(sonder_repl.intents, "classify_work", lambda line: "create" in line)
     monkeypatch.setattr(sonder_repl.web_intents, "explicit_search", lambda _line: False)
     monkeypatch.setattr(
-        sonder_repl.server, "workbench_agent",
+        sonder_repl._legacy_runtime, "workbench_agent",
         lambda **kwargs: seen.update(kwargs) or "verified workspace work",
     )
     monkeypatch.setattr(
-        sonder_repl.server, "sonder",
+        sonder_repl._legacy_runtime, "sonder",
         lambda *_args, **_kwargs: pytest.fail("plain chat must not run"),
     )
 
@@ -1400,7 +1400,7 @@ def test_workspace_create_resumes_queued_work_in_created_directory(monkeypatch, 
         workspace.mkdir(parents=True)
         return "directory create: %s" % workspace
 
-    monkeypatch.setattr(sonder_repl.server, "directory_create", create_directory)
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "directory_create", create_directory)
 
     sonder_repl.main()
 
@@ -1422,7 +1422,7 @@ def test_pending_workspace_accepts_explicit_create_path_reply(monkeypatch, tmp_p
         workspace.mkdir(parents=True)
         return "directory create: %s" % workspace
 
-    monkeypatch.setattr(sonder_repl.server, "directory_create", create_directory)
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "directory_create", create_directory)
 
     sonder_repl.main()
 
@@ -1441,7 +1441,7 @@ def test_workspace_create_obeys_directory_create_permission(monkeypatch, tmp_pat
         if command == "/workspace-create" else (True, ""),
     )
     monkeypatch.setattr(
-        sonder_repl.server, "directory_create", lambda **kwargs: calls.append(kwargs),
+        sonder_repl._legacy_runtime, "directory_create", lambda **kwargs: calls.append(kwargs),
     )
 
     sonder_repl.main()
@@ -1463,7 +1463,7 @@ def test_workspace_create_uses_one_canonical_path(monkeypatch, tmp_path):
         os.makedirs(path, exist_ok=parents)
         return "directory create: %s" % path
 
-    monkeypatch.setattr(sonder_repl.server, "directory_create", create_directory)
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "directory_create", create_directory)
     sonder_repl.main()
 
     assert seen["created"] == str(workspace.resolve())
@@ -1483,7 +1483,7 @@ def test_explicit_work_uses_selected_workspace(monkeypatch, tmp_path):
 
 def _drive_work_turn(monkeypatch, lines):
     seen = {}
-    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "qwen2.5-coder:7b"})
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "TIERS", {"code": "qwen2.5-coder:7b"})
     monkeypatch.setattr(sonder_repl, "_installed_models", lambda: [("gemma3:12b", "8 GB")])
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
@@ -1497,8 +1497,8 @@ def _drive_work_turn(monkeypatch, lines):
     monkeypatch.setattr(sonder_repl.intents, "containment_egress_refusal", lambda _line: None)
     monkeypatch.setattr(sonder_repl.intents, "classify_work", lambda line: line.startswith("create "))
     monkeypatch.setattr(sonder_repl.web_intents, "explicit_search", lambda _line: False)
-    monkeypatch.setattr(sonder_repl.server, "workbench_agent", lambda **kwargs: seen.update(kwargs) or "workbench done")
-    monkeypatch.setattr(sonder_repl.server, "sonder", lambda *_args, **_kwargs: pytest.fail("plain chat must not run"))
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "workbench_agent", lambda **kwargs: seen.update(kwargs) or "workbench done")
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "sonder", lambda *_args, **_kwargs: pytest.fail("plain chat must not run"))
     sonder_repl.main()
     return seen
 
@@ -1559,7 +1559,7 @@ def test_explicit_work_without_a_workspace_asks_for_one_then_resumes(monkeypatch
     monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_run_session_work", session_work)
-    monkeypatch.setattr(sonder_repl.server, "sonder", lambda *_a, **_k: pytest.fail("chat must not run"))
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "sonder", lambda *_a, **_k: pytest.fail("chat must not run"))
 
     sonder_repl.main()
 
@@ -1588,10 +1588,10 @@ def test_refused_explicit_work_reports_an_error_and_keeps_the_loop(monkeypatch, 
     monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
     monkeypatch.setattr(sonder_repl, "_run_session_work", refused)
     monkeypatch.setattr(
-        sonder_repl.server, "cloud_opt_in",
+        sonder_repl._legacy_runtime, "cloud_opt_in",
         lambda action="status": calls.append(action) or ("cloud " + action),
     )
-    monkeypatch.setattr(sonder_repl.server, "sonder", lambda *_a, **_k: pytest.fail("chat must not run"))
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "sonder", lambda *_a, **_k: pytest.fail("chat must not run"))
 
     sonder_repl.main()
 
@@ -1619,10 +1619,10 @@ def test_refused_workspace_work_reports_an_error_and_keeps_the_loop(monkeypatch,
     monkeypatch.setattr(sonder_repl.web_intents, "explicit_search", lambda _line: False)
     monkeypatch.setattr(sonder_repl, "_run_session_work", refused)
     monkeypatch.setattr(
-        sonder_repl.server, "cloud_opt_in",
+        sonder_repl._legacy_runtime, "cloud_opt_in",
         lambda action="status": calls.append(action) or ("cloud " + action),
     )
-    monkeypatch.setattr(sonder_repl.server, "sonder", lambda *_a, **_k: pytest.fail("chat must not run"))
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "sonder", lambda *_a, **_k: pytest.fail("chat must not run"))
 
     sonder_repl.main()
 

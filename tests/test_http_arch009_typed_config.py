@@ -85,7 +85,7 @@ def test_typed_main_uses_configured_port_when_environment_is_poisoned(monkeypatc
     # patching only the base class let this test bind a real port and hang.
     monkeypatch.setattr(serve, "ServeHTTPServer", FakeServer)
     monkeypatch.setattr(serve.sonder_lifecycle, "get", lambda: lifecycle)
-    monkeypatch.setattr(serve.server, "runtime_source_update_status", lambda refresh=False: "ok")
+    monkeypatch.setattr(serve._legacy_runtime(), "runtime_source_update_status", lambda refresh=False: "ok")
 
     serve.main(config)
 

@@ -58,7 +58,7 @@ def test_register_201_carries_a_message(monkeypatch, tmp_path):
 
     path = str(tmp_path / "register.sqlite")
     monkeypatch.setenv("SONDER_BOOTSTRAP_SECRET", "bootstrap-secret-123456")
-    monkeypatch.setattr(ts.server, "_open_db", lambda: memory_store.connect(path))
+    monkeypatch.setattr(ts._legacy_runtime(), "_open_db", lambda: memory_store.connect(path))
     monkeypatch.setattr(ts, "AUTH_MODE", "account")
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
@@ -97,8 +97,8 @@ def chat_history(monkeypatch):
         return "answer"
 
     monkeypatch.setattr(ts, "_server_side_history", server_side)
-    monkeypatch.setattr(ts.server, "chat_web_response", lambda *a, **k: None)
-    monkeypatch.setattr(ts.server, "answer_with_history", answer)
+    monkeypatch.setattr(ts._legacy_runtime(), "chat_web_response", lambda *a, **k: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", answer)
     return seen
 
 

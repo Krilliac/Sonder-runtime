@@ -439,7 +439,7 @@ def test_the_fall_through_refuses_when_the_catalog_is_blind(monkeypatch):
             raise RuntimeError("registry not initialised")
 
     command_catalog.reset_cache()
-    monkeypatch.setattr(server.mcp, "_tool_manager", _Broken())
+    monkeypatch.setattr(server.mcp._lazy_materialize(), "_tool_manager", _Broken())
     try:
         reply = ts._handle_slash("/file_delete path=notes.txt")
         assert reply is not None

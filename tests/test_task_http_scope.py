@@ -218,7 +218,7 @@ def test_account_http_rejects_global_saved_workflow_library(monkeypatch):
             lambda _line, name=tool_name, kwargs=values: (name, dict(kwargs)),
         )
         monkeypatch.setattr(
-            serve.server, tool_name,
+            serve._legacy_runtime(), tool_name,
             lambda **kwargs: calls.append((tool_name, kwargs)) or "private payload",
         )
         result = serve._dispatch_catalogued_tool(
@@ -234,5 +234,5 @@ def test_account_http_rejects_global_saved_workflow_library(monkeypatch):
         serve.command_catalog,
         "parse_invocation", lambda _line: ("workflow_list", {}),
     )
-    monkeypatch.setattr(serve.server, "workflow_list", lambda: "operator flow")
+    monkeypatch.setattr(serve._legacy_runtime(), "workflow_list", lambda: "operator flow")
     assert serve._dispatch_catalogued_tool("/workflow_list", serve._LEGACY_STATE) == "operator flow"

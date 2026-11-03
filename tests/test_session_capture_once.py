@@ -19,14 +19,14 @@ pytestmark = pytest.mark.unit
 
 def test_the_served_runner_leaves_capture_to_the_served_surface(monkeypatch):
     seen = {}
-    monkeypatch.setattr(ts.server, "parse_interaction_id", lambda out: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "parse_interaction_id", lambda out: None)
     monkeypatch.setattr(ts, "_strip_footer", lambda out: out)
 
     def fake_answer(prompt, history, **kwargs):
         seen.update(kwargs)
         return "ok"
 
-    monkeypatch.setattr(ts.server, "answer_with_history", fake_answer)
+    monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", fake_answer)
 
     assert ts._run_prompt("hi", session="chat-1", project="app") == "ok"
     assert seen["capture_session"] is False

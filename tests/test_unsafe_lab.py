@@ -155,7 +155,7 @@ def test_audit_write_failure_blocks_mcp_startup(monkeypatch, tmp_path):
     monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
     monkeypatch.setenv(unsafe_lab.AUDIT_PATH_ENV, str(tmp_path))
     monkeypatch.setattr(unsafe_lab, "is_privileged", lambda: False)
-    monkeypatch.setattr(server.mcp, "run", lambda: calls.append("mcp"))
+    monkeypatch.setattr(server.mcp._lazy_materialize(), "run", lambda: calls.append("mcp"))
     unsafe_lab._audited_processes.discard(os.getpid())
 
     with pytest.raises(OSError):
@@ -177,7 +177,7 @@ def test_mcp_startup_refuses_invalid_gate_before_adapter(
     monkeypatch.setenv("SONDER_HOST", "127.0.0.1")
     monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
     monkeypatch.setattr(unsafe_lab, "is_privileged", lambda: privileged)
-    monkeypatch.setattr(server.mcp, "run", lambda: calls.append("mcp"))
+    monkeypatch.setattr(server.mcp._lazy_materialize(), "run", lambda: calls.append("mcp"))
 
     # A refusal is a clean usage-class exit (2) with the reason on stderr,
     # matching --native, and the adapter never starts.
@@ -217,7 +217,7 @@ def test_mcp_startup_refuses_nonlocal_model_transport_before_adapter(
     for name, value in environment.items():
         monkeypatch.setenv(name, value)
     monkeypatch.setattr(unsafe_lab, "is_privileged", lambda: False)
-    monkeypatch.setattr(server.mcp, "run", lambda: calls.append("mcp"))
+    monkeypatch.setattr(server.mcp._lazy_materialize(), "run", lambda: calls.append("mcp"))
 
     # A refusal is a clean usage-class exit (2) with the reason on stderr,
     # matching --native, and the adapter never starts.

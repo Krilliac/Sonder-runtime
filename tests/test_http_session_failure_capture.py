@@ -45,7 +45,7 @@ def test_model_error_after_admission_records_model_failed(repository, monkeypatc
         except urllib.error.URLError as error:
             raise server.ModelCallError("timeout", "model timed out") from error
 
-    monkeypatch.setattr(serve.server, "answer_with_history", answer)
+    monkeypatch.setattr(serve._legacy_runtime(), "answer_with_history", answer)
     with pytest.raises(server.ModelCallError):
         serve._run_prompt(
             "hello", session="http-session", return_result=True,
@@ -64,7 +64,7 @@ def test_error_before_admission_writes_nothing(repository, monkeypatch):
     def answer(*args, **kwargs):
         raise server.ModelCallError("timeout", "model timed out")
 
-    monkeypatch.setattr(serve.server, "answer_with_history", answer)
+    monkeypatch.setattr(serve._legacy_runtime(), "answer_with_history", answer)
     with pytest.raises(server.ModelCallError):
         serve._run_prompt(
             "hello", session="http-session", return_result=True,
@@ -87,7 +87,7 @@ def test_legacy_error_answer_after_admission_is_a_model_failure(repository, monk
         dispatch_provider("ollama", "/api/chat", {"model": "fixture"}, lambda: "x")
         return "ERROR contacting Ollama: connection refused"
 
-    monkeypatch.setattr(serve.server, "answer_with_history", answer)
+    monkeypatch.setattr(serve._legacy_runtime(), "answer_with_history", answer)
     turn = serve._run_prompt(
         "hello", session="http-session", return_result=True,
         capture_request_id="http-request", capture_turn_id="http-turn",
