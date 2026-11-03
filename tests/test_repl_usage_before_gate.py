@@ -50,7 +50,7 @@ def _drive(monkeypatch, lines, gate):
     monkeypatch.setattr(sonder_repl, "_named_command_gate", gate)
     monkeypatch.setattr(sonder_repl.command_router, "resolve", lambda _line: None)
     monkeypatch.setattr(
-        sonder_repl.server, "sonder",
+        sonder_repl._legacy_runtime, "sonder",
         lambda *_a, **_k: pytest.fail("a slash command must not run a model turn"),
     )
     sonder_repl.main()
@@ -86,7 +86,7 @@ def test_pre_gate_usage_matches_what_the_branch_itself_prints(line, usage, monke
         "file_write", "file_edit", "file_read", "file_delete", "directory_create",
     ):
         monkeypatch.setattr(
-            sonder_repl.server, name,
+            sonder_repl._legacy_runtime, name,
             lambda *a, _name=name, **k: calls.append(_name) or "called",
         )
     output = []
@@ -123,7 +123,7 @@ def test_bare_fact_forget_is_not_remembered_as_a_fact(monkeypatch):
     remembered = []
     monkeypatch.setattr(sonder_repl, "_branch_usage_error", lambda *_a: "")
     monkeypatch.setattr(
-        sonder_repl.server, "sonder_remember_fact",
+        sonder_repl._legacy_runtime, "sonder_remember_fact",
         lambda text, **_k: remembered.append(text) or "ok",
     )
 

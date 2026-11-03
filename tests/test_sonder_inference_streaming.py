@@ -416,7 +416,7 @@ def _served_turn(monkeypatch, fake, *, prompt="hello"):
         monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
         monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
         monkeypatch.setattr(ts, "STREAM_HEARTBEAT_SECONDS", 0.2)
-        monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
+        monkeypatch.setattr(ts._legacy_runtime(), "chat_web_response", lambda *args, **kwargs: None)
         httpd = ts.ThreadingHTTPServer(("127.0.0.1", 0), ts.Handler)
         thread = threading.Thread(target=httpd.serve_forever, daemon=True)
         thread.start()

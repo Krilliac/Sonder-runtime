@@ -56,7 +56,7 @@ def test_sigint_during_a_chat_turn_cancels_the_turn_and_returns_to_the_prompt(
         return "second answer"
 
     _prepare(monkeypatch, iter(("long question", "next question", "/exit")))
-    monkeypatch.setattr(sonder_repl.server, "sonder", fake_sonder)
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "sonder", fake_sonder)
     previous_handler = signal.getsignal(signal.SIGINT)
 
     sonder_repl.main()
@@ -80,7 +80,7 @@ def test_ctrl_c_at_the_idle_prompt_still_exits(monkeypatch):
     _prepare(monkeypatch, iter(()))
     monkeypatch.setattr(sonder_repl, "_read_input", interrupted)
     monkeypatch.setattr(
-        sonder_repl.server, "sonder",
+        sonder_repl._legacy_runtime, "sonder",
         lambda *_a, **_k: pytest.fail("no turn was submitted"),
     )
 
@@ -96,7 +96,7 @@ def test_interrupt_clears_the_previous_turn_handles(monkeypatch, capsys):
         raise KeyboardInterrupt
 
     _prepare(monkeypatch, iter(("first", "second", "/run", "/exit")))
-    monkeypatch.setattr(sonder_repl.server, "sonder", fake_sonder)
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "sonder", fake_sonder)
     monkeypatch.setattr(
         sonder_repl.code_runner, "run_code",
         lambda *a, **k: ran.append(a) or {"ok": True},
