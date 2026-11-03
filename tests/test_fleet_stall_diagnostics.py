@@ -245,9 +245,23 @@ _GATED_CHILD = textwrap.dedent(r'''
 
     class MasterFinishGate:
         @pytest.fixture(autouse=True)
-        def hold_master_finish(self, monkeypatch):
+        def hold_master_finish(self, monkeypatch, request):
             # Import after the repository conftest pins its disposable ledger.
             import master_orchestrator
+
+            # Order, not a clock, decides where the original test fails: its
+            # join starts only after the coordinator is held inside
+            # gated_finish, which never returns before teardown, so even a
+            # short join must fail at `assert not thread.is_alive()`.
+            gate_reached = threading.Event()
+
+            guard = request.module.HANDSHAKE_GUARD_SECONDS
+
+            def wait_for_gate():
+                assert gate_reached.wait(guard), "coordinator never reached gated_finish"
+
+            monkeypatch.setattr(request.module, "_before_coordinator_join", wait_for_gate)
+            monkeypatch.setattr(request.module, "COORDINATOR_JOIN_GUARD_SECONDS", 0.5)
 
             original_finish = master_orchestrator._finish
             original_start = master_orchestrator._start_agent
@@ -278,6 +292,7 @@ _GATED_CHILD = textwrap.dedent(r'''
                         json.dumps({"coordinator_id": threading.get_ident()}),
                         encoding="utf-8",
                     )
+                    gate_reached.set()
                     # Real dispatch reaches its one-second stall first. Hold
                     # finishing until pytest tears down the original test;
                     # the process timeout contains lost teardown, not a timed
@@ -292,7 +307,7 @@ _GATED_CHILD = textwrap.dedent(r'''
                 gate.set()
                 coordinator = held.get("coordinator")
                 if coordinator is not None:
-                    coordinator.join(5)
+                    coordinator.join(60)
                     assert not coordinator.is_alive(), "gated coordinator cleanup did not finish"
 
     raise SystemExit(pytest.main([
@@ -316,7 +331,14 @@ def test_original_stall_failure_retains_coordinator_stack_before_cleanup(tmp_pat
             [sys.executable, "-c", _GATED_CHILD, str(coordinator_receipt),
              str(evidence_directory), str(junit_path), TARGET_NODE, str(startup_delay)],
             cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding="utf-8", errors="replace", timeout=30, check=False,
+            # Contains a lost child only; the gate decides the result. It
+            # outlasts the child's own guards (HANDSHAKE_GUARD_SECONDS = 120 s
+            # worker entry + 120 s gate + 60 s cleanup = 300 s) with 120 s for
+            # pytest startup. Both parameters losing their child cost 14 min,
+            # which still fits the windows-focused job's 35 min limit on top
+            # of its serial lifecycle step (13.5-16 min measured on hosted
+            # runners), so the diagnostics upload is never cancelled.
+            text=True, encoding="utf-8", errors="replace", timeout=420, check=False,
         )
         (tmp_path / "child-pytest.log").write_text(completed.stdout, encoding="utf-8")
 
