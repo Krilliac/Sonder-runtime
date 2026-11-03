@@ -1007,9 +1007,10 @@ def test_natural_language_worker_cap_rejects_negation_and_ambiguity():
 
 
 # Bounds only a hung or broken run. Every concurrency observation below comes
-# from a production handshake, never from this clock running out. 300 s is the
-# suite's own hang definition (pytest.ini faulthandler_timeout).
-HANDSHAKE_GUARD_SECONDS = 300.0
+# from a production handshake, never from this clock running out. 120 s stays
+# under the suite's hang definition (pytest.ini faulthandler_timeout = 300), so
+# a guard firing is reported as its own assertion, not a faulthandler dump.
+HANDSHAKE_GUARD_SECONDS = 120.0
 
 
 def _await_handshake(event, *, abort, guard=HANDSHAKE_GUARD_SECONDS):

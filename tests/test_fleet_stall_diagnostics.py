@@ -255,8 +255,10 @@ _GATED_CHILD = textwrap.dedent(r'''
             # short join must fail at `assert not thread.is_alive()`.
             gate_reached = threading.Event()
 
+            guard = request.module.HANDSHAKE_GUARD_SECONDS
+
             def wait_for_gate():
-                assert gate_reached.wait(300), "coordinator never reached gated_finish"
+                assert gate_reached.wait(guard), "coordinator never reached gated_finish"
 
             monkeypatch.setattr(request.module, "_before_coordinator_join", wait_for_gate)
             monkeypatch.setattr(request.module, "COORDINATOR_JOIN_GUARD_SECONDS", 0.5)
@@ -329,11 +331,14 @@ def test_original_stall_failure_retains_coordinator_stack_before_cleanup(tmp_pat
             [sys.executable, "-c", _GATED_CHILD, str(coordinator_receipt),
              str(evidence_directory), str(junit_path), TARGET_NODE, str(startup_delay)],
             cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            # Contains a lost child only; the gate decides the result. It must
-            # outlast the child's own guards (300 s worker entry + 300 s gate
-            # + 60 s cleanup) plus pytest startup, which took up to 514 s
-            # under 3x CPU oversubscription locally.
-            text=True, encoding="utf-8", errors="replace", timeout=1500, check=False,
+            # Contains a lost child only; the gate decides the result. It
+            # outlasts the child's own guards (HANDSHAKE_GUARD_SECONDS = 120 s
+            # worker entry + 120 s gate + 60 s cleanup = 300 s) with 120 s for
+            # pytest startup. Both parameters losing their child cost 14 min,
+            # which still fits the windows-focused job's 35 min limit on top
+            # of its serial lifecycle step (13.5-16 min measured on hosted
+            # runners), so the diagnostics upload is never cancelled.
+            text=True, encoding="utf-8", errors="replace", timeout=420, check=False,
         )
         (tmp_path / "child-pytest.log").write_text(completed.stdout, encoding="utf-8")
 

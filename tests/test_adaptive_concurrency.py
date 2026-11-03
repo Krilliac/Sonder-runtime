@@ -31,9 +31,12 @@ def setup_function():
 # Bounds only a hung or broken run. The run_delegated controls below observe
 # production handshakes (worker entry, coordinator return); none of their
 # assertions is produced by one of these clocks running out on a slow runner.
-# 300 s is the suite's own hang definition (pytest.ini faulthandler_timeout);
-# a 60 s guard was exhausted before worker entry under 3x CPU oversubscription.
-HANDSHAKE_GUARD_SECONDS = 300.0
+# A 60 s guard was exhausted before worker entry under 3x CPU
+# oversubscription. 120 s stays under the suite's hang definition (pytest.ini
+# faulthandler_timeout = 300), so a guard firing is reported as its own
+# assertion, not as a faulthandler dump, and the stall-diagnostics child that
+# reuses these guards fits inside the CI job's time limit.
+HANDSHAKE_GUARD_SECONDS = 120.0
 # The stall control's coordinator join. Its worker is held for twice this
 # long (and released only after the join), so a coordinator that waits on the
 # hung worker fails at the join itself.
