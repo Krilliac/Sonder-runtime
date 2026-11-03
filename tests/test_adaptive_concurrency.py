@@ -31,11 +31,18 @@ def setup_function():
 # Bounds only a hung or broken run. The run_delegated controls below observe
 # production handshakes (worker entry, coordinator return); none of their
 # assertions is produced by one of these clocks running out on a slow runner.
-HANDSHAKE_GUARD_SECONDS = 60.0
-# The stall control's coordinator join. Its worker stays blocked until after
-# the join, so the join proves the coordinator did not wait for it at any
-# bound; the injected diagnostic child shortens this to fail fast.
+# 300 s is the suite's own hang definition (pytest.ini faulthandler_timeout);
+# a 60 s guard was exhausted before worker entry under 3x CPU oversubscription.
+HANDSHAKE_GUARD_SECONDS = 300.0
+# The stall control's coordinator join. Its worker is held for twice this
+# long (and released only after the join), so a coordinator that waits on the
+# hung worker fails at the join itself.
 COORDINATOR_JOIN_GUARD_SECONDS = HANDSHAKE_GUARD_SECONDS
+STALLED_WORKER_HOLD_SECONDS = 2 * HANDSHAKE_GUARD_SECONDS
+
+
+def _before_coordinator_join():
+    """Seam for the injected diagnostic child (it waits for its gate here)."""
 
 
 def _await_handshake(event, *, alive, guard=HANDSHAKE_GUARD_SECONDS):
@@ -555,7 +562,7 @@ def test_run_delegated_stall_is_uncertain_and_retains_child_capacity(
         entered.set()
         # Held until after the coordinator join: the stall must surface while
         # this worker is provably still inside its call.
-        release.wait(HANDSHAKE_GUARD_SECONDS)
+        release.wait(STALLED_WORKER_HOLD_SECONDS)
         checkpoints["worker_returned_ns"] = time.monotonic_ns()
         return "late"
 
@@ -573,8 +580,15 @@ def test_run_delegated_stall_is_uncertain_and_retains_child_capacity(
     thread.start()
     phase = "worker-entry"
     try:
-        assert _await_handshake(entered, alive=thread.is_alive)
+        assert _await_handshake(entered, alive=thread.is_alive), {
+            # Distinguish a coordinator that returned before entry from a
+            # guard that ran out while startup was still in progress.
+            "coordinator_alive": thread.is_alive(),
+            "output": (result_box.get("result") or {}).get("output"),
+            "elapsed_s": round((time.monotonic_ns() - checkpoints["test_started_ns"]) / 1e9, 3),
+        }
         phase = "coordinator-join"
+        _before_coordinator_join()
         checkpoints["join_started_ns"] = time.monotonic_ns()
         thread.join(COORDINATOR_JOIN_GUARD_SECONDS)
         checkpoints["join_finished_ns"] = time.monotonic_ns()

@@ -249,9 +249,17 @@ _GATED_CHILD = textwrap.dedent(r'''
             # Import after the repository conftest pins its disposable ledger.
             import master_orchestrator
 
-            # The gate holds the coordinator forever; fail its join quickly
-            # instead of waiting out the original test's hang guard.
-            monkeypatch.setattr(request.module, "COORDINATOR_JOIN_GUARD_SECONDS", 2.0)
+            # Order, not a clock, decides where the original test fails: its
+            # join starts only after the coordinator is held inside
+            # gated_finish, which never returns before teardown, so even a
+            # short join must fail at `assert not thread.is_alive()`.
+            gate_reached = threading.Event()
+
+            def wait_for_gate():
+                assert gate_reached.wait(300), "coordinator never reached gated_finish"
+
+            monkeypatch.setattr(request.module, "_before_coordinator_join", wait_for_gate)
+            monkeypatch.setattr(request.module, "COORDINATOR_JOIN_GUARD_SECONDS", 0.5)
 
             original_finish = master_orchestrator._finish
             original_start = master_orchestrator._start_agent
@@ -282,6 +290,7 @@ _GATED_CHILD = textwrap.dedent(r'''
                         json.dumps({"coordinator_id": threading.get_ident()}),
                         encoding="utf-8",
                     )
+                    gate_reached.set()
                     # Real dispatch reaches its one-second stall first. Hold
                     # finishing until pytest tears down the original test;
                     # the process timeout contains lost teardown, not a timed
@@ -320,9 +329,11 @@ def test_original_stall_failure_retains_coordinator_stack_before_cleanup(tmp_pat
             [sys.executable, "-c", _GATED_CHILD, str(coordinator_receipt),
              str(evidence_directory), str(junit_path), TARGET_NODE, str(startup_delay)],
             cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            # Contains a lost child only: a full pytest start on a loaded
-            # runner took up to 113s locally, and the gate decides the result.
-            text=True, encoding="utf-8", errors="replace", timeout=240, check=False,
+            # Contains a lost child only; the gate decides the result. It must
+            # outlast the child's own guards (300 s worker entry + 300 s gate
+            # + 60 s cleanup) plus pytest startup, which took up to 514 s
+            # under 3x CPU oversubscription locally.
+            text=True, encoding="utf-8", errors="replace", timeout=1500, check=False,
         )
         (tmp_path / "child-pytest.log").write_text(completed.stdout, encoding="utf-8")
 
