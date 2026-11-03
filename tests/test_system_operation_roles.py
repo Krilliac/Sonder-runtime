@@ -68,7 +68,7 @@ def test_catalogued_dispatch_checks_role_before_invoking_system_tool(monkeypatch
     def invoked(**_kwargs):
         raise AssertionError("system handler must not run for an ordinary account")
 
-    monkeypatch.setattr(serve.server, "permission_mode", invoked)
+    monkeypatch.setattr(serve._legacy_runtime(), "permission_mode", invoked)
     result = serve._dispatch_catalogued_tool(
         "/permission_mode auto", serve.ConversationState(), context=_context("user"),
     )
@@ -79,7 +79,7 @@ def test_catalogued_dispatch_checks_role_before_invoking_system_tool(monkeypatch
 def test_runtime_slash_checks_admin_role_before_control_dispatch(monkeypatch):
     monkeypatch.setattr(serve, "_http_slash_refusal", lambda *_args, **_kwargs: "")
     monkeypatch.setattr(
-        serve.server, "control_command",
+        serve._legacy_runtime(), "control_command",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("runtime control must not run for an ordinary account")
         ),
