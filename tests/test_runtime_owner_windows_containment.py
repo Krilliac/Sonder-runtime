@@ -43,6 +43,62 @@ def test_handle_wait_uses_one_deadline(monkeypatch, force):
     assert token.cleanup_observation == (0, (258,))
 
 
+def _clocked_token(monkeypatch, observe):
+    from types import SimpleNamespace
+    from sonder_runtime.adapters.extensions import memory_limits
+    terminated = []
+    token = memory_limits._WindowsJobToken(
+        123, lambda handle: True, terminate=lambda handle: terminated.append(clock[0]) or True,
+    )
+    clock = [0.0]
+
+    def sleep(seconds):
+        clock[0] += seconds
+
+    monkeypatch.setattr(memory_limits, "time", SimpleNamespace(
+        monotonic=lambda: clock[0], sleep=sleep))
+    monkeypatch.setattr(token, "_observe", lambda: observe(clock[0]))
+    return token, clock, terminated
+
+
+def test_exit_grace_lets_an_exiting_member_leave_without_forcing(monkeypatch):
+    # A console root exited cleanly; its conhost.exe is still a job member
+    # for a moment.  Forcing at once recorded a clean exit as forced cleanup,
+    # so the disposable owner reported STOPPED_UNCLEAN
+    # ("observed before forced cleanup: <pid>=conhost.exe").
+    token, clock, terminated = _clocked_token(
+        monkeypatch, lambda now: (1, (0, 258)) if now < 0.3 else (0, (0, 0)),
+    )
+    proof = token.quiesce(force=True, exit_grace=2.0)
+    assert proof.complete and not proof.forced, proof
+    assert terminated == []
+
+
+def test_exit_grace_still_forces_a_member_that_stays(monkeypatch):
+    token, clock, terminated = _clocked_token(
+        monkeypatch, lambda now: (1, (0, 258)) if not terminated else (0, (0, 0)),
+    )
+    proof = token.quiesce(force=True, exit_grace=2.0)
+    assert proof.complete and proof.forced
+    assert len(terminated) == 1 and terminated[0] >= 2.0
+
+
+def test_exit_grace_never_delays_a_failed_handle_proof(monkeypatch):
+    token, clock, terminated = _clocked_token(monkeypatch, lambda now: (1, (0xFFFFFFFF,)))
+    proof = token.quiesce(force=True, exit_grace=2.0)
+    assert not proof.complete and proof.forced
+    assert terminated == [0.0]
+
+
+def test_root_exit_wait_settles_with_a_grace_and_cancel_forces_at_once():
+    import inspect
+    from sonder_runtime.adapters.execution import process_jobs
+    source = inspect.getsource(process_jobs.SubprocessJobProvider.wait)
+    assert "exit_grace=ROOT_EXIT_SETTLE_SECONDS" in source
+    assert process_jobs.ROOT_EXIT_SETTLE_SECONDS >= 1.0
+    assert "exit_grace" not in inspect.getsource(process_jobs.SubprocessJobProvider.cancel)
+
+
 def test_failed_job_handle_close_retains_the_owned_handle(monkeypatch):
     from sonder_runtime.adapters.extensions.memory_limits import (
         _WindowsJobToken,
