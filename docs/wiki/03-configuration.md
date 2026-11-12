@@ -373,6 +373,42 @@ unavailable, stayed on <model>: <reason> — …` when no pool worker advertises
 the model or the overflow attempt fails (the turn then falls back to its
 original route).
 
+#### Tool-lane model deny list
+
+Some installed models are text-only advisers: they may be chatted with by
+name, and used through text-only `ensemble_answer` and `consult`, but any
+lane that calls tools, or executes or applies model output (agent and
+workbench turns, repository and build fleet workers, campaigns, game generation,
+`codegen_build_loop`, `improve_function`), refuses them, the chat code gate
+never runs their replies, and they are never bound to a tier. The built-in
+list is the `astra-cyber-` prefix and the two `hf.co/...-GGUF` sources it was
+pulled from (every quantisation, tagged or not). Names are compared
+case-insensitively, without a trailing `:latest`, and by their last path
+segment too.
+
+The runtime policy can add entries (`tool_lane_denied_models` in
+`runtime_policy.json`: `{"names": [...], "prefixes": [...]}`) but never remove
+the built-in ones, and no tool or MCP parameter edits it. A malformed section
+makes the whole policy file invalid: it then loads as built-in defaults, which
+also reverts every tier binding, and caller-named models are refused in tool
+lanes until the file is repaired or reset (`/runtime reset`).
+
+A tier bound to a provider other than Ollama is judged by the model that
+provider actually serves (`SONDER_INFERENCE_TIER_MODELS`, else
+`SONDER_INFERENCE_MODEL`; the OpenRouter tier model; `SONDER_OPENAI_MODEL`).
+When that model cannot be determined (unset, `default`, or unreadable
+configuration) the tier is refused in tool lanes and chat still works.
+
+Limits: this is a name list. A renamed copy (`ollama cp astra-cyber-27b
+helper`) or an alias such as `sonder:latest` pointed at a blocked model is not
+recognised, and a provider that serves a different model than the configured
+id is not detected. The packaged model-gateway lanes (interactive agent
+lanes, conversational subagents, `build_fix` candidates) refuse a
+caller-named blocked model but do not yet judge a non-Ollama tier by its
+served model. `/run` and `/runproject` still execute the latest
+runnable block whatever model wrote it: the user typing the command is the
+explicit approval.
+
 ### Sonder ecosystem (Inference provider and Observatory)
 
 Sonder Inference provider (read lazily per call; reference:

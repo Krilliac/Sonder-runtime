@@ -1033,7 +1033,7 @@ def _gate_answer_code(response, *, iid, prompt, history, model, system,
     persist a verified repair or, when the code still fails, step to the
     next rung.
     """
-    if _tool_lane_guard.denied(model, tier_label, _RUNTIME_POLICY):
+    if _tool_lane_guard.denied(model, tier_label, _RUNTIME_POLICY):  # never auto-run; a user's /run or /runproject is their explicit approval
         return response, None, False, {}  # a blocked model's reply is never run or repaired
     captured = response
     usage = {}
@@ -14916,8 +14916,6 @@ def _game_generate_result(
     repair_rounds: int | None,
     use_reference_fallback: bool = True,
 ) -> dict:
-    if refusal := _tool_lane_guard.selector_refusal(tier, TIERS, _RUNTIME_POLICY):
-        raise ValueError(refusal)
     repair_rounds = _resolve_repair_rounds(repair_rounds, language)
     project = game_forge.prepare_project(name, language, dimension, theme, seed)
     base_prompt = game_forge.generation_prompt(project, concept)
@@ -15051,6 +15049,8 @@ def game_generate_and_test(
     repair_rounds=None picks a language default: 2 for C++, 1 otherwise.
     """
     _maybe_live_reload()
+    if refusal := _tool_lane_guard.selector_refusal(tier, TIERS, _RUNTIME_POLICY):
+        return refusal
     started = time.time()
     try:
         result = _game_generate_result(
@@ -15121,6 +15121,8 @@ def game_generation_campaign(
     emit GAME_OK and a valid frame.ppm, and records a grounded outcome.
     """
     _maybe_live_reload()
+    if refusal := _tool_lane_guard.selector_refusal(tier, TIERS, _RUNTIME_POLICY):
+        return refusal
     # Repeat the fully verified reference matrix. This keeps every default fleet
     # job recoverable if a model draft fails while still covering all supported
     # languages and 2D, isometric 2.5D, and 3D execution.
@@ -25909,9 +25911,9 @@ def codegen_build_loop(
     repair_tiers = ()
     repair_models = ()
     explicit_targets = ()
+    if refusal := _tool_lane_guard.selector_refusal(tiers.strip() or ",".join(_configured_local_tiers()), TIERS, _RUNTIME_POLICY):
+        return refusal  # no tiers: the ensemble polls every bound local tier
     if tiers.strip():
-        if refusal := _tool_lane_guard.selector_refusal(tiers, TIERS, _RUNTIME_POLICY):
-            return refusal
         explicit_targets, _unavailable = _ensemble_targets(tiers)
         if attempt_limit >= 3 and len(explicit_targets) >= 2:
             repair_tiers = (explicit_targets[0][0], explicit_targets[1][0])
