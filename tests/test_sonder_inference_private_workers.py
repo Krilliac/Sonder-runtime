@@ -427,15 +427,19 @@ def test_trust_scope_pins_the_worker_bundle(ca_bundle, monkeypatch):
         seen.append(kwargs.get("cafile"))
         return real()
 
-    gateway_module._private_tls_context.cache_clear()
     openai_compat_module._https_context.cache_clear()
     monkeypatch.setattr(gateway_module.ssl, "create_default_context", record)
-    with gateway_module.trust_scope(ca_bundle):
-        pinned = gateway_module._tls_context()
-        with gateway_module.trust_scope(""):
-            system = gateway_module._tls_context()
-        assert gateway_module._tls_context() is pinned
-    assert gateway_module._tls_context() is system
-    assert system is not pinned
-    # Each trust anchor is loaded once and then reused, never mixed.
-    assert seen == [ca_bundle, None]
+    try:
+        with gateway_module.trust_scope(ca_bundle):
+            pinned = gateway_module._tls_context()
+            with gateway_module.trust_scope(""):
+                system = gateway_module._tls_context()
+            assert gateway_module._tls_context() is not pinned
+        assert gateway_module._tls_context() is system
+        assert system is gateway_module.shared_https_context()
+        assert system is not pinned
+        # The pinned bundle is built per call inside the scope; the system
+        # context is built once and reused.
+        assert seen == [ca_bundle, None, ca_bundle]
+    finally:
+        openai_compat_module._https_context.cache_clear()

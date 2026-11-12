@@ -339,17 +339,8 @@ def trust_scope(ca_bundle: str):
 def _tls_context() -> ssl.SSLContext:
     ca_bundle = getattr(_TRUST, "ca_bundle", "")
     if ca_bundle:
-        # Cached per bundle and keyed on the file's identity, so a rotated
-        # bundle is reloaded while repeat requests to one worker are not.
-        # Contexts for different bundles never alias.
-        info = os.stat(ca_bundle)
-        return _private_tls_context(ca_bundle, info.st_mtime_ns, info.st_size)
+        return ssl.create_default_context(cafile=ca_bundle)
     return shared_https_context()
-
-
-@functools.lru_cache(maxsize=32)
-def _private_tls_context(ca_bundle: str, _mtime_ns: int, _size: int) -> ssl.SSLContext:
-    return ssl.create_default_context(cafile=ca_bundle)
 
 
 class _BudgetedHTTPSHandler(urllib.request.HTTPSHandler):
