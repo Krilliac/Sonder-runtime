@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import pkgutil
 import time
 from typing import Any
@@ -106,6 +107,16 @@ def discover_agent_tool_registrars(package: str = "sonder_runtime.bootstrap"):
     return tuple(sorted(found, key=lambda item: item[0]))
 
 
+def register_agent_tools(mcp, record, runtime, registrars=None) -> None:
+    """Run every discovered registrar. Convention: a registrar parameter named ``runtime`` receives the
+    server-module provider (a zero-argument callable); registrars without it are called as ``(mcp, record)``."""
+    for _name, registrar in (discover_agent_tool_registrars() if registrars is None else registrars):
+        if "runtime" in inspect.signature(registrar).parameters:
+            registrar(mcp, record, runtime=runtime)
+        else:
+            registrar(mcp, record)
+
+
 def register(mcp, record) -> None:
     """Expose ``tool_help`` as a bounded, read-only MCP tool."""
     def run(args: dict[str, Any]) -> str:
@@ -124,4 +135,4 @@ def register(mcp, record) -> None:
         return run({"name": name, "query": query})
 
 
-__all__ = ["catalog_for", "catalog_from_mcp", "dispatch_tool_help", "discover_agent_tool_registrars", "register"]
+__all__ = ["catalog_for", "catalog_from_mcp", "dispatch_tool_help", "discover_agent_tool_registrars", "register", "register_agent_tools"]

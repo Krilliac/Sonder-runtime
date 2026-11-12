@@ -285,9 +285,9 @@ def test_http_chat_and_explicit_pin_capture_and_replay_the_actual_lane(tmp_path,
     monkeypatch.setattr(serve, "API_KEY", "")
     monkeypatch.setattr(serve, "AUTH_MODE", "local-open")
     monkeypatch.setattr(serve, "REQUIRE_ACCOUNT", False)
-    monkeypatch.setattr(serve.server, "prewarm_model", lambda _model: None)
-    monkeypatch.setattr(serve.server, "resolve_discovered_model", lambda _model: None)
-    monkeypatch.setattr(serve.server, "chat_web_response", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(serve._legacy_runtime(), "prewarm_model", lambda _model: None)
+    monkeypatch.setattr(serve._legacy_runtime(), "resolve_discovered_model", lambda _model: None)
+    monkeypatch.setattr(serve._legacy_runtime(), "chat_web_response", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(serve, "_handle_intent", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(serve, "_handle_feedback", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(serve, "_server_side_history", lambda _session: [])
@@ -300,7 +300,7 @@ def test_http_chat_and_explicit_pin_capture_and_replay_the_actual_lane(tmp_path,
             lambda: "model answer",
         )
 
-    monkeypatch.setattr(serve.server, "answer_with_history", model_answer)
+    monkeypatch.setattr(serve._legacy_runtime(), "answer_with_history", model_answer)
     monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(server, "_refresh_live_cloud_tiers", lambda: None)
     monkeypatch.setattr(server, "_RUNTIME_POLICY", {"routing": {"chat": "fast"}})
@@ -397,7 +397,7 @@ def test_http_chat_and_explicit_pin_capture_and_replay_the_actual_lane(tmp_path,
         unnamed_ref = finished_unnamed["result_receipt"]["session_ref"]
         assert unnamed_ref
         monkeypatch.setattr(
-            serve.server, "answer_with_history",
+            serve._legacy_runtime(), "answer_with_history",
             lambda *args, **kwargs: (_ for _ in ()).throw(
                 AssertionError("unknown work outcome must not trigger another model request")
             ),
@@ -414,7 +414,7 @@ def test_http_chat_and_explicit_pin_capture_and_replay_the_actual_lane(tmp_path,
             assert finished_unknown["result_receipt"]["status"] == "unknown"
             assert not finished_unknown["output"].strip()
         monkeypatch.setattr(server, "route_work_request", original_work_route)
-        monkeypatch.setattr(serve.server, "answer_with_history", model_answer)
+        monkeypatch.setattr(serve._legacy_runtime(), "answer_with_history", model_answer)
         monkeypatch.setattr(
             serve, "_handle_work_intent",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
