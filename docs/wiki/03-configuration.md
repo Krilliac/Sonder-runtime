@@ -402,10 +402,11 @@ configuration) the tier is refused in tool lanes and chat still works.
 Limits: this is a name list. A renamed copy (`ollama cp astra-cyber-27b
 helper`) or an alias such as `sonder:latest` pointed at a blocked model is not
 recognised, and a provider that serves a different model than the configured
-id is not detected. The packaged model-gateway lanes (interactive agent
-lanes, conversational subagents, `build_fix` candidates) refuse a
-caller-named blocked model but do not yet judge a non-Ollama tier by its
-served model. `/run` and `/runproject` still execute the latest
+id is not detected. The packaged model-gateway lanes that call tools or
+apply output (interactive agent lanes, conversational subagents, `build_fix`
+candidates) and the autopilot planner and reviewer apply the same checks;
+text callers of the gateway (A2A, offloads, replay) answer a named blocked
+model as chat. `/run` and `/runproject` still execute the latest
 runnable block whatever model wrote it: the user typing the command is the
 explicit approval.
 
