@@ -6695,8 +6695,8 @@ def _sonder_impl_serialized(
         ctx = pinned_ctx
         if ctx is None:
             ctx = None if provider else 0 if rung.cloud else _auto_model_context(rung.model)
-        return (  # a reference-lookup model gets no Sonder system prompt (its Modelfile rules stay)
-            _reference_lookup_lanes.system_for(rung.model, _build_system(system, trace, persona, model=rung.model, cloud=rung.cloud, provider=provider)),
+        return (  # a reference-lookup model gets no Sonder system prompt (its Modelfile rules stay), only the caller's
+            _reference_lookup_lanes.system_for(rung.model, _build_system(system, trace, persona, model=rung.model, cloud=rung.cloud, provider=provider), system),
             ctx,
         )
 

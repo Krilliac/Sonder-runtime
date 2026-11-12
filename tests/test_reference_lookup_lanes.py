@@ -150,7 +150,7 @@ def _passthrough_lanes():
     """The lane seams as they behaved before this feature: every call hands back its input."""
     return types.SimpleNamespace(
         lookup_turn=lambda model: False,
-        system_for=lambda model, system: system,
+        system_for=lambda model, system, caller_system="": system,
         chat_generate=lambda make_generate, question, model, system, temperature,
         num_predict, num_ctx, **options: make_generate(
             model, system, temperature, num_predict, num_ctx, **options),
@@ -328,13 +328,49 @@ def test_search_terms_failure_searches_the_question_words(lane, monkeypatch):
 
 @pytest.mark.parametrize("lane_name", sorted(LANES))
 def test_lookup_turn_sends_no_system_prompt(lane, monkeypatch, lane_name):
-    _finish(lane_name, LANES[lane_name](monkeypatch, LOOKUP_MODEL))
+    # Sonder's own system prompt (here with the trace instructions on the MCP
+    # lanes) is dropped; with no caller system message there is none at all.
+    extra = {"trace": True} if lane_name in MCP_LANES else {}
+    _finish(lane_name, LANES[lane_name](monkeypatch, LOOKUP_MODEL, **extra))
     for payload in lane.payloads:
         assert payload["messages"][0]["role"] != "system"
     lane.payloads.clear()
-    LANES[lane_name](monkeypatch, PLAIN_MODEL)
+    LANES[lane_name](monkeypatch, PLAIN_MODEL, **extra)
     assert lane.payloads[0]["messages"][0]["role"] == "system"
     assert lane.payloads[0]["messages"][0]["content"]
+
+
+CALLER_SYSTEM = "Answer in one short paragraph for a SOC analyst."
+
+
+@pytest.mark.parametrize("lane_name", MCP_LANES)
+def test_caller_system_message_survives_a_lookup_turn(lane, monkeypatch, lane_name):
+    text = LANES[lane_name](monkeypatch, LOOKUP_MODEL, system=CALLER_SYSTEM, trace=True)
+
+    (answer,) = lane.answers()
+    # The caller's text, sent as is: no persona, playbook, trace or tool guidance.
+    assert answer["messages"][0] == {"role": "system", "content": CALLER_SYSTEM}
+    assert MARKER_RE.search(answer["messages"][-1]["content"])
+    (expansion,) = lane.expansions()
+    assert [m["role"] for m in expansion["messages"]] == ["user"]
+    assert "Sources:" in text
+    # Control: another model gets Sonder's composed prompt around the caller's text.
+    lane.payloads.clear()
+    LANES[lane_name](monkeypatch, PLAIN_MODEL, system=CALLER_SYSTEM, trace=True)
+    system = lane.payloads[0]["messages"][0]
+    assert system["role"] == "system" and CALLER_SYSTEM in system["content"]
+    assert system["content"] != CALLER_SYSTEM
+
+
+def test_http_route_carries_no_caller_system_message_to_keep():
+    """The HTTP chat route drops ``system`` role messages on every turn, lookup or
+    not, so there is nothing for a lookup turn to keep (B2a behaviour stands)."""
+    messages = [{"role": "system", "content": CALLER_SYSTEM},
+                {"role": "user", "content": "earlier"},
+                {"role": "assistant", "content": "reply"},
+                {"role": "user", "content": QUESTION}]
+    assert serve._history_from_messages(messages) == [
+        {"role": "user", "content": "earlier"}, {"role": "assistant", "content": "reply"}]
 
 
 def test_search_terms_call_is_small_deterministic_and_bare(lane, monkeypatch):

@@ -7,8 +7,13 @@ chat tool (by tier and by ``model_override``) and of the HTTP chat route
 * ``lookup_turn(model)``: whether automatic lookup applies to the model of the
   rung about to answer.  The decision is made once per rung and remembered for
   the rest of that rung's seams.
-* ``system_for(model, system)``: the system prompt for that rung.  A lookup
-  model is sent none, so its own Modelfile house rules stay in force.
+* ``system_for(model, system, caller_system="")``: the system prompt for that
+  rung.  A lookup model is sent none of Sonder's own (persona, playbook, trace
+  instructions, tool guidance), so its Modelfile house rules stay in force; a
+  system message the caller supplied explicitly is kept and sent as is.  The
+  MCP chat tool passes its ``system`` argument; the HTTP route has no caller
+  system message to pass (``_history_from_messages`` drops ``system`` role
+  messages on every turn, lookup or not).
 * ``chat_generate(make_generate, question, model, system, ...)``: the generate
   callable for the rung.  For a lookup model it retrieves passages once per
   turn (asking the answering model for search terms first) and frames the user
@@ -79,12 +84,15 @@ class TurnLookup:
 
     ``bound`` is set once a generate callable was built for the rung; a bound
     record is never reused, so passages cannot carry over to another rung or
-    turn.  ``bundle`` and ``review`` are filled in when the model is called.
+    turn.  ``caller_system`` is the system message the caller supplied, the
+    only one a lookup model is sent.  ``bundle`` and ``review`` are filled in
+    when the model is called.
     """
 
     model: str
     applies: bool
     bound: bool = False
+    caller_system: str = ""
     bundle: _lookup.Bundle | None = None
     review: _lookup.ReplyReview | None = None
 
@@ -128,16 +136,25 @@ def lookup_turn(model: Any) -> bool:
     return _record(model).applies
 
 
-def system_for(model: Any, system: Any) -> Any:
-    """``system`` unchanged, or ``""`` for a lookup model (its Modelfile rules stay in force)."""
-    return "" if _record(model).applies else system
+def system_for(model: Any, system: Any, caller_system: Any = "") -> Any:
+    """``system`` unchanged, or for a lookup model only ``caller_system``.
+
+    ``system`` is Sonder's composed system prompt; ``caller_system`` is the part
+    the caller supplied explicitly.  A lookup model is sent the caller's text as
+    is and none of Sonder's own, so its Modelfile rules stay in force.
+    """
+    record = _record(model)
+    if not record.applies:
+        return system
+    record.caller_system = caller_system if isinstance(caller_system, str) else ""
+    return record.caller_system
 
 
 class LookupGenerate:
     """A generate callable that answers one lookup turn.
 
     Owns nothing but references: ``inner`` is the rung's generate callable
-    (built with no system prompt), ``record`` the turn's state.  Usage and
+    (built with only the caller's system message), ``record`` the turn's state.  Usage and
     response metadata are read through to ``inner`` live, and the provider
     ceiling (``num_predict_override``) is written to it, so callers that read
     or set those attributes see the real generator.  Not thread-safe: one turn
@@ -222,7 +239,8 @@ def chat_generate(make_generate: Callable[..., Any], question: Any, model: Any, 
     record.bound = True
     if not record.applies:
         return make_generate(model, system, temperature, num_predict, num_ctx, **options)
-    inner = make_generate(model, "", temperature, num_predict, num_ctx, **options)
+    # Only the caller's own system message (kept by ``system_for``), never Sonder's.
+    inner = make_generate(model, record.caller_system, temperature, num_predict, num_ctx, **options)
 
     def expander() -> Callable[..., Any]:
         return make_generate(model, "", EXPAND_TEMPERATURE, EXPAND_NUM_PREDICT, num_ctx, **options)
