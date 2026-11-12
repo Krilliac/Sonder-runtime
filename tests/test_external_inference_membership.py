@@ -1072,7 +1072,7 @@ def test_real_entrypoints_keep_external_admission_transport_and_local_choice(
         assert legacy_root.require_inference_application(application) is pool
         checked.append(True)
     monkeypatch.setattr(serve, "main", run_interface)
-    monkeypatch.setattr(server.mcp, "run", run_interface)
+    monkeypatch.setattr(server.mcp._lazy_materialize(), "run", run_interface)
     monkeypatch.setattr(server, "require_mcp_startup_safety", lambda: None)
     monkeypatch.setattr(repl, "main", run_interface)
     try:
