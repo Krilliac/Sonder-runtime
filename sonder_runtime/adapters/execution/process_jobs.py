@@ -549,7 +549,9 @@ class SubprocessJobProvider:
         # The root exited on its own: give members already exiting (a console
         # root's conhost.exe) time to leave before forcing the job.
         containment = self._quiesce_containment(
-            job_id, force=True, exit_grace=self._root_exit_grace(job_id),
+            job_id, force=True,
+            # Only a containment token consumes the grace; skip the registry read otherwise.
+            exit_grace=self._root_exit_grace(job_id) if job_id in self._memory_tokens else 0.0,
         )
         if containment is None and self._platform == "posix":
             view = self._registry.view(job_id)

@@ -192,14 +192,6 @@ class _WindowsJobToken:
             raise ExtensionMemoryLimitError("owned root process handle missing")
         return accounting.active, tuple(int(wait(handle, 0)) for _, handle in self._process_handles)
 
-    def request_force(self) -> None:
-        """Ask any in-progress or future grace to end now.
-
-        Sets a sticky event only; it takes no lock and touches no handle, so
-        it is safe while another thread holds the lock through a grace loop.
-        """
-        self._force_requested.set()
-
     def quiesce(self, *, force: bool, exit_grace: float = 0.0) -> ProcessContainmentResult:
         """Require empty accounting AND signaled retained exact process handles.
 

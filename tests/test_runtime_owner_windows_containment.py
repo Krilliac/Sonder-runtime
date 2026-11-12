@@ -133,7 +133,7 @@ def test_force_requested_before_grace_skips_it(monkeypatch):
     token, clock, terminated = _clocked_token(
         monkeypatch, lambda now: (1, (0, 258)) if not terminated else (0, (0, 0)),
     )
-    token.request_force()
+    token._force_requested.set()  # what an earlier immediate-force quiesce leaves behind
     proof = token.quiesce(force=True, exit_grace=2.0)
     assert proof.complete and proof.forced
     assert terminated == [0.0]

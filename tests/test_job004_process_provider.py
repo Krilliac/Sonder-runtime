@@ -1820,8 +1820,8 @@ def test_root_exit_grace_capped_at_hard_deadline():
         _override_deadline(provider, job_id, raw)
         return provider._root_exit_grace(job_id)
 
-    soon = (datetime.now(timezone.utc) + timedelta(seconds=0.5)).isoformat()
-    assert 0.0 < grace_for(soon) <= 0.5
+    soon = (datetime.now(timezone.utc) + timedelta(seconds=1.5)).isoformat()
+    assert 0.0 < grace_for(soon) <= 1.5
     past = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
     assert grace_for(past) == 0.0
     far = (datetime.now(timezone.utc) + timedelta(seconds=300)).isoformat()
