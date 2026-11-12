@@ -164,7 +164,7 @@ import creative_router
 import intents
 import sonder_runtime.adapters.runtime_policy as runtime_policy
 from sonder_runtime.adapters import tool_lane_guard as _tool_lane_guard
-from sonder_runtime.adapters import chat_observers as _chat_observers, reference_lookup_lanes as _reference_lookup_lanes
+from sonder_runtime.adapters import chat_observers as _chat_observers, reference_lookup_lanes as _reference_lookup_lanes, reference_lookup_multi as _reference_lookup_multi
 import sonder_runtime.adapters.accelerators.npu.contract as npu_contract
 import sonder_runtime.adapters.accelerators.npu.service as npu_service
 import calibration
@@ -25165,18 +25165,17 @@ def ensemble_answer(
     except (TypeError, ValueError):
         requested_ctx = 0
     poll_num_ctx = max(1024, requested_ctx) if requested_ctx > 0 else 0
+    lookup = _reference_lookup_multi.ensemble(prompt, mode, targets, num_predict, _make_tier_generate, lambda tier, model: poll_num_ctx or (0 if _is_cloud_tier(tier, model) or _bridge_provider_for_tier(tier) else _auto_model_context(model)))  # one shared reference lookup
 
     answers, failures = [], []
     for tier, model in targets:
         started = time.monotonic()
         try:
-            target_num_ctx = poll_num_ctx or (
-                0 if _is_cloud_tier(tier, model) or _bridge_provider_for_tier(tier) else _auto_model_context(model)
-            )
+            target_num_ctx = lookup.num_ctx(tier, model)
             gen = _make_tier_generate(
                 tier, model, "", 0.2, max(64, int(num_predict)), target_num_ctx,
             )
-            text = (gen(question) or "").strip()
+            text = (lookup.ask(tier, gen, question) or "").strip()  # under lookup: the shared framed turn, cleaned
         except ModelCallError as error:
             if error.kind == "cancelled":
                 raise
@@ -25233,16 +25232,16 @@ def ensemble_answer(
     if len(answers) == 1:
         # Nothing to compound. Returning the single answer is honest; running a
         # synthesis pass over one input would only launder it.
-        return answers[0]["answer"] + footer
+        return answers[0]["answer"] + lookup.footer(footer)
 
-    synth = (synth_tier or "").strip().lower() or answers[-1]["tier"]
+    synth =(synth_tier or "").strip().lower() or answers[-1]["tier"]
     synth_model, _cloud, _augment, synth_label = _tool_lane_guard.chat_target(_serve_target, synth, False)
     if not synth_model or synth_label is None:
         synth_model = answers[-1]["model"]
         synth = answers[-1]["tier"]
         synth_label = synth
-    build_prompt = (
-        _ensemble_code_synthesis_prompt if code_mode else _ensemble_synthesis_prompt
+    build_prompt = (  # the synthesiser sees the raw question and cleaned answers only
+        lookup.synthesis(_ensemble_code_synthesis_prompt if code_mode else _ensemble_synthesis_prompt)
     )
     try:
         synth_num_ctx = poll_num_ctx or (
@@ -25254,7 +25253,7 @@ def ensemble_answer(
                 max(256, int(num_predict)), bridged=_bridge_provider_for_tier(synth_label) == "sonder_inference"),
             synth_num_ctx,
         )
-        merged = _fleet_synthesis.generate_synthesis(gen, build_prompt(question, answers)).strip()
+        merged = lookup.merged(_fleet_synthesis.generate_synthesis(gen, build_prompt(question, answers))).strip()
     except Exception as exc:
         # Synthesis is the only step that can fail after real work is done, so
         # hand back the strongest single answer rather than losing everything.
@@ -25268,13 +25267,13 @@ def ensemble_answer(
             "--- %s (%s) ---\n%s" % (r["tier"], r["model"], r["answer"])
             for r in answers
         )
-        return "%s\n\n(synthesis failed: %s)%s" % (raw, exc, footer)
+        return "%s\n\n(synthesis failed: %s)%s" % (raw, exc, lookup.footer(footer))
 
     if not merged:
-        return answers[-1]["answer"] + footer
+        return answers[-1]["answer"] + lookup.footer(footer)
     if code_mode:
         return merged
-    return "%s\n%s  synthesized by %s (%s)" % (merged, footer, synth, synth_model)
+    return "%s\n%s  synthesized by %s (%s)" % (merged, lookup.footer(footer, "\n"), synth, synth_model)
 
 
 @mcp.tool()

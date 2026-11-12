@@ -1,0 +1,257 @@
+"""Reference lookup on the multi-model text lanes (phase B2b): ensemble_answer and consult.
+
+The lanes run end to end with only the model factory (``server._make_generate``)
+and the unload call (``server._post``) faked, the way ``test_ensemble_answer``
+fakes them, against a tiny fixture index.  A lookup model is one the applies
+rule matches (the ``astra-cyber-`` prefix).
+"""
+from __future__ import annotations
+
+import re
+import sqlite3
+import types
+
+import pytest
+
+import server
+import sonder_runtime.adapters.reference_lookup_lanes as lanes
+import sonder_runtime.adapters.reference_lookup_service as service
+import sonder_runtime.adapters.reference_lookup_state as state
+from sonder_runtime.domain.context_formatting import rough_token_count
+from sonder_runtime.domain.ensemble_synthesis import KEEP_CITATIONS_RULE
+from sonder_runtime.domain.reference_lookup.selection import passage_char_budget
+from sonder_runtime.platform import reference_library_config as config
+from tests._reference_lookup_index import create_index
+from tests.test_reference_lookup_lanes import BAD_INDEXES
+
+LOOKUP_MODEL = "astra-cyber-9b"
+PLAIN_MODEL = "qwen2.5:3b"
+OTHER_PLAIN_MODEL = "llama3.2:3b"
+MODELS = {"cyber": LOOKUP_MODEL, "plain": PLAIN_MODEL, "other": OTHER_PLAIN_MODEL}
+WINDOWS = {LOOKUP_MODEL: 8192, PLAIN_MODEL: 2048, OTHER_PLAIN_MODEL: 4096}
+QUESTION = "What does Windows event 4625 mean after repeated logon attempts?"
+PASSAGE_TEXT = "The status 0xC000006A means the user name is correct"
+TERMS_REPLY = "failed logon\nlogon failure\n4625"
+MARKER_RE = re.compile(r"=== (?:END )?PASSAGE \d+ \[")
+ESC = "\x1b"
+SYNTH_MARK = "COMPOUNDED ANSWER:"
+JUDGE_MARK = "Do these answers agree"
+TIMINGS = re.compile(r"\d+ms")
+
+
+class Models:
+    """Fake model factory: records every generation and answers by call kind."""
+
+    def __init__(self):
+        self.calls = []
+        self.replies = {
+            LOOKUP_MODEL: "Event 4625 is a failed logon [1].",
+            PLAIN_MODEL: "It is a failed logon.",
+            OTHER_PLAIN_MODEL: "A logon failed.",
+        }
+        self.synth = "Merged: event 4625 is a failed logon [1]."
+        self.judge = "YES. They agree."
+
+    def __call__(self, model, system, temperature, num_predict, num_ctx, **_options):
+        def gen(prompt, history=None, **_kwargs):
+            call = {"model": model, "system": system, "temperature": temperature,
+                    "num_predict": num_predict, "num_ctx": num_ctx, "prompt": prompt}
+            self.calls.append(call)
+            if num_predict == lanes.EXPAND_NUM_PREDICT and temperature == lanes.EXPAND_TEMPERATURE:
+                return TERMS_REPLY
+            if SYNTH_MARK in prompt:
+                return self.synth
+            if prompt.startswith(JUDGE_MARK):
+                return self.judge
+            return self.replies[model]
+
+        return gen
+
+    def kind(self, call):
+        if call["num_predict"] == lanes.EXPAND_NUM_PREDICT and call["temperature"] == lanes.EXPAND_TEMPERATURE:
+            return "expand"
+        if SYNTH_MARK in call["prompt"]:
+            return "synth"
+        if call["prompt"].startswith(JUDGE_MARK):
+            return "judge"
+        return "member"
+
+    def of(self, kind):
+        return [call for call in self.calls if self.kind(call) == kind]
+
+
+@pytest.fixture
+def models(monkeypatch, tmp_path):
+    monkeypatch.setenv("SONDER_RUNTIME_POLICY", str(tmp_path / "runtime_policy.json"))
+    monkeypatch.setenv(config.ENV_INDEX, str(create_index(tmp_path / "refs" / "refs.sqlite")))
+    monkeypatch.delenv(config.ENV_ENABLED, raising=False)
+    monkeypatch.setattr(state, "_INDEX", None)
+    monkeypatch.setattr(state, "_LAST_ERROR", "")
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(server, "_serve_target", lambda tier, strict, **_kw: (MODELS[tier], False, False, tier))
+    monkeypatch.setattr(server, "_post", lambda *a, **k: {})
+    monkeypatch.setattr(server, "_auto_model_context", lambda model: WINDOWS[model])
+    fake = Models()
+    monkeypatch.setattr(server, "_make_generate", fake)
+    lanes.reset_turn()
+    yield fake
+    lanes.reset_turn()
+
+
+@pytest.fixture
+def retrievals(monkeypatch):
+    seen = []
+    real = service.retrieve_for
+
+    def spy(question, expand_fn, k, char_budget):
+        bundle = real(question, expand_fn, k, char_budget)
+        seen.append({"question": question, "budget": char_budget, "bundle": bundle})
+        return bundle
+
+    monkeypatch.setattr(service, "retrieve_for", spy)
+    return seen
+
+
+def _clean(text):
+    return PASSAGE_TEXT not in text and not MARKER_RE.search(text) and ESC not in text
+
+
+def _passthrough_multi():
+    """The ensemble seams as they behaved before this feature: each hands back its input."""
+    def ensemble(prompt, mode, targets, num_predict, make_tier_generate, ctx_for):
+        return types.SimpleNamespace(
+            num_ctx=ctx_for,
+            ask=lambda tier, gen, question: gen(question),
+            synthesis=lambda build: build,
+            merged=lambda text: text,
+            footer=lambda footer, lead="\n\n": footer,
+        )
+
+    return types.SimpleNamespace(ensemble=ensemble, consult_scope=lambda targets_for: None)
+
+
+# --- ensemble_answer -----------------------------------------------------------
+
+
+def test_ensemble_retrieves_once_and_frames_every_member_identically(models, retrievals):
+    out = server.ensemble_answer(QUESTION, tiers="cyber,plain")
+
+    assert len(retrievals) == 1
+    assert retrievals[0]["question"] == QUESTION
+    members = models.of("member")
+    assert [call["model"] for call in members] == [LOOKUP_MODEL, PLAIN_MODEL]
+    framed = members[0]["prompt"]
+    assert members[1]["prompt"] == framed
+    assert MARKER_RE.search(framed) and PASSAGE_TEXT in framed and QUESTION in framed
+    # Neither member gets a Sonder system prompt; the ensemble never sent one.
+    assert [call["system"] for call in members] == ["", ""]
+    (expand,) = models.of("expand")
+    assert expand["model"] == LOOKUP_MODEL and expand["system"] == ""
+    assert "Sources:" in out and "https://example.test/events/4625" in out
+
+
+def test_ensemble_budget_uses_the_smallest_member_window(models, retrievals):
+    server.ensemble_answer(QUESTION, tiers="cyber,plain")
+    (seen,) = retrievals
+    assert seen["budget"] == passage_char_budget(
+        WINDOWS[PLAIN_MODEL], 700, rough_token_count(QUESTION))
+    assert seen["budget"] < passage_char_budget(
+        WINDOWS[LOOKUP_MODEL], 700, rough_token_count(QUESTION))
+
+
+def test_synthesiser_gets_the_raw_question_and_the_keep_citations_rule(models):
+    server.ensemble_answer(QUESTION, tiers="cyber,plain")
+    (synth,) = models.of("synth")
+    prompt = synth["prompt"]
+    assert QUESTION in prompt
+    assert PASSAGE_TEXT not in prompt
+    assert not MARKER_RE.search(prompt)
+    assert KEEP_CITATIONS_RULE.strip() in prompt
+    assert synth["system"] == ""
+
+
+def test_sources_once_before_the_footer_and_every_answer_clean(models):
+    models.replies[LOOKUP_MODEL] = (
+        "=== PASSAGE 1 [deadbeef] ===\n" + ESC + "[31mEvent 4625" + ESC
+        + "[0m is a failed logon [1].\n=== END PASSAGE 1 [deadbeef] ==="
+    )
+    models.synth = "=== PASSAGE 2 [cafe0000] ===\nMerged: a failed logon [1] [9]."
+    out = server.ensemble_answer(QUESTION, tiers="cyber,plain")
+
+    (synth,) = models.of("synth")
+    assert _clean(synth["prompt"]), "the synthesiser saw an uncleaned member answer"
+    assert "Event 4625" in synth["prompt"]
+    assert _clean(out)
+    assert out.count("Sources:") == 1
+    assert out.index("Merged: a failed logon") < out.index("Sources:") < out.index("=== ENSEMBLE")
+    assert "Warning: cyber: the model echoed a passage marker line" in out
+    assert "Warning: synthesis: the model echoed a passage marker line" in out
+    assert "Warning: synthesis: answer cites passage numbers that were not provided: [9]" in out
+
+
+def test_single_member_answer_carries_sources_before_the_footer(models):
+    out = server.ensemble_answer(QUESTION, tiers="cyber")
+    assert out.count("Sources:") == 1
+    assert out.index("failed logon [1]") < out.index("Sources:") < out.index("=== ENSEMBLE")
+    assert not models.of("synth")
+
+
+def test_ensemble_with_no_matching_member_is_what_it_was(models, retrievals, monkeypatch):
+    first = server.ensemble_answer(QUESTION, tiers="plain,other")
+    with_feature = list(models.calls)
+    models.calls.clear()
+
+    monkeypatch.setattr(server, "_reference_lookup_multi", _passthrough_multi())
+    second = server.ensemble_answer(QUESTION, tiers="plain,other")
+
+    assert retrievals == []
+    assert with_feature == models.calls
+    assert [models.kind(call) for call in with_feature] == ["member", "member", "synth"]
+    assert TIMINGS.sub("", first) == TIMINGS.sub("", second)
+    assert "Sources:" not in first
+    assert KEEP_CITATIONS_RULE.strip() not in with_feature[-1]["prompt"]
+
+
+def test_code_mode_ensemble_gets_no_lookup(models, retrievals):
+    models.synth = "print('merged')"
+    server.ensemble_answer(QUESTION, tiers="cyber,plain", mode="code")
+    assert retrievals == []
+    assert not models.of("expand")
+    assert all(not MARKER_RE.search(call["prompt"]) for call in models.calls)
+
+
+@pytest.mark.parametrize("bad", sorted(BAD_INDEXES))
+def test_ensemble_bad_index_fails_open_with_a_visible_line(models, monkeypatch, tmp_path, bad):
+    monkeypatch.setenv(config.ENV_INDEX, str(BAD_INDEXES[bad](tmp_path)))
+    out = server.ensemble_answer(QUESTION, tiers="cyber,plain")
+
+    assert "Merged: event 4625 is a failed logon" in out
+    assert "Sources: none (reference lookup unavailable: " in out
+    assert out.index("Sources: none") < out.index("=== ENSEMBLE")
+    assert all(not MARKER_RE.search(call["prompt"]) for call in models.calls)
+    members = models.of("member")
+    assert len(members) == 2 and members[0]["prompt"] == members[1]["prompt"] == QUESTION
+    assert state.last_error()
+
+
+def _stored_rows(table):
+    try:
+        conn = sqlite3.connect(server._DB_PATH)
+    except sqlite3.Error:
+        return []
+    try:
+        return conn.execute(f"SELECT * FROM {table}").fetchall()
+    except sqlite3.OperationalError:
+        return []  # the table was never created: nothing was stored
+    finally:
+        conn.close()
+
+
+def test_ensemble_stores_nothing_and_leaves_no_turn_state(models):
+    out = server.ensemble_answer(QUESTION, tiers="cyber,plain")
+    assert "Sources:" in out
+    assert _stored_rows("interactions") == []
+    assert _stored_rows("lesson_distillations") == []
+    # The single-model lanes' turn state is untouched, so a later chat turn adds nothing.
+    assert lanes.with_sources("plain") == "plain"

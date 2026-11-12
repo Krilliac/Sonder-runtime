@@ -69,7 +69,15 @@ def code_synthesis_prompt(question, answers):
     )
 
 
-def synthesis_prompt(question, answers):
+# Added to the prose rules when the candidates cite reference passages as [n]
+# (a reference-lookup ensemble), so the merged answer keeps its citations.
+KEEP_CITATIONS_RULE = (
+    "- Keep the [n] citation tags the answers use next to the points they "
+    "support, and add no new ones.\n"
+)
+
+
+def synthesis_prompt(question, answers, *, keep_citations=False):
     candidate_data = candidate_references(answers)
     return (
         "Several local models were asked the same question independently. "
@@ -81,7 +89,8 @@ def synthesis_prompt(question, answers):
         "what. Do not silently pick a side.\n"
         "- If one answer is clearly more complete, prefer it, but keep any "
         "correct detail the others add.\n"
-        "- Answer the question directly. Do not describe this process.\n\n"
+        "- Answer the question directly. Do not describe this process.\n"
+        + (KEEP_CITATIONS_RULE if keep_citations else "") + "\n"
         "QUESTION (authoritative):\n%s\n\n"
         "%s\n\nCOMPOUNDED ANSWER:" % (question, candidate_boundary(candidate_data))
     )

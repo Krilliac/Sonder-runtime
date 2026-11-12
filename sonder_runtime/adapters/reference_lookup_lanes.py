@@ -33,7 +33,7 @@ a bare answer that says why.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping, MutableMapping
+from collections.abc import Callable, Collection, Mapping, MutableMapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
@@ -245,22 +245,30 @@ def mark_learning_skip(conn: Any, interaction_id: Any) -> bool:
         return False
 
 
+def bundle_sources_text(bundle: _lookup.Bundle, cited: Collection[int] = (),
+                        warnings: Sequence[str] = ()) -> str:
+    """The Sources block for ``bundle``: its passages (``cited`` ones starred) or
+    why there are none, then the bundle's warnings and ``warnings``."""
+    shown = ""
+    if bundle.applied and bundle.passages:
+        head = format_sources(bundle.passages, cited)
+    elif bundle.reason in _FAILED:
+        head = format_unavailable(bundle.reason_text)
+    else:
+        shown = _NONE_TEXT.get(bundle.reason, bundle.reason_text)
+        head = f"Sources: none ({one_line(shown)})"
+    lines = [*bundle.warnings, *warnings]
+    return "\n".join([head, *(WARNING_PREFIX + one_line(text) for text in lines if text and text != shown)])
+
+
 def sources_text(record: TurnLookup) -> str:
     """The Sources block (and any warnings) for a lookup turn's returned text."""
     bundle = record.bundle
     if bundle is None:
         return ""
     review = record.review
-    shown = ""
-    if record.grounded:
-        head = format_sources(bundle.passages, review.cited if review is not None else ())
-    elif bundle.reason in _FAILED:
-        head = format_unavailable(bundle.reason_text)
-    else:
-        shown = _NONE_TEXT.get(bundle.reason, bundle.reason_text)
-        head = f"Sources: none ({one_line(shown)})"
-    warnings = [*bundle.warnings, *(review.warnings if review is not None else ())]
-    return "\n".join([head, *(WARNING_PREFIX + one_line(text) for text in warnings if text and text != shown)])
+    return bundle_sources_text(bundle, review.cited if review is not None else (),
+                               review.warnings if review is not None else ())
 
 
 def receipt_entry(record: TurnLookup) -> dict[str, Any]:
@@ -306,6 +314,7 @@ __all__ = [
     "RECEIPT_KEY",
     "LookupGenerate",
     "TurnLookup",
+    "bundle_sources_text",
     "chat_generate",
     "finish_http",
     "lookup_turn",
