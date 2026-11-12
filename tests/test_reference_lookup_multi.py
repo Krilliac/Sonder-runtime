@@ -13,6 +13,7 @@ import types
 
 import pytest
 
+import consult as consult_module
 import server
 import sonder_runtime.adapters.reference_lookup_lanes as lanes
 import sonder_runtime.adapters.reference_lookup_service as service
@@ -61,7 +62,7 @@ class Models:
                 return TERMS_REPLY
             if SYNTH_MARK in prompt:
                 return self.synth
-            if prompt.startswith(JUDGE_MARK):
+            if JUDGE_MARK in prompt:
                 return self.judge
             return self.replies[model]
 
@@ -72,7 +73,7 @@ class Models:
             return "expand"
         if SYNTH_MARK in call["prompt"]:
             return "synth"
-        if call["prompt"].startswith(JUDGE_MARK):
+        if JUDGE_MARK in call["prompt"]:
             return "judge"
         return "member"
 
@@ -255,3 +256,111 @@ def test_ensemble_stores_nothing_and_leaves_no_turn_state(models):
     assert _stored_rows("lesson_distillations") == []
     # The single-model lanes' turn state is untouched, so a later chat turn adds nothing.
     assert lanes.with_sources("plain") == "plain"
+
+
+# --- consult -------------------------------------------------------------------
+
+VERDICT_PREFIXES = ("✓", "⚠", "?", "[OK]", "[WARNING]", "[?]")
+
+
+def _section_before_sources(out):
+    sections = out.split("\n\n")
+    (index,) = [i for i, text in enumerate(sections) if text.startswith("Sources:")]
+    return sections[index - 1], sections[index:]
+
+
+def test_consult_shares_one_retrieval_and_the_judge_sees_no_passages(models, retrievals):
+    out = server.consult(QUESTION, tiers="cyber,plain")
+
+    assert len(retrievals) == 1
+    members = models.of("member")
+    assert [call["model"] for call in members] == [LOOKUP_MODEL, PLAIN_MODEL]
+    framed = members[0]["prompt"]
+    assert members[1]["prompt"] == framed
+    assert MARKER_RE.search(framed) and PASSAGE_TEXT in framed and QUESTION in framed
+    assert [call["system"] for call in members] == ["", ""]
+    (judge,) = models.of("judge")
+    assert judge["prompt"].startswith(JUDGE_MARK)
+    assert QUESTION in judge["prompt"] and "Event 4625 is a failed logon [1]." in judge["prompt"]
+    assert _clean(judge["prompt"]) and "Sources:" not in judge["prompt"]
+    # One Sources block, after the verdict.
+    assert out.count("Sources:") == 1
+    verdict, tail = _section_before_sources(out)
+    assert verdict.startswith(VERDICT_PREFIXES)
+    assert "https://example.test/events/4625" in tail[0]
+    assert out.index("=== plain ===") < out.index("Sources:")
+
+
+def test_consult_member_answers_are_cleaned(models):
+    models.replies[LOOKUP_MODEL] = "=== PASSAGE 1 [deadbeef] ===\nEvent 4625 is a failed logon [1] [7]."
+    out = server.consult(QUESTION, tiers="cyber,plain")
+    (judge,) = models.of("judge")
+    assert _clean(judge["prompt"]) and _clean(out)
+    _verdict, tail = _section_before_sources(out)
+    assert "Warning: cyber: the model echoed a passage marker line" in tail[0]
+    assert "Warning: cyber: answer cites passage numbers that were not provided: [7]" in tail[0]
+
+
+def test_consult_with_no_matching_member_is_what_it_was(models, retrievals, monkeypatch):
+    first = server.consult(QUESTION, tiers="plain,other")
+    with_feature = list(models.calls)
+    models.calls.clear()
+
+    monkeypatch.setattr(server, "_reference_lookup_multi", _passthrough_multi())
+    second = server.consult(QUESTION, tiers="plain,other")
+
+    assert retrievals == []
+    assert with_feature == models.calls
+    assert [models.kind(call) for call in with_feature] == ["member", "member", "judge"]
+    assert TIMINGS.sub("", first) == TIMINGS.sub("", second)
+    assert "Sources:" not in first
+
+
+@pytest.mark.parametrize("bad", sorted(BAD_INDEXES))
+def test_consult_bad_index_fails_open_with_a_visible_line(models, monkeypatch, tmp_path, bad):
+    monkeypatch.setenv(config.ENV_INDEX, str(BAD_INDEXES[bad](tmp_path)))
+    out = server.consult(QUESTION, tiers="cyber,plain")
+
+    assert "Event 4625 is a failed logon [1]." in out and "It is a failed logon." in out
+    verdict, tail = _section_before_sources(out)
+    assert verdict.startswith(VERDICT_PREFIXES)
+    assert tail[0].startswith("Sources: none (reference lookup unavailable: ")
+    assert all(not MARKER_RE.search(call["prompt"]) for call in models.calls)
+    members = models.of("member")
+    assert [call["prompt"] for call in members] == [QUESTION, QUESTION]
+    assert state.last_error()
+
+
+def test_consult_stores_nothing(models):
+    out = server.consult(QUESTION, tiers="cyber,plain")
+    assert "Sources:" in out
+    assert _stored_rows("interactions") == []
+    assert _stored_rows("lesson_distillations") == []
+    assert lanes.with_sources("plain") == "plain"
+
+
+def test_default_consult_judge_runs_without_lookup(models, retrievals):
+    """The REPL path (no injected ask) still keeps passages away from the judge."""
+    result = consult_module.consult(QUESTION, ["cyber", "plain"])
+    (judge,) = models.of("judge")
+    assert _clean(judge["prompt"])
+    # Only the members looked anything up (the REPL members are not yet shared).
+    assert len(retrievals) == 1
+    assert len(result["answers"]) == 2
+
+
+def test_explicit_judge_fn_asks_the_judge_and_never_the_members():
+    asked, judged = [], []
+
+    def ask(prompt, tier):
+        asked.append(prompt)
+        return "Use a bounded queue."
+
+    def judge(prompt, tier):
+        judged.append((prompt, tier))
+        return "YES. Both say a bounded queue."
+
+    result = consult_module.consult("How?", ["code", "reasoning"], ask_fn=ask, judge_fn=judge)
+    assert asked == ["How?", "How?"]
+    assert len(judged) == 1 and judged[0][0].startswith(JUDGE_MARK) and judged[0][1] == "code"
+    assert result["agree"] is True and "sources" not in result

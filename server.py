@@ -25313,7 +25313,7 @@ def consult(
         ask_fn=lambda question, tier: ensemble_answer(
             question, tiers=tier, mode="general"
         ),
-        cloud_ok=cloud_allowed(),
+        cloud_ok=cloud_allowed(), lookup=_reference_lookup_multi.consult_scope(_ensemble_targets),  # members share one lookup; the judge runs without
     )
     return consult_flow.format_result(result)
 
