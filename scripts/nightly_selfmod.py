@@ -800,7 +800,34 @@ def _local_catalog_model(server, selected: str) -> str | None:
     return None
 
 
+class ModelRefused(RuntimeError):
+    """The model this job would ask is blocked from code-writing lanes; nothing was asked."""
+
+
+def _model_refusal(server, model="") -> str:
+    """Why the model behind this job may not write code, or ``""`` when it may.
+
+    This job splices the reply into source and runs it, so it is a lane that
+    applies model output: an explicit model is judged by name, and an
+    unpinned run by the ``code`` tier, including the model a non-Ollama
+    provider serves for that tier.  An unreadable policy refuses a named model.
+    """
+    from sonder_runtime.adapters import tool_lane_guard
+
+    policy = getattr(server, "_RUNTIME_POLICY", None)
+    selected = str(model or "").strip()
+    if selected:
+        if tool_lane_guard.denied(selected, "model:", policy):
+            return tool_lane_guard.refusal(selected, policy)
+        return ""
+    return tool_lane_guard.selector_refusal("code", getattr(server, "TIERS", {}), policy)
+
+
 def _ask(server, prompt, num_predict=1200, model="", num_ctx=0, timeout=60):
+    # A blocked model is refused before the catalog probe or any model call.
+    refusal = _model_refusal(server, model)
+    if refusal:
+        raise ModelRefused(f"model refused: {refusal}")
     # An explicit model is a catalog selector, not a temporary tier mutation.
     # The server refreshes its persisted runtime policy at every request, so
     # changing ``server.TIERS['code']`` in a caller is overwritten before the
@@ -1497,6 +1524,12 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0,
     mode = settings.get("mode") or "propose"
     if mode == "observe":
         return "mode=observe (observation only, no candidate created)"
+
+    # The model that would write the candidate is checked before anything
+    # else: a blocked one must not start a run, a backup or a workspace.
+    refusal = _model_refusal(server, model)
+    if refusal:
+        return f"model refused, no run started: {refusal}"
 
     # Every candidate check runs under an OS-enforced supervisor.  Refuse
     # before any run, backup or workspace exists when this host cannot

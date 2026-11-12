@@ -7595,8 +7595,8 @@ def parallel_generate_run(
     model = TIERS.get(tier)
     if model is None:
         return "ERROR: unknown tier '%s'. Valid tiers: %s." % (tier, _valid_tier_names())
-    if _is_cloud_tier(tier, model) and not _cloud_allowed_policy(os.environ):
-        return _cloud_disabled_message()
+    if (refusal := _tool_lane_guard.selector_refusal(tier, TIERS, _RUNTIME_POLICY)) or (_is_cloud_tier(tier, model) and not _cloud_allowed_policy(os.environ)):
+        return refusal or _cloud_disabled_message()  # a blocked model never generates the code run here
     cloud = _is_cloud_tier(tier, model)
     system = (
         "Return one complete runnable Python solution in a single ```python code block. "
@@ -7712,8 +7712,8 @@ def parallel_generate_run_languages(
     model = TIERS.get(tier)
     if model is None:
         return "ERROR: unknown tier '%s'. Valid tiers: %s." % (tier, _valid_tier_names())
-    if _is_cloud_tier(tier, model) and not _cloud_allowed_policy(os.environ):
-        return _cloud_disabled_message()
+    if (refusal := _tool_lane_guard.selector_refusal(tier, TIERS, _RUNTIME_POLICY)) or (_is_cloud_tier(tier, model) and not _cloud_allowed_policy(os.environ)):
+        return refusal or _cloud_disabled_message()  # a blocked model never generates the code run here
     cloud = _is_cloud_tier(tier, model)
     requested_workers, (max_workers, pool_capacity) = max_workers, _ollama_reporting.clamp_workers(
         max_workers, pool=OLLAMA_POOL, model=model, cloud=cloud, bridged=lambda: _bridge_provider_for_tier(tier))

@@ -436,3 +436,46 @@ def test_the_composition_root_hands_the_wrapped_gateway_to_the_tool_consumers_on
         assert isinstance(gateway, ToolLaneGateway), consumer
         assert gateway._gateway is raw, consumer
     assert len({id(gateway) for gateway in wrapped.values()}) == 1  # one shared wrapper
+
+
+# ---- an interactive lane's per-step route check ------------------------------
+
+def lane_request(gateway, *, cloud_allowed=True):
+    """One step of an interactive lane up to its route check; the rest of the service is absent."""
+    from sonder_runtime.application.agents.interactive_lanes import AgentLaneService
+
+    service = SimpleNamespace(gateway=gateway)
+    lane = {"tier": "code", "expensive_tier": False}
+    return AgentLaneService._request(
+        service, lane, [{"author": "user", "content": "list files"}],
+        context=operation_context(cloud_allowed=cloud_allowed),
+    )
+
+
+def test_a_lane_step_refused_by_the_deny_list_shows_the_deny_text(catalog, monkeypatch):
+    monkeypatch.setitem(server.TIERS, "code", DENIED)
+    inner, tool = tool_gateway()
+    with pytest.raises(PermissionError) as caught:
+        lane_request(tool)
+    assert str(caught.value) == BLOCKED % DENIED
+    assert inner.calls == [] and inner.routes == []
+
+
+def test_a_lane_step_on_a_denied_served_model_shows_the_served_text(catalog, monkeypatch):
+    bind_code(monkeypatch, "sonder-inference", {"SONDER_INFERENCE_TIER_MODELS": "code=" + DENIED_SMALL})
+    inner, tool = tool_gateway()
+    with pytest.raises(PermissionError) as caught:
+        lane_request(tool)
+    assert str(caught.value) == SERVED % ("code", "sonder_inference", DENIED_SMALL)
+    assert inner.calls == [] and inner.routes == []
+
+
+def test_a_lane_step_whose_route_fails_otherwise_keeps_the_spawn_budget_text(catalog):
+    """The control: only the deny list's refusal changes the message."""
+    class Broken:
+        def resolve_route(self, request, context):
+            raise RuntimeError("catalog offline")
+
+    with pytest.raises(PermissionError, match="unverified lane route could exceed its spawn budget"):
+        lane_request(Broken())
+

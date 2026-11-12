@@ -215,25 +215,71 @@ def test_no_update_parameter_edits_the_list():
 # ---- a denied model is never bound ------------------------------------------
 
 @pytest.mark.parametrize("name", [DENIED, "Astra-Cyber-9B:latest", "library/astra-cyber-27b", HF_QWEN, HF_ORNITH])
-def test_a_denied_model_in_local_models_invalidates_the_file(policy_file, name):
-    write_policy(policy_file, {"local_models": {"code": name}})
+def test_a_denied_model_in_local_models_drops_only_that_tier(policy_file, name):
+    write_policy(policy_file, {
+        "local_models": {"code": name, "fast": ALLOWED, "general": "qwen3:8b"},
+        "routing": {"chat": "fast"},
+    })
     policy = load()
-    assert "blocked from tool-using lanes" in policy["error"]
+    assert policy["error"] == ""  # the file stays valid
     assert policy["local_models"]["code"] == runtime_policy.DEFAULT_MODELS["code"]
     assert name not in policy["local_models"].values()
+    # The rest of the file still applies.
+    assert policy["local_models"]["fast"] == ALLOWED
+    assert policy["local_models"]["general"] == "qwen3:8b"
+    assert policy["routing"]["chat"] == "fast"
+    assert deny_of(policy).readable is True
+    assert policy["tool_lane_notices"] == [rules.tool_lane_binding_notice("code", name)]
+    status = runtime_policy.format_policy(policy)
+    assert f"WARNING: local_models.code names {name!r}" in status
+    assert "ERROR:" not in status
 
 
-def test_a_denied_model_in_an_optional_tier_is_refused_too(policy_file):
-    write_policy(policy_file, {"local_models": {"reasoning": DENIED}})
-    assert "blocked from tool-using lanes" in load()["error"]
+def test_a_denied_model_in_an_optional_tier_leaves_that_tier_unset(policy_file):
+    write_policy(policy_file, {"local_models": {"reasoning": DENIED, "code": ALLOWED}})
+    policy = load()
+    assert policy["error"] == ""
+    assert policy["local_models"]["reasoning"] == ""
+    assert policy["local_models"]["code"] == ALLOWED
+    assert "reasoning" in policy["tool_lane_notices"][0]
+    tiers = {"reasoning": "stale"}
+    guard.bind_local_tiers(tiers, policy)
+    assert "reasoning" not in tiers and tiers["code"] == ALLOWED
 
 
-def test_a_model_added_by_the_policy_cannot_be_bound_either(policy_file):
+def test_a_model_added_by_the_policy_is_dropped_from_its_tier_too(policy_file):
     write_policy(policy_file, {
         "local_models": {"code": ALLOWED},
         "tool_lane_denied_models": {"names": [ALLOWED]},
     })
-    assert "blocked from tool-using lanes" in load()["error"]
+    policy = load()
+    assert policy["error"] == ""
+    assert policy["local_models"]["code"] == runtime_policy.DEFAULT_MODELS["code"]
+    assert rule.decide(ALLOWED, deny_of(policy), free_form=False).denied
+
+
+def test_a_clean_file_has_no_notices_and_a_later_update_clears_them(policy_file):
+    write_policy(policy_file, {"local_models": {"code": ALLOWED}})
+    assert "tool_lane_notices" not in load()
+    assert "WARNING" not in runtime_policy.format_policy(load())
+    write_policy(policy_file, {"local_models": {"code": DENIED}})
+    assert load()["tool_lane_notices"]
+    updated = runtime_policy.update(routing={"chat": "general"})
+    assert "tool_lane_notices" not in updated
+    on_disk = json.loads(policy_file.read_text(encoding="utf-8"))
+    assert DENIED not in json.dumps(on_disk) and "tool_lane_notices" not in on_disk
+    assert "tool_lane_notices" not in load()
+
+
+def test_a_malformed_deny_section_still_invalidates_a_file_that_binds_a_denied_model(policy_file):
+    write_policy(policy_file, {
+        "local_models": {"code": DENIED},
+        "tool_lane_denied_models": {"names": "single"},
+    })
+    policy = load()
+    assert "names must be a list" in policy["error"]
+    assert deny_of(policy).readable is False
+    assert policy["local_models"]["code"] == runtime_policy.DEFAULT_MODELS["code"]
 
 
 def test_update_refuses_to_bind_a_denied_model(policy_file):

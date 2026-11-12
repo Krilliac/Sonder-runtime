@@ -18,6 +18,7 @@ import threading
 import time
 from pathlib import Path
 
+from ..adapters import tool_lane_guard
 from ..adapters.filesystem import file_ops
 from ..adapters.meshgen import blender_runner, record_runner
 from ..application.meshgen.loop import MeshRequest, run as run_loop
@@ -145,6 +146,11 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
         unknown = [tier for tier in tier_list if tier not in known]
         if unknown:
             raise SonderError("unknown tier(s): %s (available: %s)" % (", ".join(unknown), ", ".join(sorted(known))))
+    # The model's script drives what is built, replayed and written, so a
+    # model blocked from tool-using lanes may not write it.
+    refusal = tool_lane_guard.selector_refusal(",".join(tier_list), known or {}, getattr(rt, "_RUNTIME_POLICY", None))
+    if refusal:
+        raise SonderError(refusal)
     slug = _slug(name or brief)
 
     kit_module = None

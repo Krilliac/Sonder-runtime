@@ -30,6 +30,7 @@ from ..ports.model_gateway import ModelRequest, require_model_text
 from ..ports.model_target import ResolvedModelRoute
 from ..ports.prompts import PromptRenderer
 from ...domain import prompt_templates
+from ...domain.common.errors import Forbidden
 from ...domain.model_routing import is_cloud_model_name
 from ..session.capture import CapturedRequest, SessionCaptureService, _snapshot_payload
 from ..session.archive import ArchiveReference, SessionContextArchiveService
@@ -1970,13 +1971,16 @@ class AgentLaneService:
                 route = resolve_route(
                     ModelRequest(prompt, tier=lane["tier"]), context
                 )
-            except Exception:
+            except Exception as exc:
                 if context.cloud_allowed and not (
                     lane.get("expensive_tier") is True
                     or _known_expensive_lane_tier(lane["tier"])
                 ):
+                    # A route the tool-lane deny list refused says so; any
+                    # other unresolvable route keeps the spawn-budget text.
                     raise PermissionError(
-                        "unverified lane route could exceed its spawn budget"
+                        str(exc) if isinstance(exc, Forbidden)
+                        else "unverified lane route could exceed its spawn budget"
                     ) from None
                 # With no cloud permission, the gateway cannot legitimately
                 # dispatch a hosted model; its own provider error remains

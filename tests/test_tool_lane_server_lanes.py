@@ -648,3 +648,212 @@ def test_autopilot_helpers_reach_the_model_for_an_ordinary_tier(catalog, model_c
     with pytest.raises(RuntimeError, match="must not happen"):
         server._autopilot_json_model({"tier": "code"}, "planner", "plan it", lambda payload: None)
     assert model_calls  # got past the refusal and asked for a model
+
+
+# ---- the parallel generate-and-run tools -------------------------------------
+
+PARALLEL_TOOLS = {
+    "parallel_generate_run": lambda tier: server.parallel_generate_run(
+        "double a number", variants=2, max_workers=1, tier=tier),
+    "parallel_generate_run_languages": lambda tier: server.parallel_generate_run_languages(
+        "double a number", languages="python", max_workers=1, tier=tier),
+}
+
+
+@pytest.fixture
+def parallel_work(monkeypatch):
+    """The two parallel tools with generation and execution recorded, nothing real run."""
+    seen = {"generated": [], "executed": []}
+
+    def make_tier_generate(tier, *args, **kwargs):
+        def gen(prompt):
+            seen["generated"].append(tier)
+            return RUNNABLE
+
+        gen.last_usage = {}
+        return gen
+
+    def run_code(code, *args, **kwargs):
+        seen["executed"].append(code)
+        return True, "ok"
+
+    monkeypatch.setattr(server, "_make_tier_generate", make_tier_generate)
+    monkeypatch.setattr(server.grounding, "run_code", run_code)
+    monkeypatch.setattr(server.grounding, "run_language_code", run_code)
+    return seen
+
+
+@pytest.mark.parametrize("tool", PARALLEL_TOOLS)
+def test_parallel_tools_refuse_a_tier_bound_to_a_denied_model(catalog, parallel_work, monkeypatch, tool):
+    monkeypatch.setitem(server.TIERS, "code", DENIED)
+    out = PARALLEL_TOOLS[tool]("code")
+    assert out == BLOCKED % DENIED
+    assert not out.startswith("ERROR")
+    assert parallel_work == {"generated": [], "executed": []}
+
+
+@pytest.mark.parametrize("tool", PARALLEL_TOOLS)
+@pytest.mark.parametrize("provider, label, env, served", BRIDGES)
+def test_parallel_tools_refuse_a_tier_whose_served_model_is_denied(
+        catalog, parallel_work, monkeypatch, tool, provider, label, env, served):
+    bridge(monkeypatch, provider, **env)
+    assert PARALLEL_TOOLS[tool]("code") == SERVED % ("code", label, served)
+    assert parallel_work == {"generated": [], "executed": []}
+
+
+@pytest.mark.parametrize("tool", PARALLEL_TOOLS)
+def test_parallel_tools_refuse_a_bridged_tier_with_an_undetermined_served_model(
+        catalog, parallel_work, monkeypatch, tool):
+    bridge(monkeypatch, "sonder-inference")
+    assert PARALLEL_TOOLS[tool]("code") == UNKNOWN % ("code", "sonder_inference")
+    assert parallel_work == {"generated": [], "executed": []}
+
+
+@pytest.mark.parametrize("tool", PARALLEL_TOOLS)
+def test_parallel_tools_generate_and_run_for_an_ordinary_model(catalog, parallel_work, tool):
+    """The control: an allowed tier gets past the refusal, generates and runs its candidates."""
+    out = PARALLEL_TOOLS[tool]("code")
+    assert "blocked from tool-using" not in out and "cannot be determined" not in out
+    assert "[PASS]" in out
+    assert parallel_work["generated"] and parallel_work["executed"]
+
+
+@pytest.mark.parametrize("tool", PARALLEL_TOOLS)
+def test_parallel_tools_keep_the_unknown_tier_and_cloud_messages(catalog, parallel_work, monkeypatch, tool):
+    assert PARALLEL_TOOLS[tool]("no-such-tier").startswith("ERROR: unknown tier 'no-such-tier'")
+    monkeypatch.setitem(server.TIERS, "cloud-code", "qwen3-coder:480b-cloud")
+    monkeypatch.setattr(server, "_cloud_allowed_policy", lambda env: False)
+    assert PARALLEL_TOOLS[tool]("cloud-code") == server._cloud_disabled_message()
+    assert parallel_work == {"generated": [], "executed": []}
+
+
+# ---- the self-modification job -----------------------------------------------
+
+@pytest.fixture
+def selfmod_job(monkeypatch):
+    """``nightly_selfmod`` with every model entry recorded; the catalog lists every name."""
+    from scripts import nightly_selfmod
+
+    asked = []
+    reply = "def f():\n    return 1\n"
+
+    def make_generate(model, *args, **kwargs):
+        asked.append(("_make_generate", model))
+        return lambda prompt: reply
+
+    def ensemble_answer(prompt, **kwargs):
+        asked.append(("ensemble_answer", kwargs.get("tiers")))
+        return reply
+
+    monkeypatch.setattr(server, "_make_generate", make_generate)
+    monkeypatch.setattr(server, "ensemble_answer", ensemble_answer)
+    monkeypatch.setattr(nightly_selfmod, "_local_catalog_model", lambda srv, selected: selected)
+    # ``RuntimeError`` is the base of ``ModelRefused``: on a build without the
+    # refusal the check then fails as "did not raise", not as a missing name.
+    refused = getattr(nightly_selfmod, "ModelRefused", RuntimeError)
+    return SimpleNamespace(module=nightly_selfmod, asked=asked, reply=reply.strip(), refused=refused)
+
+
+@pytest.mark.parametrize("name", [DENIED, "Astra-Cyber-9B:latest", HF_QWEN])
+def test_selfmod_ask_refuses_an_explicit_denied_model_before_any_call(catalog, selfmod_job, name):
+    with pytest.raises(selfmod_job.refused) as caught:
+        selfmod_job.module._ask(server, "improve f", model=name)
+    assert type(caught.value).__name__ == "ModelRefused"
+    assert str(caught.value) == "model refused: " + BLOCKED % name
+    assert selfmod_job.asked == []
+
+
+def test_selfmod_ask_refuses_a_model_the_policy_added(catalog, selfmod_job, policy_file):
+    policy_file({"tool_lane_denied_models": {"names": [ALLOWED]}})
+    with pytest.raises(selfmod_job.refused):
+        selfmod_job.module._ask(server, "improve f", model=ALLOWED)
+    assert selfmod_job.asked == []
+
+
+@pytest.mark.parametrize("provider, label, env, served", BRIDGES)
+def test_selfmod_ask_refuses_a_code_tier_whose_served_model_is_denied(
+        catalog, selfmod_job, monkeypatch, provider, label, env, served):
+    bridge(monkeypatch, provider, **env)
+    with pytest.raises(selfmod_job.refused) as caught:
+        selfmod_job.module._ask(server, "improve f")
+    assert str(caught.value) == "model refused: " + SERVED % ("code", label, served)
+    assert selfmod_job.asked == []
+
+
+def test_selfmod_ask_refuses_a_code_tier_bound_to_a_denied_model(catalog, selfmod_job, monkeypatch):
+    monkeypatch.setitem(server.TIERS, "code", DENIED)
+    with pytest.raises(selfmod_job.refused):
+        selfmod_job.module._ask(server, "improve f")
+    assert selfmod_job.asked == []
+
+
+def test_selfmod_ask_returns_an_ordinary_models_reply(catalog, selfmod_job):
+    """The control: both branches still ask and return the reply."""
+    assert selfmod_job.module._ask(server, "improve f", model=ALLOWED) == selfmod_job.reply
+    assert selfmod_job.module._ask(server, "improve f") == selfmod_job.reply
+    assert selfmod_job.asked == [("_make_generate", ALLOWED), ("ensemble_answer", "code")]
+
+
+def test_selfmod_run_stops_before_any_run_for_a_denied_model(catalog, selfmod_job, monkeypatch):
+    module = selfmod_job.module
+    touched = []
+    for name in ("_isolation_refusal", "_compose_stage_journal", "propose_objective"):
+        monkeypatch.setattr(module, name, lambda *a, _n=name, **k: touched.append(_n))
+    monkeypatch.setattr(module.selfmod, "settings", lambda: {"enabled": True, "mode": "propose"})
+    monkeypatch.setattr(module.selfmod, "_git_info", lambda repo: touched.append("_git_info") or (True, "", ""))
+    monkeypatch.setattr(module.selfmod, "create_plan", lambda *a, **k: touched.append("create_plan"))
+    out = module.run(server, lambda message: None, model=DENIED)
+    assert out == "model refused, no run started: " + BLOCKED % DENIED
+    assert touched == [] and selfmod_job.asked == []
+
+
+def test_selfmod_forever_stops_on_a_model_refusal(selfmod_job, monkeypatch):
+    from scripts import selfmod_forever
+
+    passes, lines = [], []
+    monkeypatch.setattr(selfmod_forever.nightly_selfmod, "reclaim_orphans", lambda log: None)
+    monkeypatch.setattr(selfmod_forever.nightly_selfmod, "run",
+                        lambda *a, **k: passes.append(1) or "model refused, no run started: blocked")
+    monkeypatch.setattr(selfmod_forever.selfmod, "settings", lambda: {"mode": "propose"})
+    # A bounded barren limit: a loop that ignored the refusal would retry up to it, not forever.
+    monkeypatch.setattr("sys.argv", ["selfmod_forever", "--hours", "1", "--max-barren", "3", "--model", DENIED])
+    monkeypatch.setattr("builtins.print", lambda *a, **k: lines.append(" ".join(map(str, a))))
+    assert selfmod_forever.main() == 0
+    assert passes == [1]  # one refused pass, then the loop stops instead of retrying
+    assert any("may not write code" in line for line in lines)
+
+
+def test_the_nightly_stage_reports_a_model_refusal_as_a_failure():
+    from scripts import nightly_self_improve
+
+    assert nightly_self_improve._blocking_result("selfmod", "model refused, no run started: x") == (
+        "model refused, no run started: x")
+    assert nightly_self_improve._blocking_result("selfmod", "no objective proposed") is None
+
+
+# ---- mesh_generate -------------------------------------------------------------
+
+class _MeshRunner:
+    @staticmethod
+    def locate_blender():
+        return "blender"
+
+
+def test_mesh_generate_refuses_a_denied_tier_before_any_generation(catalog, model_calls, monkeypatch, tmp_path):
+    from sonder_runtime.bootstrap import mesh_agent_tools
+    from sonder_runtime.domain.common.errors import SonderError
+
+    generated = []
+    monkeypatch.setattr(server, "_generate_text", lambda *a, **k: generated.append(a) or "")
+    monkeypatch.setitem(server.TIERS, "code", DENIED)
+    with pytest.raises(SonderError) as caught:
+        mesh_agent_tools.generate_mesh("a crate", tiers="general,code", output_dir=str(tmp_path),
+                                       rt=server, runner=_MeshRunner)
+    assert str(caught.value) == BLOCKED % DENIED
+    monkeypatch.setitem(server.TIERS, "code", ALLOWED)
+    bridge(monkeypatch, "sonder-inference", SONDER_INFERENCE_TIER_MODELS="code=" + DENIED)
+    with pytest.raises(SonderError) as caught:
+        mesh_agent_tools.generate_mesh("a crate", tiers="code", output_dir=str(tmp_path),
+                                       rt=server, runner=_MeshRunner)
+    assert str(caught.value) == SERVED % ("code", "sonder_inference", DENIED)
+    assert generated == [] and model_calls == []

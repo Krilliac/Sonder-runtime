@@ -415,6 +415,23 @@ def tool_lane_deny_list(policy) -> ToolLaneDenyList:
     )
 
 
+def denied_local_bindings(local_models, deny: ToolLaneDenyList) -> list:
+    """``(tier, model)`` for each tier binding that names a model on ``deny``."""
+    return [
+        (tier, model) for tier, model in (local_models or {}).items()
+        if decide(model, deny, free_form=False).denied
+    ]
+
+
+def tool_lane_binding_notice(tier, model) -> str:
+    """Why one tier binding was not honoured; shown by the policy status."""
+    return (
+        "local_models.%s names %r, which is blocked from tool-using lanes; "
+        "that tier uses its default instead (the rest of the file applies)"
+        % (tier, model)
+    )
+
+
 def normalize(payload, defaults=None) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("runtime policy must be a JSON object")
@@ -438,13 +455,12 @@ def normalize(payload, defaults=None) -> dict:
     tool_lane_denied = normalize_tool_lane_denied_models(
         payload.get("tool_lane_denied_models")
     )
-    deny_list = ToolLaneDenyList.from_policy(tool_lane_denied)
-    for tier, model in local_models.items():
-        if decide(model, deny_list, free_form=False).denied:
-            raise ValueError(
-                "runtime policy local_models.%s names a model blocked from "
-                "tool-using lanes: %r" % (tier, model)
-            )
+    # A blocked model in one tier binding drops that binding only (the tier
+    # keeps its default); an upgrade must not invalidate an otherwise good
+    # file.  A malformed deny section above still invalidates it.
+    dropped = denied_local_bindings(local_models, ToolLaneDenyList.from_policy(tool_lane_denied))
+    for tier, _model in dropped:
+        local_models[tier] = base["local_models"].get(tier, DEFAULT_MODELS[tier])
     embedding_model = validate_model(
         payload.get("embedding_model"),
         base.get("embedding_model", DEFAULT_EMBEDDING_MODEL),
@@ -475,6 +491,7 @@ def normalize(payload, defaults=None) -> dict:
         "tool_lane_denied_models": tool_lane_denied,
         "updated_ts": max(0, int(payload.get("updated_ts") or 0)),
         "source": str(payload.get("source") or "runtime policy")[:120],
+        **({"tool_lane_notices": [tool_lane_binding_notice(*item) for item in dropped]} if dropped else {}),
     }
 
 

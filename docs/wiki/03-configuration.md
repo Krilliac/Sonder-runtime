@@ -379,8 +379,13 @@ Some installed models are text-only advisers: they may be chatted with by
 name, and used through text-only `ensemble_answer` and `consult`, but any
 lane that calls tools, or executes or applies model output (agent and
 workbench turns, repository and build fleet workers, campaigns, game generation,
-`codegen_build_loop`, `improve_function`), refuses them, the chat code gate
-never runs their replies, and they are never bound to a tier. The built-in
+`codegen_build_loop`, `improve_function`, `parallel_generate_run`,
+`parallel_generate_run_languages`, `mesh_generate`, and the self-modification
+job run by `scripts/nightly_self_improve.py` and `scripts/selfmod_forever.py`),
+refuses them, the chat code gate never runs their replies, and they are never
+bound to a tier. The self-modification job checks its model (`--model`, else
+the `code` tier) before it starts a run and stops with `model refused, no run
+started: ...`. The built-in
 list is the `astra-cyber-` prefix and the two `hf.co/...-GGUF` sources it was
 pulled from (every quantisation, tagged or not). Names are compared
 case-insensitively, without a trailing `:latest`, and by their last path
@@ -391,13 +396,22 @@ The runtime policy can add entries (`tool_lane_denied_models` in
 the built-in ones, and no tool or MCP parameter edits it. A malformed section
 makes the whole policy file invalid: it then loads as built-in defaults, which
 also reverts every tier binding, and caller-named models are refused in tool
-lanes until the file is repaired or reset (`/runtime reset`).
+lanes until the file is repaired or reset (`/runtime reset`). A `local_models`
+entry that names a blocked model does not invalidate the file: that one tier
+uses its default, the rest of the file applies, and `/runtime status` shows a
+`WARNING:` line for it. A runtime-policy update that would bind a blocked
+model is refused.
 
 A tier bound to a provider other than Ollama is judged by the model that
 provider actually serves (`SONDER_INFERENCE_TIER_MODELS`, else
 `SONDER_INFERENCE_MODEL`; the OpenRouter tier model; `SONDER_OPENAI_MODEL`).
 When that model cannot be determined (unset, `default`, or unreadable
-configuration) the tier is refused in tool lanes and chat still works.
+configuration) the tier is refused in tool lanes and chat still works. With the
+whole process on Sonder Inference (`SONDER_MODEL_BACKEND=sonder-inference`)
+and `SONDER_INFERENCE_MODEL` unset, a packaged gateway lane on tier `sonder`
+is refused as undetermined (that provider sends `default` for it), while the
+server's own agent turn on tier `sonder` is judged by the policy's chat tier;
+set `SONDER_INFERENCE_MODEL` to name the served model.
 
 Limits: this is a name list. A renamed copy (`ollama cp astra-cyber-27b
 helper`) or an alias such as `sonder:latest` pointed at a blocked model is not
@@ -408,7 +422,10 @@ candidates) and the autopilot planner and reviewer apply the same checks;
 text callers of the gateway (A2A, offloads, replay) answer a named blocked
 model as chat. `/run` and `/runproject` still execute the latest
 runnable block whatever model wrote it: the user typing the command is the
-explicit approval.
+explicit approval. `/train` practice and the operator-run evaluation and
+example scripts (`eval_*.py`, `curriculum_run.py`, `game_ladder.py`,
+`examples/`) are not checked either: they run what the model they name, or the
+default chat route, writes, and each is a command an operator types.
 
 ### Sonder ecosystem (Inference provider and Observatory)
 

@@ -141,6 +141,8 @@ def _blocking_result(name, result) -> str | None:
     text = str(result or "").strip()
     if name == "selfmod" and text.startswith("working tree dirty ("):
         return "working tree dirty"
+    if name == "selfmod" and text.startswith("model refused"):
+        return text[:300]
     return None
 
 
