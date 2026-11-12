@@ -18,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+from sonder_runtime.adapters.inference import sonder_inference_gateway as gateway_module
 from sonder_runtime.adapters.inference.sonder_inference_gateway import (
     DEFAULT_BASE_URL,
     DEFAULT_MODEL,
@@ -1034,12 +1035,25 @@ def _run_bounded(fn, seconds: float):
 _UNBOUNDED_AFTER_SECONDS = 15.0
 
 
-def test_health_probe_is_bounded_by_wall_clock_not_per_read():
+def test_health_probe_is_bounded_by_wall_clock_not_per_read(monkeypatch):
     # The peer starts a response and then never finishes it: one byte every
     # 20 ms, far inside any per-read socket timeout, until the test ends.
-    # A per-read timeout never fires against it, so an exchange that ends at
-    # all -- with a timeout -- was ended by the wall-clock budget.
+    # A per-read timeout should never fire against it.  That is not enough to
+    # prove the budget ended the exchange: a peer thread descheduled for longer
+    # than the per-read timeout would produce the same timeout outcome.  So the
+    # test observes the mechanism directly: every exchange's _ExchangeBudget is
+    # recorded, and each must have its ``expired`` flag set, which only the
+    # watchdog sets.  A per-read timeout leaves it False, and so does a
+    # disabled watchdog (which also never ends the trickle: the hang guard).
     stop = threading.Event()
+    budgets: list = []
+
+    class _RecordingBudget(gateway_module._ExchangeBudget):
+        def __init__(self, seconds):
+            super().__init__(seconds)
+            budgets.append(self)
+
+    monkeypatch.setattr(gateway_module, "_ExchangeBudget", _RecordingBudget)
 
     def trickle(conn):
         _read_request(conn)
@@ -1062,6 +1076,11 @@ def test_health_probe_is_bounded_by_wall_clock_not_per_read():
         assert kind == "ok", snapshot
         assert snapshot.state == "unavailable" and snapshot.timed_out
         assert "timed out" in snapshot.detail
+        assert budgets and all(b.expired for b in budgets), (
+            "the probe timed out without the wall-clock budget firing: it was "
+            "ended by a per-read timeout, not by the budget"
+        )
+        probe_budgets = len(budgets)
 
         # The send is bounded by the operation deadline the same way.
         send_only = SonderInferenceGateway(
@@ -1078,6 +1097,11 @@ def test_health_probe_is_bounded_by_wall_clock_not_per_read():
         )
         kind, error = outcome
         assert kind == "raised" and isinstance(error, DeadlineExceeded), outcome
+        send_budgets = budgets[probe_budgets:]
+        assert send_budgets and all(b.expired for b in send_budgets), (
+            "the send hit its deadline without the wall-clock budget firing: "
+            "it was ended by a per-read timeout, not by the budget"
+        )
     finally:
         stop.set()
         close()
