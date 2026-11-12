@@ -60,10 +60,18 @@ def _select_examples(conn):
     interaction_count = 0
     evidence_count = 0
     eligible_count = 0
+    # Turns answered with reference passages in the prompt: the stored task is
+    # the bare question, so the pair would teach answers the task cannot carry.
+    reference_grounded = memory_store.learning_excluded_interaction_ids(
+        conn, memory_store.LEARNING_SKIP_REFERENCE_LOOKUP,
+    )
 
     def finalize_group(group):
         nonlocal eligible_count, retained_chars
         first = group["first"]
+        if first.get("id") in reference_grounded:
+            rejected["reference_lookup"] += 1
+            return
         task = (first.get("task") or "").strip()
         response = (first.get("response") or "").strip()
         if not task or not response:

@@ -164,6 +164,7 @@ import creative_router
 import intents
 import sonder_runtime.adapters.runtime_policy as runtime_policy
 from sonder_runtime.adapters import tool_lane_guard as _tool_lane_guard
+from sonder_runtime.adapters import chat_observers as _chat_observers, reference_lookup_lanes as _reference_lookup_lanes
 import sonder_runtime.adapters.accelerators.npu.contract as npu_contract
 import sonder_runtime.adapters.accelerators.npu.service as npu_service
 import calibration
@@ -4143,10 +4144,10 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
                  embedding) so record_outcome can ground and distill it.
     """
     effective_system, playbook_selection = playbook_context.augment(
-        effective_system, prompt, cloud=cloud or _is_cloud_model_name(model) or _provider_bridge.hosted_rung_active() or not augment,
+        effective_system, prompt, cloud=cloud or _is_cloud_model_name(model) or _provider_bridge.hosted_rung_active() or not augment or _reference_lookup_lanes.lookup_turn(model),
     )
-    gen = _make_generate(
-        model, effective_system, temperature, num_predict, num_ctx,
+    gen = _reference_lookup_lanes.chat_generate(  # passages frame the user turn; the stored task stays raw
+        _make_generate, prompt, model, effective_system, temperature, num_predict, num_ctx,
         cloud=cloud, allow_cloud_fallback=allow_cloud_fallback,
     )
     qv = embeddings.embed(prompt)
@@ -4206,6 +4207,7 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
             task_embedding_revision=embedding_provenance.get("revision"),
             task_embedding_dim=embedding_provenance.get("dimension"),
         )
+        _reference_lookup_lanes.mark_learning_skip(conn, iid)  # a passage-grounded turn never distills or trains
         playbook_context.record_usage(conn, playbook_selection, iid)
         _prefix_cache.observe_chat_turn(effective_system, model=model, cloud=cloud, bridged=_provider_bridge.active_rung, response_meta=getattr(gen, "last_response_meta", None))
         _capture_preferences(
@@ -4223,6 +4225,7 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
         task_embedding_revision=embedding_provenance.get("revision"),
         task_embedding_dim=embedding_provenance.get("dimension"),
     )
+    _reference_lookup_lanes.mark_learning_skip(conn, iid)  # a passage-grounded turn never distills or trains
     playbook_context.record_usage(conn, playbook_selection, iid)
     _prefix_cache.observe_chat_turn(effective_system, model=model, cloud=cloud, bridged=_provider_bridge.active_rung, response_meta=getattr(gen, "last_response_meta", None))
     _capture_preferences(
@@ -6692,8 +6695,8 @@ def _sonder_impl_serialized(
         ctx = pinned_ctx
         if ctx is None:
             ctx = None if provider else 0 if rung.cloud else _auto_model_context(rung.model)
-        return (
-            _build_system(system, trace, persona, model=rung.model, cloud=rung.cloud, provider=provider),
+        return (  # a reference-lookup model gets no Sonder system prompt (its Modelfile rules stay)
+            _reference_lookup_lanes.system_for(rung.model, _build_system(system, trace, persona, model=rung.model, cloud=rung.cloud, provider=provider)),
             ctx,
         )
 
@@ -6825,6 +6828,7 @@ def _sonder_impl_serialized(
         iid, interaction_snapshot, response, repair_usage,
     ):
         footer_iid = None
+    response = _reference_lookup_lanes.with_sources(response)  # after storage and capture: Sources is never stored
 
     if trace:
         params = {
@@ -7039,14 +7043,7 @@ def _answer_with_history_impl(
         return ("ERROR: `sonder:latest` Ollama alias not found. Run setup_alias.py, or call "
                 "with strict=False to fall back to the base coder.")
     def _observe_target(observed_model, observed_label, observed_cloud):
-        if target_observer is None:
-            return
-        try:
-            target_observer(observed_model, observed_label, observed_cloud)
-        except Exception:
-            # Observability must not make a valid model call fail.  The
-            # observer is an in-process metadata hook, never model input.
-            pass
+        _chat_observers.notify(target_observer, observed_model, observed_label, observed_cloud)  # a failing hook never fails the turn
 
     # The default OpenAI ``model`` (sonder) may step to a stronger bound local
     # model when its first model fails or answers nothing (tier_escalation);
@@ -7095,11 +7092,11 @@ def _answer_with_history_impl(
             # model that answered -- including a pre-routed first attempt,
             # which is not the route the request resolved to.
             _observe_target(model, tier_label, cloud)
-            effective_system = _build_system("", trace, "", cloud=cloud, provider=bridged_provider, model=(
-                _legacy_chat_bridge.prompt_identity_model(model, tier_label, bridged_provider, _APP_GRAPH)))
+            effective_system = _reference_lookup_lanes.system_for(model, _build_system("", trace, "", cloud=cloud, provider=bridged_provider, model=(
+                _legacy_chat_bridge.prompt_identity_model(model, tier_label, bridged_provider, _APP_GRAPH))))
             if not cloud and not _explicit_serve_selection(tier, ""):
                 from sonder_runtime.application.chat.honesty import no_tools_system
-                effective_system = no_tools_system(effective_system, prompt)
+                effective_system = _reference_lookup_lanes.system_for(model, no_tools_system(effective_system, prompt))
             learn = _should_learn(_canonical_learn_tier(tier_label), True)
             req_ctx = (
                 pinned_ctx if pinned_ctx is not None
@@ -7152,7 +7149,7 @@ def _answer_with_history_impl(
                         if not cloud and endpoint_is_local
                         and bridged_provider is None else ""
                     )
-                    if model_revision and request_cache.eligible(
+                    if model_revision and not _reference_lookup_lanes.lookup_turn(model) and request_cache.eligible(  # a lookup turn is never cached
                         scope=cache_scope, cloud=cloud, temperature=temperature,
                         learning=False, augmented=False,
                         remote_endpoint=not endpoint_is_local,
@@ -7174,8 +7171,8 @@ def _answer_with_history_impl(
                         response = request_cache.get(request_cache_key)
                         request_cache_status = "hit" if response is not None else "miss"
                     if response is None:
-                        gen = _make_generate(
-                            model, effective_system, temperature, 1024, req_ctx,
+                        gen = _reference_lookup_lanes.chat_generate(
+                            _make_generate, prompt, model, effective_system, temperature, 1024, req_ctx,
                             cloud=cloud,
                             allow_cloud_fallback=_allow_cloud_fallback_for_target(tier_label),
                         )

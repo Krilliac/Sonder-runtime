@@ -108,6 +108,7 @@ from sonder_runtime.application.ports.model_gateway import ModelRequest
 from sonder_runtime.application.context import bind_operation_context
 from sonder_runtime.application.chat import provider_bridge as _provider_bridge
 from sonder_runtime.application.routing import long_context_overflow as _overflow
+import sonder_runtime.adapters.reference_lookup_lanes as _reference_lookup_lanes
 from sonder_runtime.domain import launcher_health as sonder_health
 from sonder_runtime.domain.common.errors import (
     Conflict,
@@ -7409,6 +7410,8 @@ class Handler(BaseHTTPRequestHandler):
         turn_overflow = self._turn_stack.enter_context(
             _overflow.notice_scope()
         ) if getattr(self, "_turn_stack", None) is not None else []
+        # No reference-lookup state from an earlier turn on this thread.
+        _reference_lookup_lanes.reset_turn()
         try:
             # SPEC-2 WP4 admission: bounded concurrency slot with queue
             # depth, admission deadline, drain and maintenance awareness,
@@ -7831,6 +7834,9 @@ class Handler(BaseHTTPRequestHandler):
         refusal = _turn_refusal_receipt(turn_refusals)
         if refusal is not None:
             receipt["refusal"] = refusal
+        # A lookup turn's Sources block and receipt entry, added after the turn
+        # was recorded and captured so the stored reply never holds it.
+        content = _reference_lookup_lanes.finish_http(content, receipt)
         if stream:
             streamed = self._send_stream(
                 content, model, iid=response_iid, elapsed_ms=elapsed_ms,

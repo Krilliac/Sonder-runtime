@@ -1,0 +1,318 @@
+"""Reference lookup on the single-model chat lanes.
+
+``server.py`` is a size-capped control-plane file, so each seam of the MCP
+chat tool (by tier and by ``model_override``) and of the HTTP chat route
+(learning and by-name) calls one function here:
+
+* ``lookup_turn(model)``: whether automatic lookup applies to the model of the
+  rung about to answer.  The decision is made once per rung and remembered for
+  the rest of that rung's seams.
+* ``system_for(model, system)``: the system prompt for that rung.  A lookup
+  model is sent none, so its own Modelfile house rules stay in force.
+* ``chat_generate(make_generate, question, model, system, ...)``: the generate
+  callable for the rung.  For a lookup model it retrieves passages once per
+  turn (asking the answering model for search terms first) and frames the user
+  turn through ``wrap_generate``, so the stored task stays the raw question and
+  callers store the cleaned reply.
+* ``mark_learning_skip(conn, interaction_id)``: marks a turn that was answered
+  with passages so lesson distillation and the training export skip it.
+* ``with_sources(text)`` (MCP) and ``finish_http(content, receipt)`` (HTTP):
+  the Sources block for the text returned to the caller, added after storage
+  and session capture so it is never stored.
+
+For any other model each function hands back exactly what the caller had: the
+same ``make_generate(...)`` call, the same system prompt, the same text.
+
+State and threads: a turn's lookup state lives in a ContextVar, so every
+thread and every copied context has its own; a turn never sees another
+thread's passages.  The state object is owned by the turn that created it and
+is only mutated by that turn.  Nothing here executes model output or calls a
+tool, and no index or search failure reaches the caller: the turn proceeds as
+a bare answer that says why.
+"""
+from __future__ import annotations
+
+import logging
+from collections.abc import Callable, Mapping, MutableMapping
+from contextvars import ContextVar
+from dataclasses import dataclass
+from typing import Any
+
+import sonder_runtime.adapters.memory_store as _memory_store
+import sonder_runtime.adapters.reference_lookup_service as _service
+import sonder_runtime.adapters.reference_lookup_state as _state
+from sonder_runtime.application.chat import reference_lookup as _lookup
+from sonder_runtime.application.chat import stream_sink
+from sonder_runtime.application.session.provider_attempts import provider_attempt_scope
+from sonder_runtime.domain.context_formatting import rough_token_count
+from sonder_runtime.domain.reference_lookup.answer_check import (
+    format_sources,
+    format_unavailable,
+)
+from sonder_runtime.domain.reference_lookup.sanitize import one_line, sanitize
+from sonder_runtime.domain.reference_lookup.selection import passage_char_budget
+
+_logger = logging.getLogger("sonder.reference_lookup")
+
+# The search-terms call: deterministic, small, no system prompt.
+EXPAND_TEMPERATURE = 0.0
+EXPAND_NUM_PREDICT = 80
+# Context window assumed for the budget when the call passes none (a hosted or
+# bridged rung that uses its provider's default window).
+ASSUMED_NUM_CTX = 4096
+WARNING_PREFIX = "Warning: "
+LEARNING_SKIP_REASON = _memory_store.LEARNING_SKIP_REFERENCE_LOOKUP
+RECEIPT_KEY = "reference_lookup"
+
+_FAILED = frozenset({_lookup.LookupReason.INDEX_UNAVAILABLE, _lookup.LookupReason.SEARCH_FAILED})
+_NONE_TEXT = {
+    _lookup.LookupReason.NO_MATCH: _lookup.NO_MATCH_WARNING,
+    _lookup.LookupReason.NO_ROOM: _lookup.NO_ROOM_WARNING,
+    _lookup.LookupReason.EMPTY_QUESTION: "the question was empty",
+    _lookup.LookupReason.DISABLED: "reference lookup is off",
+}
+
+
+@dataclass
+class TurnLookup:
+    """Lookup state of one rung of one chat turn.
+
+    ``bound`` is set once a generate callable was built for the rung; a bound
+    record is never reused, so passages cannot carry over to another rung or
+    turn.  ``bundle`` and ``review`` are filled in when the model is called.
+    """
+
+    model: str
+    applies: bool
+    bound: bool = False
+    bundle: _lookup.Bundle | None = None
+    review: _lookup.ReplyReview | None = None
+
+    @property
+    def grounded(self) -> bool:
+        """True when the model was given passages."""
+        return self.bundle is not None and self.bundle.applied and bool(self.bundle.passages)
+
+
+_TURN: ContextVar[TurnLookup | None] = ContextVar("sonder_reference_lookup_turn", default=None)
+
+
+def _record(model: Any) -> TurnLookup:
+    """The current rung's record for ``model``: the unbound one in force, else a new one."""
+    name = str(model or "")
+    current = _TURN.get()
+    if current is not None and not current.bound and current.model == name:
+        return current
+    try:
+        applies = bool(_service.applies(name).applies)
+    except Exception:  # noqa: BLE001  # lookup is a help: a broken rule means no lookup
+        applies = False
+    record = TurnLookup(name, applies)
+    _TURN.set(record)
+    return record
+
+
+def _take() -> TurnLookup | None:
+    record = _TURN.get()
+    _TURN.set(None)
+    return record
+
+
+def reset_turn() -> None:
+    """Forget any lookup state before a new turn starts."""
+    _TURN.set(None)
+
+
+def lookup_turn(model: Any) -> bool:
+    """Whether automatic lookup applies to the rung answering with ``model``."""
+    return _record(model).applies
+
+
+def system_for(model: Any, system: Any) -> Any:
+    """``system`` unchanged, or ``""`` for a lookup model (its Modelfile rules stay in force)."""
+    return "" if _record(model).applies else system
+
+
+class LookupGenerate:
+    """A generate callable that answers one lookup turn.
+
+    Owns nothing but references: ``inner`` is the rung's generate callable
+    (built with no system prompt), ``record`` the turn's state.  Usage and
+    response metadata are read through to ``inner`` live, and the provider
+    ceiling (``num_predict_override``) is written to it, so callers that read
+    or set those attributes see the real generator.  Not thread-safe: one turn
+    calls it on one thread.
+    """
+
+    def __init__(self, inner: Callable[..., Any], record: TurnLookup, question: str,
+                 expander: Callable[[], Callable[..., Any]], *, num_ctx: Any,
+                 num_predict: Any) -> None:
+        self._inner = inner
+        self._record = record
+        self._question = question
+        self._expander = expander
+        self._num_ctx = num_ctx
+        self._num_predict = num_predict
+
+    @property
+    def num_predict_override(self) -> Any:
+        return getattr(self._inner, "num_predict_override", None)
+
+    @num_predict_override.setter
+    def num_predict_override(self, value: Any) -> None:
+        self._inner.num_predict_override = value
+
+    def __getattr__(self, name: str) -> Any:
+        inner = self.__dict__.get("_inner")
+        if inner is None:
+            raise AttributeError(name)
+        return getattr(inner, name)
+
+    def _expand(self, prompt: str) -> str:
+        # Not a provider attempt of the turn, and never streamed to the client.
+        with provider_attempt_scope(None, None), stream_sink.armed(None):
+            return self._expander()(prompt)
+
+    def _budget(self, prompt: Any, history: Any) -> int:
+        try:
+            num_ctx = self._num_ctx
+            if isinstance(num_ctx, bool) or not isinstance(num_ctx, int) or num_ctx <= 0:
+                num_ctx = ASSUMED_NUM_CTX
+            used = rough_token_count(prompt) + sum(
+                rough_token_count(message.get("content"))
+                for message in (history or ()) if isinstance(message, Mapping)
+            )
+            return passage_char_budget(num_ctx, int(self._num_predict or 0), used)
+        except Exception:  # noqa: BLE001  # an unreadable size means no room, never a failed turn
+            return 0
+
+    def __call__(self, prompt: Any, *args: Any, **kwargs: Any) -> Any:
+        live = stream_sink.turn_stream()
+        if live is not None:
+            # Claim the turn's stream before any model call: nothing raw (and
+            # never the search terms) is forwarded; the cleaned text goes whole.
+            live.claim()
+        history = args[0] if args else kwargs.get("history")
+        bundle = _service.retrieve_for(
+            self._question, self._expand, _service.DEFAULT_K, self._budget(prompt, history),
+        )
+        self._record.bundle = bundle
+        raw: list[Any] = []
+
+        def recording(framed: Any, *call_args: Any, **call_kwargs: Any) -> Any:
+            reply = self._inner(framed, *call_args, **call_kwargs)
+            raw.append(reply)
+            return reply
+
+        reply = _lookup.wrap_generate(recording, bundle, _lookup.new_code())(prompt, *args, **kwargs)
+        if not isinstance(reply, str):
+            return reply
+        review = _lookup.review_reply(bundle, raw[-1] if raw and isinstance(raw[-1], str) else reply)
+        self._record.review = review
+        # A framed turn returns wrap_generate's cleaned reply; a bare one is
+        # cleaned here, so a lookup model's reply is always display-safe.
+        return reply if self._record.grounded else review.text
+
+
+def chat_generate(make_generate: Callable[..., Any], question: Any, model: Any, system: Any,
+                  temperature: Any, num_predict: Any, num_ctx: Any, **options: Any) -> Any:
+    """``make_generate(model, system, temperature, num_predict, num_ctx, **options)``,
+    wrapped for reference lookup when it applies to ``model``."""
+    record = _record(model)
+    record.bound = True
+    if not record.applies:
+        return make_generate(model, system, temperature, num_predict, num_ctx, **options)
+    inner = make_generate(model, "", temperature, num_predict, num_ctx, **options)
+
+    def expander() -> Callable[..., Any]:
+        return make_generate(model, "", EXPAND_TEMPERATURE, EXPAND_NUM_PREDICT, num_ctx, **options)
+
+    return LookupGenerate(inner, record, question if isinstance(question, str) else "", expander,
+                          num_ctx=num_ctx, num_predict=num_predict)
+
+
+def mark_learning_skip(conn: Any, interaction_id: Any) -> bool:
+    """Mark the current turn's interaction for distillation and export to skip, if it had passages."""
+    record = _TURN.get()
+    if record is None or not record.grounded or not interaction_id:
+        return False
+    try:
+        return bool(_memory_store.exclude_interaction_from_learning(conn, interaction_id, LEARNING_SKIP_REASON))
+    except Exception as exc:  # noqa: BLE001  # the answer stands; the miss is logged and kept for status
+        detail = sanitize(f"learning skip marker not stored: {type(exc).__name__}: {exc}")
+        _state.set_last_error(detail)
+        _logger.warning("reference lookup: %s", detail)
+        return False
+
+
+def sources_text(record: TurnLookup) -> str:
+    """The Sources block (and any warnings) for a lookup turn's returned text."""
+    bundle = record.bundle
+    if bundle is None:
+        return ""
+    review = record.review
+    shown = ""
+    if record.grounded:
+        head = format_sources(bundle.passages, review.cited if review is not None else ())
+    elif bundle.reason in _FAILED:
+        head = format_unavailable(bundle.reason_text)
+    else:
+        shown = _NONE_TEXT.get(bundle.reason, bundle.reason_text)
+        head = f"Sources: none ({one_line(shown)})"
+    warnings = [*bundle.warnings, *(review.warnings if review is not None else ())]
+    return "\n".join([head, *(WARNING_PREFIX + one_line(text) for text in warnings if text and text != shown)])
+
+
+def receipt_entry(record: TurnLookup) -> dict[str, Any]:
+    bundle = record.bundle
+    if record.grounded and bundle is not None:
+        return {"applied": True, "passages": len(bundle.passages)}
+    return {"applied": False, "reason": bundle.reason_text if bundle is not None else ""}
+
+
+def _finished(record: TurnLookup | None) -> bool:
+    return record is not None and record.applies and record.bundle is not None
+
+
+def with_sources(text: Any) -> Any:
+    """The MCP reply with the turn's Sources block appended (call after storage and capture)."""
+    record = _take()
+    if not _finished(record) or not isinstance(text, str):
+        return text
+    try:
+        return text + "\n\n" + sources_text(record)
+    except Exception:  # noqa: BLE001
+        return text
+
+
+def finish_http(content: Any, receipt: Any) -> Any:
+    """The HTTP reply with the Sources block, and the receipt's ``reference_lookup`` entry."""
+    record = _take()
+    if not _finished(record) or not isinstance(content, str):
+        return content
+    try:
+        if isinstance(receipt, MutableMapping):
+            receipt[RECEIPT_KEY] = receipt_entry(record)
+        return content + "\n\n" + sources_text(record)
+    except Exception:  # noqa: BLE001
+        return content
+
+
+__all__ = [
+    "ASSUMED_NUM_CTX",
+    "EXPAND_NUM_PREDICT",
+    "EXPAND_TEMPERATURE",
+    "LEARNING_SKIP_REASON",
+    "RECEIPT_KEY",
+    "LookupGenerate",
+    "TurnLookup",
+    "chat_generate",
+    "finish_http",
+    "lookup_turn",
+    "mark_learning_skip",
+    "receipt_entry",
+    "reset_turn",
+    "sources_text",
+    "system_for",
+    "with_sources",
+]
