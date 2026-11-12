@@ -1041,7 +1041,7 @@ class SubprocessJobProvider:
             remaining = (
                 deadline.astimezone(timezone.utc) - datetime.now(timezone.utc)
             ).total_seconds()
-        except Exception:
+        except Exception:  # noqa: BLE001 - any failure to read the deadline fails closed
             return 0.0
         return max(0.0, min(ROOT_EXIT_SETTLE_SECONDS, remaining))
 
