@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import threading
-import time
 from contextvars import ContextVar
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
@@ -48,6 +47,10 @@ class BatchPeer:
             document = (_chat(prompt, model=body["model"]) if status == 200 else
                         {"error": {"code": status, "message": "synthetic batch failure"}})
             data = json.dumps(document).encode()
+            # Record the request as completed BEFORE any response byte is sent: the client may read the whole
+            # response and return before this thread runs again, so a record made afterwards can be missing.
+            with self.lock:
+                self.finished.append(prompt)
             handler.send_response(status)
             handler.send_header("Content-Type", "application/json")
             handler.send_header("Content-Length", str(len(data)))
@@ -56,8 +59,6 @@ class BatchPeer:
                 handler.wfile.write(data)
             except (BrokenPipeError, ConnectionResetError):
                 pass  # the deadline test intentionally closes the client first
-            with self.lock:
-                self.finished.append(prompt)
             self.after(prompt)
         finally:
             with self.lock:
@@ -104,7 +105,8 @@ def requests(*prompts):
 
 def test_batch_orders_results_not_completion_and_accounts_each_authenticated_send(peer, monkeypatch):
     second_done = threading.Event()
-    peer.before = lambda prompt: second_done.wait(3) if prompt == "first" else None
+    # A hang guard only: a short wait could expire on a slow runner and let "first" finish before "second".
+    peer.before = lambda prompt: second_done.wait(30) if prompt == "first" else None
     peer.after = lambda prompt: second_done.set() if prompt == "second" else None
     usage = []
     monkeypatch.setattr(
@@ -232,10 +234,25 @@ def test_pending_cancellation_preserves_completed_success_and_never_dispatches_t
     assert [body["messages"][-1]["content"] for _, _, body in peer.requests] == ["success", "cancel"]
 
 
-def test_pending_deadline_preserves_completed_success_and_never_dispatches_tail(peer):
-    peer.before = lambda prompt: time.sleep(0.5) if prompt == "slow" else None
+def test_pending_deadline_preserves_completed_success_and_never_dispatches_tail(peer, monkeypatch):
+    # The deadline passes while "slow" is in flight.  It used to be a real
+    # 0.3s budget against a 0.5s sleep, which raced the wall clock: under CPU
+    # load "success" alone took more than 0.3s and was itself cut off
+    # (12/12 runs failed with 12 parallel runs plus 24 CPU burners).  The
+    # operation clock is now moved past the deadline from inside the "slow"
+    # request, so the ordering is fixed whatever the load.
+    from sonder_runtime.application import context as context_module
+
+    clock = [0.0]
+    monkeypatch.setattr(context_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+
+    def before(prompt):
+        if prompt == "slow":
+            clock[0] = 11.0
+
+    peer.before = before
     results = gateway(peer).generate_batch(
-        requests("success", "slow", "pending"), context(timeout_seconds=0.3), max_workers=1,
+        requests("success", "slow", "pending"), context(timeout_seconds=10), max_workers=1,
     )
     assert results[0].response.text == "success"
     assert isinstance(results[1].error, DeadlineExceeded)

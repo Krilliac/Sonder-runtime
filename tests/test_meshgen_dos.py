@@ -1,32 +1,299 @@
-"""Resource-exhaustion regressions: every reviewer probe must end in a ScriptError within two seconds.
+"""Resource-exhaustion regressions: every reviewer probe must be stopped by its own cap.
 
-The probes (d01..d17, e01..e05) each make one allow-listed operation do more work than its element count
-suggests (aliased containers, streaming str/print/f-string/assert, default-argument copies, sorts, shuffles,
-sums, joins).  The recorder charges work in proportion to the elements touched, so each one must hit a cap.
+The probes (d01..d17, e01..e05, and the later review rounds) each make one allow-listed operation do more work
+than its element count suggests (aliased containers, streaming str/print/f-string/assert, default-argument
+copies, sorts, shuffles, sums, joins).  The recorder charges work in proportion to the elements touched, so each
+one must hit a cap.
+
+Which cap fired is proven directly, never inferred from elapsed time: ``run_probe`` records whether the step cap,
+the work cap, the clock, a size cap or nothing stopped a script, together with its step and work counts.  Those
+are identical on an idle and a loaded machine; only wall time changes, so wall time is not asserted anywhere.
+The one thing the counters cannot see is host work that no charge covers (an uncharged ``str()`` of millions of
+aliased elements, say), so each probe also gets a CPU-time budget measured in units of a workload calibrated on
+the machine running the tests (see ``cpu_unit``).
 """
 from __future__ import annotations
 
-import os
 import time
+from typing import NamedTuple
 
 import pytest
 
 from sonder_runtime.domain.meshgen.dsl.errors import ScriptError
 from sonder_runtime.domain.meshgen.dsl.recorder import compile_script
 
-# Observed CI overruns under `-n auto` on shared runners were 1.02x-1.37x of the local bound.
-_IN_CI = os.environ.get("CI", "").lower() in ("true", "1")
-TIME_SLACK = float(os.environ.get("MESHGEN_DOS_TIME_SLACK", "1.5" if _IN_CI else "1.0"))
-# Capped so the largest scaled bound (8 s x slack) stays under the 120 s clock that no_clock installs.
-if not 0 < TIME_SLACK <= 10:
-    raise ValueError("MESHGEN_DOS_TIME_SLACK must be a number in (0, 10], got %r" % TIME_SLACK)
+# The sandbox clock is raised to this so that it only ends a script that hangs; a probe stopped by it means a cap is missing.
+HANG_CEILING_SECONDS = 60.0
+
+# Size caps that end a probe by message rather than by the step/work counters.
+FMT_CAP = "a % format may contain at most"
+OVERFLOW = "the result is too large"
+STR_CAP = "strings that are too long"
+RANGE_CAP = "range() is too long"
+CONTAINER_CAP = "containers that are too large"
+JSON_CAP = "larger than 4 MB of JSON"
+_SIZE_FRAGMENTS = (FMT_CAP, OVERFLOW, STR_CAP, RANGE_CAP, CONTAINER_CAP, JSON_CAP)
+
+
+class Outcome(NamedTuple):
+    stop: str  # "steps", "work", "clock", a size-cap fragment, "finishes", or the raw message if unrecognised
+    steps: int
+    work_done: int
+    cpu: float  # time.thread_time() delta: CPU seconds this thread spent in compile_script
+    message: str | None  # the ScriptError text, None when the script finished
+    log: list  # the interpreter's print() output so far
 
 
 @pytest.fixture
-def no_clock(monkeypatch):
-    """Only the work/step/size caps may stop a probe; the 10 s sandbox clock would hide a missing cap behind the slack."""
+def run_probe(monkeypatch):
+    """Run a script and report which limit stopped it.  `too_much()` is the one place the step cap, the work cap and
+    the clock all raise from, so the recording subclass classifies it with the same comparisons the recorder made.
+
+    The clock is asked first.  tick() and work() test their cap before the clock, so a deadline that has already
+    passed means the clock raised; a counter that ran past its limit because its cap never fired must not be
+    credited to that cap (with the step cap removed, a `while True` loop reaches the clock far past 2,000,000 steps)."""
     from sonder_runtime.domain.meshgen.dsl import recorder
-    monkeypatch.setattr(recorder, "MAX_SECONDS", 120.0)
+    monkeypatch.setattr(recorder, "MAX_SECONDS", HANG_CEILING_SECONDS)
+    seen = []
+
+    class _Recording(recorder._Interp):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.stopped_by = None
+            seen.append(self)
+
+        def too_much(self):
+            # Ambiguous only when a cap is broken (both counters past their limits); assert_stopped_by then fails on
+            # the exact step/work counts, which is where the real diagnosis is.
+            if recorder.time.monotonic() > self.deadline:
+                self.stopped_by = "clock"
+            elif self.steps > recorder.MAX_STEPS:
+                self.stopped_by = "steps"
+            elif self.work_done > recorder.MAX_WORK:
+                self.stopped_by = "work"
+            else:
+                self.stopped_by = "clock"
+            return super().too_much()
+
+    monkeypatch.setattr(recorder, "_Interp", _Recording)
+
+    def run(source):
+        seen.clear()
+        started = time.thread_time()
+        message = None
+        try:
+            compile_script(source)
+        except ScriptError as exc:
+            message = str(exc)
+        cpu = time.thread_time() - started
+        assert seen, "compile_script never built an interpreter, so no limit could be observed"
+        interp = seen[-1]
+        if message is None:
+            stop = "finishes"
+        elif interp.stopped_by is not None:
+            stop = interp.stopped_by
+        else:
+            stop = next((frag for frag in _SIZE_FRAGMENTS if frag in message), message)
+        return Outcome(stop, interp.steps, interp.work_done, cpu, message, list(interp.log))
+
+    return run
+
+
+def _cpu_workload():
+    total = 0
+    for i in range(6_000_000):
+        total += i & 7
+    return total
+
+
+@pytest.fixture(scope="module")
+def cpu_unit():
+    """CPU seconds a fixed pure-Python workload costs on this machine (min of 3 runs): the unit of the CPU budgets."""
+    best = None
+    for _ in range(3):
+        started = time.thread_time()
+        _cpu_workload()
+        spent = time.thread_time() - started
+        best = spent if best is None else min(best, spent)
+    assert best > 0, "thread_time did not advance over the calibration workload"
+    return best
+
+
+# CPU budgets, in cpu_unit multiples.  Measured on an idle machine (unit 0.125 s; thread_time ticks in 15.6 ms steps):
+#   instant probes (stopped by a pre-charge or size cap, idle CPU <= 0.08 s): largest ratio 0.64 -> budget 8 (12.5x headroom)
+#   heavy probes (legitimately burn up to the step/work cap, idle CPU 0.11..2.28 s): largest ratio 18.2 -> budget 60 (3.3x)
+# Those are the largest ratios over five idle runs; the heaviest probe, c09_print_dict, ranged from 11.6 to 18.2.  A later
+# measurement (three serial runs and one -n 4 run of this file) gave a worst ratio of 12.9 (c09_print_dict), so 60 is 4.7x
+# over that and 3.3x over the 18.2 worst.  The scripts further down that pass heavy=True measured 3.4 (weight walk),
+# 5.6 (predicate nodes), 1.1 (dict membership) and 0.1 (multiply by zero; below the 15.6 ms thread_time tick).
+# 60 units is about 7.5 s here, under the production clock (recorder.MAX_SECONDS = 10), which an earlier 200 (25 s) was not.
+# It was 200 until a review raised MAX_STEPS tenfold and four probes that then ran 5 to 15 s still passed.
+# The budget catches an uncharged host operation, not slowness: it is a multiple of this machine's own speed, so a slower
+# or busier runner scales it.  Under 36 CPU burners plus -n 24 the per-thread CPU of the heaviest probe grew only 1.2x.
+# It is deliberately coarse.  It trips above 8 units (about 1 s here) for an instant probe and 60 units (about 7.5 s)
+# for a heavy one, so one uncharged str() of 8 million aliased elements (0.23 s, 1.9 units) passes unnoticed; which
+# limit fired, and after how many steps, is what the assertions on `stop`, `steps` and `work_done` prove exactly.
+INSTANT_BUDGET_UNITS = 8
+HEAVY_BUDGET_UNITS = 60
+HEAVY = frozenset((
+    'b00_while',
+    'b01_startswith_tuple',
+    'b05_show_dict',
+    'b06_show_dict_one',
+    'b07_find_horspool',
+    'b08_replace_count',
+    'b09_split_sep',
+    'c02_startswith_append200k_1call',
+    'c03_startswith_append200k_loop',
+    'c04_show_dict_literal',
+    'c05_show_dict_one',
+    'c07_seed_str',
+    'c09_print_dict',
+    'd02_sort_strs',
+    'd08_sum_loop',
+    'd10_while',
+    'd14_join',
+    'e02_sort',
+    'e04_sum',
+    'f01_fstring_parts',
+    'f02_fstring_spec_parts',
+    'f04_fstring_spec_wide',
+    'p01_pred_json_4999',
+    'p02_pred_json_1500',
+    'r9_d01b_mul_zero',
+    'r9_d03_show_nested',
+    'r9_d04_dict_fresh_keys',
+    'r9_d05_sort_floats',
+    'r9_d05b_sort_floats',
+    'r9_d06_sort_float_once',
+    'r9_d07_comp_filter',
+    'r9_d08_recursion_work',
+    'r9_d11b_float_parse',
+    'r9_d13_show_dictkeys',
+    'r9_d14_in_dict_palette',
+    'r9_d15_sort_tuples_deep',
+    'r9_d17_strfind_worst',
+    'r9_d19_max_nested',
+    'seed_long_string',
+    'str_of_aliased_dict_150k',
+))
+
+
+def assert_cpu_within_budget(name, outcome, cpu_unit, heavy=None, units=None):
+    """``units`` overrides the instant/heavy budget (tests/test_meshgen_dsl_recorder.py scales it per call site)."""
+    heavy = name in HEAVY if heavy is None else heavy
+    if units is None:
+        units = HEAVY_BUDGET_UNITS if heavy else INSTANT_BUDGET_UNITS
+    assert outcome.cpu <= units * cpu_unit, (
+        f"{name} spent {outcome.cpu:.2f}s of CPU, over its budget of {units} units x {cpu_unit:.3f}s: "
+        "host work that no charge covers?")
+
+
+def assert_not_stopped_by_the_clock(name, outcome):
+    assert outcome.stop != "clock", f"{name} hit the 60 s hang ceiling: a cap is missing"
+
+
+def assert_stopped_by(name, outcome, expected):
+    """The limit that ended the script, from the interpreter's own counters."""
+    from sonder_runtime.domain.meshgen.dsl import recorder
+    assert_not_stopped_by_the_clock(name, outcome)
+    assert outcome.stop == expected, (name, outcome)
+    if expected == "steps":
+        # tick() counts one step and raises on the first one past the cap, so the count is exact.  A larger count
+        # means the step cap did not fire and something else ended the script later.
+        assert outcome.steps == recorder.MAX_STEPS + 1, (name, outcome)
+    elif expected == "work":
+        assert outcome.steps <= recorder.MAX_STEPS and outcome.work_done > recorder.MAX_WORK, (name, outcome)
+
+
+# Which limit stopped each probe.  This table is a regression record, not a statement of design: it was recorded by
+# running every probe against the current recorder and checked by hand.  A change here means the recorder's behaviour changed and needs the same
+# hand check.  The values do not depend on machine speed.  "work"/"steps" are the recorder's work and step caps,
+# "finishes" is a script that legitimately completes.
+EXPECTED_STOP = {
+    'd01_shuffle': "work",
+    'd02_sort_strs': "work",
+    'd03_alias_eq': "work",
+    'd04_alias_str': "work",
+    'd05_default_copy': "work",
+    'd06_count_alias': "work",
+    'd07_in_alias': "work",
+    'd08_sum_loop': "work",
+    'd09_percent': FMT_CAP,
+    'd10_while': "steps",
+    'd11_pow': OVERFLOW,
+    'd12_strmul': STR_CAP,
+    'd13_print_alias': "work",
+    'd14_join': "work",
+    'd15_minmax': "work",
+    'd16_assert_alias': "work",
+    'd17_fstring_alias': "work",
+    'e01_shuffle': "work",
+    'e02_sort': "work",
+    'e03_print4': "work",
+    'e04_sum': "work",
+    'e05_eq_small': "work",
+    'b00_while': "steps",
+    'b01_startswith_tuple': "work",
+    'b02_startswith_loop': "work",
+    'b03_float_long': "work",
+    'b04_insert_pop': RANGE_CAP,
+    'b05_show_dict': "work",
+    'b06_show_dict_one': "work",
+    'b07_find_horspool': "work",
+    'b08_replace_count': STR_CAP,
+    'b09_split_sep': "work",
+    'b10_endswith_tuple': "work",
+    'b11_seed_str': RANGE_CAP,
+    'b12_dict_get_hash': STR_CAP,
+    'c01_startswith_literal_1call': "work",
+    'c02_startswith_append200k_1call': "work",
+    'c03_startswith_append200k_loop': "work",
+    'c04_show_dict_literal': "work",
+    'c05_show_dict_one': "finishes",
+    'c06_insert_pop': CONTAINER_CAP,
+    'c07_seed_str': "work",
+    'c08_in_dict_keys_tuple': "work",
+    'c09_print_dict': "steps",
+    'f01_fstring_parts': STR_CAP,
+    'f02_fstring_spec_parts': STR_CAP,
+    'f03_fstring_spec_loop': STR_CAP,
+    'f04_fstring_spec_wide': STR_CAP,
+    'insert_pop_front': "work",
+    'replace_long_arguments': STR_CAP,
+    'seed_long_string': "work",
+    'split_long_separator': "work",
+    'startswith_tuple_4000_literal': "work",
+    'str_of_aliased_dict_150k': "work",
+    'p01_pred_json_4999': JSON_CAP,
+    'p02_pred_json_1500': JSON_CAP,
+    'p04_string_leaves': JSON_CAP,
+    'r9_d01_mul_zero': "work",
+    'r9_d01b_mul_zero': "steps",
+    'r9_d02_upper_expand': STR_CAP,
+    'r9_d03_show_nested': "work",
+    'r9_d04_dict_fresh_keys': "work",
+    'r9_d05_sort_floats': "steps",
+    'r9_d05b_sort_floats': "finishes",
+    'r9_d06_sort_float_once': "finishes",
+    'r9_d07_comp_filter': "steps",
+    'r9_d08_recursion_work': "work",
+    'r9_d09_dict_eq': STR_CAP,
+    'r9_d09b_dict_eq': STR_CAP,
+    'r9_d11_float_parse': STR_CAP,
+    'r9_d11b_float_parse': "work",
+    'r9_d12_split_many': "work",
+    'r9_d13_show_dictkeys': "work",
+    'r9_d14_in_dict_palette': "steps",
+    'r9_d15_sort_tuples_deep': "work",
+    'r9_d16_in_list_strings': "work",
+    'r9_d17_strfind_worst': "work",
+    'r9_d18_fstring_many': STR_CAP,
+    'r9_d19_max_nested': "work",
+}
+
+CAP_WORDS = ("too large", "too long", "too much work", "too many", "at most", "too big", "limit")
+
 
 PROBES = {
     'd01_shuffle': 'import random\ndef build():\n    l = list(range(150000))\n    for i in range(200):\n        for j in range(200):\n            random.shuffle(l)\n',
@@ -53,19 +320,16 @@ PROBES = {
     'e05_eq_small': 'def build():\n    row = [0] * 200000\n    row2 = [0] * 200000\n    g1 = [row] * 2000\n    g2 = [row2] * 2000\n    x = g1 == g2\n',
 }
 
-CAP_WORDS = ("too large", "too long", "too much work", "too many", "at most", "too big", "limit")
-
 
 @pytest.mark.parametrize("name", sorted(PROBES))
-def test_reviewer_probe_hits_a_cap_within_two_seconds(name, no_clock):
-    started = time.monotonic()
-    with pytest.raises(ScriptError) as info:
-        compile_script(PROBES[name])
-    elapsed = time.monotonic() - started
-    message = str(info.value)
-    bound = 2.0 * TIME_SLACK
-    assert elapsed < bound, "%s took %.2fs (bound %.2fs)" % (name, elapsed, bound)
+def test_reviewer_probe_is_stopped_by_its_cap(name, run_probe, cpu_unit):
+    outcome = run_probe(PROBES[name])
+    assert_stopped_by(name, outcome, EXPECTED_STOP[name])
+    message = outcome.message
+    assert message is not None, name
     assert "internal error" not in message and any(word in message for word in CAP_WORDS), message
+    assert_cpu_within_budget(name, outcome, cpu_unit)
+
 
 # ---- second review
 SECOND = {
@@ -103,29 +367,21 @@ SECOND = {
     'str_of_aliased_dict_150k': 'def build():\n    d = dict([(str(i), 0) for i in range(150000)])\n    L = [d]\n    for j in range(100):\n        for i in range(1000):\n            s = str(L)\n',
 }
 
-# c09 takes 2.2 s alone and 5.2 s with 20 copies running at once (CI runs -n auto): keep a wide margin
-SECOND_BOUNDS = {"c09_print_dict": 8.0}
 MUST_BE_WORK = ("insert_pop_front", "seed_long_string", "split_long_separator",
                 "startswith_tuple_4000_literal", "str_of_aliased_dict_150k", "c01_startswith_literal_1call",
                 "c03_startswith_append200k_loop", "c04_show_dict_literal", "c09_print_dict", "c07_seed_str")
 
 
 @pytest.mark.parametrize("name", sorted(SECOND))
-def test_second_review_probe_stops_within_three_seconds(name, no_clock):
-    started = time.monotonic()
-    try:
-        compile_script(SECOND[name])
-        outcome = None  # a single bounded call may legitimately finish (c05 is one str() of a 150k dict)
-    except ScriptError as exc:
-        outcome = str(exc)
-    elapsed = time.monotonic() - started
-    bound = SECOND_BOUNDS.get(name, 4.0) * TIME_SLACK
-    assert elapsed < bound, "%s took %.2fs (bound %.2fs)" % (name, elapsed, bound)
+def test_second_review_probe_is_stopped_by_its_cap(name, run_probe, cpu_unit):
+    outcome = run_probe(SECOND[name])  # a single bounded call may legitimately finish (c05 is one str() of a 150k dict)
+    assert_stopped_by(name, outcome, EXPECTED_STOP[name])
     if name in MUST_BE_WORK:
-        assert outcome is not None and "too much work" in outcome, (name, outcome)
-        assert "work units" in outcome and "seconds" in outcome and "steps" in outcome
-    if outcome is not None:
-        assert "internal error" not in outcome
+        assert outcome.message is not None and "too much work" in outcome.message, (name, outcome.message)
+        assert "work units" in outcome.message and "seconds" in outcome.message and "steps" in outcome.message
+    if outcome.message is not None:
+        assert "internal error" not in outcome.message
+    assert_cpu_within_budget(name, outcome, cpu_unit)
 
 
 def test_the_deadline_is_checked_on_every_step_not_every_ten_thousand():
@@ -140,6 +396,7 @@ def test_the_deadline_is_checked_on_every_step_not_every_ten_thousand():
     interp.deadline = time.monotonic() - 1.0
     with pytest.raises(ScriptError):
         interp.work(1)
+
 
 # ---- third review
 THIRD = {
@@ -171,24 +428,35 @@ THIRD = {
 }
 
 SIZE_PROBES = ("p01_pred_json_4999", "p02_pred_json_1500", "p04_string_leaves")
-SLOW_BOUNDS = {"r9_d07_comp_filter": 6.0, "r9_d05_sort_floats": 6.0, "r9_d14_in_dict_palette": 6.0}
 
 
 @pytest.mark.parametrize("name", sorted(THIRD))
-def test_third_review_probe_stops_with_margin(name, no_clock):
-    started = time.monotonic()
-    try:
-        compile_script(THIRD[name])
-        outcome = None  # single bounded calls may finish (d06, d05b)
-    except ScriptError as exc:
-        outcome = str(exc)
-    elapsed = time.monotonic() - started
-    bound = SLOW_BOUNDS.get(name, 3.0) * TIME_SLACK
-    assert elapsed < bound, "%s took %.2fs (bound %.2fs)" % (name, elapsed, bound)
+def test_third_review_probe_is_stopped_by_its_cap(name, run_probe, cpu_unit):
+    outcome = run_probe(THIRD[name])  # single bounded calls may finish (d06, d05b)
+    assert_stopped_by(name, outcome, EXPECTED_STOP[name])
     if name in SIZE_PROBES:
-        assert outcome is not None and "larger than 4 MB of JSON" in outcome, (name, outcome)
-    if outcome is not None:
-        assert "internal error" not in outcome
+        assert outcome.message is not None and "larger than 4 MB of JSON" in outcome.message, (name, outcome.message)
+    if outcome.message is not None:
+        assert "internal error" not in outcome.message
+    assert_cpu_within_budget(name, outcome, cpu_unit)
+
+
+def test_the_production_limits_are_the_ones_the_budgets_were_measured_against():
+    # Every other test compares against the live recorder constants, so raising a limit tenfold would still pass them.
+    # A deliberate change of a limit must update this test AND re-measure HEAVY_BUDGET_UNITS / INSTANT_BUDGET_UNITS.
+    from sonder_runtime.domain.meshgen.dsl import recorder
+    assert recorder.MAX_STEPS == 2_000_000
+    assert recorder.MAX_WORK == 3_000_000
+    assert recorder.MAX_SECONDS == 10.0
+
+
+def test_every_probe_has_exactly_one_expected_stop_and_the_pinned_subsets_agree_with_it():
+    assert set(EXPECTED_STOP) == set(PROBES) | set(SECOND) | set(THIRD)
+    assert len(PROBES) + len(SECOND) + len(THIRD) == len(EXPECTED_STOP), "a probe name is used in two tables"
+    assert HEAVY <= set(EXPECTED_STOP)
+    # MUST_BE_WORK means "stopped by the did-too-much-work error", which the step cap also raises (c09 reaches the 2M-step cap first).
+    assert all(EXPECTED_STOP[name] in ("work", "steps") for name in MUST_BE_WORK)
+    assert all(EXPECTED_STOP[name] == JSON_CAP for name in SIZE_PROBES)
 
 
 def test_a_tuple_colour_is_refused_before_the_size_check_so_the_original_p01_fails_fast():
@@ -198,14 +466,27 @@ def test_a_tuple_colour_is_refused_before_the_size_check_so_the_original_p01_fai
     assert "not a colour" in str(info.value) or "must be a '#RRGGBB'" in str(info.value)
 
 
-def test_multiplying_by_zero_or_a_negative_count_walks_nothing(no_clock):
+def test_multiplying_by_zero_or_a_negative_count_walks_nothing(run_probe, cpu_unit):
+    def script(first, second):
+        return chr(10).join(["def build():", "    rows = [list(range(100000)) for i in range(7)]",
+                             "    for i in range(2000):", "        x = " + first, "        y = " + second, ""])
+
+    # The same script with the 4,000 multiplications replaced by plain assignments: what building `rows` costs.
+    baseline = run_probe(script("rows", "rows"))
+    assert baseline.stop == "finishes", baseline
+    assert_cpu_within_budget("multiply baseline", baseline, cpu_unit, heavy=True)
     for count in ("0", "-5"):
-        source = chr(10).join(["def build():", "    rows = [list(range(100000)) for i in range(7)]",
-                               "    for i in range(2000):", "        x = rows * " + count, "        y = " + count + " * rows", ""])
-        started = time.monotonic()
-        compile_script(source)
-        elapsed = time.monotonic() - started
-        assert elapsed < 3.0 * TIME_SLACK, "count %s took %.2fs (bound %.2fs)" % (count, elapsed, 3.0 * TIME_SLACK)
+        outcome = run_probe(script("rows * " + count, count + " * rows"))
+        # The counters come first: they are the same whether or not a slow walk also runs into the hang ceiling.
+        # Measured 2,104,021, all of it building `rows`.  One walk of `rows` is 700,007 units: with the
+        # `count <= 0` shortcut removed the first multiplication alone takes the total to 2,804,028.
+        assert outcome.work_done <= 2_500_000, (count, outcome)
+        # Walking nothing means charging nothing, in either direction: a negative count must not be able to
+        # subtract work (`inner * count` with count < 0) any more than a zero count may add a walk.
+        assert outcome.work_done == baseline.work_done, (count, outcome, baseline)
+        assert outcome.stop == "finishes", (count, outcome)
+        # An uncharged walk of `rows` per multiplication would not show in the counters but would in CPU time.
+        assert_cpu_within_budget("multiply by " + count, outcome, cpu_unit, heavy=True)
 
 
 def test_a_list_of_small_tuples_can_be_repeated_to_the_element_limit():
@@ -219,76 +500,94 @@ def test_case_changes_and_strip_count_toward_the_string_budget():
     assert "too long" in str(info.value)
 
 
+class _SteppingTime:
+    """Stands in for the `time` module inside recorder: the clock advances 1 ms per read, so a deadline is reached
+    after a fixed number of reads however fast or slow the host is."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        self.now += 0.001
+        return self.now
+
+
 def _clock_only(monkeypatch, seconds=0.3, steps=8000):
     from sonder_runtime.domain.meshgen.dsl import recorder
     monkeypatch.setattr(recorder, "MAX_SECONDS", seconds)
     monkeypatch.setattr(recorder, "MAX_WORK", 10 ** 12)
-    monkeypatch.setattr(recorder, "MAX_STEPS", steps)  # a fallback that ends a broken clock in a few seconds
+    monkeypatch.setattr(recorder, "MAX_STEPS", steps)  # the fallback: the clock must end the script well before it
+    monkeypatch.setattr(recorder, "time", _SteppingTime())
     return recorder
 
 
-def test_the_clock_stops_cheap_steps_even_when_work_charging_would_allow_them_bounded(monkeypatch):
-    _clock_only(monkeypatch)
+def test_the_clock_stops_cheap_steps_even_when_work_charging_would_allow_them_bounded(monkeypatch, run_probe):
+    recorder = _clock_only(monkeypatch)
     source = chr(10).join(["def build():", "    l = list(range(3000))", "    while True:", "        s = sum(l)", ""])
-    started = time.monotonic()
-    with pytest.raises(ScriptError):
-        compile_script(source)
-    assert time.monotonic() - started < 0.7  # only the clock gets here; the step fallback needs about a second
+    outcome = run_probe(source)
+    assert outcome.stop == "clock", outcome  # the 8,000-step fallback did not get there first
+    assert outcome.steps < recorder.MAX_STEPS, outcome
 
 
-def test_the_clock_stops_an_operation_whose_charge_was_lowered(monkeypatch):
+def test_the_clock_stops_a_loop_that_charges_no_work_at_all(monkeypatch, run_probe):
+    """Nothing in this loop charges work, so work() never runs: the clock has to be read by tick() itself."""
+    recorder = _clock_only(monkeypatch)
+    outcome = run_probe(chr(10).join(["def build():", "    while True:", "        pass", ""]))
+    assert outcome.stop == "clock", outcome  # "steps" here means tick() stopped reading the clock
+    assert outcome.work_done == 0, outcome
+    assert outcome.steps < recorder.MAX_STEPS, outcome
+
+
+def test_the_clock_stops_an_operation_whose_charge_was_lowered(monkeypatch, run_probe):
     recorder = _clock_only(monkeypatch, steps=30000)
     monkeypatch.setattr(recorder._Interp, "weight", lambda self, value: 1)  # a charge too small to trip anything
     source = chr(10).join(["def build():", "    l = list(range(100000))", "    m = list(range(100000))", "    while True:", "        s = l == m", ""])
-    started = time.monotonic()
-    with pytest.raises(ScriptError):
-        compile_script(source)
-    assert time.monotonic() - started < 0.7
+    outcome = run_probe(source)
+    assert outcome.stop == "clock", outcome
+    assert outcome.steps < recorder.MAX_STEPS, outcome
 
 
 def test_the_clock_is_read_on_a_work_charge_below_the_old_threshold(monkeypatch):
     recorder = _clock_only(monkeypatch)
     interp = recorder._Interp(None, 0)
-    interp.deadline = time.monotonic() - 1.0
+    interp.deadline = recorder.time.monotonic() - 1.0  # the injected clock, so the deadline is behind it by construction
     with pytest.raises(ScriptError):
         interp.work(3)  # far below the 4,096-unit threshold the clock used to need
 
 
 # ---- charges that no other test pinned down (each has a RED proof against a reverted copy of the fix)
-def test_dict_membership_costs_the_key_not_the_whole_dict(no_clock):
+def test_dict_membership_costs_the_key_not_the_whole_dict(run_probe, cpu_unit):
     """20,000 `in` lookups on a 20,000-key dict: fine at one unit each, over the work limit at 20,000 each."""
     source = chr(10).join(["def build():", "    d = {}", "    for i in range(20000):", "        d['k%d' % i] = i",
                            "    n = 0", "    for j in range(20000):", "        if 'k5' in d:", "            n += 1",
                            "    print(n)", ""])
-    started = time.monotonic()
-    assert compile_script(source).log == ["20000"]
-    elapsed = time.monotonic() - started
-    assert elapsed < 6.0 * TIME_SLACK, "took %.2fs (bound %.2fs)" % (elapsed, 6.0 * TIME_SLACK)
+    outcome = run_probe(source)
+    assert outcome.stop == "finishes", outcome
+    assert outcome.work_done <= 200_000, outcome
+    assert_cpu_within_budget("dict membership", outcome, cpu_unit, heavy=True)
+    # Measured 140,002 (one unit per insert and per lookup); charging the whole dict per lookup would be 400,000,000.
+    assert outcome.log == ["20000"], outcome
 
 
-def test_weight_charges_its_own_walk(no_clock):
+def test_weight_charges_its_own_walk(run_probe, cpu_unit):
     """`pts * 1` walks 50,000 distinct tuples (200,000 nodes) per call; ten calls must exceed the work budget."""
     source = chr(10).join(["def build():", "    pts = [(i, 0, 0) for i in range(50000)]", "    for j in range(10):",
                            "        x = pts * 1", ""])
-    started = time.monotonic()
-    with pytest.raises(ScriptError) as info:
-        compile_script(source)
-    elapsed = time.monotonic() - started
-    assert "too much work" in str(info.value)
-    assert elapsed < 6.0 * TIME_SLACK, "took %.2fs (bound %.2fs)" % (elapsed, 6.0 * TIME_SLACK)
+    outcome = run_probe(source)
+    assert_stopped_by("weight walk", outcome, "work")
+    assert "too much work" in outcome.message
+    assert_cpu_within_budget("weight walk", outcome, cpu_unit, heavy=True)
 
 
-def test_predicate_nodes_are_charged_as_work_and_the_size_estimate_never_fires_first(no_clock):
+def test_predicate_nodes_are_charged_as_work_and_the_size_estimate_never_fires_first(run_probe, cpu_unit):
     """Each lambda has about 1,990 cheap nodes (about 4 KB of JSON) and costs 2 x 1,990 work units. All 1,000 calls
     would come to about 4.1 MB estimated, under the 4 MB + 64 KB threshold, so the size estimate cannot refuse
     this script; only the work budget can, and it must."""
     lam = "p.index > 0" + " and 1" * 1990
     source = chr(10).join(["def build():", "    c = primitive('cube')", "    for i in range(1000):",
                            "        paint_faces(c, lambda p: " + lam + ", '#ff0000')", ""])
-    started = time.monotonic()
-    with pytest.raises(ScriptError) as info:
-        compile_script(source)
-    assert "too much work" in str(info.value), str(info.value)
-    elapsed = time.monotonic() - started
-    assert "larger than 4 MB" not in str(info.value)
-    assert elapsed < 6.0 * TIME_SLACK, "took %.2fs (bound %.2fs)" % (elapsed, 6.0 * TIME_SLACK)
+    outcome = run_probe(source)
+    assert_stopped_by("predicate nodes", outcome, "work")  # not JSON_CAP: the size estimate did not fire first
+    assert "too much work" in outcome.message, outcome.message
+    assert "larger than 4 MB" not in outcome.message
+    assert_cpu_within_budget("predicate nodes", outcome, cpu_unit, heavy=True)
