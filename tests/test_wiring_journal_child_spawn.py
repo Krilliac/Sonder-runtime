@@ -191,3 +191,160 @@ def test_refused_dispatch_does_not_brick_a_corrected_dispatch(tmp_path, monkeypa
         (f"subagent-dispatch:{child}#dispatch-attempt-2", EffectState.COMPLETED),
     ]
     assert records[1].idempotency_key == "corrected-task#dispatch-attempt-2"
+
+
+def test_concurrent_spawn_never_reads_a_peers_unfinished_create_as_ambiguous(tmp_path, monkeypatch):
+    """The losing admission of an identical concurrent spawn retains its create
+    intent in one storage transaction and its receipt in a second one.  The
+    winner must never judge that healthy, in-flight write as an ambiguous
+    commit.  The interleaving is forced with events only: the loser is parked
+    between its intent and receipt transactions until the winner's settlement
+    check has run (unserialised code) or the winner is observed blocked on the
+    service mutation lock (a serialising implementation)."""
+    from sonder_runtime.application.execution.effect_journal import EffectState
+    from sonder_runtime.application.worker_registry import continuation as reg_mod
+
+    wait_s = 10
+    calls: list[str] = []
+    application = _application(tmp_path, monkeypatch, lambda state, save, control: calls.append("run") or "joined")
+    try:
+        delegation = application.delegation_service()
+        service = delegation._provider._local_service
+        repo = service._repository
+        repo_cls = type(repo)
+        for owner, name in ((reg_mod, "_ADMISSION_LOCK"), (service, "_lock"),
+                            (service, "_require_storage_settled"),
+                            (repo_cls, "mutate"), (repo_cls, "_connect"), (repo, "unresolved_mutation")):
+            assert hasattr(owner, name), f"hook target {name!r} is missing on {owner!r}; update this test's hooks"
+        request, context = _delegation_request(delegation, tmp_path)
+
+        meta = threading.Lock()
+        roles: dict[str, int] = {}             # "winner"/"loser" -> thread ident
+        loser_parked = threading.Event()       # loser retained its intent, receipt not yet written
+        winner_progress = threading.Event()    # winner's check ran, or winner is blocked on the service lock
+        problems: list[str] = []
+        local = threading.local()
+        at_lock = threading.Barrier(2)
+
+        def is_winner() -> bool:
+            return roles.get("winner") == threading.get_ident()
+
+        real_admission = reg_mod._ADMISSION_LOCK
+
+        class AdmissionGate:
+            def __enter__(self):
+                try:
+                    at_lock.wait(wait_s)
+                except threading.BrokenBarrierError:
+                    problems.append("both spawns did not reach the registry admission lock")
+                real_admission.acquire()
+                with meta:
+                    role = "loser" if "winner" in roles else "winner"
+                    roles[role] = threading.get_ident()
+                return self
+
+            def __exit__(self, *exc):
+                real_admission.release()
+                if is_winner() and not loser_parked.wait(wait_s):
+                    problems.append("loser never parked between its create intent and receipt")
+                return False
+
+        real_lock = service._lock
+
+        class ObservedServiceLock:
+            def __enter__(self):
+                if real_lock.acquire(blocking=False):
+                    return self
+                if loser_parked.is_set() and is_winner():
+                    winner_progress.set()
+                real_lock.acquire()
+                return self
+
+            def __exit__(self, *exc):
+                real_lock.release()
+                return False
+
+        orig_settled = service._require_storage_settled
+
+        def settled(child_id, *args, **kwargs):
+            try:
+                return orig_settled(child_id, *args, **kwargs)
+            finally:
+                if child_id == CHILD and is_winner() and loser_parked.is_set():
+                    winner_progress.set()
+
+        orig_mutate, orig_connect = repo_cls.mutate, repo_cls._connect
+
+        def mutate(self, prepared):
+            local.parking = (
+                prepared.kind == "create" and prepared.child_id == CHILD
+                and roles.get("loser") == threading.get_ident()
+            )
+            local.connects = 0
+            try:
+                return orig_mutate(self, prepared)
+            finally:
+                local.parking = False
+
+        def connect(self):
+            if getattr(local, "parking", False):
+                local.connects += 1
+                if local.connects == 2:  # intent transaction committed; receipt not yet begun
+                    loser_parked.set()
+                    if not winner_progress.wait(wait_s):
+                        problems.append("winner made no progress while the loser was parked")
+            return orig_connect(self)
+
+        monkeypatch.setattr(reg_mod, "_ADMISSION_LOCK", AdmissionGate())
+        monkeypatch.setattr(service, "_lock", ObservedServiceLock())
+        monkeypatch.setattr(service, "_require_storage_settled", settled)
+        monkeypatch.setattr(repo_cls, "mutate", mutate)
+        monkeypatch.setattr(repo_cls, "_connect", connect)
+
+        start = threading.Barrier(2)
+        handles: list[object] = []
+        errors: list[BaseException] = []
+
+        def dispatch():
+            try:
+                start.wait(wait_s)
+                handles.append(delegation.dispatch(request, context))
+            except BaseException as exc:  # noqa: BLE001 - surfaced by the assert below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=dispatch, daemon=True) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(4 * wait_s)
+        assert not any(thread.is_alive() for thread in threads), "a dispatch thread hung"
+        assert problems == [], f"forced interleaving did not happen: {problems}"
+        assert loser_parked.is_set()
+        assert errors == []
+        assert [handle.child_id for handle in handles] == [CHILD, CHILD]
+        results = [handle.result(timeout=30) for handle in handles]
+        assert {result.output for result in results} == {"joined"}
+        assert calls == ["run"]
+        assert repo.unresolved_mutation(CHILD) is None
+    finally:
+        application.close_delegation(timeout=10)
+
+    records = _run_records(tmp_path, CHILD)
+    assert [(r.operation_id, r.state) for r in records] == [
+        (f"subagent-dispatch:{CHILD}", EffectState.COMPLETED),
+    ]
+
+
+def test_registry_and_service_share_one_mutation_lock(tmp_path, monkeypatch):
+    """The composition root must build the worker registry on the continuation
+    service's own mutation lock; a registry on a private lock would let its
+    writes interleave with the service's settlement checks."""
+    application = _application(tmp_path, monkeypatch, lambda state, save, control: "unused")
+    try:
+        delegation = application.delegation_service()
+        service = delegation._provider._local_service
+        registry = delegation._worker_registry
+        assert registry is not None
+        assert registry._mutation_lock is service.mutation_lock
+    finally:
+        application.close_delegation(timeout=10)
