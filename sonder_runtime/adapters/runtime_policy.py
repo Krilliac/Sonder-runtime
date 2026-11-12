@@ -21,6 +21,7 @@ import threading
 import time
 from pathlib import Path
 
+import sonder_runtime.adapters.reference_lookup_state as _lookup_state
 from sonder_runtime.adapters.filesystem import atomic_json as _atomic_json
 from sonder_runtime.domain.runtime_policy import rules as _rules
 from sonder_runtime.platform import paths as runtime_paths
@@ -41,6 +42,7 @@ DEFAULT_LONG_CONTEXT_OVERFLOW = _rules.DEFAULT_LONG_CONTEXT_OVERFLOW
 PROVIDER_MODEL_PROVIDERS = _rules.PROVIDER_MODEL_PROVIDERS
 _MODEL_RE = _rules._MODEL_RE
 tool_lane_deny_list = _rules.tool_lane_deny_list
+reference_lookup_rule = _rules.reference_lookup_rule
 _LOCK = threading.RLock()
 
 
@@ -271,6 +273,12 @@ def update(
             or base.get("tool_lane_denied_models")
             or {}
         )
+        # Likewise the reference-lookup section: file-only, carried through.
+        candidate["reference_lookup"] = dict(
+            current.get("reference_lookup")
+            or base.get("reference_lookup")
+            or _rules.default_reference_lookup()
+        )
         if provider_models:
             if not isinstance(provider_models, dict):
                 raise ValueError("provider_models update must be a JSON object")
@@ -383,6 +391,7 @@ def format_policy(policy=None) -> str:
             provider, ", ".join("%s=%s" % item for item in tiers.items()) or "-",
         ))
     lines.append("  " + format_tool_lane_denied_models(policy))
+    lines.append("  " + format_reference_lookup(policy))
     lines.append("  cloud tiers remain separate explicit opt-in configuration")
     return "\n".join(lines)
 
@@ -398,6 +407,21 @@ def format_tool_lane_denied_models(policy=None) -> str:
     if not deny.readable:
         line += " [policy file unreadable: caller-named models refused in tool lanes]"
     return line
+
+
+def format_reference_lookup(policy=None) -> str:
+    """One status line for the reference lookup (see the lookup service)."""
+    policy = load(create=True) if policy is None else policy
+    return "reference lookup: " + _lookup_state.status_line(reference_lookup_rule(policy))
+
+
+def diagnostics_lines(policy) -> list:
+    """The ``runtime policy`` and ``reference lookup`` lines of ``diagnostics``."""
+    state = f"ERROR {policy['error']}" if policy.get("error") else "ok"
+    return [
+        f"  runtime policy: revision={policy.get('revision', 0)} {state} ({policy.get('path', policy_path())})",
+        f"  reference lookup: {_lookup_state.status_line(reference_lookup_rule(policy))}",
+    ]
 
 
 def format_long_context_overflow(policy=None, env=None) -> str:

@@ -23874,14 +23874,7 @@ def diagnostics() -> str:
         "  execution routing: host-gated foreground/autopilot/fleet with local ambiguity review"
     )
     policy = _refresh_runtime_policy(create=True)
-    lines.append(
-        "  runtime policy: revision=%s %s (%s)"
-        % (
-            policy.get("revision", 0),
-            "ERROR %s" % policy["error"] if policy.get("error") else "ok",
-            policy.get("path", runtime_policy.policy_path()),
-        )
-    )
+    lines.extend(runtime_policy.diagnostics_lines(policy))  # runtime policy + reference lookup lines
     runtime = _platform_local_runtime_summary(
         _platform_local_model_options(
             0.2,

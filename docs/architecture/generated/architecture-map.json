@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 421,
+      "file_count": 424,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -390,6 +390,8 @@
         "sonder_runtime/adapters/recall.py",
         "sonder_runtime/adapters/recall_gateway.py",
         "sonder_runtime/adapters/reference_index.py",
+        "sonder_runtime/adapters/reference_lookup_service.py",
+        "sonder_runtime/adapters/reference_lookup_state.py",
         "sonder_runtime/adapters/repl_services.py",
         "sonder_runtime/adapters/repo_repair_runner.py",
         "sonder_runtime/adapters/repository_errors.py",
@@ -438,6 +440,7 @@
         "sonder_runtime/adapters/testing/launcher.py",
         "sonder_runtime/adapters/tier_generation.py",
         "sonder_runtime/adapters/tool_executor.py",
+        "sonder_runtime/adapters/tool_lane_guard.py",
         "sonder_runtime/adapters/training/__init__.py",
         "sonder_runtime/adapters/typed_tool_executor.py",
         "sonder_runtime/adapters/unit_of_work.py",
@@ -885,7 +888,7 @@
       ]
     },
     {
-      "file_count": 75,
+      "file_count": 76,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -953,6 +956,7 @@
         "sonder_runtime/bootstrap/playbooks.py",
         "sonder_runtime/bootstrap/prepared_workbench.py",
         "sonder_runtime/bootstrap/provider_bindings.py",
+        "sonder_runtime/bootstrap/reference_agent_tools.py",
         "sonder_runtime/bootstrap/repl_host_selection.py",
         "sonder_runtime/bootstrap/repl_managed.py",
         "sonder_runtime/bootstrap/runtime_owner.py",
@@ -966,7 +970,7 @@
       ]
     },
     {
-      "file_count": 298,
+      "file_count": 300,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1197,6 +1201,7 @@
         "sonder_runtime/domain/reconnect_reconciliation.py",
         "sonder_runtime/domain/reference_lookup/__init__.py",
         "sonder_runtime/domain/reference_lookup/answer_check.py",
+        "sonder_runtime/domain/reference_lookup/applies.py",
         "sonder_runtime/domain/reference_lookup/models.py",
         "sonder_runtime/domain/reference_lookup/prompt.py",
         "sonder_runtime/domain/reference_lookup/sanitize.py",
@@ -1249,6 +1254,7 @@
         "sonder_runtime/domain/thinking_policy.py",
         "sonder_runtime/domain/tier_names.py",
         "sonder_runtime/domain/token_bucket.py",
+        "sonder_runtime/domain/tool_lane_models.py",
         "sonder_runtime/domain/tools/__init__.py",
         "sonder_runtime/domain/tools/builtin_traits.py",
         "sonder_runtime/domain/tools/descriptors.py",

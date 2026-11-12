@@ -16,6 +16,7 @@ from __future__ import annotations
 import re
 
 from ..openrouter_policy import OpenRouterPolicyError, validate_model_id
+from ..reference_lookup import applies as _lookup_applies
 from ..tool_lane_models import (
     DEFAULT_DENIED_NAMES,
     DEFAULT_DENIED_PREFIXES,
@@ -173,6 +174,11 @@ def default_tool_lane_denied_models() -> dict:
     }
 
 
+def default_reference_lookup() -> dict:
+    """The built-in reference-lookup section: on, no extra names or prefixes."""
+    return _lookup_applies.default_section()
+
+
 def default_policy(env) -> dict:
     """Built-in policy seeded from an explicit environment mapping."""
     return {
@@ -185,6 +191,7 @@ def default_policy(env) -> dict:
         "long_context_overflow": dict(DEFAULT_LONG_CONTEXT_OVERFLOW),
         "provider_models": {},
         "tool_lane_denied_models": default_tool_lane_denied_models(),
+        "reference_lookup": default_reference_lookup(),
         "updated_ts": 0,
         "source": "environment seed",
     }
@@ -401,6 +408,54 @@ def normalize_tool_lane_denied_models(raw) -> dict:
     }
 
 
+def normalize_reference_lookup(raw) -> dict:
+    """Validate ``reference_lookup``: ``{"enabled": bool, "names": [...], "prefixes": [...]}``.
+
+    The index path is never part of the policy, so a ``path`` key is refused
+    by name.  Names and prefixes are normalised like the tool-lane block list.
+    """
+    if raw in (None, ""):
+        return default_reference_lookup()
+    if not isinstance(raw, dict):
+        raise ValueError("runtime policy reference_lookup must be an object")  # noqa: TRY004  # callers catch ValueError
+    if _lookup_applies.PATH_KEY in raw:
+        raise ValueError(
+            "runtime policy reference_lookup does not accept a 'path' key: the index "
+            "path comes only from SONDER_REFERENCE_INDEX or the default location"
+        )
+    unknown = set(raw) - _lookup_applies.SECTION_KEYS
+    if unknown:
+        raise ValueError(f"unknown reference_lookup key(s): {', '.join(sorted(map(str, unknown)))}")
+    enabled = raw.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ValueError("runtime policy reference_lookup.enabled must be true or false")  # noqa: TRY004  # callers catch ValueError
+    cleaned = {"enabled": enabled}
+    for key in ("names", "prefixes"):
+        values = raw.get(key)
+        if values in (None, ""):
+            values = []
+        if isinstance(values, (str, bytes)) or not isinstance(values, (list, tuple)):
+            raise ValueError(f"runtime policy reference_lookup.{key} must be a list")  # noqa: TRY004  # callers catch ValueError
+        entries = []
+        for value in values:
+            text = value.strip() if isinstance(value, str) else ""
+            if not _MODEL_RE.fullmatch(text):
+                raise ValueError(f"invalid reference_lookup.{key} entry {value!r}")
+            entries.append(normalize_name(text))
+        cleaned[key] = entries
+    return {
+        "enabled": enabled,
+        "names": sorted(set(cleaned["names"])),
+        "prefixes": list(dict.fromkeys(cleaned["prefixes"])),
+    }
+
+
+def reference_lookup_rule(policy) -> _lookup_applies.AppliesRule:
+    """The lookup rule for a loaded policy (defaults always included)."""
+    section = policy.get("reference_lookup") if isinstance(policy, dict) else None
+    return _lookup_applies.AppliesRule.from_policy(section)
+
+
 def tool_lane_deny_list(policy) -> ToolLaneDenyList:
     """The deny list in force for a loaded policy (defaults always included).
 
@@ -473,6 +528,7 @@ def normalize(payload, defaults=None) -> dict:
         ),
         "provider_models": normalize_provider_models(payload.get("provider_models")),
         "tool_lane_denied_models": tool_lane_denied,
+        "reference_lookup": normalize_reference_lookup(payload.get("reference_lookup")),
         "updated_ts": max(0, int(payload.get("updated_ts") or 0)),
         "source": str(payload.get("source") or "runtime policy")[:120],
     }
@@ -520,4 +576,7 @@ def disk_payload(policy: dict) -> dict:
     section = policy.get("tool_lane_denied_models")
     if section and section != default_tool_lane_denied_models():
         payload["tool_lane_denied_models"] = section
+    lookup = policy.get("reference_lookup")
+    if lookup and lookup != default_reference_lookup():
+        payload["reference_lookup"] = lookup
     return payload

@@ -39,6 +39,7 @@ MCP_TOOL_MANIFEST = {
     "toolchain_status": "Run one fixed, bounded, local version probe for a tool already discovered by environment_status; it never accepts a command or arguments.",
     "tool_inventory": "Report the categorized host tool inventory (compilers, build systems, test runners, linters, package managers, runtimes, containers, VCS, cloud CLIs, editors) with redacted paths and cached fixed-probe versions.",
     "output_digest": "Summarize a guarded log file or your own test-run job output: final line, run summary counts, FAILED/ERROR lines, first parsed compiler/test errors, and a short tail.",
+    "reference_search": "Search the local reference library (event ids, ATT&CK techniques, detection rules) and return up to 8 framed passages with sources; read-only, query and count only, never a path. Models set in the runtime policy `reference_lookup` section get this automatically.",
     "hardware_profile": "Detect cross-vendor accelerators and report conservative resident, unified-memory, and GPU+RAM-spill model plans without changing host settings.",
     "data_inspect/data_query/sqlite_mutate": "Preview structured data, run bounded read-only queries, or explicitly preview/apply one guarded parameterized SQLite DML statement.",
     "data_convert": "Preview or atomically create a non-overwriting JSON/JSONL/CSV/TSV conversion with explicit ordered fields.",
