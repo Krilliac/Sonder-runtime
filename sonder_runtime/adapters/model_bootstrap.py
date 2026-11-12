@@ -6,6 +6,7 @@ from typing import Any, Callable
 
 from ..application.ports.model_bootstrap import LegacyModelRuntime, ModelBootstrapProvider
 from ..application.ports.model_target import ModelTarget
+from .tool_lane_guard import chat_target
 
 
 @dataclass(frozen=True)
@@ -21,7 +22,9 @@ class LegacyModelBootstrapAdapter:
     runtime: LegacyModelRuntime
 
     def resolve_target(self, tier: str, strict: bool | None = None) -> ModelTarget:
-        model, cloud, augment, tier_label = self.runtime._serve_target(tier, strict)
+        # Text resolution: a model blocked from tool lanes still answers chat
+        # by name here.  Tool and apply callers get ``ToolLaneGateway``.
+        model, cloud, augment, tier_label = chat_target(self.runtime._serve_target, tier, strict)
         tokenizer = template = None
         identity = getattr(self.runtime, "_model_prompt_identity", None)
         if callable(identity) and isinstance(model, str) and model.strip() and not cloud:

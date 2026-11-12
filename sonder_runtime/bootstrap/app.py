@@ -691,6 +691,13 @@ def build_application(
         fallback_observer=_report_provider_fallback,
     )
     logger.info("model gateway built")
+    # Lanes that call tools or apply model output get the guarded gateway;
+    # text callers (chat, A2A, offloads, replay) keep ``gateway``.
+    from ..adapters.tool_lane_gateway import ToolLaneGateway
+
+    tool_gateway = ToolLaneGateway(
+        gateway, resolve_target=target_resolver, bindings=provider_bindings,
+    )
     logger.debug("composing vision service and context planning facade")
     vision = VisionService(
         FileVisionInputProvider(),
@@ -1426,7 +1433,7 @@ def build_application(
             )
             from ..adapters.workspace_reality import GitWorkspaceReality
             interactive_lanes = AgentLaneService(
-                lane_store, sessions, gateway, lane_tools,
+                lane_store, sessions, tool_gateway, lane_tools,
                 authorize_grant=authorize_lane_grant,
                 allowed_tools=tuple(item.name for item in lane_tools.graph.registry.list_all()),
                 context_planning=context_planning,
@@ -1495,6 +1502,7 @@ def build_application(
                     owner_nonce=continuation_service.owner_nonce,
                     owner_pid=continuation_service.owner_pid,
                     owner_host=continuation_service.owner_host,
+                    mutation_lock=continuation_service.mutation_lock,
                 )
                 from ..adapters.conversational_subagents import (
                     conversational_runner_factory,
@@ -1505,7 +1513,7 @@ def build_application(
                 subagent_provider = LocalSubagentProvider(
                     continuation_service,
                     runner_factory=conversational_runner_factory(
-                        gateway, get_session_repository(), get_session_capture_service(),
+                        tool_gateway, get_session_repository(), get_session_capture_service(),
                     ),
                     effect_binding_factory=(
                         lambda request, _context: _compose_subagent_binding(
@@ -1994,7 +2002,7 @@ def build_application(
     build_tools = _compose_build_tools(
         config, runtime_redactor, developer_tools, get_job_registry, get_process_job_provider,
         build_grants, tools_getter=lambda: typed_tools_ref.get("tools"),
-        model_gateway_getter=lambda: gateway,
+        model_gateway_getter=lambda: tool_gateway,  # build_fix applies model patches
         # Every fix edit is a ``build-fix`` effect in the worker effect
         # journal, under this host's worker identity and owner epoch.
         effect_binding_factory=lambda run_id, scope: worker_binding(

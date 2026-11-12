@@ -9,6 +9,15 @@ The list is add-only: the built-in defaults are always part of every deny list
 built by :meth:`ToolLaneDenyList.from_policy`, so configuration can extend the
 list but never shrink it.  When the policy file is unreadable the list is
 marked unreadable and caller-named (free-form) models fail closed.
+
+A tier bound to a provider other than Ollama is judged by the model that
+provider actually serves (:func:`decide_served`); when that model cannot be
+determined the tier is refused in tool-using lanes.
+
+Limit: this is a name list.  It cannot recognise a renamed copy of a blocked
+model (``ollama cp astra-cyber-27b helper``), or an alias such as
+``sonder:latest`` that an operator points at one; the weights behind a name
+are not inspected.
 """
 from __future__ import annotations
 
@@ -26,6 +35,8 @@ class ModelLaneStatus(str, Enum):
     ALLOWED = "allowed"
     DENIED = "denied"
     POLICY_UNREADABLE = "policy_unreadable"
+    # A bridged tier whose served model is unknown (or the provider default).
+    SERVED_UNKNOWN = "served_unknown"
 
 
 @dataclass(frozen=True)
@@ -47,11 +58,21 @@ def normalize_name(name: Any) -> str:
     return text
 
 
-DEFAULT_DENIED_PREFIXES = ("astra-cyber-",)
-DEFAULT_DENIED_NAMES = (
-    normalize_name("hf.co/mradermacher/Qwen3.8-cyber-RedTeam-Surgical-Abliterated-GGUF:Q3_K_M"),
-    normalize_name("hf.co/DuoNeural/Cyber-Ornith-1.5-9B-OBLITERATED-GGUF:Q8_0"),
+# The two Hugging Face sources end at ``-gguf`` so every quantisation tag and
+# the untagged name are covered; the ``huggingface.co/`` spelling is listed
+# too so either host form of the same source is caught.
+_DENIED_SOURCES = (
+    "mradermacher/Qwen3.8-cyber-RedTeam-Surgical-Abliterated-GGUF",
+    "DuoNeural/Cyber-Ornith-1.5-9B-OBLITERATED-GGUF",
 )
+DEFAULT_DENIED_PREFIXES = ("astra-cyber-",) + tuple(
+    normalize_name(host + source)
+    for source in _DENIED_SOURCES
+    for host in ("hf.co/", "huggingface.co/")
+)
+DEFAULT_DENIED_NAMES: tuple[str, ...] = ()
+# Served-model ids that do not name a model: the provider picks one itself.
+UNDETERMINED_SERVED_MODELS = frozenset({"", "default"})
 
 
 def _clean_entries(values: Any) -> list[str]:
@@ -95,12 +116,42 @@ def refusal_message(
     if status is ModelLaneStatus.POLICY_UNREADABLE:
         return (
             "model '%s' cannot be used in tool-using lanes while the runtime "
-            "policy file is unreadable." % model
+            "policy file is unreadable; repair the file (`/runtime status` "
+            "shows the error) or reset it with `/runtime reset`." % model
         )
     return (
         "model '%s' is blocked from tool-using lanes by runtime policy; "
         "it can be used for chat by name only." % model
     )
+
+
+def served_refusal_message(tier: Any, provider: Any, verdict: ModelLaneDecision) -> str:
+    """The refusal for a bridged tier judged by the model its provider serves."""
+    if verdict.status is ModelLaneStatus.SERVED_UNKNOWN:
+        return (
+            f"tier '{tier}' is served by {provider or 'a non-Ollama provider'} "
+            "and the model it serves cannot be determined, so it cannot be "
+            "used in tool-using lanes; name the served model for this tier in "
+            "that provider's configuration (chat still works)."
+        )
+    return (
+        f"tier '{tier}' is served by {provider} with model '{verdict.model}', "
+        "which is blocked from tool-using lanes by runtime policy; it can be "
+        "used for chat only."
+    )
+
+
+def decide_served(model: Any, deny: ToolLaneDenyList) -> ModelLaneDecision:
+    """Decide for the model a non-Ollama provider serves for a tier.
+
+    An empty or ``default`` id leaves the choice to the provider, so the
+    model is unknown and the tier is refused; anything else is judged as a
+    tier-bound model.
+    """
+    raw = str(model if model is not None else "").strip()
+    if normalize_name(raw) in UNDETERMINED_SERVED_MODELS:
+        return ModelLaneDecision(ModelLaneStatus.SERVED_UNKNOWN, raw)
+    return decide(raw, deny, free_form=False)
 
 
 def allowed_bindings(
