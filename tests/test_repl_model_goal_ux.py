@@ -21,7 +21,7 @@ def _inject_legacy_runtime(monkeypatch):
 
 def _drive(monkeypatch, lines, installed=(), nonchat=()):
     feed = iter(tuple(lines) + ("/exit",))
-    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "qwen2.5-coder:7b"})
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "TIERS", {"code": "qwen2.5-coder:7b"})
     monkeypatch.setattr(sonder_repl, "_installed_models", lambda: list(installed))
     monkeypatch.setattr(
         sonder_repl, "_model_selection_ineligibility",

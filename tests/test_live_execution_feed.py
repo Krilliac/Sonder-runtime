@@ -340,10 +340,10 @@ def test_http_chat_span_lands_in_the_callers_feed(monkeypatch):
     os.environ["SONDER_AUTH_MODE"] = "account"
     alice = _account_context("alice")
     monkeypatch.setattr(ts.Handler, "_request_auth_context", lambda _self: alice)
-    monkeypatch.setattr(ts.server, "available_tiers", lambda: {})
-    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "available_tiers", lambda: {})
+    monkeypatch.setattr(ts._legacy_runtime(), "chat_web_response", lambda *args, **kwargs: None)
     monkeypatch.setattr(
-        ts.server, "answer_with_history", lambda *args, **kwargs: "answer",
+        ts._legacy_runtime(), "answer_with_history", lambda *args, **kwargs: "answer",
     )
     request = json.dumps({
         "model": "sonder",

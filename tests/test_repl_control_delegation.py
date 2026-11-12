@@ -29,7 +29,7 @@ def _drive(monkeypatch, lines):
         sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""),
     )
     monkeypatch.setattr(
-        sonder_repl.server, "sonder",
+        sonder_repl._legacy_runtime, "sonder",
         lambda *_a, **_k: pytest.fail("a slash command must not run a model turn"),
     )
     sonder_repl.main()
@@ -87,7 +87,7 @@ def test_catalogued_control_commands_are_forwarded(monkeypatch, capsys, line):
         seen.append((prompt, kwargs))
         return "handled %s" % prompt
 
-    monkeypatch.setattr(sonder_repl.server, "control_command", _control)
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "control_command", _control)
 
     _drive(monkeypatch, (line,))
 

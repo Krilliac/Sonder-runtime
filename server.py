@@ -5217,6 +5217,11 @@ def _chat_request(
     if cloud and reasoning_continuation:
         raise ValueError("reasoning continuation is available only for local models")
     bridged_rung = None if cloud else _provider_bridge.active_rung()
+    rerouted = None if bridged_rung is None else _legacy_chat_bridge.ollama_only_reroute(  # a step Inference cannot carry
+        _application().model_gateway, payload, bridged_rung, model=model, graph=_APP_GRAPH,
+        loopback_endpoint=ollama_endpoint.is_loopback(BASE), context_probe=lambda: _auto_model_context(model))
+    if rerouted is not None:  # SONDER_INFERENCE_FALLBACK=ollama: served below on loopback Ollama only (never the pool)
+        payload, bridged_rung, local_only = rerouted, None, True
     if bridged_rung is not None:
         # Delegation hook: this rung's tier is bound to a non-Ollama provider.
         # Every Ollama-only probe below (thinking budget, think support) is
@@ -5858,15 +5863,10 @@ def _offload_tier_impl(
                     timeout=request_timeout,
                     cancel_check=cancel_check,
                 )
-            else:
-                out, msg = _chat_request(
-                    payload,
-                    model=model,
-                    cloud=False,
-                    timeout=request_timeout,
-                    cancel_check=cancel_check,
-                    idempotent=True,
-                )
+            else:  # a bridged tier must reach its provider, not Ollama with num_ctx=0
+                with _provider_bridge.bind_rung(provider, tier) if provider is not None else contextlib.nullcontext():
+                    out, msg = _chat_request(payload, model=model, cloud=False, timeout=request_timeout,
+                                             cancel_check=cancel_check, idempotent=True)
             if provider is not None:
                 used_model = out.get("model") or model
             tokens_in = _model_usage_count(out.get("prompt_eval_count"))
@@ -26912,8 +26912,8 @@ _register_computer_use(mcp, _record_direct_tool, lambda: _application())
 from sonder_runtime.bootstrap.openrouter_tools import register as _register_openrouter  # noqa: E402
 _register_openrouter(mcp, _record_direct_tool)
 from sonder_runtime.bootstrap import agent_help_tools as _agent_help_tools  # noqa: E402
-for _agent_registrar_name, _agent_registrar in _agent_help_tools.discover_agent_tool_registrars():
-    _agent_registrar(mcp, _record_direct_tool)
+# Convention: a registrar parameter named ``runtime`` receives this server-module provider.
+_agent_help_tools.register_agent_tools(mcp, _record_direct_tool, lambda: sys.modules[__name__])
 
 
 def route_computer_use(text):
