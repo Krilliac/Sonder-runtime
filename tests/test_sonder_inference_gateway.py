@@ -29,6 +29,7 @@ from sonder_runtime.adapters.inference.sonder_inference_gateway import (
     correlation_headers,
     direct_get_transport,
 )
+from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.model_gateway import ModelRequest
 from sonder_runtime.application.ports.model_gateway_contract import Capability
@@ -1369,6 +1370,58 @@ def test_a3_reasoning_budget_and_sampling_reach_request_body():
     for key, value in options.items():
         if key != "think":
             assert body[key] == value
+
+
+def test_empty_length_without_explicit_thinking_retries_once_with_thinking_off():
+    first = _chat("")
+    first["choices"][0]["finish_reason"] = "length"
+    responses = iter((first, _chat("OK")))
+    fake = FakeInference(chat=lambda *_: next(responses))
+    gateway = SonderInferenceGateway(
+        SonderInferenceConfig(), transport=fake.post, get_transport=fake.get,
+        env={"SONDER_INFERENCE_THINKING": "on"},
+    )
+
+    response = gateway.generate(ModelRequest(prompt="Reply OK", tier="general"), _ctx())
+
+    assert response.text == "OK"
+    assert len(fake.posts) == 2
+    assert fake.posts[0][1]["messages"] == fake.posts[1][1]["messages"]
+    assert fake.posts[1][1]["chat_template_kwargs"]["enable_thinking"] is False
+    assert fake.posts[1][1]["stream"] is False
+    assert gateway.last_response_meta["empty_length_recovered"] is True
+
+
+@pytest.mark.parametrize("think", [True, False])
+def test_empty_length_with_explicit_thinking_choice_is_not_replayed(think):
+    first = _chat("")
+    first["choices"][0]["finish_reason"] = "length"
+    fake = FakeInference(chat=lambda *_: first)
+    gateway = SonderInferenceGateway(
+        SonderInferenceConfig(), transport=fake.post, get_transport=fake.get,
+        env={"SONDER_INFERENCE_THINKING": "on"},
+    )
+
+    with pytest.raises(ModelCallError, match="done_reason"):
+        gateway.generate(ModelRequest(prompt="Reply OK", tier="general",
+                                      options={"think": think}), _ctx())
+
+    assert len(fake.posts) == 1
+
+
+def test_empty_length_repair_is_bounded_when_second_response_is_empty():
+    empty = _chat("")
+    empty["choices"][0]["finish_reason"] = "length"
+    fake = FakeInference(chat=lambda *_: empty)
+    gateway = SonderInferenceGateway(
+        SonderInferenceConfig(), transport=fake.post, get_transport=fake.get,
+        env={"SONDER_INFERENCE_THINKING": "on"},
+    )
+
+    with pytest.raises(ModelCallError, match="done_reason"):
+        gateway.generate(ModelRequest(prompt="Reply OK", tier="general"), _ctx())
+
+    assert len(fake.posts) == 2
 
 
 @pytest.mark.parametrize("location", ["nested", "cached_tokens", "missing"])
