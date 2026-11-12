@@ -260,6 +260,13 @@ consent gate refuses a hosted (`-cloud`) or remote target even when the
 original request allowed cloud; the fallback cannot widen where a prompt
 goes. See [the provider reference](docs/architecture/sonder-inference-provider.md).
 
+Approved private workers (`SONDER_INFERENCE_PRIVATE_WORKERS`) are a separate,
+explicit lane: each entry must be an `https://` private-network IP literal with
+its own CA bundle (the only trust anchor for it) and its own token variable,
+and the list is refused unless `SONDER_ALLOW_REMOTE_INFERENCE=1`. Prompts reach
+those workers without cloud consent; the lane does not enable hosted tiers,
+remote Ollama or remote compute, and their opt-ins do not enable it.
+
 ### Observatory telemetry and ecosystem routes
 
 `/.well-known/sonder-telemetry`, `/v1/observability/events` (SSE and NDJSON)
@@ -309,6 +316,7 @@ implementation work is tracked only in the
 | Process memory-risk inspection on non-Windows hosts | Unsupported | The bounded scanner is Windows-only. |
 | Unsafe lab mode | Experimental | Exact acknowledgement, loopback-only, and unprivileged; disposable isolated hosts only, and never an OS sandbox. |
 | Sonder Inference provider on a loopback endpoint | Implemented | No consent needed; `sonder-inference` bindings only, see the Sonder Inference provider section. |
+| Approved private Sonder Inference workers | Experimental | `SONDER_INFERENCE_PRIVATE_WORKERS` plus `SONDER_ALLOW_REMOTE_INFERENCE=1`; https private IP literal, per-worker CA bundle and token; no cloud consent needed or granted. |
 | Remote Sonder Inference endpoint | Experimental | Refused unless `SONDER_ALLOW_REMOTE_INFERENCE=1`, `https://`, an API key and a cloud-allowed operation context all hold; Inference itself serves no TLS, so a TLS-terminating proxy is required. |
 | Observatory telemetry and ecosystem routes | Implemented | Admin-authorized, content-free, exact-match origin allowlists; see the Observatory telemetry section. |
 | Exposing the runtime port directly to a network | Unsupported | Remote access requires the server-private profile behind a TLS reverse proxy. |

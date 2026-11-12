@@ -1,0 +1,451 @@
+"""The floating-part check without Blender: tolerance, pruning, union-find, report entries, issue wording."""
+from __future__ import annotations
+
+import pytest
+
+from sonder_runtime.adapters.meshgen import blender_runner as runner
+from sonder_runtime.domain.meshgen import connectivity as cx
+from sonder_runtime.domain.meshgen.critique import (
+    FLOATING_SCORE_CAP, brief_allows_floating, cap_score, detached_notes, detached_parts, geometry_issues,
+    remember_floating, reopened_issues, reopened_parts,)
+from sonder_runtime.domain.meshgen.selection import has_floating
+
+
+def box(x0, z0, x1, z1):
+    return (x0, 0.0, z0, x1, 1.0, z1)
+
+
+def floating(count, touching, grounded, detached=None):
+    return cx.floating_components(count, touching, grounded, detached or [False] * count)
+
+
+# ---------------------------------------------------------------------------------------------- tolerance
+def test_tolerance_is_a_one_centimetre_floor_or_one_and_a_half_percent_of_the_height():
+    assert cx.tolerance(0.5) == 0.01          # 1.5% of 0.5 m is 0.0075 m: the floor wins
+    assert cx.tolerance(0.0) == 0.01
+    assert cx.tolerance(2.0) == 0.03          # 1.5% of 2 m
+    assert abs(cx.tolerance(10.0) - 0.15) < 1e-12
+    # exactly where the two meet: 1.5% of 2/3 m is 0.01 m
+    assert abs(cx.tolerance(2.0 / 3.0) - 0.01) < 1e-12
+    for bad in (None, "tall", float("nan"), float("inf"), -3.0):
+        assert cx.tolerance(bad) == 0.01
+
+
+def test_a_part_is_grounded_up_to_and_including_the_tolerance():
+    assert cx.is_grounded(0.0, 0.01)
+    assert cx.is_grounded(-0.2, 0.01)
+    assert cx.is_grounded(0.01, 0.01)
+    assert not cx.is_grounded(0.0100001, 0.01)
+
+
+def test_sample_indices_are_capped_even_and_deterministic():
+    assert cx.sample_indices(0) == [] and cx.sample_indices(5, 0) == []
+    assert cx.sample_indices(10) == list(range(10))
+    assert cx.sample_indices(256) == list(range(256))
+    big = cx.sample_indices(8000)
+    assert len(big) == 256 and big == sorted(set(big)) and big[0] == 0 and big[-1] > 7900
+    assert big == cx.sample_indices(8000)
+
+
+# ---------------------------------------------------------------------------------------------- pruning
+def test_box_distance_is_zero_when_boxes_overlap_and_the_gap_otherwise():
+    assert cx.box_distance(box(0, 0, 1, 1), box(0.5, 0.5, 2, 2)) == 0.0
+    assert cx.box_distance(box(0, 0, 1, 1), box(1, 1, 2, 2)) == 0.0          # touching faces
+    assert abs(cx.box_distance(box(0, 0, 1, 1), box(1, 1.5, 2, 2)) - 0.5) < 1e-12
+    assert abs(cx.box_distance((0, 0, 0, 1, 1, 1), (2, 2, 0, 3, 3, 1)) - 2 ** 0.5) < 1e-12
+
+
+def test_candidate_pairs_keep_boxes_within_the_tolerance_and_drop_the_rest():
+    near = [box(0, 0, 1, 1), box(1.01, 0, 2, 1)]                    # 0.01 apart in X
+    assert cx.candidate_pairs(near, 0.01) == [(0, 1)]               # a gap equal to the tolerance stays a candidate
+    assert cx.candidate_pairs(near, 0.0099) == []                   # just under it is pruned
+    far_in_z = [box(0, 0, 1, 1), box(0, 1.5, 1, 2)]
+    assert cx.candidate_pairs(far_in_z, 0.1) == []
+    assert cx.candidate_pairs(far_in_z, 0.5) == [(0, 1)]
+
+
+def test_candidate_pairs_skip_parts_without_a_box_and_return_ordered_index_pairs():
+    boxes = [box(5, 0, 6, 1), None, box(0, 0, 1, 1), box(0.5, 0, 5.2, 1)]
+    assert cx.candidate_pairs(boxes, 0.0) == [(0, 3), (2, 3)]
+
+
+# ---------------------------------------------------------------------------------------------- union-find
+def test_a_touching_chain_standing_on_the_ground_has_nothing_floating():
+    assert floating(4, [(0, 1), (1, 2), (2, 3)], [True, False, False, False]) == []
+
+
+def test_grounded_through_a_chain_in_any_edge_order_and_direction():
+    edges = [(3, 2), (1, 2), (0, 1)]
+    assert floating(4, edges, [True, False, False, False]) == []
+    assert floating(4, edges, [False, False, False, True]) == []
+
+
+def test_an_island_with_no_grounded_part_floats_and_lists_all_its_members():
+    result = floating(5, [(0, 1), (2, 3), (3, 4)], [True, False, False, False, False])
+    assert result == [[2, 3, 4]]
+
+
+def test_two_islands_are_reported_separately_in_first_member_order():
+    assert floating(4, [], [True, False, False, False]) == [[1], [2], [3]]
+    assert floating(5, [(3, 4), (1, 2)], [True, False, False, False, False]) == [[1, 2], [3, 4]]
+
+
+def test_one_grounded_member_grounds_the_whole_component():
+    assert floating(3, [(0, 1), (1, 2)], [False, False, True]) == []
+
+
+def test_a_detached_part_is_never_reported_and_never_bridges():
+    # part 1 is a mote hovering between 0 (grounded) and 2: it must not carry 2 to the ground
+    assert floating(3, [(0, 1), (1, 2)], [True, False, False], [False, True, False]) == [[2]]
+    # a detached part alone floating is fine
+    assert floating(2, [], [True, False], [False, True]) == []
+    # a detached part that is grounded does not ground its neighbour either
+    assert floating(2, [(0, 1)], [True, False], [True, False]) == [[1]]
+
+
+def test_degenerate_inputs():
+    assert floating(0, [], []) == []
+    assert floating(1, [], [False]) == [[0]]
+    assert floating(1, [], [True]) == []
+    assert floating(2, [(0, 7), (-1, 1)], [True, False]) == [[1]]       # out-of-range edges are ignored
+
+
+# ---------------------------------------------------------------------------------------------- report shape
+def test_a_floating_entry_is_bounded_and_rounded():
+    names = ["part%02d_" % i + "x" * 60 for i in range(30)]
+    entry = cx.floating_entry(names, [5, 5, 0, -3, 2] + list(range(100, 120)), (1.123456, 0, 0), 0.123456,
+                              (0, 0, 0.123456), "n" * 80)
+    assert len(entry["parts"]) == cx.MAX_NAMES and all(len(n) <= cx.MAX_NAME_CHARS for n in entry["parts"])
+    assert entry["part_count"] == 30
+    assert entry["lines"][:3] == [2, 5, 100] and len(entry["lines"]) == cx.MAX_NAMES
+    assert entry["centre"] == [1.1235, 0.0, 0.0] and entry["gap"] == 0.1235
+    assert len(entry["nearest"]) == cx.MAX_NAME_CHARS
+    assert cx.floating_entry(["a"], [], (0, 0, 0), 1, (0, 0, 1), None)["nearest"] is None
+
+
+def test_the_geometry_block_keeps_at_most_twenty_floating_entries():
+    entries = [cx.floating_entry(["p%d" % i], [i + 1], (0, 0, 1), 0.5, (0, 0, 0.5), None) for i in range(35)]
+    block = cx.geometry_block(40, entries, 1.23456, (1, 2, 1.23456))
+    assert block["parts"] == 40 and len(block["floating"]) == 20 and cx.MAX_FLOATING == 20
+    assert block["height"] == 1.2346 and block["dims"] == [1.0, 2.0, 1.2346]
+
+
+# ---------------------------------------------------------------------------------------------- issue wording
+def entry(parts=("loaf",), lines=(34,), gap=0.12, vec=(0, 0, 0.12), nearest="plate", count=None):
+    return {"parts": list(parts), "part_count": count or len(parts), "lines": list(lines), "centre": [0, 0, 1],
+            "gap": gap, "gap_vec": list(vec), "nearest": nearest}
+
+
+def issues_for(*entries):
+    return geometry_issues({"floating": list(entries)})
+
+
+def test_the_issue_names_the_line_the_part_the_gap_and_the_fix():
+    assert issues_for(entry()) == [
+        "line 34: 'loaf' floats 0.12 m above the nearest part ('plate'); move it down to rest on it"]
+
+
+def test_direction_words_follow_the_gap_vector():
+    def say(vec):
+        return issues_for(entry(vec=vec, gap=0.2))[0]
+
+    assert "above the nearest part" in say((0.01, -0.02, 0.2)) and "move it down" in say((0, 0, 0.2))
+    assert "below the nearest part" in say((0, 0, -0.2)) and "move it up" in say((0, 0, -0.2))
+    assert "to the right (+X) of" in say((0.2, 0.05, 0.01)) and "left (toward -X)" in say((0.2, 0, 0))
+    assert "to the left (-X) of" in say((-0.2, 0, 0)) and "right (toward +X)" in say((-0.2, 0, 0))
+    assert "behind (+Y)" in say((0, 0.2, 0)) and "forward (toward -Y)" in say((0, 0.2, 0))
+    assert "in front (-Y) of" in say((0, -0.2, 0)) and "back (toward +Y)" in say((0, -0.2, 0))
+
+
+def test_the_ground_is_the_target_when_there_is_no_other_part():
+    text = issues_for(entry(nearest=None, gap=0.3, vec=(0, 0, 0.3)))[0]
+    assert text == "line 34: 'loaf' floats 0.30 m above the ground; move it down to stand on the ground (z=0)"
+
+
+def test_a_group_of_parts_is_named_once_with_a_count_and_lines():
+    text = issues_for(entry(parts=("a", "b", "c", "d", "e"), lines=(7, 9), count=5))[0]
+    assert text.startswith("lines 7, 9: 'a', 'b', 'c' and 2 more parts float 0.12 m above")
+    assert "move them down" in text
+
+
+def test_a_missing_line_and_a_zero_vector_still_give_a_usable_issue():
+    text = issues_for(entry(lines=(), vec=(0, 0, 0), gap=0.004))[0]
+    assert text.startswith("'loaf' floats 0.004 m away from the nearest part ('plate')") and "touches it" in text
+
+
+def test_issues_are_empty_without_a_floating_part_or_a_geometry_block():
+    assert geometry_issues(None) == [] and geometry_issues({}) == [] and geometry_issues({"floating": []}) == []
+    assert geometry_issues({"floating": "x"}) == [] and geometry_issues({"floating": [3, {}, {"parts": []}]}) == []
+    assert geometry_issues("nope") == []
+
+
+def test_issue_count_and_length_are_bounded():
+    many = [entry(parts=("p%d" % i,), lines=(i + 1,)) for i in range(20)]
+    assert len(geometry_issues({"floating": many})) == 8
+    assert all(len(text) <= 300 for text in geometry_issues({"floating": [entry(parts=("n" * 500,))]}))
+
+
+def test_the_score_is_capped_only_when_something_floats():
+    assert FLOATING_SCORE_CAP == 6
+    assert cap_score(10, ["x"]) == 6 and cap_score(6, ["x"]) == 6 and cap_score(3, ["x"]) == 3
+    assert cap_score(10, []) == 10 and cap_score(None, ["x"]) is None
+
+
+# ---------------------------------------------------------------------------------------------- result file
+def test_the_runner_keeps_a_well_formed_geometry_block_and_bounds_it():
+    first = dict(entry(parts=["a"] * 12), part_count=12, lines=[3, True, -1, "x", 4])
+    block = {"parts": 3, "height": 1.5, "dims": [1, 2, 1.5], "floating": [first] + [entry()] * 40}
+    clean = runner.sanitize_result({"ok": True, "geometry": block})["geometry"]
+    assert clean["parts"] == 3 and clean["height"] == 1.5 and clean["dims"] == [1.0, 2.0, 1.5]
+    assert len(clean["floating"]) == 20
+    kept = clean["floating"][0]
+    assert len(kept["parts"]) == 8 and kept["part_count"] == 12 and kept["lines"] == [3, 4]
+    assert geometry_issues(clean)
+
+
+def test_the_runner_drops_a_geometry_block_that_is_not_one_and_neutralises_bad_numbers():
+    for junk in (None, 3, "x", [], {"floating": "x"}, {"parts": 1}):
+        assert "geometry" not in runner.sanitize_result({"ok": True, "geometry": junk})
+    bad = {"parts": True, "height": float("nan"), "dims": "x",
+           "floating": [entry(gap=float("inf"), vec=("a", None, 1e9)), "junk"]}
+    clean = runner.sanitize_result({"ok": True, "geometry": bad})["geometry"]
+    assert clean["parts"] == 0 and clean["height"] == 0.0 and clean["dims"] == [0.0, 0.0, 0.0]
+    assert len(clean["floating"]) == 1 and clean["floating"][0]["gap"] == 0.0
+    assert clean["floating"][0]["gap_vec"] == [0.0, 0.0, 1e9]
+
+
+# ---------------------------------------------------------------------------------------------- contact sampling
+TOP = [(-1.0, -0.05, 0.1), (1.0, -0.05, 0.1), (1.0, 0.05, 0.1), (-1.0, 0.05, 0.1)]      # a 2.0 x 0.1 plank top
+TOP_TRIANGLES = [(0, 1, 2), (0, 2, 3)]
+CROSSING_BOX = (-0.05, -1.0, 0.1, 0.05, 1.0, 0.2)                                       # the plank lying across it
+
+
+def test_clip_polygon_keeps_the_part_inside_the_box():
+    box = (0.0, 0.0, 0.0, 1.0, 1.0, 1.0)
+    inside = [(0.2, 0.2, 0.5), (0.8, 0.2, 0.5), (0.5, 0.8, 0.5)]
+    assert cx.clip_polygon(inside, box) == inside
+    assert cx.clip_polygon([(2.0, 2.0, 0.5), (3.0, 2.0, 0.5), (2.5, 3.0, 0.5)], box) == []
+    clipped = cx.clip_polygon([(-1.0, 0.5, 0.5), (3.0, 0.5, 0.5), (1.0, 0.9, 0.5)], box)
+    assert clipped and all(0.0 <= p[0] <= 1.0 + 1e-9 for p in clipped)
+    assert min(p[0] for p in clipped) == 0.0 and max(p[0] for p in clipped) <= 1.0 + 1e-9
+
+
+def test_contact_samples_land_in_a_flush_contact_patch_that_has_no_vertex_in_it():
+    samples = cx.contact_samples(TOP, TOP_TRIANGLES, CROSSING_BOX, 0.01)
+    assert samples and all(abs(point[0]) <= 0.06 + 1e-9 for point in samples)       # none of the far vertices
+    assert any(abs(point[0]) <= 0.05 and abs(point[1]) <= 0.05 for point in samples)
+    # the control: the part's own vertices are 1 m away, so vertex sampling alone would find nothing
+    assert min(abs(point[0]) for point in TOP) == 1.0
+
+
+def test_contact_samples_ignore_triangles_away_from_the_box_and_respect_the_cap():
+    assert cx.contact_samples(TOP, TOP_TRIANGLES, (5.0, 5.0, 5.0, 6.0, 6.0, 6.0), 0.01) == []
+    near_flush = (-1.0, -1.0, 0.0, 1.0, 1.0, 0.1)
+    assert len(cx.contact_samples(TOP, TOP_TRIANGLES, near_flush, 0.01, cap=5)) == 5
+    assert cx.CONTACT_SAMPLE_CAP == 1024
+
+
+def test_box_contains_and_the_pair_limit():
+    assert cx.box_contains((0, 0, 0, 2, 2, 2), (0.5, 0.5, 0.5, 1, 1, 1))
+    assert not cx.box_contains((0, 0, 0, 2, 2, 2), (0.5, 0.5, 0.5, 3, 1, 1))
+    crowd = [(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)] * 30                                   # 435 pairs
+    assert len(cx.candidate_pairs(crowd, 0.01)) == 435
+    assert len(cx.candidate_pairs(crowd, 0.01, 435)) == 435
+    with pytest.raises(cx.TooManyPairs):
+        cx.candidate_pairs(crowd, 0.01, 434)
+    assert cx.MAX_PAIRS == 200_000
+
+
+def test_the_geometry_block_lists_detached_parts_bounded():
+    block = cx.geometry_block(3, [], 1.0, (1, 1, 1), [("mote%d" % i, i + 1) for i in range(30)])
+    assert len(block["detached"]) == 20 and block["detached"][0] == {"name": "mote0", "line": 1}
+    assert cx.geometry_block(1, [], 1.0, (1, 1, 1))["detached"] == []
+
+
+# ---------------------------------------------------------------------------------------------- one definition of floating
+JUNK_FIRST = [{"parts": []}, {"parts": ["", "  "]}, {"parts": "x"}, 5] * 3
+
+
+def test_has_floating_and_geometry_issues_agree_on_malformed_entries():
+    for floating_list in ([], JUNK_FIRST, JUNK_FIRST + [entry()], [entry()], [{"parts": [], "gap": 1}]):
+        geometry = {"floating": floating_list}
+        assert bool(geometry_issues(geometry)) == has_floating({"geometry": geometry}), floating_list
+    assert not has_floating({}) and not has_floating({"geometry": "x"})
+    assert has_floating({"reopened": ["x"]})
+
+
+def test_the_runner_drops_entries_that_name_no_part_and_keeps_the_detached_list():
+    block = {"parts": 3, "height": 1, "dims": [1, 1, 1], "floating": [entry(parts=[]), entry(parts=["", 3]), entry()],
+             "detached": [{"name": "mote", "line": 4}, {"name": "", "line": 2}, "junk", {"name": "wisp"}]}
+    clean = runner.sanitize_result({"ok": True, "geometry": block})["geometry"]
+    assert [e["parts"] for e in clean["floating"]] == [["loaf"]]
+    assert clean["detached"] == [{"name": "mote", "line": 4}, {"name": "wisp", "line": 0}]
+
+
+# ---------------------------------------------------------------------------------------------- hostile numbers
+HUGE = 10 ** 400
+
+
+def test_the_runner_survives_and_clamps_enormous_numbers_everywhere():
+    block = {"parts": HUGE, "height": HUGE, "dims": [HUGE, -HUGE, 2], "detached": [{"name": "m", "line": HUGE}],
+             "floating": [dict(entry(), gap=HUGE, part_count=10 ** 300, lines=[10 ** 300, 7],
+                               centre=[HUGE, 0, 0], gap_vec=[-HUGE, 1e300, float("nan")])]}
+    result = runner.sanitize_result({"ok": True, "tris": HUGE, "size": [HUGE, float("inf"), 1.5], "geometry": block,
+                                     "parts": [{"name": "p", "tris": HUGE}]})
+    big = runner.MAX_NUMBER
+    assert result["tris"] == big and result["size"] == [big, 0.0, 1.5] and result["parts"][0]["tris"] == big
+    geometry = result["geometry"]
+    assert geometry["parts"] == big and geometry["height"] == big and geometry["dims"] == [big, -big, 2.0]
+    assert geometry["detached"] == [{"name": "m", "line": big}]
+    kept = geometry["floating"][0]
+    assert kept["gap"] == big and kept["part_count"] == big and kept["lines"] == [7]
+    assert kept["centre"] == [big, 0.0, 0.0] and kept["gap_vec"] == [-big, big, 0.0]
+    assert geometry_issues(geometry)                                           # and the loop can still use it
+    assert runner.sanitize_result({"ok": True, "tris": float("inf")})["tris"] == 0
+    assert runner.sanitize_result({"ok": True, "tris": float("nan")})["tris"] == 0
+
+
+# ---------------------------------------------------------------------------------------------- detached accountability
+def test_detached_parts_are_read_and_reminded_about():
+    geometry = {"floating": [], "detached": [{"name": "wisp", "line": 12}, {"name": "orb", "line": 0}, {"name": ""}]}
+    assert detached_parts(geometry) == [("wisp", 12), ("orb", 0)]
+    notes = detached_notes(geometry)
+    assert notes[0].startswith("you marked 'wisp' (line 12) detached; only do that if the brief says it floats")
+    assert "(line" not in notes[1]
+    assert detached_parts(None) == [] and detached_notes({}) == []
+
+
+def test_a_detached_part_is_reopened_by_where_it_is_not_by_name_or_line():
+    memory = {"boxes": []}
+    remember_floating(memory, {"floating": [dict(entry(parts=["loaf"], lines=[34]), box=[0, 0, 1, 1, 1, 1.1])]})
+    assert memory == {"boxes": [(0.0, 0.0, 1.0, 1.0, 1.0, 1.1)]}
+    here = [0.1, 0.1, 1.02, 0.9, 0.9, 1.1]
+    moved = {"detached": [{"name": "renamed", "line": 90, "box": here}]}
+    assert "'renamed' was floating in an earlier round and is now marked detached" in reopened_issues(moved, memory)[0]
+    assert "the brief mentions nothing that floats" in reopened_issues(moved, memory)[0]
+    # the same name or the same line elsewhere is NOT the old floater: both are recycled between rewrites
+    far = [5.0, 5.0, 5.0, 5.2, 5.2, 5.2]
+    assert reopened_issues({"detached": [{"name": "loaf", "line": 34, "box": far}]}, memory) == []
+    assert reopened_issues({"detached": [{"name": "loaf", "line": 34}]}, memory) == []        # no box, no match
+    assert reopened_issues({}, memory) == []
+    assert reopened_parts(moved, memory) == [("renamed", 90)]
+
+
+def test_a_cover_everything_or_inside_out_box_is_not_a_match():
+    memory = {"boxes": [(0.0, 0.0, 1.0, 1.0, 1.0, 1.1)]}
+    prop = {"dims": [1.0, 1.0, 1.2], "height": 1.2}
+    huge = dict(prop, detached=[{"name": "sky", "line": 2, "box": [-50, -50, -50, 50, 50, 50]}])
+    assert reopened_issues(huge, memory) == []
+    inside_out = dict(prop, detached=[{"name": "flip", "line": 2, "box": [1, 1, 1.2, 0, 0, 1]}])
+    assert reopened_issues(inside_out, memory) == []
+    honest = dict(prop, detached=[{"name": "mote", "line": 2, "box": [0.2, 0.2, 1.0, 0.4, 0.4, 1.1]}])
+    assert reopened_issues(honest, memory)
+
+
+def test_the_brief_allows_floating_things_only_when_it_says_so():
+    for brief in ("a candle with a floating flame", "A LANTERN with fireflies", "wisp lamp", "a levitating stone",
+                  "a hovering drone", "glow-motes around a shrine", "a chandelier suspended from chains",
+                  "an orb on a stand", "drifting sparks", "it floats"):
+        assert brief_allows_floating(brief), brief
+    for brief in ("a wooden cart", "a floater", "a forbidden temple", "ambient lighting", "a sparkling gem",
+                  "a motel sign", "", None):
+        assert not brief_allows_floating(brief), brief
+
+
+def test_the_sanitiser_drops_an_inside_out_box():
+    block = {"parts": 1, "height": 1, "dims": [1, 1, 1], "floating": [dict(entry(), box=[1, 0, 0, 0, 1, 1])],
+             "detached": [{"name": "m", "line": 1, "box": [0, 0, 1, 1, 1, 0]}]}
+    clean = runner.sanitize_result({"ok": True, "geometry": block})["geometry"]
+    assert "box" not in clean["floating"][0] and "box" not in clean["detached"][0]
+
+
+def test_the_revise_prompt_does_not_claim_a_reviewer_when_there_is_no_score():
+    from sonder_runtime.domain.meshgen.prompts import revise_prompt
+
+    measured = revise_prompt("BASE", "code", {"score": None, "issues": ["line 3: x"]}, notes=["you marked 'a' detached"])
+    assert "reviewer looked" not in measured and "No reviewer scored it" in measured and "Score" not in measured
+    assert "Notes:\n- you marked 'a' detached" in measured.replace("\r\n", "\n")
+    scored = revise_prompt("BASE", "code", {"score": 6, "issues": ["x"]})
+    assert "a reviewer looked" in scored and "Score: 6/10" in scored and "Notes:" not in scored
+
+
+# ---------------------------------------------------------------------------------------------- islands, closed meshes, boxes
+def test_split_islands_groups_triangles_that_share_vertices():
+    quad = [(0, 1, 2), (0, 2, 3)]
+    other = [(10, 11, 12), (12, 11, 13)]
+    assert cx.split_islands(quad + other) == [[0, 1], [2, 3]]
+    assert cx.split_islands(other + quad) == [[0, 1], [2, 3]]
+    assert cx.split_islands(quad) == [[0, 1]] and cx.split_islands([]) == []
+    chain = [(0, 1, 2), (2, 3, 4), (4, 5, 6)]                       # joined only through shared corners
+    assert cx.split_islands(chain) == [[0, 1, 2]]
+
+
+def test_split_islands_gives_up_past_the_limit():
+    many = [(3 * i, 3 * i + 1, 3 * i + 2) for i in range(65)]
+    assert cx.split_islands(many, 64) is None
+    assert len(cx.split_islands(many[:64], 64)) == 64
+    assert len(cx.split_islands(many)) == 65                          # no limit unless one is asked for
+
+
+def test_the_node_budget_collapses_the_parts_with_the_most_islands_first():
+    assert cx.MAX_NODES == 4000
+    assert cx.single_node_parts([1, 2, 3], budget=6) == set()          # fits: every part is split
+    assert cx.single_node_parts([1, 2, 3], budget=5) == {2}            # one part too many: the largest collapses
+    assert cx.single_node_parts([5, 1, 9, 5], budget=12) == {2}        # 20 nodes down to 12
+    assert cx.single_node_parts([5, 1, 9, 5], budget=8) == {2, 0}      # ties: the lowest index first
+    assert cx.single_node_parts([1, 1, 1], budget=1) == set()          # single-island parts are never "collapsed"
+    assert cx.single_node_parts([], budget=1) == set()
+
+
+def test_only_a_watertight_mesh_is_closed_and_manifold():
+    tetra = [(0, 1, 2), (0, 3, 1), (1, 3, 2), (0, 2, 3)]
+    assert cx.is_closed_manifold(tetra)
+    assert not cx.is_closed_manifold(tetra[:3])                      # one face missing: an open shell
+    assert not cx.is_closed_manifold([])
+    assert not cx.is_closed_manifold(tetra + [(0, 1, 2)])           # an edge shared by three triangles
+
+
+def test_boxes_near_is_inclusive_of_the_tolerance():
+    assert cx.boxes_near((0, 0, 0, 1, 1, 1), (1.5, 0, 0, 2, 1, 1), 0.5)
+    assert not cx.boxes_near((0, 0, 0, 1, 1, 1), (1.75, 0, 0, 2, 1, 1), 0.5)
+    assert cx.boxes_near((0, 0, 0, 1, 1, 1), (0.5, 0.5, 0.5, 2, 2, 2), 0.0)
+
+
+def test_entries_and_detached_parts_carry_a_valid_box_only():
+    box = (0, 0, 1, 1, 1, 2)
+    assert cx.floating_entry(["a"], [1], (0, 0, 1), 1, (0, 0, 1), None, box)["box"] == [0.0, 0.0, 1.0, 1.0, 1.0, 2.0]
+    assert "box" not in cx.floating_entry(["a"], [1], (0, 0, 1), 1, (0, 0, 1), None, (1, 2))
+    block = cx.geometry_block(2, [], 1, (1, 1, 1), [("m", 3, box), ("n", 4)])
+    assert block["detached"] == [{"name": "m", "line": 3, "box": [0.0, 0.0, 1.0, 1.0, 1.0, 2.0]},
+                                 {"name": "n", "line": 4}]
+
+
+def test_a_detached_part_in_the_place_of_an_earlier_floater_is_reopened_whatever_it_is_called():
+    memory = {"lines": set(), "names": set(), "boxes": []}
+    remember_floating(memory, {"floating": [dict(entry(), box=[0, 0, 1, 1, 1, 1.1])]})
+    assert memory["boxes"] == [(0.0, 0.0, 1.0, 1.0, 1.0, 1.1)]
+    renamed = {"height": 2.0, "detached": [{"name": "other", "line": 99, "box": [0.2, 0.2, 1.05, 0.8, 0.8, 1.2]}]}
+    assert reopened_issues(renamed, memory)
+    close = {"height": 2.0, "detached": [{"name": "other", "line": 99, "box": [0, 0, 1.12, 1, 1, 1.2]}]}
+    assert reopened_issues(close, memory)                                      # 0.02 m away, tolerance is 0.03
+    far = {"height": 2.0, "detached": [{"name": "other", "line": 99, "box": [0, 0, 1.5, 1, 1, 1.6]}]}
+    assert reopened_issues(far, memory) == []
+    assert reopened_issues({"detached": [{"name": "other", "line": 99}]}, memory) == []     # no box, no match
+
+
+def test_a_small_gap_gets_the_faceting_hint_and_a_large_one_does_not():
+    hint = "the gap may be from low-poly faceting; overlap the parts slightly"
+    assert hint in issues_for(entry(gap=0.01, vec=(0, 0, 0.01)))[0]
+    assert hint not in issues_for(entry(gap=0.12))[0]
+    tall = {"height": 10.0, "floating": [entry(gap=0.3, vec=(0, 0, 0.3))]}          # tolerance 0.15: 0.3 < 0.45
+    assert hint in geometry_issues(tall)[0]
+
+
+def test_the_runner_keeps_boxes_only_when_they_are_six_numbers():
+    block = {"parts": 2, "height": 1, "dims": [1, 1, 1],
+             "floating": [dict(entry(), box=[0, 0, 1, 1, 1, HUGE]), dict(entry(), box=[1, 2]), entry()],
+             "detached": [{"name": "m", "line": 1, "box": [0, 0, 0, 1, 1, 1]}, {"name": "n", "box": "x"}]}
+    clean = runner.sanitize_result({"ok": True, "geometry": block})["geometry"]
+    assert clean["floating"][0]["box"] == [0.0, 0.0, 1.0, 1.0, 1.0, runner.MAX_NUMBER]
+    assert "box" not in clean["floating"][1] and "box" not in clean["floating"][2]
+    assert clean["detached"][0]["box"] == [0.0, 0.0, 0.0, 1.0, 1.0, 1.0] and "box" not in clean["detached"][1]

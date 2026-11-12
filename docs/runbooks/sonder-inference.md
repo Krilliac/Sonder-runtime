@@ -47,8 +47,12 @@ otherwise `SONDER_INFERENCE_MODEL` (default `default`, Inference's first
 
 Optional: `SONDER_INFERENCE_FALLBACK=ollama` sends requests Inference never
 received (refused connection, unresolvable host, health not ready, 503
-`not_ready`) to local Ollama once. Leave it unset if a silent switch of model
-family is unacceptable for your work.
+`not_ready`) to local Ollama once. It also serves chat steps Inference v1
+cannot carry (decoder schemas, native tools, images) on loopback Ollama with
+the tier's policy model, recorded as `served by ollama (ollama-only feature:
+...)` in the turn receipt; without it those steps fail with a 400 naming this
+setting. Leave it unset if a switch of model family is unacceptable for your
+work.
 
 ## Verify
 
@@ -125,6 +129,23 @@ Inference serves no TLS. Put it behind a TLS-terminating proxy, start it with
 `https://` `SONDER_INFERENCE_BASE_URL`, and `SONDER_INFERENCE_API_KEY`. Only
 operation contexts that allow cloud may send prompts there; others are
 refused with `Forbidden` before any byte is sent.
+
+### Private workers (a second PC)
+
+To spread requests over this host's server and another PC's, serve the other
+PC's Inference behind its TLS proxy on the private link with `--token-file`,
+keep the primary on loopback, and set:
+
+```text
+SONDER_ALLOW_REMOTE_INFERENCE=1
+SONDER_INFERENCE_PRIVATE_WORKERS=[{"url":"https://10.77.0.2:8443/sonder-inference","ca_bundle":"C:/ProgramData/sonder/certs/sonder-ca-bundle.pem","token_env":"SONDER_INFERENCE_NODE1_TOKEN","max_inflight":2}]
+SONDER_INFERENCE_NODE1_TOKEN=<the worker's token, from a secret store>
+```
+
+Restart the runtime. `provider_status()` (doctor, the ecosystem route) lists
+each worker's health and in-flight count; the runtime log shows one
+`sonder-inference placed request on ...` line per call. Both servers must
+serve the requested model id, otherwise the worker is not chosen for it.
 
 ## Attestation
 
