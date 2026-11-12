@@ -47,6 +47,10 @@ class BatchPeer:
             document = (_chat(prompt, model=body["model"]) if status == 200 else
                         {"error": {"code": status, "message": "synthetic batch failure"}})
             data = json.dumps(document).encode()
+            # Record the request as completed BEFORE any response byte is sent: the client may read the whole
+            # response and return before this thread runs again, so a record made afterwards can be missing.
+            with self.lock:
+                self.finished.append(prompt)
             handler.send_response(status)
             handler.send_header("Content-Type", "application/json")
             handler.send_header("Content-Length", str(len(data)))
@@ -55,8 +59,6 @@ class BatchPeer:
                 handler.wfile.write(data)
             except (BrokenPipeError, ConnectionResetError):
                 pass  # the deadline test intentionally closes the client first
-            with self.lock:
-                self.finished.append(prompt)
             self.after(prompt)
         finally:
             with self.lock:
@@ -103,7 +105,8 @@ def requests(*prompts):
 
 def test_batch_orders_results_not_completion_and_accounts_each_authenticated_send(peer, monkeypatch):
     second_done = threading.Event()
-    peer.before = lambda prompt: second_done.wait(3) if prompt == "first" else None
+    # A hang guard only: a short wait could expire on a slow runner and let "first" finish before "second".
+    peer.before = lambda prompt: second_done.wait(30) if prompt == "first" else None
     peer.after = lambda prompt: second_done.set() if prompt == "second" else None
     usage = []
     monkeypatch.setattr(
