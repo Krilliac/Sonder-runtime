@@ -1502,6 +1502,7 @@ def build_application(
                     owner_nonce=continuation_service.owner_nonce,
                     owner_pid=continuation_service.owner_pid,
                     owner_host=continuation_service.owner_host,
+                    mutation_lock=continuation_service.mutation_lock,
                 )
                 from ..adapters.conversational_subagents import (
                     conversational_runner_factory,
