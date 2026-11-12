@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 419,
+      "file_count": 420,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -219,6 +219,7 @@
         "sonder_runtime/adapters/inference/openrouter_gateway.py",
         "sonder_runtime/adapters/inference/overflow_availability.py",
         "sonder_runtime/adapters/inference/overflow_route.py",
+        "sonder_runtime/adapters/inference/pool_model_catalog.py",
         "sonder_runtime/adapters/inference/prefix_cache.py",
         "sonder_runtime/adapters/inference/prewarm_gate.py",
         "sonder_runtime/adapters/inference/production_tier_router.py",

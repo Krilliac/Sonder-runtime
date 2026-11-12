@@ -1583,7 +1583,9 @@ class OllamaWorkerPool:
                 results[endpoint.worker_id] = "error: %s" % _safe_error(error)
         return results
 
-    def catalog_union(self, fetch_tags: Callable[[str], object]) -> dict:
+    def catalog_union(
+        self, fetch_tags: Callable[[str], object], *, routable_only: bool = False,
+    ) -> dict:
         """One ``/api/tags``-shaped catalog holding every member's models.
 
         A pooled request reaches whichever member the scheduler picks, so a
@@ -1594,13 +1596,16 @@ class OllamaWorkerPool:
         Only members the scheduler could route to count -- the same
         admissibility ``_choose`` applies (not probationary, expired or draining,
         no compatibility error) -- so a model is never "installed" on a worker
-        that could not serve it.
+        that could not serve it. ``routable_only`` additionally skips members
+        whose circuit is open (``cooldown_until`` in the future), so a pin is
+        never resolved against a worker ``_choose`` would refuse right now.
         """
         with self._condition:
             now = self._clock()
             origins = [
                 state.endpoint.origin for state in self._states
                 if self._membership_admissible(state, now) and not state.compatibility_error
+                and not (routable_only and state.cooldown_until > now)
             ]
         merged: dict[str, dict] = {}
         answered, last_error = False, None
@@ -1611,10 +1616,20 @@ class OllamaWorkerPool:
                 logger.warning(f"catalog read skipped a worker: {_safe_error(error)!r}")
                 last_error = error
                 continue
+            payload = payload or {}
+            rows = payload.get("models") if isinstance(payload, dict) else None
+            if not isinstance(payload, dict) or (
+                rows is not None and not isinstance(rows, (list, tuple))
+            ):
+                last_error = ValueError("malformed catalog payload from a worker")
+                logger.warning(f"catalog read skipped a worker: {last_error!r}")
+                continue
             answered = True
-            for row in (payload or {}).get("models") or ():
+            for row in rows or ():
                 name = isinstance(row, dict) and (row.get("name") or row.get("model"))
-                if name and name not in merged:
+                # A worker controls this payload: only a non-empty string names a model
+                # (anything else, e.g. a list, is skipped rather than hashed).
+                if isinstance(name, str) and name and name not in merged:
                     merged[name] = row
         if not answered and last_error is not None:
             raise last_error
