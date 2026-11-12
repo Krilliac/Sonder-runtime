@@ -14,6 +14,7 @@ import random
 import re
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -23,6 +24,14 @@ from sonder_runtime.domain.meshgen.dsl.manifest import build_manifest
 from sonder_runtime.domain.meshgen.dsl.recorder import compile_script
 from sonder_runtime.domain.meshgen.dsl.values import is_domain
 from sonder_runtime.domain.meshgen.prompts import repair_hint
+from tests.test_meshgen_dos import (  # noqa: F401  (cpu_unit and run_probe are fixtures)
+    HANG_CEILING_SECONDS,
+    assert_cpu_within_budget,
+    assert_not_stopped_by_the_clock,
+    assert_stopped_by,
+    cpu_unit,
+    run_probe,
+)
 
 KIT = '''"""kit"""
 import os
@@ -556,47 +565,77 @@ def test_recorder_source_has_no_generic_dispatch_and_few_imports():
 
 
 # ---------------------------------------------------------------- caps
-def _capped(source, needle=None, limit=2.0):
-    started = time.monotonic()
-    message = reject(source)
-    elapsed = time.monotonic() - started
-    assert elapsed < limit, "%s took %.2fs" % (source[:40], elapsed)
-    assert "internal error" not in message
-    if needle:
-        assert needle in message, message
-    return message
+# A cap test used to assert that the script was rejected in under `limit` wall-clock seconds, a stand-in for "a cap, not the
+# 10 s production clock, stopped it".  On a loaded CI runner a rejection that takes well under a second idle took 2.86 s and
+# the bound failed.  Now: (a) the interpreter's own counters say which limit stopped the script (steps or work cap, never
+# the clock, which run_probe raises to a 60 s hang ceiling), and (b) thread CPU time is held to a budget in units of a
+# calibrated workload (cpu_unit from test_meshgen_dos), which a busy runner does not inflate.  The old `limit` seconds map to
+# budget units at LIMIT_UNITS_PER_SECOND: 2.0 -> 16 units, 5.0 -> 40 units (about 2.2 s and 5.6 s of CPU where the unit is
+# 0.14 s, both under the 10 s production clock).  Worst measured ratios (3 serial runs and one -n 4 run): the step-cap loop
+# 4.0 units (budget 40, 10x), `sum(l)` 3.0 (budget 16, 5.3x), every other call site 1.4 or less (11x or more).
+LIMIT_UNITS_PER_SECOND = 8
 
 
-def test_infinite_loop_hits_the_step_budget():
-    _capped("def build():\n    while True:\n        pass\n", "step", limit=5.0)
+@pytest.fixture
+def capped(run_probe, cpu_unit):  # noqa: F811  (the fixtures imported above, requested by name)
+    """capped(source, needle=None, limit=2.0, stop=None, interpreted=True) -> the rejection message.
+
+    stop "steps"/"work" must be the cap the counters show fired; any other cap is proven by `needle` in the message
+    plus "not the clock".  interpreted=False is for sources refused before an interpreter exists (parser, op count)."""
+    def check(source, needle=None, limit=2.0, stop=None, interpreted=True):
+        wall = time.monotonic()
+        units = limit * LIMIT_UNITS_PER_SECOND
+        if interpreted:
+            outcome = run_probe(source)
+            assert outcome.message is not None, source[:40]
+            message = outcome.message
+            assert_not_stopped_by_the_clock(source[:40], outcome)
+            if stop is not None:
+                assert_stopped_by(source[:40], outcome, stop)
+        else:
+            assert stop is None
+            started = time.thread_time()
+            message = reject(source)
+            outcome = SimpleNamespace(cpu=time.thread_time() - started)
+        assert_cpu_within_budget(source[:40], outcome, cpu_unit, units=units)
+        assert time.monotonic() - wall < HANG_CEILING_SECONDS, source[:40]
+        assert "internal error" not in message
+        if needle:
+            assert needle in message, message
+        return message
+    return check
 
 
-def test_memory_bombs_are_refused_before_allocation():
-    _capped("def build():\n    x = [0] * 10**9\n")
-    _capped("def build():\n    x = 2 ** 10**9\n")
-    _capped("def build():\n    x = 'a' * 10**9\n")
-    _capped("def build():\n    x = list(range(10**9))\n")
-    _capped("def build():\n    x = [0] * 200000\n    for i in range(100):\n        y = [x] * 200000\n")
-    _capped("def build():\n    s = 'ab'\n    for i in range(40):\n        s = s + s\n")
-    _capped("def build():\n    n = 1\n    for i in range(200):\n        n = n * 1000003\n")
+def test_infinite_loop_hits_the_step_budget(capped):
+    capped("def build():\n    while True:\n        pass\n", "step", limit=5.0, stop="steps")
 
 
-def test_deep_recursion_is_refused():
-    _capped("def f(n):\n    return f(n + 1)\ndef build():\n    f(0)\n", "deep")
+def test_memory_bombs_are_refused_before_allocation(capped):
+    capped("def build():\n    x = [0] * 10**9\n", 'containers that are too large')
+    capped("def build():\n    x = 2 ** 10**9\n", 'the result is too large')
+    capped("def build():\n    x = 'a' * 10**9\n", 'strings that are too long')
+    capped("def build():\n    x = list(range(10**9))\n", 'range() is too long')
+    capped("def build():\n    x = [0] * 200000\n    for i in range(100):\n        y = [x] * 200000\n", "too much work", stop="work")
+    capped("def build():\n    s = 'ab'\n    for i in range(40):\n        s = s + s\n", "strings that are too long")
+    capped("def build():\n    n = 1\n    for i in range(200):\n        n = n * 1000003\n", "integer overflow")
+
+
+def test_deep_recursion_is_refused(capped):
+    capped("def f(n):\n    return f(n + 1)\ndef build():\n    f(0)\n", "nested too deeply")
     deep = "def f(n):\n    if n == 0:\n        return 0\n    return f(n - 1)\ndef build():\n    f(70)\n"
-    _capped(deep, "deep")
+    capped(deep, "nested too deeply")
 
 
-def test_deeply_nested_source_is_a_script_error_not_a_crash():
+def test_deeply_nested_source_is_a_script_error_not_a_crash(capped):
     source = "def build():\n    x = " + "(" * 25_000 + "1" + ")" * 25_000 + "\n"
     assert len(source) < recorder.MAX_SOURCE_CHARS
-    _capped(source)
-    _capped("def build():\n    x = " + "[" * 5_000 + "]" * 5_000 + "\n")
+    capped(source, "too many nested parentheses", interpreted=False)
+    capped("def build():\n    x = " + "[" * 5_000 + "]" * 5_000 + "\n", "too many nested parentheses", interpreted=False)
 
 
-def test_too_many_calls_are_refused():
+def test_too_many_calls_are_refused(capped):
     body = "    p()\n" * (opschema.MAX_OPS + 1)
-    message = _capped("def p():\n    primitive('cube')\n\ndef build():\n" + body, "more than")
+    message = capped("def p():\n    primitive('cube')\n\ndef build():\n" + body, "more than", interpreted=False)
     assert str(opschema.MAX_OPS) in message
 
 
@@ -732,13 +771,13 @@ def test_the_kit_exception_class_is_not_a_recordable_op():
     assert "LFError" in message and "not available" in message, message
 
 
-def test_work_is_charged_for_each_big_operation_not_just_for_loops():
+def test_work_is_charged_for_each_big_operation_not_just_for_loops(capped):
     for body in ("sorted(l)", "sum(l)", "max(l)", "min(l)", "any(l)", "l == l2", "0 in l", "l[1:]",
                  "l.count(0)", "len(list(l))", "[l] * 10 == [l2] * 10"):
         source = ("def build():\n    l = [0] * 150000\n    l2 = [0] * 150000\n    for i in range(2000):\n"
                   "        x = %s\n" % body)
-        message = _capped(source)
-        assert "too much work" in message or "too large" in message, (body, message)
+        # stop="work": the work cap fired, proven by the counters; a clock stop would carry the same message text.
+        capped(source, "too much work", stop="work")
 
 
 KIT_COLOUR = KIT.replace('def box(name, size, radius=0.0, hexcol="#888888"', 'def box(name, size, radius=0.0, hexcol="#888888"')
