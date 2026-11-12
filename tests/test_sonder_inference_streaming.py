@@ -37,13 +37,19 @@ class FakeInference:
 
     def __init__(self, *, token_delay=0.05, prefill_delay=0.0, tokens=TOKENS,
                  error_after=None, health_extra=None, json_to_stream=False,
-                 status=200, error_code="", hold_after_first=None, prefill_gate=None):
+                 status=200, error_code="", hold_after_first=None, prefill_gate=None,
+                 gate_timeout=10.0):
         self.token_delay = token_delay
         self.prefill_delay = prefill_delay
         # Optional gates (threading.Event) that pause a streamed generation at
         # a known point until the test releases it, so ordering is asserted
         # from state rather than from wall-clock bounds (load-flaky on a busy
-        # runner). Each wait is bounded so a test that never releases fails.
+        # runner). Each wait is bounded only as a hang guard: an expired wait
+        # is recorded in gate_expired and fails the test via assert_gates_held,
+        # because the fake would otherwise carry on and the test would no
+        # longer prove the property the gate exists to check.
+        self.gate_timeout = gate_timeout
+        self.gate_expired: list[str] = []
         self.hold_after_first = hold_after_first
         self.prefill_gate = prefill_gate
         self.tokens = list(tokens)
@@ -56,6 +62,17 @@ class FakeInference:
         self.written = 0
         self.disconnected = threading.Event()
         self.finished = threading.Event()
+
+    def wait_gate(self, name, gate):
+        if not gate.wait(self.gate_timeout):
+            self.gate_expired.append(name)
+
+    def assert_gates_held(self):
+        assert not self.gate_expired, (
+            "fake server gate(s) %s timed out after %ss without being released: the "
+            "client was not forwarded the expected event before the server moved on, "
+            "so streaming ordering is not proven" % (self.gate_expired, self.gate_timeout)
+        )
 
     def health(self):
         document = {
@@ -129,7 +146,7 @@ def serving(fake: FakeInference):
             self.close_connection = True
             try:
                 if fake.prefill_gate is not None:
-                    fake.prefill_gate.wait(10)
+                    fake.wait_gate("prefill_gate", fake.prefill_gate)
                 else:
                     time.sleep(fake.prefill_delay)
                 self.wfile.write(b": keep-alive\n\n")
@@ -149,7 +166,7 @@ def serving(fake: FakeInference):
                                               "finish_reason": None}]})
                     fake.written += 1
                     if index == 0 and fake.hold_after_first is not None:
-                        fake.hold_after_first.wait(10)
+                        fake.wait_gate("hold_after_first", fake.hold_after_first)
                 self._event(fake.final())
                 self._event({"id": "chatcmpl-r1", "object": "chat.completion.chunk",
                              "model": "qwen3.8:27b", "choices": [],
@@ -243,6 +260,7 @@ def test_streaming_cuts_time_to_first_token_to_one_token():
         fake.finished.clear()
         recorder = Recorder(on_first=first_delta)
         live, shaped, response, turn_started, turn_done = _bridged_turn(gateway, recorder)
+    fake.assert_gates_held()
     print("first delta arrived with generation finished=%s; turn %.3fs"
           % (finished_at_first, turn_done - turn_started))
     assert before.text == response.text == "".join(TOKENS)
@@ -348,6 +366,7 @@ def test_client_gone_during_prefill_cancels_before_any_token():
             assert fake.written == 0
         finally:
             prefill.set()  # let the held handler finish before the server closes
+    fake.assert_gates_held()
     assert recorder.deltas == []
 
 
@@ -524,6 +543,7 @@ def test_served_turn_streams_tokens_as_they_are_generated(monkeypatch):
     after_first, after_total, events, text = _served_turn(
         monkeypatch, fake, on_first_content=first_content,
     )
+    fake.assert_gates_held()
     print("served TTFT before=%.3fs (turn %.3fs) after=%.3fs (turn %.3fs), finished at first=%s"
           % (before_first, before_total, after_first, after_total, finished_at_first))
     assert _content(before_events) == _content(events) == "".join(TOKENS)
