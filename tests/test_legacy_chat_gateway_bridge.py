@@ -314,7 +314,7 @@ def _http(monkeypatch, *, stub_web=True):
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
     if stub_web:
-        monkeypatch.setattr(ts.server, "chat_web_response", lambda *a, **k: None)
+        monkeypatch.setattr(ts._legacy_runtime(), "chat_web_response", lambda *a, **k: None)
     httpd = ts.ThreadingHTTPServer(("127.0.0.1", 0), ts.Handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()

@@ -363,6 +363,7 @@ ACTION_TITLES = {
     "run_project": "Ran Project",
     "image_inspect": "Viewed Image",
     "artifact_generate": "Generated Assets",
+    "mesh_generate": "Generated Model",
     "artifact_verify": "Verified Assets",
     "game_reference_suite": "Ran Game Suite",
     "game_generate_and_test": "Built and Tested Game",
