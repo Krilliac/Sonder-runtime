@@ -15,6 +15,7 @@ import os
 import platform
 import threading
 from collections.abc import Mapping
+from contextlib import AbstractContextManager
 
 from sonder_runtime.application.owner_process import recorded_owner_is_dead
 from sonder_runtime.application.ports.continuation_records import (
@@ -204,6 +205,15 @@ class ContinuationWorkerRegistry(WorkerRegistry):
     required by the legacy registry protocol therefore fail closed here; this
     adapter intentionally narrows that protocol to ``admit``, ``get`` and
     ``record_verification`` instead of maintaining a competing state machine.
+
+    Invariant: every in-process mutation of the shared continuation repository
+    holds the service's mutation lock, so a settlement check made under it can
+    only see a settled or genuinely orphaned intent, never a healthy peer
+    between its intent and its receipt.  The composition root passes
+    ``DurableContinuationService.mutation_lock`` as ``mutation_lock``; without
+    it this registry serialises only its own writes on a private lock.  Lock
+    order is ``_ADMISSION_LOCK`` then the mutation lock.  The mutation lock is
+    not reentrant and is a leaf: only the repository call runs under it.
     """
 
     def __init__(
@@ -213,8 +223,10 @@ class ContinuationWorkerRegistry(WorkerRegistry):
         owner_nonce: str = "",
         owner_pid: int | None = None,
         owner_host: str = "",
+        mutation_lock: AbstractContextManager[object] | None = None,
     ) -> None:
         self._repository = repository
+        self._mutation_lock = threading.Lock() if mutation_lock is None else mutation_lock
         self._owner_nonce = owner_nonce.strip()
         self._owner_pid = os.getpid() if owner_pid is None else owner_pid
         self._owner_host = owner_host or platform.node()
@@ -325,7 +337,8 @@ class ContinuationWorkerRegistry(WorkerRegistry):
         with _ADMISSION_LOCK:
             self._reject_ownership_conflict(launch)
             try:
-                created = self._repository.create(DurableChildSession(request, lineage))
+                with self._mutation_lock:
+                    created = self._repository.create(DurableChildSession(request, lineage))
             except InvalidSubagentRequest as exc:
                 # The repository performs the atomic key check.  Re-read only to
                 # classify the conflict; never retry the create.
@@ -459,13 +472,14 @@ class ContinuationWorkerRegistry(WorkerRegistry):
             if _compact(current.terminal_verification) != encoded:
                 raise WorkerRegistryError("terminal verification was already recorded with different evidence")
             return self._project(current)
-        updated = self._repository.update(
-            worker_id,
-            status=current.status,
-            expected_revision=expected_revision,
-            usage=current.usage,
-            verification=verification,
-        )
+        with self._mutation_lock:
+            updated = self._repository.update(
+                worker_id,
+                status=current.status,
+                expected_revision=expected_revision,
+                usage=current.usage,
+                verification=verification,
+            )
         return None if updated is None else self._project(updated)
 
     @staticmethod

@@ -148,6 +148,17 @@ class DurableContinuationService:
         self._owner_host = platform.node()
 
     @property
+    def mutation_lock(self) -> Lock:
+        """The lock every in-process writer of this service's repository holds.
+
+        Another component that mutates the same repository in this process
+        (the continuation worker registry) must hold it around each mutation.
+        It is a plain non-reentrant lock; no admission, spawn or dispatch lock
+        is acquired while it is held.
+        """
+        return self._lock
+
+    @property
     def owner_nonce(self) -> str:
         return self._owner_nonce
 
@@ -179,6 +190,10 @@ class DurableContinuationService:
             # settlement check and the following mutation together so a worker
             # cannot observe another operation in that narrow interval and
             # misclassify the ordered mutation as its own ambiguity.
+            # Invariant: every in-process mutation of the shared continuation
+            # repository holds this lock (the worker registry receives it as
+            # ``mutation_lock``), so a settlement check made under it can only
+            # see a settled or genuinely orphaned intent.
             with self._lock:
                 if _settlement_timeout > 0:
                     self._wait_for_storage_settlement(
@@ -428,7 +443,8 @@ class DurableContinuationService:
     def _start(self, child_id: str, context: OperationContext, runner: Runner, *,
                resuming: bool = False, expected_revision: int | None = None,
                resume_barrier: ResumeBarrier | None = None) -> SubagentHandle:
-        self._require_storage_settled(child_id)
+        with self._lock:
+            self._require_storage_settled(child_id)
         record = self._require(child_id)
         if expected_revision is not None and record.revision != expected_revision:
             raise InvalidSubagentRequest("child session changed after resume validation")
@@ -792,7 +808,8 @@ class DurableContinuationService:
             or not recorded_owner_is_dead(metadata)
         ):
             raise ContinuationCleanupRequired(child_id)
-        self._require_storage_settled(child_id)
+        with self._lock:
+            self._require_storage_settled(child_id)
         result = SubagentResult(
             child_id, record.request.parent_id, SubagentStatus.FAILED,
             error=SubagentError("owner_lost", "child owner process exited before completion", True),
@@ -849,7 +866,8 @@ class DurableContinuationService:
             thread = self._threads.get(child_id)
         if thread is not None:
             thread.join(timeout)
-        self._require_storage_settled(child_id)
+        with self._lock:
+            self._require_storage_settled(child_id)
         result = self._require(child_id).result
         if result is None:
             raise TimeoutError("child session has not reached a terminal state")
