@@ -312,3 +312,34 @@ def test_oversized_bytecode_falls_back_without_materializing(tmp_path, monkeypat
         assert owner._payload.bytecode_binding() is None
     finally:
         owner.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows payload profile required")
+@pytest.mark.usefixtures("small_managed_runtime_layout")
+def test_bytecode_write_failure_leaves_no_partial_file(tmp_path, monkeypatch):
+    from sonder_runtime.adapters.execution import runtime_payload
+
+    calls = []
+    real_os = runtime_payload.os
+
+    class FailingFsyncOs:
+        # The owner lock fsyncs through the shared os module, so patching
+        # os.fsync globally would break construction before the payload is
+        # built. Swap only runtime_payload's reference: its sole fsync is the
+        # bytecode file's.
+        def __getattr__(self, name):
+            return getattr(real_os, name)
+
+        def fsync(self, fd):
+            calls.append(fd)
+            raise OSError("simulated bytecode write failure")
+
+    monkeypatch.setattr(runtime_payload, "os", FailingFsyncOs())
+    owner = _selected_owner(tmp_path)
+    try:
+        assert calls, "the bytecode write was never attempted"
+        assert not (owner.path / runtime_payload.BYTECODE_NAME).exists()
+        assert not (owner._payload.root / runtime_payload.BYTECODE_NAME).exists()
+        assert owner._payload.bytecode_binding() is None
+    finally:
+        owner.close()

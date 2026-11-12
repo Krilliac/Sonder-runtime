@@ -195,6 +195,7 @@ def test_compile_bytecode_aborts_at_the_limit_before_marshalling(tmp_path, monke
 def test_compile_bytecode_within_limit_is_unchanged(tmp_path):
     root = _bulk_root(tmp_path)
     data, digests = compile_bytecode(((str(root), False),), limit=1024**3)
+    assert (data, digests) == compile_bytecode(((str(root), False),))
     table = marshal.loads(data)
     expected = sorted(str(root / f"mod{index}.py") for index in range(5))
     assert sorted(table) == expected
