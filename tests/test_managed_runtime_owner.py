@@ -1,6 +1,7 @@
 import os
 import socket
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -16,6 +17,29 @@ def port():
         listener.bind(("127.0.0.1", 0))
         return listener.getsockname()[1]
 
+
+
+# A managed launch validates the full payload manifest twice and then starts a
+# child that compiles the runtime without writing bytecode (-B), which takes
+# ~20-27s on an idle workstation. The owner bounds each command at 30s. For a
+# slower start its contract is "readiness is unresolved; retain launch
+# identity": executing the same prepared launch again resumes the readiness
+# wait for the process already started, without starting another. PR #673's
+# CI hit that bound on a loaded runner. This helper is that resume, bounded
+# only against a hang.
+_LAUNCH_HANG_SECONDS = 180.0
+
+
+def _execute_launch(owner, launch):
+    deadline = time.monotonic() + _LAUNCH_HANG_SECONDS
+    while True:
+        try:
+            return owner.execute(launch)
+        except OwnerRefused as error:
+            if "readiness is unresolved" not in str(error) or time.monotonic() >= deadline:
+                raise
+            # Exactly one launch: the identity is retained, nothing relaunched.
+            assert owner._launch_id == launch.operation_id
 
 
 def _capture_managed_owner_failure(owner, output_path, *, iteration, phase,
@@ -110,7 +134,7 @@ def test_full_manifest_owned_http_and_relaunch(tmp_path, monkeypatch):
             injection_completed = False
             launch = owner.prepare(f"launch{index}", "launch", {})
             launch_job_id = launch.operation_id
-            assert owner.execute(launch)["state"] == "RUNNING"
+            assert _execute_launch(owner, launch)["state"] == "RUNNING"
             with pytest.raises(OwnerRefused):
                 owner.selected_store
             configured_port = owner._config(configuration)["port"]
@@ -170,7 +194,7 @@ def test_full_manifest_owned_http_and_relaunch(tmp_path, monkeypatch):
             injection_completed = False
             launch = owner.prepare("migrated-launch", "launch", {})
             launch_job_id = launch.operation_id
-            assert owner.execute(launch)["state"] == "RUNNING"
+            assert _execute_launch(owner, launch)["state"] == "RUNNING"
             phase = "migrated-stop"
             receipt = owner.execute(owner.prepare("migrated-stop", "stop", {}))
             phase = "migrated-assert-clean-stop"
