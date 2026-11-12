@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 426,
+      "file_count": 427,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -392,6 +392,7 @@
         "sonder_runtime/adapters/recall_gateway.py",
         "sonder_runtime/adapters/reference_index.py",
         "sonder_runtime/adapters/reference_lookup_lanes.py",
+        "sonder_runtime/adapters/reference_lookup_multi.py",
         "sonder_runtime/adapters/reference_lookup_service.py",
         "sonder_runtime/adapters/reference_lookup_state.py",
         "sonder_runtime/adapters/repl_services.py",
