@@ -213,7 +213,10 @@ class ContinuationWorkerRegistry(WorkerRegistry):
     ``DurableContinuationService.mutation_lock`` as ``mutation_lock``; without
     it this registry serialises only its own writes on a private lock.  Lock
     order is ``_ADMISSION_LOCK`` then the mutation lock.  The mutation lock is
-    not reentrant and is a leaf: only the repository call runs under it.
+    not reentrant and is a leaf: the registry itself runs only its repository
+    call under it.  The service can also hold it across a short settlement poll
+    (a cancellation), so a registry write may wait up to roughly a second or
+    two behind one.
     """
 
     def __init__(

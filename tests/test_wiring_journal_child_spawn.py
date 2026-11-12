@@ -333,3 +333,18 @@ def test_concurrent_spawn_never_reads_a_peers_unfinished_create_as_ambiguous(tmp
     assert [(r.operation_id, r.state) for r in records] == [
         (f"subagent-dispatch:{CHILD}", EffectState.COMPLETED),
     ]
+
+
+def test_registry_and_service_share_one_mutation_lock(tmp_path, monkeypatch):
+    """The composition root must build the worker registry on the continuation
+    service's own mutation lock; a registry on a private lock would let its
+    writes interleave with the service's settlement checks."""
+    application = _application(tmp_path, monkeypatch, lambda state, save, control: "unused")
+    try:
+        delegation = application.delegation_service()
+        service = delegation._provider._local_service
+        registry = delegation._worker_registry
+        assert registry is not None
+        assert registry._mutation_lock is service.mutation_lock
+    finally:
+        application.close_delegation(timeout=10)

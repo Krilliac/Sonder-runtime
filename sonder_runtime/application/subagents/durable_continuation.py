@@ -835,12 +835,13 @@ class DurableContinuationService:
                     continue
             if record.status is SubagentStatus.RUNNING:
                 child_id = record.request.child_id
-                pending = self._repository.unresolved_mutation(child_id)
-                if pending is not None:
-                    raise ContinuationCommitAmbiguous(pending)
-                latest = self._repository.latest_mutation(child_id)
-                if latest is not None and self._repository.reconcile(latest) is None:
-                    raise ContinuationCommitAmbiguous(latest)
+                with self._lock:
+                    pending = self._repository.unresolved_mutation(child_id)
+                    if pending is not None:
+                        raise ContinuationCommitAmbiguous(pending)
+                    latest = self._repository.latest_mutation(child_id)
+                    if latest is not None and self._repository.reconcile(latest) is None:
+                        raise ContinuationCommitAmbiguous(latest)
                 raise ContinuationCleanupRequired(child_id)
         return tuple(recovered)
 
