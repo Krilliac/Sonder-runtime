@@ -1,0 +1,336 @@
+"""Closed generate -> gate -> build -> render -> critique -> revise loop.
+
+All I/O is injected, so the loop is deterministic under test:
+
+* ``generate(tier, prompt) -> str``     one model completion
+* ``build(candidate_index, round_index, code, recording) -> dict``  replays the recorded script
+  (``recording.text`` is its ``ops.json``) and returns ``ok``, ``tris``, ``within_budget``,
+  ``error``, ``files`` with an optional ``sheet`` and an optional ``geometry`` block (the harness' measured
+  part-connectivity report; absent from an old harness, in which case nothing below changes); it may raise,
+  which is treated as a failed build
+* ``critique(sheet_path) -> str | None``  vision reply; ``None`` = unavailable
+* ``map_parallel(fn, items) -> list``    ordered parallel map
+* ``record(code, seed) -> Recording``    records a script (raises ``ScriptError``).  Required: production passes
+  the resource-limited subprocess recorder; unit tests opt in to :func:`in_process_recorder`, which has no
+  hard wall-clock or memory limit.  Any other exception ends that attempt.
+
+The model's script is never executed: ``compile_script`` records it into an op list (a
+``ScriptError`` is the failure the model sees, with a line number) and only that data is built.
+
+A floating part in the ``geometry`` block is a measured fact, not an opinion: it becomes concrete issues that
+go first in the revise prompt, caps the score at ``FLOATING_SCORE_CAP`` whatever the critic said, and keeps the
+candidate from being accepted even without a vision score.
+
+Each candidate runs on its own thread of control and keeps every attempt plus
+its best version; the overall winner is :func:`pick_best` over those.  The
+report contains no code bodies.
+"""
+from __future__ import annotations
+
+import re
+import time
+from dataclasses import dataclass
+
+from ...domain.meshgen.critique import (
+    brief_allows_floating, cap_score, detached_notes, detached_parts, geometry_issues, parse_critique,
+    remember_floating, reopened_issue, reopened_note, reopened_parts,)
+from ...domain.meshgen.dsl.errors import ScriptError
+from ...domain.meshgen.dsl.recorder import compile_script
+from ...domain.meshgen.prompts import (
+    extract_code, generation_prompt, repair_hint, repair_prompt, revise_prompt,)
+from ...domain.meshgen.selection import pick_best
+
+_ERROR_CLIP = 1500
+
+
+@dataclass(frozen=True)
+class MeshRequest:
+    brief: str
+    max_tris: int = 3000
+    height_m: float = 0.0
+    kit_module: str | None = None
+    kit_names: frozenset = frozenset()
+    kit_excluded: frozenset = frozenset()
+    manifest: object = None
+    api_doc: str = ""
+    candidates: int = 3
+    rounds: int = 3
+    tiers: tuple = ("general", "code")
+    target_score: int = 8
+    vision: bool = True
+
+
+def _clip(text, limit=_ERROR_CLIP):
+    text = str(text or "").strip()
+    return text if len(text) <= limit else text[:limit] + " ..."
+
+
+def _failure_text(result: dict) -> str:
+    text = str(result.get("error") or "build failed")
+    tail = result.get("tail") or result.get("traceback")
+    if tail:
+        text += "\n" + "\n".join(str(line) for line in tail)
+    return _clip(text)
+
+
+def _over_budget_text(result: dict, max_tris: int) -> str:
+    text = ("The model built but has %s triangles; the budget is %d. Cut segments on round parts, "
+            "merge or drop small details, and simplify until it is clearly under %d triangles "
+            "while keeping it recognisable." % (result.get("tris"), max_tris, max_tris))
+    parts = [part for part in (result.get("parts") or []) if isinstance(part, dict)][:5]
+    if parts:
+        text += " Biggest contributors: " + ", ".join(
+            "%s (%s tris)" % (part.get("name"), part.get("tris")) for part in parts) + "."
+    return text
+
+
+def _first_line(text) -> str:
+    lines = str(text or "").strip().splitlines()
+    return lines[0].strip() if lines else ""
+
+
+def _words(text) -> set:
+    return set(re.findall(r"[a-z]{3,}", str(text or "").lower()))
+
+
+def _same_problem(previous, current) -> bool:
+    """True when ``current`` repeats ``previous`` (same error, same top issue, same score)."""
+    if not previous or previous["status"] != current["status"]:
+        return False
+    status = current["status"]
+    if status == "build_error":
+        return bool(_first_line(current.get("error"))) and (
+            _first_line(previous.get("error")) == _first_line(current.get("error")))
+    if status == "script_error":
+        def strip(issue):
+            return re.sub(r"^line \d+:", "", str(issue)).strip()
+        return bool(current["issues"]) and bool(previous["issues"]) and (
+            strip(previous["issues"][0]) == strip(current["issues"][0]))
+    if status == "over_budget":
+        return bool(previous["tris"]) and bool(current["tris"]) and current["tris"] >= previous["tris"] * 0.95
+    if status == "revise":
+        if previous["score"] != current["score"] or not previous["issues"] or not current["issues"]:
+            return False
+        if not previous["tris"] or not current["tris"] or abs(current["tris"] - previous["tris"]) > 0.15 * previous["tris"]:
+            return False
+        first, second = _words(previous["issues"][0]), _words(current["issues"][0])
+        return bool(first and second) and len(first & second) / len(first | second) >= 0.6
+    return False
+
+
+def _stuck_note(attempt) -> str:
+    status = attempt["status"]
+    if status == "build_error":
+        return ("Your last revision did not fix: %s. The identical failure happened again, so changing "
+                "other parts of the script achieves nothing. Change exactly that line this time."
+                % _first_line(attempt.get("error")))
+    if status == "revise":
+        return ("Your last revision did not fix: %s. The score stayed at %s and the geometry barely changed. "
+                "Make a real, visible change to exactly that part, and verify the rotation or position "
+                "numerically before returning the script." % (attempt["issues"][0], attempt["score"]))
+    if status == "script_error":
+        return ("Your last revision hit the same script error again: %s. Change exactly that line."
+                % attempt["issues"][0])
+    return ("Your last revision did not reduce the triangle count (%s). Remove or simplify the biggest "
+            "parts instead of adjusting small ones." % attempt["tris"])
+
+
+def in_process_recorder(manifest):
+    """A ``record`` callable that runs the recorder in this process.  For unit tests only: it has no hard
+    wall-clock kill and no memory cap, so production must pass the subprocess recorder instead."""
+    def record(code, seed):
+        return compile_script(code, manifest, seed=seed)
+    return record
+
+
+def run(request: MeshRequest, *, generate, build, critique, map_parallel, record) -> dict:
+    started = time.monotonic()
+    tiers = tuple(request.tiers) or ("general",)
+    base = generation_prompt(
+        request.brief, max_tris=request.max_tris, height_m=request.height_m,
+        kit_module=request.kit_module, api_doc=request.api_doc,
+    )
+    vision_off = {"reason": "" if request.vision else "disabled by the caller", "used": 0}
+
+    def attempt_round(index, tier, round_index, prompt, attempt, versions, memory):
+        """One round; returns ``(stop, build_prompt)``.
+
+        ``build_prompt(stuck)`` renders the next prompt (``None`` = keep the current one), so a
+        no-progress note can be placed inside it, before the closing instruction.
+        """
+        try:
+            reply = generate(tier, prompt)
+        except Exception as exc:  # noqa: BLE001 - a model failure ends the round, not the run
+            attempt["status"] = "generate_error"
+            attempt["error"] = _clip("%s: %s" % (type(exc).__name__, exc), 400)
+            return False, None
+        code = extract_code(reply)
+        try:
+            recording = record(code, index * 100 + round_index)
+        except ScriptError as exc:
+            attempt["status"] = "script_error"
+            attempt["issues"] = [str(exc)]
+            failure = "The script could not be recorded:\n- " + str(exc)
+            hint = repair_hint(failure, request.kit_module, request.kit_names, request.kit_excluded)
+            return False, lambda stuck: repair_prompt(base, code, failure, hint=hint, stuck=stuck)
+        except Exception as exc:  # noqa: BLE001 - the recorder process failed or the run is out of time
+            attempt["status"] = "build_error"
+            attempt["error"] = _clip("%s: %s" % (type(exc).__name__, exc), 400)
+            return False, None
+        try:
+            result = build(index, round_index, code, recording)
+        except Exception as exc:  # noqa: BLE001 - a builder crash is a failed build
+            result = {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)}
+        if not result.get("ok"):
+            attempt["status"] = "build_error"
+            attempt["error"] = _clip(result.get("error"), 400)
+            crash_tail = [_clip(line, 160) for line in (result.get("tail") or [])[-6:]]
+            if crash_tail:
+                attempt["tail"] = crash_tail
+            failure = _failure_text(result)
+            if recording.log:
+                failure = _clip(failure + "\nYour print() output while recording:\n" + "\n".join(recording.log[-10:]))
+            hint = repair_hint(failure, request.kit_module, request.kit_names, request.kit_excluded)
+            return False, lambda stuck: repair_prompt(base, code, failure, hint=hint, stuck=stuck)
+        within = bool(result.get("within_budget"))
+        attempt["tris"] = int(result.get("tris") or 0)
+        files = dict(result.get("files") or {})
+        version = {"round": round_index, "built": True, "within_budget": within, "tier": tier,
+                   "tris": attempt["tris"], "score": None, "issues": [], "files": files,
+                   "size": result.get("size")}
+        geometry = result.get("geometry") if isinstance(result.get("geometry"), dict) else None
+        if geometry is not None:
+            version["geometry"] = attempt["geometry"] = geometry
+        floating = geometry_issues(geometry)
+        # a part reported floating earlier and marked detached now is still a floating part
+        reopened = reopened_parts(geometry, memory)
+        notes = detached_notes(geometry, skip={name for name, _line in reopened})
+        if reopened and brief_allows_floating(request.brief):
+            # the brief has floating things, so this may be one of them: advise, do not cap, block or rank down
+            attempt["detached_again"] = [name for name, _line in reopened]
+            notes += [reopened_note(name) for name, _line in reopened]
+        elif reopened:
+            issues_again = [reopened_issue(name, line) for name, line in reopened]
+            floating = floating + issues_again
+            version["reopened"] = attempt["reopened"] = issues_again
+        if detached_parts(geometry):
+            attempt["detached"] = [{"name": name, "line": line} for name, line in detached_parts(geometry)]
+        remember_floating(memory, geometry)
+        versions.append(version)
+        if not within:
+            attempt["status"] = "over_budget"
+            failure = _over_budget_text(result, request.max_tris)
+            return False, lambda stuck: repair_prompt(base, code, failure, stuck=stuck)
+        sheet = files.get("sheet")
+        parsed = None
+        if request.vision and not vision_off["reason"] and sheet:
+            vision_off["used"] += 1
+            try:
+                verdict = critique(sheet)
+            except Exception as exc:  # noqa: BLE001 - lost vision degrades to build-only
+                verdict = None
+                vision_off["reason"] = _clip("%s: %s" % (type(exc).__name__, exc), 200)
+            if verdict is None:
+                vision_off["reason"] = vision_off["reason"] or "no vision model answered"
+            else:
+                parsed = parse_critique(verdict)
+                version["score"] = attempt["score"] = parsed["score"]
+                version["issues"] = attempt["issues"] = list(parsed["issues"])
+        if floating:
+            # measured: ahead of the critic's issues, over its score, and never accepted as it stands
+            capped = cap_score(parsed["score"] if parsed else None, floating)
+            issues = floating + (list(parsed["issues"]) if parsed else [])
+            version["score"] = attempt["score"] = capped
+            version["issues"] = attempt["issues"] = issues
+            attempt["status"] = "revise"
+            return False, lambda stuck: revise_prompt(base, code, {"score": capped, "issues": issues}, stuck=stuck,
+                                                      notes=notes)
+        if parsed is not None and parsed["score"] is not None:
+            if parsed["score"] >= request.target_score:
+                attempt["status"] = "accepted"
+                return True, None
+            attempt["status"] = "revise"
+            return False, lambda stuck: revise_prompt(base, code, parsed, stuck=stuck, notes=notes)
+        attempt["status"] = "built"
+        return True, None
+
+    def next_tier(current, used):
+        """A tier different from ``current``, preferring one this candidate has not used yet."""
+        others = [name for name in tiers if name != current]
+        if not others:
+            return current
+        fresh = [name for name in others if name not in used]
+        return (fresh or others)[0]
+
+    def run_candidate(index: int) -> dict:
+        tier = tiers[index % len(tiers)]
+        used = [tier]
+        attempts: list[dict] = []
+        versions: list[dict] = []
+        prompt = base
+        memory = {"boxes": []}   # where this candidate's earlier rounds reported floating parts
+        for round_index in range(max(1, int(request.rounds))):
+            began = time.monotonic()
+            attempt = {"tier": tier, "round": round_index, "status": "", "tris": None,
+                       "score": None, "issues": [], "seconds": 0.0}
+            attempts.append(attempt)
+            try:
+                stop, build_prompt = attempt_round(index, tier, round_index, prompt, attempt, versions, memory)
+            finally:
+                attempt["seconds"] = round(time.monotonic() - began, 2)
+            previous = attempts[-2] if len(attempts) > 1 else None
+            if build_prompt is not None:
+                stuck = ""
+                if _same_problem(previous, attempt):
+                    stuck = _stuck_note(attempt)
+                    attempt["stuck"] = True
+                    switched = next_tier(tier, used)
+                    if switched != tier:
+                        tier = switched
+                        attempt["escalated_to"] = tier
+                        if tier not in used:
+                            used.append(tier)
+                prompt = build_prompt(stuck)
+            if stop:
+                break
+        best = pick_best(versions)
+        return {"index": index, "tier": attempts[0]["tier"], "tiers_used": used, "attempts": attempts,
+                "best": best, "built": best is not None}
+
+    outcomes = map_parallel(run_candidate, list(range(max(1, int(request.candidates)))))
+    candidates = []
+    for position, outcome in enumerate(outcomes):
+        if isinstance(outcome, dict):
+            candidates.append(outcome)
+        else:
+            candidates.append({"index": position, "tier": tiers[position % len(tiers)], "attempts": [],
+                               "best": None, "built": False, "error": _clip(outcome, 400)})
+    ranked = [dict(c["best"], candidate=c["index"], tier=c["best"].get("tier", c["tier"])) if c.get("best") else
+              {"built": False, "candidate": c["index"], "tier": c["tier"]} for c in candidates]
+    winner = pick_best(ranked)
+    if winner is not None and not winner.get("built"):
+        winner = None
+    within_budget = bool(winner and winner.get("within_budget"))
+    budget_warning = ""
+    if winner is not None and not within_budget:
+        budget_warning = "winner is %s/%s tris and was never critiqued" % (winner.get("tris"), request.max_tris)
+    if request.vision and not vision_off["reason"]:
+        if vision_off["used"]:
+            vision = "on"
+        elif any(c.get("best") and c["best"].get("within_budget") for c in candidates):
+            vision = "unavailable: no within-budget build produced a contact sheet to critique"
+        elif any(c.get("best") for c in candidates):
+            vision = ("unavailable: no build was within the %d triangle budget, so none reached the critique step"
+                      % request.max_tris)
+        else:
+            vision = "unavailable: no candidate reached the critique step"
+    else:
+        vision = "unavailable: %s" % (vision_off["reason"] or "disabled by the caller")
+    report = {"ok": winner is not None, "within_budget": within_budget, "winner": winner,
+              "candidates": candidates, "vision": vision, "elapsed_s": round(time.monotonic() - started, 2)}
+    if budget_warning:
+        report["budget_warning"] = budget_warning
+    return report
+
+
+__all__ = ["MeshRequest", "run"]

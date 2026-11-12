@@ -304,7 +304,9 @@ def test_ordinary_helper_does_not_read_agent_sampling_env_or_health(monkeypatch)
     calls = []
     generator = make_generate(_factory(graph, calls), "fast", ("model", "system", .2, 100, 0), {}, graph=graph, consent=lambda: (True, False))
     generator("plain")
-    assert graph.model_gateway.requests[0].options == {"temperature": .2, "num_predict": 100}
+    # think is unset, so the bridge leaves a possibly-thinking Inference model the
+    # local thinking headroom (provider_bridge.generate_via_gateway).
+    assert graph.model_gateway.requests[0].options == {"temperature": .2, "num_predict": 4096}
 
 
 @pytest.mark.parametrize("name,value", [

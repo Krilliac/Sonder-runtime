@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 411,
+      "file_count": 419,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -211,6 +211,7 @@
         "sonder_runtime/adapters/inference/ollama_gateway.py",
         "sonder_runtime/adapters/inference/ollama_model_root.py",
         "sonder_runtime/adapters/inference/ollama_pool.py",
+        "sonder_runtime/adapters/inference/ollama_reporting.py",
         "sonder_runtime/adapters/inference/ollama_vision.py",
         "sonder_runtime/adapters/inference/openai_compat.py",
         "sonder_runtime/adapters/inference/openai_compat_gateway.py",
@@ -256,6 +257,13 @@
         "sonder_runtime/adapters/memory_repository.py",
         "sonder_runtime/adapters/memory_rerank.py",
         "sonder_runtime/adapters/memory_store.py",
+        "sonder_runtime/adapters/meshgen/__init__.py",
+        "sonder_runtime/adapters/meshgen/blender_runner.py",
+        "sonder_runtime/adapters/meshgen/harness.py",
+        "sonder_runtime/adapters/meshgen/record_runner.py",
+        "sonder_runtime/adapters/meshgen/recorder_worker.py",
+        "sonder_runtime/adapters/meshgen/replay.py",
+        "sonder_runtime/adapters/meshgen/sandbox_win.py",
         "sonder_runtime/adapters/model_bootstrap.py",
         "sonder_runtime/adapters/model_error_details.py",
         "sonder_runtime/adapters/model_error_formatting.py",
@@ -455,7 +463,7 @@
       ]
     },
     {
-      "file_count": 411,
+      "file_count": 413,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -626,6 +634,8 @@
         "sonder_runtime/application/memory/replication.py",
         "sonder_runtime/application/memory/retrieval_evaluation.py",
         "sonder_runtime/application/memory/strategy_memory.py",
+        "sonder_runtime/application/meshgen/__init__.py",
+        "sonder_runtime/application/meshgen/loop.py",
         "sonder_runtime/application/model_batching.py",
         "sonder_runtime/application/model_gateway/__init__.py",
         "sonder_runtime/application/model_gateway/escalation.py",
@@ -872,7 +882,7 @@
       ]
     },
     {
-      "file_count": 74,
+      "file_count": 75,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -930,6 +940,7 @@
         "sonder_runtime/bootstrap/managed_standalone.py",
         "sonder_runtime/bootstrap/managed_terminal_eligibility.py",
         "sonder_runtime/bootstrap/memory_replication.py",
+        "sonder_runtime/bootstrap/mesh_agent_tools.py",
         "sonder_runtime/bootstrap/model_gateways.py",
         "sonder_runtime/bootstrap/native_mcp.py",
         "sonder_runtime/bootstrap/openrouter_cli.py",
@@ -952,7 +963,7 @@
       ]
     },
     {
-      "file_count": 277,
+      "file_count": 291,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1124,6 +1135,20 @@
         "sonder_runtime/domain/memory/rules.py",
         "sonder_runtime/domain/memory/wp6_typed.py",
         "sonder_runtime/domain/memory/write_quality.py",
+        "sonder_runtime/domain/meshgen/__init__.py",
+        "sonder_runtime/domain/meshgen/connectivity.py",
+        "sonder_runtime/domain/meshgen/critique.py",
+        "sonder_runtime/domain/meshgen/dsl/__init__.py",
+        "sonder_runtime/domain/meshgen/dsl/core_api.py",
+        "sonder_runtime/domain/meshgen/dsl/errors.py",
+        "sonder_runtime/domain/meshgen/dsl/manifest.py",
+        "sonder_runtime/domain/meshgen/dsl/opschema.py",
+        "sonder_runtime/domain/meshgen/dsl/predicates.py",
+        "sonder_runtime/domain/meshgen/dsl/recorder.py",
+        "sonder_runtime/domain/meshgen/dsl/values.py",
+        "sonder_runtime/domain/meshgen/kit_policy.py",
+        "sonder_runtime/domain/meshgen/prompts.py",
+        "sonder_runtime/domain/meshgen/selection.py",
         "sonder_runtime/domain/mode_tool_policy.py",
         "sonder_runtime/domain/model_capabilities.py",
         "sonder_runtime/domain/model_catalog.py",

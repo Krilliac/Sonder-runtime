@@ -200,7 +200,7 @@ def test_host_owned_application_send_projects_constrained_peer_failure(tmp_path,
     assert calls == ['attestation']
     assert application.artifact_mobility_status(result['operation_id']) == result
     assert application.artifact_mobility_list() == {'operations': [result]}
-    monkeypatch.setattr(repl.server, '_application', lambda: application)
+    monkeypatch.setattr(repl._legacy_runtime, '_application', lambda: application)
     assert json.loads(repl._artifact_mobility_command('status ' + result['operation_id'])) == result
     assert json.loads(repl._artifact_mobility_command('list')) == {'operations': [result]}
     encoded = json.dumps([result, application.artifact_mobility_list(), capabilities])
