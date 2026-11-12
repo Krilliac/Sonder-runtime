@@ -75,28 +75,46 @@ def served_model(tier: Any, env: Mapping[str, str] | None = None) -> tuple[str, 
         PROVIDER_TIERS,
         provider_bindings_from_env,
     )
+    from sonder_runtime.application.chat.provider_bridge import LEGACY_PROVIDER
 
     label = str(tier or "").strip().lower()
     if label not in PROVIDER_TIERS:
         return None  # model pins, the strict alias and cloud tiers stay on Ollama
-    provider = provider_bindings_from_env(env).tier_providers.get(label, "ollama")
-    if provider == "ollama":
+    provider = provider_bindings_from_env(env).tier_providers.get(label, LEGACY_PROVIDER)
+    if provider == LEGACY_PROVIDER:
         return None
-    if provider == "sonder_inference":
-        from sonder_runtime.adapters.inference.sonder_inference_gateway import (
-            config_from_env,
-        )
+    return provider, _provider_model(provider, label, "", env)
 
-        settings = config_from_env(env)
-        return provider, str(settings.tier_models.get(label, settings.model) or "").strip()
-    if provider == "openrouter":
-        from sonder_runtime.adapters.inference.openrouter_gateway import config_from_env
 
-        return provider, str(config_from_env(env).model_for_tier(label) or "").strip()
-    if provider == "openai_compatible":
+def _provider_model(provider: str, key: str, explicit: str, env: Mapping[str, str] | None) -> str:
+    """The model id ``provider``'s own gateway sends for routing key ``key``.
+
+    An explicit per-call ``model`` option wins on every non-Ollama gateway.
+    The OpenAI-compatible transport sends its configured model, else the key
+    itself, which names a model only when it is not a tier or the alias.
+    """
+    from sonder_runtime.adapters.inference import (
+        openrouter_gateway,
+        sonder_inference_gateway,
+    )
+    from sonder_runtime.adapters.provider_bindings import (
+        PROVIDER_LABEL_IDS,
+        PROVIDER_TIERS,
+    )
+
+    if explicit:
+        return explicit
+    if provider == sonder_inference_gateway.PROVIDER_ID:
+        settings = sonder_inference_gateway.config_from_env(env)
+        return str(settings.tier_models.get(key, settings.model) or "").strip()
+    if provider == openrouter_gateway.PROVIDER_ID:
+        return str(openrouter_gateway.config_from_env(env).model_for_tier(key) or "").strip()
+    if provider == PROVIDER_LABEL_IDS["openai-compatible"]:
         source = os.environ if env is None else env
-        return provider, str(source.get("SONDER_OPENAI_MODEL", "") or "").strip()
-    return provider, ""
+        configured = str(source.get("SONDER_OPENAI_MODEL", "") or "").strip()
+        named = key not in PROVIDER_TIERS and key.lower() not in _DEFAULT_ROUTE
+        return configured or (key if named else "")
+    return ""
 
 
 def _served_refusal(tier: Any, deny: _models.ToolLaneDenyList) -> str:
@@ -115,6 +133,54 @@ def _served_refusal(tier: Any, deny: _models.ToolLaneDenyList) -> str:
     provider, model = served
     verdict = _models.decide_served(model, deny)
     return _models.served_refusal_message(label, provider, verdict) if verdict.denied else ""
+
+
+def gateway_refusal(
+    tier: Any,
+    explicit_model: Any,
+    resolve_target: Callable[..., Any],
+    bindings: Any,
+    policy: Mapping[str, Any] | None = None,
+) -> str:
+    """Refusal for one packaged ``ModelGateway`` request from a tool or apply lane.
+
+    Three identities are judged, because each can be what answers: a model
+    the caller named (the request tier when it is not a tier, and an
+    explicit ``model`` option); the Ollama target the runtime resolves for
+    the request; and, when the gateway routes the request to another
+    provider (the tier's binding, else the default provider, which is what a
+    uniform gateway uses for any name), the model that provider sends.  An
+    undeterminable served model refuses.  ``bindings`` is the gateway's own
+    ``ProviderBindings``.
+    """
+    from sonder_runtime.application.chat.provider_bridge import LEGACY_PROVIDER
+
+    selector = str(tier or "") or "sonder"
+    explicit = explicit_model.strip() if isinstance(explicit_model, str) else ""
+    deny = deny_list(policy)
+    target = resolve_target(selector, None)
+    label = getattr(target, "tier_label", None)
+    named = [explicit] if explicit else []
+    if not label or _free_form(label):
+        named.append(selector)
+    for name in named:
+        verdict = _models.decide(name, deny, free_form=True)
+        if verdict.denied:
+            return _models.refusal_message(verdict.model, verdict.status)
+    refused = resolved_refusal(selector, getattr(target, "model", None), label, policy)
+    if refused:
+        return refused
+    try:
+        provider = bindings.tier_providers.get(selector) or bindings.default_generation_provider
+        if provider == LEGACY_PROVIDER:
+            return ""
+        model = _provider_model(provider, selector, explicit, None)
+    except Exception as exc:  # noqa: BLE001 - an unreadable provider configuration fails closed
+        _warn_once("provider configuration could not be read", exc)
+        verdict = _models.ModelLaneDecision(_models.ModelLaneStatus.SERVED_UNKNOWN, "")
+        return _models.served_refusal_message(selector, "", verdict)
+    verdict = _models.decide_served(model, deny)
+    return _models.served_refusal_message(selector, provider, verdict) if verdict.denied else ""
 
 
 def denied(model: Any, tier_label: Any = "", policy: Mapping[str, Any] | None = None) -> bool:

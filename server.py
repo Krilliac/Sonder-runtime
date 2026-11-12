@@ -22409,8 +22409,8 @@ def _autopilot_json_model(run: dict, role: str, prompt: str, validator) -> dict:
     else:
         tier = run_tier
     model, cloud, _augment, tier_label = _serve_target(tier, False)
-    if model is None or cloud or _provider_bridge.is_hosted(_bridge_provider_for_tier(tier_label)) or tier_label not in autopilot_controller.LOCAL_TIERS:
-        raise RuntimeError("autopilot requires an available local model tier")
+    if (refusal := _tool_lane_guard.resolved_refusal(tier, model, tier_label, _RUNTIME_POLICY)) or model is None or cloud or _provider_bridge.is_hosted(_bridge_provider_for_tier(tier_label)) or tier_label not in autopilot_controller.LOCAL_TIERS:
+        raise RuntimeError(refusal or "autopilot requires an available local model tier")  # its plan or verdict drives agent tasks
     system = _build_system(
         _prompts.render("autopilot_system", role=role),
         False,
@@ -22492,8 +22492,8 @@ def _autopilot_review_model(run: dict, issue: str) -> dict:
         run_tier = autopilot_controller.normalize_tier(run.get("tier", "code"))
         tier = runtime_policy.route_tier("review", _refresh_runtime_policy(create=True), fallback=run_tier)
         model, cloud, _augment, tier_label = _serve_target(tier, False)
-        if model is None or cloud or _provider_bridge.is_hosted(_bridge_provider_for_tier(tier_label)) or tier_label not in autopilot_controller.LOCAL_TIERS:
-            raise RuntimeError("autopilot requires an available local model tier")
+        if (refusal := _tool_lane_guard.resolved_refusal(tier, model, tier_label, _RUNTIME_POLICY)) or model is None or cloud or _provider_bridge.is_hosted(_bridge_provider_for_tier(tier_label)) or tier_label not in autopilot_controller.LOCAL_TIERS:
+            raise RuntimeError(refusal or "autopilot requires an available local model tier")  # its plan or verdict drives agent tasks
         system = _build_system(
             _prompts.render("autopilot_system", role="reviewer"), False, "", model=model, cloud=False,
         )

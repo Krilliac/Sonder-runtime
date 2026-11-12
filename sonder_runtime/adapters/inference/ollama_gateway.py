@@ -49,7 +49,6 @@ from ...platform import context_policy
 from ...platform.metrics import default_registry
 from .telemetry import from_ollama
 from ..model_transport import ModelCallError
-from ..tool_lane_guard import refusal as _tool_lane_refusal
 ollama_endpoint = importlib.import_module(
     "sonder_runtime.adapters.inference.ollama_endpoint"
 )
@@ -217,8 +216,6 @@ class OllamaGateway:
             raise DependencyUnavailable("model target provider returned invalid target")
         if target.tier_label == "cloud-disabled":
             raise Forbidden("cloud tiers are disabled on this runtime")
-        if target.tier_label == "tool-lane-denied":
-            raise Forbidden(_tool_lane_refusal(request.tier))
         if not isinstance(target.model, str) or not target.model.strip():
             raise DependencyUnavailable("model route identity is unavailable")
         if not isinstance(target.tier_label, str) or not target.tier_label.strip():
@@ -275,8 +272,6 @@ class OllamaGateway:
         logger.debug(f"OllamaGateway.generate: resolved model={model!r}, cloud={cloud}, tier_label={tier_label!r}")
         if tier_label == "cloud-disabled":
             raise Forbidden("cloud tiers are disabled on this runtime")
-        if tier_label == "tool-lane-denied":
-            raise Forbidden(_tool_lane_refusal(request.tier))
         if tier_label is None:
             raise InvalidInput("unknown model tier %r" % (request.tier,))
         if model is None:
