@@ -28,6 +28,13 @@ of the model — an uncensored or "abliterated" model changes what it will
   to a hosted model is refused, and it cannot widen where a prompt goes.
   Inference traffic ignores proxy settings and never follows redirects
   ([provider reference](../architecture/sonder-inference-provider.md)).
+- **Private Sonder Inference workers are their own consent lane.**
+  `SONDER_INFERENCE_PRIVATE_WORKERS` names operator-approved private servers
+  (https, private IP literal, a dedicated CA bundle and token variable). It
+  works only with `SONDER_ALLOW_REMOTE_INFERENCE=1`, lets prompts reach those
+  servers without cloud consent, and neither grants nor depends on cloud,
+  remote-Ollama or remote-compute consent
+  ([private workers](../architecture/sonder-inference-provider.md#private-workers)).
 - **`SONDER_ALLOW_PRIVATE_COT` takes a second, separate act.** It is the one
   consent gate an environment variable cannot open by itself:
   `admin_private_chain_of_thought` also requires an explicit `allow` rule for

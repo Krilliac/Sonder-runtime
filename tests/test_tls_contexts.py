@@ -15,7 +15,6 @@ import threading
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-import certifi
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
