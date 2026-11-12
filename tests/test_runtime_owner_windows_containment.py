@@ -90,13 +90,72 @@ def test_exit_grace_never_delays_a_failed_handle_proof(monkeypatch):
     assert terminated == [0.0]
 
 
-def test_root_exit_wait_settles_with_a_grace_and_cancel_forces_at_once():
-    import inspect
-    from sonder_runtime.adapters.execution import process_jobs
-    source = inspect.getsource(process_jobs.SubprocessJobProvider.wait)
-    assert "exit_grace=ROOT_EXIT_SETTLE_SECONDS" in source
-    assert process_jobs.ROOT_EXIT_SETTLE_SECONDS >= 1.0
-    assert "exit_grace" not in inspect.getsource(process_jobs.SubprocessJobProvider.cancel)
+def test_concurrent_force_preempts_exit_grace(monkeypatch):
+    import threading
+    import time
+    from sonder_runtime.adapters.extensions.memory_limits import _WindowsJobToken
+    terminated = threading.Event()
+    terminated_at = []
+    in_loop = threading.Event()
+
+    def terminate(handle):
+        terminated_at.append(time.monotonic())
+        terminated.set()
+        return True
+
+    token = _WindowsJobToken(123, lambda handle: True, terminate=terminate)
+
+    def observe():
+        in_loop.set()
+        return (0, (0, 0)) if terminated.is_set() else (1, (0, 258))
+
+    monkeypatch.setattr(token, "_observe", observe)
+    results = []
+    first = threading.Thread(
+        target=lambda: results.append(token.quiesce(force=True, exit_grace=5.0)),
+        daemon=True,
+    )
+    first.start()
+    try:
+        assert in_loop.wait(2), "first quiesce never entered its grace loop"
+        asked_at = time.monotonic()
+        token.quiesce(force=True)
+        assert terminated_at, "deadline-style force never terminated the job"
+        assert terminated_at[0] - asked_at < 1.0, terminated_at[0] - asked_at
+    finally:
+        terminated.set()  # let a still-graceful first quiesce settle quickly
+        first.join(timeout=9)
+    assert not first.is_alive()
+    assert len(results) == 1 and results[0].complete and results[0].forced, results
+
+
+def test_force_requested_before_grace_skips_it(monkeypatch):
+    token, clock, terminated = _clocked_token(
+        monkeypatch, lambda now: (1, (0, 258)) if not terminated else (0, (0, 0)),
+    )
+    token.request_force()
+    proof = token.quiesce(force=True, exit_grace=2.0)
+    assert proof.complete and proof.forced
+    assert terminated == [0.0]
+
+
+def test_immediate_force_quiesce_sets_force_request(monkeypatch):
+    from sonder_runtime.adapters.extensions.memory_limits import _WindowsJobToken
+
+    def fresh():
+        token = _WindowsJobToken(123, lambda handle: True)
+        monkeypatch.setattr(token, "_observe", lambda: (0, (0, 0)))
+        return token
+
+    token = fresh()
+    assert token.quiesce(force=True).complete
+    assert token._force_requested.is_set()
+    token = fresh()
+    assert token.quiesce(force=False).complete
+    assert not token._force_requested.is_set()
+    token = fresh()
+    assert token.quiesce(force=True, exit_grace=1.0).complete
+    assert not token._force_requested.is_set()
 
 
 def test_failed_job_handle_close_retains_the_owned_handle(monkeypatch):

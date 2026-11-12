@@ -18,7 +18,7 @@ import shutil
 import subprocess
 import time
 from typing import Callable, Mapping, Protocol
-from threading import RLock
+from threading import Event, RLock
 
 
 class ExtensionMemoryLimitError(RuntimeError):
@@ -66,6 +66,7 @@ class _WindowsJobToken:
         self._quiescent_proved = False
         self._published = False
         self._lock = RLock()
+        self._force_requested = Event()
         self._process_handles = []
         self._last_observation = None
         self._last_member_pids: tuple[int, ...] = ()
@@ -191,6 +192,14 @@ class _WindowsJobToken:
             raise ExtensionMemoryLimitError("owned root process handle missing")
         return accounting.active, tuple(int(wait(handle, 0)) for _, handle in self._process_handles)
 
+    def request_force(self) -> None:
+        """Ask any in-progress or future grace to end now.
+
+        Sets a sticky event only; it takes no lock and touches no handle, so
+        it is safe while another thread holds the lock through a grace loop.
+        """
+        self._force_requested.set()
+
     def quiesce(self, *, force: bool, exit_grace: float = 0.0) -> ProcessContainmentResult:
         """Require empty accounting AND signaled retained exact process handles.
 
@@ -207,10 +216,18 @@ class _WindowsJobToken:
         deadline = started + 3 + grace
         forced = False
         forced_member_images: tuple[tuple[int, str], ...] = ()
+        # Set before taking the lock so a caller blocked behind another
+        # thread's grace loop still preempts that grace.
+        if force and grace <= 0.0:
+            self._force_requested.set()
+        force_seen = False
         with self._lock:
             if self._handle is None:
                 return ProcessContainmentResult(False, detail="job handle is no longer held")
             while time.monotonic() < deadline:
+                if not force_seen and self._force_requested.is_set():
+                    force_seen = True
+                    deadline = min(deadline, time.monotonic() + 3)
                 try:
                     active, states = self._observe()
                     self._last_observation = (active, states)
@@ -230,7 +247,8 @@ class _WindowsJobToken:
                 # Permission to force cleanup is not evidence it is necessary.
                 needs_termination = self._proof_failed or (active > 0 and 258 in states)
                 if (force and not forced and needs_termination
-                        and (self._proof_failed or time.monotonic() >= force_after)):
+                        and (self._proof_failed or self._force_requested.is_set()
+                             or time.monotonic() >= force_after)):
                     forced_member_images = self._last_member_images or tuple(
                         (pid, "?") for pid in self._last_member_pids
                     )

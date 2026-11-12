@@ -549,7 +549,7 @@ class SubprocessJobProvider:
         # The root exited on its own: give members already exiting (a console
         # root's conhost.exe) time to leave before forcing the job.
         containment = self._quiesce_containment(
-            job_id, force=True, exit_grace=ROOT_EXIT_SETTLE_SECONDS,
+            job_id, force=True, exit_grace=self._root_exit_grace(job_id),
         )
         if containment is None and self._platform == "posix":
             view = self._registry.view(job_id)
@@ -1024,6 +1024,26 @@ class SubprocessJobProvider:
                 prior.cancel()
             self._deadline_timers[job_id] = timer
         timer.start()
+
+    def _root_exit_grace(self, job_id: str) -> float:
+        """Root-exit settle time, capped at the time left to the hard deadline.
+
+        Fails closed: an unreadable or unparseable deadline yields no grace
+        (an immediate force), never a longer one.
+        """
+        try:
+            raw_deadline = (self._registry.view(job_id).metadata or {}).get("hard_deadline_at")
+            if raw_deadline is None:
+                return ROOT_EXIT_SETTLE_SECONDS
+            deadline = datetime.fromisoformat(raw_deadline.replace("Z", "+00:00"))
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+            remaining = (
+                deadline.astimezone(timezone.utc) - datetime.now(timezone.utc)
+            ).total_seconds()
+        except Exception:
+            return 0.0
+        return max(0.0, min(ROOT_EXIT_SETTLE_SECONDS, remaining))
 
     def _schedule_deadline_at(self, job_id: str, raw_deadline: str) -> None:
         deadline = datetime.fromisoformat(raw_deadline.replace("Z", "+00:00"))
