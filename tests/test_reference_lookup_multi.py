@@ -18,6 +18,7 @@ import server
 import sonder_runtime.adapters.reference_lookup_lanes as lanes
 import sonder_runtime.adapters.reference_lookup_service as service
 import sonder_runtime.adapters.reference_lookup_state as state
+from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.domain.context_formatting import rough_token_count
 from sonder_runtime.domain.ensemble_synthesis import KEEP_CITATIONS_RULE
 from sonder_runtime.domain.reference_lookup.selection import passage_char_budget
@@ -52,6 +53,7 @@ class Models:
         }
         self.synth = "Merged: event 4625 is a failed logon [1]."
         self.judge = "YES. They agree."
+        self.expand_error = None
 
     def __call__(self, model, system, temperature, num_predict, num_ctx, **_options):
         def gen(prompt, history=None, **_kwargs):
@@ -59,6 +61,8 @@ class Models:
                     "num_predict": num_predict, "num_ctx": num_ctx, "prompt": prompt}
             self.calls.append(call)
             if num_predict == lanes.EXPAND_NUM_PREDICT and temperature == lanes.EXPAND_TEMPERATURE:
+                if self.expand_error is not None:
+                    raise self.expand_error
                 return TERMS_REPLY
             if SYNTH_MARK in prompt:
                 return self.synth
@@ -212,6 +216,31 @@ def test_ensemble_with_no_matching_member_is_what_it_was(models, retrievals, mon
     assert TIMINGS.sub("", first) == TIMINGS.sub("", second)
     assert "Sources:" not in first
     assert KEEP_CITATIONS_RULE.strip() not in with_feature[-1]["prompt"]
+
+
+def test_cancelled_search_terms_call_cancels_the_ensemble(models):
+    models.expand_error = ModelCallError("cancelled", "the caller cancelled the turn")
+    with pytest.raises(ModelCallError) as caught:
+        server.ensemble_answer(QUESTION, tiers="cyber,plain")
+    assert caught.value.kind == "cancelled"
+    assert len(models.of("expand")) == 1
+    assert models.of("member") == [] and models.of("synth") == []
+
+
+def test_bridged_member_is_judged_by_the_model_its_provider_serves(models, monkeypatch):
+    import sonder_runtime.adapters.reference_lookup_multi as multi
+
+    def seams(tier, model):
+        return multi.ensemble(QUESTION, "", [(tier, model)], 700, server._make_tier_generate,
+                              lambda _tier, _model: 4096)
+
+    monkeypatch.setenv("SONDER_GENERAL_PROVIDER", "sonder_inference")
+    monkeypatch.delenv("SONDER_INFERENCE_TIER_MODELS", raising=False)
+    monkeypatch.setenv("SONDER_INFERENCE_MODEL", LOOKUP_MODEL)
+    assert seams("general", PLAIN_MODEL).shared is not None
+    monkeypatch.setenv("SONDER_INFERENCE_MODEL", PLAIN_MODEL)
+    assert seams("general", LOOKUP_MODEL).shared is None
+    assert seams("cyber", LOOKUP_MODEL).shared is not None   # not a provider tier: its own name
 
 
 def test_code_mode_ensemble_gets_no_lookup(models, retrievals):

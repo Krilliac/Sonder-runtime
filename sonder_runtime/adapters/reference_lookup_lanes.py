@@ -23,10 +23,21 @@ chat tool (by tier and by ``model_override``) and of the HTTP chat route
   with passages so lesson distillation and the training export skip it.
 * ``with_sources(text)`` (MCP) and ``finish_http(content, receipt)`` (HTTP):
   the Sources block for the text returned to the caller, added after storage
-  and session capture so it is never stored.
+  and session capture so it is never stored.  The HTTP receipt entry also says
+  that the runtime system prompt was not sent.
+* ``replaced(text)``: the turn's reply was replaced by another text (the
+  web-denial guard), so the lookup state is dropped and that text gets no
+  Sources.  ``take_turn()`` / ``restore_turn(record)`` let a caller that runs
+  several candidate turns (Spanda sampling) keep each candidate's state and
+  put back the one whose reply it sends.
 
 For any other model each function hands back exactly what the caller had: the
 same ``make_generate(...)`` call, the same system prompt, the same text.
+
+A rung bound to a non-Ollama provider is judged by the model that provider
+serves (``answering_model``, the same reading the tool-lane guard uses), not
+by the rung's Ollama name; an unreadable provider configuration means no
+lookup.
 
 State and threads: a turn's lookup state lives in a ContextVar, so every
 thread and every copied context has its own; a turn never sees another
@@ -46,6 +57,8 @@ from typing import Any
 import sonder_runtime.adapters.memory_store as _memory_store
 import sonder_runtime.adapters.reference_lookup_service as _service
 import sonder_runtime.adapters.reference_lookup_state as _state
+import sonder_runtime.adapters.tool_lane_guard as _guard
+from sonder_runtime.application.chat import provider_bridge as _provider_bridge
 from sonder_runtime.application.chat import reference_lookup as _lookup
 from sonder_runtime.application.chat import stream_sink
 from sonder_runtime.application.session.provider_attempts import provider_attempt_scope
@@ -68,6 +81,8 @@ ASSUMED_NUM_CTX = 4096
 WARNING_PREFIX = "Warning: "
 LEARNING_SKIP_REASON = _memory_store.LEARNING_SKIP_REFERENCE_LOOKUP
 RECEIPT_KEY = "reference_lookup"
+# The receipt says a lookup turn was sent none of the runtime's system prompt.
+RECEIPT_SYSTEM_PROMPT_KEY = "runtime_system_prompt_sent"
 
 _FAILED = frozenset({_lookup.LookupReason.INDEX_UNAVAILABLE, _lookup.LookupReason.SEARCH_FAILED})
 _NONE_TEXT = {
@@ -105,6 +120,25 @@ class TurnLookup:
 _TURN: ContextVar[TurnLookup | None] = ContextVar("sonder_reference_lookup_turn", default=None)
 
 
+def answering_model(model: Any, tier: Any = None) -> str:
+    """The model that answers ``model``'s call: on a tier bound to another provider, the one it serves.
+
+    ``tier`` is the tier label; without one the rung bound on this thread (if
+    any) is used.  ``""`` when the provider configuration cannot be read.
+    """
+    name = str(model or "")
+    if tier is None:
+        rung = _provider_bridge.active_rung()
+        if rung is None:
+            return name
+        tier = rung.tier
+    try:
+        served = _guard.served_model(tier)
+    except Exception:  # noqa: BLE001  # an unknown served model gets no lookup
+        return ""
+    return served[1] if served is not None else name
+
+
 def _record(model: Any) -> TurnLookup:
     """The current rung's record for ``model``: the unbound one in force, else a new one."""
     name = str(model or "")
@@ -112,7 +146,7 @@ def _record(model: Any) -> TurnLookup:
     if current is not None and not current.bound and current.model == name:
         return current
     try:
-        applies = bool(_service.applies(name).applies)
+        applies = bool(_service.applies(answering_model(name)).applies)
     except Exception:  # noqa: BLE001  # lookup is a help: a broken rule means no lookup
         applies = False
     record = TurnLookup(name, applies)
@@ -129,6 +163,22 @@ def _take() -> TurnLookup | None:
 def reset_turn() -> None:
     """Forget any lookup state before a new turn starts."""
     _TURN.set(None)
+
+
+def take_turn() -> TurnLookup | None:
+    """The current lookup state, removed from this context (``restore_turn`` puts it back)."""
+    return _take()
+
+
+def restore_turn(record: TurnLookup | None) -> None:
+    """Make ``record`` (from ``take_turn``) the current lookup state again."""
+    _TURN.set(record if isinstance(record, TurnLookup) else None)
+
+
+def replaced(text: Any) -> Any:
+    """``text`` unchanged, with the turn's lookup state dropped: a replacement reply has no Sources."""
+    _TURN.set(None)
+    return text
 
 
 def lookup_turn(model: Any) -> bool:
@@ -191,11 +241,12 @@ class LookupGenerate:
             return self._expander()(prompt)
 
     def _budget(self, prompt: Any, history: Any) -> int:
+        """Passage characters that fit: the caller's system message, history and prompt are counted."""
         try:
             num_ctx = self._num_ctx
             if isinstance(num_ctx, bool) or not isinstance(num_ctx, int) or num_ctx <= 0:
                 num_ctx = ASSUMED_NUM_CTX
-            used = rough_token_count(prompt) + sum(
+            used = rough_token_count(self._record.caller_system) + rough_token_count(prompt) + sum(
                 rough_token_count(message.get("content"))
                 for message in (history or ()) if isinstance(message, Mapping)
             )
@@ -290,10 +341,18 @@ def sources_text(record: TurnLookup) -> str:
 
 
 def receipt_entry(record: TurnLookup) -> dict[str, Any]:
+    """The receipt's ``reference_lookup`` object for a lookup turn.
+
+    A lookup model is never sent the runtime's system prompt (only a system
+    message the caller supplied), grounded or not, and the entry says so.
+    """
     bundle = record.bundle
     if record.grounded and bundle is not None:
-        return {"applied": True, "passages": len(bundle.passages)}
-    return {"applied": False, "reason": bundle.reason_text if bundle is not None else ""}
+        entry: dict[str, Any] = {"applied": True, "passages": len(bundle.passages)}
+    else:
+        entry = {"applied": False, "reason": bundle.reason_text if bundle is not None else ""}
+    entry[RECEIPT_SYSTEM_PROMPT_KEY] = False
+    return entry
 
 
 def _finished(record: TurnLookup | None) -> bool:
@@ -330,16 +389,21 @@ __all__ = [
     "EXPAND_TEMPERATURE",
     "LEARNING_SKIP_REASON",
     "RECEIPT_KEY",
+    "RECEIPT_SYSTEM_PROMPT_KEY",
     "LookupGenerate",
     "TurnLookup",
+    "answering_model",
     "bundle_sources_text",
     "chat_generate",
     "finish_http",
     "lookup_turn",
     "mark_learning_skip",
     "receipt_entry",
+    "replaced",
     "reset_turn",
+    "restore_turn",
     "sources_text",
     "system_for",
+    "take_turn",
     "with_sources",
 ]

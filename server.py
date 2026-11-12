@@ -7251,7 +7251,7 @@ def _answer_with_history_impl(
     replacement = _web_denial_guard(prompt, response, history=history)
     if replacement is not None:
         _discard_interaction(iid)
-        return _append_activity(replacement)
+        return _append_activity(_reference_lookup_lanes.replaced(replacement))  # a replacement reply carries no lookup Sources
     if web_tools.enabled() and web_intents.denies_web_access(response):
         # Guard miss: the reply denies web access while web tools are enabled.
         # Drop the captured refusal and return it footer-less so it can never
@@ -25236,7 +25236,7 @@ def ensemble_answer(
         # synthesis pass over one input would only launder it.
         return answers[0]["answer"] + lookup.footer(footer)
 
-    synth =(synth_tier or "").strip().lower() or answers[-1]["tier"]
+    synth = (synth_tier or "").strip().lower() or answers[-1]["tier"]
     synth_model, _cloud, _augment, synth_label = _tool_lane_guard.chat_target(_serve_target, synth, False)
     if not synth_model or synth_label is None:
         synth_model = answers[-1]["model"]

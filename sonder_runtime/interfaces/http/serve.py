@@ -7544,6 +7544,7 @@ class Handler(BaseHTTPRequestHandler):
                             )
                             _samples = []
                             _sample_turns = []
+                            _sample_lookups = {}  # each sample's own reference-lookup state
                             with _serve_temp_override(_sample_temp):
                                 for _si in range(int(_spanda_policy.k)):
                                     # Candidate samples must not admit durable
@@ -7568,6 +7569,7 @@ class Handler(BaseHTTPRequestHandler):
                                     )
                                     _samples.append(_sturn.content)
                                     _sample_turns.append(_sturn)
+                                    _sample_lookups[id(_sturn)] = _reference_lookup_lanes.take_turn()
                             _spanda_eval = _spanda_evaluate(
                                 _samples,
                                 alpha=_spanda_policy.alpha,
@@ -7604,6 +7606,8 @@ class Handler(BaseHTTPRequestHandler):
                             turn = next(
                                 t for t in _sample_turns if t.content == _dom
                             )
+                            # Sources and receipt come from the sample sent.
+                            _reference_lookup_lanes.restore_turn(_sample_lookups.get(id(turn)))
                             # Restore learning-feedback pointers to the answer
                             # the client actually receives (not the last sample).
                             state.last_iid = turn.iid

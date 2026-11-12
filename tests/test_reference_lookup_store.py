@@ -541,6 +541,24 @@ def test_retrieve_applies_with_terms_and_warnings(small):
     assert seen == [terms.build_expand_prompt('why did 4625 happen')]
 
 
+def test_thousands_of_identifiers_issue_at_most_the_capped_title_queries(small, monkeypatch):
+    from sonder_runtime.adapters import reference_index
+
+    queried = []
+    real = reference_index.priority_rows
+
+    def counting(rows, idents, fetch):
+        return real(rows, idents, lambda ident: queried.append(ident) or fetch(ident))
+
+    monkeypatch.setattr(reference_index, 'priority_rows', counting)
+    numbers = [str(n) for n in range(10000, 12000)]
+    question = 'why did 4625 happen with ' + ' '.join(numbers)
+    bundle = lookup.retrieve(question, None, 6, BIG_BUDGET, index=small)
+    assert len(queried) <= terms.MAX_IDENTIFIERS == 8
+    assert queried == ['4625', *numbers[:7]]
+    assert bundle.applied and bundle.passages[0].path == 'events/4625.md'
+
+
 def test_retrieve_expansion_failure_searches_with_question_words_and_warns(small):
     def broken(prompt_text):
         raise RuntimeError('model down\n\x1b[31m')

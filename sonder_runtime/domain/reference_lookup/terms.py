@@ -11,6 +11,8 @@ from collections.abc import Iterable
 MAX_QUERY_TERMS = 40
 MAX_MODEL_TERMS = 8
 MAX_TERM_CHARS = 60
+# Identifiers given title priority per question: each costs one title query.
+MAX_IDENTIFIERS = 8
 
 _STOP_TEXT = (
     'a an and are as at be but by can do does did for from has have how i if in into is it '
@@ -72,12 +74,19 @@ def identifiers(text: str | None) -> set[str]:
     return {m.group(0).lower() for m in IDENTIFIER_RE.finditer(text or '')}
 
 
-def ordered_identifiers(text: str | None) -> list[str]:
-    """Identifiers in text, lower-cased, in order of first appearance."""
+def ordered_identifiers(text: str | None, limit: int | None = None) -> list[str]:
+    """Identifiers in text, lower-cased, in order of first appearance.
+
+    With ``limit`` the scan stops once that many distinct identifiers are found.
+    """
     found: list[str] = []
+    seen: set[str] = set()
     for m in IDENTIFIER_RE.finditer(text or ''):
+        if limit is not None and len(found) >= limit:
+            break
         ident = m.group(0).lower()
-        if ident not in found:
+        if ident not in seen:
+            seen.add(ident)
             found.append(ident)
     return found
 

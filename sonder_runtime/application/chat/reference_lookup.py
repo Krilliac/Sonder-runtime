@@ -3,7 +3,9 @@
 The index is injected (an adapter implementing ``ReferenceSearch``), so this
 module reads no files, opens no database and reads no environment.  Every
 failure to look something up becomes a ``Bundle`` with ``applied=False`` and a
-typed reason; the turn then proceeds as a normal bare answer.
+typed reason; the turn then proceeds as a normal bare answer.  The one
+exception is cancellation: a cancelled search-terms call is re-raised, so the
+turn stops instead of going on to the answer call.
 """
 from __future__ import annotations
 
@@ -13,6 +15,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Protocol
 
+from ...domain.common.errors import Cancelled
 from ...domain.reference_lookup.answer_check import (
     ECHO_WARNING,
     cited_numbers,
@@ -34,6 +37,7 @@ from ...domain.reference_lookup.selection import (
     select_passages,
 )
 from ...domain.reference_lookup.terms import (
+    MAX_IDENTIFIERS,
     build_expand_prompt,
     filter_terms,
     fts_query,
@@ -46,6 +50,8 @@ NO_MATCH_WARNING = 'no reference passages matched the question'
 NO_TERMS_WARNING = 'keyword expansion returned no usable terms'
 EXPANSION_FAILED_PREFIX = 'keyword expansion failed: '
 CODE_BYTES = 4
+# The model-call failure kind a cancelled call carries (``ModelCallError.kind``).
+CANCELLED_KIND = "cancelled"
 
 
 class ReferenceSearch(Protocol):
@@ -113,14 +119,25 @@ def _bare(reason: LookupReason, *, terms: Sequence[str] = (), dropped: Sequence[
                   warnings=tuple(warnings), index_state=state, detail=detail)
 
 
+def is_cancellation(exc: BaseException) -> bool:
+    """True for a cancelled model call: the domain ``Cancelled`` or a transport error of that kind."""
+    return isinstance(exc, Cancelled) or getattr(exc, "kind", None) == CANCELLED_KIND
+
+
 def _expand(question: str, expand_fn: Callable[[str], str] | None
             ) -> tuple[list[str], list[str], list[str]]:
-    """(kept terms, dropped terms, warnings); a failed or empty expansion is a warning only."""
+    """(kept terms, dropped terms, warnings); a failed or empty expansion is a warning only.
+
+    A cancelled call is re-raised: cancellation ends the turn, it is not a
+    search problem to work around.
+    """
     if expand_fn is None:
         return [], [], []
     try:
         terms = parse_terms(expand_fn(build_expand_prompt(question)))
-    except Exception as exc:  # noqa: BLE001  # reported to the caller as a warning, never hidden
+    except Exception as exc:  # reported to the caller as a warning, never hidden
+        if is_cancellation(exc):
+            raise
         return [], [], [EXPANSION_FAILED_PREFIX + sanitize(exc)]
     kept, dropped = filter_terms(question, terms)
     if not kept:
@@ -137,12 +154,15 @@ def retrieve(
     index: ReferenceSearch,
     enabled: bool = True,
 ) -> Bundle:
-    """Search the index for passages that fit ``char_budget`` characters; never raises.
+    """Search the index for passages that fit ``char_budget`` characters.
 
     ``expand_fn(prompt)`` asks the answering model for search terms and returns
     its text (the caller sets temperature 0, num_predict 80 and no system
     prompt); ``None`` skips expansion.  A failed call searches with the
-    question words alone and adds a warning.
+    question words alone and adds a warning.  Only the first
+    ``MAX_IDENTIFIERS`` identifiers of the question get title priority (one
+    title query each).  Never raises, except to pass on a cancelled
+    search-terms call (``is_cancellation``).
     """
     try:
         if not enabled:
@@ -159,7 +179,8 @@ def retrieve(
         rows: tuple[RankedRow, ...] = ()
         if match and k > 0:
             try:
-                rows = index.search_rows(match, candidate_limit(k), ordered_identifiers(question))
+                rows = index.search_rows(match, candidate_limit(k),
+                                         ordered_identifiers(question, MAX_IDENTIFIERS))
             except ReferenceIndexError as exc:
                 return _bare(LookupReason.INDEX_UNAVAILABLE, terms=terms, dropped=dropped,
                              warnings=warnings, state=exc.state, detail=exc.detail)
@@ -174,7 +195,9 @@ def retrieve(
         return Bundle(applied=True, reason=LookupReason.APPLIED, passages=passages,
                       terms=tuple(terms), dropped_terms=tuple(dropped), warnings=tuple(warnings),
                       index_state=IndexState.READY)
-    except Exception as exc:  # noqa: BLE001  # fail open: a lookup problem must never break the turn
+    except Exception as exc:  # fail open: a lookup problem must never break the turn
+        if is_cancellation(exc):
+            raise
         return _bare(LookupReason.SEARCH_FAILED, detail=sanitize(f'{type(exc).__name__}: {exc}'))
 
 

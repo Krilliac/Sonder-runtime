@@ -192,6 +192,14 @@ def test_ordered_identifiers_first_appearance_without_repeats():
         't1558.003', '4719']
 
 
+def test_ordered_identifiers_limit_keeps_the_first_distinct_ones():
+    text = '4719 4719 T1558.003 ' + ' '.join(str(n) for n in range(5000, 7000))
+    assert terms.ordered_identifiers(text, 3) == ['4719', 't1558.003', '5000']
+    assert terms.ordered_identifiers(text, 0) == []
+    assert len(terms.ordered_identifiers(text)) == 2002
+    assert terms.MAX_IDENTIFIERS == 8
+
+
 def test_expand_prompt_wording_and_question():
     text = terms.build_expand_prompt('why did logon fail? {x}')
     assert text.endswith('Question: why did logon fail? {x}')

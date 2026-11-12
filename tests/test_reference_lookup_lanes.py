@@ -8,6 +8,7 @@ see exactly the request it saw before the feature.
 """
 from __future__ import annotations
 
+import http.client
 import json
 import re
 import sqlite3
@@ -21,12 +22,14 @@ import server
 import sonder_runtime.adapters.reference_lookup_lanes as lanes
 import sonder_runtime.adapters.reference_lookup_service as service
 import sonder_runtime.adapters.reference_lookup_state as state
-from sonder_runtime.adapters import embeddings, memory_store
+from sonder_runtime.adapters import embeddings, memory_store, runtime_policy
+from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.application.chat import stream_sink
 from sonder_runtime.application.session.provider_attempts import (
     deferred_provider_request_scope,
     dispatch_provider,
 )
+from sonder_runtime.domain.common.errors import Cancelled
 from sonder_runtime.domain.context_formatting import rough_token_count
 from sonder_runtime.domain.reference_lookup.selection import passage_char_budget
 from sonder_runtime.interfaces.http import serve
@@ -49,8 +52,10 @@ class Transport:
     def __init__(self):
         self.payloads = []
         self.reply = ANSWER
+        self.replies = []  # answer replies taken in order before ``reply``
         self.terms = TERMS_REPLY
         self.expand_error = None
+        self.answer_error = None
         self.dispatch = False
 
     @staticmethod
@@ -66,7 +71,9 @@ class Transport:
                 raise self.expand_error
             content = self.terms
         else:
-            content = self.reply
+            if self.answer_error is not None:
+                raise self.answer_error
+            content = self.replies.pop(0) if self.replies else self.reply
         result = {"message": {"content": content}}
         if self.dispatch:
             return dispatch_provider("ollama", path, payload, lambda: result)
@@ -568,8 +575,8 @@ def test_lookup_state_never_leaks_into_another_turn(lane, monkeypatch):
 # --- HTTP handler: Sources and receipt after capture, streamed whole ---------
 
 
-@pytest.mark.parametrize("learning", (True, False), ids=("http_learning", "http_by_name"))
-def test_http_handler_adds_sources_after_capture(lane, monkeypatch, tmp_path, learning):
+def _serve_http(monkeypatch, tmp_path, learning):
+    """Set up the real HTTP chat handler over the fake transport; returns the session repository."""
     from types import SimpleNamespace
 
     from sonder_runtime.adapters.persistence.session_repository import (
@@ -577,7 +584,6 @@ def test_http_handler_adds_sources_after_capture(lane, monkeypatch, tmp_path, le
     )
     from sonder_runtime.application.session.capture import SessionCaptureService
     from sonder_runtime.bootstrap import app as bootstrap_app
-    from tests.test_serve_auth import _http_server, _request
 
     repository = SQLiteSessionRepository(tmp_path / "sessions.sqlite")
     capture = SessionCaptureService(repository)
@@ -592,14 +598,26 @@ def test_http_handler_adds_sources_after_capture(lane, monkeypatch, tmp_path, le
     monkeypatch.setattr(server, "_refresh_live_cloud_tiers", lambda: None)
     _bind_general(monkeypatch, LOOKUP_MODEL)
     monkeypatch.setattr(server, "_should_learn", lambda *_a: learning)
+    return repository
+
+
+def _chat_body(session, stream=False, model="general", prompt=QUESTION):
+    return json.dumps({"model": model, "session": session, "stream": stream,
+                       "messages": [{"role": "user", "content": prompt}]}).encode("utf-8")
+
+
+@pytest.mark.parametrize("learning", (True, False), ids=("http_learning", "http_by_name"))
+def test_http_handler_adds_sources_after_capture(lane, monkeypatch, tmp_path, learning):
+    from tests.test_serve_auth import _http_server, _request
+
+    repository = _serve_http(monkeypatch, tmp_path, learning)
     recorded = []
     real_record = serve._record_chat
     monkeypatch.setattr(serve, "_record_chat", lambda role, content, **kw: (
         recorded.append((role, content)), real_record(role, content, **kw))[1])
 
     def send(port, session, stream):
-        body = json.dumps({"model": "general", "session": session, "stream": stream,
-                           "messages": [{"role": "user", "content": QUESTION}]}).encode("utf-8")
+        body = _chat_body(session, stream)
         status, _headers, payload = _request(port, "POST", "/v1/chat/completions", body=body,
                                              headers={"Content-Type": "application/json"})
         assert status == 200, payload
@@ -628,3 +646,181 @@ def test_http_handler_adds_sources_after_capture(lane, monkeypatch, tmp_path, le
         assert QUESTION in captured and ANSWER in captured, session
         assert "Sources:" not in captured and PASSAGE_TEXT not in captured
         assert not MARKER_RE.search(captured)
+
+
+def test_http_receipt_says_the_runtime_system_prompt_was_not_sent(lane, monkeypatch):
+    for index in (None, "absent"):
+        if index:
+            monkeypatch.setenv(config.ENV_INDEX, str(server._DB_PATH) + ".absent.sqlite")
+        _text, receipt = _finish("http_learning", _http_learning(monkeypatch, LOOKUP_MODEL))
+        assert receipt["reference_lookup"][lanes.RECEIPT_SYSTEM_PROMPT_KEY] is False
+    _text, receipt = _finish("http_learning", _http_learning(monkeypatch, PLAIN_MODEL))
+    assert receipt == {}
+
+
+# --- the Sources block belongs to the reply that is sent -----------------------
+
+
+def test_web_denial_replacement_carries_no_sources(lane, monkeypatch):
+    replacement = "Here is what the web search found."
+    monkeypatch.setattr(server, "_web_denial_guard", lambda *a, **k: replacement)
+    text, receipt = _finish("http_learning", _http_learning(monkeypatch, LOOKUP_MODEL))
+    assert lane.answers(), "the lookup turn ran before its reply was replaced"
+    assert replacement in text and "Sources:" not in text
+    assert receipt == {}
+
+
+class _SampledReplies:
+    """Answers for a sampled turn: the dominant answer first, a different one last."""
+
+    DOMINANT = "Event 4625 is a failed logon [1]."
+    OUTLIER = "It is something else entirely [9]."
+
+
+def test_spanda_sampling_shows_the_chosen_samples_sources(lane, monkeypatch, tmp_path):
+    from tests.test_serve_auth import _http_server, _request
+
+    _serve_http(monkeypatch, tmp_path, False)
+    lane.replies = [_SampledReplies.DOMINANT, _SampledReplies.DOMINANT, _SampledReplies.OUTLIER]
+    with _http_server(monkeypatch) as port:
+        status, _headers, payload = _request(
+            port, "POST", "/v1/chat/completions", body=_chat_body("SP1"),
+            headers={"Content-Type": "application/json", "X-Sonder-Spanda": "1"})
+    assert status == 200, payload
+    reply = json.loads(payload)
+    content = reply["choices"][0]["message"]["content"]
+    assert len(lane.answers()) == 3 and lane.replies == []
+    assert content.startswith(_SampledReplies.DOMINANT) and content.count("Sources:") == 1
+    # The last sample cited a passage that was not given; the chosen one did not.
+    assert "[9]" not in content
+    assert reply["sonder_receipt"]["reference_lookup"]["applied"] is True
+
+
+def test_keep_alive_turn_after_a_failed_lookup_turn_carries_nothing_from_it(lane, monkeypatch, tmp_path):
+    from tests.test_serve_auth import _http_server
+
+    _serve_http(monkeypatch, tmp_path, False)
+    monkeypatch.setattr(serve.Handler, "protocol_version", "HTTP/1.1")
+    lane.answer_error = ModelCallError("timeout", "the model did not answer")
+    plain = "Plain web answer."
+    monkeypatch.setattr(server, "route_computer_use", lambda *a, **k: None)
+    monkeypatch.setattr(server, "chat_web_response",
+                        lambda prompt, **_k: plain if prompt == "hello there" else None)
+    results = []
+    with _http_server(monkeypatch) as port:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+        try:
+            for body in (_chat_body("K1"), _chat_body("K2", model="sonder", prompt="hello there")):
+                conn.request("POST", "/v1/chat/completions", body=body,
+                             headers={"Content-Type": "application/json"})
+                response = conn.getresponse()
+                results.append((response.status, json.loads(response.read()),
+                                response.getheader("Connection")))
+        finally:
+            conn.close()
+    (first_status, _first, _), (second_status, second, _) = results
+    # The first turn retrieved passages, then its answer call failed before
+    # the Sources step; the second (same connection, same thread) is a web reply.
+    assert lane.expansions() and first_status != 200
+    assert second_status == 200
+    content = second["choices"][0]["message"]["content"]
+    assert content == plain
+    assert "reference_lookup" not in second["sonder_receipt"]
+
+
+# --- cancellation ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize("error", [ModelCallError("cancelled", "the caller cancelled the turn"),
+                                   Cancelled("the caller cancelled the turn")],
+                         ids=("transport", "domain"))
+def test_cancelled_search_terms_call_propagates_and_no_answer_is_asked(lane, error):
+    asked = []
+
+    def make_generate(model, system, temperature, num_predict, num_ctx, **_options):
+        def gen(prompt, history=None, **_kwargs):
+            asked.append(num_predict)
+            if num_predict == lanes.EXPAND_NUM_PREDICT:
+                raise error
+            return ANSWER
+        return gen
+
+    lanes.system_for(LOOKUP_MODEL, "runtime system prompt")
+    gen = lanes.chat_generate(make_generate, QUESTION, LOOKUP_MODEL, "", 0.2, 1024, 8192)
+    with pytest.raises(type(error)):
+        gen(QUESTION, None)
+    assert asked == [lanes.EXPAND_NUM_PREDICT]
+
+
+def test_cancelled_search_terms_call_ends_the_chat_turn(lane, monkeypatch):
+    lane.expand_error = ModelCallError("cancelled", "the caller cancelled the turn")
+    with pytest.raises(ModelCallError) as caught:
+        _http_learning(monkeypatch, LOOKUP_MODEL, raise_model_errors=True)
+    assert caught.value.kind == "cancelled"
+    assert len(lane.expansions()) == 1 and lane.answers() == []
+
+
+# --- the applies rule is read from the policy file only when it changed --------
+
+
+def test_ordinary_model_turns_do_not_read_the_policy_file_per_rung(lane, monkeypatch):
+    built = []
+    real = runtime_policy.reference_lookup_rule
+    monkeypatch.setattr(runtime_policy, "reference_lookup_rule",
+                        lambda policy: built.append(1) or real(policy))
+    for _ in range(4):
+        _mcp_by_name(monkeypatch, PLAIN_MODEL)
+        _http_by_name(monkeypatch, PLAIN_MODEL)
+    assert len(lane.answers()) == 8
+    assert len(built) <= 1
+
+
+# --- the passage budget counts the caller's system message ----------------------
+
+
+def test_budget_counts_the_callers_system_message(lane, monkeypatch):
+    seen = []
+    real = service.retrieve_for
+
+    def spy(question, expand_fn, k, char_budget):
+        seen.append(char_budget)
+        return real(question, expand_fn, k, char_budget)
+
+    monkeypatch.setattr(service, "retrieve_for", spy)
+    caller_system = "Answer for a SOC analyst. " * 40
+    _mcp_by_name(monkeypatch, LOOKUP_MODEL, system=caller_system, num_ctx=2048, num_predict=512)
+    (budget,) = seen
+    num_ctx = lane.answers()[-1]["options"]["num_ctx"]
+    used = rough_token_count(caller_system) + rough_token_count(QUESTION)
+    assert budget == passage_char_budget(num_ctx, 512, used)
+    assert budget < passage_char_budget(num_ctx, 512, rough_token_count(QUESTION))
+
+
+# --- a bridged rung is judged by the model its provider serves ------------------
+
+
+def _bridge_general(monkeypatch, served):
+    monkeypatch.setenv("SONDER_GENERAL_PROVIDER", "sonder_inference")
+    monkeypatch.setenv("SONDER_INFERENCE_MODEL", served)
+    monkeypatch.delenv("SONDER_INFERENCE_TIER_MODELS", raising=False)
+
+
+def test_bridged_rung_is_judged_by_the_model_its_provider_serves(lane, monkeypatch):
+    from sonder_runtime.application.chat import provider_bridge
+
+    _bridge_general(monkeypatch, LOOKUP_MODEL)
+    with provider_bridge.bind_rung("sonder_inference", "general"):
+        assert lanes.answering_model(PLAIN_MODEL) == LOOKUP_MODEL
+        assert lanes.lookup_turn(PLAIN_MODEL) is True
+    lanes.reset_turn()
+    _bridge_general(monkeypatch, PLAIN_MODEL)
+    with provider_bridge.bind_rung("sonder_inference", "general"):
+        assert lanes.lookup_turn(LOOKUP_MODEL) is False
+    lanes.reset_turn()
+    monkeypatch.setenv("SONDER_GENERAL_PROVIDER", "no-such-provider")
+    with provider_bridge.bind_rung("sonder_inference", "general"):
+        assert lanes.answering_model(LOOKUP_MODEL) == ""
+        assert lanes.lookup_turn(LOOKUP_MODEL) is False   # unknown served model: no lookup
+    lanes.reset_turn()
+    # No rung bound (an Ollama rung): the rung's own model name decides.
+    assert lanes.lookup_turn(LOOKUP_MODEL) is True

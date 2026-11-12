@@ -14,8 +14,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from ..tool_lane_models import _candidates as name_candidates
-from ..tool_lane_models import normalize_name
+from ..tool_lane_models import name_candidates, normalize_name
 
 DEFAULT_PREFIXES = ("astra-cyber-",)
 DEFAULT_NAMES = (

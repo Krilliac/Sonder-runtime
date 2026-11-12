@@ -10,15 +10,24 @@ tool) and ``status`` / ``status_line`` (for the policy status output and
 
 Nothing here raises to a caller: every failure becomes a typed not-applied
 result with a reason, and the last such failure is kept for ``status``.  The
-index path comes only from the platform configuration, never from the runtime
-policy or a tool argument.  Thread-safe: all shared state lives in
-``reference_lookup_state`` behind a lock; each search opens its own connection.
+one exception is a cancelled search-terms call, which ``retrieve_for`` passes
+on so the turn stops.  The index path comes only from the platform
+configuration, never from the runtime policy or a tool argument.
+
+The applies rule read from the policy file is cached by the file's resolved
+path, modification time, size and file id, so a turn reads and normalises
+the policy only after it changed (an ordinary model's rung costs one
+``stat``).  Thread-safe: the rule cache is guarded by its own lock, the rest of
+the shared state lives in ``reference_lookup_state`` behind a lock; each
+search opens its own connection.
 """
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 import sonder_runtime.adapters.reference_lookup_state as _state
@@ -39,6 +48,12 @@ MAX_K = 8
 DEFAULT_K = 5
 UNAVAILABLE_PREFIX = "reference lookup unavailable: "
 _FAILED_REASONS = frozenset({_lookup.LookupReason.INDEX_UNAVAILABLE, _lookup.LookupReason.SEARCH_FAILED})
+
+# (path, mtime_ns, size, file id) of the policy file -> the rule built from it.
+# A missing file is keyed with None for the three file values.
+_RuleKey = tuple[str, int | None, int | None, int | None]
+_RULE_LOCK = threading.Lock()
+_RULE_CACHE: tuple[_RuleKey, _applies.AppliesRule] | None = None
 
 
 class SearchOutcome(str, Enum):
@@ -67,10 +82,51 @@ def clamp_k(value: Any) -> int:
     return max(MIN_K, min(MAX_K, number))
 
 
-def _rule(policy: Mapping[str, Any] | None = None) -> _applies.AppliesRule:
-    """The applies rule in force; built-in defaults when the policy cannot be read."""
+def _policy_file_key() -> _RuleKey:
+    """What identifies one version of the policy file; taken before the file is read."""
+    path = Path(_policy.policy_path()).resolve()
     try:
-        return _policy.reference_lookup_rule(policy if policy is not None else _policy.load(create=False))
+        info = path.stat()
+    except FileNotFoundError:
+        return (str(path), None, None, None)
+    return (str(path), info.st_mtime_ns, info.st_size, info.st_ino)
+
+
+def _cached_rule() -> _applies.AppliesRule:
+    """The rule from the policy file, read again only when the file changed.
+
+    The key is taken before the read, so a write racing the read leaves a key
+    that no longer matches and the next call reads again; a stale rule is
+    never cached under a newer key.  A failed read is not cached.
+    """
+    global _RULE_CACHE
+    key = _policy_file_key()
+    with _RULE_LOCK:
+        if _RULE_CACHE is not None and _RULE_CACHE[0] == key:
+            return _RULE_CACHE[1]
+    rule = _policy.reference_lookup_rule(_policy.load(create=False))
+    with _RULE_LOCK:
+        _RULE_CACHE = (key, rule)
+    return rule
+
+
+def clear_rule_cache() -> None:
+    """Forget the cached applies rule (the next call reads the policy file)."""
+    global _RULE_CACHE
+    with _RULE_LOCK:
+        _RULE_CACHE = None
+
+
+def _rule(policy: Mapping[str, Any] | None = None) -> _applies.AppliesRule:
+    """The applies rule in force; built-in defaults when the policy cannot be read.
+
+    ``policy`` is a policy the caller already loaded; without one the policy
+    file is used through the cache.
+    """
+    try:
+        if policy is not None:
+            return _policy.reference_lookup_rule(policy)
+        return _cached_rule()
     except Exception:  # noqa: BLE001  # lookup is a help, not a safeguard: defaults stay in force
         return _applies.AppliesRule.from_policy(None)
 
@@ -98,13 +154,18 @@ def retrieve_for(
     k: int,
     char_budget: int,
 ) -> _lookup.Bundle:
-    """Retrieve passages for a question with the configured index; never raises."""
+    """Retrieve passages for a question with the configured index.
+
+    Never raises, except to pass on a cancelled search-terms call.
+    """
     try:
         bundle = _lookup.retrieve(
             question, expand_fn, k, char_budget,
             index=_state.index(), enabled=not _state.kill_switch_off(),
         )
-    except Exception as exc:  # noqa: BLE001  # fail open
+    except Exception as exc:  # fail open
+        if _lookup.is_cancellation(exc):
+            raise
         bundle = _lookup.Bundle(
             applied=False, reason=_lookup.LookupReason.SEARCH_FAILED,
             detail=sanitize(f"{type(exc).__name__}: {exc}"),
@@ -149,5 +210,5 @@ def status_line(policy: Mapping[str, Any] | None = None) -> str:
 
 __all__ = [
     "DEFAULT_K", "MAX_K", "MIN_K", "SearchOutcome", "SearchResult",
-    "applies", "clamp_k", "retrieve_for", "search", "status", "status_line",
+    "applies", "clamp_k", "clear_rule_cache", "retrieve_for", "search", "status", "status_line",
 ]

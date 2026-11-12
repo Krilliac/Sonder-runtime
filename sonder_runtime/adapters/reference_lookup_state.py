@@ -98,7 +98,8 @@ def status_line(rule: AppliesRule) -> str:
     elif not s.policy_enabled:
         automatic = "off (runtime policy)"
     else:
-        automatic = f"names={', '.join(s.names) or '-'} prefixes={', '.join(s.prefixes) or '-'}"
+        automatic = (f"names={', '.join(s.names) or '-'} prefixes={', '.join(s.prefixes) or '-'} "
+                     "(runtime system prompt not sent on lookup turns)")
     if s.readable:
         sources = ", ".join(f"{name}:{count}" for name, count in s.sources) or "-"
         index_text = f"readable=yes passages={s.passages} sources={sources} built={s.built_at or '-'}"

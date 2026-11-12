@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import threading
 
 import pytest
 
@@ -152,6 +153,80 @@ def test_applies_never_raises_when_the_policy_cannot_be_loaded(monkeypatch):
     monkeypatch.setattr(runtime_policy, "load", boom)
     assert service.applies("astra-cyber-27b").applies is True
     assert service.applies("qwen3:4b").applies is False
+
+
+# ---- the applies rule is cached by the policy file's version -------------
+
+def _count_loads(monkeypatch):
+    reads = []
+    real = runtime_policy.load
+    monkeypatch.setattr(runtime_policy, "load", lambda *a, **k: reads.append(1) or real(*a, **k))
+    return reads
+
+
+def test_policy_file_is_read_once_while_unchanged_and_again_after_it_changes(isolated, monkeypatch):
+    path = isolated / "runtime_policy.json"
+    _write_policy(path, {"names": ["custom:7b"]})
+    reads = _count_loads(monkeypatch)
+    for _ in range(25):
+        assert service.applies("custom:7b").applies is True
+        assert service.applies("qwen3:4b").applies is False
+    assert len(reads) == 1
+    _write_policy(path, {"names": ["another-lab-model"]})       # a different size
+    assert service.applies("custom:7b").applies is False
+    assert service.applies("another-lab-model").applies is True
+    assert len(reads) == 2
+    path.unlink()
+    assert service.applies("another-lab-model").applies is False
+    assert service.applies("another-lab-model").applies is False
+    assert len(reads) == 3
+
+
+def test_a_policy_at_another_path_is_never_served_from_the_cache(isolated, monkeypatch):
+    first, second = isolated / "a" / "policy.json", isolated / "b" / "policy.json"
+    for path, name in ((first, "custom:7b"), (second, "custom:8b")):
+        path.parent.mkdir()
+        _write_policy(path, {"names": [name]})
+    monkeypatch.setenv("SONDER_RUNTIME_POLICY", str(first))
+    assert service.applies("custom:7b").applies is True
+    monkeypatch.setenv("SONDER_RUNTIME_POLICY", str(second))
+    assert service.applies("custom:7b").applies is False
+    assert service.applies("custom:8b").applies is True
+
+
+def test_an_unreadable_policy_is_not_cached(isolated, monkeypatch):
+    _write_policy(isolated / "runtime_policy.json", {"names": ["custom:7b"]})
+    real = runtime_policy.load
+
+    def busy(*_args, **_kwargs):
+        raise OSError("policy file busy")
+
+    monkeypatch.setattr(runtime_policy, "load", busy)
+    assert service.applies("custom:7b").applies is False        # defaults while unreadable
+    monkeypatch.setattr(runtime_policy, "load", real)
+    assert service.applies("custom:7b").applies is True
+
+
+def test_the_rule_cache_is_safe_across_threads(isolated, monkeypatch):
+    _write_policy(isolated / "runtime_policy.json", {"names": ["custom:7b"]})
+    reads = _count_loads(monkeypatch)
+    wrong = []
+
+    def worker():
+        for _ in range(50):
+            if (service.applies("custom:7b").applies, service.applies("qwen3:4b").applies) != (True, False):
+                wrong.append(1)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert wrong == [] and 1 <= len(reads) <= len(threads)
+
+
+def test_status_line_says_the_runtime_system_prompt_is_not_sent():
+    assert "runtime system prompt not sent on lookup turns" in service.status_line()
 
 
 # ---- status ----------------------------------------------------------------

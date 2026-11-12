@@ -4,7 +4,8 @@
 is one call into this module.
 
 * One retrieval per question, shared.  Lookup applies to an ensemble (or a
-  consult) when at least one member's answering model matches the applies
+  consult) when at least one member's answering model (for a tier bound to
+  another provider, the model that provider serves) matches the applies
   rule; then every member is sent the same framed user turn (the same text
   and marker code), so the answers stay comparable.  The search terms come
   from the first matching member's model (temperature 0, 80 tokens, no system
@@ -56,9 +57,9 @@ ContextFor = Callable[[str, str], Any]
 Member = tuple[str, str]
 
 
-def _applies(model: Any) -> bool:
+def _applies(tier: Any, model: Any) -> bool:
     try:
-        return bool(_service.applies(str(model or "")).applies)
+        return bool(_service.applies(_lanes.answering_model(model, tier)).applies)
     except Exception:  # noqa: BLE001  # lookup is a help: a broken rule means no lookup
         return False
 
@@ -176,7 +177,7 @@ def off() -> Iterator[None]:
 def _shared_for(question: Any, members: Sequence[Any]) -> SharedLookup | None:
     text = question.strip() if isinstance(question, str) else ""
     pairs = tuple((str(tier), str(model)) for tier, model in members if model)
-    matching = next((pair for pair in pairs if _applies(pair[1])), None)
+    matching = next((pair for pair in pairs if _applies(*pair)), None)
     if not text or matching is None:
         return None
     return SharedLookup(text, pairs, matching)
