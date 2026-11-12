@@ -179,9 +179,11 @@ HEAVY = frozenset((
 ))
 
 
-def assert_cpu_within_budget(name, outcome, cpu_unit, heavy=None):
+def assert_cpu_within_budget(name, outcome, cpu_unit, heavy=None, units=None):
+    """``units`` overrides the instant/heavy budget (tests/test_meshgen_dsl_recorder.py scales it per call site)."""
     heavy = name in HEAVY if heavy is None else heavy
-    units = HEAVY_BUDGET_UNITS if heavy else INSTANT_BUDGET_UNITS
+    if units is None:
+        units = HEAVY_BUDGET_UNITS if heavy else INSTANT_BUDGET_UNITS
     assert outcome.cpu <= units * cpu_unit, (
         f"{name} spent {outcome.cpu:.2f}s of CPU, over its budget of {units} units x {cpu_unit:.3f}s: "
         "host work that no charge covers?")
