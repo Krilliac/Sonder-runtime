@@ -18,7 +18,7 @@ def _http_server(monkeypatch):
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
     monkeypatch.setattr(ts, "STREAM_HEARTBEAT_SECONDS", 0.2)
-    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "chat_web_response", lambda *args, **kwargs: None)
     httpd = ts.ThreadingHTTPServer(("127.0.0.1", 0), ts.Handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -78,7 +78,7 @@ def test_stream_headers_and_keepalives_arrive_before_generation_finishes(monkeyp
         if separator and stream.count(b": keep-alive") >= 2:
             client_has_stream.set()
 
-    monkeypatch.setattr(ts.server, "answer_with_history", answer_once_client_has_stream)
+    monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", answer_once_client_has_stream)
     with _http_server(monkeypatch) as port:
         text = _stream_request(port, on_received=on_received)
 
@@ -101,7 +101,7 @@ def test_model_error_after_commit_is_a_terminal_sse_error(monkeypatch):
         time.sleep(0.5)
         raise ts.ModelCallError("timeout", "model timed out", attempts=1)
 
-    monkeypatch.setattr(ts.server, "answer_with_history", failing)
+    monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", failing)
     with _http_server(monkeypatch) as port:
         text = _stream_request(port)
 
@@ -116,7 +116,7 @@ def test_model_error_after_commit_is_a_terminal_sse_error(monkeypatch):
 
 
 def test_non_stream_path_is_unchanged(monkeypatch):
-    monkeypatch.setattr(ts.server, "answer_with_history", lambda *a, **k: "plain")
+    monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", lambda *a, **k: "plain")
     body = json.dumps({"model": "sonder", "messages": [{"role": "user", "content": "hi"}]})
     import http.client
     with _http_server(monkeypatch) as port:

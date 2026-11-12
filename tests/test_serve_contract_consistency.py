@@ -18,9 +18,9 @@ def _http_server(monkeypatch, answers):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
-    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "chat_web_response", lambda *args, **kwargs: None)
     monkeypatch.setattr(
-        ts.server, "answer_with_history",
+        ts._legacy_runtime(), "answer_with_history",
         lambda *args, **kwargs: answers.append(kwargs.get("context_size")) or "answer",
     )
     httpd = ts.ThreadingHTTPServer(("127.0.0.1", 0), ts.Handler)

@@ -496,6 +496,10 @@ from sonder_runtime.interfaces.http.serve_policy import (
 )
 from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool, prewarm_gate
 from sonder_runtime.adapters.inference import ollama_reporting as _ollama_reporting
+from sonder_runtime.adapters.inference.pool_model_catalog import (
+    PoolCatalogCache,
+    resolve_model_pin,
+)
 from sonder_runtime.domain import ollama_policy
 from sonder_runtime.domain.runtime_model_configuration import (
     RuntimeModelConfiguration,
@@ -6650,13 +6654,10 @@ def _sonder_impl_serialized(
     # local route turn into a cloud route here: that would change the privacy
     # contract by sending its augmented project context remotely.
     if model_override:
-        try:
-            found = resolve_discovered_model_record(model_override)
-        except Exception:
-            found = None
-        if found is None or _fanout_nonchat_reason(found[1]):
+        pin = _resolve_model_pin(model_override)
+        if not pin.ok:
             return "model pin '%s' is unavailable or is not chat-capable." % model_override
-        pinned_model, _record = found
+        pinned_model = pin.model
         if _is_cloud_model_name(pinned_model) != cloud:
             return (
                 "model pin '%s' is incompatible with the selected %s route."
@@ -23409,9 +23410,25 @@ def _route_work_request(
     )
 
 
-def _pool_member_tags(origin: str) -> dict:
-    with OLLAMA_POOL.open_url(urllib.request.Request(f"{origin}/api/tags"), timeout=15) as resp:
+def _pool_member_tags(origin: str, timeout: float = 15) -> dict:
+    with OLLAMA_POOL.open_url(urllib.request.Request(f"{origin}/api/tags"), timeout=timeout) as resp:
         return json.loads(_read_ollama_response_bytes(resp).decode("utf-8"))
+
+
+_PIN_CATALOG_TIMEOUT_SECONDS = 3
+_POOL_PIN_CATALOG = PoolCatalogCache()
+
+
+def _resolve_model_pin(selector):
+    """Resolve a model pin against this host, then the pool's routable members."""
+    return resolve_model_pin(
+        selector,
+        endpoint_record=lambda s: resolve_discovered_model_record(s),
+        pool=OLLAMA_POOL,
+        fetch_member_tags=lambda o: _pool_member_tags(o, timeout=_PIN_CATALOG_TIMEOUT_SECONDS),
+        nonchat_reason=lambda r: _fanout_nonchat_reason(r),
+        cache=_POOL_PIN_CATALOG,
+    )
 
 
 def _runtime_installed_model_records() -> tuple[tuple[str, dict], ...]:
@@ -26912,8 +26929,8 @@ _register_computer_use(mcp, _record_direct_tool, lambda: _application())
 from sonder_runtime.bootstrap.openrouter_tools import register as _register_openrouter  # noqa: E402
 _register_openrouter(mcp, _record_direct_tool)
 from sonder_runtime.bootstrap import agent_help_tools as _agent_help_tools  # noqa: E402
-for _agent_registrar_name, _agent_registrar in _agent_help_tools.discover_agent_tool_registrars():
-    _agent_registrar(mcp, _record_direct_tool)
+# Convention: a registrar parameter named ``runtime`` receives this server-module provider.
+_agent_help_tools.register_agent_tools(mcp, _record_direct_tool, lambda: sys.modules[__name__])
 
 
 def route_computer_use(text):

@@ -146,8 +146,8 @@ def test_choice_receipt_survives_real_http_response(monkeypatch, stream, command
     monkeypatch.setattr(serve, "API_KEY", "")
     monkeypatch.setattr(serve, "AUTH_MODE", "local-open")
     monkeypatch.setattr(serve, "REQUIRE_ACCOUNT", False)
-    monkeypatch.setattr(serve.server, "master_orchestrate", lambda task, **kw: master_choice(task, 3, 1, 1))
-    monkeypatch.setattr(serve.server, "answer_with_history", lambda *a, **kw: pytest.fail("command became model chat"))
+    monkeypatch.setattr(serve._legacy_runtime(), "master_orchestrate", lambda task, **kw: master_choice(task, 3, 1, 1))
+    monkeypatch.setattr(serve._legacy_runtime(), "answer_with_history", lambda *a, **kw: pytest.fail("command became model chat"))
     body = json.dumps({"model": "sonder", "stream": stream,
                        "messages": [{"role": "user", "content": f"{command} write primes.py"}]})
     with _http_server(monkeypatch) as port:
@@ -177,7 +177,7 @@ def test_new_commands_cannot_bypass_plan_mode(monkeypatch, command):
     monkeypatch.setattr(modes, "_LOADED", True)
     monkeypatch.setitem(modes._STATE, "mode", modes.PLAN)
     monkeypatch.setattr(modes, "_rule_lookup", lambda tool: None)
-    monkeypatch.setattr(serve.server, "master_orchestrate", lambda **kw: pytest.fail("plan dispatched work"))
+    monkeypatch.setattr(serve._legacy_runtime(), "master_orchestrate", lambda **kw: pytest.fail("plan dispatched work"))
     monkeypatch.setattr("sonder_runtime.bootstrap.app.default_app", lambda: pytest.fail("plan constructed lane service"))
     reply = serve._handle_slash(f"{command} write primes.py")
     assert reply and "refused" in reply.lower()
