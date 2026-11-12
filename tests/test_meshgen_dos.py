@@ -41,6 +41,7 @@ class Outcome(NamedTuple):
     work_done: int
     cpu: float  # time.thread_time() delta: CPU seconds this thread spent in compile_script
     message: str | None  # the ScriptError text, None when the script finished
+    log: list  # the interpreter's print() output so far
 
 
 @pytest.fixture
@@ -62,6 +63,8 @@ def run_probe(monkeypatch):
             seen.append(self)
 
         def too_much(self):
+            # Ambiguous only when a cap is broken (both counters past their limits); assert_stopped_by then fails on
+            # the exact step/work counts, which is where the real diagnosis is.
             if recorder.time.monotonic() > self.deadline:
                 self.stopped_by = "clock"
             elif self.steps > recorder.MAX_STEPS:
@@ -91,7 +94,7 @@ def run_probe(monkeypatch):
             stop = interp.stopped_by
         else:
             stop = next((frag for frag in _SIZE_FRAGMENTS if frag in message), message)
-        return Outcome(stop, interp.steps, interp.work_done, cpu, message)
+        return Outcome(stop, interp.steps, interp.work_done, cpu, message, list(interp.log))
 
     return run
 
@@ -118,16 +121,20 @@ def cpu_unit():
 
 # CPU budgets, in cpu_unit multiples.  Measured on an idle machine (unit 0.125 s; thread_time ticks in 15.6 ms steps):
 #   instant probes (stopped by a pre-charge or size cap, idle CPU <= 0.08 s): largest ratio 0.64 -> budget 8 (12.5x headroom)
-#   heavy probes (legitimately burn up to the step/work cap, idle CPU 0.11..2.28 s): largest ratio 18.2 -> budget 200 (11x)
-# Those are the largest ratios over five idle runs; the heaviest probe, c09_print_dict, ranged from 11.6 to 18.2.  The
-# two scripts further down that pass heavy=True measured 2.9 (weight walk) and 4.9 (predicate nodes).
+#   heavy probes (legitimately burn up to the step/work cap, idle CPU 0.11..2.28 s): largest ratio 18.2 -> budget 60 (3.3x)
+# Those are the largest ratios over five idle runs; the heaviest probe, c09_print_dict, ranged from 11.6 to 18.2.  A later
+# measurement (three serial runs and one -n 4 run of this file) gave a worst ratio of 12.9 (c09_print_dict), so 60 is 4.7x
+# over that and 3.3x over the 18.2 worst.  The scripts further down that pass heavy=True measured 3.4 (weight walk),
+# 5.6 (predicate nodes), 1.1 (dict membership) and 0.1 (multiply by zero; below the 15.6 ms thread_time tick).
+# 60 units is about 7.5 s here, under the production clock (recorder.MAX_SECONDS = 10), which an earlier 200 (25 s) was not.
+# It was 200 until a review raised MAX_STEPS tenfold and four probes that then ran 5 to 15 s still passed.
 # The budget catches an uncharged host operation, not slowness: it is a multiple of this machine's own speed, so a slower
 # or busier runner scales it.  Under 36 CPU burners plus -n 24 the per-thread CPU of the heaviest probe grew only 1.2x.
-# It is deliberately coarse.  It trips above 8 units (about 1 s here) for an instant probe and 200 units (about 25 s)
+# It is deliberately coarse.  It trips above 8 units (about 1 s here) for an instant probe and 60 units (about 7.5 s)
 # for a heavy one, so one uncharged str() of 8 million aliased elements (0.23 s, 1.9 units) passes unnoticed; which
 # limit fired, and after how many steps, is what the assertions on `stop`, `steps` and `work_done` prove exactly.
 INSTANT_BUDGET_UNITS = 8
-HEAVY_BUDGET_UNITS = 200
+HEAVY_BUDGET_UNITS = 60
 HEAVY = frozenset((
     'b00_while',
     'b01_startswith_tuple',
@@ -197,8 +204,10 @@ def assert_stopped_by(name, outcome, expected):
         assert outcome.steps <= recorder.MAX_STEPS and outcome.work_done > recorder.MAX_WORK, (name, outcome)
 
 
-# Which limit must stop each probe (identical on an idle and a loaded machine; the step and work counts do not depend
-# on speed).  "work"/"steps" are the recorder's work and step caps, "finishes" is a script that legitimately completes.
+# Which limit stopped each probe.  This table is a regression record, not a statement of design: it was recorded by
+# running every probe against the current recorder and checked by hand.  A change here means the recorder's behaviour changed and needs the same
+# hand check.  The values do not depend on machine speed.  "work"/"steps" are the recorder's work and step caps,
+# "finishes" is a script that legitimately completes.
 EXPECTED_STOP = {
     'd01_shuffle': "work",
     'd02_sort_strs': "work",
@@ -430,6 +439,15 @@ def test_third_review_probe_is_stopped_by_its_cap(name, run_probe, cpu_unit):
     assert_cpu_within_budget(name, outcome, cpu_unit)
 
 
+def test_the_production_limits_are_the_ones_the_budgets_were_measured_against():
+    # Every other test compares against the live recorder constants, so raising a limit tenfold would still pass them.
+    # A deliberate change of a limit must update this test AND re-measure HEAVY_BUDGET_UNITS / INSTANT_BUDGET_UNITS.
+    from sonder_runtime.domain.meshgen.dsl import recorder
+    assert recorder.MAX_STEPS == 2_000_000
+    assert recorder.MAX_WORK == 3_000_000
+    assert recorder.MAX_SECONDS == 10.0
+
+
 def test_every_probe_has_exactly_one_expected_stop_and_the_pinned_subsets_agree_with_it():
     assert set(EXPECTED_STOP) == set(PROBES) | set(SECOND) | set(THIRD)
     assert len(PROBES) + len(SECOND) + len(THIRD) == len(EXPECTED_STOP), "a probe name is used in two tables"
@@ -446,7 +464,7 @@ def test_a_tuple_colour_is_refused_before_the_size_check_so_the_original_p01_fai
     assert "not a colour" in str(info.value) or "must be a '#RRGGBB'" in str(info.value)
 
 
-def test_multiplying_by_zero_or_a_negative_count_walks_nothing(run_probe):
+def test_multiplying_by_zero_or_a_negative_count_walks_nothing(run_probe, cpu_unit):
     def script(first, second):
         return chr(10).join(["def build():", "    rows = [list(range(100000)) for i in range(7)]",
                              "    for i in range(2000):", "        x = " + first, "        y = " + second, ""])
@@ -454,6 +472,7 @@ def test_multiplying_by_zero_or_a_negative_count_walks_nothing(run_probe):
     # The same script with the 4,000 multiplications replaced by plain assignments: what building `rows` costs.
     baseline = run_probe(script("rows", "rows"))
     assert baseline.stop == "finishes", baseline
+    assert_cpu_within_budget("multiply baseline", baseline, cpu_unit, heavy=True)
     for count in ("0", "-5"):
         outcome = run_probe(script("rows * " + count, count + " * rows"))
         # The counters come first: they are the same whether or not a slow walk also runs into the hang ceiling.
@@ -464,6 +483,8 @@ def test_multiplying_by_zero_or_a_negative_count_walks_nothing(run_probe):
         # subtract work (`inner * count` with count < 0) any more than a zero count may add a walk.
         assert outcome.work_done == baseline.work_done, (count, outcome, baseline)
         assert outcome.stop == "finishes", (count, outcome)
+        # An uncharged walk of `rows` per multiplication would not show in the counters but would in CPU time.
+        assert_cpu_within_budget("multiply by " + count, outcome, cpu_unit, heavy=True)
 
 
 def test_a_list_of_small_tuples_can_be_repeated_to_the_element_limit():
@@ -533,16 +554,17 @@ def test_the_clock_is_read_on_a_work_charge_below_the_old_threshold(monkeypatch)
 
 
 # ---- charges that no other test pinned down (each has a RED proof against a reverted copy of the fix)
-def test_dict_membership_costs_the_key_not_the_whole_dict(run_probe):
+def test_dict_membership_costs_the_key_not_the_whole_dict(run_probe, cpu_unit):
     """20,000 `in` lookups on a 20,000-key dict: fine at one unit each, over the work limit at 20,000 each."""
     source = chr(10).join(["def build():", "    d = {}", "    for i in range(20000):", "        d['k%d' % i] = i",
                            "    n = 0", "    for j in range(20000):", "        if 'k5' in d:", "            n += 1",
                            "    print(n)", ""])
     outcome = run_probe(source)
     assert outcome.stop == "finishes", outcome
-    assert compile_script(source).log == ["20000"]
-    # Measured 140,002 (one unit per insert and per lookup); charging the whole dict per lookup would be 400,000,000.
     assert outcome.work_done <= 200_000, outcome
+    assert_cpu_within_budget("dict membership", outcome, cpu_unit, heavy=True)
+    # Measured 140,002 (one unit per insert and per lookup); charging the whole dict per lookup would be 400,000,000.
+    assert outcome.log == ["20000"], outcome
 
 
 def test_weight_charges_its_own_walk(run_probe, cpu_unit):
