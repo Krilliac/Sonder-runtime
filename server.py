@@ -163,6 +163,7 @@ from sonder_runtime.application.ports.work_narration import route_reason as _nar
 import creative_router
 import intents
 import sonder_runtime.adapters.runtime_policy as runtime_policy
+from sonder_runtime.adapters import tool_lane_guard as _tool_lane_guard
 import sonder_runtime.adapters.accelerators.npu.contract as npu_contract
 import sonder_runtime.adapters.accelerators.npu.service as npu_service
 import calibration
@@ -666,7 +667,7 @@ def _context_native(value=None):
     return _platform_native_context(value, default_value=SESSION_NUM_CTX)
 
 
-TIERS = _RUNTIME_MODEL_CONFIGURATION.tier_map()
+TIERS = _tool_lane_guard.seed_bindings(_RUNTIME_MODEL_CONFIGURATION.tier_map())
 # Tiers whose ":...-cloud" model runs on Ollama's servers (data leaves the machine).
 CLOUD_TIERS = set(_RUNTIME_MODEL_CONFIGURATION.cloud_tiers)
 LOCAL_TIERS = tuple(k for k in TIERS if k not in CLOUD_TIERS)
@@ -952,16 +953,7 @@ def _refresh_runtime_policy(create=True):
     global _RUNTIME_POLICY
     policy = runtime_policy.load(create=create)
     prior_embedding = str(_RUNTIME_POLICY.get("embedding_model") or "").strip()
-    for tier in runtime_policy.LOCAL_TIERS:
-        model = str(policy["local_models"].get(tier) or "").strip()
-        if model:
-            TIERS[tier] = model
-        else:
-            # An optional tier the operator left unset must not be offered at
-            # all: dropping it keeps `_serve_target`, `available_tiers()` and
-            # `/v1/models` honest, and the capability router sees it as
-            # unavailable and degrades to a base tier.
-            TIERS.pop(tier, None)
+    _tool_lane_guard.bind_local_tiers(TIERS, policy)  # unset tiers dropped, blocked models never bound
     # Embeddings intentionally live outside ``TIERS`` so an embedding-only
     # model can never become a chat target. Only an actual policy transition
     # reconfigures the process binding: a routine status/live-reload refresh
@@ -1041,6 +1033,8 @@ def _gate_answer_code(response, *, iid, prompt, history, model, system,
     persist a verified repair or, when the code still fails, step to the
     next rung.
     """
+    if _tool_lane_guard.denied(model, tier_label, _RUNTIME_POLICY):
+        return response, None, False, {}  # a blocked model's reply is never run or repaired
     captured = response
     usage = {}
 
@@ -2513,7 +2507,7 @@ def _build_system(system, trace, persona, model="", cloud=False, provider=None):
     )
 
 
-def _serve_target(tier, strict):
+def _serve_target(tier, strict, *, chat_only=False):
     """Resolve a serve/app request's OpenAI `model` field to a concrete target.
 
     Returns (model, cloud, augment, tier_label):
@@ -2566,10 +2560,10 @@ def _serve_target(tier, strict):
         cloud = _is_cloud_model_name(model)
         if cloud and not _cloud_allowed_policy(os.environ):
             return None, True, False, "cloud-disabled"
+        if not chat_only and _tool_lane_guard.denied(model, "model:", _RUNTIME_POLICY):
+            return None, False, False, "tool-lane-denied"  # chat by name only
         return model, cloud, False, "model:%s" % model
     return None, False, True, None
-
-
 
 
 def _latest_runnable_block(history):
@@ -5534,7 +5528,7 @@ def prewarm_model(tier: str = "") -> bool:
     if not sonder_speculation.prewarm_enabled():
         return False
     try:
-        model, cloud, _augment, tier_label = _serve_target(tier or "sonder", None)
+        model, cloud, _augment, tier_label = _tool_lane_guard.chat_target(_serve_target, tier or "sonder", None)
     except Exception:
         return False
     if cloud or not model or tier_label in (None, "cloud-disabled"):
@@ -6640,7 +6634,7 @@ def _sonder_impl_serialized(
         web_reply = _route_chat_web(prompt, session, project, location_consent)
         if web_reply is not None:
             return _append_activity(web_reply)
-    tgt_model, cloud, augment, tier_label = _serve_target(tier, strict)
+    tgt_model, cloud, augment, tier_label = _tool_lane_guard.chat_target(_serve_target, tier, strict)
     if tier_label == "cloud-disabled":
         return _cloud_disabled_message()
     if tier_label is None:
@@ -7035,7 +7029,7 @@ def _answer_with_history_impl(
         )
         if command is not None:
             return _append_activity(command)
-    model, cloud, model_augment, tier_label = _serve_target(tier, strict)
+    model, cloud, model_augment, tier_label = _tool_lane_guard.chat_target(_serve_target, tier, strict)
     if tier_label == "cloud-disabled":
         return _cloud_disabled_message()
     if tier_label is None:
@@ -7366,7 +7360,7 @@ def structured_answer_with_history(
     syntax and validated the small schema dialect it promises to post-check.
     """
     _maybe_live_reload()
-    model, cloud, _augment, tier_label = _serve_target(tier, None)
+    model, cloud, _augment, tier_label = _tool_lane_guard.chat_target(_serve_target, tier, None)
     if tier_label == "cloud-disabled":
         raise ModelCallError("configuration", _cloud_disabled_message(), cloud=True)
     if tier_label is None:
@@ -7877,6 +7871,8 @@ def campaign_generate_compile_execute_record(
     When record_failures is true, terminal failed attempts with an interaction id are
     recorded as failed too, so the reward store keeps negative signals.
     """
+    if refusal := _tool_lane_guard.selector_refusal(tier, TIERS, _RUNTIME_POLICY):
+        return refusal
     total = max(1, min(int(total or 1), 120))
     max_workers = max(1, min(int(max_workers or 1), 12, total))
     timeout = max(1, min(int(timeout or 8), 120))
@@ -8200,6 +8196,8 @@ def campaign_repo_repair(
     import shutil
     import tempfile
 
+    if refusal := _tool_lane_guard.selector_refusal(tier, TIERS, _RUNTIME_POLICY):
+        return refusal
     total = max(1, min(int(total or 1), 60))
     max_workers = max(1, min(int(max_workers or 1), 8, total))
     timeout = max(5, min(int(timeout or 30), 120))
@@ -14918,6 +14916,8 @@ def _game_generate_result(
     repair_rounds: int | None,
     use_reference_fallback: bool = True,
 ) -> dict:
+    if refusal := _tool_lane_guard.selector_refusal(tier, TIERS, _RUNTIME_POLICY):
+        raise ValueError(refusal)
     repair_rounds = _resolve_repair_rounds(repair_rounds, language)
     project = game_forge.prepare_project(name, language, dimension, theme, seed)
     base_prompt = game_forge.generation_prompt(project, concept)
@@ -20534,6 +20534,8 @@ def _agent_turn(
         from sonder_runtime.bootstrap.prepared_workbench import prepared_tool_allowlist
         tool_allowlist = prepared_tool_allowlist(tool_allowlist)
     model, cloud, augment, tier_label = pinned_target if pinned_target is not None else _serve_target(tier, None)
+    if refusal := _tool_lane_guard.resolved_refusal(tier, model, tier_label, _RUNTIME_POLICY):
+        return refusal  # before any model call or tool dispatch
     if tier_label == "cloud-disabled":
         return _cloud_disabled_message()
     if tier_label is None:
@@ -24275,7 +24277,7 @@ def _fanout_plan(scope, *, profile="", include_unhealthy=False):
         cloud = _is_cloud_model_name(name)
         if not (scope == "all" or (scope == "cloud" and cloud) or (scope == "local" and not cloud)):
             continue
-        reason = _fanout_nonchat_reason(record)
+        reason = _fanout_nonchat_reason(record) or _tool_lane_guard.sweep_skip_reason(name, _RUNTIME_POLICY)
         if reason:
             skipped.append({"model": name, "reason": reason})
             continue
@@ -24304,11 +24306,6 @@ def _fanout_plan(scope, *, profile="", include_unhealthy=False):
             "hosted/cloud tiers are disabled. Set SONDER_ALLOW_CLOUD=1 to opt in; prompts sent to cloud tiers leave this machine.",
         )
     return {"scope": scope, "selected": selected, "skipped": skipped}, None
-
-
-
-
-
 
 
 def _fanout_provider_retry_after_ts(exc):
@@ -25059,7 +25056,7 @@ def _ensemble_targets(tiers: str = ""):
             if not _cloud_allowed_policy(os.environ):
                 unknown.append("%s (cloud disabled; set SONDER_ALLOW_CLOUD=1)" % tier)
                 continue
-        model, _cloud, _augment, label = _serve_target(tier, False)
+        model, _cloud, _augment, label = _tool_lane_guard.chat_target(_serve_target, tier, False)  # text only
         if not model or label is None:
             unknown.append(tier)
             continue
@@ -25099,10 +25096,6 @@ def _ensemble_prompt_with_project_facts(task: str, project: str) -> str:
     if not facts:
         return task
     return orchestrator.build_prompt(task, [], project_facts=facts)
-
-
-
-
 
 
 @mcp.tool()
@@ -25253,7 +25246,7 @@ def ensemble_answer(
         return answers[0]["answer"] + footer
 
     synth = (synth_tier or "").strip().lower() or answers[-1]["tier"]
-    synth_model, _cloud, _augment, synth_label = _serve_target(synth, False)
+    synth_model, _cloud, _augment, synth_label = _tool_lane_guard.chat_target(_serve_target, synth, False)
     if not synth_model or synth_label is None:
         synth_model = answers[-1]["model"]
         synth = answers[-1]["tier"]
@@ -25394,6 +25387,8 @@ def improve_function(
         router=tier_router.route, tier_models=TIERS,
         request_payload={"messages": [{"content": code_improve.extract_function(source, function) or ""}]},
     )["tier"]
+    if refusal := _tool_lane_guard.selector_refusal(chosen, TIERS, _RUNTIME_POLICY):
+        return refusal
 
     def ask(prompt_text, model_tier):
         return ensemble_answer(prompt_text, tiers=model_tier, mode="code")
@@ -25915,6 +25910,8 @@ def codegen_build_loop(
     repair_models = ()
     explicit_targets = ()
     if tiers.strip():
+        if refusal := _tool_lane_guard.selector_refusal(tiers, TIERS, _RUNTIME_POLICY):
+            return refusal
         explicit_targets, _unavailable = _ensemble_targets(tiers)
         if attempt_limit >= 3 and len(explicit_targets) >= 2:
             repair_tiers = (explicit_targets[0][0], explicit_targets[1][0])

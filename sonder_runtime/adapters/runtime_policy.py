@@ -40,6 +40,7 @@ DEFAULT_NPU = _rules.DEFAULT_NPU
 DEFAULT_LONG_CONTEXT_OVERFLOW = _rules.DEFAULT_LONG_CONTEXT_OVERFLOW
 PROVIDER_MODEL_PROVIDERS = _rules.PROVIDER_MODEL_PROVIDERS
 _MODEL_RE = _rules._MODEL_RE
+tool_lane_deny_list = _rules.tool_lane_deny_list
 _LOCK = threading.RLock()
 
 
@@ -261,6 +262,15 @@ def update(
                 for name, tiers in (base.get("provider_models") or {}).items()
             },
         }
+        # The tool-lane deny list is add-only and has no update parameter: the
+        # loaded section is carried through unchanged, even across ``reset``.
+        # (An invalid file loads as built-in defaults, so resetting one keeps
+        # only those.)
+        candidate["tool_lane_denied_models"] = dict(
+            current.get("tool_lane_denied_models")
+            or base.get("tool_lane_denied_models")
+            or {}
+        )
         if provider_models:
             if not isinstance(provider_models, dict):
                 raise ValueError("provider_models update must be a JSON object")
@@ -372,8 +382,22 @@ def format_policy(policy=None) -> str:
         lines.append("  %s tier models (used only where that provider is bound): %s" % (
             provider, ", ".join("%s=%s" % item for item in tiers.items()) or "-",
         ))
+    lines.append("  " + format_tool_lane_denied_models(policy))
     lines.append("  cloud tiers remain separate explicit opt-in configuration")
     return "\n".join(lines)
+
+
+def format_tool_lane_denied_models(policy=None) -> str:
+    """One status line for the models blocked from tool-using lanes."""
+    policy = load(create=True) if policy is None else policy
+    deny = tool_lane_deny_list(policy)
+    source = "defaults plus policy file" if deny.extended else "defaults only"
+    line = "tool-lane blocked models (chat by name only; %s): names=%s prefixes=%s" % (
+        source, ", ".join(sorted(deny.names)) or "-", ", ".join(deny.prefixes) or "-",
+    )
+    if not deny.readable:
+        line += " [policy file unreadable: caller-named models refused in tool lanes]"
+    return line
 
 
 def format_long_context_overflow(policy=None, env=None) -> str:

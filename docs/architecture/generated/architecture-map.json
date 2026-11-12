@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 420,
+      "file_count": 421,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -437,6 +437,7 @@
         "sonder_runtime/adapters/testing/launcher.py",
         "sonder_runtime/adapters/tier_generation.py",
         "sonder_runtime/adapters/tool_executor.py",
+        "sonder_runtime/adapters/tool_lane_guard.py",
         "sonder_runtime/adapters/training/__init__.py",
         "sonder_runtime/adapters/typed_tool_executor.py",
         "sonder_runtime/adapters/unit_of_work.py",
@@ -964,7 +965,7 @@
       ]
     },
     {
-      "file_count": 291,
+      "file_count": 292,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1240,6 +1241,7 @@
         "sonder_runtime/domain/thinking_policy.py",
         "sonder_runtime/domain/tier_names.py",
         "sonder_runtime/domain/token_bucket.py",
+        "sonder_runtime/domain/tool_lane_models.py",
         "sonder_runtime/domain/tools/__init__.py",
         "sonder_runtime/domain/tools/builtin_traits.py",
         "sonder_runtime/domain/tools/descriptors.py",
