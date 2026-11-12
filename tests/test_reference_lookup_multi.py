@@ -23,7 +23,11 @@ from sonder_runtime.domain.context_formatting import rough_token_count
 from sonder_runtime.domain.ensemble_synthesis import KEEP_CITATIONS_RULE
 from sonder_runtime.domain.reference_lookup.selection import passage_char_budget
 from sonder_runtime.platform import reference_library_config as config
-from tests._reference_lookup_index import create_index
+from tests._reference_lookup_index import create_index, rule_cache_cleared
+
+
+# No applies rule is carried from one test to the next.
+_forget_rule_cache = pytest.fixture(autouse=True)(rule_cache_cleared)
 from tests.test_reference_lookup_lanes import BAD_INDEXES
 
 LOOKUP_MODEL = "astra-cyber-9b"

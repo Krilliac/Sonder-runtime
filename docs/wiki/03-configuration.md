@@ -416,8 +416,9 @@ For some local models a chat turn first searches a local reference library
 (Windows security event pages, MITRE ATT&CK techniques, Sigma detection
 rules) and sends the passages it found inside the user turn, between marker
 lines that carry a random code for that turn. The built-in models are the
-same names as the deny list above (the `astra-cyber-` prefix and the two
-`hf.co/...-GGUF` sources). The model is first asked for search terms once
+same names as the deny list above, taken from its default prefixes: the
+`astra-cyber-` prefix and the two Hugging Face GGUF sources (as `hf.co/...` or
+`huggingface.co/...`) in any quantisation, tagged or not. The model is first asked for search terms once
 (temperature 0, 80 tokens, no system prompt, never streamed, not a provider
 attempt of the turn); only the first eight identifiers in a question (event
 ids, technique ids, hex values) get title priority. The reply is cleaned
@@ -438,7 +439,10 @@ A missing or unusable index fails open: the turn answers without passages and
 says `Sources: none (reference lookup unavailable: <reason>)`. The runtime
 policy status output and `diagnostics` show one line with the index path, its
 state, the names in force and the last error. A cancelled search-terms call
-ends the turn.
+ends the turn in the chat routes. It does not in `consult`: `consult` turns
+any exception from a member call into that member's error entry (as it did
+before this feature), so a cancellation there is reported as that member's
+error and the call goes on.
 
 Lookup applies to the MCP chat tool (by tier or `model_override`), the HTTP
 chat route, text-mode `ensemble_answer` (one retrieval shared by every member
@@ -446,7 +450,9 @@ when any member matches; the synthesiser sees only the cleaned answers) and
 `consult` (members share one retrieval; the judge sees no passages). It does
 not apply to structured answers, code-mode ensembles or model fan-out. A tier
 bound to a provider other than Ollama is judged by the model that provider
-serves, as for the deny list. The read-only MCP tool `reference_search`
+serves, as for the deny list. When a provider falls back to another backend
+in the middle of a call, the lookup decision follows the primary provider's
+configured model. The read-only MCP tool `reference_search`
 (`query`, `k` 1 to 8) returns framed passages and their sources to any caller.
 
 A lookup turn is sent none of the runtime's system prompt (persona, playbook,

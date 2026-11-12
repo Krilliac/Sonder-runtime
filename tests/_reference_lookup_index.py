@@ -59,3 +59,16 @@ def create_index(path: Path, rows=SMALL_ROWS, *, meta: bool = True, built_at: st
     finally:
         conn.close()
     return path
+
+
+def rule_cache_cleared():
+    """Forget the applies-rule cache before and after a test.
+
+    Register it in a test module as
+    ``_forget_rule_cache = pytest.fixture(autouse=True)(rule_cache_cleared)``.
+    """
+    from sonder_runtime.adapters import reference_lookup_service as service
+
+    service.clear_rule_cache()
+    yield
+    service.clear_rule_cache()

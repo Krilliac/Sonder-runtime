@@ -107,6 +107,7 @@ class TurnLookup:
     model: str
     applies: bool
     bound: bool = False
+    tier: str = ""
     caller_system: str = ""
     bundle: _lookup.Bundle | None = None
     review: _lookup.ReplyReview | None = None
@@ -140,16 +141,23 @@ def answering_model(model: Any, tier: Any = None) -> str:
 
 
 def _record(model: Any) -> TurnLookup:
-    """The current rung's record for ``model``: the unbound one in force, else a new one."""
+    """The current rung's record for ``model``: the unbound one in force, else a new one.
+
+    A record is reused only for the same model name and the same binding (the
+    bound provider tier, or none for an Ollama rung), because the decision
+    depends on both.
+    """
     name = str(model or "")
+    rung = _provider_bridge.active_rung()
+    tier = str(rung.tier) if rung is not None else ""
     current = _TURN.get()
-    if current is not None and not current.bound and current.model == name:
+    if current is not None and not current.bound and current.model == name and current.tier == tier:
         return current
     try:
         applies = bool(_service.applies(answering_model(name)).applies)
     except Exception:  # noqa: BLE001  # lookup is a help: a broken rule means no lookup
         applies = False
-    record = TurnLookup(name, applies)
+    record = TurnLookup(name, applies, tier=tier)
     _TURN.set(record)
     return record
 

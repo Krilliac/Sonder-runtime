@@ -15,7 +15,11 @@ from sonder_runtime.domain.reference_lookup.applies import (
     decide,
 )
 from sonder_runtime.platform import reference_library_config as config
-from tests._reference_lookup_index import SMALL_ROWS, create_index
+from tests._reference_lookup_index import SMALL_ROWS, create_index, rule_cache_cleared
+
+
+# No applies rule is carried from one test to the next.
+_forget_rule_cache = pytest.fixture(autouse=True)(rule_cache_cleared)
 
 SOURCE_TAGS = (
     "hf.co/mradermacher/Qwen3.8-cyber-RedTeam-Surgical-Abliterated-GGUF:Q3_K_M",
@@ -51,6 +55,41 @@ def test_defaults_match_both_spellings_prefixes_and_tags(name):
     decision = decide(name, DEFAULT_RULE)
     assert decision.applies is True
     assert decision.reason in (AppliesReason.MATCHED_NAME, AppliesReason.MATCHED_PREFIX)
+
+
+QUANTISATION_VARIANTS = (
+    "hf.co/mradermacher/Qwen3.8-cyber-RedTeam-Surgical-Abliterated-GGUF:Q4_K_M",
+    "hf.co/mradermacher/Qwen3.8-cyber-RedTeam-Surgical-Abliterated-GGUF",
+    "hf.co/mradermacher/Qwen3.8-cyber-RedTeam-Surgical-Abliterated-GGUF:latest",
+    "huggingface.co/mradermacher/Qwen3.8-cyber-RedTeam-Surgical-Abliterated-GGUF:IQ2_M",
+    "hf.co/DuoNeural/Cyber-Ornith-1.5-9B-OBLITERATED-GGUF:Q4_K_M",
+    "hf.co/DuoNeural/Cyber-Ornith-1.5-9B-OBLITERATED-GGUF",
+    "huggingface.co/DuoNeural/Cyber-Ornith-1.5-9B-OBLITERATED-GGUF:F16",
+)
+
+
+@pytest.mark.parametrize("name", QUANTISATION_VARIANTS)
+def test_every_quantisation_and_the_untagged_form_of_each_source_matches(name):
+    decision = decide(name, DEFAULT_RULE)
+    assert decision.applies is True and decision.reason is AppliesReason.MATCHED_PREFIX
+
+
+@pytest.mark.parametrize("name", [
+    "hf.co/mradermacher/Qwen3.8-cyber-RedTeam-Surgical-Abliterated",
+    "hf.co/mradermacher/Qwen3.8-cyber-RedTeam-Surgical-Abliterated-AWQ:Q4",
+    "hf.co/other/Cyber-Ornith-1.5-9B-OBLITERATED-GGUF:Q8_0",
+    "hf.co/DuoNeural/Cyber-Ornith-1.5-9B",
+    "Cyber-Ornith-1.5-9B-OBLITERATED-GGUF:Q8_0",
+])
+def test_near_misses_of_the_built_in_sources_do_not_match(name):
+    assert decide(name, DEFAULT_RULE).applies is False
+
+
+def test_built_in_rule_reuses_the_deny_lists_defaults():
+    from sonder_runtime.domain import tool_lane_models as lanes
+
+    assert DEFAULT_RULE.prefixes == lanes.DEFAULT_DENIED_PREFIXES
+    assert DEFAULT_RULE.names == frozenset(lanes.DEFAULT_DENIED_NAMES)
 
 
 @pytest.mark.parametrize("name", [
@@ -205,6 +244,27 @@ def test_an_unreadable_policy_is_not_cached(isolated, monkeypatch):
     assert service.applies("custom:7b").applies is False        # defaults while unreadable
     monkeypatch.setattr(runtime_policy, "load", real)
     assert service.applies("custom:7b").applies is True
+
+
+def test_a_policy_read_that_fails_once_is_not_cached(isolated, monkeypatch):
+    # The real loader swallows OSError and returns the defaults with an "error"
+    # entry; that result must not be kept under the unchanged file's key.
+    path = isolated / "runtime_policy.json"
+    _write_policy(path, {"names": ["custom:7b"]})
+    real_read = type(path).read_text
+    failures = []
+
+    def locked_once(self, *args, **kwargs):
+        if self.name == path.name and not failures:
+            failures.append(1)
+            raise PermissionError("policy file locked by another process")
+        return real_read(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(path), "read_text", locked_once)
+    assert service.applies("custom:7b").applies is False        # defaults while locked
+    assert service.applies("astra-cyber-9b").applies is True
+    assert service.applies("custom:7b").applies is True         # file unchanged, read again
+    assert failures == [1]
 
 
 def test_the_rule_cache_is_safe_across_threads(isolated, monkeypatch):

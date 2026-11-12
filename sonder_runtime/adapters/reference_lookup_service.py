@@ -104,7 +104,10 @@ def _cached_rule() -> _applies.AppliesRule:
     with _RULE_LOCK:
         if _RULE_CACHE is not None and _RULE_CACHE[0] == key:
             return _RULE_CACHE[1]
-    rule = _policy.reference_lookup_rule(_policy.load(create=False))
+    loaded = _policy.load(create=False)
+    rule = _policy.reference_lookup_rule(loaded)
+    if isinstance(loaded, Mapping) and loaded.get("error"):
+        return rule  # the load fell back to defaults (a locked or bad file): try again next call
     with _RULE_LOCK:
         _RULE_CACHE = (key, rule)
     return rule

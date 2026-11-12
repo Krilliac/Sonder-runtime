@@ -14,13 +14,17 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from ..tool_lane_models import name_candidates, normalize_name
-
-DEFAULT_PREFIXES = ("astra-cyber-",)
-DEFAULT_NAMES = (
-    normalize_name("hf.co/mradermacher/Qwen3.8-cyber-RedTeam-Surgical-Abliterated-GGUF:Q3_K_M"),
-    normalize_name("hf.co/DuoNeural/Cyber-Ornith-1.5-9B-OBLITERATED-GGUF:Q8_0"),
+from ..tool_lane_models import (
+    DEFAULT_DENIED_NAMES,
+    DEFAULT_DENIED_PREFIXES,
+    name_candidates,
+    normalize_name,
 )
+
+# The built-in models are the tool-lane deny list's: the same prefixes (so every
+# quantisation of the two source repositories, tagged or not) and names.
+DEFAULT_PREFIXES = DEFAULT_DENIED_PREFIXES
+DEFAULT_NAMES = DEFAULT_DENIED_NAMES
 
 SECTION_KEYS = frozenset({"enabled", "names", "prefixes"})
 PATH_KEY = "path"

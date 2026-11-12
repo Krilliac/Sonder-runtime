@@ -14,7 +14,11 @@ from sonder_runtime.bootstrap import reference_agent_tools as tools
 from sonder_runtime.domain.reference_lookup.prompt import MARKER_LINE_RE
 from sonder_runtime.domain.tools.builtin_traits import READ_ONLY_TOOLS
 from sonder_runtime.platform import reference_library_config as config
-from tests._reference_lookup_index import CREATE_META, CREATE_PASSAGES, create_index
+from tests._reference_lookup_index import CREATE_META, CREATE_PASSAGES, create_index, rule_cache_cleared
+
+
+# No applies rule is carried from one test to the next.
+_forget_rule_cache = pytest.fixture(autouse=True)(rule_cache_cleared)
 
 
 class _FakeMcp:

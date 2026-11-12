@@ -118,7 +118,11 @@ class SharedLookup:
 
     def retrieve(self, make_tier_generate: Callable[..., Any], ctx_for: ContextFor,
                  num_predict: Any, prompt: Any) -> _lookup.Bundle:
-        """The shared bundle, retrieved on the first call; never raises."""
+        """The shared bundle, retrieved on the first call.
+
+        A failed retrieval yields an unavailable bundle, not an exception; only a
+        cancellation of the search-terms call is let through.
+        """
         if self.bundle is not None:
             return self.bundle
         live = stream_sink.turn_stream()

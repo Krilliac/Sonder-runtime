@@ -34,7 +34,11 @@ from sonder_runtime.domain.context_formatting import rough_token_count
 from sonder_runtime.domain.reference_lookup.selection import passage_char_budget
 from sonder_runtime.interfaces.http import serve
 from sonder_runtime.platform import reference_library_config as config
-from tests._reference_lookup_index import CREATE_META, create_index
+from tests._reference_lookup_index import CREATE_META, create_index, rule_cache_cleared
+
+
+# No applies rule is carried from one test to the next.
+_forget_rule_cache = pytest.fixture(autouse=True)(rule_cache_cleared)
 
 LOOKUP_MODEL = "astra-cyber-9b"
 PLAIN_MODEL = "qwen2.5:3b"
@@ -824,3 +828,20 @@ def test_bridged_rung_is_judged_by_the_model_its_provider_serves(lane, monkeypat
     lanes.reset_turn()
     # No rung bound (an Ollama rung): the rung's own model name decides.
     assert lanes.lookup_turn(LOOKUP_MODEL) is True
+
+
+def test_an_unbound_record_is_not_reused_for_another_binding(lane, monkeypatch):
+    from sonder_runtime.application.chat import provider_bridge
+
+    _bridge_general(monkeypatch, LOOKUP_MODEL)
+    with provider_bridge.bind_rung("sonder_inference", "general"):
+        bridged = lanes._record(PLAIN_MODEL)
+        assert bridged.applies is True and bridged.tier == "general"
+        assert lanes._record(PLAIN_MODEL) is bridged            # same name, same binding
+    # The same model name on an Ollama rung (no binding) is a different decision.
+    plain = lanes._record(PLAIN_MODEL)
+    assert plain is not bridged
+    assert plain.applies is False and plain.tier == ""
+    with provider_bridge.bind_rung("sonder_inference", "general"):
+        again = lanes._record(PLAIN_MODEL)
+    assert again is not plain and again.applies is True
