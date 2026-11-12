@@ -26912,8 +26912,8 @@ _register_computer_use(mcp, _record_direct_tool, lambda: _application())
 from sonder_runtime.bootstrap.openrouter_tools import register as _register_openrouter  # noqa: E402
 _register_openrouter(mcp, _record_direct_tool)
 from sonder_runtime.bootstrap import agent_help_tools as _agent_help_tools  # noqa: E402
-for _agent_registrar_name, _agent_registrar in _agent_help_tools.discover_agent_tool_registrars():
-    _agent_registrar(mcp, _record_direct_tool)
+# Convention: a registrar parameter named ``runtime`` receives this server-module provider.
+_agent_help_tools.register_agent_tools(mcp, _record_direct_tool, lambda: sys.modules[__name__])
 
 
 def route_computer_use(text):
