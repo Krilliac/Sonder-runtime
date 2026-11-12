@@ -1,26 +1,47 @@
-"""Shared, verifying TLS client contexts for outbound HTTPS adapters.
+"""Verifying TLS client contexts for outbound HTTPS adapters.
 
 Building an ``ssl.SSLContext`` loads trust anchors: the platform store costs
 ~150-200 ms on Windows, and ``urllib.request.build_opener()`` builds one for
 its default HTTPS handler eagerly, even when the URL is plain HTTP.  Openers
-built per request therefore paid that load on every request.  These helpers
-build each context once and hand out the same one; a context is never
-mutated after creation, so threads share it safely.
+built per request therefore paid that load on every request.
 
-Neither helper weakens verification: both are ``CERT_REQUIRED`` with
-``check_hostname`` on.  Cache keys follow what the uncached code read at
-call time, so configuration changes still take effect on the next request:
-the OpenSSL trust-path variables for the default context, and the bundle
-file's path, size and mtime for an explicit CA bundle.
+Guarantees:
+
+* Pinned CA bundles (:func:`bundle_https_context`) are read on every request.
+  Nothing is cached, so a rotated or removed bundle takes effect on the next
+  request and a missing bundle raises instead of falling back to system trust.
+* The shared system context (:func:`default_https_context`) is built once and
+  shared across threads; a context is never mutated after creation.  It is
+  rebuilt on the next request when ``SSL_CERT_FILE`` or ``SSL_CERT_DIR``
+  changes, or when the ``SSL_CERT_FILE`` file's inode, size or mtime changes.
+  Changes to the OS trust store are picked up within ``_MAX_AGE_SECONDS`` or
+  immediately after :func:`reset_https_contexts`.
+
+Every context is ``CERT_REQUIRED`` with ``check_hostname`` on.
 """
 from __future__ import annotations
 
-import functools
 import os
 import ssl
+import threading
+import time
 import urllib.request
 
-__all__ = ["bundle_https_context", "default_https_context", "https_handler"]
+__all__ = [
+    "bundle_https_context",
+    "default_https_context",
+    "https_handler",
+    "reset_https_contexts",
+]
+
+# Upper bound on how long the shared system context may outlive an OS
+# trust-store change that leaves the environment and SSL_CERT_FILE untouched.
+_MAX_AGE_SECONDS = 300.0
+
+_Key = tuple["str | None", "str | None", "tuple[int, int, int] | None"]
+
+_lock = threading.Lock()
+_slot: tuple[_Key, float, ssl.SSLContext] | None = None
 
 
 def _finish(context: ssl.SSLContext) -> ssl.SSLContext:
@@ -31,29 +52,54 @@ def _finish(context: ssl.SSLContext) -> ssl.SSLContext:
     return context
 
 
+def _current_key() -> _Key:
+    cert_file = os.environ.get("SSL_CERT_FILE")
+    cert_dir = os.environ.get("SSL_CERT_DIR")
+    stamp: tuple[int, int, int] | None = None
+    if cert_file:
+        try:
+            stat = os.stat(cert_file)
+        except OSError:
+            stamp = None
+        else:
+            stamp = (stat.st_ino, stat.st_size, stat.st_mtime_ns)
+    return (cert_file, cert_dir, stamp)
+
+
 def default_https_context() -> ssl.SSLContext:
-    """The platform-trust context, keyed by ``SSL_CERT_FILE``/``SSL_CERT_DIR``."""
-    return _default(os.environ.get("SSL_CERT_FILE"), os.environ.get("SSL_CERT_DIR"))
+    """The shared platform-trust context.
+
+    Rebuilt when ``SSL_CERT_FILE``/``SSL_CERT_DIR`` or the ``SSL_CERT_FILE``
+    file stamp changes, or after ``_MAX_AGE_SECONDS``.
+    """
+    global _slot
+    key = _current_key()
+    with _lock:
+        slot = _slot
+    if slot is not None and slot[0] == key and time.monotonic() - slot[1] <= _MAX_AGE_SECONDS:
+        return slot[2]
+    # Built outside the lock; a duplicate concurrent build is harmless.
+    built_at = time.monotonic()
+    context = _finish(ssl.create_default_context())
+    with _lock:
+        _slot = (key, built_at, context)
+    return context
 
 
-@functools.lru_cache(maxsize=4)
-def _default(_cert_file: str | None, _cert_dir: str | None) -> ssl.SSLContext:
-    return _finish(ssl.create_default_context())
+def reset_https_contexts() -> None:
+    """Drop the shared system context so the next request rebuilds it."""
+    global _slot
+    with _lock:
+        _slot = None
 
 
 def bundle_https_context(cafile: str) -> ssl.SSLContext:
     """A context that trusts exactly ``cafile`` (not the platform store).
 
-    Keyed by the file's identity and content stamp, so a rotated bundle is
-    picked up on the next request.
+    Built per call (about 1 ms): rotation and removal take effect on the next
+    request.  ``FileNotFoundError`` / ``ssl.SSLError`` propagate; there is
+    never a fallback to the system context.
     """
-    stat = os.stat(cafile)
-    return _bundle(os.path.abspath(cafile), stat.st_size, stat.st_mtime_ns)
-
-
-@functools.lru_cache(maxsize=8)
-def _bundle(cafile: str, _size: int, _mtime_ns: int) -> ssl.SSLContext:
-    # Exactly what the uncached Ollama path built (no ALPN change).
     return ssl.create_default_context(cafile=cafile)
 
 

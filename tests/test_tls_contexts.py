@@ -7,6 +7,7 @@ request take ~170 ms instead of ~15 ms.
 """
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import ssl
@@ -16,6 +17,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import certifi
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
 
 from sonder_runtime.adapters import client_transport, tls_contexts
 from sonder_runtime.adapters.cluster import http_control_state
@@ -107,9 +112,58 @@ def test_pinned_mobility_client_reuses_one_verifying_context(trust_loads):
     assert trust_loads.count("load_default_certs") <= 1
 
 
-def test_ollama_ca_bundle_context_is_reused_rotated_and_bundle_only(tmp_path, monkeypatch, trust_loads):
+def _ca_pem(common_name: str) -> bytes:
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name).issuer_name(name).public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=30))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    return cert.public_bytes(serialization.Encoding.PEM)
+
+
+def _same_length_ca_pems() -> tuple[bytes, bytes]:
+    """Two distinct one-CA PEMs of identical byte length (trailing newlines pad)."""
+    first, second = _ca_pem("sonder-test-ca-A"), _ca_pem("sonder-test-ca-B")
+    size = max(len(first), len(second))
+    first, second = first.ljust(size, b"\n"), second.ljust(size, b"\n")
+    assert len(first) == len(second) and first != second
+    return first, second
+
+
+def _subjects(context: ssl.SSLContext) -> set[str]:
+    return {
+        dict(pair[0] for pair in cert["subject"]).get("commonName", "")
+        for cert in context.get_ca_certs()
+    }
+
+
+@pytest.fixture(autouse=True)
+def _fresh_shared_contexts():
+    def clear():
+        reset = getattr(tls_contexts, "reset_https_contexts", None)
+        if reset is not None:
+            reset()
+        for name in ("_default", "_bundle"):
+            cached = getattr(tls_contexts, name, None)
+            if hasattr(cached, "cache_clear"):
+                cached.cache_clear()
+
+    clear()
+    yield
+    clear()
+
+
+def test_bundle_context_is_built_per_call_and_tracks_rotation(tmp_path, monkeypatch, trust_loads):
+    pem_a, pem_b = _same_length_ca_pems()
     bundle = tmp_path / "ollama-ca.pem"
-    bundle.write_bytes(open(certifi.where(), "rb").read())
+    bundle.write_bytes(pem_a)
     monkeypatch.setattr(ollama_endpoint, "_ca_bundle", lambda: str(bundle))
     monkeypatch.setattr(ollama_endpoint, "configured_origin",
                         lambda *_a, **_k: "https://ollama.example:11434")
@@ -121,22 +175,83 @@ def test_ollama_ca_bundle_context_is_reused_rotated_and_bundle_only(tmp_path, mo
         return "sent"
 
     monkeypatch.setattr(urllib.request.OpenerDirector, "open", capture)
-    for _ in range(4):
+    for _ in range(3):
         assert ollama_endpoint.open_url("https://ollama.example:11434/api/tags") == "sent"
-    assert all(context is contexts[0] for context in contexts)
-    assert trust_loads == ["load_verify_locations"], trust_loads
+    # Pinned-bundle contexts are built per call (as on main), never shared.
+    assert len({id(context) for context in contexts}) == 3
+    assert trust_loads == ["load_verify_locations"] * 3, trust_loads
 
     # Trusts exactly the bundle, with verification on.
     context = contexts[0]
     assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname
-    expected = ssl.create_default_context(cafile=str(bundle)).get_ca_certs()
-    assert len(context.get_ca_certs()) == len(expected) > 0
+    assert _subjects(context) == {"sonder-test-ca-A"}
 
-    # A rotated bundle is picked up on the next request.
-    stamp = bundle.stat().st_mtime_ns + 1_000_000_000
-    os.utime(bundle, ns=(stamp, stamp))
+    # Same-size replacement with the mtime preserved (cp -p / rsync -a).
+    before = bundle.stat().st_mtime_ns
+    bundle.write_bytes(pem_b)
+    os.utime(bundle, ns=(before, before))
+    assert bundle.stat().st_size == len(pem_a) and bundle.stat().st_mtime_ns == before
     ollama_endpoint.open_url("https://ollama.example:11434/api/tags")
-    assert contexts[-1] is not context
+    assert _subjects(contexts[-1]) == {"sonder-test-ca-B"}
+
+
+def test_removed_bundle_errors_not_system_fallback(tmp_path, monkeypatch):
+    missing = tmp_path / "gone.pem"
+    with pytest.raises(FileNotFoundError):
+        tls_contexts.bundle_https_context(str(missing))
+
+    # The Ollama open path with a configured bundle that no longer exists.
+    bundle = tmp_path / "ollama-ca.pem"
+    bundle.write_bytes(_ca_pem("sonder-test-ca-A"))
+    monkeypatch.setattr(ollama_endpoint, "_configured_ca_bundle", str(bundle))
+    monkeypatch.setattr(ollama_endpoint, "configured_origin",
+                        lambda *_a, **_k: "https://ollama.example:11434")
+    opened = []
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open",
+                        lambda self, *a, **k: opened.append(1) or "sent")
+    bundle.unlink()
+    with pytest.raises(ValueError):
+        ollama_endpoint.open_url("https://ollama.example:11434/api/tags")
+    assert opened == []
+
+
+def test_default_context_rebuilds_when_ssl_cert_file_content_changes(tmp_path, monkeypatch):
+    pem_a, pem_b = _ca_pem("sonder-test-ca-A"), _ca_pem("sonder-test-ca-B")
+    cert_file = tmp_path / "trust.pem"
+    cert_file.write_bytes(pem_a)
+    monkeypatch.setenv("SSL_CERT_FILE", str(cert_file))
+    first = tls_contexts.default_https_context()
+    assert "sonder-test-ca-A" in _subjects(first)
+    assert tls_contexts.default_https_context() is first
+
+    cert_file.write_bytes(pem_b)
+    stamp = cert_file.stat().st_mtime_ns + 5_000_000_000
+    os.utime(cert_file, ns=(stamp, stamp))
+    second = tls_contexts.default_https_context()
+    assert second is not first
+    subjects = _subjects(second)
+    assert "sonder-test-ca-B" in subjects and "sonder-test-ca-A" not in subjects
+
+
+def test_default_context_refreshes_after_max_age(monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr(tls_contexts.time, "monotonic", lambda: now[0])
+    first = tls_contexts.default_https_context()
+    now[0] += tls_contexts._MAX_AGE_SECONDS - 1
+    assert tls_contexts.default_https_context() is first
+    now[0] += 2
+    assert tls_contexts.default_https_context() is not first
+
+
+def test_every_site_verifies(tmp_path):
+    bundle = tmp_path / "ca.pem"
+    bundle.write_bytes(_ca_pem("sonder-test-ca-A"))
+    handler_context = tls_contexts.https_handler()._context
+    for context in (tls_contexts.default_https_context(),
+                    tls_contexts.bundle_https_context(str(bundle)),
+                    handler_context):
+        assert context.verify_mode == ssl.CERT_REQUIRED
+        assert context.check_hostname is True
 
 
 def test_default_context_verifies_and_follows_trust_path_variables(tmp_path, monkeypatch):
