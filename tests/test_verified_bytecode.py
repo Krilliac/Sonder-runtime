@@ -166,3 +166,39 @@ def test_bytecode_must_be_compiled_from_the_hashed_sources(tmp_path):
         _require_compiled_from({str(tmp_path / "mod.py"): "c" * 64}, rows, site, alias)
     with pytest.raises(OwnerRefused, match="changed during inspection"):
         _require_compiled_from({str(tmp_path / "unhashed.py"): "b" * 64}, rows, site, alias)
+
+
+def _bulk_root(tmp_path):
+    root = tmp_path / "bulk"
+    root.mkdir()
+    for index in range(5):
+        lines = "".join(f"value_{index}_{line} = {line}\n" for line in range(200))
+        (root / f"mod{index}.py").write_text(lines, encoding="utf-8")
+        assert (root / f"mod{index}.py").stat().st_size >= 3 * 1024
+    return root
+
+
+def test_compile_bytecode_aborts_at_the_limit_before_marshalling(tmp_path, monkeypatch):
+    from sonder_runtime.adapters.execution import runtime_payload
+
+    root = _bulk_root(tmp_path)
+
+    class _NoMarshal:
+        @staticmethod
+        def dumps(*args, **kwargs):
+            raise AssertionError("marshal.dumps called past the limit")
+
+    monkeypatch.setattr(runtime_payload, "marshal", _NoMarshal)
+    assert compile_bytecode(((str(root), False),), limit=8 * 1024) == (None, {})
+
+
+def test_compile_bytecode_within_limit_is_unchanged(tmp_path):
+    root = _bulk_root(tmp_path)
+    data, digests = compile_bytecode(((str(root), False),), limit=1024**3)
+    table = marshal.loads(data)
+    expected = sorted(str(root / f"mod{index}.py") for index in range(5))
+    assert sorted(table) == expected
+    assert sorted(digests) == expected
+    for path in expected:
+        assert digests[path] == sha256(Path(path).read_bytes()).hexdigest()
+        assert int.from_bytes(table[path][4:8], "little") == 0b11

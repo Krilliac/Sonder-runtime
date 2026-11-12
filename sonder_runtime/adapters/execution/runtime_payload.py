@@ -167,7 +167,7 @@ def inventory(roots):
     return rows
 
 
-def compile_bytecode(entries):
+def compile_bytecode(entries, *, limit=None):
     """Compile every ``.py`` under the given import roots into checked-hash pycs.
 
     ``entries`` holds ``(import_root, exclude_site)`` pairs whose strings equal
@@ -180,11 +180,18 @@ def compile_bytecode(entries):
 
     Returns the marshalled table and the SHA-256 of each compiled source, so
     the caller can prove the bytecode was compiled from the hashed sources.
+
+    A running upper bound of the marshalled size is kept; once it exceeds
+    ``limit`` (default: the module's ``MAX_BYTECODE``, read at call time) the
+    table is dropped and ``(None, {})`` is returned without marshalling.
     """
     from importlib.util import source_hash
     from importlib._bootstrap_external import _code_to_hash_pyc
 
+    if limit is None:
+        limit = MAX_BYTECODE
     table, digests = {}, {}
+    bound = 16
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         for root, exclude_site in entries:
@@ -198,7 +205,11 @@ def compile_bytecode(entries):
                     code = compile(source, str(path), "exec", dont_inherit=True, optimize=0)
                 except (SyntaxError, ValueError):
                     continue
-                table[str(path)] = bytes(_code_to_hash_pyc(code, source_hash(source), True))
+                pyc = bytes(_code_to_hash_pyc(code, source_hash(source), True))
+                bound += len(str(path).encode("utf-8", "surrogatepass")) + len(pyc) + 16
+                if bound > limit:
+                    return None, {}
+                table[str(path)] = pyc
                 digests[str(path)] = sha256(source).hexdigest()
     return marshal.dumps(table), digests
 
@@ -328,17 +339,27 @@ class RuntimePayload:
             (self.root / "python-cache").mkdir()
             roots = [(str(self.path), False), *external,
                      *((path, False) for path in profile_roots)]
-            bytecode, compiled = compile_bytecode(
-                ((str(self.path), False), (str(base / "Lib"), True), (str(site_paths[0]), False)))
             # The bytecode is an optimization only. A closure already close to
             # the verification budget launches without it instead of failing.
-            if (len(bytecode) <= MAX_BYTECODE
-                    and len(planned) + copied + 1 <= MAX_FILES
-                    and sum(item.st_size for _, item in planned) + total + len(bytecode) <= MAX_BYTES):
-                with (self.root / BYTECODE_NAME).open("xb") as stream:
-                    stream.write(bytecode)
-                    stream.flush()
-                    os.fsync(stream.fileno())
+            remaining = MAX_BYTES - sum(item.st_size for _, item in planned) - total
+            bytecode, compiled = None, {}
+            if len(planned) + copied + 1 <= MAX_FILES and remaining > 0:
+                bytecode, compiled = compile_bytecode(
+                    ((str(self.path), False), (str(base / "Lib"), True), (str(site_paths[0]), False)),
+                    limit=min(MAX_BYTECODE, remaining))
+            written = False
+            if (bytecode is not None and len(bytecode) <= MAX_BYTECODE
+                    and len(bytecode) <= remaining):
+                target = self.root / BYTECODE_NAME
+                try:
+                    with target.open("xb") as stream:
+                        stream.write(bytecode)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    written = True
+                except OSError:
+                    target.unlink(missing_ok=True)  # handle already closed by the with block
+            if written:
                 roots.append((str(self.root / BYTECODE_NAME), False))
             else:
                 compiled = {}

@@ -37,8 +37,9 @@ before the process effect, and again by the child at startup. Immediately
 before native spawn, the owner rechecks the directory anchor, digest, profile
 and live writable-root separation; it does not rehash bytes that the same
 single-use, operation-bound admission hashed moments earlier. Resuming the
-readiness wait of a launch that already started spawns nothing and admits
-nothing. The child uses explicit import paths with `-E -S`, no user-site
+readiness wait of a launch that already started spawns nothing, so it does not
+rehash; it rechecks the directory anchor, digest, profile and live
+writable-root separation before RUNNING is published. The child uses explicit import paths with `-E -S`, no user-site
 or `.pth` execution, a private pycache prefix with bytecode writes disabled,
 and a minimal declared runtime DLL PATH.
 

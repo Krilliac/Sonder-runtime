@@ -247,3 +247,68 @@ def test_owner_compiled_bytecode_is_part_of_the_hashed_payload(tmp_path, monkeyp
         assert owner._launch_id is None and not effects
     finally:
         owner.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows payload profile required")
+@pytest.mark.usefixtures("small_managed_runtime_layout")
+def test_resumed_launch_rechecks_live_writable_roots_without_rehash(tmp_path, monkeypatch):
+    roots = []
+    owner = _selected_owner(tmp_path, roots)
+    try:
+        launch = owner.prepare("launch", "launch", {})
+        owner._launch_id = launch.operation_id  # as after a bounded readiness wait
+        hashes = _count_content_hashes(monkeypatch)
+        monkeypatch.setattr(owner._process, "alive", lambda job_id: True)
+        monkeypatch.setattr(owner, "_evidence", lambda job_id: {"phase": "READY"})
+        # paths[3] is the first declared site-packages directory: external closure.
+        closure = Path(owner._payload.manifest["paths"][3])
+        assert not closure.is_relative_to(owner.path)
+        roots.append(closure)  # the host widened its writable roots after the launch began
+        with pytest.raises(OwnerRefused, match="artifact overlaps"):
+            owner.execute(launch)
+        assert hashes == [], "a resumed launch must not re-hash the payload"
+        assert owner._launch_id == launch.operation_id
+        assert owner.journal.prepare(launch) is None, "RUNNING must not be published"
+    finally:
+        owner._launch_id = None
+        owner.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows payload profile required")
+@pytest.mark.usefixtures("small_managed_runtime_layout")
+def test_conflicting_launch_is_refused_without_hashing(tmp_path, monkeypatch):
+    owner = _selected_owner(tmp_path)
+    try:
+        launch = owner.prepare("launch", "launch", {})
+        owner._launch_id = "other"
+        hashes = _count_content_hashes(monkeypatch)
+        with pytest.raises(OwnerRefused, match="another owned launch needs reconciliation"):
+            owner.execute(launch)
+        assert hashes == []
+        assert owner._process._admitted is None
+    finally:
+        owner._launch_id = None
+        owner.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows payload profile required")
+@pytest.mark.usefixtures("small_managed_runtime_layout")
+def test_oversized_bytecode_falls_back_without_materializing(tmp_path, monkeypatch):
+    from sonder_runtime.adapters.execution import runtime_payload
+
+    real_dumps = runtime_payload.marshal.dumps
+
+    def forbidden(value, *args, **kwargs):
+        # Compiling one pyc marshals a code object; only the table is forbidden.
+        if isinstance(value, dict):
+            raise AssertionError("bytecode bundle was materialized past its limit")
+        return real_dumps(value, *args, **kwargs)
+
+    monkeypatch.setattr(runtime_payload, "MAX_BYTECODE", 1)
+    monkeypatch.setattr(runtime_payload.marshal, "dumps", forbidden)
+    owner = _selected_owner(tmp_path)
+    try:
+        assert not (owner.path / runtime_payload.BYTECODE_NAME).exists()
+        assert owner._payload.bytecode_binding() is None
+    finally:
+        owner.close()
