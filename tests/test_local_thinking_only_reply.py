@@ -116,6 +116,36 @@ def test_the_original_failure_is_reported_when_the_second_ask_fails(monkeypatch)
     assert len(seen) == 3
 
 
+def test_a_failed_second_ask_is_recorded_with_how_it_ended(monkeypatch):
+    def reply(payload, _index):
+        if payload.get("think") is False:
+            raise server.ModelCallError("timeout", "model call timed out")
+        return dict(THINKING_ONLY)
+
+    events = []
+    monkeypatch.setattr(server.activity_tracker, "record_event",
+                        lambda name, **fields: events.append((name, fields)))
+    _record(monkeypatch, reply)
+
+    with pytest.raises(server.ModelCallError) as caught:
+        _ask(260)
+
+    assert caught.value.kind == "empty_response"  # the truthful failure is the thinking-only reply
+    assert [fields for name, fields in events if name == "model_thinking_fallback_failed"] == [
+        {"model": "r", "failure": "timeout"}]
+
+
+def test_a_second_ask_that_answers_records_no_failure(monkeypatch):
+    events = []
+    monkeypatch.setattr(server.activity_tracker, "record_event",
+                        lambda name, **fields: events.append((name, fields)))
+    _record(monkeypatch, _answers_only_without_thinking)
+
+    _ask(260)
+
+    assert "model_thinking_fallback_failed" not in [name for name, _fields in events]
+
+
 def test_a_cancelled_second_ask_stays_a_cancellation(monkeypatch):
     def reply(payload, _index):
         if payload.get("think") is False:

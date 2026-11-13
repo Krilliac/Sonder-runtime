@@ -5444,11 +5444,8 @@ def _chat_request(
                 # below stays the reported failure; a cancellation stays one.
                 fallback_payload = dict(caller_payload)
                 fallback_payload["think"] = False
-                activity_tracker.record_event(
-                    "model_thinking_fallback",
-                    model=str(model or "")[:80],
-                    reason="thinking_exhausted_budget",
-                )
+                activity_tracker.record_event("model_thinking_fallback", model=str(model or "")[:80],
+                                              reason="thinking_exhausted_budget")
                 try:
                     return _chat_request(
                         fallback_payload,
@@ -5464,6 +5461,10 @@ def _chat_request(
                 except ModelCallError as fallback_error:
                     if fallback_error.kind == "cancelled":
                         raise
+                    # Only this event says how the second ask ended.
+                    activity_tracker.record_event(
+                        "model_thinking_fallback_failed", model=str(model or "")[:80],
+                        failure=str(fallback_error.kind or "")[:40])
         raise ModelCallError(
             "empty_response",
             _empty_model_response_detail(out, message),
