@@ -114,6 +114,9 @@ class DurableProcessEffectVerifier:
 # Upper bound ``wait`` spends publishing the last output window after the
 # root process exited and its readers reached end of file.
 OUTPUT_DRAIN_SECONDS = 5.0
+# After a root exits on its own, how long members already exiting may take
+# to leave its job before the cleanup is forced (and recorded as forced).
+ROOT_EXIT_SETTLE_SECONDS = 2.0
 
 
 class _ProcessSlotLease:
@@ -543,7 +546,13 @@ class SubprocessJobProvider:
                 exit_code = process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             return ProcessJobWait(self._registry.poll(job_id), None, timed_out=True)
-        containment = self._quiesce_containment(job_id, force=True)
+        # The root exited on its own: give members already exiting (a console
+        # root's conhost.exe) time to leave before forcing the job.
+        containment = self._quiesce_containment(
+            job_id, force=True,
+            # Only a containment token consumes the grace; skip the registry read otherwise.
+            exit_grace=self._root_exit_grace(job_id) if job_id in self._memory_tokens else 0.0,
+        )
         if containment is None and self._platform == "posix":
             view = self._registry.view(job_id)
             containment = self._quiesce_exited_group(
@@ -1018,6 +1027,26 @@ class SubprocessJobProvider:
             self._deadline_timers[job_id] = timer
         timer.start()
 
+    def _root_exit_grace(self, job_id: str) -> float:
+        """Root-exit settle time, capped at the time left to the hard deadline.
+
+        Fails closed: an unreadable or unparseable deadline yields no grace
+        (an immediate force), never a longer one.
+        """
+        try:
+            raw_deadline = (self._registry.view(job_id).metadata or {}).get("hard_deadline_at")
+            if raw_deadline is None:
+                return ROOT_EXIT_SETTLE_SECONDS
+            deadline = datetime.fromisoformat(raw_deadline.replace("Z", "+00:00"))
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+            remaining = (
+                deadline.astimezone(timezone.utc) - datetime.now(timezone.utc)
+            ).total_seconds()
+        except Exception:  # noqa: BLE001 - any failure to read the deadline fails closed
+            return 0.0
+        return max(0.0, min(ROOT_EXIT_SETTLE_SECONDS, remaining))
+
     def _schedule_deadline_at(self, job_id: str, raw_deadline: str) -> None:
         deadline = datetime.fromisoformat(raw_deadline.replace("Z", "+00:00"))
         if deadline.tzinfo is None:
@@ -1117,6 +1146,7 @@ class SubprocessJobProvider:
         job_id: str,
         *,
         force: bool,
+        exit_grace: float = 0.0,
     ) -> ProcessContainmentResult | None:
         token = self._memory_tokens.get(job_id)
         if token is None:
@@ -1125,7 +1155,7 @@ class SubprocessJobProvider:
         if not callable(quiesce):
             return None
         try:
-            result = quiesce(force=force)
+            result = quiesce(force=force, exit_grace=exit_grace)
         except Exception as exc:
             return ProcessContainmentResult(
                 False,

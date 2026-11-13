@@ -129,7 +129,7 @@ class _TestScopeToken:
     def close(self):
         return None
 
-    def quiesce(self, *, force):
+    def quiesce(self, *, force, exit_grace=0.0):
         return ProcessContainmentResult(True, forced=bool(force))
 
 
