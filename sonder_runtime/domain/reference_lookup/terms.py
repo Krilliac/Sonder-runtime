@@ -49,6 +49,20 @@ _VERDICT_RE = re.compile(r'(?<![A-Za-z0-9_])(NOT[ \t]+RELATED|UNRELATED|RELATED)
 # punctuation or markdown around it ("Unrelated.", "**UNRELATED**").
 _LONE_VERDICT_RE = re.compile(r'[\W_]*(not[ \t]+related|unrelated|related)[\W_]*', re.IGNORECASE)
 _LINE_LABEL_RE = re.compile(r'^[ \t]*(?:first|second)[ \t]+line[ \t]*:[ \t]*', re.IGNORECASE)
+# What a model puts in front of the verdict: a list number, a label ("2. Verdict: Related").
+_VERDICT_LABEL_RE = re.compile(
+    r'^[\W_]*(?:\d{1,2}[.)][ \t]*)?(?:(?:verdict|answer|scope|result)[ \t]*[:=-][ \t]*)?', re.IGNORECASE)
+# The verdict followed by an explanation ("Related - it is about Kerberos",
+# "Unrelated (cooking)", "RELATED. It is not UNRELATED.").  A hyphen joined to
+# the word ("related-key attack") or a plain next word ("unrelated domain") is a term.
+_EXPLAINED_VERDICT_RE = re.compile(
+    r'[\W_]*(not[ \t]+related|unrelated|related)(?:[ \t]+[-\u2013\u2014][ \t]|[ \t]*[:(]|[.;!](?:\s|$))',
+    re.IGNORECASE)
+# The request copied back, in any case, with or without its line label.
+_ECHO_RE = re.compile(
+    '|'.join(r'\s+'.join(re.escape(word) for word in sentence.split())
+             for sentence in (_SCOPE_FIRST, _SCOPE_SECOND.split(': ', 1)[1])),
+    re.IGNORECASE)
 
 
 def build_expand_prompt(question: str, *, scope: bool = False) -> str:
@@ -66,29 +80,44 @@ def split_scope(content: str) -> tuple[str, bool]:
     Models put the verdict on its own line, as the last item of the terms line
     or after the last term without a comma; all three are read.  A line or
     item that is only the verdict counts in any case and with punctuation or
-    markdown around it; inside other text only the upper-case word does.  The
-    last verdict decides.  A reply without one is not a verdict of UNRELATED,
-    so a model that ran out of room listing terms changes nothing.  The
-    request's own sentences, copied back, are not a verdict.
+    markdown around it, also behind a list number or a label ("2. Verdict:
+    Related"); inside other text only the upper-case word does.  After the
+    first line, a line without a comma that opens with the verdict and goes on
+    to explain it ("Unrelated (cooking)") is read as the verdict and dropped
+    whole.
+
+    The reply is UNRELATED only when that is the one verdict in it.  A reply
+    without a verdict, or with both ("RELATED, not UNRELATED"), is not: the
+    costly mistake is taking passages away from a question that is in scope,
+    and a model that ran out of room listing terms must change nothing.  The
+    two sentences of the request, copied back in any case, are removed first;
+    a looser paraphrase of them is not recognised.
 
     Whatever is read as a verdict is removed, so it never becomes a search
     term: a stray "Unrelated" would be searched for and, being rare in the
     library, would count against every passage.
     """
-    unrelated = False
+    seen = set()
     lines = []
-    for line in content.replace(_SCOPE_SECOND, ' ').replace(_SCOPE_FIRST, ' ').split('\n'):
+    for number, line in enumerate(_ECHO_RE.sub(' ', content).split('\n')):
+        line = _LINE_LABEL_RE.sub('', line)
+        explained = None
+        if number and ',' not in line:
+            explained = _EXPLAINED_VERDICT_RE.match(_VERDICT_LABEL_RE.sub('', line))
+        if explained:
+            seen.add(explained.group(1).lower() == 'related')
+            lines.append('')
+            continue
         items = []
-        for item in _LINE_LABEL_RE.sub('', line).split(','):
-            lone = _LONE_VERDICT_RE.fullmatch(item)
+        for item in line.split(','):
+            lone = _LONE_VERDICT_RE.fullmatch(_VERDICT_LABEL_RE.sub('', item))
             if lone:
-                unrelated = lone.group(1).lower() != 'related'
+                seen.add(lone.group(1).lower() == 'related')
                 continue
-            for word in _VERDICT_RE.findall(item):
-                unrelated = word != 'RELATED'
+            seen.update(word == 'RELATED' for word in _VERDICT_RE.findall(item))
             items.append(_VERDICT_RE.sub('', item))
         lines.append(','.join(items))
-    return '\n'.join(lines), unrelated
+    return '\n'.join(lines), seen == {False}
 
 
 def query_terms(text: str | None, extra_terms: Iterable[object] = ()) -> list[str]:

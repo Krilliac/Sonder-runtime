@@ -88,18 +88,73 @@ def test_split_scope_without_a_verdict_still_strips_line_labels():
     assert split_scope("First line: a, b\nSecond line:") == ("a, b\n", False)
 
 
-@pytest.mark.parametrize("reply, unrelated", [
-    ("a, b\nUNRELATED\nRELATED", False),
-    ("a, b\nRELATED\nUNRELATED", True),
-    ("a, RELATED, b, UNRELATED", True),
-    ("a, UNRELATED, b, RELATED", False),
-    ("UNRELATED RELATED", False),
-    ("RELATED UNRELATED", True),
+@pytest.mark.parametrize("reply", [
+    "a, b\nUNRELATED\nRELATED",
+    "a, b\nRELATED\nUNRELATED",
+    "a, RELATED, b, UNRELATED",
+    "a, UNRELATED, b, RELATED",
+    "UNRELATED RELATED",
+    "RELATED UNRELATED",
+    # an explanation that names the other word (second review, each read as UNRELATED before)
+    "kerberos, tgt\nRELATED (not UNRELATED)",
+    "kerberos, tgt\nRELATED, not UNRELATED",
+    "kerberos, tgt\nRELATED. It is not UNRELATED.",
+    "kerberos, tgt\nRELATED/UNRELATED",
+    "kerberos, tgt\nUNRELATED? No: RELATED",
 ])
-def test_split_scope_the_last_verdict_word_decides(reply, unrelated):
+def test_split_scope_a_reply_holding_both_verdicts_is_not_unrelated(reply):
+    """Taking passages from an in-scope question is the costly mistake, so a mixed reply changes nothing."""
+    text, verdict = split_scope(reply)
+    assert verdict is False
+    assert "RELATED" not in text
+
+
+@pytest.mark.parametrize("reply, unrelated, terms", [
+    ("kerberos, tgt\nVerdict: Related", False, ["kerberos", "tgt"]),
+    ("kerberos, tgt\nAnswer: Related", False, ["kerberos", "tgt"]),
+    ("pasta, sauce\nanswer = unrelated", True, ["pasta", "sauce"]),
+    ("pasta, sauce\nScope: **Unrelated**", True, ["pasta", "sauce"]),
+    ("1. lsass, mimikatz\n2. Unrelated", True, ["lsass", "mimikatz"]),
+    ("1. lsass, mimikatz\n2) Related.", False, ["lsass", "mimikatz"]),
+    ("lsass, Verdict: Unrelated", True, ["lsass"]),
+])
+def test_split_scope_reads_a_verdict_behind_a_list_number_or_a_label(reply, unrelated, terms):
     text, verdict = split_scope(reply)
     assert verdict is unrelated
-    assert "RELATED" not in text
+    assert parse_terms(text) == terms
+
+
+@pytest.mark.parametrize("reply, unrelated, terms", [
+    ("kerberos, tgt\nRelated - it is about Kerberos", False, ["kerberos", "tgt"]),
+    ("pasta, sauce\nUnrelated (cooking)", True, ["pasta", "sauce"]),
+    ("pasta, sauce\nUnrelated. The question is about cooking.", True, ["pasta", "sauce"]),
+    ("pasta, sauce\nUnrelated: a recipe question", True, ["pasta", "sauce"]),
+    ("pasta, sauce\nNot related; it is a recipe", True, ["pasta", "sauce"]),
+    ("pasta, sauce\nUnrelated — a recipe question", True, ["pasta", "sauce"]),
+    ("pasta, sauce\n2. Verdict: Unrelated (cooking)", True, ["pasta", "sauce"]),
+])
+def test_split_scope_reads_a_verdict_that_is_followed_by_its_explanation(reply, unrelated, terms):
+    """The explanation's words would otherwise be searched for."""
+    text, verdict = split_scope(reply)
+    assert verdict is unrelated
+    assert parse_terms(text) == terms
+
+
+@pytest.mark.parametrize("reply, terms", [
+    ("aes\nrelated-key attack", ["aes", "related-key attack"]),
+    ("dns\nunrelated domain", ["dns", "unrelated domain"]),
+    ("dns\nrelated.example.com lookup", ["dns", "related.example.com lookup"]),
+    ("dns\nrelated events, logon", ["dns", "related events", "logon"]),
+    # a line that lists terms is never dropped whole, whatever it opens with
+    ("dns\nRelated: zone transfer, axfr", ["dns", "Related: zone transfer", "axfr"]),
+    ("dns\nrelated – zone transfer, axfr", ["dns", "related – zone transfer", "axfr"]),
+    # the first line is the terms line: it is never dropped whole
+    ("Related - kerberos tgt delegation\nRELATED", ["Related - kerberos tgt delegation"]),
+])
+def test_split_scope_keeps_a_term_that_only_opens_with_the_word(reply, terms):
+    text, verdict = split_scope(reply)
+    assert verdict is False
+    assert parse_terms(text) == terms
 
 
 @pytest.mark.parametrize("reply", ["UNRELATED", "a, b\nUNRELATED", "a, UNRELATED"])
@@ -146,7 +201,7 @@ def test_split_scope_the_word_inside_a_term_in_lower_or_title_case_is_an_ordinar
     ("recipe, baking\n`unrelated`", True, ["recipe", "baking"]),
     ("related", False, []),
     ("unrelated", True, []),
-    ("Related, Unrelated", True, []),
+    ("Related, Unrelated", False, []),
 ])
 def test_split_scope_a_line_or_item_that_is_only_the_verdict_counts_in_any_case(reply, unrelated, terms):
     text, verdict = split_scope(reply)
@@ -167,7 +222,22 @@ def test_split_scope_the_request_copied_back_is_not_a_verdict():
     assert parse_terms(text) == ["4625", "logon"]
 
     second = echo[echo.index("Second line:"):]
-    assert split_scope("4625, logon\n" + second) == ("4625, logon\n ", False)
+    assert split_scope("4625, logon\n" + second) == ("4625, logon\n", False)
+
+
+@pytest.mark.parametrize("copied", [
+    SCOPE_REQUEST.strip().lower(),
+    SCOPE_REQUEST.strip().upper(),
+    SCOPE_REQUEST[SCOPE_REQUEST.index("RELATED if"):],                    # without its line label
+    SCOPE_REQUEST[SCOPE_REQUEST.index("RELATED if"):].replace(" or ", "\nor "),  # wrapped
+])
+@pytest.mark.parametrize("answer, unrelated", [("", False), ("\nRELATED", False), ("\nUNRELATED", True)])
+def test_split_scope_removes_the_request_copied_back_in_any_case_or_without_its_label(copied, answer, unrelated):
+    """Second review: the unlabelled copy read as UNRELATED and its words became search terms."""
+    text, verdict = split_scope("4625, logon\n" + copied + answer)
+
+    assert verdict is unrelated
+    assert parse_terms(text) == ["4625", "logon"]
 
 
 def test_split_scope_reads_a_long_reply_quickly():
