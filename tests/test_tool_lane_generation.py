@@ -26,6 +26,7 @@ from tests.support.tool_lane import (
     HF_ORNITH,
     HF_QWEN,
     SERVED,
+    UNKNOWN,
     clear_environment,
     write_policy,
 )
@@ -254,6 +255,46 @@ def test_a_bridged_rung_whose_served_model_is_ordinary_is_served(posts, monkeypa
                       served=ALLOWED)
     assert server._make_tier_generate("code", ALLOWED, "", 0.2, 64, 0)("hi") == "bridged answer"
     assert len(gateway.calls) == 1
+
+
+# ---- bridged rungs: the served model the reply reports -----------------------
+
+@pytest.mark.parametrize("reported", ["astra-cyber-9b", "Astra-Cyber-27B:latest", "acme/astra-cyber-27b", HF_ORNITH])
+def test_a_reply_reporting_a_denied_served_model_is_refused(posts, monkeypatch, reported):
+    gateway = bridged(monkeypatch, "sonder-inference", {"SONDER_INFERENCE_TIER_MODELS": "code=" + ALLOWED},
+                      served=reported)
+    gen = server._make_tier_generate("code", ALLOWED, "", 0.2, 64, 0)
+    assert refused(lambda: gen("hi")) == SERVED % ("code", "sonder_inference", reported)
+    assert len(gateway.calls) == 1  # judged after the provider answered; the reply is dropped
+
+
+@pytest.mark.parametrize("reported", ["", "default", "code", "sonder"])
+def test_a_reply_that_names_no_model_is_refused(posts, monkeypatch, reported):
+    gateway = bridged(monkeypatch, "openai_compatible", {}, served=reported)
+    gen = server._make_tier_generate("code", ALLOWED, "", 0.2, 64, 0)
+    assert refused(lambda: gen("hi")) == UNKNOWN % ("code", "openai_compatible")
+    assert len(gateway.calls) == 1  # nothing named before sending, so the reply decides
+
+
+def test_a_text_only_bridged_call_answers_whatever_the_reply_reports(posts, monkeypatch):
+    gateway = bridged(monkeypatch, "openai_compatible", {}, served="astra-cyber-9b")
+    assert server._make_tier_generate("code", ALLOWED, "", 0.2, 64, 0, text_only=True)("hi") == "bridged answer"
+    assert len(gateway.calls) == 1
+
+
+def test_a_reply_reporting_an_ordinary_served_model_is_returned(posts, monkeypatch):
+    gateway = bridged(monkeypatch, "openai_compatible", {}, served="vendor/ordinary-7b")
+    assert server._make_tier_generate("code", ALLOWED, "", 0.2, 64, 0)("hi") == "bridged answer"
+    assert len(gateway.calls) == 1
+
+
+def test_require_served_unit():
+    rung = SimpleNamespace(provider="sonder_inference", tier="code")
+    guard.require_served(rung, "ordinary:8b")
+    guard.require_served(rung, DENIED, text_only=True)
+    for reported in (DENIED, "", "default", "general", None):
+        with pytest.raises(server.ModelCallError):
+            guard.require_served(rung, reported)
 
 
 # ---- ordinary models: nothing changes ------------------------------------------

@@ -5204,7 +5204,7 @@ def _chat_request(
             )
         return _legacy_chat_bridge.chat_request(
             _application().model_gateway, payload, bridged_rung,
-            context=_bridge_operation_context(timeout, cancel_check),
+            context=_bridge_operation_context(timeout, cancel_check), text_only=text_only,
         )
     if reasoning_continuation:
         options = payload.get("options") if isinstance(payload, dict) else None

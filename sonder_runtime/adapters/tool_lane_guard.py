@@ -145,6 +145,38 @@ def require_generation(
         raise _generation_refused(_models.served_refusal_message(tier, provider, verdict))
 
 
+def require_served(
+    rung: Any,
+    reported: Any,
+    *,
+    text_only: bool = False,
+    policy: Mapping[str, Any] | None = None,
+) -> None:
+    """Refuse a bridged reply whose provider reports a denied or unnamed model.
+
+    The other half of ``require_generation`` for a bridged rung: after the
+    provider answers, the model it says it served (``ModelResponse.model``)
+    is judged unless the caller declared the call text-only.  An empty or
+    ``default`` id, or one that only echoes a tier or the default route back
+    (what the OpenAI-compatible transport reports when no model is
+    configured), names no model and is refused.  Raises the same 403
+    ``ModelCallError`` as ``require_generation``; the reply is discarded.
+    """
+    if text_only:
+        return
+    from sonder_runtime.adapters.provider_bindings import PROVIDER_TIERS
+
+    provider = str(getattr(rung, "provider", "") or "")
+    tier = str(getattr(rung, "tier", "") or "").strip().lower()
+    raw = str(reported if reported is not None else "").strip()
+    if raw.lower() in PROVIDER_TIERS or raw.lower() in _DEFAULT_ROUTE:
+        verdict = _models.ModelLaneDecision(_models.ModelLaneStatus.SERVED_UNKNOWN, raw)
+    else:
+        verdict = _models.decide_served(raw, generation_deny_list(policy))
+    if verdict.denied:
+        raise _generation_refused(_models.served_refusal_message(tier, provider, verdict))
+
+
 def decision(
     model: Any, policy: Mapping[str, Any] | None = None, *, free_form: bool,
 ) -> _models.ModelLaneDecision:
