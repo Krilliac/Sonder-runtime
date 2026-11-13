@@ -441,7 +441,7 @@ def default_model_fn(temperature: float = 0.2) -> Callable[[str], str]:
     import server  # local import: no model/network needed to import this module
 
     model = server.resolve_sonder_model(False)
-    gen = server._make_generate(model, "", temperature, 1024, 4096)
+    gen = server._make_generate(model, "", temperature, 1024, 4096, text_only=True)
 
     def _model_fn(prompt: str) -> str:
         return gen(prompt)

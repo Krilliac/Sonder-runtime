@@ -21,6 +21,7 @@ from ...application.build.fix_ports import ResidencyRefused
 from ...application.context import OperationContext
 from ...application.ports.model_gateway import ModelRequest, require_model_text
 from ...domain.build.repair import CandidatePatch, RepairEvidence, parse_candidate_patch, repair_prompt
+from ...domain.common.errors import Forbidden
 from ...domain.model_routing import is_cloud_model_name
 
 DEFAULT_ROUTE = "codegen"
@@ -80,6 +81,8 @@ class ModelCandidateGenerator:
         if resolve is not None:
             try:
                 route = resolve(ModelRequest("Classify build-fix route residency.", tier=tier), context)
+            except Forbidden as exc:  # a refused route (e.g. a model blocked from tool lanes)
+                raise ResidencyRefused(str(exc)) from None
             except Exception as exc:  # noqa: BLE001 - unclassifiable routes fail closed
                 raise ResidencyRefused("the candidate route could not be classified (%s)"
                                        % type(exc).__name__) from None

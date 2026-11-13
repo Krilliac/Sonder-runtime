@@ -683,7 +683,7 @@ def build_application(
         raise InvalidInput(str(exc)) from exc
     logger.info(f"provider bindings resolved, provider={provider_bindings.default_generation_provider!r}")
     logger.debug("building model gateway")
-    gateway = build_model_gateway(
+    raw_gateway = build_model_gateway(
         provider_bindings,
         target_resolver=target_resolver,
         generate_factory=generate_factory,
@@ -691,6 +691,19 @@ def build_application(
         fallback_observer=_report_provider_fallback,
     )
     logger.info("model gateway built")
+    # ``gateway`` is the checked handle every consumer gets by default: it
+    # refuses a tool-lane-denied model before the request reaches the shared
+    # gateway.  Only the named text consumers below (Application.model_gateway,
+    # which serves chat, A2A, offloads and replay, and ChatService) are handed
+    # ``raw_gateway``; tests/support/generation_call_sites.py counts its uses.
+    # ChatService holds it through ServedTierGateway (a blocked model never
+    # serves a tier); the legacy bridge, Application.model_gateway's
+    # generating consumer, applies the same rule itself (legacy_chat_bridge).
+    from ..adapters.tool_lane_gateway import ServedTierGateway, ToolLaneGateway
+
+    gateway = ToolLaneGateway(
+        raw_gateway, resolve_target=target_resolver, bindings=provider_bindings,
+    )
     logger.debug("composing vision service and context planning facade")
     vision = VisionService(
         FileVisionInputProvider(),
@@ -1995,7 +2008,7 @@ def build_application(
     build_tools = _compose_build_tools(
         config, runtime_redactor, developer_tools, get_job_registry, get_process_job_provider,
         build_grants, tools_getter=lambda: typed_tools_ref.get("tools"),
-        model_gateway_getter=lambda: gateway,
+        model_gateway_getter=lambda: gateway,  # build_fix applies model patches
         # Every fix edit is a ``build-fix`` effect in the worker effect
         # journal, under this host's worker identity and owner epoch.
         effect_binding_factory=lambda run_id, scope: worker_binding(
@@ -2039,14 +2052,14 @@ def build_application(
         profile=profile,
         runtime_policy=RuntimePolicyService(RuntimePolicyRepository()),
         provider_bindings=provider_bindings,
-        model_gateway=gateway,
+        model_gateway=raw_gateway,  # text consumers only (see above)
         provider_registry=provider_registry,
         provider_overrides=ProviderOverrideService(
             ProviderOverridePolicy({item.provider_id: item.provider_id for item in provider_registry.providers()})
         ),
         specialized_providers=specialized_bundle,
         chat=ChatService(
-            gateway,
+            ServedTierGateway(raw_gateway, bindings=provider_bindings),
             session_capture_service,
             chat_default_tier=lambda: target_resolver("sonder", None).tier_label or "sonder",
             strict_alias_provider_available="ollama" in provider_bindings.required_providers,

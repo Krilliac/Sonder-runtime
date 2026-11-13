@@ -16,6 +16,13 @@ from __future__ import annotations
 import re
 
 from ..openrouter_policy import OpenRouterPolicyError, validate_model_id
+from ..tool_lane_models import (
+    DEFAULT_DENIED_NAMES,
+    DEFAULT_DENIED_PREFIXES,
+    ToolLaneDenyList,
+    decide,
+    normalize_name,
+)
 
 VERSION = 1
 # Tiers that are always bound to a model. These are the router's fallback
@@ -142,7 +149,11 @@ def seed_model(env, tier: str) -> str:
     if is_reserved_personal_alias(configured):
         configured = ""
     if configured and not is_cloud_name(configured):
-        return validate_model(configured, DEFAULT_MODELS[tier])
+        model = validate_model(configured, DEFAULT_MODELS[tier])
+        # A model blocked from tool lanes is never seeded into a tier.
+        if decide(model, ToolLaneDenyList.from_policy(None), free_form=False).denied:
+            return DEFAULT_MODELS[tier]
+        return model
     return DEFAULT_MODELS[tier]
 
 
@@ -152,6 +163,14 @@ def seed_embedding_model(env) -> str:
     if configured and not is_cloud_name(configured):
         return validate_model(configured, DEFAULT_EMBEDDING_MODEL)
     return DEFAULT_EMBEDDING_MODEL
+
+
+def default_tool_lane_denied_models() -> dict:
+    """The built-in tool-lane deny list in policy-section shape."""
+    return {
+        "names": sorted(DEFAULT_DENIED_NAMES),
+        "prefixes": list(DEFAULT_DENIED_PREFIXES),
+    }
 
 
 def default_policy(env) -> dict:
@@ -165,6 +184,7 @@ def default_policy(env) -> dict:
         "npu": dict(DEFAULT_NPU),
         "long_context_overflow": dict(DEFAULT_LONG_CONTEXT_OVERFLOW),
         "provider_models": {},
+        "tool_lane_denied_models": default_tool_lane_denied_models(),
         "updated_ts": 0,
         "source": "environment seed",
     }
@@ -343,6 +363,75 @@ def normalize_provider_models(raw) -> dict:
     return result
 
 
+def normalize_tool_lane_denied_models(raw) -> dict:
+    """Validate ``tool_lane_denied_models``: ``{"names": [...], "prefixes": [...]}``.
+
+    Entries must look like model names.  The built-in defaults are always
+    present in the result, so the section can add entries but never remove one.
+    """
+    if raw in (None, ""):
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ValueError("runtime policy tool_lane_denied_models must be an object")
+    unknown = set(raw) - {"names", "prefixes"}
+    if unknown:
+        raise ValueError(
+            "unknown tool_lane_denied_models key(s): %s" % ", ".join(sorted(unknown))
+        )
+    cleaned = {}
+    for key in ("names", "prefixes"):
+        values = raw.get(key)
+        if values in (None, ""):
+            values = []
+        if isinstance(values, (str, bytes)) or not isinstance(values, (list, tuple)):
+            raise ValueError("runtime policy tool_lane_denied_models.%s must be a list" % key)
+        entries = []
+        for value in values:
+            text = str(value if value is not None else "").strip()
+            if not isinstance(value, str) or not _MODEL_RE.fullmatch(text):
+                raise ValueError(
+                    "invalid tool_lane_denied_models.%s entry %r" % (key, value)
+                )
+            entries.append(normalize_name(text))
+        cleaned[key] = entries
+    deny = ToolLaneDenyList.from_policy(cleaned)
+    return {
+        "names": sorted(deny.names),
+        "prefixes": list(deny.prefixes),
+    }
+
+
+def tool_lane_deny_list(policy) -> ToolLaneDenyList:
+    """The deny list in force for a loaded policy (defaults always included).
+
+    A policy that loaded with an ``error`` fell back to built-in defaults, so
+    the list is marked unreadable and caller-named models fail closed.
+    """
+    if not isinstance(policy, dict):
+        return ToolLaneDenyList.from_policy(None, readable=False)
+    readable = not str(policy.get("error") or "").strip()
+    return ToolLaneDenyList.from_policy(
+        policy.get("tool_lane_denied_models"), readable=readable,
+    )
+
+
+def denied_local_bindings(local_models, deny: ToolLaneDenyList) -> list:
+    """``(tier, model)`` for each tier binding that names a model on ``deny``."""
+    return [
+        (tier, model) for tier, model in (local_models or {}).items()
+        if decide(model, deny, free_form=False).denied
+    ]
+
+
+def tool_lane_binding_notice(tier, model) -> str:
+    """Why one tier binding was not honoured; shown by the policy status."""
+    return (
+        "local_models.%s names %r, which is blocked from tool-using lanes; "
+        "that tier uses its default instead (the rest of the file applies)"
+        % (tier, model)
+    )
+
+
 def normalize(payload, defaults=None) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("runtime policy must be a JSON object")
@@ -363,6 +452,15 @@ def normalize(payload, defaults=None) -> dict:
         )
         for tier in LOCAL_TIERS
     }
+    tool_lane_denied = normalize_tool_lane_denied_models(
+        payload.get("tool_lane_denied_models")
+    )
+    # A blocked model in one tier binding drops that binding only (the tier
+    # keeps its default); an upgrade must not invalidate an otherwise good
+    # file.  A malformed deny section above still invalidates it.
+    dropped = denied_local_bindings(local_models, ToolLaneDenyList.from_policy(tool_lane_denied))
+    for tier, _model in dropped:
+        local_models[tier] = base["local_models"].get(tier, DEFAULT_MODELS[tier])
     embedding_model = validate_model(
         payload.get("embedding_model"),
         base.get("embedding_model", DEFAULT_EMBEDDING_MODEL),
@@ -390,8 +488,10 @@ def normalize(payload, defaults=None) -> dict:
             payload.get("long_context_overflow"), base.get("long_context_overflow"),
         ),
         "provider_models": normalize_provider_models(payload.get("provider_models")),
+        "tool_lane_denied_models": tool_lane_denied,
         "updated_ts": max(0, int(payload.get("updated_ts") or 0)),
         "source": str(payload.get("source") or "runtime policy")[:120],
+        **({"tool_lane_notices": [tool_lane_binding_notice(*item) for item in dropped]} if dropped else {}),
     }
 
 
@@ -433,4 +533,8 @@ def disk_payload(policy: dict) -> dict:
     # policy file that never used it keeps its existing shape.
     if policy.get("provider_models"):
         payload["provider_models"] = policy["provider_models"]
+    # Written only when it adds to the built-in defaults.
+    section = policy.get("tool_lane_denied_models")
+    if section and section != default_tool_lane_denied_models():
+        payload["tool_lane_denied_models"] = section
     return payload

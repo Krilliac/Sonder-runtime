@@ -1298,7 +1298,7 @@ def test_kimi_k3_extra_usage_402_falls_back_once(monkeypatch):
 
     def fake_chat(
         payload, *, model, cloud, timeout=None, cancel_check=None,
-        accept_native_tool_calls=False, idempotent=False,
+        accept_native_tool_calls=False, idempotent=False, **_kwargs,
     ):
         calls.append((model, payload.get("think"), idempotent))
         if model == "kimi-k3:cloud":
@@ -1334,7 +1334,7 @@ def test_kimi_k3_extra_usage_402_does_not_fallback_when_explicitly_disabled(monk
 
     def fake_chat(
         payload, *, model, cloud, timeout=None, cancel_check=None,
-        accept_native_tool_calls=False, idempotent=False,
+        accept_native_tool_calls=False, idempotent=False, **_kwargs,
     ):
         calls.append((model, idempotent))
         raise server.ModelCallError(
@@ -1357,7 +1357,7 @@ def test_kimi_k3_agent_fallback_preserves_compact_native_tool_flags(monkeypatch)
 
     def fake_chat(
         payload, *, model, cloud, timeout=None, cancel_check=None,
-        accept_native_tool_calls=False, idempotent=False,
+        accept_native_tool_calls=False, idempotent=False, **_kwargs,
     ):
         calls.append((
             model, payload.get("think"), accept_native_tool_calls, idempotent,
@@ -1398,7 +1398,7 @@ def test_kimi_k3_non_402_failure_never_falls_back(monkeypatch, status):
 
     def fake_chat(
         payload, *, model, cloud, timeout=None, cancel_check=None,
-        accept_native_tool_calls=False, idempotent=False,
+        accept_native_tool_calls=False, idempotent=False, **_kwargs,
     ):
         calls.append((model, idempotent))
         raise server.ModelCallError("http", "rejected", status=status, cloud=True)

@@ -197,9 +197,7 @@ def plan(
         if tier == "":
             rung = start
         else:
-            if tier == "vision" and not has_image:
-                continue
-            if tier != prerouted_tier and _STRENGTH.get(tier, _WORKING_STRENGTH) < floor:
+            if not _may_be_rung(tier, floor, has_image=has_image, prerouted=tier == prerouted_tier):
                 continue
             rung = resolve(tier)
             if rung is None or rung.cloud:
@@ -216,6 +214,42 @@ def plan(
         task=route.task, confidence=route.confidence, rungs=tuple(rungs),
         prerouted=prerouted_tier is not None,
     )
+
+
+def _may_be_rung(tier: str, floor: int, *, has_image: bool, prerouted: bool) -> bool:
+    """The plan's own filter for a ladder tier: vision needs an image, and only
+    a prerouted specialist may sit below the start's strength ``floor``."""
+    if tier == "vision" and not has_image:
+        return False
+    return prerouted or _STRENGTH.get(tier, _WORKING_STRENGTH) >= floor
+
+
+def reachable_tiers(
+    start_tier: str, available: Iterable[str], *, has_image: bool = False, escalate: bool = True,
+) -> tuple[str, ...]:
+    """Every tier :func:`plan` can make a rung of from ``start_tier``, for any prompt.
+
+    The prompt picks the ladder's order, a prerouted specialist and how far
+    the budget reaches; this is the union over prompts, decided by the
+    plan's own filter (:func:`_may_be_rung`): the start, then each tier in
+    ``available`` that filter admits, an optional tier counted as a possible
+    prerouted specialist.  With ``escalate`` off the plan is the start alone.
+    The resolver's own exclusions (an unbound or cloud tier, a tier on the
+    start's model) are the caller's to apply.
+    """
+    start = str(start_tier or "").strip().lower()
+    if not escalate:
+        return (start,)
+    floor = _STRENGTH.get(start, _WORKING_STRENGTH)
+    found = [start]
+    for tier in available:
+        tier = str(tier or "").strip().lower()
+        if not tier or tier in found:
+            continue
+        prerouted = tier in policy_rules.OPTIONAL_LOCAL_TIERS
+        if _may_be_rung(tier, floor, has_image=has_image, prerouted=prerouted):
+            found.append(tier)
+    return tuple(found)
 
 
 def _same_model(left: Rung, right: Rung) -> bool:

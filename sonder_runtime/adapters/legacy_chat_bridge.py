@@ -168,8 +168,18 @@ def _provider_display_url(gateway: object, provider: str) -> str:
     return "(endpoint unavailable)"
 
 
-def chat_request(gateway: object, payload: dict, rung, *, context: OperationContext):
-    """Serve one local chat step through the gateway for a non-Ollama rung."""
+def chat_request(
+    gateway: object, payload: dict, rung, *, context: OperationContext, text_only: bool = False,
+):
+    """Serve one local chat step through the gateway for a non-Ollama rung.
+
+    The model the provider reports it served is judged against the tool-lane
+    deny list before the reply is returned (``tool_lane_guard.require_served``)
+    on every call, text-only or not: a blocked model never serves a tier.  A
+    text-only call keeps a reply that names no model.
+    """
+    from sonder_runtime.adapters.tool_lane_guard import require_served
+
     try:
         out, response = provider_bridge.generate_via_gateway(
             gateway, payload, tier=rung.tier, context=context,
@@ -183,6 +193,7 @@ def chat_request(gateway: object, payload: dict, rung, *, context: OperationCont
         error.provider = rung.provider
         error.provider_display_url = _provider_display_url(gateway, rung.provider)
         raise error from exc
+    require_served(rung, response.model, text_only=text_only)
     return out, response.text
 
 

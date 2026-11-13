@@ -58,3 +58,41 @@ def merge_reasoning_response_usage(first, later, *, segments: int) -> dict:
         merged["thinking_chars"] = thinking_chars
     merged["reasoning_segments"] = max(1, int(segments))
     return merged
+
+
+# Bounded, non-content inference fields a response may carry into metadata.
+_RESPONSE_METADATA_KEYS = (
+    "total_duration", "load_duration",
+    "prompt_eval_count", "prompt_eval_cached_count",
+    "prompt_eval_duration",
+    "eval_count", "eval_duration",
+    "load_state", "cold_start",
+    "reasoning_segments", "finish_reason",
+)
+
+
+def response_metadata(out) -> dict:
+    """The backend's bounded, non-content inference metadata for one response.
+
+    Gateways can expose measured phase timing without retaining prompts,
+    responses, or arbitrary provider fields.  ``thinking_chars`` is a positive
+    scalar only (the historical empty-metadata contract is preserved), so
+    fanout can explain output budgets without retaining private reasoning
+    text; an aggregated multi-segment response reports its own total.
+    """
+    message = out.get("message")
+    thinking = message.get("thinking", "") if isinstance(message, dict) else ""
+    aggregate_thinking_chars = (
+        usage_count(out.get("thinking_chars"))
+        if "reasoning_segments" in out else None
+    )
+    thinking_chars = (
+        aggregate_thinking_chars
+        if aggregate_thinking_chars is not None
+        else len(thinking) if isinstance(thinking, str) else 0
+    )
+    return {
+        "done_reason": str(out.get("done_reason") or "").strip().casefold(),
+        **{key: out.get(key) for key in _RESPONSE_METADATA_KEYS if key in out},
+        **({"thinking_chars": thinking_chars} if thinking_chars > 0 else {}),
+    }

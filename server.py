@@ -96,6 +96,7 @@ from sonder_runtime.platform.deployment_auth import (
 from sonder_runtime.domain.model_usage import usage_count as _model_usage_count
 from sonder_runtime.domain.model_usage import (
     merge_reasoning_response_usage as _merge_reasoning_response_usage,
+    response_metadata as _response_metadata,
 )
 from sonder_runtime.domain.memory.fact_validity import (
     fact_write_inputs as _surface_fact_metadata,
@@ -163,6 +164,7 @@ from sonder_runtime.application.ports.work_narration import route_reason as _nar
 import creative_router
 import intents
 import sonder_runtime.adapters.runtime_policy as runtime_policy
+from sonder_runtime.adapters import tool_lane_guard as _tool_lane_guard
 import sonder_runtime.adapters.accelerators.npu.contract as npu_contract
 import sonder_runtime.adapters.accelerators.npu.service as npu_service
 import calibration
@@ -666,7 +668,7 @@ def _context_native(value=None):
     return _platform_native_context(value, default_value=SESSION_NUM_CTX)
 
 
-TIERS = _RUNTIME_MODEL_CONFIGURATION.tier_map()
+TIERS = _tool_lane_guard.seed_bindings(_RUNTIME_MODEL_CONFIGURATION.tier_map())
 # Tiers whose ":...-cloud" model runs on Ollama's servers (data leaves the machine).
 CLOUD_TIERS = set(_RUNTIME_MODEL_CONFIGURATION.cloud_tiers)
 LOCAL_TIERS = tuple(k for k in TIERS if k not in CLOUD_TIERS)
@@ -926,7 +928,7 @@ def _cloud_extra_usage_fallback(model, error):
 def _chat_request_with_cloud_fallback(
     payload, *, model, timeout=None, cancel_check=None,
     accept_native_tool_calls=False, compact_cloud_reasoning=False,
-    allow_cloud_fallback=True,
+    allow_cloud_fallback=True, text_only=False,
 ):
     """Make one cloud request, optionally falling back once on K3 HTTP 402."""
     return _chat_request_with_cloud_fallback_policy(
@@ -934,7 +936,7 @@ def _chat_request_with_cloud_fallback(
         accept_native_tool_calls=accept_native_tool_calls,
         compact_cloud_reasoning=compact_cloud_reasoning,
         allow_cloud_fallback=allow_cloud_fallback,
-        chat_request=_chat_request,
+        chat_request=functools.partial(_chat_request, text_only=text_only),
         apply_thinking_policy=_apply_cloud_thinking_policy,
         fallback_model=CLOUD_EXTRA_USAGE_FALLBACK_MODEL,
     )
@@ -952,16 +954,7 @@ def _refresh_runtime_policy(create=True):
     global _RUNTIME_POLICY
     policy = runtime_policy.load(create=create)
     prior_embedding = str(_RUNTIME_POLICY.get("embedding_model") or "").strip()
-    for tier in runtime_policy.LOCAL_TIERS:
-        model = str(policy["local_models"].get(tier) or "").strip()
-        if model:
-            TIERS[tier] = model
-        else:
-            # An optional tier the operator left unset must not be offered at
-            # all: dropping it keeps `_serve_target`, `available_tiers()` and
-            # `/v1/models` honest, and the capability router sees it as
-            # unavailable and degrades to a base tier.
-            TIERS.pop(tier, None)
+    _tool_lane_guard.bind_local_tiers(TIERS, policy)  # unset tiers dropped, blocked models never bound
     # Embeddings intentionally live outside ``TIERS`` so an embedding-only
     # model can never become a chat target. Only an actual policy transition
     # reconfigures the process binding: a routine status/live-reload refresh
@@ -976,10 +969,7 @@ def _refresh_runtime_policy(create=True):
 
 def _configured_local_tiers():
     """Local tiers the shared policy currently binds to a model."""
-    bound = runtime_policy.bound_tiers(
-        _RUNTIME_POLICY or _refresh_runtime_policy(create=True)
-    )
-    return tuple(tier for tier in bound if tier in TIERS)
+    return runtime_policy.configured_tiers(_RUNTIME_POLICY or _refresh_runtime_policy(create=True), TIERS)
 
 
 _refresh_runtime_policy(create=True)
@@ -1041,6 +1031,8 @@ def _gate_answer_code(response, *, iid, prompt, history, model, system,
     persist a verified repair or, when the code still fails, step to the
     next rung.
     """
+    if _tool_lane_guard.denied(model, tier_label, _RUNTIME_POLICY):  # never auto-run; a user's /run or /runproject is their explicit approval
+        return response, None, False, {}  # a blocked model's reply is never run or repaired
     captured = response
     usage = {}
 
@@ -1790,7 +1782,7 @@ def _make_generate(
     cancel_check=None, accept_native_tool_calls=False,
     compact_cloud_reasoning=False, schema=None, allow_cloud_fallback=True,
     think=None, reasoning_continuation=False, reasoning_total_tokens=None,
-    single_send=False,
+    single_send=False, text_only=False,
 ):
     """Build a generate(prompt, history) closure for `model`.
 
@@ -1888,7 +1880,7 @@ def _make_generate(
                     cancel_check=cancel_check,
                     accept_native_tool_calls=accept_native_tool_calls,
                     compact_cloud_reasoning=compact_cloud_reasoning,
-                    allow_cloud_fallback=allow_cloud_fallback,
+                    allow_cloud_fallback=allow_cloud_fallback, text_only=text_only,
                 )
             else:
                 local_chat_options = {}
@@ -1906,7 +1898,7 @@ def _make_generate(
                     accept_native_tool_calls=accept_native_tool_calls,
                     idempotent=not single_send,
                     local_only=single_send,
-                    single_send=single_send,
+                    single_send=single_send, text_only=text_only,
                     **local_chat_options,
                 )
                 if (
@@ -1928,38 +1920,7 @@ def _make_generate(
                 "token_source": source,
             }
             gen.last_usage = dict(usage)
-            # Keep only the backend's bounded, non-content inference metadata.
-            # Gateways can expose measured phase timing without retaining prompts,
-            # responses, or arbitrary provider fields.
-            thinking = out.get("message", {}).get("thinking", "") if isinstance(out.get("message"), dict) else ""
-            aggregate_thinking_chars = (
-                _model_usage_count(out.get("thinking_chars"))
-                if "reasoning_segments" in out else None
-            )
-            thinking_chars = (
-                aggregate_thinking_chars
-                if aggregate_thinking_chars is not None
-                else len(thinking) if isinstance(thinking, str) else 0
-            )
-            response_metadata = {
-                "done_reason": str(out.get("done_reason") or "").strip().casefold(),
-                **{
-                    key: out.get(key)
-                    for key in (
-                        "total_duration", "load_duration",
-                        "prompt_eval_count", "prompt_eval_cached_count",
-                        "prompt_eval_duration",
-                        "eval_count", "eval_duration",
-                        "load_state", "cold_start",
-                        "reasoning_segments", "finish_reason",
-                    )
-                    if key in out
-                },
-                # Preserve the historical empty-metadata contract.  A positive
-                # scalar lets fanout explain output budgets without retaining
-                # private reasoning text.
-                **({"thinking_chars": thinking_chars} if thinking_chars > 0 else {}),
-            }
+            response_metadata = _response_metadata(out)  # bounded, non-content fields only
             gen.last_response_meta = response_metadata
             if (metadata_local := getattr(gen, "_response_metadata_local", None)) is not None:
                 metadata_local.value = response_metadata
@@ -2004,12 +1965,12 @@ def _make_tier_generate(tier, *args, **kwargs):
 
 
 def _generate_text(prompt, tier="fast", system="", temperature=0.2,
-                   num_predict=256, num_ctx=0, timeout=None):
+                   num_predict=256, num_ctx=0, timeout=None, text_only=False):
     _refresh_live_cloud_tiers()
     model = TIERS.get(tier, TIERS["fast"])
     return _make_tier_generate(
         tier if tier in TIERS else "fast", model, system, temperature, num_predict,
-        num_ctx, timeout=timeout,
+        num_ctx, timeout=timeout, text_only=text_only,
     )(prompt)
 
 
@@ -2350,7 +2311,7 @@ def _internal_generate_for_route(model, cloud):
     of silently loading a local model between cloud calls.
     """
     if not cloud:
-        return _generate_text
+        return functools.partial(_generate_text, text_only=True)
     if not str(model or "").strip():
         raise ModelCallError(
             "configuration",
@@ -2366,7 +2327,7 @@ def _internal_generate_for_route(model, cloud):
         generate.last_usage = {}
         gen = _make_generate(
             model, system, temperature, num_predict, num_ctx,
-            cloud=True, timeout=timeout,
+            cloud=True, timeout=timeout, text_only=True,
         )
         response = gen(prompt)
         generate.last_usage = dict(getattr(gen, "last_usage", None) or {})
@@ -2513,7 +2474,7 @@ def _build_system(system, trace, persona, model="", cloud=False, provider=None):
     )
 
 
-def _serve_target(tier, strict):
+def _serve_target(tier, strict, *, chat_only=False):
     """Resolve a serve/app request's OpenAI `model` field to a concrete target.
 
     Returns (model, cloud, augment, tier_label):
@@ -2566,10 +2527,10 @@ def _serve_target(tier, strict):
         cloud = _is_cloud_model_name(model)
         if cloud and not _cloud_allowed_policy(os.environ):
             return None, True, False, "cloud-disabled"
+        if not chat_only and _tool_lane_guard.denied(model, "model:", _RUNTIME_POLICY):
+            return None, False, False, "tool-lane-denied"  # chat by name only
         return model, cloud, False, "model:%s" % model
     return None, False, True, None
-
-
 
 
 def _latest_runnable_block(history):
@@ -4153,7 +4114,7 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
     )
     gen = _make_generate(
         model, effective_system, temperature, num_predict, num_ctx,
-        cloud=cloud, allow_cloud_fallback=allow_cloud_fallback,
+        cloud=cloud, allow_cloud_fallback=allow_cloud_fallback, text_only=True,
     )
     qv = embeddings.embed(prompt)
     if not embeddings.valid_vector(qv):
@@ -5213,6 +5174,7 @@ def _chat_request(
     _reasoning_segments: int = 0,
     _reasoning_checkpoint: str = "",
     _reasoning_deadline: float | None = None,
+    text_only: bool = False,
 ) -> tuple[dict, str]:
     if not isinstance(reasoning_continuation, bool):
         raise ValueError("reasoning_continuation must be a boolean")
@@ -5221,6 +5183,7 @@ def _chat_request(
     if cloud and reasoning_continuation:
         raise ValueError("reasoning continuation is available only for local models")
     bridged_rung = None if cloud else _provider_bridge.active_rung()
+    _tool_lane_guard.require_generation(model, rung=bridged_rung, text_only=text_only, payload=payload)  # deny list unless text-only
     rerouted = None if bridged_rung is None else _legacy_chat_bridge.ollama_only_reroute(  # a step Inference cannot carry
         _application().model_gateway, payload, bridged_rung, model=model, graph=_APP_GRAPH,
         loopback_endpoint=ollama_endpoint.is_loopback(BASE), context_probe=lambda: _auto_model_context(model))
@@ -5238,7 +5201,7 @@ def _chat_request(
             )
         return _legacy_chat_bridge.chat_request(
             _application().model_gateway, payload, bridged_rung,
-            context=_bridge_operation_context(timeout, cancel_check),
+            context=_bridge_operation_context(timeout, cancel_check), text_only=text_only,
         )
     if reasoning_continuation:
         options = payload.get("options") if isinstance(payload, dict) else None
@@ -5396,7 +5359,7 @@ def _chat_request(
                         _reasoning_spent=spent,
                         _reasoning_segments=completed_segments,
                         _reasoning_checkpoint=checkpoint,
-                        _reasoning_deadline=_reasoning_deadline,
+                        _reasoning_deadline=_reasoning_deadline, text_only=text_only,
                     )
                 except ModelCallError as error:
                     _preserve_reasoning_failure_usage(
@@ -5434,7 +5397,7 @@ def _chat_request(
                 accept_native_tool_calls=accept_native_tool_calls,
                 idempotent=idempotent,
                 local_only=local_only,
-                _budget_retried=True,
+                _budget_retried=True, text_only=text_only,
             )
         if (
             not cloud
@@ -5455,7 +5418,7 @@ def _chat_request(
                 accept_native_tool_calls=accept_native_tool_calls,
                 idempotent=idempotent,
                 local_only=local_only,
-                _budget_retried=True,
+                _budget_retried=True, text_only=text_only,
             )
         raise ModelCallError(
             "empty_response",
@@ -5534,7 +5497,7 @@ def prewarm_model(tier: str = "") -> bool:
     if not sonder_speculation.prewarm_enabled():
         return False
     try:
-        model, cloud, _augment, tier_label = _serve_target(tier or "sonder", None)
+        model, cloud, _augment, tier_label = _tool_lane_guard.chat_target(_serve_target, tier or "sonder", None)
     except Exception:
         return False
     if cloud or not model or tier_label in (None, "cloud-disabled"):
@@ -5865,12 +5828,12 @@ def _offload_tier_impl(
                     payload,
                     model=model,
                     timeout=request_timeout,
-                    cancel_check=cancel_check,
+                    cancel_check=cancel_check, text_only=True,
                 )
             else:  # a bridged tier must reach its provider, not Ollama with num_ctx=0
                 with _provider_bridge.bind_rung(provider, tier) if provider is not None else contextlib.nullcontext():
                     out, msg = _chat_request(payload, model=model, cloud=False, timeout=request_timeout,
-                                             cancel_check=cancel_check, idempotent=True)
+                                             cancel_check=cancel_check, idempotent=True, text_only=True)
             if provider is not None:
                 used_model = out.get("model") or model
             tokens_in = _model_usage_count(out.get("prompt_eval_count"))
@@ -5943,7 +5906,7 @@ def _offload_tier_impl(
             cloud=True,
             timeout=request_timeout,
             cancel_check=cancel_check,
-            schema=schema, queue=False,
+            schema=schema, queue=False, text_only=True,
         )
         retrieve_kwargs["retrieve_fn"] = _no_retrieve_policy
     else:
@@ -5957,7 +5920,7 @@ def _offload_tier_impl(
             num_ctx,
             timeout=request_timeout,
             cancel_check=cancel_check,
-            schema=schema, queue=False,
+            schema=schema, queue=False, text_only=True,
         )
     if capture_session is not None:
         gen = wrap_model_generator(
@@ -6640,7 +6603,7 @@ def _sonder_impl_serialized(
         web_reply = _route_chat_web(prompt, session, project, location_consent)
         if web_reply is not None:
             return _append_activity(web_reply)
-    tgt_model, cloud, augment, tier_label = _serve_target(tier, strict)
+    tgt_model, cloud, augment, tier_label = _tool_lane_guard.chat_target(_serve_target, tier, strict)
     if tier_label == "cloud-disabled":
         return _cloud_disabled_message()
     if tier_label is None:
@@ -7035,7 +6998,7 @@ def _answer_with_history_impl(
         )
         if command is not None:
             return _append_activity(command)
-    model, cloud, model_augment, tier_label = _serve_target(tier, strict)
+    model, cloud, model_augment, tier_label = _tool_lane_guard.chat_target(_serve_target, tier, strict)
     if tier_label == "cloud-disabled":
         return _cloud_disabled_message()
     if tier_label is None:
@@ -7182,7 +7145,7 @@ def _answer_with_history_impl(
                     if response is None:
                         gen = _make_generate(
                             model, effective_system, temperature, 1024, req_ctx,
-                            cloud=cloud,
+                            cloud=cloud, text_only=True,
                             allow_cloud_fallback=_allow_cloud_fallback_for_target(tier_label),
                         )
                         response = gen(prompt, history or None)
@@ -7366,7 +7329,7 @@ def structured_answer_with_history(
     syntax and validated the small schema dialect it promises to post-check.
     """
     _maybe_live_reload()
-    model, cloud, _augment, tier_label = _serve_target(tier, None)
+    model, cloud, _augment, tier_label = _tool_lane_guard.chat_target(_serve_target, tier, None)
     if tier_label == "cloud-disabled":
         raise ModelCallError("configuration", _cloud_disabled_message(), cloud=True)
     if tier_label is None:
@@ -7399,7 +7362,7 @@ def structured_answer_with_history(
     # cannot carry ``format``) instead of reaching an absent Ollama.
     with _provider_bridge.bind_rung(bridged_provider, tier_label):
         response = _make_generate(
-            model, system, 0.2, 1024, req_ctx, cloud=cloud, schema=schema,
+            model, system, 0.2, 1024, req_ctx, cloud=cloud, schema=schema, text_only=True,
             allow_cloud_fallback=_allow_cloud_fallback_for_target(tier_label),
         )(prompt, history or None)
     try:
@@ -7601,8 +7564,8 @@ def parallel_generate_run(
     model = TIERS.get(tier)
     if model is None:
         return "ERROR: unknown tier '%s'. Valid tiers: %s." % (tier, _valid_tier_names())
-    if _is_cloud_tier(tier, model) and not _cloud_allowed_policy(os.environ):
-        return _cloud_disabled_message()
+    if (refusal := _tool_lane_guard.selector_refusal(tier, TIERS, _RUNTIME_POLICY)) or (_is_cloud_tier(tier, model) and not _cloud_allowed_policy(os.environ)):
+        return refusal or _cloud_disabled_message()  # a blocked model never generates the code run here
     cloud = _is_cloud_tier(tier, model)
     system = (
         "Return one complete runnable Python solution in a single ```python code block. "
@@ -7718,8 +7681,8 @@ def parallel_generate_run_languages(
     model = TIERS.get(tier)
     if model is None:
         return "ERROR: unknown tier '%s'. Valid tiers: %s." % (tier, _valid_tier_names())
-    if _is_cloud_tier(tier, model) and not _cloud_allowed_policy(os.environ):
-        return _cloud_disabled_message()
+    if (refusal := _tool_lane_guard.selector_refusal(tier, TIERS, _RUNTIME_POLICY)) or (_is_cloud_tier(tier, model) and not _cloud_allowed_policy(os.environ)):
+        return refusal or _cloud_disabled_message()  # a blocked model never generates the code run here
     cloud = _is_cloud_tier(tier, model)
     requested_workers, (max_workers, pool_capacity) = max_workers, _ollama_reporting.clamp_workers(
         max_workers, pool=OLLAMA_POOL, model=model, cloud=cloud, bridged=lambda: _bridge_provider_for_tier(tier))
@@ -7877,6 +7840,8 @@ def campaign_generate_compile_execute_record(
     When record_failures is true, terminal failed attempts with an interaction id are
     recorded as failed too, so the reward store keeps negative signals.
     """
+    if refusal := _tool_lane_guard.selector_refusal(tier, TIERS, _RUNTIME_POLICY):
+        return refusal
     total = max(1, min(int(total or 1), 120))
     max_workers = max(1, min(int(max_workers or 1), 12, total))
     timeout = max(1, min(int(timeout or 8), 120))
@@ -8200,6 +8165,8 @@ def campaign_repo_repair(
     import shutil
     import tempfile
 
+    if refusal := _tool_lane_guard.selector_refusal(tier, TIERS, _RUNTIME_POLICY):
+        return refusal
     total = max(1, min(int(total or 1), 60))
     max_workers = max(1, min(int(max_workers or 1), 8, total))
     timeout = max(5, min(int(timeout or 30), 120))
@@ -14371,7 +14338,7 @@ def _vision_analyze_impl(
     }
     _out, content = _chat_request(
         payload, model=model, cloud=False, timeout=timeout, idempotent=True,
-        local_only=True,
+        local_only=True, text_only=True,
     )
     return content.strip()
 
@@ -15051,6 +15018,8 @@ def game_generate_and_test(
     repair_rounds=None picks a language default: 2 for C++, 1 otherwise.
     """
     _maybe_live_reload()
+    if refusal := _tool_lane_guard.selector_refusal(tier, TIERS, _RUNTIME_POLICY):
+        return refusal
     started = time.time()
     try:
         result = _game_generate_result(
@@ -15121,6 +15090,8 @@ def game_generation_campaign(
     emit GAME_OK and a valid frame.ppm, and records a grounded outcome.
     """
     _maybe_live_reload()
+    if refusal := _tool_lane_guard.selector_refusal(tier, TIERS, _RUNTIME_POLICY):
+        return refusal
     # Repeat the fully verified reference matrix. This keeps every default fleet
     # job recoverable if a model draft fails while still covering all supported
     # languages and 2D, isometric 2.5D, and 3D execution.
@@ -20534,6 +20505,8 @@ def _agent_turn(
         from sonder_runtime.bootstrap.prepared_workbench import prepared_tool_allowlist
         tool_allowlist = prepared_tool_allowlist(tool_allowlist)
     model, cloud, augment, tier_label = pinned_target if pinned_target is not None else _serve_target(tier, None)
+    if refusal := _tool_lane_guard.resolved_refusal(tier, model, tier_label, _RUNTIME_POLICY):
+        return refusal  # before any model call or tool dispatch
     if tier_label == "cloud-disabled":
         return _cloud_disabled_message()
     if tier_label is None:
@@ -22405,8 +22378,8 @@ def _autopilot_json_model(run: dict, role: str, prompt: str, validator) -> dict:
     else:
         tier = run_tier
     model, cloud, _augment, tier_label = _serve_target(tier, False)
-    if model is None or cloud or _provider_bridge.is_hosted(_bridge_provider_for_tier(tier_label)) or tier_label not in autopilot_controller.LOCAL_TIERS:
-        raise RuntimeError("autopilot requires an available local model tier")
+    if (refusal := _tool_lane_guard.resolved_refusal(tier, model, tier_label, _RUNTIME_POLICY)) or model is None or cloud or _provider_bridge.is_hosted(_bridge_provider_for_tier(tier_label)) or tier_label not in autopilot_controller.LOCAL_TIERS:
+        raise RuntimeError(refusal or "autopilot requires an available local model tier")  # its plan or verdict drives agent tasks
     system = _build_system(
         _prompts.render("autopilot_system", role=role),
         False,
@@ -22488,8 +22461,8 @@ def _autopilot_review_model(run: dict, issue: str) -> dict:
         run_tier = autopilot_controller.normalize_tier(run.get("tier", "code"))
         tier = runtime_policy.route_tier("review", _refresh_runtime_policy(create=True), fallback=run_tier)
         model, cloud, _augment, tier_label = _serve_target(tier, False)
-        if model is None or cloud or _provider_bridge.is_hosted(_bridge_provider_for_tier(tier_label)) or tier_label not in autopilot_controller.LOCAL_TIERS:
-            raise RuntimeError("autopilot requires an available local model tier")
+        if (refusal := _tool_lane_guard.resolved_refusal(tier, model, tier_label, _RUNTIME_POLICY)) or model is None or cloud or _provider_bridge.is_hosted(_bridge_provider_for_tier(tier_label)) or tier_label not in autopilot_controller.LOCAL_TIERS:
+            raise RuntimeError(refusal or "autopilot requires an available local model tier")  # its plan or verdict drives agent tasks
         system = _build_system(
             _prompts.render("autopilot_system", role="reviewer"), False, "", model=model, cloud=False,
         )
@@ -24275,7 +24248,7 @@ def _fanout_plan(scope, *, profile="", include_unhealthy=False):
         cloud = _is_cloud_model_name(name)
         if not (scope == "all" or (scope == "cloud" and cloud) or (scope == "local" and not cloud)):
             continue
-        reason = _fanout_nonchat_reason(record)
+        reason = _fanout_nonchat_reason(record) or _tool_lane_guard.sweep_skip_reason(name, _RUNTIME_POLICY)
         if reason:
             skipped.append({"model": name, "reason": reason})
             continue
@@ -24304,11 +24277,6 @@ def _fanout_plan(scope, *, profile="", include_unhealthy=False):
             "hosted/cloud tiers are disabled. Set SONDER_ALLOW_CLOUD=1 to opt in; prompts sent to cloud tiers leave this machine.",
         )
     return {"scope": scope, "selected": selected, "skipped": skipped}, None
-
-
-
-
-
 
 
 def _fanout_provider_retry_after_ts(exc):
@@ -24612,7 +24580,7 @@ def _execute_fanout_run(run_id):
 
             generate = _make_generate(model, "", 0.2, limits["num_predict"], 4096,
                                       timeout=limits["timeout"],
-                                      allow_cloud_fallback=False,
+                                      allow_cloud_fallback=False, text_only=True,
                                       cancel_check=dispatch_cancelled)
             # A consent or ownership fence which wins before the durable
             # handoff has made no provider request, so it remains resumable.
@@ -25059,7 +25027,7 @@ def _ensemble_targets(tiers: str = ""):
             if not _cloud_allowed_policy(os.environ):
                 unknown.append("%s (cloud disabled; set SONDER_ALLOW_CLOUD=1)" % tier)
                 continue
-        model, _cloud, _augment, label = _serve_target(tier, False)
+        model, _cloud, _augment, label = _tool_lane_guard.chat_target(_serve_target, tier, False)  # text only
         if not model or label is None:
             unknown.append(tier)
             continue
@@ -25099,10 +25067,6 @@ def _ensemble_prompt_with_project_facts(task: str, project: str) -> str:
     if not facts:
         return task
     return orchestrator.build_prompt(task, [], project_facts=facts)
-
-
-
-
 
 
 @mcp.tool()
@@ -25191,7 +25155,7 @@ def ensemble_answer(
                 0 if _is_cloud_tier(tier, model) or _bridge_provider_for_tier(tier) else _auto_model_context(model)
             )
             gen = _make_tier_generate(
-                tier, model, "", 0.2, max(64, int(num_predict)), target_num_ctx,
+                tier, model, "", 0.2, max(64, int(num_predict)), target_num_ctx, text_only=True,
             )
             text = (gen(question) or "").strip()
         except ModelCallError as error:
@@ -25253,7 +25217,7 @@ def ensemble_answer(
         return answers[0]["answer"] + footer
 
     synth = (synth_tier or "").strip().lower() or answers[-1]["tier"]
-    synth_model, _cloud, _augment, synth_label = _serve_target(synth, False)
+    synth_model, _cloud, _augment, synth_label = _tool_lane_guard.chat_target(_serve_target, synth, False)
     if not synth_model or synth_label is None:
         synth_model = answers[-1]["model"]
         synth = answers[-1]["tier"]
@@ -25269,7 +25233,7 @@ def ensemble_answer(
         gen = _make_tier_generate(
             synth_label, synth_model, "", 0.2, _fleet_synthesis.json_num_predict(
                 max(256, int(num_predict)), bridged=_bridge_provider_for_tier(synth_label) == "sonder_inference"),
-            synth_num_ctx,
+            synth_num_ctx, text_only=True,
         )
         merged = _fleet_synthesis.generate_synthesis(gen, build_prompt(question, answers)).strip()
     except Exception as exc:
@@ -25394,6 +25358,8 @@ def improve_function(
         router=tier_router.route, tier_models=TIERS,
         request_payload={"messages": [{"content": code_improve.extract_function(source, function) or ""}]},
     )["tier"]
+    if refusal := _tool_lane_guard.selector_refusal(chosen, TIERS, _RUNTIME_POLICY):
+        return refusal
 
     def ask(prompt_text, model_tier):
         return ensemble_answer(prompt_text, tiers=model_tier, mode="code")
@@ -25914,6 +25880,8 @@ def codegen_build_loop(
     repair_tiers = ()
     repair_models = ()
     explicit_targets = ()
+    if refusal := _tool_lane_guard.selector_refusal(tiers.strip() or ",".join(_configured_local_tiers()), TIERS, _RUNTIME_POLICY):
+        return refusal  # no tiers: the ensemble polls every bound local tier
     if tiers.strip():
         explicit_targets, _unavailable = _ensemble_targets(tiers)
         if attempt_limit >= 3 and len(explicit_targets) >= 2:
