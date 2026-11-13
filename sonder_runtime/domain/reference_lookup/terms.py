@@ -33,19 +33,22 @@ EXPAND_PROMPT = (
 
 # Added to the search-terms request when the passages are for an answer: the same
 # short call also says whether the question is in the library's subjects at all.
-SCOPE_REQUEST = (
-    '\n\nFirst line: the search terms. Second line: RELATED if the question is about computers, '
-    'networks, accounts, logs or security in any way, or UNRELATED if it is about something else '
-    'entirely.')
+_SCOPE_FIRST = 'First line: the search terms.'
+_SCOPE_SECOND = (
+    'Second line: RELATED if the question is about computers, networks, accounts, logs or '
+    'security in any way, or UNRELATED if it is about something else entirely.')
+SCOPE_REQUEST = '\n\n' + _SCOPE_FIRST + ' ' + _SCOPE_SECOND
 
 IDENTIFIER_RE = re.compile(
     r'0x[0-9a-f]+|\b(?:DET|AN|[TMSG])\d{3,4}(?:\.\d{3})?\b|\d{3,}', re.IGNORECASE)
 
-# The verdict word as the model writes it: upper case, standing alone.  Lower-case
-# "related" is an ordinary word and stays a search term.
-_VERDICT_RE = re.compile(r'(?<![A-Za-z0-9])(UNRELATED|RELATED)(?![A-Za-z0-9])')
-_LINE_LABEL_RE = re.compile(r'^[ \t]*(?:first|second)[ \t]+line[ \t]*:[ \t]*',
-                            re.IGNORECASE | re.MULTILINE)
+# The verdict inside other text: upper case, standing alone ("... T1003.001 RELATED").
+# Lower-case "related" inside a term ("related events") is an ordinary word.
+_VERDICT_RE = re.compile(r'(?<![A-Za-z0-9_])(NOT[ \t]+RELATED|UNRELATED|RELATED)(?![A-Za-z0-9_])')
+# A line or comma item that is nothing but the verdict, in any case, with any
+# punctuation or markdown around it ("Unrelated.", "**UNRELATED**").
+_LONE_VERDICT_RE = re.compile(r'[\W_]*(not[ \t]+related|unrelated|related)[\W_]*', re.IGNORECASE)
+_LINE_LABEL_RE = re.compile(r'^[ \t]*(?:first|second)[ \t]+line[ \t]*:[ \t]*', re.IGNORECASE)
 
 
 def build_expand_prompt(question: str, *, scope: bool = False) -> str:
@@ -61,13 +64,31 @@ def split_scope(content: str) -> tuple[str, bool]:
     """(the reply without its verdict, True when the verdict is UNRELATED).
 
     Models put the verdict on its own line, as the last item of the terms line
-    or after the last term without a comma; all three are read.  The last
-    verdict word decides.  A reply without one is not a verdict of UNRELATED,
-    so a model that ran out of room listing terms changes nothing.
+    or after the last term without a comma; all three are read.  A line or
+    item that is only the verdict counts in any case and with punctuation or
+    markdown around it; inside other text only the upper-case word does.  The
+    last verdict decides.  A reply without one is not a verdict of UNRELATED,
+    so a model that ran out of room listing terms changes nothing.  The
+    request's own sentences, copied back, are not a verdict.
+
+    Whatever is read as a verdict is removed, so it never becomes a search
+    term: a stray "Unrelated" would be searched for and, being rare in the
+    library, would count against every passage.
     """
-    verdicts = _VERDICT_RE.findall(content)
-    text = _LINE_LABEL_RE.sub('', _VERDICT_RE.sub('', content))
-    return text, bool(verdicts) and verdicts[-1] == 'UNRELATED'
+    unrelated = False
+    lines = []
+    for line in content.replace(_SCOPE_SECOND, ' ').replace(_SCOPE_FIRST, ' ').split('\n'):
+        items = []
+        for item in _LINE_LABEL_RE.sub('', line).split(','):
+            lone = _LONE_VERDICT_RE.fullmatch(item)
+            if lone:
+                unrelated = lone.group(1).lower() != 'related'
+                continue
+            for word in _VERDICT_RE.findall(item):
+                unrelated = word != 'RELATED'
+            items.append(_VERDICT_RE.sub('', item))
+        lines.append(','.join(items))
+    return '\n'.join(lines), unrelated
 
 
 def query_terms(text: str | None, extra_terms: Iterable[object] = ()) -> list[str]:

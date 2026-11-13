@@ -116,20 +116,73 @@ def test_split_scope_a_reply_of_only_the_verdict_leaves_no_terms():
 
 
 @pytest.mark.parametrize("reply, terms", [
-    ("related", ["related"]),
-    ("unrelated", ["unrelated"]),
-    ("related, unrelated, audit", ["related", "unrelated", "audit"]),
-    ("Related, Unrelated", ["Related", "Unrelated"]),
-    ("a, b\nunrelated", ["a", "b", "unrelated"]),
+    ("related events, unrelated noise", ["related events", "unrelated noise"]),
+    ("logon related, 4625", ["logon related", "4625"]),
+    ("Related Events\nUnrelated Noise", ["Related Events", "Unrelated Noise"]),
+    ("not related to logon, audit", ["not related to logon", "audit"]),
 ])
-def test_split_scope_lower_case_words_are_ordinary_search_terms(reply, terms):
+def test_split_scope_the_word_inside_a_term_in_lower_or_title_case_is_an_ordinary_word(reply, terms):
     text, verdict = split_scope(reply)
     assert (text, verdict) == (reply, False)
     assert parse_terms(text) == terms
 
 
+@pytest.mark.parametrize("reply, unrelated, terms", [
+    # found in review: a title-case verdict line became the search term "Unrelated", a word rare
+    # enough in the library (7 of 8,908 passages) to count heavily against every passage
+    ("recipe, baking\nUnrelated", True, ["recipe", "baking"]),
+    ("recipe, baking\nunrelated", True, ["recipe", "baking"]),
+    ("4625, logon\nRelated", False, ["4625", "logon"]),
+    ("4625, logon\nSecond line: Related", False, ["4625", "logon"]),
+    ("4625, logon\nSecond line: Unrelated.", True, ["4625", "logon"]),
+    ("4625, logon, related", False, ["4625", "logon"]),
+    ("recipe, baking, Unrelated", True, ["recipe", "baking"]),
+    ("recipe, baking\n**UNRELATED**", True, ["recipe", "baking"]),
+    ("4625, logon\n**Related**", False, ["4625", "logon"]),
+    ("recipe, baking\nNOT RELATED", True, ["recipe", "baking"]),
+    ("recipe, baking\nNot related.", True, ["recipe", "baking"]),
+    ("recipe baking NOT RELATED", True, ["recipe baking"]),
+    ("recipe, baking\n- UNRELATED", True, ["recipe", "baking"]),
+    ("recipe, baking\n`unrelated`", True, ["recipe", "baking"]),
+    ("related", False, []),
+    ("unrelated", True, []),
+    ("Related, Unrelated", True, []),
+])
+def test_split_scope_a_line_or_item_that_is_only_the_verdict_counts_in_any_case(reply, unrelated, terms):
+    text, verdict = split_scope(reply)
+    assert verdict is unrelated
+    assert parse_terms(text) == terms
+    assert "related" not in text.lower()
+
+
+def test_split_scope_the_request_copied_back_is_not_a_verdict():
+    echo = SCOPE_REQUEST.strip()
+
+    text, verdict = split_scope("4625, logon\n" + echo)
+    assert verdict is False
+    assert parse_terms(text) == ["4625", "logon"]
+
+    text, verdict = split_scope(echo + "\n4625, logon\nUNRELATED")
+    assert verdict is True
+    assert parse_terms(text) == ["4625", "logon"]
+
+    second = echo[echo.index("Second line:"):]
+    assert split_scope("4625, logon\n" + second) == ("4625, logon\n ", False)
+
+
+def test_split_scope_reads_a_long_reply_quickly():
+    import time
+
+    reply = ", ".join(["related events"] * 20_000) + "\n" + "*" * 20_000 + "UNRELATED" + "_" * 20_000
+    started = time.perf_counter()
+    _text, verdict = split_scope(reply)
+
+    assert verdict is True
+    assert time.perf_counter() - started < 2.0
+
+
 @pytest.mark.parametrize("reply", ["UNRELATEDLY", "XRELATED", "RELATED2", "a, UNRELATEDLY", "9RELATED, b",
-                                   "XUNRELATED", "UNRELATED7"])
+                                   "XUNRELATED", "UNRELATED7", "UNRELATED_FLAG set, b", "is_RELATED now"])
 def test_split_scope_a_verdict_glued_to_other_characters_is_not_a_verdict(reply):
     assert split_scope(reply) == (reply, False)
 

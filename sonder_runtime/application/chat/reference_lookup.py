@@ -171,14 +171,15 @@ def _expand(question: str, expand_fn: Callable[[str], str] | None, scope: bool =
 def passage_coverage(index: object, terms: Sequence[str], passages: Sequence[Passage]) -> float | None:
     """How much of the query's vocabulary the best of ``passages`` holds (0..1), or None.
 
-    Only single words are measured.  ``query_terms`` gives each phrase a model
+    Only terms without a space are measured (a word, or an identifier such as
+    ``t1003.001``).  ``query_terms`` gives each phrase a model
     wrote and then each of its words; a phrase the library never holds verbatim
     would otherwise carry the largest weight against a passage that holds every
     one of its words, and the result would turn on how the model happened to
     phrase its terms.
 
     None means the measure is not available (the index does not offer term
-    statistics, a passage has no row id, there is no single word to measure, or
+    statistics, a passage has no row id, no term is without a space, or
     the index could not be read): the caller then keeps the passages, as before
     the floor existed.
     """

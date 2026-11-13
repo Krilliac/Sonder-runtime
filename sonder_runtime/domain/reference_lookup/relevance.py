@@ -11,7 +11,8 @@ that one passage holds, each word weighted by how rare it is in the library
 (BM25's inverse document frequency, so "server" counts for little and a word
 the library never uses counts fully against the passage).  A passage about the
 question's subject holds a good part of its distinctive words; a passage found
-through common words does not.  The caller measures single words only: a
+through common words does not.  The caller measures terms without a space
+only (a word, or an identifier such as "t1003.001"): a
 multi-word phrase a model wrote is counted through its words, because a phrase
 the library never holds verbatim would otherwise weigh most and the result
 would turn on how the model happened to phrase its terms (one covered question
@@ -47,7 +48,9 @@ The verdict is therefore never used alone, and the raised floor sits under
 the lowest wrongly judged covered question with little room: eight covered
 questions measured under 0.40 with the smaller model's terms, and one of them
 judged UNRELATED would be answered without passages (the Sources block then
-says none was close enough).  A reply without a verdict changes nothing.
+says none was close enough).  A reply without a verdict leaves the floor
+where it was.  The longer request can change the terms the model writes, and
+through them the passages found; the six term sets above include it.
 
 So the floors remove the clear misses and keep every measured hit.  They do
 not catch a short unrelated question that the model judges related or whose

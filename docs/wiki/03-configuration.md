@@ -624,7 +624,7 @@ or refused); only the first eight identifiers in a question (event
 ids, technique ids, hex values) get title priority. Passages are handed to the
 model only when the best of them is close enough to the question: it must hold
 at least a fifth of the query's search words, each word weighted by how
-rare it is in the library (single words only: a multi-word phrase the model
+rare it is in the library (terms without a space only: a multi-word phrase the model
 wrote counts through its words, not as a phrase). A question the library does not cover (a long
 design question about another subject shares many common words with it) is
 answered without passages and says
@@ -633,8 +633,8 @@ same search-terms call is also asked, on a second line, whether the question
 is about computers, networks, accounts, logs or security at all; a reply of
 `UNRELATED` raises the floor for that turn from a fifth to two fifths. The
 verdict never removes passages by itself (the smaller measured model gave it
-to five of 44 covered questions), and a reply without a verdict changes
-nothing. Short questions on other subjects that the model judges related, or
+to five of 44 covered questions), and a reply without a verdict leaves the
+floor where it was. Short questions on other subjects that the model judges related, or
 whose best passage reaches two fifths, still get passages. The
 floors are constants measured on the security library
 (`sonder_runtime/domain/reference_lookup/relevance.py`); it does not apply to
