@@ -46,6 +46,7 @@ from ...domain.reference_lookup.terms import (
     ordered_identifiers,
     parse_terms,
     query_terms,
+    split_scope,
 )
 
 NO_ROOM_WARNING = 'no room for references'
@@ -139,35 +140,51 @@ def is_cancellation(exc: BaseException) -> bool:
     return isinstance(exc, Cancelled) or getattr(exc, "kind", None) == CANCELLED_KIND
 
 
-def _expand(question: str, expand_fn: Callable[[str], str] | None
-            ) -> tuple[list[str], list[str], list[str]]:
-    """(kept terms, dropped terms, warnings); a failed or empty expansion is a warning only.
+def _expand(question: str, expand_fn: Callable[[str], str] | None, scope: bool = False
+            ) -> tuple[list[str], list[str], list[str], bool]:
+    """(kept terms, dropped terms, warnings, judged unrelated); a failed or empty expansion is a warning only.
+
+    With ``scope`` the same call is also asked whether the question is in the
+    library's subjects; the last value is True only when it answered UNRELATED.
 
     A cancelled call is re-raised: cancellation ends the turn, it is not a
     search problem to work around.
     """
     if expand_fn is None:
-        return [], [], []
+        return [], [], [], False
+    unrelated = False
     try:
-        terms = parse_terms(expand_fn(build_expand_prompt(question)))
+        reply = expand_fn(build_expand_prompt(question, scope=scope))
+        if scope and isinstance(reply, str):
+            reply, unrelated = split_scope(reply)
+        terms = parse_terms(reply)
     except Exception as exc:  # reported to the caller as a warning, never hidden
         if is_cancellation(exc):
             raise
-        return [], [], [EXPANSION_FAILED_PREFIX + sanitize(exc)]
+        return [], [], [EXPANSION_FAILED_PREFIX + sanitize(exc)], False
     kept, dropped = filter_terms(question, terms)
     if not kept:
-        return [], dropped, [NO_TERMS_WARNING]
-    return kept, dropped, []
+        return [], dropped, [NO_TERMS_WARNING], unrelated
+    return kept, dropped, [], unrelated
 
 
 def passage_coverage(index: object, terms: Sequence[str], passages: Sequence[Passage]) -> float | None:
     """How much of the query's vocabulary the best of ``passages`` holds (0..1), or None.
 
+    Only terms without a space are measured (a word, or an identifier such as
+    ``t1003.001``).  ``query_terms`` gives each phrase a model
+    wrote and then each of its words; a phrase the library never holds verbatim
+    would otherwise carry the largest weight against a passage that holds every
+    one of its words, and the result would turn on how the model happened to
+    phrase its terms.
+
     None means the measure is not available (the index does not offer term
-    statistics, a passage has no row id, or the index could not be read): the
-    caller then keeps the passages, as before the floor existed.
+    statistics, a passage has no row id, no term is without a space, or
+    the index could not be read): the caller then keeps the passages, as before
+    the floor existed.
     """
     stats_for = getattr(index, "term_stats", None)
+    terms = [term for term in terms if isinstance(term, str) and " " not in term]
     if not callable(stats_for) or not terms or not passages:
         return None
     try:
@@ -191,6 +208,7 @@ def retrieve(
     index: ReferenceSearch,
     enabled: bool = True,
     min_coverage: float = 0.0,
+    unrelated_coverage: float = 0.0,
 ) -> Bundle:
     """Search the index for passages that fit ``char_budget`` characters.
 
@@ -207,6 +225,12 @@ def retrieve(
     gets none (``LookupReason.LOW_RELEVANCE``).  The default, 0, is a plain
     search that returns the nearest passages whatever they are.
 
+    ``unrelated_coverage`` above ``min_coverage`` adds one line to the
+    search-terms request: is the question in the library's subjects at all?
+    A reply of UNRELATED raises the floor to ``unrelated_coverage`` for this
+    turn.  It never removes passages by itself, and no verdict, a failed call
+    or no ``expand_fn`` leaves the floor at ``min_coverage``.
+
     Never raises, except to pass on a cancelled search-terms call
     (``is_cancellation``).
     """
@@ -220,7 +244,8 @@ def retrieve(
             return _bare(LookupReason.INDEX_UNAVAILABLE, state=status.state, detail=status.detail)
         if char_budget <= 0:
             return _bare(LookupReason.NO_ROOM, warnings=(NO_ROOM_WARNING,))
-        terms, dropped, warnings = _expand(question, expand_fn)
+        terms, dropped, warnings, unrelated = _expand(
+            question, expand_fn, scope=unrelated_coverage > min_coverage > 0)
         match = fts_query(question, terms)
         rows: tuple[RankedRow, ...] = ()
         if match and k > 0:
@@ -237,12 +262,14 @@ def retrieve(
             return _bare(LookupReason.NO_MATCH, terms=terms, dropped=dropped, warnings=warnings,
                          state=IndexState.READY)
         if min_coverage > 0:
+            floor = unrelated_coverage if unrelated else min_coverage
             covered = passage_coverage(index, query_terms(question, terms), passages)
-            if covered is not None and covered < min_coverage:
+            if covered is not None and covered < floor:
                 warnings.append(LOW_RELEVANCE_WARNING)
+                judged = ' (the search-terms reply judged the question unrelated)' if unrelated else ''
                 return _bare(LookupReason.LOW_RELEVANCE, terms=terms, dropped=dropped,
                              warnings=warnings, state=IndexState.READY,
-                             detail=f'best passage coverage {covered:.2f} is under {min_coverage:.2f}')
+                             detail=f'best passage coverage {covered:.2f} is under {floor:.2f}{judged}')
         if len(passages) < len(found):
             warnings.append(f'{len(found) - len(passages)} passage(s) left out to fit the prompt size')
         return Bundle(applied=True, reason=LookupReason.APPLIED, passages=passages,

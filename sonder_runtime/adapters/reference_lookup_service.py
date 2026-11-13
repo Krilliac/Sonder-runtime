@@ -36,7 +36,7 @@ from sonder_runtime.application.chat import reference_lookup as _lookup
 from sonder_runtime.domain.reference_lookup import applies as _applies
 from sonder_runtime.domain.reference_lookup.answer_check import format_sources
 from sonder_runtime.domain.reference_lookup.prompt import build_prompt
-from sonder_runtime.domain.reference_lookup.relevance import MIN_COVERAGE
+from sonder_runtime.domain.reference_lookup.relevance import MIN_COVERAGE, UNRELATED_MIN_COVERAGE
 from sonder_runtime.domain.reference_lookup.sanitize import (
     one_line,
     sanitize,
@@ -174,6 +174,7 @@ def retrieve_for(
             question, expand_fn, k, char_budget,
             index=_state.index(), enabled=not _state.kill_switch_off(),
             min_coverage=MIN_COVERAGE if for_answer else 0.0,
+            unrelated_coverage=UNRELATED_MIN_COVERAGE if for_answer else 0.0,
         )
     except Exception as exc:  # fail open
         if _lookup.is_cancellation(exc):

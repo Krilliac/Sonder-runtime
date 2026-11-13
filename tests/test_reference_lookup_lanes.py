@@ -340,6 +340,20 @@ def test_search_terms_failure_searches_the_question_words(lane, monkeypatch):
     assert "Sources:\n" in text
 
 
+def test_the_search_terms_request_of_an_answer_asks_whether_the_question_is_in_scope(lane, monkeypatch):
+    from sonder_runtime.domain.reference_lookup import terms
+
+    lane.terms = TERMS_REPLY + "\nRELATED"
+    text = _mcp_by_name(monkeypatch, LOOKUP_MODEL)
+
+    requests = [payload["messages"][-1]["content"] for payload in lane.expansions()]
+    assert requests == [terms.build_expand_prompt(QUESTION, scope=True)]
+    assert requests[0].endswith(terms.SCOPE_REQUEST)
+    assert PASSAGE_TEXT in lane.user_turn()
+    assert "RELATED" not in lane.user_turn()
+    assert "Sources:\n" in text
+
+
 # --- no Sonder system prompt on a lookup turn --------------------------------
 
 
