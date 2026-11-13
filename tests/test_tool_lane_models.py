@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 from sonder_runtime.domain import tool_lane_models as rule
+from sonder_runtime.domain.runtime_model_configuration import RuntimeModelConfiguration
 from sonder_runtime.domain.tool_lane_models import ModelLaneStatus, ToolLaneDenyList
 
 DEFAULTS = ToolLaneDenyList.from_policy(None)
@@ -82,16 +83,121 @@ def test_hf_sources_denied_in_every_quantisation_tagged_or_not(name):
     assert denied(name), name
 
 
+@pytest.mark.parametrize("source", (QWEN_SOURCE, ORNITH_SOURCE))
+def test_each_builtin_source_is_denied_under_every_repository_and_file_spelling(source):
+    stem = source.rsplit("/", 1)[-1].removesuffix("-GGUF")
+    spellings = (
+        source, source + ":Q4_K_M", source.rsplit("/", 1)[-1],
+        stem, stem + ":Q8_0", stem + "-Q4_K_M.gguf",
+        "hf.co/" + source, "huggingface.co/" + source,
+        "https://hf.co/" + source, "https://huggingface.co/" + source,
+        "registry.ollama.ai/hf.co/" + source + ":Q4_K_M",
+        "cache/" + stem + "/quantised.gguf",
+    )
+    for name in spellings:
+        assert denied(name), name
+
+
+@pytest.mark.parametrize("source", (QWEN_SOURCE, ORNITH_SOURCE))
+def test_windows_paths_containing_each_builtin_stem_are_denied(source):
+    stem = source.rsplit("/", 1)[-1].removesuffix("-GGUF")
+    assert denied(rf"C:\models\{stem}-Q8_0.gguf")
+    assert denied(rf"C:\models\{stem}-AWQ.bin")
+    assert denied(rf"C:\models\{stem}\ordinary.gguf")
+
+
+def test_windows_path_containing_astra_prefix_is_denied():
+    assert denied(r"D:\m\astra-cyber-27b.gguf")
+    assert denied(r"D:\m\astra-cyber-27b\ordinary.gguf")
+
+
+def test_policy_exact_name_matches_the_last_backslash_segment():
+    deny = ToolLaneDenyList.from_policy({"names": ["helper-model"]})
+    assert denied(r"C:\models\helper-model", deny)
+    assert not denied(r"C:\models\helper-model-extra", deny)
+
+
+# Refused before backslashes were treated as separators (the candidate was the
+# whole last ``/`` segment), so they must stay refused: the split only adds.
+def _bs(text):
+    """``|`` stands for a backslash, so no test name depends on string escapes."""
+    return text.replace("|", chr(92))
+
+
+@pytest.mark.parametrize("name", (
+    "C:/models/pfx-model|weights.gguf",
+    "hf.co/pfx-thing|team",
+    "ollama/pfx-x|",
+    "team/pfx-thing|:latest",
+    "pfx-model|weights.gguf",
+))
+def test_policy_prefix_still_matches_a_last_slash_segment_holding_a_backslash(name):
+    name = _bs(name)
+    assert chr(92) in name
+    deny = ToolLaneDenyList.from_policy({"prefixes": ["pfx-"]})
+    assert denied(name, deny)
+    assert not denied(name)
+
+
+def test_policy_name_holding_a_backslash_still_matches_the_last_slash_segment():
+    deny = ToolLaneDenyList.from_policy({"names": [_bs("team|blocked")]})
+    assert denied(_bs("hf.co/team|blocked"), deny)
+    assert denied(_bs("team|blocked"), deny)
+    assert not denied(_bs("hf.co/team|blocked-other"), deny)
+    assert not denied(_bs("hf.co/team|blocked"))
+
+
+@pytest.mark.parametrize("name", (
+    "plain", "a/b", "a|b", "a/b|c", "a|b/c", "c:|x|y/z|w", "trailing/", "trailing|", "/", "|",
+))
+def test_candidates_always_include_the_original_two(name):
+    name = _bs(name)
+    candidates = rule.name_candidates(name)
+    assert candidates[0] == name
+    assert name.rsplit("/", 1)[-1] in candidates
+    assert {name, name.rsplit("/", 1)[-1]} <= rule.policy_candidates(name) <= set(candidates)
+
+
+@pytest.mark.parametrize("name", (
+    r"C:\models\qwen3.8-Q8_0.gguf",
+    r"D:\m\qwen3-coder.gguf",
+    r"C:\models\Cyber-Ornith-1.5-9B.gguf",
+))
+def test_ordinary_windows_paths_remain_allowed(name):
+    assert not denied(name)
+
+
+@pytest.mark.parametrize("name", (
+    "qwen3.5:4b", "qwen3:8b", "sonder:latest", "kimi-k2.7-code:cloud",
+    "glm-5.2:cloud", "qwen3-coder:480b-cloud", "qwen3.8", "qwen3-coder",
+    "hf.co/mradermacher/Qwen3.8-27B-GGUF:Q4_K_M",
+    "hf.co/mradermacher/Qwen3.8-cyber-Surgical-GGUF",
+    "hf.co/DuoNeural/Cyber-Ornith-1.5-8B-GGUF",
+    "registry.ollama.ai/unsloth/Qwen3.8-27B-GGUF",
+))
+def test_existing_defaults_helpers_and_other_gguf_repositories_remain_allowed(name):
+    assert not denied(name), name
+
+
+def test_repository_tier_defaults_are_all_allowed():
+    defaults = RuntimeModelConfiguration.from_environment({}).tier_map()
+    assert defaults
+    assert all(not denied(model) for model in defaults.values()), defaults
+
+
 def test_a_longer_repo_name_under_a_denied_hf_source_is_denied_by_design():
     assert denied(f"hf.co/{QWEN_SOURCE}-extra")
 
 
 def test_hf_defaults_are_prefixes_not_exact_names():
-    """Both Hugging Face sources and both host spellings are prefixes ending at ``-gguf``."""
+    """The hosted ids, hostless ids and stems all come from the source list."""
     prefixes = set(rule.DEFAULT_DENIED_PREFIXES)
     for host in ("hf.co/", "huggingface.co/"):
         for source in (QWEN_SOURCE, ORNITH_SOURCE):
             assert (host + source).casefold() in prefixes
+    for source in (QWEN_SOURCE, ORNITH_SOURCE):
+        assert source.casefold() in prefixes
+        assert source.rsplit("/", 1)[-1].removesuffix("-GGUF").casefold() in prefixes
     assert all(prefix.endswith("-gguf") for prefix in prefixes if "/" in prefix)
     assert "astra-cyber-" in prefixes
     assert DEFAULTS.names == frozenset()
@@ -116,10 +222,8 @@ def test_hf_defaults_are_prefixes_not_exact_names():
     "astra",
     "cyber-astra-27b",
     "hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q3_K_XL",
-    "hf.co/someone-else/Qwen3.8-cyber-RedTeam-Surgical-Abliterated-GGUF",  # another owner
-    "hf.co/DuoNeural/Cyber-Ornith-1.5-9B",  # the non-GGUF sibling is a different source
+    "hf.co/DuoNeural/Cyber-Ornith-1.5-9B",  # shorter sibling remains allowed
     "huggingface.co/unsloth/Qwen3.8-27B-GGUF",
-    "qwen3.8-cyber-redteam-surgical-abliterated-gguf",  # tail of the denied source, no owner or host
 ])
 def test_ordinary_and_near_miss_names_are_allowed(name):
     decision = rule.decide(name, DEFAULTS, free_form=False)
@@ -200,7 +304,7 @@ def test_an_exact_name_is_matched_against_the_last_path_segment():
     for name in ("helper-model", "HELPER-MODEL:latest", "owner/helper-model", "reg.io/owner/Helper-Model:latest"):
         assert denied(name, deny), name
     assert not denied("helper-model-2", deny)
-    assert not denied("owner/helper-model/other", deny)  # the last segment is "other"
+    assert not denied("owner/helper-model/other", deny)  # policy names keep last-segment matching
     assert not denied("my-helper-model", deny)
 
 
@@ -215,7 +319,7 @@ def test_a_policy_prefix_matches_by_prefix():
     deny = ToolLaneDenyList.from_policy({"names": [], "prefixes": ["Team-X/"]})
     assert denied("team-x/anything:7b", deny)
     assert denied("TEAM-X/other", deny)
-    assert not denied("other/team-x/anything", deny)  # the tail "anything" does not start with it, nor does the whole
+    assert not denied("other/team-x/anything", deny)  # policy prefixes keep full-name/last-segment matching
     assert not denied("team-xylophone", deny)
 
 

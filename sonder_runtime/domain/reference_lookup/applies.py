@@ -2,7 +2,7 @@
 
 Pure decision rule: callers supply the rule (built from the runtime policy
 section) and the kill-switch state, and act on the typed result.  Names are
-judged with the same normalisation and last-path-segment matching as the
+judged with the same normalisation and path-segment matching as the
 tool-lane block list, so the two lists agree on what a model name means.  The
 built-in defaults are always part of every rule: the policy section can add
 entries but never remove one.  No I/O happens here.
@@ -19,6 +19,7 @@ from ..tool_lane_models import (
     DEFAULT_DENIED_PREFIXES,
     name_candidates,
     normalize_name,
+    policy_candidates,
 )
 
 # The built-in models are the tool-lane deny list's: the same prefixes (so every
@@ -97,10 +98,13 @@ def decide(model: Any, rule: AppliesRule, *, kill_switch_off: bool = False) -> A
     normalized = normalize_name(model)
     if not normalized:
         return AppliesDecision(False, AppliesReason.NO_MODEL)
+    original_candidates = policy_candidates(normalized)
     for candidate in name_candidates(normalized):
-        if candidate in rule.names:
+        if candidate in original_candidates and candidate in rule.names:
             return AppliesDecision(True, AppliesReason.MATCHED_NAME, candidate)
         for prefix in rule.prefixes:
-            if candidate.startswith(prefix):
+            if candidate.startswith(prefix) and (
+                prefix in DEFAULT_PREFIXES or candidate in original_candidates
+            ):
                 return AppliesDecision(True, AppliesReason.MATCHED_PREFIX, prefix)
     return AppliesDecision(False, AppliesReason.NOT_CONFIGURED)

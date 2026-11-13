@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import inspect
 import re
+import sys
 
 import pytest
 
@@ -255,6 +256,77 @@ def test_the_default_route_judges_every_configured_local_tier(monkeypatch):
         assert guard.selector_refusal(selector, server.TIERS, server._RUNTIME_POLICY) == CODE_REFUSAL, selector
     assert guard.default_route_refusal(server.TIERS, server._RUNTIME_POLICY) == CODE_REFUSAL
     assert guard.selector_refusal("fast", server.TIERS, server._RUNTIME_POLICY) == ""  # an explicit tier is itself
+
+
+def test_strict_default_route_judges_the_resolved_local_code_fallback(monkeypatch):
+    monkeypatch.setenv("SONDER_STRICT", "1")
+    monkeypatch.setattr(server, "LOCAL_CODE_MODEL", "policy-blocked-local")
+    policy = dict(server._RUNTIME_POLICY, tool_lane_denied_models={"names": ["policy-blocked-local"]})
+    assert guard.default_route_reach(server.TIERS, policy)[0] == "sonder"
+    assert guard.selector_refusal("sonder", server.TIERS, policy) == BLOCKED % "policy-blocked-local"
+
+
+def test_strict_default_route_judges_the_stable_alias(monkeypatch):
+    monkeypatch.setenv("SONDER_STRICT", "1")
+    policy = dict(server._RUNTIME_POLICY, tool_lane_denied_models={"names": [server.SONDER_STABLE_ALIAS]})
+    assert guard.selector_refusal("sonder", server.TIERS, policy) == BLOCKED % server.SONDER_STABLE_ALIAS
+
+
+def test_unbound_chat_start_judges_the_local_code_model_against_policy(monkeypatch):
+    monkeypatch.setattr(server, "LOCAL_CODE_MODEL", "custom-local-code")
+    policy = dict(server._RUNTIME_POLICY, tool_lane_denied_models={"names": ["custom-local-code"]})
+    bindings = dict(server.TIERS)
+    bindings.pop("general")
+    assert guard.default_route_reach(bindings, policy)[0] == "sonder"
+    assert guard.default_route_refusal(bindings, policy) == BLOCKED % "custom-local-code"
+
+
+def test_default_route_without_loaded_server_judges_policy_added_local_code(monkeypatch):
+    monkeypatch.setenv("SONDER_STRICT", "1")
+    monkeypatch.setenv("SONDER_CODE_LOCAL", "policy-blocked-local")
+    monkeypatch.delitem(sys.modules, "server")
+    policy = dict(server._RUNTIME_POLICY, tool_lane_denied_models={"names": ["policy-blocked-local"]})
+    assert guard.selector_refusal("sonder", server.TIERS, policy) == BLOCKED % "policy-blocked-local"
+
+
+def test_default_route_without_loaded_server_preserves_ordinary_configuration(monkeypatch):
+    monkeypatch.setenv("SONDER_STRICT", "1")
+    monkeypatch.setenv("SONDER_CODE_LOCAL", ALLOWED)
+    monkeypatch.delitem(sys.modules, "server")
+    assert guard.selector_refusal("sonder", server.TIERS, server._RUNTIME_POLICY) == ""
+
+
+def test_default_route_without_loaded_server_swaps_a_builtin_blocked_local_code_like_the_runtime(monkeypatch):
+    """The runtime never keeps a built-in-blocked SONDER_CODE_LOCAL: it uses the stable alias."""
+    monkeypatch.setenv("SONDER_STRICT", "1")
+    monkeypatch.setenv("SONDER_CODE_LOCAL", DENIED)
+    monkeypatch.delitem(sys.modules, "server")
+    assert guard.projected_local_code_model() == "sonder:latest"
+    assert guard.selector_refusal("sonder", server.TIERS, server._RUNTIME_POLICY) == ""
+    policy = dict(server._RUNTIME_POLICY, tool_lane_denied_models={"names": ["sonder:latest"]})
+    assert guard.selector_refusal("sonder", server.TIERS, policy) == BLOCKED % "sonder:latest"
+
+
+@pytest.mark.parametrize("configured", (None, "", ALLOWED, DENIED, "Astra-Cyber-9B:latest", "policy-blocked-local"))
+def test_projected_local_code_model_matches_the_runtime_configuration(monkeypatch, configured):
+    from sonder_runtime.domain.runtime_model_configuration import RuntimeModelConfiguration
+
+    if configured is None:
+        monkeypatch.delenv("SONDER_CODE_LOCAL", raising=False)
+        env = {}
+    else:
+        monkeypatch.setenv("SONDER_CODE_LOCAL", configured)
+        env = {"SONDER_CODE_LOCAL": configured}
+    runtime = RuntimeModelConfiguration.from_environment(env)
+    assert guard.projected_local_code_model(runtime.stable_alias) == runtime.local_code_model
+
+
+def test_unrelated_loaded_server_module_cannot_break_default_route(monkeypatch):
+    monkeypatch.setenv("SONDER_STRICT", "1")
+    monkeypatch.setenv("SONDER_CODE_LOCAL", "policy-blocked-local")
+    monkeypatch.setitem(sys.modules, "server", object())
+    policy = dict(server._RUNTIME_POLICY, tool_lane_denied_models={"names": ["policy-blocked-local"]})
+    assert guard.selector_refusal("sonder", server.TIERS, policy) == BLOCKED % "policy-blocked-local"
 
 
 def test_the_optional_reasoning_rung_is_judged(monkeypatch):

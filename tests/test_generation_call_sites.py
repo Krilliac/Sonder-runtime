@@ -498,6 +498,199 @@ def test_a_direct_refusal_still_covers_a_call_nested_after_it(tmp_path, monkeypa
     assert sites[("scripts/evil.py", "through_the_helper", "ensemble_answer")].judged
 
 
+@pytest.mark.parametrize("check", [
+    "if g.selector_refusal(tier, server.TIERS) is None: return",
+    "if (r := g.selector_refusal(tier, server.TIERS)) and False: return r",
+    "if False or g.selector_refusal(tier, server.TIERS): return",
+    "if g.require_generation(tier, text_only=True): return",
+    "if g.selector_refusal(tier, {}): return",
+    "if g.selector_refusal(tier, other.TIERS): return",
+])
+def test_scanner_does_not_credit_non_stopping_or_wrongly_bound_checks(tmp_path, monkeypatch, check):
+    sites = _scan_source(tmp_path, monkeypatch, "scripts/shapes.py", f'''
+        import server
+        from sonder_runtime.adapters import tool_lane_guard as g
+        def run(p, tier):
+            {check}
+            exec(server.sonder(p, tier=tier))
+    ''')
+    assert not sites[("scripts/shapes.py", "run", "sonder")].refused
+
+
+def test_scanner_does_not_credit_a_shadowed_refusal(tmp_path, monkeypatch):
+    sites = _scan_source(tmp_path, monkeypatch, "scripts/shadow.py", '''
+        import server
+        def selector_refusal(tier, bindings):
+            return ""
+        def run(p, tier):
+            if selector_refusal(tier, server.TIERS): return
+            exec(server.sonder(p, tier=tier))
+    ''')
+    assert not sites[("scripts/shadow.py", "run", "sonder")].refused
+
+
+@pytest.mark.parametrize("mutation, selector", [
+    ("args.tiers = 'astra-cyber-27b'", "args.tiers"),
+    ("args['tiers'] = 'astra-cyber-27b'", "args['tiers']"),
+    ("args.tiers[0] = 'astra-cyber-27b'", "args.tiers"),
+])
+def test_scanner_loses_judgement_after_attribute_or_subscript_store(
+    tmp_path, monkeypatch, mutation, selector,
+):
+    sites = _scan_source(tmp_path, monkeypatch, "scripts/mutate.py", f'''
+        import server
+        from sonder_runtime.adapters import tool_lane_guard as g
+        def run(p, args):
+            if g.selector_refusal({selector}, server.TIERS): return
+            {mutation}
+            exec(server.ensemble_answer(p, tiers={selector}))
+    ''')
+    site = sites[("scripts/mutate.py", "run", "ensemble_answer")]
+    assert site.refused and not site.judged
+
+
+@pytest.mark.parametrize("check", [
+    "if g.selector_refusal(tier, server.TIERS): return",
+    "if r := g.selector_refusal(tier, server.TIERS): return r",
+    "r = g.selector_refusal(tier, server.TIERS)\n            if r: return r",
+    "if (r := g.selector_refusal(tier, server.TIERS)) or False: return r",
+])
+def test_scanner_credits_only_supported_truthy_refusal_shapes(tmp_path, monkeypatch, check):
+    sites = _scan_source(tmp_path, monkeypatch, "scripts/valid.py", f'''
+        import server
+        from sonder_runtime.adapters import tool_lane_guard as g
+        def run(p, tier):
+            {check}
+            exec(server.sonder(p, tier=tier))
+    ''')
+    site = sites[("scripts/valid.py", "run", "sonder")]
+    assert site.refused and site.judged
+
+
+def test_scanner_accepts_a_runtime_tier_map_with_an_empty_fallback(tmp_path, monkeypatch):
+    sites = _scan_source(tmp_path, monkeypatch, "scripts/runtime.py", '''
+        import server
+        from sonder_runtime.adapters import tool_lane_guard as g
+        def run(rt, p, tier):
+            known = getattr(rt, "TIERS", None)
+            if g.selector_refusal(tier, known or {}): return
+            exec(server.sonder(p, tier=tier))
+    ''')
+    assert sites[("scripts/runtime.py", "run", "sonder")].judged
+
+
+def test_scanner_accepts_an_imported_real_tier_map_but_not_a_local_replacement(tmp_path, monkeypatch):
+    accepted = _scan_source(tmp_path, monkeypatch, "scripts/imported.py", '''
+        import server
+        from server import TIERS
+        from sonder_runtime.adapters import tool_lane_guard as g
+        def run(p, tier):
+            if g.selector_refusal(tier, TIERS): return
+            exec(server.sonder(p, tier=tier))
+    ''')
+    rejected = _scan_source(tmp_path, monkeypatch, "scripts/local.py", '''
+        import server
+        from sonder_runtime.adapters import tool_lane_guard as g
+        TIERS = {}
+        def run(p, tier):
+            if g.selector_refusal(tier, TIERS): return
+            exec(server.sonder(p, tier=tier))
+    ''')
+    assert accepted[("scripts/imported.py", "run", "sonder")].judged
+    assert not rejected[("scripts/local.py", "run", "sonder")].refused
+
+
+def test_scanner_does_not_borrow_a_tier_map_from_a_sibling_function(tmp_path, monkeypatch):
+    sites = _scan_source(tmp_path, monkeypatch, "scripts/sibling.py", '''
+        import server
+        from sonder_runtime.adapters import tool_lane_guard as g
+        def elsewhere(rt):
+            known = getattr(rt, "TIERS", None)
+        def run(p, tier):
+            if g.selector_refusal(tier, known or {}): return
+            exec(server.sonder(p, tier=tier))
+    ''')
+    assert not sites[("scripts/sibling.py", "run", "sonder")].refused
+
+
+def test_scanner_accepts_a_tier_map_from_an_enclosing_function(tmp_path, monkeypatch):
+    sites = _scan_source(tmp_path, monkeypatch, "scripts/enclosing.py", '''
+        import server
+        from sonder_runtime.adapters import tool_lane_guard as g
+        def outer(rt, p, tier):
+            known = getattr(rt, "TIERS", None)
+            def run():
+                if g.selector_refusal(tier, known or {}): return
+                exec(server.sonder(p, tier=tier))
+            return run()
+    ''')
+    assert sites[("scripts/enclosing.py", "outer.run", "sonder")].judged
+
+
+def test_scanner_does_not_credit_a_reassigned_tier_map(tmp_path, monkeypatch):
+    sites = _scan_source(tmp_path, monkeypatch, "scripts/reassigned_map.py", '''
+        import server
+        from sonder_runtime.adapters import tool_lane_guard as g
+        def run(rt, p, tier):
+            known = getattr(rt, "TIERS", None)
+            known = {}
+            if g.selector_refusal(tier, known or {}): return
+            exec(server.sonder(p, tier=tier))
+    ''')
+    assert not sites[("scripts/reassigned_map.py", "run", "sonder")].refused
+
+
+def test_scanner_does_not_credit_a_locally_rebound_imported_tiers(tmp_path, monkeypatch):
+    sites = _scan_source(tmp_path, monkeypatch, "scripts/rebound_tiers.py", '''
+        import server
+        from server import TIERS
+        from sonder_runtime.adapters import tool_lane_guard as g
+        def run(p, tier):
+            TIERS = {}
+            if g.selector_refusal(tier, TIERS): return
+            exec(server.sonder(p, tier=tier))
+    ''')
+    assert not sites[("scripts/rebound_tiers.py", "run", "sonder")].refused
+
+
+@pytest.mark.parametrize("shadow, check", [
+    ("from sonder_runtime.adapters.tool_lane_guard import prompt_refusal as selector_refusal",
+     "selector_refusal(tier, server.TIERS)"),
+    ("try: raise ValueError()\n            except ValueError as selector_refusal: pass",
+     "selector_refusal(tier, server.TIERS)"),
+    ("g.selector_refusal = lambda *args: ''", "g.selector_refusal(tier, server.TIERS)"),
+])
+def test_scanner_does_not_credit_other_refusal_shadowing(tmp_path, monkeypatch, shadow, check):
+    sites = _scan_source(tmp_path, monkeypatch, "scripts/shadowed.py", f'''
+        import server
+        from sonder_runtime.adapters import tool_lane_guard as g
+        def run(p, tier):
+            {shadow}
+            if {check}: return
+            exec(server.sonder(p, tier=tier))
+    ''')
+    assert not sites[("scripts/shadowed.py", "run", "sonder")].refused
+
+
+@pytest.mark.parametrize("mutation", [
+    "setattr(args, 'tiers', 'astra-cyber-27b')",
+    "args.update(tiers='astra-cyber-27b')",
+])
+def test_scanner_loses_judgement_after_a_call_that_can_mutate_the_selector(
+    tmp_path, monkeypatch, mutation,
+):
+    sites = _scan_source(tmp_path, monkeypatch, "scripts/mutating_call.py", f'''
+        import server
+        from sonder_runtime.adapters import tool_lane_guard as g
+        def run(p, args):
+            if g.selector_refusal(args.tiers, server.TIERS): return
+            {mutation}
+            exec(server.ensemble_answer(p, tiers=args.tiers))
+    ''')
+    site = sites[("scripts/mutating_call.py", "run", "ensemble_answer")]
+    assert site.refused and not site.judged
+
+
 GUARDS = '''
     import server
     from sonder_runtime.adapters import tool_lane_guard as g

@@ -59,17 +59,18 @@ def normalize_name(name: Any) -> str:
     return text
 
 
-# The two Hugging Face sources end at ``-gguf`` so every quantisation tag and
-# the untagged name are covered; the ``huggingface.co/`` spelling is listed
-# too so either host form of the same source is caught.
+# Derive hosted ids, hostless ids and repository stems from one source list.
 _DENIED_SOURCES = (
     "mradermacher/Qwen3.8-cyber-RedTeam-Surgical-Abliterated-GGUF",
     "DuoNeural/Cyber-Ornith-1.5-9B-OBLITERATED-GGUF",
 )
 DEFAULT_DENIED_PREFIXES = ("astra-cyber-",) + tuple(
-    normalize_name(host + source)
+    normalize_name(host + source if host else source)
     for source in _DENIED_SOURCES
-    for host in ("hf.co/", "huggingface.co/")
+    for host in ("hf.co/", "huggingface.co/", "")
+) + tuple(
+    normalize_name(source.rsplit("/", 1)[-1].removesuffix("-GGUF"))
+    for source in _DENIED_SOURCES
 )
 DEFAULT_DENIED_NAMES: tuple[str, ...] = ()
 # Served-model ids that do not name a model: the provider picks one itself.
@@ -223,9 +224,29 @@ def decide_selector(
 
 
 def name_candidates(normalized: str) -> tuple[str, ...]:
-    """The names a normalized model name is matched as: itself, then its last path segment."""
-    tail = normalized.rsplit("/", 1)[-1]
-    return (normalized,) if tail == normalized else (normalized, tail)
+    """The full name, its last ``/`` segment, and every slash/backslash path suffix and segment.
+
+    The first two are the original rule's candidates and are always present,
+    so splitting on ``\\`` as well can only add candidates, never drop one.
+    """
+    parts = normalized.replace("\\", "/").split("/")
+    return tuple(dict.fromkeys(
+        [normalized, normalized.rsplit("/", 1)[-1]]
+        + ["/".join(parts[index:]) for index in range(len(parts))] + parts
+    ))
+
+
+def policy_candidates(normalized: str) -> frozenset[str]:
+    """The candidates a policy-added name or prefix is matched against.
+
+    The original two (the full name and its last ``/`` segment, backslashes
+    included) plus the last segment after either separator.
+    """
+    return frozenset({
+        normalized,
+        normalized.rsplit("/", 1)[-1],
+        normalized.replace("\\", "/").rsplit("/", 1)[-1],
+    })
 
 
 _candidates = name_candidates  # the original private name, kept for existing callers
@@ -234,19 +255,24 @@ _candidates = name_candidates  # the original private name, kept for existing ca
 def decide(model: Any, deny: ToolLaneDenyList, *, free_form: bool) -> ModelLaneDecision:
     """Decide whether ``model`` may be used in a tool-using lane.
 
-    Exact names and prefixes are matched against the normalized name and its
-    last path segment.  With an unreadable policy a caller-named (``free_form``)
-    model fails closed; a tier-bound model is still checked against the lists.
+    Built-ins match every path segment; policy-added entries are matched
+    against ``policy_candidates``: the original full name and last ``/``
+    segment, plus the last segment after either separator. With an unreadable policy a
+    caller-named (``free_form``) model fails closed; a tier-bound model is
+    still checked against the lists.
     """
     raw = str(model if model is not None else "").strip()
     normalized = normalize_name(raw)
     if not normalized:
         return ModelLaneDecision(ModelLaneStatus.ALLOWED, raw)
+    original_candidates = policy_candidates(normalized)
     for candidate in _candidates(normalized):
-        if candidate in deny.names:
+        if candidate in original_candidates and candidate in deny.names:
             return ModelLaneDecision(ModelLaneStatus.DENIED, raw, candidate)
         for prefix in deny.prefixes:
-            if candidate.startswith(prefix):
+            if candidate.startswith(prefix) and (
+                prefix in DEFAULT_DENIED_PREFIXES or candidate in original_candidates
+            ):
                 return ModelLaneDecision(ModelLaneStatus.DENIED, raw, prefix)
     if free_form and not deny.readable:
         return ModelLaneDecision(ModelLaneStatus.POLICY_UNREADABLE, raw)
