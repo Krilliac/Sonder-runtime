@@ -52,8 +52,11 @@ def test_choke_points_and_text_entry_points_exist_and_are_seen(scan):
     missing = [name for name in calls.CHOKE_POINTS + calls.TEXT_ENTRY_POINTS if name not in defined]
     assert not missing, "renamed or removed (update the scanner and registry): %s" % missing
     seen = {callee for _path, _qualname, callee in scan.sites}
-    unseen = [name for name in calls.CHOKE_POINTS + calls.TEXT_ENTRY_POINTS if name not in seen]
-    assert not unseen, "no site references %s: the scan has stopped seeing it" % unseen
+    unseen = {name for name in calls.CHOKE_POINTS + calls.TEXT_ENTRY_POINTS if name not in seen}
+    assert unseen == calls.UNREFERENCED_ENTRY_POINTS, (
+        "no site references %s (or UNREFERENCED_ENTRY_POINTS is stale): the scan has stopped seeing it"
+        % sorted(unseen ^ calls.UNREFERENCED_ENTRY_POINTS)
+    )
     assert calls.GATEWAY_GENERATE in seen
     assert "raw-gateway:" + calls.RAW_GATEWAY_NAME in seen
 
@@ -123,20 +126,42 @@ def test_every_text_only_declaration_is_registered(scan):
 
 
 def test_exec_consumers_the_bottom_check_cannot_see_refuse_first(scan):
+    """A refusal counts only when its result stops the function and it judges the call's selector."""
     problems = []
     for key, entry in calls.REGISTRY.items():
         if entry.cls != calls.EXEC or not calls.needs_refusal(key[2]):
             continue
-        if scan.sites[key].refused:
-            continue
-        if not entry.guarded_by:
-            problems.append("%s :: %s :: %s has no refusal before the call" % key)
-            continue
-        for guard in entry.guarded_by:
-            path, qualname = guard.split("::", 1)
-            if calls.function_refuses(path, qualname) is not True:
-                problems.append("%s guards %s :: %s :: %s but does not refuse" % ((guard,) + key))
+        site = scan.sites[key]
+        if entry.guarded_by:
+            judged = site.refused and site.judged
+            for guard in entry.guarded_by:
+                path, qualname = guard.split("::", 1)
+                judgements = calls.guard_judgements(path, qualname)
+                if not judgements:
+                    problems.append("%s guards %s :: %s :: %s but no refusal stops it" % ((guard,) + key))
+                    continue
+                judged = judged or all(
+                    any(calls.selector_matches(selector, item) for item in judgements)
+                    for selector in site.selectors
+                )
+            refused = True
+        else:
+            refused, judged = site.refused, site.judged
+        if not refused:
+            problems.append("%s :: %s :: %s has no refusal that stops the function before the call" % key)
+        elif not judged and not entry.selector_reason:
+            problems.append(
+                "%s :: %s :: %s: the refusal does not judge the selector the call passes (%s); "
+                "judge that expression or give selector_reason" % (key + (sorted(site.selectors),))
+            )
+        elif judged and entry.selector_reason:
+            problems.append("%s :: %s :: %s: stale selector_reason (the refusal judges the selector)" % key)
     assert not problems, "\n".join(problems) + "\n" + HOW
+
+
+def test_selector_reasons_only_on_exec_entries():
+    for key, entry in calls.REGISTRY.items():
+        assert not entry.selector_reason or entry.cls == calls.EXEC, key
 
 
 # ---- the scanner on synthetic sources -----------------------------------------
@@ -207,6 +232,165 @@ def test_scanner_credits_a_refusal_in_the_function_or_a_same_file_helper(tmp_pat
     assert sites[("scripts/new_job.py", "checked", "ensemble_answer")].refused
     assert sites[("scripts/new_job.py", "outer.inner", "sonder")].refused
     assert not sites[("scripts/new_job.py", "unchecked", "ensemble_answer")].refused
+    # The helper judges 'code' but the call takes the ensemble's default tiers.
+    assert not sites[("scripts/new_job.py", "checked", "ensemble_answer")].judged
+    # An empty selector judges the default route the bare call takes.
+    assert sites[("scripts/new_job.py", "outer.inner", "sonder")].judged
+
+
+TEXT_ONLY_WRAPPERS = '''
+    import server
+
+    def offload_exec(p):
+        exec(server.offload(p, tier="code"))
+
+    def offload_tier_exec(p):
+        exec(server._offload_tier_impl(p, tier="code"))
+
+    def sonder_impl_exec(p):
+        exec(server._sonder_impl(p))
+
+    def serialized_exec(p):
+        exec(server._sonder_impl_serialized(p))
+
+    def answer_exec(conn, p):
+        exec(server._answer(conn, p, "m", "", 0.2, 64, 0, None, "", None)[0])
+
+    def history_exec(p):
+        exec(server._answer_with_history_impl(p, []))
+
+    def vision_exec(p):
+        exec(server.vision_analyze("x.png", p))
+
+    def vision_impl_exec(p):
+        exec(server._vision_analyze_impl("x.png", p))
+'''
+
+
+def test_scanner_sees_every_text_only_wrapper(tmp_path, monkeypatch):
+    sites = _scan_source(tmp_path, monkeypatch, "scripts/evil.py", TEXT_ONLY_WRAPPERS)
+    expected = {
+        "offload_exec": "offload", "offload_tier_exec": "_offload_tier_impl",
+        "sonder_impl_exec": "_sonder_impl", "serialized_exec": "_sonder_impl_serialized",
+        "answer_exec": "_answer", "history_exec": "_answer_with_history_impl",
+        "vision_exec": "vision_analyze", "vision_impl_exec": "_vision_analyze_impl",
+    }
+    for function, callee in expected.items():
+        site = sites[("scripts/evil.py", function, callee)]
+        assert site.kinds == {"call"} and not site.refused, function
+        assert calls.needs_refusal(callee), callee
+
+
+def test_a_new_text_only_wrapper_site_fails_the_ratchet(tmp_path, monkeypatch):
+    """The registry check itself rejects ``exec(server.offload(...))`` in a new script."""
+    sites = _scan_source(tmp_path, monkeypatch, "scripts/evil.py", TEXT_ONLY_WRAPPERS)
+    unlisted = set(sites) - set(calls.REGISTRY)
+    assert ("scripts/evil.py", "offload_exec", "offload") in unlisted
+
+
+def test_scanner_attributes_aliases_partials_and_gateway_calls(tmp_path, monkeypatch):
+    sites = _scan_source(tmp_path, monkeypatch, "scripts/evil.py", '''
+        import functools
+        import server
+        from server import ensemble_answer as ea
+
+        ask = server.offload
+        later = functools.partial(server.ensemble_answer, tiers="code")
+
+        def aliased(p):
+            exec(ea(p, tiers="code"))
+
+        def assigned(p):
+            exec(ask(p))
+
+        def via_partial(p):
+            exec(later(p))
+
+        def keywords(gateway, req, ctx):
+            return gateway.generate(request=req, context=ctx)
+
+        def three(gateway, req, ctx):
+            return gateway.generate(req, ctx, None)
+
+        def raw(application, req, ctx):
+            return application.model_gateway
+
+        def hardware(cuda):
+            offload = bool(cuda)
+            return {"cpu_offload_supported": offload}
+    ''')
+    aliased = sites[("scripts/evil.py", "aliased", "ensemble_answer")]
+    assert aliased.kinds == {"call"} and aliased.selectors == {"'code'"}
+    assert sites[("scripts/evil.py", "<module>", "ensemble_answer")].kinds >= {"import"}
+    assert sites[("scripts/evil.py", "assigned", "offload")].kinds == {"call"}
+    assert sites[("scripts/evil.py", "via_partial", "ensemble_answer")].kinds == {"call"}
+    assert ("scripts/evil.py", "keywords", calls.GATEWAY_GENERATE) in sites
+    assert ("scripts/evil.py", "three", calls.GATEWAY_GENERATE) in sites
+    assert ("scripts/evil.py", "raw", "raw-gateway:" + calls.RAW_GATEWAY_ATTRIBUTE) in sites
+    # A local variable that happens to be called ``offload`` is not the tool.
+    assert not any(key[1] == "hardware" for key in sites)
+
+
+def test_scanner_credits_only_a_refusal_that_stops_and_judges_the_selector(tmp_path, monkeypatch):
+    sites = _scan_source(tmp_path, monkeypatch, "scripts/evil.py", '''
+        import server
+        from sonder_runtime.adapters import tool_lane_guard
+
+        def ghost(p):
+            tool_lane_guard.denied("totally-unrelated")
+            exec(server.ensemble_answer(p, tiers="astra-cyber-27b"))
+
+        def ignored(p, tiers):
+            refusal = tool_lane_guard.selector_refusal(tiers, server.TIERS)
+            exec(server.ensemble_answer(p, tiers=tiers))
+
+        def other_selector(p, tiers):
+            if tool_lane_guard.selector_refusal("code", server.TIERS):
+                return
+            exec(server.ensemble_answer(p, tiers=tiers))
+
+        def after(p, tiers):
+            exec(server.ensemble_answer(p, tiers=tiers))
+            if tool_lane_guard.selector_refusal(tiers, server.TIERS):
+                return
+
+        def judged(p, tiers):
+            if refusal := tool_lane_guard.selector_refusal(tiers, server.TIERS):
+                raise SystemExit(refusal)
+            exec(server.ensemble_answer(p, tiers=tiers))
+
+        def judged_through_a_name(p, model):
+            refusal = tool_lane_guard.selector_refusal(model or "", server.TIERS)
+            if refusal:
+                return refusal
+            exec(server.sonder(p, model_override=model))
+
+        def _refuse(server, tiers):
+            if refusal := tool_lane_guard.selector_refusal(tiers, server.TIERS):
+                raise SystemExit(refusal)
+
+        def through_a_raising_helper(p, chosen):
+            _refuse(server, chosen)
+            exec(server.ensemble_answer(p, tiers=chosen))
+
+        def in_a_loop(tasks):
+            for task in tasks:
+                if tool_lane_guard.selector_refusal("", server.TIERS):
+                    continue
+                exec(server.sonder(task))
+    ''')
+
+    def site(function, callee="ensemble_answer"):
+        return sites[("scripts/evil.py", function, callee)]
+
+    assert not site("ghost").refused
+    assert not site("ignored").refused
+    assert site("other_selector").refused and not site("other_selector").judged
+    assert not site("after").refused
+    assert site("judged").refused and site("judged").judged
+    assert site("judged_through_a_name", "sonder").judged
+    assert site("through_a_raising_helper").judged
+    assert site("in_a_loop", "sonder").judged
 
 
 def test_an_unparseable_file_is_reported(tmp_path, monkeypatch):
