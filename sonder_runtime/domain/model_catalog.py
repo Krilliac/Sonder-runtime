@@ -2,9 +2,11 @@
 
 The catalog payload is the only cheap metadata available for every model.
 These helpers deduplicate names case-insensitively, keep unknown records
-eligible, read a tag's immutable digest and resolve an exact selector; the
-HTTP fetch itself stays with the caller. Moved from ``server.py`` in the WP1
-Three-Hundred-Twenty-Ninth Slice with its behaviour byte-for-byte intact.
+eligible, read a tag's immutable digest and resolve a selector (exactly, or
+an untagged name to its ``:latest`` record); the HTTP fetch itself stays with
+the caller. Moved from ``server.py`` in the WP1 Three-Hundred-Twenty-Ninth
+Slice with its behaviour intact; the ``:latest`` reading of an untagged
+selector was added later.
 """
 from __future__ import annotations
 
@@ -78,12 +80,29 @@ def catalog_revision(model, records):
     return ""
 
 
+def untagged(name):
+    """True when the model part of ``name`` (after the last ``/``) carries no tag."""
+    return ":" not in name.rsplit("/", 1)[-1]
+
+
 def resolve_record(selector, records):
-    """Resolve an exact catalog record case-insensitively, or return None."""
+    """Resolve a catalog record case-insensitively, or return None.
+
+    An exact name always wins. A selector without a tag also matches its
+    ``:latest`` record, which is how Ollama itself reads an untagged name (and
+    what ``catalog_revision`` already does). No other tag is ever inferred, a
+    tagged selector never matches an untagged record, and the name returned is
+    always the catalog's own, so callers keep judging the model that answers.
+    """
     wanted = str(selector or "").strip().casefold()
     if not wanted:
         return None
+    latest = wanted + ":latest" if untagged(wanted) else None
+    fallback = None
     for name, record in records:
-        if name.casefold() == wanted:
+        advertised = name.casefold()
+        if advertised == wanted:
             return name, record
-    return None
+        if fallback is None and advertised == latest:
+            fallback = (name, record)
+    return fallback
