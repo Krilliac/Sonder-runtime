@@ -709,3 +709,12 @@ def test_an_embedding_only_worker_model_is_still_not_a_chat_target(text_rig):
     assert guard.chat_target(server._serve_target, WORKER_EMBED, None)[3] is None
     assert server._ensemble_targets(WORKER_EMBED) == ([], [WORKER_EMBED])
     assert text_rig.reads, "the union was consulted and its record refused"
+
+
+def test_a_failing_pool_lookup_leaves_a_text_lane_name_unknown(text_rig, monkeypatch):
+    """Like the endpoint read beside it: an error is a miss, never an exception."""
+    def boom(_selector):
+        raise RuntimeError("pool lookup broke")
+
+    monkeypatch.setattr(server, "_resolve_model_pin", boom)
+    assert server._serve_target(WORKER_ONLY, None, chat_only=True)[3] is None
