@@ -82,17 +82,46 @@ def test_hf_sources_denied_in_every_quantisation_tagged_or_not(name):
     assert denied(name), name
 
 
+@pytest.mark.parametrize("source", (QWEN_SOURCE, ORNITH_SOURCE))
+def test_each_builtin_source_is_denied_under_every_repository_and_file_spelling(source):
+    stem = source.rsplit("/", 1)[-1].removesuffix("-GGUF")
+    spellings = (
+        source, source + ":Q4_K_M", source.rsplit("/", 1)[-1],
+        stem, stem + ":Q8_0", stem + "-Q4_K_M.gguf",
+        "hf.co/" + source, "huggingface.co/" + source,
+        "https://hf.co/" + source, "https://huggingface.co/" + source,
+        "registry.ollama.ai/hf.co/" + source + ":Q4_K_M",
+        "cache/" + stem + "/quantised.gguf",
+    )
+    for name in spellings:
+        assert denied(name), name
+
+
+@pytest.mark.parametrize("name", (
+    "qwen3.5:4b", "qwen3:8b", "sonder:latest", "kimi-k2.7-code:cloud",
+    "glm-5.2:cloud", "qwen3-coder:480b-cloud", "qwen3.8", "qwen3-coder",
+    "hf.co/mradermacher/Qwen3.8-27B-GGUF:Q4_K_M",
+    "hf.co/mradermacher/Qwen3.8-cyber-Surgical-GGUF",
+    "hf.co/DuoNeural/Cyber-Ornith-1.5-8B-GGUF",
+    "registry.ollama.ai/unsloth/Qwen3.8-27B-GGUF",
+))
+def test_existing_defaults_helpers_and_other_gguf_repositories_remain_allowed(name):
+    assert not denied(name), name
+
+
 def test_a_longer_repo_name_under_a_denied_hf_source_is_denied_by_design():
     assert denied(f"hf.co/{QWEN_SOURCE}-extra")
 
 
 def test_hf_defaults_are_prefixes_not_exact_names():
-    """Both Hugging Face sources and both host spellings are prefixes ending at ``-gguf``."""
+    """The hosted ids, hostless ids and stems all come from the source list."""
     prefixes = set(rule.DEFAULT_DENIED_PREFIXES)
     for host in ("hf.co/", "huggingface.co/"):
         for source in (QWEN_SOURCE, ORNITH_SOURCE):
             assert (host + source).casefold() in prefixes
-    assert all(prefix.endswith("-gguf") for prefix in prefixes if "/" in prefix)
+    for source in (QWEN_SOURCE, ORNITH_SOURCE):
+        assert source.casefold() in prefixes
+        assert source.rsplit("/", 1)[-1].removesuffix("-GGUF").casefold() in prefixes
     assert "astra-cyber-" in prefixes
     assert DEFAULTS.names == frozenset()
 
@@ -116,10 +145,7 @@ def test_hf_defaults_are_prefixes_not_exact_names():
     "astra",
     "cyber-astra-27b",
     "hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q3_K_XL",
-    "hf.co/someone-else/Qwen3.8-cyber-RedTeam-Surgical-Abliterated-GGUF",  # another owner
-    "hf.co/DuoNeural/Cyber-Ornith-1.5-9B",  # the non-GGUF sibling is a different source
     "huggingface.co/unsloth/Qwen3.8-27B-GGUF",
-    "qwen3.8-cyber-redteam-surgical-abliterated-gguf",  # tail of the denied source, no owner or host
 ])
 def test_ordinary_and_near_miss_names_are_allowed(name):
     decision = rule.decide(name, DEFAULTS, free_form=False)
@@ -200,7 +226,7 @@ def test_an_exact_name_is_matched_against_the_last_path_segment():
     for name in ("helper-model", "HELPER-MODEL:latest", "owner/helper-model", "reg.io/owner/Helper-Model:latest"):
         assert denied(name, deny), name
     assert not denied("helper-model-2", deny)
-    assert not denied("owner/helper-model/other", deny)  # the last segment is "other"
+    assert not denied("owner/helper-model/other", deny)  # policy names keep last-segment matching
     assert not denied("my-helper-model", deny)
 
 
@@ -215,7 +241,7 @@ def test_a_policy_prefix_matches_by_prefix():
     deny = ToolLaneDenyList.from_policy({"names": [], "prefixes": ["Team-X/"]})
     assert denied("team-x/anything:7b", deny)
     assert denied("TEAM-X/other", deny)
-    assert not denied("other/team-x/anything", deny)  # the tail "anything" does not start with it, nor does the whole
+    assert not denied("other/team-x/anything", deny)  # policy prefixes keep full-name/last-segment matching
     assert not denied("team-xylophone", deny)
 
 

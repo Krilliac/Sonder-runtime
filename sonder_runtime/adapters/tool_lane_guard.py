@@ -15,8 +15,8 @@ A tier bound to a non-Ollama provider (``SONDER_<TIER>_PROVIDER`` /
 ``SONDER_MODEL_BACKEND``) is judged by the model that provider serves, which
 ``served_model`` reads from the same environment the provider reads on every
 call; the Ollama name in ``TIERS`` is not what answers such a tier.  A
-bridged call is always a tier call (a model asked for by name stays on
-Ollama, and the bridged request carries no ``model`` option), so a blocked
+server bridged call is always a tier call (a model asked for by name stays on
+Ollama there, and the bridged request carries no ``model`` option), so a blocked
 model never serves a tier: the bridge refuses it before sending when the
 provider is configured to serve it and after the reply when the reply
 reports it, on every lane, text-only or not.  ``text_only`` keeps its
@@ -26,6 +26,9 @@ the served model in every reply, so an undetermined configured model is not
 refused up front for them; only the OpenAI-compatible transport, whose
 reply is never read for a model name, is refused in tool lanes when nothing
 names its model.
+
+The packaged chat-service gateway may send a by-name selector to a uniform
+non-Ollama provider. Its configured and reported served models are judged too.
 
 A selector on the default route (``""``, ``sonder``, ``local``) is judged by
 every tier that route can answer on: its start and every configured local
@@ -37,6 +40,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from collections.abc import Callable, Mapping, MutableMapping
 from typing import Any
 
@@ -403,17 +407,6 @@ def gateway_refusal(
     return _served_message(selector, provider, verdict) if verdict.denied else ""
 
 
-def _tier_call(tier: Any, explicit_model: Any) -> str:
-    """The routing key of a packaged request that asks for a tier, or ``""`` for one by name."""
-    from sonder_runtime.adapters.provider_bindings import PROVIDER_TIERS
-
-    selector = str(tier or "").strip().lower() or "sonder"
-    explicit = explicit_model.strip() if isinstance(explicit_model, str) else ""
-    if explicit or (selector not in PROVIDER_TIERS and selector != "sonder"):
-        return ""
-    return selector
-
-
 def _dispatched_provider(selector: str, bindings: Any) -> str:
     """The provider a packaged gateway sends ``selector`` to (the tier's binding, else the default)."""
     return str(bindings.tier_providers.get(selector) or bindings.default_generation_provider or "")
@@ -422,25 +415,21 @@ def _dispatched_provider(selector: str, bindings: Any) -> str:
 def tier_serving_refusal(
     tier: Any, explicit_model: Any, bindings: Any, policy: Mapping[str, Any] | None = None,
 ) -> str:
-    """Before sending a packaged text request: refused when a bridged tier's provider serves a blocked model.
+    """Refuse a packaged text request when its non-Ollama provider serves a blocked model.
 
-    Only a tier call is judged (a request that names a model, by tier or by
-    an explicit ``model`` option, is a by-name request and answers as text).
-    An Ollama tier and an undetermined served model pass; the reply is judged
-    by ``reply_refusal``.  A provider configuration that cannot be read
-    passes too: the provider reads the same configuration and fails itself,
-    and any reply it produces is still judged.
+    The provider's model is judged for every selector it receives, including
+    a by-name request on a uniform non-Ollama gateway.  Ollama by-name chat
+    remains text-only.  An undetermined model is judged after the reply.
     """
     from sonder_runtime.application.chat.provider_bridge import LEGACY_PROVIDER
 
-    selector = _tier_call(tier, explicit_model)
-    if not selector:
-        return ""
+    selector = str(tier or "").strip().lower() or "sonder"
+    explicit = explicit_model.strip() if isinstance(explicit_model, str) else ""
     try:
         provider = _dispatched_provider(selector, bindings)
         if provider in ("", LEGACY_PROVIDER):
             return ""
-        model = _provider_model(provider, selector, "", None)
+        model = _provider_model(provider, selector, explicit, None)
     except Exception as exc:  # noqa: BLE001 - the reply's served model is judged instead
         _warn_once("provider configuration could not be read before sending", exc)
         return ""
@@ -456,17 +445,13 @@ def reply_refusal(
 ) -> str:
     """After a packaged reply from a non-Ollama provider: refused when it reports a blocked or unnamed model.
 
-    A blocked reported model refuses a tier call on every lane and any
-    request on a tool lane; an unnamed one refuses unless ``text_only``.  A
-    text request that names a model is not judged here, and neither is a
-    request the gateway sends to Ollama (judged before sending).
+    A blocked reported model refuses every non-Ollama request, including a
+    by-name text request. An unnamed one refuses unless ``text_only``.
+    Ollama is judged before sending on tool lanes.
     """
     from sonder_runtime.application.chat.provider_bridge import LEGACY_PROVIDER
 
-    selector = _tier_call(tier, explicit_model)
-    if text_only and not selector:
-        return ""
-    key = selector or str(tier or "").strip().lower() or "sonder"
+    key = str(tier or "").strip().lower() or "sonder"
     try:
         provider = _dispatched_provider(key, bindings)
     except Exception as exc:  # noqa: BLE001 - an unreadable binding fails closed
@@ -572,6 +557,22 @@ def default_route_refusal(
     """
     deny = deny_list(policy) if deny is None else deny
     start, reachable = default_route_reach(bindings, policy)
+    if start not in reachable:
+        # ``sonder`` is resolved through the stable alias, falling back to
+        # LOCAL_CODE_MODEL.  It is not a key in TIERS, so reachable_tiers omits
+        # it; judge that fallback with the current policy before escalation.
+        from sonder_runtime.domain.runtime_model_configuration import RuntimeModelConfiguration
+
+        live_server = sys.modules.get("server")
+        if live_server is None:
+            defaults = RuntimeModelConfiguration.from_environment(os.environ)
+            possible_starts = (defaults.stable_alias, defaults.local_code_model)
+        else:
+            possible_starts = (live_server.SONDER_STABLE_ALIAS, live_server.LOCAL_CODE_MODEL)
+        for model in possible_starts:
+            verdict = _models.decide(model, deny, free_form=False)
+            if verdict.denied:
+                return _models.refusal_message(verdict.model, verdict.status)
     for tier in reachable:
         refused = _tier_refusal(tier, bindings, deny)
         if refused:

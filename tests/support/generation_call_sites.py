@@ -45,7 +45,12 @@ Classes:
     does not see, is preceded by a refusal from ``tool_lane_guard`` (in its
     function, an enclosing one, or every one of its ``guarded_by`` callers)
     whose result stops the function, and which judges the selector the call
-    passes.  A refusal stops the function only as a direct statement of the
+    passes. The scanner recognises a fixed set of refusal shapes; new consumers
+    must use one of them. An ``if`` test is a refusal call, a walrus or name
+    bound to one, or one of those as the first operand of ``or``. The binding
+    for ``selector_refusal`` is TIERS, server.TIERS, or a name obtained
+    from runtime TIERS with an empty-mapping fallback. A refusal stops the
+    function only as a direct statement of the
     function body (not nested in an ``if``, ``try``, ``with`` or loop) that
     comes before the statement holding the call: an ``if`` whose test holds
     the refusal and whose body ends in ``return`` or ``raise``, or a call
@@ -53,7 +58,7 @@ Classes:
     loop body counts as such a block for a call inside the same loop body,
     where the ``if`` may also end in ``continue`` or ``break``.  It judges the
     selector when it judges the same expression (``x or ""`` counts as
-    ``x``) and no name in that expression is assigned between the refusal
+    ``x``) and no name, attribute or subscript in that expression is assigned between the refusal
     and the call; a call that passes none takes its default and is judged by
     ``""``, ``"sonder"`` or ``"local"`` (the default route).  Where the
     judged expression differs by design the entry says why in
@@ -136,7 +141,7 @@ RAW_GATEWAY_ATTRIBUTE = "model_gateway"
 # text entry point or a raw HTTP path.
 REFUSAL_CALLS = frozenset({
     "selector_refusal", "resolved_refusal", "denied", "refusal",
-    "gateway_refusal", "require_generation", "default_route_refusal", "prompt_refusal",
+    "gateway_refusal", "default_route_refusal", "prompt_refusal",
 })
 # Refusals whose first argument is not a selector (``prompt_refusal`` judges
 # the model request in the prompt's own text).
@@ -318,6 +323,35 @@ class _Scanner(ast.NodeVisitor):
     def __init__(self, path: str, tree: ast.Module):
         self.path = path
         self.tree = tree
+        self.imported_tiers = any(
+            isinstance(node, ast.ImportFrom) and node.module == "server"
+            and any(alias.name == "TIERS" and (alias.asname or alias.name) == "TIERS" for alias in node.names)
+            for node in tree.body
+        )
+        self.shadowed_refusals: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names = [node.name]
+            elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+                names = [node.id]
+            elif isinstance(node, ast.arg):
+                names = [node.arg]
+            elif isinstance(node, ast.Import):
+                names = [alias.asname or alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module != "sonder_runtime.adapters.tool_lane_guard":
+                names = [alias.asname or alias.name for alias in node.names]
+            else:
+                names = []
+            self.shadowed_refusals.update(name for name in names if name in REFUSAL_CALLS)
+        self.tier_map_names = {
+            target.id for node in ast.walk(tree)
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+            and _called_name(node.value) == "getattr" and len(node.value.args) >= 2
+            and isinstance(node.value.args[0], ast.Name)
+            and node.value.args[0].id in ("server", "rt")
+            and isinstance(node.value.args[1], ast.Constant) and node.value.args[1].value == "TIERS"
+            for target in node.targets if isinstance(target, ast.Name)
+        }
         self.scope: list[str] = []
         self.functions: list[ast.AST] = []
         self.parents: dict[ast.AST, ast.AST] = {}
@@ -387,12 +421,56 @@ class _Scanner(ast.NodeVisitor):
 
     # -- refusals ------------------------------------------------------------
     def _is_refusal_call(self, node: ast.AST) -> bool:
-        return isinstance(node, ast.Call) and (
-            _called_name(node) in REFUSAL_CALLS or _called_name(node) in self.returning_helpers
+        if not isinstance(node, ast.Call):
+            return False
+        name = _called_name(node)
+        if name in REFUSAL_CALLS and name in self.shadowed_refusals:
+            return False
+        if name in self.returning_helpers and name not in REFUSAL_CALLS:
+            return True
+        if name not in REFUSAL_CALLS:
+            return False
+        if name == "selector_refusal":
+            binding = node.args[1] if len(node.args) > 1 else next(
+                (kw.value for kw in node.keywords if kw.arg == "bindings"), None,
+            )
+            if not self._real_bindings(binding):
+                return False
+        return True
+
+    def _real_bindings(self, node: ast.AST | None) -> bool:
+        """Accept TIERS, server.TIERS, or a known runtime TIERS fallback."""
+        if isinstance(node, ast.Name):
+            return node.id == "TIERS" and (self.path == "server.py" or self.imported_tiers)
+        if isinstance(node, ast.Attribute):
+            return node.attr == "TIERS" and isinstance(node.value, ast.Name) and node.value.id == "server"
+        if isinstance(node, ast.Call):
+            return (
+                _called_name(node) == "getattr" and len(node.args) == 3
+                and isinstance(node.args[0], ast.Name) and node.args[0].id == "server"
+                and isinstance(node.args[1], ast.Constant) and node.args[1].value == "TIERS"
+                and isinstance(node.args[2], ast.Dict) and not node.args[2].keys
+            )
+        return (
+            isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or)
+            and len(node.values) == 2 and isinstance(node.values[0], ast.Name)
+            and node.values[0].id in self.tier_map_names
+            and isinstance(node.values[1], ast.Dict)
+            and not node.values[1].keys
         )
 
     def _contains_refusal(self, node: ast.AST) -> bool:
-        return any(self._is_refusal_call(inner) for inner in ast.walk(node))
+        return bool(self._test_calls(node, {}))
+
+    def _test_calls(self, node: ast.AST, assigned: dict[str, list[ast.Call]]) -> list[ast.Call]:
+        """Fixed truthy shapes: call, walrus, name, or the first operand of or."""
+        if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
+            return self._test_calls(node.values[0], assigned)
+        if isinstance(node, ast.NamedExpr):
+            return self._test_calls(node.value, assigned)
+        if isinstance(node, ast.Name):
+            return assigned.get(node.id, [])
+        return [node] if self._is_refusal_call(node) else []
 
     def _guard_tests(self, block: list[ast.stmt], stops=_STOPS) -> list[tuple[ast.If, list[ast.Call]]]:
         """Each direct ``if`` of ``block`` whose test holds refusal calls and whose body ends in a stop.
@@ -404,7 +482,7 @@ class _Scanner(ast.NodeVisitor):
         found = []
         for node in block:
             if isinstance(node, ast.Assign):
-                calls = [inner for inner in ast.walk(node.value) if self._is_refusal_call(inner)]
+                calls = self._test_calls(node.value, assigned)
                 for target in node.targets:
                     if isinstance(target, ast.Name):
                         if calls:
@@ -414,10 +492,7 @@ class _Scanner(ast.NodeVisitor):
                 continue
             if not isinstance(node, ast.If) or not isinstance(node.body[-1], stops):
                 continue
-            calls = [inner for inner in ast.walk(node.test) if self._is_refusal_call(inner)]
-            for inner in ast.walk(node.test):
-                if isinstance(inner, ast.Name) and isinstance(inner.ctx, ast.Load) and inner.id in assigned:
-                    calls.extend(assigned[inner.id])
+            calls = self._test_calls(node.test, assigned)
             if calls:
                 found.append((node, calls))
         return found
@@ -438,7 +513,7 @@ class _Scanner(ast.NodeVisitor):
             deciding = [
                 inner for statement in helper.body
                 if isinstance(statement, ast.Return) and statement.value is not None
-                for inner in ast.walk(statement.value) if self._is_refusal_call(inner)
+                for inner in self._test_calls(statement.value, {})
             ] + [
                 call_ for guard, calls in self._guard_tests(helper.body)
                 if isinstance(guard.body[-1], ast.Raise) for call_ in calls
@@ -521,13 +596,31 @@ class _Scanner(ast.NodeVisitor):
             if isinstance(inner, ast.Name) and isinstance(inner.ctx, (ast.Store, ast.Del))
             and after < inner.lineno <= before
         }
+        stored_parts = {
+            ast.unparse(inner) for inner in ast.walk(function)
+            if isinstance(inner, (ast.Attribute, ast.Subscript))
+            and isinstance(inner.ctx, (ast.Store, ast.Del))
+            and after < inner.lineno <= before
+        }
         kept = set()
         for expression in judged:
             try:
-                names = {inner.id for inner in ast.walk(ast.parse(expression, mode="eval")) if isinstance(inner, ast.Name)}
+                parts = tuple(ast.walk(ast.parse(expression, mode="eval")))
+                names = {inner.id for inner in parts if isinstance(inner, ast.Name)}
+                attributes = {ast.unparse(inner) for inner in parts if isinstance(inner, (ast.Attribute, ast.Subscript))}
             except SyntaxError:
                 names = set()
-            if not names & stored:
+                attributes = set()
+            mutated = bool(attributes & stored_parts) or any(
+                stored_part.startswith((attribute + ".", attribute + "["))
+                for attribute in attributes for stored_part in stored_parts
+            )
+            if not attributes:
+                mutated = mutated or any(
+                    stored_part.startswith((name + ".", name + "["))
+                    for name in names for stored_part in stored_parts
+                )
+            if not names & stored and not mutated:
                 kept.add(expression)
         return kept
 

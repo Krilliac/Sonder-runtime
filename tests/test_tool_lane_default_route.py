@@ -257,6 +257,29 @@ def test_the_default_route_judges_every_configured_local_tier(monkeypatch):
     assert guard.selector_refusal("fast", server.TIERS, server._RUNTIME_POLICY) == ""  # an explicit tier is itself
 
 
+def test_strict_default_route_judges_the_resolved_local_code_fallback(monkeypatch):
+    monkeypatch.setenv("SONDER_STRICT", "1")
+    monkeypatch.setattr(server, "LOCAL_CODE_MODEL", "policy-blocked-local")
+    policy = dict(server._RUNTIME_POLICY, tool_lane_denied_models={"names": ["policy-blocked-local"]})
+    assert guard.default_route_reach(server.TIERS, policy)[0] == "sonder"
+    assert guard.selector_refusal("sonder", server.TIERS, policy) == BLOCKED % "policy-blocked-local"
+
+
+def test_strict_default_route_judges_the_stable_alias(monkeypatch):
+    monkeypatch.setenv("SONDER_STRICT", "1")
+    policy = dict(server._RUNTIME_POLICY, tool_lane_denied_models={"names": [server.SONDER_STABLE_ALIAS]})
+    assert guard.selector_refusal("sonder", server.TIERS, policy) == BLOCKED % server.SONDER_STABLE_ALIAS
+
+
+def test_unbound_chat_start_judges_the_local_code_model_against_policy(monkeypatch):
+    monkeypatch.setattr(server, "LOCAL_CODE_MODEL", "custom-local-code")
+    policy = dict(server._RUNTIME_POLICY, tool_lane_denied_models={"names": ["custom-local-code"]})
+    bindings = dict(server.TIERS)
+    bindings.pop("general")
+    assert guard.default_route_reach(bindings, policy)[0] == "sonder"
+    assert guard.default_route_refusal(bindings, policy) == BLOCKED % "custom-local-code"
+
+
 def test_the_optional_reasoning_rung_is_judged(monkeypatch):
     policy = policy_with(monkeypatch, reasoning=OTHER)
     monkeypatch.setenv("SONDER_REASONING_PROVIDER", "sonder-inference")

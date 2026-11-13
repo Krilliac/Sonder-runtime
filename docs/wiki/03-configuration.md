@@ -387,11 +387,16 @@ self-modification job run by `scripts/nightly_self_improve.py` and
 refuses them, the chat code gate never runs their replies, and they are never
 bound to a tier. The self-modification job checks its model (`--model`, else
 the `code` tier) before it starts a run and stops with `model refused, no run
-started: ...`. The built-in
-list is the `astra-cyber-` prefix and the two `hf.co/...-GGUF` sources it was
-pulled from (every quantisation, tagged or not). Names are compared
-case-insensitively, without a trailing `:latest`, and by their last path
-segment too.
+started: ...`. The built-in list is the `astra-cyber-` prefix and two source
+repositories. For each source, the hosted `hf.co/owner/repo` and
+`huggingface.co/owner/repo` ids, the hostless `owner/repo` id, and the repository
+name without `-GGUF` (the model stem) are denied as prefixes. This covers tags,
+quantisation suffixes and `.gguf` file names beginning with that stem. Matching
+casefolds and trims names, removes one trailing `:latest`, and checks the full
+name, every slash-delimited suffix and every path segment. An `https://` URL or
+registry prefix therefore cannot hide a source; an unrelated owner using the
+same model stem also matches. Policy-added names and prefixes keep the prior
+full-name and final-segment matching rule.
 
 The runtime policy can add entries (`tool_lane_denied_models` in
 `runtime_policy.json`: `{"names": [...], "prefixes": [...]}`) but never remove
@@ -408,12 +413,16 @@ A tier bound to a provider other than Ollama is judged by the model that
 provider actually serves (`SONDER_INFERENCE_TIER_MODELS`, else
 `SONDER_INFERENCE_MODEL`; the OpenRouter tier model; `SONDER_OPENAI_MODEL`).
 A blocked model never serves a tier, in any lane: a bridged call is always a
-tier call (a model asked for by name stays on Ollama, and the bridged request
-carries no model name), so when a tier's provider is configured to serve a
+tier call on the server lanes (a model asked for by name stays on Ollama, and
+the bridged request carries no model name), so when a tier's provider is
+configured to serve a
 blocked model, or its reply reports one, that call is refused on every lane,
 chat by tier included. The refusal names the tier, the provider, the model and
 the setting that chooses it, and says to ask the model by name for a text
-answer instead. Sonder Inference and OpenRouter name the served model in every
+answer instead. On the packaged chat-service path, a single non-Ollama provider
+also receives by-name and `local` requests. It serves its own configured model
+for those selectors, which is judged before sending and after the reply.
+Sonder Inference and OpenRouter name the served model in every
 reply (the Sonder Inference gateway rejects a reply that does not), so a tier
 on them with no model named is not refused up front: the model the reply
 reports is judged on every call, and the lane runs when it is an ordinary one.
@@ -425,7 +434,7 @@ transport never reads a model name from the reply, so with
 the served model cannot be determined: that tier is refused in tool lanes,
 with a refusal that names `SONDER_OPENAI_MODEL`, and chat still works.
 
-A lane on the default route (tier `""`, `sonder` or `local`) is judged before
+    A lane on the default route (tier `""`, `sonder` or `local`) is judged before
 it starts by every tier that route can answer on, not only the tier it starts
 on. The route starts on the policy's chat tier (on the `sonder` alias when
 `SONDER_STRICT` is on or that tier is unbound) and, with
@@ -436,7 +445,8 @@ the configured local tiers, `runtime_policy.configured_tiers`, with no image):
 the start, then every configured local tier at least as strong by role as the
 start (`fast` is below `general` and `code`) and the optional `reasoning` tier;
 never `vision` (the default route carries no image); with escalation off, the
-start alone. So a lane that runs the reply (campaigns, game generation,
+start alone. The `sonder` start also judges the stable alias and its local code
+fallback (`LOCAL_CODE_MODEL`) against policy-added names. So a lane that runs the reply (campaigns, game generation,
 `/train`, `curriculum_run.py`, `eval_retrieval.py`, `game_ladder.py`) refuses
 when a reachable tier is bound to a blocked model, is bridged to a provider
 that serves one, or is on the OpenAI-compatible transport with no model named.
@@ -476,7 +486,7 @@ a blocked model. The packaged gateway handed to the application is the checked
 one; only the text consumers receive the unchecked gateway:
 `Application.model_gateway`, whose generating consumer is the legacy bridge
 above, and the chat service (A2A), which holds it through a handle that
-applies the same served-model rule to a tier request. Ordinary models are
+    applies the same served-model rule to every non-Ollama request it dispatches. Ordinary models are
 judged against a deny list cached per version of the policy file, so they pay
 no extra disk read per call.
 
@@ -521,10 +531,16 @@ Because that model cannot be identified at the bridge, an OpenAI-compatible
 tier with no model named that is bound while a default-route lane is running
 answers that lane's text call like any undetermined tier; only the lane's
 up-front check refuses it, and only for tiers configured when it ran.
-A streamed HTTP chat turn forwards a bridged reply's tokens to the client as
-they arrive; only that text chat turn streams (every tool-lane generation runs
-with the stream disarmed), so a tool-lane reply refused after it arrives was
-never shown. Text-lane output applied by
+If the policy file is unreadable, built-in names are still enforced everywhere;
+names added only in that file are enforced for caller-named models, but not for
+tier-served ones until the file is readable again. `/runtime status` reports the
+unreadable file. A name added while a job runs is enforced for that job's
+by-name text calls when the job next starts; tiers are covered immediately. A
+streamed HTTP chat turn forwards a bridged reply's tokens to the client as they
+arrive. On Sonder Inference, streamed chat by tier with no model named can
+display text from a denied model before the reported model is refused; that
+display-only text is not stored or run. Tool-lane generation runs with the
+stream disarmed. Text-lane output applied by
 an external program (an MCP or HTTP client that splices `ensemble_answer`
 output, or executes tool calls returned by `/v1/chat/completions`) is outside
 the runtime's control.
@@ -547,6 +563,13 @@ gateway (`raw_gateway`, or any read of `.model_gateway`). A call through an
 imported alias, a name bound to one of these or a `functools.partial` counts as
 a call of the original. Register the site in
 `tests/support/generation_call_sites.py` with its count, class and reason:
+
+The scanner recognises a fixed set of refusal shapes. Write a new EXEC
+consumer in one of them: a direct `if` test of a refusal call, a name or
+walrus bound to it, or one of those as the first operand of `or`, with a
+stopping body. `selector_refusal` must receive `TIERS`, `server.TIERS`, or a
+name read from the runtime's `TIERS` with an empty fallback (the `known or {}`
+form in `mesh_agent_tools.py`). Other shapes are not credited.
 
 - `TEXT`: the reply is only shown, parsed or stored as text. Pass
   `text_only=True` at a generation-stack call; a text entry point already
