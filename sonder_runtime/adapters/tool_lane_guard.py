@@ -561,14 +561,15 @@ def default_route_refusal(
         # ``sonder`` is resolved through the stable alias, falling back to
         # LOCAL_CODE_MODEL.  It is not a key in TIERS, so reachable_tiers omits
         # it; judge that fallback with the current policy before escalation.
-        from sonder_runtime.domain.runtime_model_configuration import RuntimeModelConfiguration
-
         live_server = sys.modules.get("server")
-        if live_server is None:
-            defaults = RuntimeModelConfiguration.from_environment(os.environ)
-            possible_starts = (defaults.stable_alias, defaults.local_code_model)
-        else:
-            possible_starts = (live_server.SONDER_STABLE_ALIAS, live_server.LOCAL_CODE_MODEL)
+        # These are the two values resolve_sonder_model may return. Read only
+        # the relevant environment value; the full configuration projection
+        # logs and would run on every check before server is imported.
+        stable_alias = getattr(live_server, "SONDER_STABLE_ALIAS", "sonder:latest")
+        local_code = getattr(
+            live_server, "LOCAL_CODE_MODEL", str(os.environ.get("SONDER_CODE_LOCAL", stable_alias)),
+        )
+        possible_starts = (stable_alias, local_code)
         for model in possible_starts:
             verdict = _models.decide(model, deny, free_form=False)
             if verdict.denied:

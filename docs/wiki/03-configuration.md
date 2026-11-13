@@ -390,13 +390,15 @@ the `code` tier) before it starts a run and stops with `model refused, no run
 started: ...`. The built-in list is the `astra-cyber-` prefix and two source
 repositories. For each source, the hosted `hf.co/owner/repo` and
 `huggingface.co/owner/repo` ids, the hostless `owner/repo` id, and the repository
-name without `-GGUF` (the model stem) are denied as prefixes. This covers tags,
-quantisation suffixes and `.gguf` file names beginning with that stem. Matching
-casefolds and trims names, removes one trailing `:latest`, and checks the full
-name, every slash-delimited suffix and every path segment. An `https://` URL or
-registry prefix therefore cannot hide a source; an unrelated owner using the
-same model stem also matches. Policy-added names and prefixes keep the prior
-full-name and final-segment matching rule.
+name without `-GGUF` (the model stem) are denied as prefixes. A built-in stem
+matches at the start of any path segment, followed by any characters, including
+another format or quantisation suffix. The `astra-cyber-` prefix likewise
+matches at the start of any segment. Both `/` and `\` separate segments;
+matching casefolds and trims names and removes one trailing `:latest`. An
+`https://` URL or registry prefix cannot hide a source. A different model
+stored under a directory named after a blocked model is also refused.
+Policy-added names and prefixes keep full-name and final-segment matching,
+with either path separator.
 
 The runtime policy can add entries (`tool_lane_denied_models` in
 `runtime_policy.json`: `{"names": [...], "prefixes": [...]}`) but never remove
@@ -434,7 +436,7 @@ transport never reads a model name from the reply, so with
 the served model cannot be determined: that tier is refused in tool lanes,
 with a refusal that names `SONDER_OPENAI_MODEL`, and chat still works.
 
-    A lane on the default route (tier `""`, `sonder` or `local`) is judged before
+A lane on the default route (tier `""`, `sonder` or `local`) is judged before
 it starts by every tier that route can answer on, not only the tier it starts
 on. The route starts on the policy's chat tier (on the `sonder` alias when
 `SONDER_STRICT` is on or that tier is unbound) and, with
@@ -486,9 +488,9 @@ a blocked model. The packaged gateway handed to the application is the checked
 one; only the text consumers receive the unchecked gateway:
 `Application.model_gateway`, whose generating consumer is the legacy bridge
 above, and the chat service (A2A), which holds it through a handle that
-    applies the same served-model rule to every non-Ollama request it dispatches. Ordinary models are
-judged against a deny list cached per version of the policy file, so they pay
-no extra disk read per call.
+applies the same served-model rule to every non-Ollama request it dispatches.
+Ordinary models are judged against a deny list cached per version of the
+policy file, so they pay no extra disk read per call.
 
 Three configurations fail closed where they did not before:
 
@@ -564,13 +566,6 @@ imported alias, a name bound to one of these or a `functools.partial` counts as
 a call of the original. Register the site in
 `tests/support/generation_call_sites.py` with its count, class and reason:
 
-The scanner recognises a fixed set of refusal shapes. Write a new EXEC
-consumer in one of them: a direct `if` test of a refusal call, a name or
-walrus bound to it, or one of those as the first operand of `or`, with a
-stopping body. `selector_refusal` must receive `TIERS`, `server.TIERS`, or a
-name read from the runtime's `TIERS` with an empty fallback (the `known or {}`
-form in `mesh_agent_tools.py`). Other shapes are not credited.
-
 - `TEXT`: the reply is only shown, parsed or stored as text. Pass
   `text_only=True` at a generation-stack call; a text entry point already
   declares itself.
@@ -592,6 +587,15 @@ form in `mesh_agent_tools.py`). Other shapes are not credited.
   `selector_reason`.
 - `CHOKE`: the generation stack forwarding the flag, imports and re-exports.
 - `ACCEPTED`: a named exception with its reason.
+
+The scanner recognises a fixed set of refusal shapes. Write a new EXEC
+consumer in one of them: a direct `if` test of a refusal call, a name or
+walrus bound to it, or one of those as the first operand of `or`, with a
+stopping body. `selector_refusal` must receive `TIERS`, `server.TIERS`, or a
+name read from an enclosing runtime function's `TIERS` with an empty fallback
+(the `known or {}` form in `mesh_agent_tools.py`). It cannot prove statically
+that `rt` is the runtime; review must verify that binding. Other shapes are
+not credited.
 
 `GAP` (runs model output with no refusal) is not accepted: the list of
 tolerated gaps is empty. Limit: a name computed at run time

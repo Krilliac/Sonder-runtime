@@ -97,7 +97,7 @@ def decide(model: Any, rule: AppliesRule, *, kill_switch_off: bool = False) -> A
     normalized = normalize_name(model)
     if not normalized:
         return AppliesDecision(False, AppliesReason.NO_MODEL)
-    original_candidates = {normalized, normalized.rsplit("/", 1)[-1]}
+    original_candidates = {normalized, normalized.replace("\\", "/").rsplit("/", 1)[-1]}
     for candidate in name_candidates(normalized):
         if candidate in original_candidates and candidate in rule.names:
             return AppliesDecision(True, AppliesReason.MATCHED_NAME, candidate)

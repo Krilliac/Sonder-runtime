@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 from sonder_runtime.domain import tool_lane_models as rule
+from sonder_runtime.domain.runtime_model_configuration import RuntimeModelConfiguration
 from sonder_runtime.domain.tool_lane_models import ModelLaneStatus, ToolLaneDenyList
 
 DEFAULTS = ToolLaneDenyList.from_policy(None)
@@ -97,6 +98,34 @@ def test_each_builtin_source_is_denied_under_every_repository_and_file_spelling(
         assert denied(name), name
 
 
+@pytest.mark.parametrize("source", (QWEN_SOURCE, ORNITH_SOURCE))
+def test_windows_paths_containing_each_builtin_stem_are_denied(source):
+    stem = source.rsplit("/", 1)[-1].removesuffix("-GGUF")
+    assert denied(rf"C:\models\{stem}-Q8_0.gguf")
+    assert denied(rf"C:\models\{stem}-AWQ.bin")
+    assert denied(rf"C:\models\{stem}\ordinary.gguf")
+
+
+def test_windows_path_containing_astra_prefix_is_denied():
+    assert denied(r"D:\m\astra-cyber-27b.gguf")
+    assert denied(r"D:\m\astra-cyber-27b\ordinary.gguf")
+
+
+def test_policy_exact_name_matches_the_last_backslash_segment():
+    deny = ToolLaneDenyList.from_policy({"names": ["helper-model"]})
+    assert denied(r"C:\models\helper-model", deny)
+    assert not denied(r"C:\models\helper-model-extra", deny)
+
+
+@pytest.mark.parametrize("name", (
+    r"C:\models\qwen3.8-Q8_0.gguf",
+    r"D:\m\qwen3-coder.gguf",
+    r"C:\models\Cyber-Ornith-1.5-9B.gguf",
+))
+def test_ordinary_windows_paths_remain_allowed(name):
+    assert not denied(name)
+
+
 @pytest.mark.parametrize("name", (
     "qwen3.5:4b", "qwen3:8b", "sonder:latest", "kimi-k2.7-code:cloud",
     "glm-5.2:cloud", "qwen3-coder:480b-cloud", "qwen3.8", "qwen3-coder",
@@ -107,6 +136,12 @@ def test_each_builtin_source_is_denied_under_every_repository_and_file_spelling(
 ))
 def test_existing_defaults_helpers_and_other_gguf_repositories_remain_allowed(name):
     assert not denied(name), name
+
+
+def test_repository_tier_defaults_are_all_allowed():
+    defaults = RuntimeModelConfiguration.from_environment({}).tier_map()
+    assert defaults
+    assert all(not denied(model) for model in defaults.values()), defaults
 
 
 def test_a_longer_repo_name_under_a_denied_hf_source_is_denied_by_design():
@@ -122,6 +157,7 @@ def test_hf_defaults_are_prefixes_not_exact_names():
     for source in (QWEN_SOURCE, ORNITH_SOURCE):
         assert source.casefold() in prefixes
         assert source.rsplit("/", 1)[-1].removesuffix("-GGUF").casefold() in prefixes
+    assert all(prefix.endswith("-gguf") for prefix in prefixes if "/" in prefix)
     assert "astra-cyber-" in prefixes
     assert DEFAULTS.names == frozenset()
 
@@ -145,6 +181,7 @@ def test_hf_defaults_are_prefixes_not_exact_names():
     "astra",
     "cyber-astra-27b",
     "hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q3_K_XL",
+    "hf.co/DuoNeural/Cyber-Ornith-1.5-9B",  # shorter sibling remains allowed
     "huggingface.co/unsloth/Qwen3.8-27B-GGUF",
 ])
 def test_ordinary_and_near_miss_names_are_allowed(name):

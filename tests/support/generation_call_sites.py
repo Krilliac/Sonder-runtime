@@ -48,18 +48,21 @@ Classes:
     passes. The scanner recognises a fixed set of refusal shapes; new consumers
     must use one of them. An ``if`` test is a refusal call, a walrus or name
     bound to one, or one of those as the first operand of ``or``. The binding
-    for ``selector_refusal`` is TIERS, server.TIERS, or a name obtained
-    from runtime TIERS with an empty-mapping fallback. A refusal stops the
-    function only as a direct statement of the
-    function body (not nested in an ``if``, ``try``, ``with`` or loop) that
+    for ``selector_refusal`` is TIERS, server.TIERS, or a name obtained from
+    ``getattr(rt, "TIERS", ...)`` in the same or a lexically enclosing function,
+    with an empty-mapping fallback. The scanner cannot prove ``rt`` is the
+    runtime; review must verify it. A refusal stops the function only as a
+    direct statement of the function body (not nested in an ``if``, ``try``,
+    ``with`` or loop) that
     comes before the statement holding the call: an ``if`` whose test holds
     the refusal and whose body ends in ``return`` or ``raise``, or a call
     statement of a same-file helper that refuses that way with ``raise``.  A
     loop body counts as such a block for a call inside the same loop body,
     where the ``if`` may also end in ``continue`` or ``break``.  It judges the
     selector when it judges the same expression (``x or ""`` counts as
-    ``x``) and no name, attribute or subscript in that expression is assigned between the refusal
-    and the call; a call that passes none takes its default and is judged by
+    ``x``) and no name, attribute or subscript in that expression is assigned
+    or mutated by a method call between the refusal and the call; a call that
+    passes none takes its default and is judged by
     ``""``, ``"sonder"`` or ``"local"`` (the default route).  Where the
     judged expression differs by design the entry says why in
     ``selector_reason``.
@@ -323,10 +326,23 @@ class _Scanner(ast.NodeVisitor):
     def __init__(self, path: str, tree: ast.Module):
         self.path = path
         self.tree = tree
-        self.imported_tiers = any(
+        imported_tiers = any(
             isinstance(node, ast.ImportFrom) and node.module == "server"
             and any(alias.name == "TIERS" and (alias.asname or alias.name) == "TIERS" for alias in node.names)
             for node in tree.body
+        )
+        self.imported_tiers = imported_tiers and not any(
+            isinstance(node, ast.Name) and node.id == "TIERS"
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+            or isinstance(node, ast.arg) and node.arg == "TIERS"
+            or isinstance(node, ast.ExceptHandler) and node.name == "TIERS"
+            or isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and node.name == "TIERS"
+            or isinstance(node, ast.ImportFrom) and node.module != "server"
+            and any((alias.asname or alias.name) == "TIERS" for alias in node.names)
+            or isinstance(node, ast.Import)
+            and any((alias.asname or alias.name) == "TIERS" for alias in node.names)
+            for node in ast.walk(tree)
         )
         self.shadowed_refusals: set[str] = set()
         for node in ast.walk(tree):
@@ -336,22 +352,21 @@ class _Scanner(ast.NodeVisitor):
                 names = [node.id]
             elif isinstance(node, ast.arg):
                 names = [node.arg]
+            elif isinstance(node, ast.ExceptHandler):
+                names = [node.name] if node.name else []
+            elif isinstance(node, ast.Attribute) and isinstance(node.ctx, (ast.Store, ast.Del)):
+                names = [node.attr]
             elif isinstance(node, ast.Import):
                 names = [alias.asname or alias.name for alias in node.names]
-            elif isinstance(node, ast.ImportFrom) and node.module != "sonder_runtime.adapters.tool_lane_guard":
-                names = [alias.asname or alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [
+                    alias.asname or alias.name for alias in node.names
+                    if node.module != "sonder_runtime.adapters.tool_lane_guard"
+                    or (alias.asname or alias.name) != alias.name
+                ]
             else:
                 names = []
             self.shadowed_refusals.update(name for name in names if name in REFUSAL_CALLS)
-        self.tier_map_names = {
-            target.id for node in ast.walk(tree)
-            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
-            and _called_name(node.value) == "getattr" and len(node.value.args) >= 2
-            and isinstance(node.value.args[0], ast.Name)
-            and node.value.args[0].id in ("server", "rt")
-            and isinstance(node.value.args[1], ast.Constant) and node.value.args[1].value == "TIERS"
-            for target in node.targets if isinstance(target, ast.Name)
-        }
         self.scope: list[str] = []
         self.functions: list[ast.AST] = []
         self.parents: dict[ast.AST, ast.AST] = {}
@@ -434,12 +449,50 @@ class _Scanner(ast.NodeVisitor):
             binding = node.args[1] if len(node.args) > 1 else next(
                 (kw.value for kw in node.keywords if kw.arg == "bindings"), None,
             )
-            if not self._real_bindings(binding):
+            if not self._real_bindings(binding, node):
                 return False
         return True
 
-    def _real_bindings(self, node: ast.AST | None) -> bool:
-        """Accept TIERS, server.TIERS, or a known runtime TIERS fallback."""
+    def _known_tier_map(self, name: str, call: ast.Call) -> bool:
+        """Find an unmodified runtime TIERS binding in this lexical function chain."""
+        boundary = call.lineno
+        scope = self.parents.get(call)
+        while scope is not None:
+            if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                stores = []
+                for node in _own_nodes(scope):
+                    if getattr(node, "lineno", boundary) >= boundary:
+                        continue
+                    if isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, (ast.Store, ast.Del)):
+                        stores.append(node)
+                    elif isinstance(node, ast.ExceptHandler) and node.name == name:
+                        stores.append(node)
+                    elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == name:
+                        stores.append(node)
+                    elif isinstance(node, (ast.Import, ast.ImportFrom)) and any(
+                        (alias.asname or alias.name) == name for alias in node.names
+                    ):
+                        stores.append(node)
+                if stores:
+                    if len(stores) != 1:
+                        return False
+                    assignment = self.parents.get(stores[0])
+                    return (
+                        isinstance(assignment, ast.Assign)
+                        and isinstance(assignment.value, ast.Call)
+                        and _called_name(assignment.value) == "getattr"
+                        and len(assignment.value.args) >= 2
+                        and isinstance(assignment.value.args[0], ast.Name)
+                        and assignment.value.args[0].id in ("server", "rt")
+                        and isinstance(assignment.value.args[1], ast.Constant)
+                        and assignment.value.args[1].value == "TIERS"
+                    )
+                boundary = scope.lineno
+            scope = self.parents.get(scope)
+        return False
+
+    def _real_bindings(self, node: ast.AST | None, call: ast.Call) -> bool:
+        """Accept TIERS, server.TIERS, or a lexical runtime TIERS fallback."""
         if isinstance(node, ast.Name):
             return node.id == "TIERS" and (self.path == "server.py" or self.imported_tiers)
         if isinstance(node, ast.Attribute):
@@ -454,7 +507,7 @@ class _Scanner(ast.NodeVisitor):
         return (
             isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or)
             and len(node.values) == 2 and isinstance(node.values[0], ast.Name)
-            and node.values[0].id in self.tier_map_names
+            and self._known_tier_map(node.values[0].id, call)
             and isinstance(node.values[1], ast.Dict)
             and not node.values[1].keys
         )
@@ -588,20 +641,27 @@ class _Scanner(ast.NodeVisitor):
         return found
 
     def _unchanged(self, function: ast.AST, judged: set[str], refusal: ast.stmt, node: ast.AST) -> set[str]:
-        """``judged`` without any expression whose names are assigned between ``refusal`` and ``node``."""
+        """Drop selectors written or possibly mutated between refusal and call."""
         after = getattr(refusal, "end_lineno", refusal.lineno)
         before = getattr(node, "lineno", 0)
+        between = [inner for inner in ast.walk(function) if after < getattr(inner, "lineno", 0) <= before]
         stored = {
-            inner.id for inner in ast.walk(function)
+            inner.id for inner in between
             if isinstance(inner, ast.Name) and isinstance(inner.ctx, (ast.Store, ast.Del))
-            and after < inner.lineno <= before
         }
         stored_parts = {
-            ast.unparse(inner) for inner in ast.walk(function)
+            ast.unparse(inner) for inner in between
             if isinstance(inner, (ast.Attribute, ast.Subscript))
             and isinstance(inner.ctx, (ast.Store, ast.Del))
-            and after < inner.lineno <= before
         }
+        mutation_targets = set()
+        for inner in between:
+            if not isinstance(inner, ast.Call):
+                continue
+            if _called_name(inner) == "setattr" and inner.args:
+                mutation_targets.add(ast.unparse(inner.args[0]))
+            elif isinstance(inner.func, ast.Attribute):
+                mutation_targets.add(ast.unparse(inner.func.value))
         kept = set()
         for expression in judged:
             try:
@@ -620,6 +680,7 @@ class _Scanner(ast.NodeVisitor):
                     stored_part.startswith((name + ".", name + "["))
                     for name in names for stored_part in stored_parts
                 )
+            mutated = mutated or bool(mutation_targets & (names | attributes))
             if not names & stored and not mutated:
                 kept.add(expression)
         return kept

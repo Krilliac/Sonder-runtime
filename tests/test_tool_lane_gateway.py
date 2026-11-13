@@ -294,6 +294,18 @@ def test_single_provider_chat_rejects_a_denied_reported_model(monkeypatch, provi
             chat.generate(request(name), operation_context())
 
 
+def test_chat_gateway_judges_an_explicit_model_option_before_sending(monkeypatch):
+    monkeypatch.setenv("SONDER_MODEL_BACKEND", "sonder-inference")
+    monkeypatch.setenv("SONDER_INFERENCE_MODEL", ALLOWED)
+    inner = RecordingGateway()
+    chat = ServedTierGateway(inner, bindings=provider_bindings_from_env())
+    with pytest.raises(Forbidden, match="blocked by runtime policy"):
+        chat.generate(request("code", model=DENIED), operation_context())
+    assert inner.calls == []
+    assert chat.generate(request("code", model=ALLOWED), operation_context()).text == "answered"
+    assert [call.options["model"] for call in inner.calls] == [ALLOWED]
+
+
 def test_tool_lane_rejects_a_reply_that_only_echoes_the_tier(monkeypatch, catalog):
     bind_code(monkeypatch, "sonder-inference", {"SONDER_INFERENCE_TIER_MODELS": "code=" + ALLOWED})
     inner = RecordingGateway()

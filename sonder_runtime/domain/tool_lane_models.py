@@ -224,10 +224,10 @@ def decide_selector(
 
 
 def name_candidates(normalized: str) -> tuple[str, ...]:
-    """The full name and each slash-delimited suffix, including every segment."""
-    parts = normalized.split("/")
+    """The full name and slash/backslash path suffixes, including every segment."""
+    parts = normalized.replace("\\", "/").split("/")
     return tuple(dict.fromkeys(
-        ["/".join(parts[index:]) for index in range(len(parts))] + parts
+        [normalized] + ["/".join(parts[index:]) for index in range(len(parts))] + parts
     ))
 
 
@@ -246,7 +246,7 @@ def decide(model: Any, deny: ToolLaneDenyList, *, free_form: bool) -> ModelLaneD
     normalized = normalize_name(raw)
     if not normalized:
         return ModelLaneDecision(ModelLaneStatus.ALLOWED, raw)
-    original_candidates = {normalized, normalized.rsplit("/", 1)[-1]}
+    original_candidates = {normalized, normalized.replace("\\", "/").rsplit("/", 1)[-1]}
     for candidate in _candidates(normalized):
         if candidate in original_candidates and candidate in deny.names:
             return ModelLaneDecision(ModelLaneStatus.DENIED, raw, candidate)

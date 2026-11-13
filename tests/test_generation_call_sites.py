@@ -600,6 +600,97 @@ def test_scanner_accepts_an_imported_real_tier_map_but_not_a_local_replacement(t
     assert not rejected[("scripts/local.py", "run", "sonder")].refused
 
 
+def test_scanner_does_not_borrow_a_tier_map_from_a_sibling_function(tmp_path, monkeypatch):
+    sites = _scan_source(tmp_path, monkeypatch, "scripts/sibling.py", '''
+        import server
+        from sonder_runtime.adapters import tool_lane_guard as g
+        def elsewhere(rt):
+            known = getattr(rt, "TIERS", None)
+        def run(p, tier):
+            if g.selector_refusal(tier, known or {}): return
+            exec(server.sonder(p, tier=tier))
+    ''')
+    assert not sites[("scripts/sibling.py", "run", "sonder")].refused
+
+
+def test_scanner_accepts_a_tier_map_from_an_enclosing_function(tmp_path, monkeypatch):
+    sites = _scan_source(tmp_path, monkeypatch, "scripts/enclosing.py", '''
+        import server
+        from sonder_runtime.adapters import tool_lane_guard as g
+        def outer(rt, p, tier):
+            known = getattr(rt, "TIERS", None)
+            def run():
+                if g.selector_refusal(tier, known or {}): return
+                exec(server.sonder(p, tier=tier))
+            return run()
+    ''')
+    assert sites[("scripts/enclosing.py", "outer.run", "sonder")].judged
+
+
+def test_scanner_does_not_credit_a_reassigned_tier_map(tmp_path, monkeypatch):
+    sites = _scan_source(tmp_path, monkeypatch, "scripts/reassigned_map.py", '''
+        import server
+        from sonder_runtime.adapters import tool_lane_guard as g
+        def run(rt, p, tier):
+            known = getattr(rt, "TIERS", None)
+            known = {}
+            if g.selector_refusal(tier, known or {}): return
+            exec(server.sonder(p, tier=tier))
+    ''')
+    assert not sites[("scripts/reassigned_map.py", "run", "sonder")].refused
+
+
+def test_scanner_does_not_credit_a_locally_rebound_imported_tiers(tmp_path, monkeypatch):
+    sites = _scan_source(tmp_path, monkeypatch, "scripts/rebound_tiers.py", '''
+        import server
+        from server import TIERS
+        from sonder_runtime.adapters import tool_lane_guard as g
+        def run(p, tier):
+            TIERS = {}
+            if g.selector_refusal(tier, TIERS): return
+            exec(server.sonder(p, tier=tier))
+    ''')
+    assert not sites[("scripts/rebound_tiers.py", "run", "sonder")].refused
+
+
+@pytest.mark.parametrize("shadow, check", [
+    ("from sonder_runtime.adapters.tool_lane_guard import prompt_refusal as selector_refusal",
+     "selector_refusal(tier, server.TIERS)"),
+    ("try: raise ValueError()\n            except ValueError as selector_refusal: pass",
+     "selector_refusal(tier, server.TIERS)"),
+    ("g.selector_refusal = lambda *args: ''", "g.selector_refusal(tier, server.TIERS)"),
+])
+def test_scanner_does_not_credit_other_refusal_shadowing(tmp_path, monkeypatch, shadow, check):
+    sites = _scan_source(tmp_path, monkeypatch, "scripts/shadowed.py", f'''
+        import server
+        from sonder_runtime.adapters import tool_lane_guard as g
+        def run(p, tier):
+            {shadow}
+            if {check}: return
+            exec(server.sonder(p, tier=tier))
+    ''')
+    assert not sites[("scripts/shadowed.py", "run", "sonder")].refused
+
+
+@pytest.mark.parametrize("mutation", [
+    "setattr(args, 'tiers', 'astra-cyber-27b')",
+    "args.update(tiers='astra-cyber-27b')",
+])
+def test_scanner_loses_judgement_after_a_call_that_can_mutate_the_selector(
+    tmp_path, monkeypatch, mutation,
+):
+    sites = _scan_source(tmp_path, monkeypatch, "scripts/mutating_call.py", f'''
+        import server
+        from sonder_runtime.adapters import tool_lane_guard as g
+        def run(p, args):
+            if g.selector_refusal(args.tiers, server.TIERS): return
+            {mutation}
+            exec(server.ensemble_answer(p, tiers=args.tiers))
+    ''')
+    site = sites[("scripts/mutating_call.py", "run", "ensemble_answer")]
+    assert site.refused and not site.judged
+
+
 GUARDS = '''
     import server
     from sonder_runtime.adapters import tool_lane_guard as g
