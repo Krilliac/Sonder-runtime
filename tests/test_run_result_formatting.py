@@ -1,5 +1,6 @@
 import ast
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 import time
 
@@ -244,3 +245,18 @@ def test_host_tools_enable_digest_and_bound_the_entire_observation(name, args):
     assert "1 failed" in rendered
     if name == "script_run":
         assert "artifact risk: off\nexecution allowed by effective policy off" in rendered
+
+
+def test_run_logs_in_the_runtime_checkout_do_not_make_it_look_modified():
+    """The guarded updater refuses a checkout that `git status` reports as changed."""
+    repo = Path(__file__).resolve().parents[1]
+    if not (repo / ".git").exists():
+        pytest.skip("not a git checkout")
+
+    def ignored(path):
+        return subprocess.run(
+            ["git", "check-ignore", "--quiet", "--no-index", path], cwd=repo, check=False,
+        ).returncode
+
+    assert ignored(".sonder/run/0123456789abcdef0123456789abcdef.log") == 0
+    assert ignored("sonder_runtime/run/example.log") == 1
