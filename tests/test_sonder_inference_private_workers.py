@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from sonder_runtime.adapters.inference import openai_compat_gateway as openai_compat_module
+from sonder_runtime.adapters import tls_contexts
 from sonder_runtime.adapters.inference import sonder_inference_gateway as gateway_module
 from sonder_runtime.adapters.inference.sonder_inference_gateway import (
     ENV_PRIVATE_WORKERS,
@@ -427,7 +427,7 @@ def test_trust_scope_pins_the_worker_bundle(ca_bundle, monkeypatch):
         seen.append(kwargs.get("cafile"))
         return real()
 
-    openai_compat_module._https_context.cache_clear()
+    tls_contexts.reset_https_contexts()
     monkeypatch.setattr(gateway_module.ssl, "create_default_context", record)
     try:
         with gateway_module.trust_scope(ca_bundle):
@@ -442,4 +442,4 @@ def test_trust_scope_pins_the_worker_bundle(ca_bundle, monkeypatch):
         # context is built once and reused.
         assert seen == [ca_bundle, None, ca_bundle]
     finally:
-        openai_compat_module._https_context.cache_clear()
+        tls_contexts.reset_https_contexts()

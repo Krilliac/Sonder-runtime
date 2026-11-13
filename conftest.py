@@ -113,6 +113,22 @@ def _isolate_deployment_posture():
             os.environ[name] = value
 
 
+# The shared system TLS context is process-global. A test that patches
+# ``ssl.create_default_context`` and reaches it would otherwise leave its fake in
+# the slot for whichever test runs next, so the slot is emptied around every test.
+# The module is looked up, never imported, so tests that do no TLS pay nothing.
+@pytest.fixture(autouse=True)
+def _fresh_shared_tls_context():
+    def reset() -> None:
+        module = sys.modules.get("sonder_runtime.adapters.tls_contexts")
+        if module is not None:
+            module.reset_https_contexts()
+
+    reset()
+    yield
+    reset()
+
+
 @pytest.fixture
 def live_provider_environment(request, monkeypatch):
     """Restore only explicit live-provider inputs for doubly opted-in tests."""
