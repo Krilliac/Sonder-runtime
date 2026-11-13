@@ -5239,7 +5239,7 @@ def _chat_request(
         # content, so a tight cap hits done_reason "length" having emitted
         # nothing. Give thinking headroom, as the cloud path does. Cache-only:
         # this must not add a speculative round trip to the hot path.
-        payload = _model_pace.up_front(_with_local_thinking_budget(payload), caller_payload, model, timeout or TIMEOUT, _think_option_supported(model))
+        payload = _model_pace.up_front(payload if _budget_retried else _with_local_thinking_budget(payload), caller_payload, model, _bound_request_timeout(timeout, TIMEOUT), _think_option_supported(model), keep_room=_budget_retried)
         # Never override an explicit choice; the cloud policy sets `think`
         # itself. Ollama returns message.thinking for these models regardless,
         # so this is belt-and-braces rather than the mechanism.
@@ -5260,7 +5260,7 @@ def _chat_request(
         local_only=local_only,
         single_send=single_send,
     )
-    _model_pace.observe(model, out, local=not cloud)
+    _model_pace.observe(model, out, local=not (cloud or _is_cloud_model_name(model)))
     if not isinstance(out, dict):
         raise ModelCallError(
             "protocol", "Ollama response was not a JSON object",
@@ -5420,7 +5420,7 @@ def _chat_request(
             and payload.get("think") is not False
             and exhausted_thinking
         ):
-            roomier = _model_pace.room_to_retry(payload, _with_local_thinking_budget(payload), caller_payload, model, timeout or TIMEOUT)
+            roomier = _model_pace.room_to_retry(payload, _with_local_thinking_budget(payload), caller_payload, model, _bound_request_timeout(timeout, TIMEOUT))
             if not _budget_retried and roomier != payload:
                 # The model reasoned right up to the cap and never got to an answer.
                 # Now that the response has identified it, retry once with the

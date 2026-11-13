@@ -271,7 +271,7 @@ def test_model_pace_forgets_a_measurement_after_the_window():
     model_pace.observe("m", SLOW)
 
     assert model_pace.rate("m") == 4.5
-    assert RATE_WINDOW >= 2
+    assert RATE_WINDOW == 5
 
 
 def test_model_pace_slowest_is_none_for_an_unmeasured_model():
@@ -305,6 +305,23 @@ def test_model_pace_one_slow_measurement_alone_is_enough_to_decide():
     model_pace.observe("m", SLOW)
 
     assert model_pace.up_front(_payload(MINIMUM), _payload(900), "m", 300, True)["think"] is False
+
+
+def test_model_pace_keeps_the_room_of_a_request_that_was_already_sized():
+    model_pace.observe("m", SLOW)
+    sized = _payload(1080)
+    model_pace.observe("m", SLOWER)
+
+    assert model_pace.up_front(sized, _payload(900), "m", 300, False, keep_room=True) is sized
+    assert model_pace.up_front(sized, _payload(900), "m", 300, False)["options"]["num_predict"] == 900
+
+
+def test_model_pace_can_still_drop_thinking_from_a_request_that_was_already_sized():
+    model_pace.observe("m", SLOW)
+
+    plain = model_pace.up_front(_payload(1080), _payload(900), "m", 300, True, keep_room=True)
+
+    assert (plain["options"]["num_predict"], plain["think"]) == (900, False)
 
 
 def test_model_pace_sizes_the_reply_on_the_slowest_recent_measurement():
@@ -580,6 +597,7 @@ def test_a_slow_model_is_sent_what_it_can_deliver_when_the_callers_budget_would_
 
 
 def test_an_explicit_timeout_changes_what_a_slow_model_is_asked_for(monkeypatch):
+    monkeypatch.setattr(server, "TIMEOUT", 600)
     server._remember_thinking_model("r")
     server._model_pace.observe("r", SLOW)
     seen = _record(monkeypatch, _answer())
@@ -590,6 +608,44 @@ def test_an_explicit_timeout_changes_what_a_slow_model_is_asked_for(monkeypatch)
 
     assert _affordable(SLOW, 500) >= 900 + MIN_THINKING_TOKENS > _affordable(SLOW, 300) > 900 > _affordable(SLOW, 100)
     assert seen == [(MINIMUM, None), (900, False), (_affordable(SLOW, 100), False)]
+
+
+def test_a_timeout_above_the_ceiling_is_sized_for_the_ceiling_the_transport_enforces(monkeypatch):
+    """The transport clamps a request timeout to ``TIMEOUT``; sizing for the longer figure the
+    caller named would keep the 4096-token headroom the model cannot write in the time it gets."""
+    monkeypatch.setattr(server, "TIMEOUT", 300)
+    server._remember_thinking_model("r")
+    server._model_pace.observe("r", SLOW)
+    seen = _record(monkeypatch, _answer())
+
+    _ask(900, timeout=500)
+
+    assert _affordable(SLOW, 500) >= 900 + MIN_THINKING_TOKENS > _affordable(SLOW, 300)
+    assert seen == [(900, False)]
+
+
+def test_a_zero_timeout_is_sized_for_the_one_second_the_transport_allows(monkeypatch):
+    monkeypatch.setattr(server, "TIMEOUT", 300)
+    server._remember_thinking_model("r")
+    server._model_pace.observe("r", SLOW)
+    seen = _record(monkeypatch, _answer())
+
+    _ask(900, timeout=0)
+
+    assert seen == [(MIN_FITTED_TOKENS, False)]
+
+
+def test_the_headroom_retry_is_sized_for_the_ceiling_the_transport_enforces(monkeypatch):
+    monkeypatch.setattr(server, "TIMEOUT", 300)
+    server._remember_unsupported_think_option("r")
+    server._model_pace.observe("r", SLOW)
+    seen = _record(monkeypatch, lambda payload, _index: (
+        {"message": {"content": "the real answer"}} if payload["options"]["num_predict"] != 900
+        else dict(THINKING_ONLY)))
+
+    _ask(900, timeout=500)
+
+    assert [budget for budget, _think in seen] == [900, _affordable(SLOW, 300)]
 
 
 def test_a_fast_thinking_model_is_sent_its_usual_request_under_the_fanout_timeout(monkeypatch):
@@ -667,6 +723,7 @@ def test_a_timeout_long_enough_for_the_headroom_leaves_it_whole(monkeypatch):
     server._model_pace.observe("r", SLOW)
     seen = _record(monkeypatch, _answer())
     needed = int(MINIMUM / (4.5 * PACE_MARGIN)) + 1
+    monkeypatch.setattr(server, "TIMEOUT", needed)
 
     _ask(900, timeout=needed)
 
@@ -789,6 +846,31 @@ def test_retry_with_room_returns_a_request_without_a_budget():
     assert retry_with_room(payload, dict(payload), payload, 1080) is payload
 
 
+def test_the_headroom_retry_keeps_its_room_when_a_slower_reply_is_measured_meanwhile(monkeypatch):
+    """Another request for the same model can record a slower speed between the decision to
+    retry with more room and the retry itself; sizing the retry again then sent the first
+    request a second time."""
+    server._remember_unsupported_think_option("r")
+    server._model_pace.observe("r", SLOW)
+    decide = server._model_pace.room_to_retry
+
+    def decide_then_another_reply_lands(*args):
+        roomier = decide(*args)
+        server._model_pace.observe("r", SLOWER)
+        return roomier
+
+    monkeypatch.setattr(server._model_pace, "room_to_retry", decide_then_another_reply_lands)
+    seen = _record(monkeypatch, lambda payload, _index: (
+        {"message": {"content": "the real answer"}} if payload["options"]["num_predict"] != 900
+        else dict(THINKING_ONLY)))
+
+    _out, content = _ask(900)
+
+    assert _affordable(SLOWER) < 900 < _affordable(SLOW)
+    assert content == "the real answer"
+    assert [budget for budget, _think in seen] == [900, _affordable(SLOW)]
+
+
 def test_no_headroom_retry_is_made_when_nothing_beyond_the_callers_budget_is_affordable(monkeypatch):
     server._model_pace.observe("r", VERY_SLOW)
     seen = _record(monkeypatch, lambda payload, _index: (
@@ -811,6 +893,33 @@ def test_a_hosted_response_does_not_record_a_rate(monkeypatch):
     )
 
     assert server._model_pace.rate("custom:cloud") is None
+
+
+def test_a_call_the_caller_flags_as_hosted_does_not_record_a_rate_whatever_its_name(monkeypatch):
+    _record(monkeypatch, _answer(**FAST))
+
+    server._chat_request(
+        {"model": "hosted", "messages": [], "options": {"num_predict": 900}},
+        model="hosted", cloud=True, idempotent=True,
+    )
+
+    assert server._model_pace.rate("hosted") is None
+
+
+def test_a_hosted_model_named_only_by_its_suffix_is_never_paced(monkeypatch):
+    """The transport treats a ``:cloud`` name as hosted whether or not the caller says so; a
+    slow, thinking reply from one must not make its next request a local-style ask."""
+    seen = _record(monkeypatch, lambda _payload, _index: {
+        "message": {"thinking": "deliberation", "content": "an answer"}, **SLOW})
+    ask = {"model": "custom:cloud", "messages": [], "options": {"num_predict": 900}}
+
+    server._chat_request(dict(ask, options=dict(ask["options"])), model="custom:cloud")
+    assert server._model_pace.rate("custom:cloud") is None
+    server._chat_request(dict(ask, options=dict(ask["options"])), model="custom:cloud")
+
+    assert server._known_thinking_model("custom:cloud")
+    assert seen[0][0] == 900
+    assert seen[1][0] == MINIMUM and seen[1][1] is not False
 
 
 def test_a_local_response_records_a_rate_that_fits_the_next_call(monkeypatch):

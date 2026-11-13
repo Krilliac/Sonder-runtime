@@ -113,7 +113,7 @@ def room_to_retry(payload: dict, with_headroom: dict, caller_payload: object, mo
 
 
 def up_front(payload: dict, caller_payload: object, model: object, timeout_seconds: object,
-             can_skip_thinking: bool) -> dict:
+             can_skip_thinking: bool, *, keep_room: bool = False) -> dict:
     """The request to send to a model known to think; ``payload`` carries its thinking headroom.
 
     A measured model too slow to write the caller's reply and a minimum of
@@ -121,6 +121,12 @@ def up_front(payload: dict, caller_payload: object, model: object, timeout_secon
     off, when ``can_skip_thinking`` (the model has not refused the switch) and
     neither request sets ``think``.  Otherwise the headroom is fitted as in
     ``fit``.
+
+    ``keep_room`` is for the retry that ``room_to_retry`` already sized: it can
+    still become the ask without thinking, but its room is not fitted a second
+    time.  A slower reply from the same model measured in between would
+    otherwise shrink it back to the request that was just answered with
+    nothing.
 
     A model that refuses the switch on that request is asked again by the
     transport without it and thinks inside the reply budget; if it writes no
@@ -130,7 +136,7 @@ def up_front(payload: dict, caller_payload: object, model: object, timeout_secon
     affordable = _affordable(model, timeout_seconds)
     plain = without_thinking(payload, caller_payload, *affordable) if can_skip_thinking else None
     if plain is None:
-        return _fit(payload, caller_payload, model, timeout_seconds, affordable)
+        return payload if keep_room else _fit(payload, caller_payload, model, timeout_seconds, affordable)
     sent, asked = plain["options"].get("num_predict"), caller_payload["options"].get("num_predict")
     _logger.log(
         logging.WARNING if sent < asked else logging.INFO,
