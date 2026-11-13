@@ -22,6 +22,7 @@ from contextlib import contextmanager, redirect_stdout
 
 from sonder_runtime.domain.common.errors import DependencyUnavailable
 from sonder_runtime.application import foreground_turns
+from sonder_runtime.domain.model_catalog import untagged as _model_name_untagged
 from sonder_runtime.domain.runtime_model_configuration import OPTIONAL_LOCAL_TIERS
 from sonder_runtime.adapters import creation_workspace
 from sonder_runtime.adapters.filesystem import file_ops
@@ -3836,7 +3837,7 @@ def main(*, machine_output=False):
         names = [name for name, _size in installed]
         model_names = {str(name).casefold(): name for name in names}
         selected_model = model_names.get(arg.casefold())
-        if selected_model is None and ":" not in arg:
+        if selected_model is None and _model_name_untagged(arg):
             # Ollama treats a bare name as its ":latest" tag.
             selected_model = model_names.get(arg.casefold() + ":latest")
         if selected_model is None:
