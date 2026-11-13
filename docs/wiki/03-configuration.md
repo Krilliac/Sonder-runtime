@@ -515,7 +515,15 @@ bound to a provider other than Ollama is judged by the model that provider
 serves, as for the deny list. When a provider falls back to another backend
 in the middle of a call, the lookup decision follows the primary provider's
 configured model. The read-only MCP tool `reference_search`
-(`query`, `k` 1 to 8) returns framed passages and their sources to any caller.
+(`query`, `k` 1 to 8) returns framed passages and their sources to any caller;
+it makes no model call.
+
+Every model call the lookup makes is a text call under the deny list's
+generation check: the search-terms call declares `text_only=True` itself, and
+the framed answer, each ensemble or consult member, the synthesis and the
+consult judge carry the declaration of the lane they belong to. A model both
+rules name therefore answers with lookup on these lanes, while the lanes that
+run or apply model output still refuse it and make no lookup call.
 
 A lookup turn is sent none of the runtime's system prompt (persona, playbook,
 trace instructions, tool guidance, profile and goal), so the model's own
