@@ -96,6 +96,7 @@ from .openai_compat_gateway import (
     GET_BODY_LIMIT,
     OpenAICompatibleConfig,
     OpenAICompatibleGateway,
+    shared_https_context,
 )
 from .request_tuning import thinking_supported, tune_request
 from .sse_stream import post_streaming
@@ -339,7 +340,7 @@ def _tls_context() -> ssl.SSLContext:
     ca_bundle = getattr(_TRUST, "ca_bundle", "")
     if ca_bundle:
         return ssl.create_default_context(cafile=ca_bundle)
-    return ssl.create_default_context()
+    return shared_https_context()
 
 
 class _BudgetedHTTPSHandler(urllib.request.HTTPSHandler):

@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from sonder_runtime.adapters.inference import openai_compat_gateway as openai_compat_module
 from sonder_runtime.adapters.inference import sonder_inference_gateway as gateway_module
 from sonder_runtime.adapters.inference.sonder_inference_gateway import (
     ENV_PRIVATE_WORKERS,
@@ -426,11 +427,19 @@ def test_trust_scope_pins_the_worker_bundle(ca_bundle, monkeypatch):
         seen.append(kwargs.get("cafile"))
         return real()
 
+    openai_compat_module._https_context.cache_clear()
     monkeypatch.setattr(gateway_module.ssl, "create_default_context", record)
-    with gateway_module.trust_scope(ca_bundle):
-        gateway_module._tls_context()
-        with gateway_module.trust_scope(""):
-            gateway_module._tls_context()
-        gateway_module._tls_context()
-    gateway_module._tls_context()
-    assert seen == [ca_bundle, None, ca_bundle, None]
+    try:
+        with gateway_module.trust_scope(ca_bundle):
+            pinned = gateway_module._tls_context()
+            with gateway_module.trust_scope(""):
+                system = gateway_module._tls_context()
+            assert gateway_module._tls_context() is not pinned
+        assert gateway_module._tls_context() is system
+        assert system is gateway_module.shared_https_context()
+        assert system is not pinned
+        # The pinned bundle is built per call inside the scope; the system
+        # context is built once and reused.
+        assert seen == [ca_bundle, None, ca_bundle]
+    finally:
+        openai_compat_module._https_context.cache_clear()
