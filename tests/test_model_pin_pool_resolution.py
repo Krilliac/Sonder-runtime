@@ -216,13 +216,51 @@ def test_selector_is_case_insensitive_and_exact_on_the_tag_in_both_paths():
         via_pool = _resolve(selector, pool=pool)
         assert via_endpoint.model == via_pool.model == "Model-X:7B"
         assert (via_endpoint.source, via_pool.source) == ("endpoint", "pool")
-    # resolve_record is an exact (casefolded) match: a bare name does NOT match
-    # ``name:latest`` and vice versa. The pool path behaves identically.
-    for selector in ("tagless", "model-x"):
-        assert _resolve(selector, endpoint=ep, pool=None).status is PinStatus.NOT_INSTALLED
-        assert _resolve(selector, pool=pool).status is PinStatus.NOT_INSTALLED
+    # No tag is inferred except ``:latest``: a bare name whose only record has
+    # another tag stays unresolved. The pool path behaves identically.
+    assert _resolve("model-x", endpoint=ep, pool=None).status is PinStatus.NOT_INSTALLED
+    assert _resolve("model-x", pool=pool).status is PinStatus.NOT_INSTALLED
     assert _resolve("tagless:latest", pool=pool).status is PinStatus.RESOLVED
     assert _resolve("", pool=pool).status is PinStatus.NOT_INSTALLED
+
+
+def test_untagged_selector_resolves_to_its_latest_record_in_both_paths():
+    catalog = {"models": [_rec("Tagless:latest"), _rec("Model-X:7B")]}
+    ep = _endpoint_over(catalog)
+    pool = _FakePool(catalog)
+    for selector in ("tagless", "TAGLESS", "  Tagless  "):
+        via_endpoint = _resolve(selector, endpoint=ep, pool=None)
+        via_pool = _resolve(selector, pool=pool)
+        # The catalog's own name comes back, never the selector as typed.
+        assert via_endpoint.model == via_pool.model == "Tagless:latest"
+        assert (via_endpoint.source, via_pool.source) == ("endpoint", "pool")
+
+
+def test_untagged_selector_prefers_an_exact_record_over_latest():
+    for rows in ([_rec("both"), _rec("both:latest")], [_rec("both:latest"), _rec("both")]):
+        records = catalog_records({"models": rows})
+        assert resolve_record("both", records)[0] == "both"
+        assert resolve_record("both:latest", records)[0] == "both:latest"
+
+
+@pytest.mark.parametrize("selector, names, expected", [
+    # A tagged selector never matches an untagged record, or another tag.
+    ("bare:latest", ["bare"], None),
+    ("bare:7b", ["bare:latest"], None),
+    ("bare:", ["bare:latest"], None),
+    # Only the model part decides "untagged": a registry port is not a tag.
+    ("reg.example:5000/team/model", ["reg.example:5000/team/model:latest"],
+     "reg.example:5000/team/model:latest"),
+    ("hf.co/owner/repo", ["hf.co/owner/repo:latest"], "hf.co/owner/repo:latest"),
+    ("hf.co/owner/repo", ["hf.co/owner/repo:Q8_0"], None),
+    # No prefix, suffix or partial matching rides in with the alias.
+    ("bar", ["bare:latest", "foobar:latest", "ns/bar:latest"], None),
+    ("ns/bar", ["bar:latest"], None),
+    (":latest", ["x:latest"], None),
+])
+def test_latest_alias_edges(selector, names, expected):
+    found = resolve_record(selector, catalog_records({"models": [_rec(n) for n in names]}))
+    assert (found[0] if found else None) == expected
 
 
 # ---- server level ---------------------------------------------------------
@@ -232,8 +270,9 @@ WORKER = "https://worker.example:8443"
 LOCAL_ONLY = "local-only:7b"
 WORKER_ONLY = "worker-only:7b"
 TAGS = {
-    LOCAL: {"models": [_rec("shared:1"), _rec(LOCAL_ONLY), _rec("embed-local:1", ["embedding"])]},
-    WORKER: {"models": [_rec("shared:1"), _rec(WORKER_ONLY)]},
+    LOCAL: {"models": [_rec("shared:1"), _rec(LOCAL_ONLY), _rec("embed-local:1", ["embedding"]),
+                       _rec("local-latest:latest")]},
+    WORKER: {"models": [_rec("shared:1"), _rec(WORKER_ONLY), _rec("worker-latest:latest")]},
 }
 REFUSAL = "model pin '%s' is unavailable or is not chat-capable."
 
@@ -316,6 +355,14 @@ def test_worker_only_model_resolves_when_the_local_member_answers_the_pooled_rea
     rig.pooled_read_answered_by = LOCAL
     assert _pin(WORKER_ONLY) == "answered by %s" % WORKER
     assert rig.chats == [(WORKER_ONLY, WORKER)]
+
+
+def test_bare_pin_reaches_the_latest_record_on_either_member(rig):
+    """A pin typed without a tag is sent as the catalog's ``:latest`` name."""
+    assert _pin("local-latest") == "answered by %s" % LOCAL
+    assert _pin("Worker-Latest") == "answered by %s" % WORKER
+    assert rig.chats == [("local-latest:latest", LOCAL), ("worker-latest:latest", WORKER)]
+    assert _pin("shared") == REFUSAL % "shared"  # only ``shared:1`` exists: no tag is guessed
 
 
 def test_model_on_neither_member_returns_the_unchanged_refusal_and_sends_no_chat(rig):
