@@ -27,6 +27,7 @@ from tests.support.tool_lane import (
     HF_QWEN,
     SERVED,
     UNKNOWN,
+    UNKNOWN_OPENAI,
     clear_environment,
     write_policy,
 )
@@ -272,7 +273,7 @@ def test_a_reply_reporting_a_denied_served_model_is_refused(posts, monkeypatch, 
 def test_a_reply_that_names_no_model_is_refused(posts, monkeypatch, reported):
     gateway = bridged(monkeypatch, "openai_compatible", {}, served=reported)
     gen = server._make_tier_generate("code", ALLOWED, "", 0.2, 64, 0)
-    assert refused(lambda: gen("hi")) == UNKNOWN % ("code", "openai_compatible")
+    assert refused(lambda: gen("hi")) == UNKNOWN_OPENAI % "code"  # names the setting that fixes it
     assert len(gateway.calls) == 1  # nothing named before sending, so the reply decides
 
 

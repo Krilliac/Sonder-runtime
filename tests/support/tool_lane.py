@@ -32,6 +32,18 @@ UNKNOWN = (
     "so it cannot be used in tool-using lanes; name the served model for this "
     "tier in that provider's configuration (chat still works)."
 )
+UNKNOWN_OPENAI = (
+    "tier '%s' is served by openai_compatible and the model it serves cannot "
+    "be determined, so it cannot be used in tool-using lanes; set "
+    "SONDER_OPENAI_MODEL to the model that endpoint serves (chat still works)."
+)
+# The default route's refusal for a tier it can step up to: (tier, that tier's
+# own refusal, tier).
+ESCALATION = (
+    "the default route can step up to tier '%s' (automatic escalation), and %s "
+    "To run this lane, bind tier '%s' to an allowed model or name an allowed "
+    "tier for the lane."
+)
 
 # Variables that choose a provider, a served model or a tier binding.  The
 # repository-level conftest already scrubs ambient SONDER_* variables; this

@@ -46,6 +46,10 @@ def practice_on(tasks):
         name = t.get("name", "?")
         try:
             print("  practice: %s ..." % name)
+            # A generated task's own text can pick a model (``use model X: ...``).
+            if refusal := server._tool_lane_guard.prompt_refusal(t["prompt"], server.natural_model_request, server.TIERS):
+                print("    -> SKIP " + refusal)
+                continue
             resp = server.sonder(t["prompt"])
             iid = server.parse_interaction_id(resp)
             code = grounding.extract_code_block(resp)

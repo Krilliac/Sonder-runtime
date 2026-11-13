@@ -86,6 +86,16 @@ _disk_payload = _rules.disk_payload
 _write_json_atomic = _atomic_json.write_json_atomic
 
 
+def configured_tiers(policy, bindings) -> tuple:
+    """Local tiers ``policy`` binds that the live tier map ``bindings`` also holds.
+
+    This is the ``available`` set of the default route's escalation plan
+    (``server._configured_local_tiers``) and the set the tool-lane guard
+    judges for a lane on the default route, so the two cannot drift.
+    """
+    return tuple(tier for tier in bound_tiers(policy) if tier in bindings)
+
+
 def default_policy(env=None) -> dict:
     return _rules.default_policy(os.environ if env is None else env)
 

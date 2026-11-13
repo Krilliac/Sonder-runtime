@@ -222,6 +222,12 @@ def generate_mesh(brief, name="", kit_path="", api_doc_path="", max_tris=3000, h
         with vision_state["lock"]:
             if vision_state["dead"]:
                 return None
+        # The critique steers the next round's script, so the vision tier is
+        # judged like the tiers that write it; a refused tier only turns it off.
+        if refusal := tool_lane_guard.selector_refusal("vision", known or {}, getattr(rt, "_RUNTIME_POLICY", None)):
+            with vision_state["lock"]:
+                vision_state["dead"] = vision_state["dead"] or refusal
+            return None
         try:
             return rt._vision_analyze_impl(sheet, critique_text, extra_roots=str(root))
         except Exception as exc:  # noqa: BLE001 - vision is optional; report why it is off
