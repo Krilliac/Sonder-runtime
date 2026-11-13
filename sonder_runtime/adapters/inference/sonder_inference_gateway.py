@@ -346,6 +346,7 @@ def _tls_context() -> ssl.SSLContext:
 class _BudgetedHTTPSHandler(urllib.request.HTTPSHandler):
     def __init__(self, budget: _ExchangeBudget) -> None:
         super().__init__(context=_tls_context())
+
         self._budget = budget
 
     def https_open(self, req):
