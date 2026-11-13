@@ -8,6 +8,7 @@ asks again the old way when the no-thinking reply is lost to the option itself.
 """
 from __future__ import annotations
 
+import ast
 import json
 
 import pytest
@@ -16,6 +17,7 @@ import server
 import sonder_runtime.adapters.reference_lookup_lanes as lanes
 from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.domain.common.errors import Cancelled
+from tests.support import generation_call_sites as call_sites
 from tests.test_reference_lookup_lanes import (  # noqa: F401  # ``lane`` is a fixture
     LOOKUP_MODEL,
     QUESTION,
@@ -220,3 +222,50 @@ def test_any_other_failure_is_raised_and_not_asked_again(error):
 
     assert factory.asked == [False]
     assert len(factory.built) == 1
+
+
+def _terms_generate_references():
+    """Every place outside the tests that names ``terms_generate``, as (path, enclosing scope)."""
+    found = set()
+
+    def walk(node, scope, path):
+        for child in ast.iter_child_nodes(node):
+            named = (
+                (isinstance(child, ast.Name) and child.id == "terms_generate")
+                or (isinstance(child, ast.Attribute) and child.attr == "terms_generate")
+                or (isinstance(child, ast.alias) and child.name == "terms_generate")
+                or (isinstance(child, ast.Constant) and child.value == "terms_generate")
+            )
+            if named:
+                found.add((path, ".".join(scope) or "<module>"))
+            inner = scope
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                inner = (*scope, child.name)
+            walk(child, inner, path)
+
+    scanned = 0
+    for _label, pattern, _floor in call_sites.ROOTS:
+        for source in call_sites.REPO_ROOT.glob(pattern):
+            relative = source.relative_to(call_sites.REPO_ROOT)
+            if not source.is_file() or "__pycache__" in source.parts or relative.parts[0] == "tests":
+                continue
+            scanned += 1
+            walk(ast.parse(source.read_text(encoding="utf-8-sig")), (), relative.as_posix())
+    assert scanned > 1000, "the scan is not seeing the tree"
+    return found
+
+
+def test_only_the_two_lookup_seams_use_the_text_only_helper():
+    """``terms_generate`` declares its call text-only on its caller's behalf.
+
+    The generation call-site ratchet registers the helper, not its callers, so a
+    new caller would be text-only without being classified.  The reply of each
+    caller below is only parsed into query words; classify a new one the same way
+    (tests/support/generation_call_sites.py) before adding it here.
+    """
+    lanes_path = "sonder_runtime/adapters/reference_lookup_lanes.py"
+    assert _terms_generate_references() == {
+        (lanes_path, "<module>"),                 # the ``__all__`` export
+        (lanes_path, "chat_generate.expander"),   # single-model chat lanes
+        ("sonder_runtime/adapters/reference_lookup_multi.py", "SharedLookup.retrieve.expand"),
+    }
