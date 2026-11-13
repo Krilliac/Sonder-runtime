@@ -11,6 +11,7 @@ import io
 import json
 import logging
 import socket
+import ssl
 import threading
 import urllib.error
 from datetime import datetime, timezone
@@ -30,6 +31,7 @@ from sonder_runtime.adapters.inference.sonder_inference_gateway import (
     correlation_headers,
     direct_get_transport,
 )
+from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.model_gateway import ModelRequest
 from sonder_runtime.application.ports.model_gateway_contract import Capability
@@ -1107,6 +1109,54 @@ def test_health_probe_is_bounded_by_wall_clock_not_per_read(monkeypatch):
         close()
 
 
+def test_requests_never_reload_the_tls_trust_store(loopback_server, monkeypatch, tmp_path):
+    # Loading the platform trust store costs ~150-200 ms on Windows.  Every
+    # exchange used to do it, plain-HTTP loopback included: our HTTPS
+    # handler built a fresh context, and build_opener() built another for
+    # its default HTTPS handler.  Each small loopback request took ~200 ms
+    # instead of ~2 ms.
+    from sonder_runtime.adapters.inference.openai_compat_gateway import (
+        OpenAICompatibleGateway,
+        shared_https_context,
+    )
+
+    server, handler = loopback_server
+    base = "http://127.0.0.1:%d" % server.server_address[1]
+    handler.routes.update({
+        "/v1/sonder/health": (200, _health()),
+        "/v1/chat/completions": (200, _chat("ok")),
+    })
+    gateway = SonderInferenceGateway(SonderInferenceConfig(base_url=base, health_ttl_seconds=0))
+    chat = {"model": "m", "messages": [{"role": "user", "content": "x"}]}
+
+    def every_transport():
+        gateway.generate(ModelRequest(prompt="x", tier="fast"), _ctx())  # health GET + POST
+        OpenAICompatibleGateway._default_get_transport(base + "/v1/sonder/health", {}, 5)
+        OpenAICompatibleGateway._default_transport(
+            base + "/v1/chat/completions", chat, {"Content-Type": "application/json"}, 5,
+        )
+
+    every_transport()  # the shared context may load the store once per process
+    loads = []
+    real_load = ssl.SSLContext.load_default_certs
+
+    def counting_load(self, *args, **kwargs):
+        loads.append(1)
+        return real_load(self, *args, **kwargs)
+
+    monkeypatch.setattr(ssl.SSLContext, "load_default_certs", counting_load)
+    for _ in range(3):
+        every_transport()
+    assert loads == [], "%d trust-store loads in 3 rounds of requests" % len(loads)
+
+    # The shared context still verifies.
+    context = shared_https_context()
+    assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname
+    # OpenSSL's trust-path variables are still honoured per request.
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "bundle.pem"))
+    assert shared_https_context() is not context
+
+
 OVERLOADED = {"error": {"message": "too many connections", "type": "service_unavailable",
                         "code": "overloaded", "param": None}, "sonder": {"api_version": 1}}
 
@@ -1452,6 +1502,58 @@ def test_a3_reasoning_budget_and_sampling_reach_request_body():
     for key, value in options.items():
         if key != "think":
             assert body[key] == value
+
+
+def test_empty_length_without_explicit_thinking_retries_once_with_thinking_off():
+    first = _chat("")
+    first["choices"][0]["finish_reason"] = "length"
+    responses = iter((first, _chat("OK")))
+    fake = FakeInference(chat=lambda *_: next(responses))
+    gateway = SonderInferenceGateway(
+        SonderInferenceConfig(), transport=fake.post, get_transport=fake.get,
+        env={"SONDER_INFERENCE_THINKING": "on"},
+    )
+
+    response = gateway.generate(ModelRequest(prompt="Reply OK", tier="general"), _ctx())
+
+    assert response.text == "OK"
+    assert len(fake.posts) == 2
+    assert fake.posts[0][1]["messages"] == fake.posts[1][1]["messages"]
+    assert fake.posts[1][1]["chat_template_kwargs"]["enable_thinking"] is False
+    assert fake.posts[1][1]["stream"] is False
+    assert gateway.last_response_meta["empty_length_recovered"] is True
+
+
+@pytest.mark.parametrize("think", [True, False])
+def test_empty_length_with_explicit_thinking_choice_is_not_replayed(think):
+    first = _chat("")
+    first["choices"][0]["finish_reason"] = "length"
+    fake = FakeInference(chat=lambda *_: first)
+    gateway = SonderInferenceGateway(
+        SonderInferenceConfig(), transport=fake.post, get_transport=fake.get,
+        env={"SONDER_INFERENCE_THINKING": "on"},
+    )
+
+    with pytest.raises(ModelCallError, match="done_reason"):
+        gateway.generate(ModelRequest(prompt="Reply OK", tier="general",
+                                      options={"think": think}), _ctx())
+
+    assert len(fake.posts) == 1
+
+
+def test_empty_length_repair_is_bounded_when_second_response_is_empty():
+    empty = _chat("")
+    empty["choices"][0]["finish_reason"] = "length"
+    fake = FakeInference(chat=lambda *_: empty)
+    gateway = SonderInferenceGateway(
+        SonderInferenceConfig(), transport=fake.post, get_transport=fake.get,
+        env={"SONDER_INFERENCE_THINKING": "on"},
+    )
+
+    with pytest.raises(ModelCallError, match="done_reason"):
+        gateway.generate(ModelRequest(prompt="Reply OK", tier="general"), _ctx())
+
+    assert len(fake.posts) == 2
 
 
 @pytest.mark.parametrize("location", ["nested", "cached_tokens", "missing"])

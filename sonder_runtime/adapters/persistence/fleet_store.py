@@ -32,6 +32,9 @@ from pathlib import Path
 
 from sonder_runtime.domain.automation import state_machine as _sm
 from sonder_runtime.platform import paths as _platform_paths
+from sonder_runtime.adapters.persistence.interactive_root_reconciliation import (
+    finish_cancelled_interactive_root,
+)
 from sonder_runtime.adapters.process_liveness import (
     PROCESS_DEAD, probe_process, process_identity,
 )
@@ -1129,6 +1132,9 @@ def cancel_agents(selector: str) -> dict:
                     """,
                     (activity, now, agent_id),
                 )
+        for agent_id in selected:
+            if active[agent_id].get("parent_id") == "":
+                finish_cancelled_interactive_root(conn, agent_id, now)
         selected_rows = []
         if selected:
             placeholders = ",".join("?" for _ in selected)
