@@ -1,4 +1,5 @@
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -160,12 +161,13 @@ def test_pg_prelaunch_drain_failure_does_not_publish_process_identity(
     store.close = lambda: calls.append("drain") or len(calls) > 1
     owner._selection = store
     monkeypatch.setattr(owner._payload, "validate", lambda roots: None)
+    launch = SimpleNamespace(operation_id="launch")
     try:
         with pytest.raises(OwnerRefused, match="cleanup"):
-            owner._before_launch(None)
+            owner._before_launch(launch)
         assert owner._launch_id is None
         assert owner.journal.status()["state"] == "STOPPED_CLEAN"
-        owner._before_launch(None)
+        owner._before_launch(launch)
         assert calls == ["drain", "drain"]
         assert owner._launch_id is None
     finally:
