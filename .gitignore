@@ -57,3 +57,8 @@ examples/codegen-arena-shooter/FpsGame_Skeleton/
 # The AST measurement corpus is a reproducible local artifact and can be large
 # (~835 KB). Keep the compact .summary.json report trackable beside it.
 /docs/architecture/powershell-ast-corpus.jsonl
+# Full-output logs of long tool runs. The runtime writes them to
+# <working folder>/.sonder/run/, and when a run's working folder is this
+# checkout they made an installed source checkout look modified, so the
+# guarded runtime updater refused to update it.
+/.sonder/
