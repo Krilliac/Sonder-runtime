@@ -5184,6 +5184,7 @@ def _chat_request(
     _reasoning_checkpoint: str = "",
     _reasoning_deadline: float | None = None,
     text_only: bool = False,
+    _caller_payload: dict | None = None,
 ) -> tuple[dict, str]:
     if not isinstance(reasoning_continuation, bool):
         raise ValueError("reasoning_continuation must be a boolean")
@@ -5224,6 +5225,9 @@ def _chat_request(
         )
         if _reasoning_deadline is None and timeout is not None:
             _reasoning_deadline = time.monotonic() + max(0.0, float(timeout))
+    # The request as the caller sized it, before any thinking headroom is added:
+    # the ask without thinking (below) goes back to this reply budget.
+    caller_payload = payload if _caller_payload is None else _caller_payload
     if (
         not cloud
         and _known_thinking_model(model)
@@ -5412,23 +5416,55 @@ def _chat_request(
             not cloud
             and not reasoning_continuation
             and payload.get("think") is not False
-            and not _budget_retried
             and exhausted_thinking
         ):
-            # The model reasoned right up to the cap and never got to an answer.
-            # Now that the response has identified it, retry once with the
-            # headroom it needed rather than reporting an empty response.
-            return _chat_request(
-                _with_local_thinking_budget(payload),
-                model=model,
-                cloud=cloud,
-                timeout=timeout,
-                cancel_check=cancel_check,
-                accept_native_tool_calls=accept_native_tool_calls,
-                idempotent=idempotent,
-                local_only=local_only,
-                _budget_retried=True, text_only=text_only,
-            )
+            roomier = _with_local_thinking_budget(payload)
+            if not _budget_retried and roomier != payload:
+                # The model reasoned right up to the cap and never got to an answer.
+                # Now that the response has identified it, retry once with the
+                # headroom it needed rather than reporting an empty response.
+                return _chat_request(
+                    roomier,
+                    model=model,
+                    cloud=cloud,
+                    timeout=timeout,
+                    cancel_check=cancel_check,
+                    accept_native_tool_calls=accept_native_tool_calls,
+                    idempotent=idempotent,
+                    local_only=local_only,
+                    _budget_retried=True, text_only=text_only,
+                    _caller_payload=caller_payload,
+                )
+            if _think_option_supported(model):
+                # The headroom went on thought too (seen live: 4096 tokens of
+                # thinking, no answer, where the same turn with thinking off was
+                # answered in seconds).  More of the same request will not help,
+                # so ask once with thinking off and the reply budget the caller
+                # chose.  If that ask fails as well, the thinking-only reply
+                # below stays the reported failure; a cancellation stays one.
+                fallback_payload = dict(caller_payload)
+                fallback_payload["think"] = False
+                activity_tracker.record_event("model_thinking_fallback", model=str(model or "")[:80],
+                                              reason="thinking_exhausted_budget")
+                try:
+                    return _chat_request(
+                        fallback_payload,
+                        model=model,
+                        cloud=cloud,
+                        timeout=timeout,
+                        cancel_check=cancel_check,
+                        accept_native_tool_calls=accept_native_tool_calls,
+                        idempotent=idempotent,
+                        local_only=local_only,
+                        _budget_retried=True, text_only=text_only,
+                    )
+                except ModelCallError as fallback_error:
+                    if fallback_error.kind == "cancelled":
+                        raise
+                    # Only this event says how the second ask ended.
+                    activity_tracker.record_event(
+                        "model_thinking_fallback_failed", model=str(model or "")[:80],
+                        failure=str(fallback_error.kind or "")[:40])
         raise ModelCallError(
             "empty_response",
             _empty_model_response_detail(out, message),

@@ -959,8 +959,8 @@ _ENTRIES = [
     ("server.py", "_autopilot_review_model.generator_factory", "_make_tier_generate", 1, EXEC,
      "autopilot review verdicts steer applied work"),
     ("server.py", "_chat_request", "/api/chat", 1, CHOKE, "the Ollama chat transport"),
-    ("server.py", "_chat_request", "_chat_request", 3, CHOKE,
-     "continuation and retry recursions; forward text_only"),
+    ("server.py", "_chat_request", "_chat_request", 4, CHOKE,
+     "continuation, retry and thinking-off recursions; forward text_only"),
     ("server.py", "_chat_request", "_post_model", 1, CHOKE, "below the check"),
     ("server.py", "_chat_request", "raw-gateway:" + RAW_GATEWAY_ATTRIBUTE, 2, CHOKE,
      "the legacy bridge to a non-Ollama rung, after require_generation; legacy_chat_bridge judges "
