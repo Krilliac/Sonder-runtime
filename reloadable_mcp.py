@@ -740,10 +740,37 @@ class _ReloadableMCPServerMixin:
             "recovery_action": action,
         }
 
+    def _observe_loaded_source(self) -> None:
+        """Record first-seen package module signatures (cheap when unchanged)."""
+        if not self._reload_source_path:
+            return
+        try:
+            from sonder_runtime.adapters import loaded_source
+
+            loaded_source.observe(Path(self._reload_source_path).resolve().parent)
+        except Exception:
+            return
+
+    def _stale_package_modules(self, exclude) -> list[str]:
+        if not self._reload_source_path:
+            return []
+        try:
+            from sonder_runtime.adapters import loaded_source
+
+            # The registered source swaps cleanly through the refresh, whatever
+            # name it is loaded under (``__main__``, ``server`` or both).
+            source = Path(self._reload_source_path).resolve()
+            return loaded_source.stale_modules(
+                source.parent, exclude=exclude, exclude_files=(source,)
+            )
+        except Exception:
+            return []
+
     def refresh_if_changed(self) -> dict:
         """Load changed source into a fresh namespace and swap on full success."""
         if not _enabled() or not self._reload_source_path:
             return {"reloaded": False, "surface_changed": False}
+        self._observe_loaded_source()
         provenance = self._runtime_provenance()
         provenance_error = _provenance_error(provenance.get("issue", ""))
         if provenance_error:
@@ -1001,8 +1028,9 @@ class _ReloadableMCPServerMixin:
         await self._refresh_and_notify(ctx)
         return await super()._handle_get_prompt(ctx, params)
 
-    def runtime_snapshot(self) -> dict:
+    def runtime_snapshot(self, exclude_modules=()) -> dict:
         current = self._current_source_state()
+        stale_modules = self._stale_package_modules(exclude_modules)
         provenance = self._runtime_provenance()
         effective_error = self._last_error or _provenance_error(
             provenance.get("issue", "")
@@ -1025,10 +1053,13 @@ class _ReloadableMCPServerMixin:
             status = "disabled (pending edit ignored)" if source_changed else "disabled"
         elif source_changed:
             status = "refresh pending"
+        elif stale_modules:
+            status = "restart required"
         else:
             status = "current"
         return {
             "status": status,
+            "stale_modules": stale_modules,
             "enabled": _enabled(),
             "module": self._reload_module_name,
             "path": "(registered)" if self._reload_source_path else "",
