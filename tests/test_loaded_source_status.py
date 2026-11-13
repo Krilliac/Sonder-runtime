@@ -348,14 +348,62 @@ def test_a_stale_package_module_makes_the_status_restart_required(live_mcp):
     assert "ls_test_pkg" in text
 
 
-def test_exclude_modules_removes_watched_modules_from_the_snapshot(live_mcp):
+def test_a_module_the_live_reload_watches_is_not_stale_while_it_waits_for_its_reload(
+    live_mcp, monkeypatch
+):
+    from sonder_runtime.adapters.web import live_reload
+
     mcp, _path, package = live_mcp
     _rewrite(package, "VALUE = 22222\n")
+    assert mcp.runtime_snapshot()["stale_modules"] == ["ls_test_pkg"]
 
-    state = mcp.runtime_snapshot(exclude_modules=["ls_test_pkg"])
+    monkeypatch.setitem(live_reload._SIGNATURES, "ls_test_pkg", (1, 1))
+    state = mcp.runtime_snapshot()
 
+    assert "ls_test_pkg" in live_reload.watched_modules()
     assert state["stale_modules"] == []
     assert state["status"] == "current"
+
+
+def test_a_live_reload_adapter_without_the_watched_list_changes_nothing_else(live_mcp, monkeypatch):
+    """A process can hold an older live-reload adapter than its reloadable_mcp."""
+    from sonder_runtime.adapters.web import live_reload
+
+    mcp, _path, package = live_mcp
+    _rewrite(package, "VALUE = 22222\n")
+    monkeypatch.delattr(live_reload, "watched_modules")
+
+    assert mcp.runtime_snapshot()["stale_modules"] == ["ls_test_pkg"]
+
+
+def test_runtime_snapshot_takes_no_arguments():
+    """New server.py is re-executed against the reloadable_mcp the process started with."""
+    import inspect
+
+    import reloadable_mcp
+
+    parameters = inspect.signature(reloadable_mcp.ReloadableMCPServer.runtime_snapshot).parameters
+    assert list(parameters) == ["self"]
+
+
+def test_an_alias_of_an_excluded_module_is_excluded_with_it(tmp_path, clean_baseline, made_modules):
+    """A root shim and its packaged module are one object under two names."""
+    packaged = tmp_path / "sonder_runtime" / "helper.py"
+    module = _make_module(made_modules, "ls_test_pkg.helper", packaged, "V = 1\n")
+    sys.modules["ls_test_helper_shim"] = module
+    made_modules.append("ls_test_helper_shim")
+    other = tmp_path / "sonder_runtime" / "other.py"
+    _make_module(made_modules, "ls_test_other", other, "V = 1\n")
+    loaded_source.observe(tmp_path)
+    _rewrite(packaged, "V = 22222\n")
+    _rewrite(other, "V = 22222\n")
+
+    assert loaded_source.stale_modules(tmp_path) == [
+        "ls_test_helper_shim", "ls_test_other", "ls_test_pkg.helper"]
+    assert loaded_source.stale_modules(tmp_path, exclude=["ls_test_helper_shim"]) == ["ls_test_other"]
+    assert loaded_source.stale_modules(tmp_path, exclude=["ls_test_pkg.helper"]) == ["ls_test_other"]
+    assert loaded_source.stale_modules(tmp_path, exclude=["not_loaded"]) == [
+        "ls_test_helper_shim", "ls_test_other", "ls_test_pkg.helper"]
 
 
 def test_error_refresh_pending_and_disabled_keep_their_precedence(live_mcp, monkeypatch):
@@ -416,17 +464,42 @@ def test_a_fast_forward_under_a_running_process_requires_restart(monkeypatch):
     assert data["restart_required"] is True
 
 
-def test_mcp_runtime_data_passes_the_watched_modules_as_exclusions(monkeypatch):
-    seen = {}
+def test_mcp_runtime_data_works_with_the_snapshot_of_a_process_started_before_this_change(monkeypatch):
+    """Reproduced in review: new server.py passed a parameter the older running class lacks,
+    and every status tool raised TypeError in exactly the process the change is for."""
+    def older_snapshot():
+        return {"status": "current", "loaded_digest": "a" * 64, "current_digest": "a" * 64}
 
-    def fake(exclude_modules=()):
-        seen["exclude"] = list(exclude_modules)
-        return {"stale_modules": []}
+    monkeypatch.setattr(server.mcp, "runtime_snapshot", older_snapshot)
 
-    monkeypatch.setattr(server.mcp, "runtime_snapshot", fake)
-    server.mcp_runtime_data()
+    assert server.mcp_runtime_data()["status"] == "current"
+    assert "status: current" in server.format_mcp_runtime()
 
-    assert seen["exclude"] == list(server.LIVE_RELOAD_MODULES)
+
+def test_no_module_the_server_watches_is_reported_stale(clean_baseline, monkeypatch):
+    """Every watched module, under every name it is loaded as, is left to the live reload."""
+    from sonder_runtime.adapters.web import live_reload
+
+    # The server primes its watch list at import when live reload is on; do the
+    # same here on copies, so no other test sees this record.
+    monkeypatch.setenv("SONDER_LIVE_RELOAD", "1")
+    monkeypatch.setattr(live_reload, "_SIGNATURES", dict(live_reload._SIGNATURES))
+    monkeypatch.setattr(live_reload, "_MTIMES", dict(live_reload._MTIMES))
+    live_reload.prime_modules(server.LIVE_RELOAD_MODULES)
+    root = os.path.dirname(os.path.abspath(server.__file__))
+    loaded_source.observe(root)
+    assert len(loaded_source._BASELINE) > 100
+    for name in list(loaded_source._BASELINE):
+        loaded_source._BASELINE[name] = (1, 1)
+    watched = set(live_reload.watched_modules())
+    assert watched >= {name for name in server.LIVE_RELOAD_MODULES if name in sys.modules}
+
+    stale = loaded_source.stale_modules(root, exclude=watched, exclude_files=[server.__file__])
+
+    watched_objects = {id(sys.modules[name]) for name in watched if name in sys.modules}
+    assert stale, "every other package module has a forced-old record and must be reported"
+    assert [name for name in stale if id(sys.modules[name]) in watched_objects] == []
+    assert not watched & set(stale)
 
 
 def test_the_adapter_is_not_a_live_reload_module():

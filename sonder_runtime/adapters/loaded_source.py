@@ -120,14 +120,17 @@ def observe(root) -> None:
 def stale_modules(root, *, exclude=(), exclude_files=()) -> list[str]:
     """Sorted names of loaded package modules whose source changed since first seen.
 
-    ``exclude`` names modules that are reloaded in place (their object stays
-    the same while their code is replaced), ``exclude_files`` source files that
-    are refreshed by other means, whatever name they are loaded under.  A
+    ``exclude`` names modules that are reloaded by other means: a changed one
+    is not stale, it is waiting for its reload.  Every other name bound to the
+    same module object is excluded with it (a root shim and its packaged
+    module are one object under two names).  ``exclude_files`` are source
+    files refreshed by other means, whatever name they are loaded under.  A
     module whose source file is gone counts as changed.  Never raises.
     """
     try:
         base = _norm(root)
         skip = set(exclude or ())
+        skip_objects = {id(module) for module in map(sys.modules.get, skip) if module is not None}
         skip_files = {_norm(path) for path in (exclude_files or ()) if path}
         with _LOCK:
             _observe(base)
@@ -139,6 +142,8 @@ def stale_modules(root, *, exclude=(), exclude_files=()) -> list[str]:
                 continue
             module = sys.modules.get(name)
             if module is None or seen is None or seen() is not module:
+                continue
+            if id(module) in skip_objects:
                 continue
             if _signature(source) != baseline:
                 stale.append(name)

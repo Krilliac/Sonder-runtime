@@ -751,17 +751,21 @@ class _ReloadableMCPServerMixin:
         except Exception:
             return
 
-    def _stale_package_modules(self, exclude) -> list[str]:
+    def _stale_package_modules(self) -> list[str]:
         if not self._reload_source_path:
             return []
         try:
             from sonder_runtime.adapters import loaded_source
+            from sonder_runtime.adapters.web import live_reload
 
+            # Modules the live reload watches are replaced when they change;
+            # an older adapter in this process may not list them.
+            watched = getattr(live_reload, "watched_modules", tuple)()
             # The registered source swaps cleanly through the refresh, whatever
             # name it is loaded under (``__main__``, ``server`` or both).
             source = Path(self._reload_source_path).resolve()
             return loaded_source.stale_modules(
-                source.parent, exclude=exclude, exclude_files=(source,)
+                source.parent, exclude=watched, exclude_files=(source,)
             )
         except Exception:
             return []
@@ -1028,9 +1032,13 @@ class _ReloadableMCPServerMixin:
         await self._refresh_and_notify(ctx)
         return await super()._handle_get_prompt(ctx, params)
 
-    def runtime_snapshot(self, exclude_modules=()) -> dict:
+    def runtime_snapshot(self) -> dict:
+        # ``server.py`` is re-executed against the ``reloadable_mcp`` this
+        # process started with, which may be older or newer than it: this
+        # method takes no arguments, and a caller must not rely on a key that
+        # an older version does not return.
         current = self._current_source_state()
-        stale_modules = self._stale_package_modules(exclude_modules)
+        stale_modules = self._stale_package_modules()
         provenance = self._runtime_provenance()
         effective_error = self._last_error or _provenance_error(
             provenance.get("issue", "")

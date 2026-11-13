@@ -16358,7 +16358,7 @@ def _web_denial_guard(
 
 def mcp_runtime_data() -> dict:
     """Return the loaded/current MCP source and tool-registry convergence state."""
-    return mcp.runtime_snapshot(exclude_modules=LIVE_RELOAD_MODULES)
+    return mcp.runtime_snapshot()
 
 
 def _safe_mcp_recovery_action(provenance: dict) -> str:
