@@ -1196,12 +1196,14 @@ TEXT_ONLY_DECLARATIONS: dict[tuple[str, str, str], str] = {
     ("sonder_runtime/adapters/inference/ollama_gateway.py", "OllamaGateway.generate", "_generate_factory"):
         "the packaged Ollama gateway: callers that run or apply output hold the "
         "ToolLaneGateway, which judged the request first",
-    ("sonder_runtime/adapters/reference_lookup_lanes.py", "chat_generate.expander", "make_generate"):
-        "reference lookup's search-terms call on the single-model chat lanes: the reply is only "
-        "parsed into query words; make_generate is the lane's _make_generate",
-    ("sonder_runtime/adapters/reference_lookup_multi.py", "SharedLookup.retrieve.expand", "make_tier_generate"):
-        "reference lookup's search-terms call for ensemble_answer and consult members: the reply "
-        "is only parsed into query words; make_tier_generate is the ensemble's _make_tier_generate",
+    ("sonder_runtime/adapters/reference_lookup_lanes.py", "terms_generate", "make"):
+        "reference lookup's search-terms call, built for the single-model chat lanes "
+        "(chat_generate.expander) and for ensemble_answer and consult members "
+        "(SharedLookup.retrieve.expand): the reply is only parsed into query words; make is the "
+        "lane's _make_generate or the ensemble's _make_tier_generate",
+    ("sonder_runtime/adapters/reference_lookup_lanes.py", "terms_generate.generate", "make"):
+        "the same search-terms call asked once more as an ordinary call when the no-thinking "
+        "reply came back empty or refused: the reply is only parsed into query words",
     ("sonder_runtime/adapters/tool_lane_gateway.py", "ServedTierGateway.generate", "reply_refusal"):
         "ChatService's text handle: a reply that names no model is kept as text; a blocked "
         "reported model is refused whatever the flag says",

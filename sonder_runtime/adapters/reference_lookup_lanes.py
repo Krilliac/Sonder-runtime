@@ -75,7 +75,7 @@ from sonder_runtime.domain.reference_lookup.selection import passage_char_budget
 
 _logger = logging.getLogger("sonder.reference_lookup")
 
-# The search-terms call: deterministic, small, no system prompt.
+# The search-terms call: deterministic, small, no system prompt, no model thinking.
 EXPAND_TEMPERATURE = 0.0
 EXPAND_NUM_PREDICT = 80
 # Context window assumed for the budget when the call passes none (a hosted or
@@ -330,6 +330,56 @@ class LookupGenerate:
         return reply if self._record.grounded else review.text
 
 
+# Options that only make sense for a call that thinks.
+_THINKING_ONLY_OPTIONS = frozenset({"reasoning_continuation", "reasoning_total_tokens"})
+
+
+def _thinking_was_needed(exc: BaseException) -> bool:
+    """True when a no-thinking call failed because of the option itself.
+
+    Either the reply came back empty (the model thought anyway: its route
+    dropped or ignored the option) or the request was refused (HTTP 400: the
+    model rejects the option and this route does not retry without it).
+    """
+    kind = getattr(exc, "kind", None)
+    return kind == "empty_response" or (kind == "http" and getattr(exc, "status", None) == 400)
+
+
+def terms_generate(make: Callable[..., Any], *target: Any, **options: Any) -> Any:
+    """``make(*target, "", ...)`` for the search-terms call, with model thinking off.
+
+    ``target`` is ``(model, num_ctx)``, after the tier for a tier-bound factory.
+    The reply is one line of query words, so reasoning only delays it and can use
+    up the reply budget.  Never worse than the call as it was:
+
+    * a hosted model's provider owns thinking and the factory refuses the option
+      for it (``ValueError``): that target gets the plain call;
+    * a call that comes back empty or refused because of the option (see
+      ``_thinking_was_needed``) is asked again once, as the plain call.
+    """
+    *head, num_ctx = target
+    args = (*head, "", EXPAND_TEMPERATURE, EXPAND_NUM_PREDICT, num_ctx)
+    # ``text_only=True`` is spelled out at each call so the generation call-site
+    # scan (tests/support/generation_call_sites.py) sees the declaration.
+    plain_options = {key: value for key, value in options.items() if key != "text_only"}
+    quick_options = {key: value for key, value in plain_options.items()
+                     if key != "think" and key not in _THINKING_ONLY_OPTIONS}
+    try:
+        quick = make(*args, text_only=True, think=False, **quick_options)
+    except ValueError:
+        return make(*args, text_only=True, **plain_options)
+
+    def generate(prompt: Any, *call_args: Any, **call_kwargs: Any) -> Any:
+        try:
+            return quick(prompt, *call_args, **call_kwargs)
+        except Exception as exc:  # noqa: BLE001  # re-raised unless the option itself was the cause
+            if not _thinking_was_needed(exc):
+                raise
+        return make(*args, text_only=True, **plain_options)(prompt, *call_args, **call_kwargs)
+
+    return generate
+
+
 def chat_generate(make_generate: Callable[..., Any], question: Any, model: Any, system: Any,
                   temperature: Any, num_predict: Any, num_ctx: Any, **options: Any) -> Any:
     """``make_generate(model, system, temperature, num_predict, num_ctx, **options)``,
@@ -353,8 +403,7 @@ def chat_generate(make_generate: Callable[..., Any], question: Any, model: Any, 
 
     def expander() -> Callable[..., Any]:
         # The search-terms reply is only parsed into query words: a text call.
-        return make_generate(model, "", EXPAND_TEMPERATURE, EXPAND_NUM_PREDICT, num_ctx,
-                             text_only=True, **expand_options)
+        return terms_generate(make_generate, model, num_ctx, **expand_options)
 
     return LookupGenerate(inner, record, question if isinstance(question, str) else "", expander,
                           num_ctx=num_ctx, num_predict=num_predict)
@@ -466,6 +515,7 @@ __all__ = [
     "sources_text",
     "system_for",
     "take_turn",
+    "terms_generate",
     "turn_scoped",
     "with_sources",
 ]
