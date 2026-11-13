@@ -463,10 +463,11 @@ def test_request_cache_never_serves_a_lookup_turn(lane, monkeypatch):
 class _ForwardingTransport(Transport):
     """A provider that streams: it forwards its content when it can claim the turn stream.
 
-    Only a chat call claims.  The runtime also reads ``/api/show`` once per
-    model per process; a fake that claimed for that read spent the turn's one
-    claim before the chat call, so whichever case ran first in a process
-    forwarded nothing (and its "claimed" check passed for the wrong reason).
+    Only a chat call claims, as in the real transports.  The runtime also reads
+    ``/api/show`` for a model's context size (cached per model); a fake that
+    claimed for that read spent the turn's one claim before the chat call, so
+    the control turn of whichever case first used the plain model in a process
+    forwarded nothing.
     """
 
     def __call__(self, path, payload, *args, **kwargs):
