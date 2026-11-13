@@ -193,17 +193,32 @@ def test_serve_target_still_resolves_tiers_and_the_default_route(catalog):
     assert server._serve_target("no-such-model-xyz", None)[3] is None  # unknown stays unknown
 
 
-def test_chat_target_resolves_again_only_for_a_refused_target():
+def test_chat_target_resolves_again_only_for_a_refused_or_unknown_target():
     seen = []
 
     def fake(tier, strict, **kwargs):
         seen.append((tier, strict, kwargs))
-        return ("m", False, False, guard.DENIED_LABEL if tier == "denied" and not kwargs else "model:m")
+        if kwargs:
+            return ("m", False, False, "model:m")
+        return {"denied": ("m", False, False, guard.DENIED_LABEL),
+                "unknown": (None, False, True, None),
+                "cloud": (None, True, False, "cloud-disabled")}.get(tier, ("m", False, False, "model:m"))
 
     assert guard.chat_target(fake, "ok", True)[3] == "model:m"
     assert seen == [("ok", True, {})]  # an ordinary selector keeps the two-argument call
     seen.clear()
-    assert guard.chat_target(fake, "denied", None)[3] == "model:m"
+    assert guard.chat_target(fake, "cloud", True)[3] == "cloud-disabled"
+    assert seen == [("cloud", True, {})]  # any other refusal is final
+    for selector in ("denied", "unknown"):
+        seen.clear()
+        assert guard.chat_target(fake, selector, None)[3] == "model:m"
+        assert seen == [(selector, None, {}), (selector, None, {"chat_only": True})]
+    # The narrower rule, for a resolver that also serves tool lanes.
+    seen.clear()
+    assert guard.chat_target(fake, "unknown", None, pool_wide=False)[3] is None
+    assert seen == [("unknown", None, {})]
+    seen.clear()
+    assert guard.chat_target(fake, "denied", None, pool_wide=False)[3] == "model:m"
     assert seen == [("denied", None, {}), ("denied", None, {"chat_only": True})]
 
 
