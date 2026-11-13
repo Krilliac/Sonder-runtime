@@ -26,6 +26,9 @@ def _gen_fn():
     """Escalating-temperature generator: each successive attempt samples hotter so
     self-repair actually explores instead of re-emitting the same buggy answer."""
     model = server.resolve_sonder_model(False)
+    # Solver attempts are run: one clear refusal instead of N refused attempts.
+    if refusal := server._tool_lane_guard.resolved_refusal("", model, ""):
+        raise SystemExit("EVAL: " + refusal)
     temps = [0.2, 0.6, 0.9, 1.1, 1.2]
     state = {"i": 0}
 

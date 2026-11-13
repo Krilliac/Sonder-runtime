@@ -12,6 +12,8 @@ import logging
 from dataclasses import dataclass
 from typing import Mapping
 
+from .tool_lane_models import ToolLaneDenyList, decide
+
 logger = logging.getLogger(__name__)
 
 
@@ -77,9 +79,15 @@ class RuntimeModelConfiguration:
             # INFO: optional tiers are unset on a default install; /model and
             # /doctor report them, and the REPL log file keeps this record.
             logger.info(f"local tiers with no model configured: {empty_local_tiers} -- requests needing these capabilities will fall back to general-purpose models")
+        local_code_model = str(env.get("SONDER_CODE_LOCAL", stable_alias))
+        # Like a tier seed, the local code fallback never names a model that
+        # is blocked from tool-using lanes: it backs the default route.
+        if decide(local_code_model, ToolLaneDenyList.from_policy(None), free_form=False).denied:
+            logger.warning(f"SONDER_CODE_LOCAL={local_code_model!r} is blocked from tool-using lanes; using {stable_alias!r}")
+            local_code_model = stable_alias
         return cls(
             stable_alias=stable_alias,
-            local_code_model=str(env.get("SONDER_CODE_LOCAL", stable_alias)),
+            local_code_model=local_code_model,
             default_cloud_code_model=default_cloud_code_model,
             default_cloud_general_model=default_cloud_general_model,
             cloud_extra_usage_fallback_model=default_cloud_code_model,

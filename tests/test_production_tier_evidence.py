@@ -199,6 +199,7 @@ def test_server_callers_use_packaged_router_and_payload_wiring():
 def _server_callers(tiers, source, replies):
     """Execute the real tool bodies with inert I/O, without importing server."""
     import code_improve
+    from sonder_runtime.adapters import runtime_policy, tool_lane_guard
     from sonder_runtime.adapters.inference import production_tier_router
 
     namespace = {
@@ -207,6 +208,8 @@ def _server_callers(tiers, source, replies):
         "file_ops": SimpleNamespace(read_file=lambda _: {"text": source}),
         "code_improve": code_improve,
         "ensemble_answer": lambda prompt, tiers, mode: replies.append((prompt, tiers)) or source,
+        # The real tool-lane check, on a default policy: an ordinary tier is not refused.
+        "_tool_lane_guard": tool_lane_guard, "_RUNTIME_POLICY": runtime_policy.default_policy({}),
     }
     tree = ast.parse((Path(__file__).resolve().parents[1] / "server.py").read_text(encoding="utf-8"))
     functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)

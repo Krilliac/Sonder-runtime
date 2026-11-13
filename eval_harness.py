@@ -642,6 +642,9 @@ class OllamaProvider:
 
     def __init__(self, model, temperature=0.0, num_predict=1024, num_ctx=4096):
         import server  # heavy; deferred so offline paths never pay for it
+        # Harness answers are scored by running them: refuse a denied model once.
+        if server._tool_lane_guard.denied(model, "model:"):
+            raise HarnessError(server._tool_lane_guard.refusal(model))
         self.name = "ollama:" + model
         self.model = model
         self._generate = server._make_generate(

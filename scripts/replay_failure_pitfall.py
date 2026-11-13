@@ -182,7 +182,7 @@ def main():
                     offload_fn=lambda prompt, **options: server._generate_text(
                         prompt,
                         timeout=server._distillation_timeout_seconds(),
-                        **options
+                        text_only=True, **options
                     ),
                 )
                 stage = (

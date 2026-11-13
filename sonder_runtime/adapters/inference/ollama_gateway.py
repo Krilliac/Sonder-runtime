@@ -144,6 +144,9 @@ def _enforce_local_endpoint(base: str, context: OperationContext) -> None:
 def _map_model_error(exc) -> Exception:
     kind = getattr(exc, "kind", "unknown")
     detail = getattr(exc, "detail", str(exc))
+    if getattr(exc, "tool_lane_refused", False):
+        # The deny-list refusal text, verbatim, as the packaged permission error.
+        return Forbidden(detail)
     if kind == "timeout":
         return DeadlineExceeded(detail)
     if kind == "cancelled":
@@ -383,6 +386,9 @@ class OllamaGateway:
                 (lambda: context.cancellation.cancelled)
                 if context.cancellation is not None else None
             ),
+            # Packaged callers that run or apply output hold the ToolLaneGateway,
+            # which judged this request before it got here.
+            text_only=True,
             **generate_options,
         )
         started = time.monotonic()

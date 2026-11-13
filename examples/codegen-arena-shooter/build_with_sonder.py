@@ -393,6 +393,12 @@ def parse_errors(errors: list[str]):
     return out
 
 
+def _refuse_denied(server, tiers: str) -> None:
+    """Stop before asking a tool-lane-denied tier: every reply here is written and compiled."""
+    if refusal := server._tool_lane_guard.selector_refusal(tiers, server.TIERS):
+        raise SystemExit(refusal)
+
+
 def repair_lines(server, name: str, parsed, tiers: str) -> bool:
     """Fix syntax errors one source line at a time, splicing the result back.
 
@@ -405,6 +411,7 @@ def repair_lines(server, name: str, parsed, tiers: str) -> bool:
 
     Returns True if any line was changed.
     """
+    _refuse_denied(server, tiers)
     path = os.path.join(PROJECT, name)
     with open(path, encoding="utf-8") as fh:
         lines = fh.read().split("\n")
@@ -518,6 +525,7 @@ def snapshot(name: str) -> None:
 
 def generate(server, name: str, contract: str, tiers: str, num_predict: int,
              use_real_api: bool = False) -> None:
+    _refuse_denied(server, tiers)
     snapshot(name)
     context = dependency_brief(name) if use_real_api else specs.SHARED_CONTRACT
     prompt = (
@@ -536,6 +544,7 @@ def generate(server, name: str, contract: str, tiers: str, num_predict: int,
 
 def repair(server, name: str, contract: str, file_errors: list[str],
            tiers: str, num_predict: int) -> None:
+    _refuse_denied(server, tiers)
     path = os.path.join(PROJECT, name)
     current = open(path, encoding="utf-8").read()
     prompt = (

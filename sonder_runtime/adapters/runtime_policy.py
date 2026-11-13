@@ -40,6 +40,7 @@ DEFAULT_NPU = _rules.DEFAULT_NPU
 DEFAULT_LONG_CONTEXT_OVERFLOW = _rules.DEFAULT_LONG_CONTEXT_OVERFLOW
 PROVIDER_MODEL_PROVIDERS = _rules.PROVIDER_MODEL_PROVIDERS
 _MODEL_RE = _rules._MODEL_RE
+tool_lane_deny_list = _rules.tool_lane_deny_list
 _LOCK = threading.RLock()
 
 
@@ -83,6 +84,16 @@ normalize = _rules.normalize
 bound_tiers = _rules.bound_tiers
 _disk_payload = _rules.disk_payload
 _write_json_atomic = _atomic_json.write_json_atomic
+
+
+def configured_tiers(policy, bindings) -> tuple:
+    """Local tiers ``policy`` binds that the live tier map ``bindings`` also holds.
+
+    This is the ``available`` set of the default route's escalation plan
+    (``server._configured_local_tiers``) and the set the tool-lane guard
+    judges for a lane on the default route, so the two cannot drift.
+    """
+    return tuple(tier for tier in bound_tiers(policy) if tier in bindings)
 
 
 def default_policy(env=None) -> dict:
@@ -261,6 +272,15 @@ def update(
                 for name, tiers in (base.get("provider_models") or {}).items()
             },
         }
+        # The tool-lane deny list is add-only and has no update parameter: the
+        # loaded section is carried through unchanged, even across ``reset``.
+        # (An invalid file loads as built-in defaults, so resetting one keeps
+        # only those.)
+        candidate["tool_lane_denied_models"] = dict(
+            current.get("tool_lane_denied_models")
+            or base.get("tool_lane_denied_models")
+            or {}
+        )
         if provider_models:
             if not isinstance(provider_models, dict):
                 raise ValueError("provider_models update must be a JSON object")
@@ -289,6 +309,15 @@ def update(
             ):
                 raise ValueError(
                     "sonder-personal:latest is reserved for an active validated deployment"
+                )
+            # An explicit request to bind a blocked model is refused outright;
+            # only a file that already names one loads with that tier dropped.
+            blocked = _rules.denied_local_bindings(local_models, _rules.tool_lane_deny_list(candidate))
+            if blocked:
+                tier, model = blocked[0]
+                raise ValueError(
+                    f"runtime policy local_models.{tier} names a model blocked from "
+                    f"tool-using lanes: {model!r}"
                 )
             candidate["local_models"].update(local_models)
         if routing:
@@ -341,6 +370,8 @@ def format_policy(policy=None) -> str:
     ]
     if policy.get("error"):
         lines.append("  ERROR: %s (safe defaults active)" % policy["error"])
+    for notice in policy.get("tool_lane_notices") or ():
+        lines.append(f"  WARNING: {notice}")
     lines.append("  local models:")
     for tier in LOCAL_TIERS:
         model = policy["local_models"].get(tier) or ""
@@ -372,8 +403,22 @@ def format_policy(policy=None) -> str:
         lines.append("  %s tier models (used only where that provider is bound): %s" % (
             provider, ", ".join("%s=%s" % item for item in tiers.items()) or "-",
         ))
+    lines.append("  " + format_tool_lane_denied_models(policy))
     lines.append("  cloud tiers remain separate explicit opt-in configuration")
     return "\n".join(lines)
+
+
+def format_tool_lane_denied_models(policy=None) -> str:
+    """One status line for the models blocked from tool-using lanes."""
+    policy = load(create=True) if policy is None else policy
+    deny = tool_lane_deny_list(policy)
+    source = "defaults plus policy file" if deny.extended else "defaults only"
+    line = "tool-lane blocked models (chat by name only; %s): names=%s prefixes=%s" % (
+        source, ", ".join(sorted(deny.names)) or "-", ", ".join(deny.prefixes) or "-",
+    )
+    if not deny.readable:
+        line += " [policy file unreadable: caller-named models refused in tool lanes]"
+    return line
 
 
 def format_long_context_overflow(policy=None, env=None) -> str:

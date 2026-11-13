@@ -104,6 +104,9 @@ def main() -> int:
                 # Not the loop's to fix, and it will not clear on its own.
                 log("stopping: the tree must be clean for a run to be committable")
                 break
+            if result.startswith("model refused"):
+                log("stopping: the selected model may not write code (tool-lane deny list)")
+                break
 
     log("=== done: %d pass(es), %d commit(s) ===" % (passes, len(committed)))
     for line in committed:

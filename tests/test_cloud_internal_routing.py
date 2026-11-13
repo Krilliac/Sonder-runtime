@@ -59,6 +59,7 @@ def _install_request_fakes(monkeypatch, *, model, cloud, tier_label):
     def make_generate(
         selected_model, system, temperature, num_predict, num_ctx,
         cloud=False, timeout=None, cancel_check=None, allow_cloud_fallback=True,
+        **_kwargs,
     ):
         def generate(prompt, history=None):
             calls.append({"model": selected_model, "cloud": cloud, "prompt": prompt})
@@ -150,7 +151,7 @@ def test_cloud_only_route_propagates_to_overflow_summary(monkeypatch):
 
     def make_generate(
         model, system, temperature, num_predict, num_ctx,
-        cloud=False, timeout=None, cancel_check=None,
+        cloud=False, timeout=None, cancel_check=None, **_kwargs,
     ):
         def generate(prompt, history=None):
             calls.append((model, cloud))

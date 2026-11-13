@@ -595,6 +595,11 @@ def main():
         print(output)
         return 0 if verified else 1
 
+    # Every body below is written and compiled: refuse a denied tier first.
+    if refusal := server._tool_lane_guard.selector_refusal(args.tiers, server.TIERS):
+        print("ABORT: " + refusal)
+        return 2
+
     slots = []
     for name, skel in skeleton.FILES:
         if args.only and name != args.only:
