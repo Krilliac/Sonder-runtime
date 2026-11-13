@@ -142,6 +142,7 @@ class SharedLookup:
         self.retrievals += 1
         self.bundle = _service.retrieve_for(
             self.question, expand, _service.DEFAULT_K, self._budget(ctx_for, num_predict, prompt),
+            for_answer=True,
         )
         return self.bundle
 

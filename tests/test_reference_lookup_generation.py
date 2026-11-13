@@ -82,9 +82,9 @@ def checked(request, monkeypatch):
     retrievals = []
     real_retrieve = service.retrieve_for
 
-    def retrieve(question, expand_fn, k, char_budget):
+    def retrieve(question, expand_fn, k, char_budget, **options):
         retrievals.append(question)
-        return real_retrieve(question, expand_fn, k, char_budget)
+        return real_retrieve(question, expand_fn, k, char_budget, **options)
 
     monkeypatch.setattr(service, "retrieve_for", retrieve)
     return transport, judged, retrievals

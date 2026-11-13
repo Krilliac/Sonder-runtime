@@ -452,8 +452,8 @@ def test_normal_context_respects_the_budget(lane, monkeypatch):
     seen = []
     real = service.retrieve_for
 
-    def spy(question, expand_fn, k, char_budget):
-        bundle = real(question, expand_fn, k, char_budget)
+    def spy(question, expand_fn, k, char_budget, **options):
+        bundle = real(question, expand_fn, k, char_budget, **options)
         seen.append((char_budget, bundle))
         return bundle
 
@@ -840,9 +840,9 @@ def test_budget_counts_the_callers_system_message(lane, monkeypatch):
     seen = []
     real = service.retrieve_for
 
-    def spy(question, expand_fn, k, char_budget):
+    def spy(question, expand_fn, k, char_budget, **options):
         seen.append(char_budget)
-        return real(question, expand_fn, k, char_budget)
+        return real(question, expand_fn, k, char_budget, **options)
 
     monkeypatch.setattr(service, "retrieve_for", spy)
     caller_system = "Answer for a SOC analyst. " * 40
