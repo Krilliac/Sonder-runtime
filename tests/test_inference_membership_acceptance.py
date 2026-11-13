@@ -225,21 +225,24 @@ def test_membership_change_drains_response_bearing_request_then_outage_expires(c
 
 
 @pytest.mark.parametrize("count", SIZES)
-def test_model_request_targets_one_unknown_worker_without_full_refresh(count, monkeypatch):
+def test_model_request_targets_one_unknown_wave_without_full_refresh(count, monkeypatch):
+    # One request probes one concurrent wave: min(parallelism, batch) workers,
+    # never the roster. A single-worker probe refused any model that another
+    # unknown worker served.
     endpoints, probes, sent = origins(count, local=True), [], []
     pool = OllamaWorkerPool(endpoints[0], endpoints[1:], max_workers=count,
-                            capability_probe_batch_size=5,
+                            capability_probe_parallelism=3, capability_probe_batch_size=5,
                             capability_prober=lambda origin: probes.append(origin) or {"models": []})
     monkeypatch.setattr(pool, "refresh_capabilities", lambda **_: pytest.fail("full refresh from request"))
     with pytest.raises(WorkerCapabilityUnavailable):
         pool.request(lambda origin: sent.append(origin), model="absent")
-    assert len(probes) == 1 and not sent
+    assert sorted(probes) == sorted(endpoints[:3]) and not sent
     with pytest.raises(WorkerCapabilityUnavailable):
         pool.request(lambda origin: sent.append(origin), model="absent")
-    assert len(probes) == len(set(probes)) == 2 and not sent
+    assert sorted(probes) == sorted(endpoints[:6]) and not sent
     pool.request(lambda origin: sent.append(origin))
     pool.status()
-    assert len(probes) == 2  # model-less admission and status do not probe
+    assert len(probes) == 6  # model-less admission and status do not probe
 
 
 @pytest.mark.parametrize("count", SIZES)
@@ -270,7 +273,10 @@ def test_targeted_probe_single_flight_uses_global_queue(count, outcome):
         wait_until(lambda: pool.summary()["queue"]["waiting"] == 1)
         with pytest.raises(WorkerPoolBackpressure):
             pool.request(lambda _: pytest.fail("unprobed request sent"), model="code")
-        assert results == [] and len(calls) == 1
+        # The first caller's wave is min(parallelism, batch) = 2 concurrent
+        # probes; the queued caller joined it and started nothing.
+        wait_until(lambda: len(calls) == 2)
+        assert results == [] and len(calls) == 2
     finally:
         release.set()
         first.join(5)
@@ -278,11 +284,12 @@ def test_targeted_probe_single_flight_uses_global_queue(count, outcome):
             second.join(5)
     assert not first.is_alive() and not second.is_alive()
     if outcome == "success":
-        assert not failures and results == [endpoints[0], endpoints[0]]
+        assert not failures and len(results) == 2 and set(results) <= set(endpoints[:2])
     else:
         assert not results and len(failures) == 2
         assert all(isinstance(error, WorkerCapabilityUnavailable) for error in failures)
-    assert calls == [endpoints[0]] and pool.summary()["queue"]["waiting"] == 0
+    # No second wave: the joined caller never probes beyond the first one.
+    assert sorted(calls) == sorted(endpoints[:2]) and pool.summary()["queue"]["waiting"] == 0
 
 
 @pytest.mark.parametrize("count", SIZES)
@@ -421,17 +428,18 @@ def test_targeted_request_joins_administrator_batch_and_timeout_clears_waiter():
     assert results[0] in calls and pool.summary()["queue"]["waiting"] == 0
 
 
-def test_stale_model_evidence_requires_one_targeted_probe_and_no_prober_fails_closed():
+def test_stale_model_evidence_requires_one_targeted_wave_and_no_prober_fails_closed():
     endpoints, probes = origins(16, local=True), []
     now = [100.0]
     pool = OllamaWorkerPool(endpoints[0], endpoints[1:], clock=lambda: now[0],
+                            capability_probe_parallelism=3,
                             capability_probe_batch_size=16, capability_ttl_seconds=10,
                             capability_prober=lambda origin: probes.append(origin) or {"models": ["code"]})
     pool.refresh_capabilities()
     assert len(probes) == 16
     now[0] += 11
-    assert pool.request(lambda origin: origin, model="code") == endpoints[0]
-    assert len(probes) == 17
+    assert pool.request(lambda origin: origin, model="code") in endpoints[:3]
+    assert sorted(probes[16:]) == sorted(endpoints[:3])
     no_prober = OllamaWorkerPool(endpoints[0], endpoints[1:])
     with pytest.raises(WorkerCapabilityUnavailable):
         no_prober.request(lambda _: pytest.fail("unprobed worker selected"), model="code")

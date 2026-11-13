@@ -777,7 +777,7 @@ class OllamaWorkerPool:
         self._local_worker_count = len(states) - len(self._configured_remote_origins)
         self._membership_omitted = 0
         self._external_source = None
-        self._active_probe_states = ()
+        self._request_wave_inflight = False
         self._last_model_miss_refresh = None
 
     @staticmethod
@@ -1228,7 +1228,7 @@ class OllamaWorkerPool:
 
     def _refresh_capabilities(
         self, *, force: bool = False, _membership: bool = False,
-        _target: _WorkerState | None = None, _lock_owned: bool = False,
+        _lock_owned: bool = False,
         _targets: frozenset[int] | None = None, _renew_within: float = 0.0,
     ) -> None:
         """Update cached capabilities using the configured bounded probe batch.
@@ -1255,8 +1255,6 @@ class OllamaWorkerPool:
                 for offset in range(state_count):
                     index = (start + offset) % state_count
                     state = self._states[index]
-                    if _target is not None and state is not _target:
-                        continue
                     if _targets is not None and id(state) not in _targets:
                         continue
                     if state.membership_state is not None and (
@@ -1288,7 +1286,6 @@ class OllamaWorkerPool:
                         break
                 if last_selected_index is not None and state_count:
                     self._probe_cursor = (last_selected_index + 1) % state_count
-                self._active_probe_states = tuple(candidates)
             if not candidates:
                 logger.debug("no stale/eligible workers to probe")
                 return
@@ -1417,13 +1414,25 @@ class OllamaWorkerPool:
                 self._condition.notify_all()
         finally:
             with self._condition:
-                self._active_probe_states = ()
                 self._condition.notify_all()
             if not _lock_owned:
                 self._probe_lock.release()
 
     def _refresh_for_model(self, model: str, *, admission_timeout: float) -> None:
-        """Probe one fair static unknown/stale worker, joining existing work.
+        """Probe one fair wave of static unknown/stale workers, joining existing work.
+
+        Probing a single worker per request failed any request whose model was
+        served by another unknown/stale worker: the fair cursor picked one
+        worker, it lacked the model, and admission refused the request at once
+        although the next worker in rotation advertised it. One wave is at
+        most the configured probe parallelism (and batch size), so its probes
+        run concurrently, take no longer than one probe timeout, and never
+        fan out across a large roster. A request takes part in at most one
+        wave: a caller that arrives while another request's wave is in flight
+        joins that wave and starts none of its own. A caller that waited
+        behind an administrative or controller batch starts its wave only if
+        the model is still unserved, and only over workers that batch did not
+        probe.
 
         The same probe lock serializes this with administrative batches, so
         their configured parallelism ceiling remains global to this pool.
@@ -1434,41 +1443,33 @@ class OllamaWorkerPool:
             now = self._clock()
             if self._draining or self._capability_prober is None:
                 return
-            if any(self._membership_admissible(state, now)
-                   and not state.compatibility_error and state.cooldown_until <= now
-                   and self._supports_model(state, model) for state in self._states):
+            if self._fresh_supporter_locked(model, now):
                 return
             candidates = [state for state in self._states
-                          if state.membership_state is None
-                          and self._membership_admissible(state, now)
-                          and self._capabilities_stale(state, now)
-                          and state.cooldown_until <= now and not state.half_open_inflight]
+                          if self._stale_static_candidate_locked(state, now)]
             if not candidates:
                 miss = self._model_miss_candidates_locked(model, now)
                 if not miss:
                     return
                 self._last_model_miss_refresh = now
+            else:
+                # Candidates do not depend on the model, so another request's
+                # wave in flight is the wave this caller would have started.
+                joined = self._request_wave_inflight
+                # A lock holder bumps the completion generation of every worker
+                # it probes, after either a successful or failed result, so a
+                # caller that waited never probes the same worker again.
+                generations = {id(state): state.capability_probe_generation
+                               for state in candidates}
+                acquired = self._probe_lock.acquire(blocking=False)
+                if not acquired:
+                    if self._waiters >= self._queue_depth:
+                        self._metrics["backpressure_rejections"] += 1
+                        raise WorkerPoolBackpressure("Ollama worker queue is full")
+                    self._waiters += 1
         if not candidates:
             self._refresh_after_model_miss(model, miss, admission_timeout=admission_timeout)
             return
-        with self._condition:
-            candidate_ids = {id(state) for state in candidates}
-            # A caller arriving during a probe joins it even if the fair cursor
-            # already advanced. Identity and completion generation prevent a
-            # duplicate probe after either a successful or failed result.
-            target = next((state for state in self._active_probe_states
-                           if id(state) in candidate_ids), None)
-            if target is None:
-                start = self._probe_cursor % len(self._states)
-                target = next(state for state in self._states[start:] + self._states[:start]
-                              if id(state) in candidate_ids)
-            generation = target.capability_probe_generation
-            acquired = self._probe_lock.acquire(blocking=False)
-            if not acquired:
-                if self._waiters >= self._queue_depth:
-                    self._metrics["backpressure_rejections"] += 1
-                    raise WorkerPoolBackpressure("Ollama worker queue is full")
-                self._waiters += 1
         if not acquired:
             try:
                 acquired = self._probe_lock.acquire(timeout=max(0.0, admission_timeout))
@@ -1480,14 +1481,48 @@ class OllamaWorkerPool:
                 with self._condition:
                     self._metrics["backpressure_rejections"] += 1
                 raise WorkerPoolBackpressure("timed out waiting for Ollama worker capability")
+        started = False
         try:
             with self._condition:
-                if (self._draining or target.capability_probe_generation != generation
-                        or not any(state is target for state in self._states)):
+                now = self._clock()
+                # The batch this caller waited behind may already have found
+                # the model; never start another wave in that case.
+                if self._draining or joined or self._fresh_supporter_locked(model, now):
                     return
-            self._refresh_capabilities(_target=target, _lock_owned=True)
+                # Fair rotation from the shared cursor, chosen only now that
+                # the lock is held. A worker whose earlier probe has not
+                # returned would be skipped by the refresh, so it must not
+                # take a wave slot.
+                count = len(self._states)
+                start = self._probe_cursor % count if count else 0
+                wave = [state for state in self._states[start:] + self._states[:start]
+                        if generations.get(id(state)) == state.capability_probe_generation
+                        and self._stale_static_candidate_locked(state, now)
+                        and not state.capability_probe_inflight
+                        ][:min(self._probe_batch_size, self._probe_parallelism)]
+                if not wave:
+                    return
+                self._request_wave_inflight = started = True
+            self._refresh_capabilities(
+                _targets=frozenset(id(state) for state in wave), _lock_owned=True)
         finally:
+            if started:
+                with self._condition:
+                    self._request_wave_inflight = False
             self._probe_lock.release()
+
+    def _stale_static_candidate_locked(self, state: _WorkerState, now: float) -> bool:
+        """True for a routable static worker whose inventory is unknown or expired."""
+        return (state.membership_state is None
+                and self._membership_admissible(state, now)
+                and self._capabilities_stale(state, now)
+                and state.cooldown_until <= now and not state.half_open_inflight)
+
+    def _fresh_supporter_locked(self, model: str, now: float) -> bool:
+        """True when an admissible, closed-circuit worker freshly advertises ``model``."""
+        return any(self._membership_admissible(state, now)
+                   and not state.compatibility_error and state.cooldown_until <= now
+                   and self._supports_model(state, model) for state in self._states)
 
     def _model_miss_candidates_locked(self, model: str, now: float) -> list[_WorkerState]:
         """Select at most one probe batch whose cached inventory may predate a pull.
