@@ -596,7 +596,7 @@ excluded from lesson distillation and the training export.
 
 | Control | Effect |
 |---|---|
-| `SONDER_REFERENCE_INDEX` | path of the index file; default `references/references.sqlite` under the Sonder home |
+| `SONDER_REFERENCE_INDEX` | path of the index file; default `references/references.sqlite` under the Sonder home. Opened read-only through the runtime's SQLite factory: on POSIX that removes group/other permission bits from the file when the runtime's user owns it, and a managed child process only admits an index inside its private roots (elsewhere the lookup reports itself unavailable) |
 | `SONDER_REFERENCE_LOOKUP=0` | kill switch: no automatic lookup for any model, and `reference_search` answers unavailable |
 | `reference_lookup` in `runtime_policy.json` | `{"enabled": true, "names": [...], "prefixes": [...]}`: entries add to the built-in names, never remove them; `enabled: false` turns automatic lookup off; a `path` key is rejected, because the index path comes only from the environment |
 

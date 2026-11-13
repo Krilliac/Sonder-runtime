@@ -6,6 +6,13 @@ fresh, short-lived connection opened through a ``file:`` URI with
 another database and never opens the ``path`` column stored with a passage
 (that value is only text that is shown as a source label).  The validation
 result is cached by (path, mtime, size) so a changed file is re-checked.
+
+The connection is made through the runtime's owned-SQLite factory, like every
+other handle the runtime opens.  Two consequences: on POSIX the factory
+removes group/other permission bits from the index file when the runtime's
+user owns it (the file's content is never touched); and in a managed child
+process, whose owner admits only paths inside its private roots, an index
+outside them is refused and the lookup reports itself unavailable.
 """
 from __future__ import annotations
 
@@ -18,6 +25,7 @@ import threading
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
 from sonder_runtime.domain.reference_lookup.models import (
     IndexState,
     IndexStatus,
@@ -88,7 +96,12 @@ class ReferenceIndex:
     def connect(self) -> Iterator[sqlite3.Connection]:
         """A read-only connection that is closed on exit."""
         uri = self._path.resolve().as_uri() + "?mode=ro"
-        conn = sqlite3.connect(uri, uri=True, timeout=BUSY_TIMEOUT_SECONDS)
+        try:
+            conn = owned_sqlite_connect(uri, uri=True, timeout=BUSY_TIMEOUT_SECONDS)
+        except RuntimeError as exc:
+            # A managed process's owner refused the handle (path outside its
+            # roots, admission stopped or at capacity): unavailable, not fatal.
+            raise sqlite3.OperationalError("index not admitted by the runtime: %s" % exc) from None
         try:
             conn.execute("PRAGMA query_only=ON")
             yield conn

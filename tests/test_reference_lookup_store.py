@@ -203,6 +203,45 @@ def test_store_never_writes_and_its_connection_is_read_only(small):
     assert sorted(p.name for p in path.parent.iterdir()) == ['small.sqlite']   # no journal or wal left
 
 
+def test_connection_comes_from_the_owned_sqlite_factory(small, monkeypatch):
+    from sonder_runtime.adapters import reference_index
+
+    calls = []
+    real = reference_index.owned_sqlite_connect
+
+    def recording(database, **kwargs):
+        calls.append((database, kwargs))
+        return real(database, **kwargs)
+
+    monkeypatch.setattr(reference_index, 'owned_sqlite_connect', recording)
+    assert small.status().ready and _search(small, '4625')
+    assert calls and all(
+        database.startswith('file:') and database.endswith('?mode=ro') and kwargs.get('uri') is True
+        for database, kwargs in calls)
+
+
+def test_an_index_the_managed_owner_refuses_is_unavailable_not_fatal(tmp_path):
+    """Inside a managed process the owner admits only its private roots."""
+    from sonder_runtime.adapters import reference_index
+    from sonder_runtime.adapters.persistence import owned_sqlite
+
+    roots = tmp_path / 'private'
+    roots.mkdir()
+    owner = owned_sqlite.OwnedSQLiteConnections((roots,))
+    outside = ReferenceIndex(create_index(tmp_path / 'elsewhere' / 'r.sqlite'))
+    inside = ReferenceIndex(create_index(roots / 'r.sqlite'))
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(reference_index, 'owned_sqlite_connect', owner.connect)
+        status = outside.status()
+        assert status.state is IndexState.ERROR and not status.ready
+        assert 'not admitted' in status.detail
+        bundle = lookup.retrieve('why did 4625 happen', None, 6, BIG_BUDGET, index=outside)
+        assert not bundle.applied and bundle.index_state is IndexState.ERROR
+        assert inside.status().ready and _search(inside, '4625')
+        assert owner.snapshot().clean                      # every handle was closed
+    assert outside.status().ready                          # the refusal was not remembered
+
+
 _NO_QUESTION_MARK = pytest.mark.skipif(os.name == 'nt', reason='a folder name cannot contain ? on Windows')
 
 
