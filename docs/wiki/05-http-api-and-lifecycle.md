@@ -106,7 +106,10 @@ limiter or spend another address's budget.
 tier IDs. It also includes exact installed/discovered models that declare a
 chat capability; embedding- or vision-only entries are omitted. Cloud models
 appear only after the operator enables cloud use, so clients must treat the
-response as the live allowlist rather than a static catalog.
+response as the live allowlist rather than a static catalog. A model named
+without a tag selects its `:latest` entry, as Ollama reads an untagged name
+(an entry with exactly that name wins); no other tag is inferred, and the
+turn is judged and reported under the catalog's own name.
 
 Each row also carries an additive `sonder` object so a client without
 administrator access can label routes: a route is

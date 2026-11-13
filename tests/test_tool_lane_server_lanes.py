@@ -164,6 +164,20 @@ def test_serve_target_default_is_the_refusing_one_even_with_odd_spelling(catalog
     assert server._serve_target("ASTRA-CYBER-27B:LATEST", None)[3] == "tool-lane-denied"
 
 
+def test_bare_name_of_a_latest_record_is_judged_like_the_full_name(monkeypatch):
+    """The real catalog resolver: a bare name reaches ``name:latest`` and no further."""
+    tags = {"models": [{"name": "astra-cyber-27b:latest"}, {"name": "Plain:latest"}]}
+    monkeypatch.setattr(server, "_get", lambda path: tags)
+    full = "astra-cyber-27b:latest"
+    for selector in ("astra-cyber-27b", "Astra-Cyber-27B", full):
+        assert server._serve_target(selector, None) == (None, False, False, "tool-lane-denied")
+        assert server._serve_target(selector, None, chat_only=True) == (
+            full, False, False, "model:" + full)
+    plain = ("Plain:latest", False, False, "model:Plain:latest")
+    assert server._serve_target("plain", None) == plain
+    assert server._serve_target("plain", None, chat_only=True) == plain
+
+
 def test_serve_target_leaves_an_ordinary_model_alone(catalog):
     expected = (ALLOWED, False, False, "model:" + ALLOWED)
     assert server._serve_target(ALLOWED, None) == expected

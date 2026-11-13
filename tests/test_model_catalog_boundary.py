@@ -36,6 +36,9 @@ def test_revision_and_resolution_honour_latest_and_case():
     assert model_catalog.resolve_record("GEMMA3:12B", records) == ("gemma3:12b", records[0][1])
     assert model_catalog.resolve_record("missing", records) is None
     assert model_catalog.resolve_record("", records) is None
+    # An untagged selector reads as ``:latest``, as it does for the revision.
+    assert model_catalog.resolve_record("phi4", records)[0] == "Phi4:latest"
+    assert model_catalog.resolve_record("gemma3", records) is None
 
 
 def test_root_discovery_functions_fetch_once_and_parse_through_the_domain(monkeypatch):
