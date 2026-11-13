@@ -398,6 +398,43 @@ def test_search_terms_call_is_small_deterministic_and_bare(lane, monkeypatch):
     assert [m["role"] for m in expansion["messages"]] == ["user"]
 
 
+def _reasoning_search_terms(lane):
+    """The lane's fake, with search-terms calls (temperature 0) answered like a thinking model:
+    a call capped below the local thinking budget spends it thinking and returns no content."""
+    answer = lane.__call__
+
+    def call(path, payload, *args, **kwargs):
+        if path != "/api/chat" or payload.get("options", {}).get("temperature") != 0.0:
+            return answer(path, payload, *args, **kwargs)
+        lane.payloads.append(json.loads(json.dumps(payload)))
+        if payload["options"]["num_predict"] < server.LOCAL_THINKING_MIN_NUM_PREDICT:
+            return {"message": {"content": "", "thinking": "considering " * 20},
+                    "done_reason": "length", "eval_count": payload["options"]["num_predict"]}
+        return {"message": {"content": "failed logon, 4625", "thinking": "done"}, "done_reason": "stop"}
+
+    return call
+
+
+def test_ensemble_search_terms_requests_are_the_single_lanes_byte_for_byte(lane, monkeypatch):
+    """Same model, question and window: the same requests, including the one budget retry."""
+    monkeypatch.setattr(server, "_auto_model_context", lambda model: 8192)
+    monkeypatch.setattr(server, "_post", _reasoning_search_terms(lane))
+
+    def search_terms_calls():
+        return [p for p in lane.payloads if p["options"]["temperature"] == 0.0]
+
+    monkeypatch.setattr(server, "_THINKING_CAPABILITY_CACHE", {})
+    _mcp_by_name(monkeypatch, LOOKUP_MODEL)
+    single = search_terms_calls()
+    lane.payloads.clear()
+    monkeypatch.setattr(server, "_THINKING_CAPABILITY_CACHE", {})
+    out = server.ensemble_answer(QUESTION, tiers=LOOKUP_MODEL)
+
+    assert [p["options"]["num_predict"] for p in single] == [80, server.LOCAL_THINKING_MIN_NUM_PREDICT]
+    assert search_terms_calls() == single
+    assert "keyword expansion failed" not in out and "Sources:" in out
+
+
 # --- context budget ----------------------------------------------------------
 
 

@@ -23,8 +23,12 @@ class LegacyModelBootstrapAdapter:
 
     def resolve_target(self, tier: str, strict: bool | None = None) -> ModelTarget:
         # Text resolution: a model blocked from tool lanes still answers chat
-        # by name here.  Tool and apply callers get ``ToolLaneGateway``.
-        model, cloud, augment, tier_label = chat_target(self.runtime._serve_target, tier, strict)
+        # by name here.  Tool and apply callers get ``ToolLaneGateway``, which
+        # resolves through this same method, so a model installed only on
+        # another pool member is not looked up here (``pool_wide=False``).
+        model, cloud, augment, tier_label = chat_target(
+            self.runtime._serve_target, tier, strict, pool_wide=False,
+        )
         tokenizer = template = None
         identity = getattr(self.runtime, "_model_prompt_identity", None)
         if callable(identity) and isinstance(model, str) and model.strip() and not cloud:

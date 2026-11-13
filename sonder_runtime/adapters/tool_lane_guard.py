@@ -690,16 +690,23 @@ def bind_local_tiers(tiers: MutableMapping[str, str], policy: Mapping[str, Any])
             tiers.pop(tier, None)
 
 
-def chat_target(serve_target: Callable[..., tuple], tier: Any, strict: Any) -> tuple:
+def chat_target(
+    serve_target: Callable[..., tuple], tier: Any, strict: Any, *, pool_wide: bool = True,
+) -> tuple:
     """Resolve a target for a text-only caller: by-name chat, ensemble, prewarm.
 
-    Only a target refused as tool-lane-denied is resolved again with
-    ``chat_only=True``, so every other selector keeps the two-argument call.
-    A caller that executes or applies the reply must use ``selector_refusal``
-    first.
+    A target refused as tool-lane-denied, or reported unknown (tier label
+    ``None``), is resolved again with ``chat_only=True``; every other selector
+    keeps the two-argument call.  The ``chat_only`` call answers a denied
+    model by name and finds a model installed only on another pool member
+    (``server._serve_target``).  ``pool_wide=False`` keeps the narrower rule
+    (resolve again only for a refused target) for a resolver that also serves
+    tool lanes.  A caller that executes or applies the reply must use
+    ``selector_refusal`` first: it judges names, so where a model is installed
+    never changes its verdict.
     """
     target = serve_target(tier, strict)
-    if target[3] == DENIED_LABEL:
+    if target[3] == DENIED_LABEL or (pool_wide and target[3] is None):
         return serve_target(tier, strict, chat_only=True)
     return target
 

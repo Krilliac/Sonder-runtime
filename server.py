@@ -2518,6 +2518,12 @@ def _serve_target(tier, strict, *, chat_only=False):
         found = resolve_discovered_model_record(tier)
     except Exception:
         found = None
+    if not found and chat_only:  # text lanes only: a model another pool member holds
+        try:
+            pin = _resolve_model_pin(tier)
+            found = (pin.model, pin.record) if pin.ok else None
+        except Exception:
+            found = None
     if found:
         model, record = found
         # A catalog can legitimately include embedding or vision-only models.
