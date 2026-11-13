@@ -156,21 +156,44 @@ class WindowsManagedRuntimeProcess(WindowsOwnedRuntimeProcess):
         if type(payload) is not RuntimePayload or hasattr(self, "_payload"):
             raise OwnerRefused("exact single runtime payload binding required")
         self._payload, self._payload_roots = payload, writable_roots
+        self._admitted = None
+
+    def admit_payload(self, operation_id):
+        """Hash the whole payload once for this launch, before any process effect.
+
+        The admission is single-use and bound to the operation and digest. The
+        spawn of that exact launch then rechecks identity and live writable-root
+        separation without rehashing the same bytes; the child still hashes
+        every byte again at startup.
+        """
+        self._admitted = None
+        self._payload.validate(self._payload_roots())
+        self._admitted = (operation_id, self._payload.digest)
 
     def _launch_layout(self, command):
         import json
         if not hasattr(self, "_payload") or json.loads(command.payload) != {"artifact_digest": self._payload.digest}:
             raise OwnerRefused("prepared launch artifact binding is missing")
-        self._payload.validate(self._payload_roots())
+        admitted, self._admitted = getattr(self, "_admitted", None), None
+        if admitted == (command.operation_id, self._payload.digest):
+            self._payload.recheck_identity(self._payload_roots())
+        else:
+            self._payload.validate(self._payload_roots())
         value = self._payload.manifest
+        # -B stays: the child never writes bytecode, and the private prefix
+        # keeps it from reading unverified __pycache__ files. Precompiled
+        # bytecode comes only from the owner-compiled file whose SHA-256 is
+        # in this payload's manifest (see verified_bytecode).
         code = (
             "import sys,json; "
             "paths=json.loads(sys.argv.pop(1)); sys.path[:]=paths; "
+            "import sonder_runtime.bootstrap.verified_bytecode as bytecode; "
+            "bytecode.install(json.loads(sys.argv.pop(1))); "
             "import runpy; "
             "runpy.run_module('sonder_runtime.bootstrap.managed_http_runtime', "
             "run_name='__main__')"
         )
         arguments = (value["executable"], "-E", "-S", "-B", "-X", "pycache_prefix=" + str(self.root / "python-cache"),
-            "-c", code, json.dumps(value["paths"]))
+            "-c", code, json.dumps(value["paths"]), json.dumps(self._payload.bytecode_binding()))
         return (Path(value["payload"]), arguments, str(value["payload"]),
             os.pathsep.join(value["dll_paths"]), (("runtime_artifact_digest", self._payload.digest),))

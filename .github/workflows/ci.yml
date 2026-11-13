@@ -257,6 +257,7 @@ jobs:
           -p tests.fleet_stall_diagnostics
           --fleet-stall-evidence-dir "$env:RUNNER_TEMP/sonder-fleet-diagnostics"
           tests/test_managed_runtime_payload.py
+          tests/test_verified_bytecode.py
           tests/test_managed_runtime_owner.py
           tests/test_artifact_fetch.py
           tests/test_artifact_authenticode_native_windows.py

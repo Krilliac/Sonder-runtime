@@ -334,7 +334,14 @@ class ManagedRuntimeOwner(DisposableRuntimeOwner, ChildMigrationActivation):
         super()._launch_prepared(command)
 
     def _before_launch(self, command):
-        self._payload.validate(self._roots())
+        if self._launch_id is None:
+            self._process.admit_payload(command.operation_id)  # full content hash, once per spawn
+        else:
+            # Resume of the started launch (or a conflicting one the base
+            # refuses): spawns nothing, so no rehash, but the cheap live facts
+            # must still hold before RUNNING is published. The child's own
+            # startup hash does not cover the host widening writable roots.
+            self._payload.recheck_identity(self._roots())
         if (
             type(self._selection) is PostgresChildMigrationStore
             and not self._selection.close()
