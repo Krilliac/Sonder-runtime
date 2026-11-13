@@ -26,7 +26,6 @@ from tests.support.tool_lane import (
     HF_ORNITH,
     HF_QWEN,
     SERVED,
-    UNKNOWN,
     UNKNOWN_OPENAI,
     clear_environment,
     write_policy,
