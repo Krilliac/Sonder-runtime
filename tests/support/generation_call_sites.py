@@ -73,9 +73,11 @@ TEXT_ENTRY_POINTS = (
 )
 ENDPOINT_PATHS = ("/api/chat", "/api/generate", "/v1/chat/completions")
 GATEWAY_GENERATE = ".generate(request, context)"
-# The composition root's name for the unwrapped packaged gateway.
+# The composition root's name for the unwrapped packaged gateway.  Every other
+# consumer gets ``gateway`` (the ToolLaneGateway); each use of the raw handle
+# is counted, so handing it to one more consumer fails the ratchet.
 RAW_GATEWAY_FILE = "sonder_runtime/bootstrap/app.py"
-RAW_GATEWAY_NAME = "gateway"
+RAW_GATEWAY_NAME = "raw_gateway"
 # Calls that count as an early tool-lane refusal for an EXEC consumer of a
 # text entry point or a raw HTTP path.
 REFUSAL_CALLS = frozenset({
@@ -565,8 +567,8 @@ _ENTRIES = [
     ("sonder_runtime/application/routing/evidence_gateway.py", "CapabilityEvidenceGateway.generate",
      GATEWAY_GENERATE, 4, CHOKE, "packaged gateway plumbing"),
     ("sonder_runtime/bootstrap/app.py", "build_application", "raw-gateway:" + RAW_GATEWAY_NAME, 4, CHOKE,
-     "the unwrapped gateway: built once, wrapped for tool lanes, and handed to "
-     "Application.model_gateway and ChatService"),
+     "the unwrapped gateway: built once, wrapped as the default handle, and handed only "
+     "to Application.model_gateway and ChatService (text consumers)"),
     ("sonder_runtime/bootstrap/build_tools.py", "_LazyModelGateway.generate", GATEWAY_GENERATE, 1, CHOKE,
      "lazy handle over the gateway build_fix is given"),
     ("sonder_runtime/bootstrap/mesh_agent_tools.py", "generate_mesh.generate", "_generate_text", 1, EXEC,
