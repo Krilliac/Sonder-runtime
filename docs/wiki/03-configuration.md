@@ -621,9 +621,22 @@ same names as the deny list above, taken from its default prefixes: the
 attempt of the turn; with model thinking off where the model's route accepts
 that, and asked once more as an ordinary call when that reply comes back empty
 or refused); only the first eight identifiers in a question (event
-ids, technique ids, hex values) get title priority. The reply is cleaned
+ids, technique ids, hex values) get title priority. Passages are handed to the
+model only when the best of them is close enough to the question: it must hold
+at least a fifth of the query's search vocabulary, each term weighted by how
+rare it is in the library. A question the library does not cover (a long
+design question about another subject shares many common words with it) is
+answered without passages and says
+`Sources: none (no reference passage was close enough to the question)`. The
+floor is a constant measured on the security library
+(`sonder_runtime/domain/reference_lookup/relevance.py`); it does not apply to
+the `reference_search` tool, which returns the nearest passages as they are.
+The reply is cleaned
 (copied marker lines removed, display-safe text), its `[n]` citations are
-checked, and a `Sources:` block with any warnings follows it. The stored task
+checked, and a `Sources:` block with any warnings follows it. When the answer
+cites none of its passages the block starts
+`Sources: retrieved but not cited in the answer`, so passages the model was
+given but did not use are not read as the answer's support. The stored task
 is the raw question and the stored reply the cleaned text; the Sources block
 is added after storage and capture, and a turn answered with passages is
 excluded from lesson distillation and the training export.
@@ -672,7 +685,8 @@ A lookup turn is sent none of the runtime's system prompt (persona, playbook,
 trace instructions, tool guidance, profile and goal), so the model's own
 Modelfile rules stay in force; only a system message the caller supplied to
 the MCP chat tool is sent. The HTTP receipt says so:
-`sonder_receipt.reference_lookup` holds `applied`, `passages` or `reason`, and
+`sonder_receipt.reference_lookup` holds `applied`, `passages` or `reason`
+(`low_relevance` when the floor removed the passages), and
 `runtime_system_prompt_sent: false`. The status line says so too.
 
 One exception to "passages are never stored": when a turn's provider attempts

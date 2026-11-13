@@ -28,8 +28,10 @@ from ...domain.reference_lookup.models import (
     Passage,
     RankedRow,
     ReferenceIndexError,
+    TermStats,
 )
 from ...domain.reference_lookup.prompt import build_prompt, strip_markers
+from ...domain.reference_lookup.relevance import best_coverage, term_weight
 from ...domain.reference_lookup.sanitize import sanitize, terminal_text
 from ...domain.reference_lookup.selection import (
     candidate_limit,
@@ -43,10 +45,12 @@ from ...domain.reference_lookup.terms import (
     fts_query,
     ordered_identifiers,
     parse_terms,
+    query_terms,
 )
 
 NO_ROOM_WARNING = 'no room for references'
 NO_MATCH_WARNING = 'no reference passages matched the question'
+LOW_RELEVANCE_WARNING = 'no reference passage was close enough to the question'
 NO_TERMS_WARNING = 'keyword expansion returned no usable terms'
 EXPANSION_FAILED_PREFIX = 'keyword expansion failed: '
 CODE_BYTES = 4
@@ -63,6 +67,16 @@ class ReferenceSearch(Protocol):
                     idents: Sequence[str] = ()) -> tuple[RankedRow, ...]: ...
 
 
+class TermStatistics(Protocol):
+    """What the relevance floor needs from the index adapter.
+
+    Kept apart from ``ReferenceSearch``: an index that does not offer it is
+    searched as before, without the floor.
+    """
+
+    def term_stats(self, terms: Sequence[str], rowids: Sequence[int]) -> TermStats: ...
+
+
 class LookupReason(str, Enum):
     """Why a turn did or did not get passages."""
 
@@ -72,6 +86,7 @@ class LookupReason(str, Enum):
     INDEX_UNAVAILABLE = "index_unavailable"
     SEARCH_FAILED = "search_failed"
     NO_MATCH = "no_match"
+    LOW_RELEVANCE = "low_relevance"
     NO_ROOM = "no_room"
 
 
@@ -145,6 +160,28 @@ def _expand(question: str, expand_fn: Callable[[str], str] | None
     return kept, dropped, []
 
 
+def passage_coverage(index: object, terms: Sequence[str], passages: Sequence[Passage]) -> float | None:
+    """How much of the query's vocabulary the best of ``passages`` holds (0..1), or None.
+
+    None means the measure is not available (the index does not offer term
+    statistics, a passage has no row id, or the index could not be read): the
+    caller then keeps the passages, as before the floor existed.
+    """
+    stats_for = getattr(index, "term_stats", None)
+    if not callable(stats_for) or not terms or not passages:
+        return None
+    try:
+        rowids = [passage.rowid for passage in passages]
+        if any(row <= 0 for row in rowids):
+            return None
+        stats = stats_for(terms, rowids)
+        weights = {term: term_weight(stats.passage_count, stats.matching.get(term, 0))
+                   for term in terms}
+        return best_coverage(weights, (stats.held.get(row, frozenset()) for row in rowids))
+    except Exception:  # noqa: BLE001  # the floor is a help: without it the passages are kept
+        return None
+
+
 def retrieve(
     question: str,
     expand_fn: Callable[[str], str] | None,
@@ -153,6 +190,7 @@ def retrieve(
     *,
     index: ReferenceSearch,
     enabled: bool = True,
+    min_coverage: float = 0.0,
 ) -> Bundle:
     """Search the index for passages that fit ``char_budget`` characters.
 
@@ -161,8 +199,16 @@ def retrieve(
     prompt); ``None`` skips expansion.  A failed call searches with the
     question words alone and adds a warning.  Only the first
     ``MAX_IDENTIFIERS`` identifiers of the question get title priority (one
-    title query each).  Never raises, except to pass on a cancelled
-    search-terms call (``is_cancellation``).
+    title query each).
+
+    ``min_coverage`` above 0 is the relevance floor for passages handed to a
+    model on its own (``domain.reference_lookup.relevance``): when the best
+    passage holds less than that share of the query's vocabulary, the turn
+    gets none (``LookupReason.LOW_RELEVANCE``).  The default, 0, is a plain
+    search that returns the nearest passages whatever they are.
+
+    Never raises, except to pass on a cancelled search-terms call
+    (``is_cancellation``).
     """
     try:
         if not enabled:
@@ -190,6 +236,13 @@ def retrieve(
             warnings.append(NO_MATCH_WARNING)
             return _bare(LookupReason.NO_MATCH, terms=terms, dropped=dropped, warnings=warnings,
                          state=IndexState.READY)
+        if min_coverage > 0:
+            covered = passage_coverage(index, query_terms(question, terms), passages)
+            if covered is not None and covered < min_coverage:
+                warnings.append(LOW_RELEVANCE_WARNING)
+                return _bare(LookupReason.LOW_RELEVANCE, terms=terms, dropped=dropped,
+                             warnings=warnings, state=IndexState.READY,
+                             detail=f'best passage coverage {covered:.2f} is under {min_coverage:.2f}')
         if len(passages) < len(found):
             warnings.append(f'{len(found) - len(passages)} passage(s) left out to fit the prompt size')
         return Bundle(applied=True, reason=LookupReason.APPLIED, passages=passages,

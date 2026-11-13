@@ -54,11 +54,16 @@ class RankedRow:
     path: str
     doc: int
     rank: float
+    rowid: int = 0
 
 
 @dataclass(frozen=True)
 class Passage:
-    """A selected passage; its number in the prompt is its 1-based position."""
+    """A selected passage; its number in the prompt is its 1-based position.
+
+    ``rowid`` is the passage's row in the index (0 when unknown); it is only
+    used to ask the index which search terms the passage holds.
+    """
 
     title: str
     heading: str
@@ -67,3 +72,17 @@ class Passage:
     path: str
     text: str
     score: float = 0.0
+    rowid: int = 0
+
+
+@dataclass(frozen=True)
+class TermStats:
+    """What the index knows about a query's terms.
+
+    ``passage_count`` is the size of the index, ``matching`` the number of
+    passages holding each term and ``held`` the terms each asked-about row holds.
+    """
+
+    passage_count: int
+    matching: dict[str, int]
+    held: dict[int, frozenset[str]]

@@ -119,8 +119,8 @@ def retrievals(monkeypatch):
     seen = []
     real = service.retrieve_for
 
-    def spy(question, expand_fn, k, char_budget):
-        bundle = real(question, expand_fn, k, char_budget)
+    def spy(question, expand_fn, k, char_budget, **options):
+        bundle = real(question, expand_fn, k, char_budget, **options)
         seen.append({"question": question, "budget": char_budget, "bundle": bundle})
         return bundle
 
