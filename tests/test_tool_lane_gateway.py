@@ -16,7 +16,7 @@ import server
 from sonder_runtime.adapters import tool_lane_guard as guard
 from sonder_runtime.adapters.model_bootstrap import LegacyModelBootstrapAdapter
 from sonder_runtime.adapters.provider_bindings import provider_bindings_from_env
-from sonder_runtime.adapters.tool_lane_gateway import ToolLaneGateway
+from sonder_runtime.adapters.tool_lane_gateway import ServedTierGateway, ToolLaneGateway
 from sonder_runtime.application.ports.model_gateway import ModelRequest
 from sonder_runtime.domain.common.errors import Forbidden
 from tests.support.tool_lane import (
@@ -26,13 +26,13 @@ from tests.support.tool_lane import (
     DENIED_SMALL,
     HF_ORNITH,
     HF_QWEN,
-    SERVED,
     UNKNOWN,
     UNKNOWN_OPENAI,
     UNREADABLE,
     RecordingGateway,
     clear_environment,
     operation_context,
+    served_refusal,
     write_policy,
 )
 
@@ -157,7 +157,7 @@ def bind_code(monkeypatch, provider, env):
 def test_a_denied_served_model_is_refused_on_each_provider_kind(catalog, monkeypatch, provider, label, env, served):
     bind_code(monkeypatch, provider, env)
     inner, tool = tool_gateway()
-    expected = SERVED % ("code", label, served)
+    expected = served_refusal("code", label, served)
     for call in (tool.generate, tool.resolve_route):
         with pytest.raises(Forbidden) as caught:
             call(request("code"), operation_context())
@@ -178,8 +178,6 @@ def test_an_explicit_denied_model_on_a_bridged_tier_is_refused(catalog, monkeypa
 
 
 @pytest.mark.parametrize("provider, label, env", [
-    pytest.param("sonder-inference", "sonder_inference", {}, id="inference-no-model"),
-    pytest.param("sonder-inference", "sonder_inference", {"SONDER_INFERENCE_MODEL": "default"}, id="inference-default"),
     pytest.param("openai_compatible", "openai_compatible", {}, id="openai-no-model"),
 ])
 def test_an_unknown_served_identity_is_refused(catalog, monkeypatch, provider, label, env):
@@ -205,10 +203,9 @@ def test_a_uniform_backend_judges_the_default_model_and_any_name(catalog, monkey
         tool.generate(request("sonder"), operation_context())
     assert "astra-cyber-9b" in str(caught.value)
     monkeypatch.delenv("SONDER_INFERENCE_MODEL")
-    with pytest.raises(Forbidden) as caught:
-        tool.generate(request("fast"), operation_context())
-    assert str(caught.value) == UNKNOWN % ("fast", "sonder_inference")
-    assert [call.tier for call in inner.calls] == ["fast"]
+    # No model named: the reply names it ("inner", ordinary), and that is what is judged.
+    assert tool.generate(request("fast"), operation_context()).text == "answered"
+    assert [call.tier for call in inner.calls] == ["fast", "fast"]
 
 
 def test_a_provider_configuration_that_cannot_be_read_is_refused(catalog, monkeypatch):
@@ -375,7 +372,7 @@ def test_build_fix_refuses_a_denied_served_model(catalog, monkeypatch):
     generator = ModelCandidateGenerator(_LazyModelGateway(lambda: tool), route="code")
     with pytest.raises(ResidencyRefused) as caught:
         generator.residency("code", operation_context())
-    assert str(caught.value) == SERVED % ("code", "sonder_inference", "astra-cyber-9b")
+    assert str(caught.value) == served_refusal("code", "sonder_inference", "astra-cyber-9b")
     assert inner.routes == []
 
 
@@ -423,8 +420,8 @@ def test_the_composition_root_hands_the_wrapped_gateway_to_the_tool_consumers_on
 
     raw = application.model_gateway
     assert not isinstance(raw, ToolLaneGateway)
-    # Text consumers: the raw gateway.
-    assert seen["chat"][0][0] is raw
+    # Text consumers: the raw gateway (ChatService through the served-tier check).
+    assert isinstance(seen["chat"][0][0], ServedTierGateway) and seen["chat"][0][0]._gateway is raw
     assert not isinstance(seen["chat"][0][0], ToolLaneGateway)
     vision_gateway = seen["vision"][0][1]
     assert not isinstance(vision_gateway, ToolLaneGateway)
@@ -468,7 +465,7 @@ def test_a_lane_step_on_a_denied_served_model_shows_the_served_text(catalog, mon
     inner, tool = tool_gateway()
     with pytest.raises(PermissionError) as caught:
         lane_request(tool)
-    assert str(caught.value) == SERVED % ("code", "sonder_inference", DENIED_SMALL)
+    assert str(caught.value) == served_refusal("code", "sonder_inference", DENIED_SMALL)
     assert inner.calls == [] and inner.routes == []
 
 

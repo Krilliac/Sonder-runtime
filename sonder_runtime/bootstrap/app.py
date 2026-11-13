@@ -696,7 +696,10 @@ def build_application(
     # gateway.  Only the named text consumers below (Application.model_gateway,
     # which serves chat, A2A, offloads and replay, and ChatService) are handed
     # ``raw_gateway``; tests/support/generation_call_sites.py counts its uses.
-    from ..adapters.tool_lane_gateway import ToolLaneGateway
+    # ChatService holds it through ServedTierGateway (a blocked model never
+    # serves a tier); the legacy bridge, Application.model_gateway's
+    # generating consumer, applies the same rule itself (legacy_chat_bridge).
+    from ..adapters.tool_lane_gateway import ServedTierGateway, ToolLaneGateway
 
     gateway = ToolLaneGateway(
         raw_gateway, resolve_target=target_resolver, bindings=provider_bindings,
@@ -2056,7 +2059,7 @@ def build_application(
         ),
         specialized_providers=specialized_bundle,
         chat=ChatService(
-            raw_gateway,
+            ServedTierGateway(raw_gateway, bindings=provider_bindings),
             session_capture_service,
             chat_default_tier=lambda: target_resolver("sonder", None).tier_label or "sonder",
             strict_alias_provider_available="ollama" in provider_bindings.required_providers,

@@ -23,10 +23,25 @@ UNREADABLE = (
     "file is unreadable; repair the file (`/runtime status` shows the error) "
     "or reset it with `/runtime reset`."
 )
-SERVED = (
-    "tier '%s' is served by %s with model '%s', which is blocked from "
-    "tool-using lanes by runtime policy; it can be used for chat only."
-)
+# The setting that chooses the model each bridged provider serves for a tier.
+SETTINGS = {
+    "sonder_inference": "SONDER_INFERENCE_TIER_MODELS entry {tier}=<model>, else SONDER_INFERENCE_MODEL",
+    "openrouter": ("SONDER_OPENROUTER_TIER_MODELS entry {tier}=<model> or the policy's "
+                   "provider_models.openrouter, else SONDER_OPENROUTER_MODEL"),
+    "openai_compatible": "SONDER_OPENAI_MODEL",
+}
+
+
+def served_refusal(tier, provider, model):
+    """The refusal for a tier whose bridged provider serves a blocked model (every lane)."""
+    return (
+        "tier '%s' is served by %s with model '%s', which is blocked by runtime "
+        "policy, and a blocked model does not serve a tier; ask for '%s' by name "
+        "for a text answer, or change the model %s serves for tier '%s' (%s)."
+        % (tier, provider, model, model, provider, tier, SETTINGS[provider].format(tier=tier))
+    )
+
+
 UNKNOWN = (
     "tier '%s' is served by %s and the model it serves cannot be determined, "
     "so it cannot be used in tool-using lanes; name the served model for this "
@@ -34,15 +49,16 @@ UNKNOWN = (
 )
 UNKNOWN_OPENAI = (
     "tier '%s' is served by openai_compatible and the model it serves cannot "
-    "be determined, so it cannot be used in tool-using lanes; set "
+    "be determined, so it cannot be used in tool-using lanes; SONDER_OPENAI_MODEL "
+    "is not set and that transport never reads a model name from the reply; set "
     "SONDER_OPENAI_MODEL to the model that endpoint serves (chat still works)."
 )
-# The default route's refusal for a tier it can step up to: (tier, that tier's
-# own refusal, tier).
+# The default route's refusal for a tier its escalation can reach: (tier, that
+# tier's own refusal).
 ESCALATION = (
-    "the default route can step up to tier '%s' (automatic escalation), and %s "
-    "To run this lane, bind tier '%s' to an allowed model or name an allowed "
-    "tier for the lane."
+    "the default route can step up to tier '%s' when an answer fails or is "
+    "empty, and %s Alternatively set SONDER_MODEL_ESCALATION=0 to keep the "
+    "default route on its first tier."
 )
 
 # Variables that choose a provider, a served model or a tier binding.  The

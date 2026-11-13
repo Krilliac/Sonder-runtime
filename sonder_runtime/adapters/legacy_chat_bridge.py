@@ -173,9 +173,10 @@ def chat_request(
 ):
     """Serve one local chat step through the gateway for a non-Ollama rung.
 
-    Unless the caller declared the step text-only, the model the provider
-    reports it served is judged against the tool-lane deny list before the
-    reply is returned (``tool_lane_guard.require_served``).
+    The model the provider reports it served is judged against the tool-lane
+    deny list before the reply is returned (``tool_lane_guard.require_served``)
+    on every call, text-only or not: a blocked model never serves a tier.  A
+    text-only call keeps a reply that names no model.
     """
     from sonder_runtime.adapters.tool_lane_guard import require_served
 

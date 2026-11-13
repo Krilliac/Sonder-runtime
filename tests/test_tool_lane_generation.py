@@ -25,9 +25,9 @@ from tests.support.tool_lane import (
     DENIED,
     HF_ORNITH,
     HF_QWEN,
-    SERVED,
     UNKNOWN_OPENAI,
     clear_environment,
+    served_refusal,
     write_policy,
 )
 
@@ -238,16 +238,18 @@ def test_a_bridged_rung_whose_served_model_is_denied_is_refused_before_sending(
         posts, monkeypatch, provider, label, env, served):
     gateway = bridged(monkeypatch, provider, env)
     gen = server._make_tier_generate("code", ALLOWED, "", 0.2, 64, 0)
-    assert refused(lambda: gen("hi")) == SERVED % ("code", label, served)
+    assert refused(lambda: gen("hi")) == served_refusal("code", label, served)
     assert gateway.calls == [] and posts == []
 
 
 @pytest.mark.parametrize("provider, label, env, served", BRIDGES)
-def test_a_bridged_rung_whose_served_model_is_denied_still_answers_text(
+def test_a_bridged_rung_whose_served_model_is_denied_is_refused_for_text_too(
         posts, monkeypatch, provider, label, env, served):
+    """A blocked model never serves a tier: text-only does not open a bridged rung to it."""
     gateway = bridged(monkeypatch, provider, env)
-    assert server._make_tier_generate("code", ALLOWED, "", 0.2, 64, 0, text_only=True)("hi") == "bridged answer"
-    assert len(gateway.calls) == 1 and posts == []
+    gen = server._make_tier_generate("code", ALLOWED, "", 0.2, 64, 0, text_only=True)
+    assert refused(lambda: gen("hi")) == served_refusal("code", label, served)
+    assert gateway.calls == [] and posts == []
 
 
 def test_a_bridged_rung_whose_served_model_is_ordinary_is_served(posts, monkeypatch):
@@ -264,7 +266,7 @@ def test_a_reply_reporting_a_denied_served_model_is_refused(posts, monkeypatch, 
     gateway = bridged(monkeypatch, "sonder-inference", {"SONDER_INFERENCE_TIER_MODELS": "code=" + ALLOWED},
                       served=reported)
     gen = server._make_tier_generate("code", ALLOWED, "", 0.2, 64, 0)
-    assert refused(lambda: gen("hi")) == SERVED % ("code", "sonder_inference", reported)
+    assert refused(lambda: gen("hi")) == served_refusal("code", "sonder_inference", reported)
     assert len(gateway.calls) == 1  # judged after the provider answered; the reply is dropped
 
 
@@ -276,8 +278,16 @@ def test_a_reply_that_names_no_model_is_refused(posts, monkeypatch, reported):
     assert len(gateway.calls) == 1  # nothing named before sending, so the reply decides
 
 
-def test_a_text_only_bridged_call_answers_whatever_the_reply_reports(posts, monkeypatch):
+def test_a_text_only_bridged_call_is_refused_when_the_reply_reports_a_denied_model(posts, monkeypatch):
     gateway = bridged(monkeypatch, "openai_compatible", {}, served="astra-cyber-9b")
+    gen = server._make_tier_generate("code", ALLOWED, "", 0.2, 64, 0, text_only=True)
+    assert refused(lambda: gen("hi")) == served_refusal("code", "openai_compatible", "astra-cyber-9b")
+    assert len(gateway.calls) == 1  # judged after the reply; the reply is dropped
+
+
+@pytest.mark.parametrize("reported", ["", "default", "code", "sonder"])
+def test_a_text_only_bridged_call_answers_a_reply_that_names_no_model(posts, monkeypatch, reported):
+    gateway = bridged(monkeypatch, "openai_compatible", {}, served=reported)
     assert server._make_tier_generate("code", ALLOWED, "", 0.2, 64, 0, text_only=True)("hi") == "bridged answer"
     assert len(gateway.calls) == 1
 
@@ -291,10 +301,14 @@ def test_a_reply_reporting_an_ordinary_served_model_is_returned(posts, monkeypat
 def test_require_served_unit():
     rung = SimpleNamespace(provider="sonder_inference", tier="code")
     guard.require_served(rung, "ordinary:8b")
-    guard.require_served(rung, DENIED, text_only=True)
+    guard.require_served(rung, "ordinary:8b", text_only=True)
+    for reported in ("", "default", "general", None):
+        guard.require_served(rung, reported, text_only=True)  # text: an unnamed reply is kept
     for reported in (DENIED, "", "default", "general", None):
         with pytest.raises(server.ModelCallError):
             guard.require_served(rung, reported)
+    with pytest.raises(server.ModelCallError):
+        guard.require_served(rung, DENIED, text_only=True)  # a blocked model never serves a tier
 
 
 # ---- ordinary models: nothing changes ------------------------------------------
@@ -385,11 +399,14 @@ def test_mcp_answer_with_history_by_name_answers(chat):
     assert out.startswith("answer from " + DENIED) and models(chat) == [DENIED]
 
 
-def test_mcp_chat_by_tier_answers_on_a_tier_serving_a_denied_model(chat, monkeypatch):
+def test_mcp_chat_by_tier_is_refused_on_a_tier_serving_a_denied_model(chat, monkeypatch):
+    """Chat by tier no longer answers when the tier's provider serves a blocked model."""
     gateway = bridged(monkeypatch, "sonder-inference", {"SONDER_INFERENCE_TIER_MODELS": "code=astra-cyber-9b"},
                       served="astra-cyber-9b")
-    out = server._answer_with_history_impl("hi", [], tier="code", raise_model_errors=True, augment=False)
-    assert "bridged answer" in out and len(gateway.calls) == 1 and chat == []
+    with pytest.raises(server.ModelCallError) as caught:
+        server._answer_with_history_impl("hi", [], tier="code", raise_model_errors=True, augment=False)
+    assert caught.value.detail == served_refusal("code", "sonder_inference", "astra-cyber-9b")
+    assert gateway.calls == [] and chat == []
 
 
 def test_http_chat_by_name_answers(chat):

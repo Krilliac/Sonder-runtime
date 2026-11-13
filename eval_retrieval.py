@@ -173,10 +173,10 @@ def run_task(task, model=None, digest_probe=None, expected_digest=None):
     """Run one held-out task under both conditions. Never raises."""
     name, prompt, check = task["name"], task["prompt"], task["check"]
     # Both conditions run the reply's code: refuse a denied model or route first.
-    if refusal := server._tool_lane_guard.selector_refusal(model or "", server.TIERS):
+    if refusal := server._tool_lane_guard.selector_refusal(model or "", server.TIERS, server._RUNTIME_POLICY):
         raise ModelRefused(refusal)
     # A task's own text can pick a model (``use model X: ...``) over ``model``.
-    if refusal := server._tool_lane_guard.prompt_refusal(prompt, server.natural_model_request, server.TIERS):
+    if refusal := server._tool_lane_guard.prompt_refusal(prompt, server.natural_model_request, server.TIERS, server._RUNTIME_POLICY):
         raise ModelRefused(refusal)
     def prove_model():
         if digest_probe is None:

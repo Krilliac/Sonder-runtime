@@ -29,8 +29,8 @@ is not a reference.  The registry key is ``(path, enclosing qualified name,
 callee)`` with the number of references; no line numbers, so unrelated edits
 never disturb it.
 
-Limit: a name computed at run time (``getattr(server, "ens" + "emble_answer")``)
-cannot be seen statically; review has to catch it.
+Limit: a name computed at run time (``getattr(server, "ens" + "emble_answer")``
+or ``getattr(server, name)``) cannot be seen statically; review has to catch it.
 
 Classes:
 
@@ -43,14 +43,21 @@ Classes:
     A choke-point EXEC site leaves the default (refuse a denied model).  An
     EXEC site of a text entry point or a raw HTTP path, which the bottom check
     does not see, is preceded by a refusal from ``tool_lane_guard`` (in its
-    function, an enclosing one, or a ``guarded_by`` caller) whose result
-    stops the function (the test of an ``if`` whose body returns, raises,
-    continues or breaks, or a call to a same-file helper that raises) and
-    which judges the selector the call passes: the same expression (``x or
-    ""`` counts as ``x``); a call that passes none takes its default and is
-    judged by ``""``, ``"sonder"`` or ``"local"``, which judges every
-    configured local tier.  Where the judged expression differs by design the
-    entry says why in ``selector_reason``.
+    function, an enclosing one, or every one of its ``guarded_by`` callers)
+    whose result stops the function, and which judges the selector the call
+    passes.  A refusal stops the function only as a direct statement of the
+    function body (not nested in an ``if``, ``try``, ``with`` or loop) that
+    comes before the statement holding the call: an ``if`` whose test holds
+    the refusal and whose body ends in ``return`` or ``raise``, or a call
+    statement of a same-file helper that refuses that way with ``raise``.  A
+    loop body counts as such a block for a call inside the same loop body,
+    where the ``if`` may also end in ``continue`` or ``break``.  It judges the
+    selector when it judges the same expression (``x or ""`` counts as
+    ``x``) and no name in that expression is assigned between the refusal
+    and the call; a call that passes none takes its default and is judged by
+    ``""``, ``"sonder"`` or ``"local"`` (the default route).  Where the
+    judged expression differs by design the entry says why in
+    ``selector_reason``.
 ``CHOKE``
     The generation stack itself: the wrappers that forward ``text_only``, the
     recursions, imports, re-exports and the guard's own plumbing.
@@ -134,7 +141,9 @@ REFUSAL_CALLS = frozenset({
 # Refusals whose first argument is not a selector (``prompt_refusal`` judges
 # the model request in the prompt's own text).
 _NON_SELECTOR_REFUSALS = frozenset({"prompt_refusal"})
-_STOPS = (ast.Return, ast.Raise, ast.Continue, ast.Break)
+_STOPS = (ast.Return, ast.Raise)
+_LOOP_STOPS = _STOPS + (ast.Continue, ast.Break)
+_LOOPS = (ast.For, ast.AsyncFor, ast.While)
 _ENDPOINT = re.compile(
     r"(" + "|".join(re.escape(path) for path in ENDPOINT_PATHS) + r")(?![\w/])"
 )
@@ -339,14 +348,14 @@ class _Scanner(ast.NodeVisitor):
         for _ in range(2):  # a helper over a helper
             for name, node in self.helpers.items():
                 if any(
-                    isinstance(inner, ast.Return) and inner.value is not None
-                    and self._contains_refusal(inner.value)
-                    for inner in _own_nodes(node)
+                    isinstance(statement, ast.Return) and statement.value is not None
+                    and self._contains_refusal(statement.value)
+                    for statement in node.body
                 ):
                     self.returning_helpers.add(name)
                 if any(
-                    isinstance(stop, ast.Raise)
-                    for guard, _calls in self._guard_tests(node) for stop in self._stops_in(guard)
+                    isinstance(guard.body[-1], ast.Raise)
+                    for guard, _calls in self._guard_tests(node.body)
                 ):
                     self.raising_helpers.add(name)
         # Names bound to a choke point or text entry point (import aliases and
@@ -385,21 +394,15 @@ class _Scanner(ast.NodeVisitor):
     def _contains_refusal(self, node: ast.AST) -> bool:
         return any(self._is_refusal_call(inner) for inner in ast.walk(node))
 
-    @staticmethod
-    def _stops_in(guard: ast.If) -> list[ast.AST]:
-        return [
-            inner for statement in guard.body for inner in (statement, *_own_nodes(statement))
-            if isinstance(inner, _STOPS)
-        ]
+    def _guard_tests(self, block: list[ast.stmt], stops=_STOPS) -> list[tuple[ast.If, list[ast.Call]]]:
+        """Each direct ``if`` of ``block`` whose test holds refusal calls and whose body ends in a stop.
 
-    def _guard_tests(self, function: ast.AST) -> list[tuple[ast.If, list[ast.Call]]]:
-        """Each ``if`` in ``function`` whose test holds refusal calls, directly or through a name."""
+        The test may hold the call itself or a name a direct assignment of
+        ``block`` bound to one earlier.
+        """
         assigned: dict[str, list[ast.Call]] = {}
         found = []
-        for node in sorted(
-            (node for node in _own_nodes(function) if isinstance(node, (ast.Assign, ast.If))),
-            key=lambda node: (node.lineno, node.col_offset),
-        ):
+        for node in block:
             if isinstance(node, ast.Assign):
                 calls = [inner for inner in ast.walk(node.value) if self._is_refusal_call(inner)]
                 for target in node.targets:
@@ -408,6 +411,8 @@ class _Scanner(ast.NodeVisitor):
                             assigned[target.id] = calls
                         else:
                             assigned.pop(target.id, None)
+                continue
+            if not isinstance(node, ast.If) or not isinstance(node.body[-1], stops):
                 continue
             calls = [inner for inner in ast.walk(node.test) if self._is_refusal_call(inner)]
             for inner in ast.walk(node.test):
@@ -428,9 +433,17 @@ class _Scanner(ast.NodeVisitor):
                 return set()
             judged = set()
             params = _all_params(helper)
-            for inner in _own_nodes(helper):
-                if not self._is_refusal_call(inner):
-                    continue
+            # Only the refusals that decide the helper's result: a direct
+            # ``return`` of one, or a direct ``if`` on one that raises.
+            deciding = [
+                inner for statement in helper.body
+                if isinstance(statement, ast.Return) and statement.value is not None
+                for inner in ast.walk(statement.value) if self._is_refusal_call(inner)
+            ] + [
+                call_ for guard, calls in self._guard_tests(helper.body)
+                if isinstance(guard.body[-1], ast.Raise) for call_ in calls
+            ]
+            for inner in deciding:
                 for expression in self._judged_by(inner, depth + 1):
                     if expression in params:
                         bound = _bound_argument(helper, call, expression)
@@ -446,20 +459,77 @@ class _Scanner(ast.NodeVisitor):
                 return {ast.unparse(keyword.value)}
         return set()
 
-    def stopping_refusals(self, function: ast.AST) -> list[tuple[int, set[str]]]:
-        """``(line, judged selectors)`` of each refusal whose result stops ``function``."""
-        key = id(function)
+    def block_refusals(self, block: list[ast.stmt], stops=_STOPS) -> list[tuple[ast.stmt, set[str]]]:
+        """``(statement, judged selectors)`` of each refusal that is a direct statement of ``block``."""
+        key = (id(block), stops)
         if key not in self._stopping:
             found = []
-            for guard, calls in self._guard_tests(function):
-                if self._stops_in(guard):
-                    for call in calls:
-                        found.append((guard.lineno, self._judged_by(call)))
-            for node in _own_nodes(function):
-                if isinstance(node, ast.Call) and _called_name(node) in self.raising_helpers:
-                    found.append((node.lineno, self._judged_by(node)))
+            for guard, calls in self._guard_tests(block, stops):
+                for call in calls:
+                    found.append((guard, self._judged_by(call)))
+            for statement in block:
+                if (
+                    isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call)
+                    and _called_name(statement.value) in self.raising_helpers
+                ):
+                    found.append((statement, self._judged_by(statement.value)))
             self._stopping[key] = found
         return self._stopping[key]
+
+    def stopping_refusals(self, function: ast.AST) -> list[tuple[ast.stmt, set[str]]]:
+        """The refusals that stop ``function``: direct statements of its body."""
+        return self.block_refusals(function.body)
+
+    def preceding_refusals(self, function: ast.AST, node: ast.AST) -> list[set[str]]:
+        """The judged selectors of each refusal that stops ``function`` before ``node`` runs.
+
+        A refusal counts when it is a direct statement of the function body,
+        or of a loop body, that comes before the statement of that same body
+        holding ``node``.  A judged expression loses a name assigned anywhere
+        in ``function`` between the refusal and ``node``.
+        """
+        chain = []
+        current = node
+        while current is not None and current is not function:
+            chain.append(current)
+            current = self.parents.get(current)
+        if current is None:
+            return []
+        found = []
+        for statement in chain:
+            parent = self.parents.get(statement)
+            if parent is function:
+                block, stops = function.body, _STOPS
+            elif isinstance(parent, _LOOPS) and statement in parent.body:
+                block, stops = parent.body, _LOOP_STOPS
+            else:
+                continue
+            if statement not in block:
+                continue
+            index = block.index(statement)
+            for refusal, judged in self.block_refusals(block, stops):
+                if block.index(refusal) < index:
+                    found.append(self._unchanged(function, judged, refusal, node))
+        return found
+
+    def _unchanged(self, function: ast.AST, judged: set[str], refusal: ast.stmt, node: ast.AST) -> set[str]:
+        """``judged`` without any expression whose names are assigned between ``refusal`` and ``node``."""
+        after = getattr(refusal, "end_lineno", refusal.lineno)
+        before = getattr(node, "lineno", 0)
+        stored = {
+            inner.id for inner in ast.walk(function)
+            if isinstance(inner, ast.Name) and isinstance(inner.ctx, (ast.Store, ast.Del))
+            and after < inner.lineno <= before
+        }
+        kept = set()
+        for expression in judged:
+            try:
+                names = {inner.id for inner in ast.walk(ast.parse(expression, mode="eval")) if isinstance(inner, ast.Name)}
+            except SyntaxError:
+                names = set()
+            if not names & stored:
+                kept.add(expression)
+        return kept
 
     def _locally_bound(self, function: ast.AST) -> set[str]:
         key = id(function)
@@ -516,10 +586,9 @@ class _Scanner(ast.NodeVisitor):
         if selectors is None:
             selectors = call_selectors(callee, call) if kind == "call" else {UNKNOWN}
         site.selectors |= selectors
-        line = getattr(node, "lineno", 0)
         preceding = [
             judged for function in self.functions
-            for at, judged in self.stopping_refusals(function) if at <= line
+            for judged in self.preceding_refusals(function, node)
         ]
         refused = bool(preceding)
         judged = refused and all(
@@ -738,7 +807,7 @@ _ENTRIES = [
     ("server.py", "_chat_request", "_post_model", 1, CHOKE, "below the check"),
     ("server.py", "_chat_request", "raw-gateway:" + RAW_GATEWAY_ATTRIBUTE, 2, CHOKE,
      "the legacy bridge to a non-Ollama rung, after require_generation; legacy_chat_bridge judges "
-     "the served model the reply reports unless the call is text-only"),
+     "the served model the reply reports on every call (an unnamed one is kept only when text-only)"),
     ("server.py", "_chat_request_with_cloud_fallback", "_chat_request", 1, CHOKE,
      "injected transport; forwards text_only, so the K3 fallback model is judged again"),
     ("server.py", "_codegen_critic_generation", "/api/generate", 1, CHOKE, _UNLOAD),
@@ -871,8 +940,11 @@ _ENTRIES = [
      GATEWAY_GENERATE, 1, CHOKE, "packaged gateway plumbing"),
     ("sonder_runtime/adapters/repl_services.py", "<module>", "consult", 1, CHOKE,
      "service provider for the consult module; not a call"),
+    ("sonder_runtime/adapters/tool_lane_gateway.py", "ServedTierGateway.generate", GATEWAY_GENERATE, 1, CHOKE,
+     "ChatService's handle: a bridged tier serving a blocked model is refused before delegating "
+     "and a reply reporting one after"),
     ("sonder_runtime/adapters/tool_lane_gateway.py", "ToolLaneGateway.generate", GATEWAY_GENERATE, 1, CHOKE,
-     "the wrapper itself: refuses before delegating"),
+     "the wrapper itself: refuses before delegating and judges a non-Ollama reply's model after"),
     ("sonder_runtime/application/agents/interactive_lanes.py", "AgentLaneService.run_pending",
      GATEWAY_GENERATE, 1, EXEC, "interactive lane steps call tools; " + _WRAPPED),
     ("sonder_runtime/application/chat/handle_chat.py", "ChatService.complete", GATEWAY_GENERATE, 1, TEXT,
@@ -897,7 +969,8 @@ _ENTRIES = [
      GATEWAY_GENERATE, 4, CHOKE, "packaged gateway plumbing"),
     ("sonder_runtime/bootstrap/app.py", "build_application", "raw-gateway:" + RAW_GATEWAY_NAME, 4, CHOKE,
      "the unwrapped gateway: built once, wrapped as the default handle, and handed only "
-     "to Application.model_gateway and ChatService (text consumers)"),
+     "to Application.model_gateway (the legacy bridge, which judges the served model on every "
+     "call) and, through ServedTierGateway, to ChatService (text consumers)"),
     ("sonder_runtime/bootstrap/build_tools.py", "_LazyModelGateway.generate", GATEWAY_GENERATE, 1, CHOKE,
      "lazy handle over the gateway build_fix is given"),
     ("sonder_runtime/bootstrap/mesh_agent_tools.py", "generate_mesh.generate", "_generate_text", 1, EXEC,
@@ -962,6 +1035,9 @@ TEXT_ONLY_DECLARATIONS: dict[tuple[str, str, str], str] = {
     ("sonder_runtime/adapters/inference/ollama_gateway.py", "OllamaGateway.generate", "_generate_factory"):
         "the packaged Ollama gateway: callers that run or apply output hold the "
         "ToolLaneGateway, which judged the request first",
+    ("sonder_runtime/adapters/tool_lane_gateway.py", "ServedTierGateway.generate", "reply_refusal"):
+        "ChatService's text handle: a reply that names no model is kept as text; a blocked "
+        "reported model is refused whatever the flag says",
 }
 
 
@@ -988,13 +1064,34 @@ def guard_judgements(path: str, qualname: str) -> list[set[str]] | None:
     scanner, function = _find(path, qualname)
     if function is None:
         return None
-    return [judged for _line, judged in scanner.stopping_refusals(function)]
+    return [judged for _statement, judged in scanner.stopping_refusals(function)]
 
 
 def function_refuses(path: str, qualname: str) -> bool | None:
     """Whether a refusal's result stops ``qualname`` in ``path``; None when it does not exist."""
     judgements = guard_judgements(path, qualname)
     return None if judgements is None else bool(judgements)
+
+
+def guards_judge(guarded_by: Iterable[str], selectors: Iterable[str]) -> tuple[bool, list[str]]:
+    """Whether every ``guarded_by`` guard refuses and judges ``selectors``, and the guards that do not refuse.
+
+    One judging guard does not cover another: each caller reaches the site on
+    its own, so each must judge what the site passes.
+    """
+    selectors = list(selectors)
+    judged, unrefused = True, []
+    for guard in guarded_by:
+        path, qualname = guard.split("::", 1)
+        judgements = guard_judgements(path, qualname)
+        if not judgements:
+            unrefused.append(guard)
+            judged = False
+            continue
+        judged = judged and all(
+            any(selector_matches(selector, item) for item in judgements) for selector in selectors
+        )
+    return judged, unrefused
 
 
 def needs_refusal(callee: str) -> bool:

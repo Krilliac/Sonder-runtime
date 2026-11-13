@@ -403,8 +403,15 @@ def test_served_refusal_messages():
         "code", "sonder_inference", rule.ModelLaneDecision(ModelLaneStatus.DENIED, "astra-cyber-9b"))
     assert denied_text == (
         "tier 'code' is served by sonder_inference with model 'astra-cyber-9b', "
-        "which is blocked from tool-using lanes by runtime policy; it can be used for chat only."
+        "which is blocked by runtime policy, and a blocked model does not serve a tier; "
+        "ask for 'astra-cyber-9b' by name for a text answer, or change the model that "
+        "provider serves for this tier in its configuration."
     )
+    with_setting = rule.served_refusal_message(
+        "code", "sonder_inference", rule.ModelLaneDecision(ModelLaneStatus.DENIED, "astra-cyber-9b"),
+        setting="SONDER_INFERENCE_MODEL")
+    assert with_setting.endswith(
+        "or change the model sonder_inference serves for tier 'code' (SONDER_INFERENCE_MODEL).")
     unknown = rule.served_refusal_message(
         "code", "openrouter", rule.ModelLaneDecision(ModelLaneStatus.SERVED_UNKNOWN, ""))
     assert "cannot be determined" in unknown and "chat still works" in unknown
