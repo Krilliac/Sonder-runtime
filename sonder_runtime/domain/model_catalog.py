@@ -80,7 +80,7 @@ def catalog_revision(model, records):
     return ""
 
 
-def _untagged(name):
+def untagged(name):
     """True when the model part of ``name`` (after the last ``/``) carries no tag."""
     return ":" not in name.rsplit("/", 1)[-1]
 
@@ -97,7 +97,7 @@ def resolve_record(selector, records):
     wanted = str(selector or "").strip().casefold()
     if not wanted:
         return None
-    latest = wanted + ":latest" if _untagged(wanted) else None
+    latest = wanted + ":latest" if untagged(wanted) else None
     fallback = None
     for name, record in records:
         advertised = name.casefold()

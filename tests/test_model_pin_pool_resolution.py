@@ -248,6 +248,8 @@ def test_untagged_selector_prefers_an_exact_record_over_latest():
     ("bare:latest", ["bare"], None),
     ("bare:7b", ["bare:latest"], None),
     ("bare:", ["bare:latest"], None),
+    ("bare:7b", ["bare:7b:latest"], None),
+    ("bare@sha256:0123", ["bare@sha256:0123:latest", "bare:latest"], None),
     # Only the model part decides "untagged": a registry port is not a tag.
     ("reg.example:5000/team/model", ["reg.example:5000/team/model:latest"],
      "reg.example:5000/team/model:latest"),
