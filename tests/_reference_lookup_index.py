@@ -72,3 +72,21 @@ def rule_cache_cleared():
     service.clear_rule_cache()
     yield
     service.clear_rule_cache()
+
+
+# A model the lookup rule matches only because the policy's ``reference_lookup``
+# section names it; it is not on the tool-lane deny list, so a bridged provider
+# may serve it for a tier.
+LOOKUP_ONLY_MODEL = 'sec-notes:7b'
+
+
+def write_lookup_only_policy(path) -> None:
+    """Write a runtime policy at ``path`` whose ``reference_lookup`` adds ``LOOKUP_ONLY_MODEL``."""
+    from sonder_runtime.adapters import reference_lookup_service as service
+    from sonder_runtime.adapters import runtime_policy
+
+    base = runtime_policy.default_policy(env={})
+    payload = {key: base[key] for key in ('local_models', 'embedding_model', 'routing')}
+    payload['reference_lookup'] = {'names': [LOOKUP_ONLY_MODEL]}
+    Path(path).write_text(json.dumps(payload), encoding='utf-8')
+    service.clear_rule_cache()

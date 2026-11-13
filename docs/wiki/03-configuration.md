@@ -616,7 +616,10 @@ when any member matches; the synthesiser sees only the cleaned answers) and
 `consult` (members share one retrieval; the judge sees no passages). It does
 not apply to structured answers, code-mode ensembles or model fan-out. A tier
 bound to a provider other than Ollama is judged by the model that provider
-serves, as for the deny list. When a provider falls back to another backend
+serves, as for the deny list. A deny-listed model never serves a tier (that
+call is refused), so on a bridged tier lookup applies only to a name the
+policy's `reference_lookup` section adds; a refused call leaves no Sources
+block, no stored interaction and no lookup state. When a provider falls back to another backend
 in the middle of a call, the lookup decision follows the primary provider's
 configured model. The read-only MCP tool `reference_search`
 (`query`, `k` 1 to 8) returns framed passages and their sources to any caller;
@@ -625,9 +628,11 @@ it makes no model call.
 Every model call the lookup makes is a text call under the deny list's
 generation check: the search-terms call declares `text_only=True` itself, and
 the framed answer, each ensemble or consult member, the synthesis and the
-consult judge carry the declaration of the lane they belong to. A model both
-rules name therefore answers with lookup on these lanes, while the lanes that
-run or apply model output still refuse it and make no lookup call.
+consult judge carry the declaration of the lane they belong to. Lookup runs
+only on a lane that declares itself text-only. A model both rules name
+therefore answers with lookup on these lanes when asked for by name, while
+the lanes that run or apply model output still refuse it and make no lookup
+call.
 
 A lookup turn is sent none of the runtime's system prompt (persona, playbook,
 trace instructions, tool guidance, profile and goal), so the model's own

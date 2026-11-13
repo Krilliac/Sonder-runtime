@@ -34,7 +34,13 @@ from sonder_runtime.domain.context_formatting import rough_token_count
 from sonder_runtime.domain.reference_lookup.selection import passage_char_budget
 from sonder_runtime.interfaces.http import serve
 from sonder_runtime.platform import reference_library_config as config
-from tests._reference_lookup_index import CREATE_META, create_index, rule_cache_cleared
+from tests._reference_lookup_index import (
+    CREATE_META,
+    LOOKUP_ONLY_MODEL,
+    create_index,
+    rule_cache_cleared,
+    write_lookup_only_policy,
+)
 
 
 # No applies rule is carried from one test to the next.
@@ -804,6 +810,14 @@ def test_budget_counts_the_callers_system_message(lane, monkeypatch):
 
 
 def _bridge_general(monkeypatch, served):
+    """``general`` on Sonder Inference serving ``served``.
+
+    A deny-listed model never serves a tier, so a bridged lookup tier serves a
+    name only the policy's ``reference_lookup`` section adds.
+    """
+    import os
+
+    write_lookup_only_policy(os.environ["SONDER_RUNTIME_POLICY"])
     monkeypatch.setenv("SONDER_GENERAL_PROVIDER", "sonder_inference")
     monkeypatch.setenv("SONDER_INFERENCE_MODEL", served)
     monkeypatch.delenv("SONDER_INFERENCE_TIER_MODELS", raising=False)
@@ -812,9 +826,9 @@ def _bridge_general(monkeypatch, served):
 def test_bridged_rung_is_judged_by_the_model_its_provider_serves(lane, monkeypatch):
     from sonder_runtime.application.chat import provider_bridge
 
-    _bridge_general(monkeypatch, LOOKUP_MODEL)
+    _bridge_general(monkeypatch, LOOKUP_ONLY_MODEL)
     with provider_bridge.bind_rung("sonder_inference", "general"):
-        assert lanes.answering_model(PLAIN_MODEL) == LOOKUP_MODEL
+        assert lanes.answering_model(PLAIN_MODEL) == LOOKUP_ONLY_MODEL
         assert lanes.lookup_turn(PLAIN_MODEL) is True
     lanes.reset_turn()
     _bridge_general(monkeypatch, PLAIN_MODEL)
@@ -833,7 +847,7 @@ def test_bridged_rung_is_judged_by_the_model_its_provider_serves(lane, monkeypat
 def test_an_unbound_record_is_not_reused_for_another_binding(lane, monkeypatch):
     from sonder_runtime.application.chat import provider_bridge
 
-    _bridge_general(monkeypatch, LOOKUP_MODEL)
+    _bridge_general(monkeypatch, LOOKUP_ONLY_MODEL)
     with provider_bridge.bind_rung("sonder_inference", "general"):
         bridged = lanes._record(PLAIN_MODEL)
         assert bridged.applies is True and bridged.tier == "general"

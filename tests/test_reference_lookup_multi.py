@@ -7,6 +7,7 @@ rule matches (the ``astra-cyber-`` prefix).
 """
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
 import types
@@ -23,7 +24,12 @@ from sonder_runtime.domain.context_formatting import rough_token_count
 from sonder_runtime.domain.ensemble_synthesis import KEEP_CITATIONS_RULE
 from sonder_runtime.domain.reference_lookup.selection import passage_char_budget
 from sonder_runtime.platform import reference_library_config as config
-from tests._reference_lookup_index import create_index, rule_cache_cleared
+from tests._reference_lookup_index import (
+    LOOKUP_ONLY_MODEL,
+    create_index,
+    rule_cache_cleared,
+    write_lookup_only_policy,
+)
 
 
 # No applies rule is carried from one test to the next.
@@ -238,9 +244,12 @@ def test_bridged_member_is_judged_by_the_model_its_provider_serves(models, monke
         return multi.ensemble(QUESTION, "", [(tier, model)], 700, server._make_tier_generate,
                               lambda _tier, _model: 4096)
 
+    # A deny-listed model never serves a tier: the served lookup model is one
+    # only the policy's reference_lookup section adds.
+    write_lookup_only_policy(os.environ["SONDER_RUNTIME_POLICY"])
     monkeypatch.setenv("SONDER_GENERAL_PROVIDER", "sonder_inference")
     monkeypatch.delenv("SONDER_INFERENCE_TIER_MODELS", raising=False)
-    monkeypatch.setenv("SONDER_INFERENCE_MODEL", LOOKUP_MODEL)
+    monkeypatch.setenv("SONDER_INFERENCE_MODEL", LOOKUP_ONLY_MODEL)
     assert seams("general", PLAIN_MODEL).shared is not None
     monkeypatch.setenv("SONDER_INFERENCE_MODEL", PLAIN_MODEL)
     assert seams("general", LOOKUP_MODEL).shared is None

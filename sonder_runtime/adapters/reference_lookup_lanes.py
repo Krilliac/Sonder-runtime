@@ -264,6 +264,16 @@ class LookupGenerate:
             return 0
 
     def __call__(self, prompt: Any, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return self._respond(prompt, *args, **kwargs)
+        except BaseException:
+            # A failed or refused call leaves no lookup state behind: the turn
+            # has no reply to carry Sources, and no later turn may pick it up.
+            if _TURN.get() is self._record:
+                _TURN.set(None)
+            raise
+
+    def _respond(self, prompt: Any, *args: Any, **kwargs: Any) -> Any:
         live = stream_sink.turn_stream()
         if live is not None:
             # Claim the turn's stream before any model call: nothing raw (and

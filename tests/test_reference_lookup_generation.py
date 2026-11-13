@@ -17,6 +17,9 @@ and makes no lookup call.
 from __future__ import annotations
 
 import json
+import os
+import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,7 +27,10 @@ import server
 import sonder_runtime.adapters.reference_lookup_lanes as lanes
 import sonder_runtime.adapters.reference_lookup_service as service
 from sonder_runtime.adapters import tool_lane_guard as guard
-from tests.support.tool_lane import BLOCKED, clear_environment
+from sonder_runtime.adapters.provider_bindings import provider_bindings_from_env
+from sonder_runtime.application.ports.model_gateway import ModelResponse
+from tests._reference_lookup_index import LOOKUP_ONLY_MODEL, write_lookup_only_policy
+from tests.support.tool_lane import BLOCKED, clear_environment, served_refusal
 from tests.test_reference_lookup_lanes import (  # noqa: F401  # ``lane`` is a fixture
     ANSWER,
     LOOKUP_MODEL,
@@ -253,3 +259,72 @@ def test_a_code_mode_ensemble_on_the_lookup_model_looks_nothing_up(checked):
     assert transport.expansions() == []
     assert all(PASSAGE_TEXT not in p["messages"][-1]["content"] for p in transport.payloads)
     _assert_judged_text_only(judged, len(transport.payloads))
+
+
+# --- a bridged tier on a lookup turn: refused calls leave nothing behind --------
+
+
+class BridgeGateway:
+    """The packaged gateway a bridged tier is served by: records each request, reports ``served``."""
+
+    def __init__(self, served):
+        self.calls = []
+        self.served = served
+
+    def generate(self, request, context):
+        self.calls.append(request)
+        return ModelResponse(text=ANSWER, model=self.served, tier=request.tier, tokens_out=1)
+
+
+def _bridge_general(monkeypatch, configured, reported):
+    """``general`` on Sonder Inference, configured to serve ``configured``; replies report ``reported``."""
+    monkeypatch.setenv("SONDER_GENERAL_PROVIDER", "sonder-inference")
+    monkeypatch.setenv("SONDER_INFERENCE_TIER_MODELS", "general=" + configured)
+    gateway = BridgeGateway(reported)
+    monkeypatch.setattr(server, "_APP_GRAPH", SimpleNamespace(
+        provider_bindings=provider_bindings_from_env(), model_gateway=gateway,
+        recall=SimpleNamespace(retrieve=lambda *a, **k: [])))
+    return gateway
+
+
+def _stored_interactions():
+    conn = sqlite3.connect(server._DB_PATH)
+    try:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'interactions'").fetchone():
+            return 0
+        return conn.execute("SELECT COUNT(*) FROM interactions").fetchone()[0]
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize(
+    ("configured", "sent"),
+    [(LOOKUP_MODEL, 0), (LOOKUP_ONLY_MODEL, 2)],
+    ids=("configured_blocked", "reply_reports_blocked"),
+)
+def test_a_refused_bridged_lookup_turn_leaves_no_record_sources_or_interaction(
+        checked, monkeypatch, configured, sent):
+    """A blocked model never serves a tier, lookup turn or not.
+
+    Configured to serve a deny-listed model, the tier is refused before
+    anything is sent.  Configured to serve a lookup-only model whose replies
+    report a deny-listed one, the search-terms reply and the framed reply are
+    each refused after they arrive.  Either way the turn ends with the refusal,
+    no Sources block, no stored interaction and no lookup state, and the next
+    turn carries nothing from it.
+    """
+    transport, _judged, _retrievals = checked
+    write_lookup_only_policy(os.environ["SONDER_RUNTIME_POLICY"])
+    gateway = _bridge_general(monkeypatch, configured, LOOKUP_MODEL)
+    _bind_general(monkeypatch, PLAIN_MODEL)
+
+    out = server.sonder(QUESTION, tier="general", session="none")
+
+    assert served_refusal("general", "sonder_inference", LOOKUP_MODEL) in out
+    assert ANSWER not in out and "Sources:" not in out and PASSAGE_TEXT not in out
+    assert len(gateway.calls) == sent and transport.payloads == []
+    assert _stored_interactions() == 0
+    assert lanes._TURN.get() is None
+
+    following = server.sonder("Say hello.", model_override=PLAIN_MODEL, session="none")
+    assert "Sources:" not in following and ANSWER in following
