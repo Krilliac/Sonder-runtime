@@ -75,7 +75,7 @@ from sonder_runtime.domain.reference_lookup.selection import passage_char_budget
 
 _logger = logging.getLogger("sonder.reference_lookup")
 
-# The search-terms call: deterministic, small, no system prompt.
+# The search-terms call: deterministic, small, no system prompt, no model thinking.
 EXPAND_TEMPERATURE = 0.0
 EXPAND_NUM_PREDICT = 80
 # Context window assumed for the budget when the call passes none (a hosted or
@@ -330,6 +330,23 @@ class LookupGenerate:
         return reply if self._record.grounded else review.text
 
 
+def terms_generate(make: Callable[..., Any], *target: Any, **options: Any) -> Any:
+    """``make(*target, "", ...)`` for the search-terms call, with model thinking off.
+
+    ``target`` is ``(model, num_ctx)``, after the tier for a tier-bound factory.
+    The reply is one line of query words, so reasoning only delays it and can use
+    up the reply budget.  A hosted model's provider owns thinking and the factory
+    refuses the option for it (``ValueError``): that target gets the plain call.
+    """
+    *head, num_ctx = target
+    args = (*head, "", EXPAND_TEMPERATURE, EXPAND_NUM_PREDICT, num_ctx)
+    options = {**options, "text_only": True}
+    try:
+        return make(*args, **{**options, "think": False})
+    except ValueError:
+        return make(*args, **options)
+
+
 def chat_generate(make_generate: Callable[..., Any], question: Any, model: Any, system: Any,
                   temperature: Any, num_predict: Any, num_ctx: Any, **options: Any) -> Any:
     """``make_generate(model, system, temperature, num_predict, num_ctx, **options)``,
@@ -353,8 +370,7 @@ def chat_generate(make_generate: Callable[..., Any], question: Any, model: Any, 
 
     def expander() -> Callable[..., Any]:
         # The search-terms reply is only parsed into query words: a text call.
-        return make_generate(model, "", EXPAND_TEMPERATURE, EXPAND_NUM_PREDICT, num_ctx,
-                             text_only=True, **expand_options)
+        return terms_generate(make_generate, model, num_ctx, **expand_options)
 
     return LookupGenerate(inner, record, question if isinstance(question, str) else "", expander,
                           num_ctx=num_ctx, num_predict=num_predict)
@@ -466,6 +482,7 @@ __all__ = [
     "sources_text",
     "system_for",
     "take_turn",
+    "terms_generate",
     "turn_scoped",
     "with_sources",
 ]

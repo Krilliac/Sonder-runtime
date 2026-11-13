@@ -617,7 +617,7 @@ lines that carry a random code for that turn. The built-in models are the
 same names as the deny list above, taken from its default prefixes: the
 `astra-cyber-` prefix and the two Hugging Face GGUF sources (as `hf.co/...` or
 `huggingface.co/...`) in any quantisation, tagged or not. The model is first asked for search terms once
-(temperature 0, 80 tokens, no system prompt, never streamed, not a provider
+(temperature 0, 80 tokens, no system prompt, model thinking off, never streamed, not a provider
 attempt of the turn); only the first eight identifiers in a question (event
 ids, technique ids, hex values) get title priority. The reply is cleaned
 (copied marker lines removed, display-safe text), its `[n]` citations are
