@@ -44,13 +44,14 @@ SOURCE_URL = "https://example.test/events/4625"
 
 
 @pytest.fixture
-def checked(lane, monkeypatch):
+def checked(request, monkeypatch):
     """The lookup lane fixture with the deny list in force and every bottom check recorded.
 
     Yields ``(transport, judged, retrievals)``: the fake transport, one
     ``(model, text_only)`` per ``require_generation`` call, and one entry per
     reference retrieval.
     """
+    transport = request.getfixturevalue("lane")
     clear_environment(monkeypatch)
     monkeypatch.setattr(guard, "_GENERATION_CACHE", None)
     monkeypatch.setattr(server, "_RUNTIME_POLICY", server._RUNTIME_POLICY)
@@ -80,7 +81,7 @@ def checked(lane, monkeypatch):
         return real_retrieve(question, expand_fn, k, char_budget)
 
     monkeypatch.setattr(service, "retrieve_for", retrieve)
-    return lane, judged, retrievals
+    return transport, judged, retrievals
 
 
 def _models(payloads):

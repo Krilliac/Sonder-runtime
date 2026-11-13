@@ -422,11 +422,11 @@ _ENTRIES = [
      "agent review verdict steers the tool loop"),
     ("server.py", "_agent_turn", "_make_tier_generate", 1, EXEC, "agent decisions become tool calls"),
     ("server.py", "_answer", "_make_generate", 1, TEXT,
-     "chat answer (sonder, by tier or by name); handed to reference_lookup_lanes.chat_generate, "
-     "which forwards text_only to the framed call"),
+     ("chat answer (sonder, by tier or by name); handed to reference_lookup_lanes.chat_generate, "
+      "which forwards text_only to the framed call")),
     ("server.py", "_answer_with_history_impl", "_make_generate", 1, TEXT,
-     "chat answer with history (MCP and HTTP chat); handed to reference_lookup_lanes.chat_generate, "
-     "which forwards text_only to the framed call"),
+     ("chat answer with history (MCP and HTTP chat); handed to reference_lookup_lanes.chat_generate, "
+      "which forwards text_only to the framed call")),
     ("server.py", "_autopilot_json_model", "_make_tier_generate", 1, EXEC,
      "autopilot plans become tasks"),
     ("server.py", "_autopilot_review_model.generator_factory", "_make_tier_generate", 1, EXEC,
@@ -495,8 +495,8 @@ _ENTRIES = [
     ("server.py", "control_command", "ensemble_answer", 1, TEXT, "/ensemble answer"),
     ("server.py", "ensemble_answer", "/api/generate", 1, CHOKE, _UNLOAD),
     ("server.py", "ensemble_answer", "_make_tier_generate", 3, TEXT,
-     "ensemble members and synthesis, and the factory handed to the shared reference lookup "
-     "for its search-terms call (parsed into query words); the answer is returned"),
+     ("ensemble members and synthesis, and the factory handed to the shared reference lookup "
+      "for its search-terms call (parsed into query words); the answer is returned")),
     ("server.py", "improve_function.ask", "ensemble_answer", 1, EXEC, _REFUSES),
     ("server.py", "offload", "_offload_impl", 1, TEXT, "offload answer"),
     ("server.py", "parallel_generate_run", "_make_tier_generate", 1, EXEC,
