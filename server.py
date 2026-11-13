@@ -5420,7 +5420,7 @@ def _chat_request(
             and payload.get("think") is not False
             and exhausted_thinking
         ):
-            roomier = _model_pace.fit(_with_local_thinking_budget(payload), caller_payload, model, timeout or TIMEOUT)
+            roomier = _model_pace.room_to_retry(payload, _with_local_thinking_budget(payload), caller_payload, model, timeout or TIMEOUT)
             if not _budget_retried and roomier != payload:
                 # The model reasoned right up to the cap and never got to an answer.
                 # Now that the response has identified it, retry once with the

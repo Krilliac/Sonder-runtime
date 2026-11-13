@@ -3,10 +3,14 @@
 Seen live on 2026-11-13: a local model writing 4.5 tokens a second was given the 4096 token
 headroom under a 300 second timeout (about 1,300 tokens fit) and the call failed with a read
 timeout.  With the headroom cut back it spent the whole request thinking and needed a second
-one (561 seconds in all), so a model too slow for its headroom is now asked once, without
-thinking.  These pin the pure rules, the per-process speed cache and the way ``_chat_request``
-uses them.
+one (561 seconds in all), so a model too slow to write the reply and a minimum of thought
+inside the timeout is now asked once, without thinking.  A model with time for both keeps
+thinking, also under the 45 second timeout of a fan-out call.  These pin the pure rules, the
+per-process speed cache and the way ``_chat_request`` uses them.
 """
+import io
+import urllib.error
+
 import pytest
 
 import server
@@ -14,10 +18,14 @@ from sonder_runtime.adapters import model_pace
 from sonder_runtime.domain.thinking_pace import (
     MIN_FITTED_TOKENS,
     MIN_SAMPLE_TOKENS,
+    MIN_THINKING_TOKENS,
     PACE_MARGIN,
+    RATE_SMOOTHING,
     affordable_tokens,
     fit_headroom,
     output_rate,
+    retry_with_room,
+    smoothed_rate,
     without_thinking,
 )
 
@@ -26,6 +34,8 @@ THINKING_ONLY = {"message": {"thinking": "long deliberation", "content": ""}, "d
 SLOW = {"eval_count": 45, "eval_duration": 10_000_000_000}  # 4.5 tokens a second
 FAST = {"eval_count": 500, "eval_duration": 10_000_000_000}  # 50 tokens a second
 VERY_SLOW = {"eval_count": 16, "eval_duration": 100_000_000_000}  # 0.16 tokens a second
+MEASURED_FAST = {"eval_count": 529, "eval_duration": 10_000_000_000}  # 52.9, the larger model live
+FANOUT_TIMEOUT, FANOUT_NUM_PREDICT = 45, 512  # model_fanout's defaults
 
 
 @pytest.fixture(autouse=True)
@@ -236,11 +246,34 @@ def test_model_pace_unmeasurable_response_keeps_the_earlier_measurement(unmeasur
     assert model_pace.rate("m") == 4.5
 
 
-def test_model_pace_a_later_measurement_replaces_an_earlier_one():
+def test_model_pace_a_later_measurement_is_averaged_with_the_earlier_one():
     model_pace.observe("m", SLOW)
     model_pace.observe("m", FAST)
 
-    assert model_pace.rate("m") == 50.0
+    assert model_pace.rate("m") == pytest.approx(27.25)
+
+
+def test_model_pace_one_slow_reply_does_not_cost_a_fast_model_its_thinking():
+    """One reply at a fifth of the usual speed (a busy machine) leaves the fan-out call thinking."""
+    model_pace.observe("m", MEASURED_FAST)
+    model_pace.observe("m", {"eval_count": 100, "eval_duration": 10_000_000_000})
+
+    sent = model_pace.up_front(_payload(MINIMUM), _payload(FANOUT_NUM_PREDICT), "m", FANOUT_TIMEOUT, True)
+
+    assert int(10.0 * FANOUT_TIMEOUT * PACE_MARGIN) < FANOUT_NUM_PREDICT + MIN_THINKING_TOKENS
+    assert "think" not in sent
+    assert sent["options"]["num_predict"] > FANOUT_NUM_PREDICT + MIN_THINKING_TOKENS
+
+
+def test_smoothed_rate_takes_the_first_measurement_as_it_is():
+    assert smoothed_rate(None, 4.5) == 4.5
+
+
+def test_smoothed_rate_moves_part_of_the_way_to_a_new_measurement():
+    assert 0 < RATE_SMOOTHING < 1
+    assert smoothed_rate(10.0, 20.0) == pytest.approx(10.0 + 10.0 * RATE_SMOOTHING)
+    assert smoothed_rate(20.0, 10.0) == pytest.approx(20.0 - 10.0 * RATE_SMOOTHING)
+    assert smoothed_rate(10.0, 20.0, 0.25) == pytest.approx(12.5)
 
 
 def test_model_pace_names_are_stripped_and_blank_names_are_ignored():
@@ -309,17 +342,30 @@ def test_without_thinking_keeps_a_callers_reply_smaller_than_the_smallest_fitted
     assert without_thinking(_payload(MINIMUM), _payload(20), 5)["options"]["num_predict"] == 20
 
 
-@pytest.mark.parametrize("affordable", [None, MINIMUM, MINIMUM + 1, 100_000])
+@pytest.mark.parametrize("affordable", [None, 900 + MIN_THINKING_TOKENS, MINIMUM, MINIMUM + 1, 100_000])
 def test_without_thinking_is_none_when_the_model_has_time_to_think(affordable):
     assert without_thinking(_payload(MINIMUM), _payload(900), affordable) is None
 
 
-def test_without_thinking_applies_when_the_caller_asked_for_more_than_the_headroom():
-    """No headroom was added (the caller's budget is the budget), and it still would not arrive."""
-    plain = without_thinking(_payload(6000), _payload(6000), 1080)
+def test_without_thinking_applies_one_token_short_of_the_reply_and_the_minimum_of_thought():
+    plain = without_thinking(_payload(MINIMUM), _payload(900), 900 + MIN_THINKING_TOKENS - 1)
 
-    assert plain["think"] is False
-    assert plain["options"]["num_predict"] == 1080
+    assert (plain["options"]["num_predict"], plain["think"]) == (900, False)
+
+
+def test_without_thinking_measures_against_the_reply_not_the_whole_headroom():
+    """The rule this replaces switched thinking off whenever the 4096 headroom would not arrive."""
+    affordable = FANOUT_NUM_PREDICT + MIN_THINKING_TOKENS
+
+    assert affordable < MINIMUM
+    assert without_thinking(_payload(MINIMUM), _payload(FANOUT_NUM_PREDICT), affordable) is None
+
+
+@pytest.mark.parametrize("asked", [MINIMUM, MINIMUM + 1, 8192])
+@pytest.mark.parametrize("affordable", [0, 1080, 7200])
+def test_without_thinking_leaves_a_request_that_was_given_no_headroom(asked, affordable):
+    """A caller who sized the budget at or above the headroom gets the request unchanged."""
+    assert without_thinking(_payload(asked), _payload(asked), affordable) is None
 
 
 @pytest.mark.parametrize("choice", [True, False, "high"])
@@ -473,10 +519,79 @@ def test_an_explicit_timeout_changes_what_a_slow_model_is_asked_for(monkeypatch)
     seen = _record(monkeypatch, _answer())
 
     _ask(900, timeout=500)
+    _ask(900, timeout=300)
     _ask(900, timeout=100)
 
-    assert _affordable(SLOW, 500) > 900 > _affordable(SLOW, 100)
-    assert seen == [(900, False), (_affordable(SLOW, 100), False)]
+    assert _affordable(SLOW, 500) >= 900 + MIN_THINKING_TOKENS > _affordable(SLOW, 300) > 900 > _affordable(SLOW, 100)
+    assert seen == [(_affordable(SLOW, 500), None), (900, False), (_affordable(SLOW, 100), False)]
+
+
+def test_a_fast_thinking_model_keeps_thinking_under_the_fanout_timeout(monkeypatch):
+    """52.9 tokens a second cannot write 4096 tokens in 45 seconds; it can think and write 512."""
+    server._remember_thinking_model("r")
+    server._model_pace.observe("r", MEASURED_FAST)
+    seen = _record(monkeypatch, _answer())
+
+    _ask(FANOUT_NUM_PREDICT, timeout=FANOUT_TIMEOUT)
+
+    fitted = _affordable(MEASURED_FAST, FANOUT_TIMEOUT)
+    assert FANOUT_NUM_PREDICT + MIN_THINKING_TOKENS <= fitted < MINIMUM
+    assert seen == [(fitted, None)]
+
+
+@pytest.mark.parametrize("timing", [SLOW, FAST])
+@pytest.mark.parametrize("asked", [MINIMUM, 8192])
+def test_a_budget_at_or_above_the_headroom_is_sent_as_the_caller_sized_it(monkeypatch, timing, asked):
+    server._remember_thinking_model("r")
+    server._model_pace.observe("r", timing)
+    seen = _record(monkeypatch, _answer())
+
+    _ask(asked)
+
+    assert seen == [(asked, None)]
+
+
+def _refusing_the_switch(monkeypatch, then):
+    """Patch the wire: a request that carries ``think`` is refused, any other gets ``then``."""
+    sent = []
+
+    def fake_post(_path, payload, timeout=None):
+        sent.append((payload["options"].get("num_predict"), payload.get("think", "absent")))
+        if "think" in payload:
+            raise urllib.error.HTTPError(server.BASE + "/api/chat", 400, "failure", {},
+                                         io.BytesIO(b'{"error":"model does not support thinking"}'))
+        return dict(then)
+
+    monkeypatch.setenv("SONDER_LOCAL_RETRIES", "0")
+    monkeypatch.setattr(server, "_post", fake_post)
+    return sent
+
+
+def test_a_slow_model_that_refuses_the_switch_on_the_first_ask_still_answers(monkeypatch):
+    """The transport drops the refused switch and asks again; later calls keep the fitted headroom."""
+    server._remember_thinking_model("r")
+    server._model_pace.observe("r", SLOW)
+    sent = _refusing_the_switch(monkeypatch, {"message": {"content": "an answer"}})
+
+    _out, content = _ask(900)
+    _ask(900)
+
+    assert content == "an answer"
+    assert not server._think_option_supported("r")
+    assert sent == [(900, False), (900, "absent"), (max(900, _affordable(SLOW)), "absent")]
+
+
+def test_a_slow_model_that_refuses_the_switch_and_only_thinks_fails_as_an_empty_response(monkeypatch):
+    """Nothing more is sent for that call: a third request would outlast the caller's timeout."""
+    server._remember_thinking_model("r")
+    server._model_pace.observe("r", SLOW)
+    sent = _refusing_the_switch(monkeypatch, THINKING_ONLY)
+
+    with pytest.raises(server.ModelCallError) as raised:
+        _ask(900)
+
+    assert raised.value.kind == "empty_response"
+    assert sent == [(900, False), (900, "absent")]
 
 
 def test_a_timeout_long_enough_for_the_headroom_leaves_it_whole(monkeypatch):
@@ -537,6 +652,52 @@ def test_the_headroom_retry_of_a_fast_unknown_model_gets_the_full_headroom(monke
     _ask(900)
 
     assert [budget for budget, _think in seen] == [900, MINIMUM]
+
+
+@pytest.mark.parametrize("reply_timing", [
+    {"eval_count": 500, "eval_duration": 10_000_000_000},  # slower than held: the fitted figure drops
+    {"eval_count": 700, "eval_duration": 10_000_000_000},  # faster than held: the fitted figure rises
+])
+def test_a_reply_that_used_its_fitted_headroom_on_thought_is_not_sent_again_with_headroom(monkeypatch, reply_timing):
+    """The speed measured from that reply moves the fitted figure; that is not more room."""
+    server._remember_thinking_model("r")
+    server._model_pace.observe("r", MEASURED_FAST)
+    seen = _record(monkeypatch, lambda payload, _index: (
+        {"message": {"content": "the real answer"}} if payload.get("think") is False
+        else {**THINKING_ONLY, **reply_timing}))
+
+    _out, content = _ask(FANOUT_NUM_PREDICT, timeout=FANOUT_TIMEOUT)
+
+    assert _affordable(reply_timing, FANOUT_TIMEOUT) != _affordable(MEASURED_FAST, FANOUT_TIMEOUT)
+    assert content == "the real answer"
+    assert seen == [(_affordable(MEASURED_FAST, FANOUT_TIMEOUT), None), (FANOUT_NUM_PREDICT, False)]
+
+
+def test_retry_with_room_gives_an_unsized_request_the_affordable_headroom():
+    payload, caller = _payload(900), _payload(900)
+
+    assert retry_with_room(payload, _payload(MINIMUM), caller, 1080)["options"]["num_predict"] == 1080
+    assert retry_with_room(payload, _payload(MINIMUM), caller, None)["options"]["num_predict"] == MINIMUM
+
+
+@pytest.mark.parametrize("affordable", [0, 899, 900])
+def test_retry_with_room_returns_the_request_itself_when_no_more_is_affordable(affordable):
+    payload = _payload(900)
+
+    assert retry_with_room(payload, _payload(MINIMUM), _payload(900), affordable) is payload
+
+
+@pytest.mark.parametrize("affordable", [None, 1000, 1897, 2500, 100_000])
+def test_retry_with_room_returns_a_request_that_already_carried_headroom(affordable):
+    payload = _payload(1897)
+
+    assert retry_with_room(payload, _payload(MINIMUM), _payload(512), affordable) is payload
+
+
+def test_retry_with_room_returns_a_request_without_a_budget():
+    payload = {"model": "m", "messages": []}
+
+    assert retry_with_room(payload, dict(payload), payload, 1080) is payload
 
 
 def test_no_headroom_retry_is_made_when_nothing_beyond_the_callers_budget_is_affordable(monkeypatch):
