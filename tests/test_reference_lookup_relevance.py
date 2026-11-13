@@ -468,6 +468,20 @@ def test_a_row_without_a_rowid_gives_a_passage_without_one():
 # passage_coverage and retrieve with the floor
 # ---------------------------------------------------------------------------
 
+def test_a_passage_with_a_malformed_row_id_keeps_the_passages():
+    """A row id that is not a number must not turn the floor into a failed lookup."""
+    from types import SimpleNamespace
+
+    from sonder_runtime.application.chat.reference_lookup import passage_coverage
+
+    class _Index:
+        def term_stats(self, terms, rowids):  # pragma: no cover - must not be reached
+            raise AssertionError("statistics were asked for a passage without a usable row id")
+
+    for bad in (None, "7", object()):
+        assert passage_coverage(_Index(), ["logon"], [SimpleNamespace(rowid=bad)]) is None
+
+
 def test_the_corpus_discriminates(index):
     """If these stop holding the other tests pass or fail for the wrong reason."""
     off = _retrieve(index, OFF_QUESTION, OFF_TERMS)

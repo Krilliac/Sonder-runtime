@@ -168,10 +168,12 @@ def passage_coverage(index: object, terms: Sequence[str], passages: Sequence[Pas
     caller then keeps the passages, as before the floor existed.
     """
     stats_for = getattr(index, "term_stats", None)
-    rowids = [passage.rowid for passage in passages]
-    if not callable(stats_for) or not terms or not rowids or any(row <= 0 for row in rowids):
+    if not callable(stats_for) or not terms or not passages:
         return None
     try:
+        rowids = [passage.rowid for passage in passages]
+        if any(row <= 0 for row in rowids):
+            return None
         stats = stats_for(terms, rowids)
         weights = {term: term_weight(stats.passage_count, stats.matching.get(term, 0))
                    for term in terms}
