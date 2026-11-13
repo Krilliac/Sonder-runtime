@@ -28,9 +28,17 @@ probe every 30 seconds while still recovering a rebooted one within a minute
 or two.
 
 For model-specific routing the pool requires fresh positive capability evidence.
-If no fresh supporting worker exists, one request may probe one unknown or stale
-worker; it does not fan out across the roster. When no eligible worker advertises
-the requested model at all, the request forces one bounded capability batch over
+If no fresh supporting worker exists, one request may probe one concurrent wave
+of unknown or stale static workers, at most the smaller of the configured probe
+parallelism (4 by default) and batch size, so a model served by any of them is
+found on that request. The wave takes no longer than one probe timeout and does
+not fan out across a larger roster; workers beyond one wave are left to later
+requests. A request that arrives while another request's wave is in flight
+waits for it, within its admission timeout, instead of starting another; one
+that waited behind an operator refresh probes its own wave only if the model is
+still unserved. When no eligible
+worker advertises the requested model at all, the request forces one bounded
+capability batch over
 eligible workers whose cached inventory lacks it (at most once every 30 seconds
 per pool), so a model pulled after the last probe becomes routable without an
 operator refresh. This renews inventory only; it never admits a worker that
