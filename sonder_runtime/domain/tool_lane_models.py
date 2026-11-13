@@ -222,9 +222,13 @@ def decide_selector(
     return decide(text, deny, free_form=True)
 
 
-def _candidates(normalized: str) -> tuple[str, ...]:
+def name_candidates(normalized: str) -> tuple[str, ...]:
+    """The names a normalized model name is matched as: itself, then its last path segment."""
     tail = normalized.rsplit("/", 1)[-1]
     return (normalized,) if tail == normalized else (normalized, tail)
+
+
+_candidates = name_candidates  # the original private name, kept for existing callers
 
 
 def decide(model: Any, deny: ToolLaneDenyList, *, free_form: bool) -> ModelLaneDecision:

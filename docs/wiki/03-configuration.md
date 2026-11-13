@@ -576,6 +576,78 @@ tolerated gaps is empty. Limit: a name computed at run time
 variable) cannot be seen statically, so the ratchet does not catch it; review
 has to.
 
+#### Reference lookup
+
+For some local models a chat turn first searches a local reference library
+(Windows security event pages, MITRE ATT&CK techniques, Sigma detection
+rules) and sends the passages it found inside the user turn, between marker
+lines that carry a random code for that turn. The built-in models are the
+same names as the deny list above, taken from its default prefixes: the
+`astra-cyber-` prefix and the two Hugging Face GGUF sources (as `hf.co/...` or
+`huggingface.co/...`) in any quantisation, tagged or not. The model is first asked for search terms once
+(temperature 0, 80 tokens, no system prompt, never streamed, not a provider
+attempt of the turn); only the first eight identifiers in a question (event
+ids, technique ids, hex values) get title priority. The reply is cleaned
+(copied marker lines removed, display-safe text), its `[n]` citations are
+checked, and a `Sources:` block with any warnings follows it. The stored task
+is the raw question and the stored reply the cleaned text; the Sources block
+is added after storage and capture, and a turn answered with passages is
+excluded from lesson distillation and the training export.
+
+| Control | Effect |
+|---|---|
+| `SONDER_REFERENCE_INDEX` | path of the index file; default `references/references.sqlite` under the Sonder home. Opened read-only through the runtime's SQLite factory: on POSIX that removes group/other permission bits from the file when the runtime's user owns it, and a managed child process only admits an index inside its private roots (elsewhere the lookup reports itself unavailable) |
+| `SONDER_REFERENCE_LOOKUP=0` | kill switch: no automatic lookup for any model, and `reference_search` answers unavailable |
+| `reference_lookup` in `runtime_policy.json` | `{"enabled": true, "names": [...], "prefixes": [...]}`: entries add to the built-in names, never remove them; `enabled: false` turns automatic lookup off; a `path` key is rejected, because the index path comes only from the environment |
+
+The index itself is built by a separate tool and is not shipped with Sonder.
+A missing or unusable index fails open: the turn answers without passages and
+says `Sources: none (reference lookup unavailable: <reason>)`. The runtime
+policy status output and `diagnostics` show one line with the index path, its
+state, the names in force and the last error. A cancelled search-terms call
+ends the turn in the chat routes. It does not in `consult`: `consult` turns
+any exception from a member call into that member's error entry (as it did
+before this feature), so a cancellation there is reported as that member's
+error and the call goes on.
+
+Lookup applies to the MCP chat tool (by tier or `model_override`), the HTTP
+chat route, text-mode `ensemble_answer` (one retrieval shared by every member
+when any member matches; the synthesiser sees only the cleaned answers) and
+`consult` (members share one retrieval; the judge sees no passages). It does
+not apply to structured answers, code-mode ensembles or model fan-out. A tier
+bound to a provider other than Ollama is judged by the model that provider
+serves, as for the deny list. A deny-listed model never serves a tier (that
+call is refused), so on a bridged tier lookup applies only to a name the
+policy's `reference_lookup` section adds; a refused call leaves no Sources
+block, no stored interaction and no lookup state. When a provider falls back to another backend
+in the middle of a call, the lookup decision follows the primary provider's
+configured model. The read-only MCP tool `reference_search`
+(`query`, `k` 1 to 8) returns framed passages and their sources to any caller;
+it makes no model call.
+
+Every model call the lookup makes is a text call under the deny list's
+generation check: the search-terms call declares `text_only=True` itself, and
+the framed answer, each ensemble or consult member, the synthesis and the
+consult judge carry the declaration of the lane they belong to. Lookup runs
+only on a lane that declares itself text-only. A model both rules name
+therefore answers with lookup on these lanes when asked for by name, while
+the lanes that run or apply model output still refuse it and make no lookup
+call.
+
+A lookup turn is sent none of the runtime's system prompt (persona, playbook,
+trace instructions, tool guidance, profile and goal), so the model's own
+Modelfile rules stay in force; only a system message the caller supplied to
+the MCP chat tool is sent. The HTTP receipt says so:
+`sonder_receipt.reference_lookup` holds `applied`, `passages` or `reason`, and
+`runtime_system_prompt_sent: false`. The status line says so too.
+
+One exception to "passages are never stored": when a turn's provider attempts
+are captured in the durable session event stream, the `provider.requested`
+event keeps the payload that was sent, which is the framed prompt with its
+passages, and a session export (including ATIF) can carry it. The passages are
+public reference text and the record is transport evidence; it is not fed
+back to a model.
+
 ### Sonder ecosystem (Inference provider and Observatory)
 
 Sonder Inference provider (read lazily per call; reference:

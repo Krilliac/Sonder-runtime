@@ -430,6 +430,10 @@ _READ_ONLY = frozenset({
     # like web_fetch/weather_lookup; the cloud consent gate still refuses
     # them unless SONDER_ALLOW_CLOUD is on.
     "openrouter_models", "openrouter_account",
+    # Reads the local reference library through a read-only sqlite connection
+    # (bootstrap/reference_agent_tools.py): query and count only, no model
+    # call, no write, no network; the index path is never an argument.
+    "reference_search",
 })
 
 # Branches whose real work is done by module-level functions that front no

@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 424,
+      "file_count": 430,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -84,6 +84,7 @@
         "sonder_runtime/adapters/build/source_editor.py",
         "sonder_runtime/adapters/build/tree_reader.py",
         "sonder_runtime/adapters/chat_file_routing.py",
+        "sonder_runtime/adapters/chat_observers.py",
         "sonder_runtime/adapters/cheat_trial_runner.py",
         "sonder_runtime/adapters/cli_options.py",
         "sonder_runtime/adapters/client_config.py",
@@ -390,6 +391,11 @@
         "sonder_runtime/adapters/provider_dispatch/gateway.py",
         "sonder_runtime/adapters/recall.py",
         "sonder_runtime/adapters/recall_gateway.py",
+        "sonder_runtime/adapters/reference_index.py",
+        "sonder_runtime/adapters/reference_lookup_lanes.py",
+        "sonder_runtime/adapters/reference_lookup_multi.py",
+        "sonder_runtime/adapters/reference_lookup_service.py",
+        "sonder_runtime/adapters/reference_lookup_state.py",
         "sonder_runtime/adapters/repl_services.py",
         "sonder_runtime/adapters/repo_repair_runner.py",
         "sonder_runtime/adapters/repository_errors.py",
@@ -468,7 +474,7 @@
       ]
     },
     {
-      "file_count": 413,
+      "file_count": 414,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -522,6 +528,7 @@
         "sonder_runtime/application/chat/honesty.py",
         "sonder_runtime/application/chat/lanes.py",
         "sonder_runtime/application/chat/provider_bridge.py",
+        "sonder_runtime/application/chat/reference_lookup.py",
         "sonder_runtime/application/chat/stream_sink.py",
         "sonder_runtime/application/chat/tool_intent.py",
         "sonder_runtime/application/command_surface/__init__.py",
@@ -887,7 +894,7 @@
       ]
     },
     {
-      "file_count": 76,
+      "file_count": 77,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -955,6 +962,7 @@
         "sonder_runtime/bootstrap/playbooks.py",
         "sonder_runtime/bootstrap/prepared_workbench.py",
         "sonder_runtime/bootstrap/provider_bindings.py",
+        "sonder_runtime/bootstrap/reference_agent_tools.py",
         "sonder_runtime/bootstrap/repl_host_selection.py",
         "sonder_runtime/bootstrap/repl_managed.py",
         "sonder_runtime/bootstrap/runtime_owner.py",
@@ -969,7 +977,7 @@
       ]
     },
     {
-      "file_count": 292,
+      "file_count": 300,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1198,6 +1206,14 @@
         "sonder_runtime/domain/reasoning_continuation.py",
         "sonder_runtime/domain/recipe.py",
         "sonder_runtime/domain/reconnect_reconciliation.py",
+        "sonder_runtime/domain/reference_lookup/__init__.py",
+        "sonder_runtime/domain/reference_lookup/answer_check.py",
+        "sonder_runtime/domain/reference_lookup/applies.py",
+        "sonder_runtime/domain/reference_lookup/models.py",
+        "sonder_runtime/domain/reference_lookup/prompt.py",
+        "sonder_runtime/domain/reference_lookup/sanitize.py",
+        "sonder_runtime/domain/reference_lookup/selection.py",
+        "sonder_runtime/domain/reference_lookup/terms.py",
         "sonder_runtime/domain/replication_ack.py",
         "sonder_runtime/domain/repository_languages.py",
         "sonder_runtime/domain/request_timeout.py",
@@ -1349,7 +1365,7 @@
       ]
     },
     {
-      "file_count": 49,
+      "file_count": 50,
       "name": "platform",
       "python_files": [
         "sonder_runtime/platform/__init__.py",
@@ -1387,6 +1403,7 @@
         "sonder_runtime/platform/private_files.py",
         "sonder_runtime/platform/process.py",
         "sonder_runtime/platform/reasoning_policy.py",
+        "sonder_runtime/platform/reference_library_config.py",
         "sonder_runtime/platform/runtime_summary.py",
         "sonder_runtime/platform/runtime_threads.py",
         "sonder_runtime/platform/secret_presence.py",

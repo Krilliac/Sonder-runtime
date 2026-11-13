@@ -23,6 +23,15 @@ def _default_ask(prompt, tier):
     return server.ensemble_answer(prompt, tiers=tier, mode="general")
 
 
+def _default_judge(prompt, tier):
+    # The judge compares the members' answers.  It runs with reference lookup
+    # off, so it is never sent passages or marker lines of its own.
+    from sonder_runtime.adapters import reference_lookup_multi
+
+    with reference_lookup_multi.off():
+        return _default_ask(prompt, tier)
+
+
 def _failure(text):
     value = str(text or "").strip()
     lowered = value.lower()
@@ -102,7 +111,15 @@ def default_tiers(cloud_ok=None):
     return tiers
 
 
-def consult(prompt, tiers=None, *, ask_fn=None, cloud_ok=None):
+def _with_sources(result, scope):
+    """Attach the reference-lookup Sources block, when the consult had one."""
+    text = scope.sources() if scope is not None else ""
+    if text:
+        result["sources"] = text
+    return result
+
+
+def consult(prompt, tiers=None, *, ask_fn=None, judge_fn=None, cloud_ok=None, lookup=None):
     """Ask ``prompt`` to several independent tiers and report their agreement.
 
     ``tiers`` is a list of tier names; when None it is :func:`default_tiers`
@@ -113,6 +130,14 @@ def consult(prompt, tiers=None, *, ask_fn=None, cloud_ok=None):
 
     ``ask_fn(prompt, tier) -> str`` is an injection seam for offline tests, and
     ``cloud_ok`` forces the cloud decision for :func:`default_tiers` in tests.
+    ``judge_fn(prompt, tier) -> str`` asks the judge; it defaults to the
+    lookup scope's judge (reference lookup off) or else ``ask_fn``, so the judge
+    never shares the members' reference passages.
+    ``lookup(question, tiers)`` is the reference-lookup hook: it returns None
+    (the consult runs as it always did) or a scope whose ``member(ask)`` gives
+    every member the same retrieved passages, whose ``judge(ask)`` runs the
+    judge without lookup, and whose ``sources()`` text is put in the result's
+    ``sources`` entry, shown after the verdict.
     Returned model errors are failures, not answers; a failed or malformed judge
     falls back to normalized-token overlap and leaves confidence unknown.
     """
@@ -127,7 +152,13 @@ def consult(prompt, tiers=None, *, ask_fn=None, cloud_ok=None):
         if tier not in ordered:
             ordered.append(tier)
 
-    graded = [(tier,) + _ask(ask, question, tier) for tier in ordered]
+    scope = lookup(question, list(ordered)) if lookup is not None else None
+    member_ask = scope.member(ask) if scope is not None else ask
+    judge_ask = judge_fn or (
+        scope.judge(ask) if scope is not None
+        else ask if ask_fn is not None else _default_judge
+    )
+    graded = [(tier,) + _ask(member_ask, question, tier) for tier in ordered]
     answers = [
         {"tier": tier, "text": "[failed] %s" % text if failed else text}
         for tier, text, failed in graded
@@ -137,16 +168,16 @@ def consult(prompt, tiers=None, *, ask_fn=None, cloud_ok=None):
     tail = "" if not failed_tiers else " (no answer from %s)" % ", ".join(failed_tiers)
 
     if len(ok) < 2:
-        return {
+        return _with_sources({
             "prompt": question,
             "answers": answers,
             "agree": None,
             "confidence": "unknown",
             "note": "Need two answers to compare; failed for tier(s): %s."
             % (", ".join(failed_tiers) or "unknown"),
-        }
+        }, scope)
 
-    judge, judge_failed = _ask(ask, _judge_prompt(question, ok), ok[0][0])
+    judge, judge_failed = _ask(judge_ask, _judge_prompt(question, ok), ok[0][0])
     verdict = None if judge_failed else _judge_verdict(judge)
     if verdict is None:
         agree = _all_overlap([text for _tier, text in ok])
@@ -160,13 +191,13 @@ def consult(prompt, tiers=None, *, ask_fn=None, cloud_ok=None):
         confidence = "high" if agree else "low"
         note = ("All tiers agree on the substance." if agree else "Tiers disagree.") + tail
 
-    return {
+    return _with_sources({
         "prompt": question,
         "answers": answers,
         "agree": agree,
         "confidence": confidence,
         "note": note,
-    }
+    }, scope)
 
 
 def verdict_line(result, encoding=None):
@@ -203,4 +234,7 @@ def format_result(result, encoding=None):
         for answer in result["answers"]
     ]
     sections.append(verdict_line(result, encoding=encoding))
+    if result.get("sources"):
+        # One reference-lookup Sources block, after the verdict.
+        sections.append(result["sources"])
     return "\n\n".join(sections)
