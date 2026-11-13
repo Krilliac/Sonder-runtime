@@ -90,11 +90,15 @@ def format_mcp_runtime(data, *, recovery_action) -> str:
     """
     loaded = str(data.get("loaded_digest") or "")[:12] or "unknown"
     current = str(data.get("current_digest") or "")[:12] or "unknown"
+    stale = sorted(str(name) for name in (data.get("stale_modules") or ()))
+    status = data.get("status", "unknown")
+    if stale and status == "current":
+        status = "restart required"
     lines = [
         "sonder MCP runtime",
         "  status: %s | live source refresh: %s"
         % (
-            data.get("status", "unknown"),
+            status,
             "on" if data.get("enabled") else "off",
         ),
         "  tools: %s | atomic refreshes: %s | last surface changed: %s"
@@ -109,6 +113,20 @@ def format_mcp_runtime(data, *, recovery_action) -> str:
         % ("available" if data.get("path") else "unknown"),
         "  loaded/current: %s / %s" % (loaded, current),
     ]
+    if stale:
+        lines.append(
+            "  package code: %d loaded module(s) changed on disk after this process"
+            " loaded them (%s%s)"
+            % (
+                len(stale),
+                ", ".join(stale[:3]),
+                ", +%d more" % (len(stale) - 3) if len(stale) > 3 else "",
+            )
+        )
+        lines.append(
+            "  ACTION: restart the Sonder MCP server; live source refresh reloads"
+            " server.py and the watched helper modules only"
+        )
     provenance = data.get("provenance") or {}
     if provenance:
         lines.extend([
