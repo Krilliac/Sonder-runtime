@@ -750,7 +750,7 @@ def test_cancelled_search_terms_call_propagates_and_no_answer_is_asked(lane, err
         return gen
 
     lanes.system_for(LOOKUP_MODEL, "runtime system prompt")
-    gen = lanes.chat_generate(make_generate, QUESTION, LOOKUP_MODEL, "", 0.2, 1024, 8192)
+    gen = lanes.chat_generate(make_generate, QUESTION, LOOKUP_MODEL, "", 0.2, 1024, 8192, text_only=True)
     with pytest.raises(type(error)):
         gen(QUESTION, None)
     assert asked == [lanes.EXPAND_NUM_PREDICT]

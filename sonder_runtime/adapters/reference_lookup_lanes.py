@@ -18,7 +18,8 @@ chat tool (by tier and by ``model_override``) and of the HTTP chat route
   callable for the rung.  For a lookup model it retrieves passages once per
   turn (asking the answering model for search terms first) and frames the user
   turn through ``wrap_generate``, so the stored task stays the raw question and
-  callers store the cleaned reply.
+  callers store the cleaned reply.  Only a lane that passes ``text_only=True``
+  gets lookup; any other lane is called through unchanged.
 * ``mark_learning_skip(conn, interaction_id)``: marks a turn that was answered
   with passages so lesson distillation and the training export skip it.
 * ``with_sources(text)`` (MCP) and ``finish_http(content, receipt)`` (HTTP):
@@ -293,7 +294,15 @@ class LookupGenerate:
 def chat_generate(make_generate: Callable[..., Any], question: Any, model: Any, system: Any,
                   temperature: Any, num_predict: Any, num_ctx: Any, **options: Any) -> Any:
     """``make_generate(model, system, temperature, num_predict, num_ctx, **options)``,
-    wrapped for reference lookup when it applies to ``model``."""
+    wrapped for reference lookup when it applies to ``model``.
+
+    Lookup runs only on a lane that declared itself text-only
+    (``text_only=True`` in ``options``).  Any other lane gets the plain call:
+    no lookup record, no retrieval and no search-terms call, so nothing is
+    sent ahead of a call the generation check is about to refuse.
+    """
+    if options.get("text_only") is not True:
+        return make_generate(model, system, temperature, num_predict, num_ctx, **options)
     record = _record(model)
     record.bound = True
     if not record.applies:

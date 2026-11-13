@@ -223,3 +223,33 @@ def test_the_lookup_seams_never_bind_an_exec_lane(checked, monkeypatch):
     server.parallel_generate_run("double a number", variants=1, max_workers=1, tier="code")
     server._agent_turn("list files", tier=LOOKUP_MODEL)
     assert seen == []
+
+
+def test_an_undeclared_lane_gets_no_lookup_and_sends_nothing(checked, monkeypatch):
+    """A lane that did not declare itself text-only is called through: no record, no search terms."""
+    transport, judged, retrievals = checked
+    seen = []
+    real_record = lanes._record
+    monkeypatch.setattr(lanes, "_record", lambda model: (seen.append(model), real_record(model))[1])
+
+    gen = lanes.chat_generate(server._make_generate, QUESTION, LOOKUP_MODEL, "", 0.2, 1024, 4096)
+    with pytest.raises(server.ModelCallError) as caught:
+        gen(QUESTION, None)
+
+    assert getattr(caught.value, "tool_lane_refused", False) is True
+    assert transport.payloads == []
+    assert retrievals == []
+    assert seen == [] and lanes._TURN.get() is None
+    assert judged == [(LOOKUP_MODEL, False)]
+    assert not isinstance(gen, lanes.LookupGenerate)
+
+
+def test_a_code_mode_ensemble_on_the_lookup_model_looks_nothing_up(checked):
+    """Every caller that runs an ensemble's reply asks in code mode, which gets no shared lookup."""
+    transport, judged, retrievals = checked
+    server.ensemble_answer(QUESTION, tiers=LOOKUP_MODEL, mode="code")
+
+    assert retrievals == []
+    assert transport.expansions() == []
+    assert all(PASSAGE_TEXT not in p["messages"][-1]["content"] for p in transport.payloads)
+    _assert_judged_text_only(judged, len(transport.payloads))
