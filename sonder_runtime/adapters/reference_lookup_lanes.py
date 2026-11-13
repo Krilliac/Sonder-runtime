@@ -359,13 +359,15 @@ def terms_generate(make: Callable[..., Any], *target: Any, **options: Any) -> An
     """
     *head, num_ctx = target
     args = (*head, "", EXPAND_TEMPERATURE, EXPAND_NUM_PREDICT, num_ctx)
-    plain_options = {**options, "text_only": True}
+    # ``text_only=True`` is spelled out at each call so the generation call-site
+    # scan (tests/support/generation_call_sites.py) sees the declaration.
+    plain_options = {key: value for key, value in options.items() if key != "text_only"}
     quick_options = {key: value for key, value in plain_options.items()
-                     if key not in _THINKING_ONLY_OPTIONS}
+                     if key != "think" and key not in _THINKING_ONLY_OPTIONS}
     try:
-        quick = make(*args, **{**quick_options, "think": False})
+        quick = make(*args, text_only=True, think=False, **quick_options)
     except ValueError:
-        return make(*args, **plain_options)
+        return make(*args, text_only=True, **plain_options)
 
     def generate(prompt: Any, *call_args: Any, **call_kwargs: Any) -> Any:
         try:
@@ -373,7 +375,7 @@ def terms_generate(make: Callable[..., Any], *target: Any, **options: Any) -> An
         except Exception as exc:  # noqa: BLE001  # re-raised unless the option itself was the cause
             if not _thinking_was_needed(exc):
                 raise
-        return make(*args, **plain_options)(prompt, *call_args, **call_kwargs)
+        return make(*args, text_only=True, **plain_options)(prompt, *call_args, **call_kwargs)
 
     return generate
 
