@@ -24,6 +24,7 @@ import server
 from sonder_runtime.adapters import tool_lane_guard as guard
 from sonder_runtime.adapters.provider_bindings import provider_bindings_from_env
 from sonder_runtime.application.ports.model_gateway import ModelResponse
+from tests import test_tool_lane_default_route as default_route
 from tests.support.tool_lane import (
     ALLOWED,
     DENIED,
@@ -32,7 +33,11 @@ from tests.support.tool_lane import (
     clear_environment,
     served_refusal,
 )
-from tests.test_tool_lane_default_route import TASK, executed, isolated  # noqa: F401 - fixtures
+
+# The default-route suite's isolation (autouse) and execution-sink fixtures.
+isolated = default_route.isolated
+executed = default_route.executed
+TASK = default_route.TASK
 
 LATE = "deepseek-r1:8b"  # an ordinary Ollama name bound to ``reasoning`` while a run is going
 TASKS = [dict(TASK, name="t1"), dict(TASK, name="t2")]
