@@ -412,7 +412,8 @@ def test_chat_request_does_not_retry_forever(monkeypatch):
             {"model": "r", "messages": [], "options": {"num_predict": 260}},
             model="r",
         )
-    assert len(calls) == 2  # original plus exactly one budget retry
+    # original, one budget retry, one ask with thinking off: never a fourth
+    assert len(calls) == 3
 
 
 def test_a_learned_thinking_model_gets_headroom_up_front(monkeypatch):
