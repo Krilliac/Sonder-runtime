@@ -399,8 +399,9 @@ def test_search_terms_call_is_small_deterministic_and_bare(lane, monkeypatch):
 
 
 def _reasoning_search_terms(lane):
-    """The lane's fake, with search-terms calls (temperature 0) answered like a thinking model:
-    a call capped below the local thinking budget spends it thinking and returns no content."""
+    """The lane's fake, with search-terms calls (temperature 0) answered like a thinking model
+    whose route ignores the thinking-off option: a call capped below the local thinking budget
+    spends it thinking and returns no content, so the call is asked once more as an ordinary one."""
     answer = lane.__call__
 
     def call(path, payload, *args, **kwargs):
@@ -416,7 +417,7 @@ def _reasoning_search_terms(lane):
 
 
 def test_ensemble_search_terms_requests_are_the_single_lanes_byte_for_byte(lane, monkeypatch):
-    """Same model, question and window: the same requests, including the one budget retry."""
+    """Same model, question and window: the same requests, including the second ask."""
     monkeypatch.setattr(server, "_auto_model_context", lambda model: 8192)
     monkeypatch.setattr(server, "_post", _reasoning_search_terms(lane))
 
@@ -430,7 +431,8 @@ def test_ensemble_search_terms_requests_are_the_single_lanes_byte_for_byte(lane,
     monkeypatch.setattr(server, "_THINKING_CAPABILITY_CACHE", {})
     out = server.ensemble_answer(QUESTION, tiers=LOOKUP_MODEL)
 
-    assert [p["options"]["num_predict"] for p in single] == [80, server.LOCAL_THINKING_MIN_NUM_PREDICT]
+    assert [(p.get("think"), p["options"]["num_predict"]) for p in single] == [
+        (False, 80), (None, server.LOCAL_THINKING_MIN_NUM_PREDICT)]
     assert search_terms_calls() == single
     assert "keyword expansion failed" not in out and "Sources:" in out
 

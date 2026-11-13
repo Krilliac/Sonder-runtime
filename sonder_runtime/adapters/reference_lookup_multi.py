@@ -135,9 +135,8 @@ class SharedLookup:
             # Not a provider attempt of the turn, and never streamed.  The reply
             # is only parsed into query words: a text call.
             with provider_attempt_scope(None, None), stream_sink.armed(None):
-                return make_tier_generate(
-                    tier, model, "", _lanes.EXPAND_TEMPERATURE, _lanes.EXPAND_NUM_PREDICT,
-                    self.num_ctx(ctx_for, tier, model), text_only=True,
+                return _lanes.terms_generate(
+                    make_tier_generate, tier, model, self.num_ctx(ctx_for, tier, model),
                 )(text)
 
         self.retrievals += 1
