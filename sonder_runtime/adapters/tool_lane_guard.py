@@ -5,9 +5,11 @@ refuse a blocked model calls one function here.  The decision rule itself is
 the pure ``sonder_runtime.domain.tool_lane_models``; this adapter only supplies
 the deny list from the runtime policy and shapes the result for the caller.
 
-Every function takes the loaded runtime policy the caller already holds.  A
+Every lane check takes the loaded runtime policy the caller already holds.  A
 missing policy is read from disk without creating it, and a policy that cannot
-be read fails closed for caller-named models.
+be read fails closed for caller-named models.  The generation checks
+(``require_generation``, ``require_served``) read a deny list cached per
+version of the policy file, and refuse unless the call site is text-only.
 
 A tier bound to a non-Ollama provider (``SONDER_<TIER>_PROVIDER`` /
 ``SONDER_MODEL_BACKEND``) is judged by the model that provider serves, which
