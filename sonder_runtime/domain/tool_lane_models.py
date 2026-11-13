@@ -224,11 +224,29 @@ def decide_selector(
 
 
 def name_candidates(normalized: str) -> tuple[str, ...]:
-    """The full name and slash/backslash path suffixes, including every segment."""
+    """The full name, its last ``/`` segment, and every slash/backslash path suffix and segment.
+
+    The first two are the original rule's candidates and are always present,
+    so splitting on ``\\`` as well can only add candidates, never drop one.
+    """
     parts = normalized.replace("\\", "/").split("/")
     return tuple(dict.fromkeys(
-        [normalized] + ["/".join(parts[index:]) for index in range(len(parts))] + parts
+        [normalized, normalized.rsplit("/", 1)[-1]]
+        + ["/".join(parts[index:]) for index in range(len(parts))] + parts
     ))
+
+
+def policy_candidates(normalized: str) -> frozenset[str]:
+    """The candidates a policy-added name or prefix is matched against.
+
+    The original two (the full name and its last ``/`` segment, backslashes
+    included) plus the last segment after either separator.
+    """
+    return frozenset({
+        normalized,
+        normalized.rsplit("/", 1)[-1],
+        normalized.replace("\\", "/").rsplit("/", 1)[-1],
+    })
 
 
 _candidates = name_candidates  # the original private name, kept for existing callers
@@ -246,7 +264,7 @@ def decide(model: Any, deny: ToolLaneDenyList, *, free_form: bool) -> ModelLaneD
     normalized = normalize_name(raw)
     if not normalized:
         return ModelLaneDecision(ModelLaneStatus.ALLOWED, raw)
-    original_candidates = {normalized, normalized.replace("\\", "/").rsplit("/", 1)[-1]}
+    original_candidates = policy_candidates(normalized)
     for candidate in _candidates(normalized):
         if candidate in original_candidates and candidate in deny.names:
             return ModelLaneDecision(ModelLaneStatus.DENIED, raw, candidate)

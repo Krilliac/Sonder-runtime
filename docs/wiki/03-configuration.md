@@ -397,8 +397,9 @@ matches at the start of any segment. Both `/` and `\` separate segments;
 matching casefolds and trims names and removes one trailing `:latest`. An
 `https://` URL or registry prefix cannot hide a source. A different model
 stored under a directory named after a blocked model is also refused.
-Policy-added names and prefixes keep full-name and final-segment matching,
-with either path separator.
+Policy-added names and prefixes are matched against the full name, its last
+`/` segment (backslashes included, as before), and its last segment after
+either separator.
 
 The runtime policy can add entries (`tool_lane_denied_models` in
 `runtime_policy.json`: `{"names": [...], "prefixes": [...]}`) but never remove
@@ -581,8 +582,12 @@ a call of the original. Register the site in
   and whose body ends in `return` or `raise` (`continue` or `break` in a loop
   body), or a call statement of a same-file helper that refuses that way with
   `raise`. It judges the selector the call passes when it judges the same
-  expression and no name in it is assigned between the refusal and the call (a
-  call that passes none is judged by `""`, the default route). Where a
+  expression and nothing in it is changed between the refusal and the call: no
+  name in it is assigned, and no `setattr` or method call is made on it (a
+  read-only method call counts too, so keep such calls before the refusal; a
+  call that passes none is judged by `""`, the default route). The check
+  recognises these fixed shapes and is meant to catch an honest omission, not
+  code written to get around it. Where a
   different expression is right by design, the entry says why in
   `selector_reason`.
 - `CHOKE`: the generation stack forwarding the flag, imports and re-exports.

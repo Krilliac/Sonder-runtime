@@ -540,6 +540,21 @@ def default_route_reach(
     return start, tiers
 
 
+def projected_local_code_model(stable_alias: str = "sonder:latest") -> str:
+    """The local code model the runtime would configure, read without loading it.
+
+    Mirrors ``RuntimeModelConfiguration.from_environment``: ``SONDER_CODE_LOCAL``
+    or the stable alias, and never a model on the built-in list (the runtime
+    swaps one for the stable alias).  Reads one environment value per call, so
+    it is quiet, cheap and cannot go stale; a test pins the two together.
+    """
+    configured = str(os.environ.get("SONDER_CODE_LOCAL", stable_alias))
+    builtin = _models.ToolLaneDenyList.from_policy(None)
+    if _models.decide(configured, builtin, free_form=False).denied:
+        return stable_alias
+    return configured
+
+
 def default_route_refusal(
     bindings: Mapping[str, str], policy: Mapping[str, Any] | None = None,
     deny: _models.ToolLaneDenyList | None = None,
@@ -562,13 +577,11 @@ def default_route_refusal(
         # LOCAL_CODE_MODEL.  It is not a key in TIERS, so reachable_tiers omits
         # it; judge that fallback with the current policy before escalation.
         live_server = sys.modules.get("server")
-        # These are the two values resolve_sonder_model may return. Read only
-        # the relevant environment value; the full configuration projection
-        # logs and would run on every check before server is imported.
+        # These are the two values resolve_sonder_model may return.
         stable_alias = getattr(live_server, "SONDER_STABLE_ALIAS", "sonder:latest")
-        local_code = getattr(
-            live_server, "LOCAL_CODE_MODEL", str(os.environ.get("SONDER_CODE_LOCAL", stable_alias)),
-        )
+        local_code = getattr(live_server, "LOCAL_CODE_MODEL", None)
+        if local_code is None:
+            local_code = projected_local_code_model(stable_alias)
         possible_starts = (stable_alias, local_code)
         for model in possible_starts:
             verdict = _models.decide(model, deny, free_form=False)

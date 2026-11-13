@@ -117,6 +117,47 @@ def test_policy_exact_name_matches_the_last_backslash_segment():
     assert not denied(r"C:\models\helper-model-extra", deny)
 
 
+# Refused before backslashes were treated as separators (the candidate was the
+# whole last ``/`` segment), so they must stay refused: the split only adds.
+def _bs(text):
+    """``|`` stands for a backslash, so no test name depends on string escapes."""
+    return text.replace("|", chr(92))
+
+
+@pytest.mark.parametrize("name", (
+    "C:/models/pfx-model|weights.gguf",
+    "hf.co/pfx-thing|team",
+    "ollama/pfx-x|",
+    "team/pfx-thing|:latest",
+    "pfx-model|weights.gguf",
+))
+def test_policy_prefix_still_matches_a_last_slash_segment_holding_a_backslash(name):
+    name = _bs(name)
+    assert chr(92) in name
+    deny = ToolLaneDenyList.from_policy({"prefixes": ["pfx-"]})
+    assert denied(name, deny)
+    assert not denied(name)
+
+
+def test_policy_name_holding_a_backslash_still_matches_the_last_slash_segment():
+    deny = ToolLaneDenyList.from_policy({"names": [_bs("team|blocked")]})
+    assert denied(_bs("hf.co/team|blocked"), deny)
+    assert denied(_bs("team|blocked"), deny)
+    assert not denied(_bs("hf.co/team|blocked-other"), deny)
+    assert not denied(_bs("hf.co/team|blocked"))
+
+
+@pytest.mark.parametrize("name", (
+    "plain", "a/b", "a|b", "a/b|c", "a|b/c", "c:|x|y/z|w", "trailing/", "trailing|", "/", "|",
+))
+def test_candidates_always_include_the_original_two(name):
+    name = _bs(name)
+    candidates = rule.name_candidates(name)
+    assert candidates[0] == name
+    assert name.rsplit("/", 1)[-1] in candidates
+    assert {name, name.rsplit("/", 1)[-1]} <= rule.policy_candidates(name) <= set(candidates)
+
+
 @pytest.mark.parametrize("name", (
     r"C:\models\qwen3.8-Q8_0.gguf",
     r"D:\m\qwen3-coder.gguf",

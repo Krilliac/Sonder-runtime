@@ -296,6 +296,31 @@ def test_default_route_without_loaded_server_preserves_ordinary_configuration(mo
     assert guard.selector_refusal("sonder", server.TIERS, server._RUNTIME_POLICY) == ""
 
 
+def test_default_route_without_loaded_server_swaps_a_builtin_blocked_local_code_like_the_runtime(monkeypatch):
+    """The runtime never keeps a built-in-blocked SONDER_CODE_LOCAL: it uses the stable alias."""
+    monkeypatch.setenv("SONDER_STRICT", "1")
+    monkeypatch.setenv("SONDER_CODE_LOCAL", DENIED)
+    monkeypatch.delitem(sys.modules, "server")
+    assert guard.projected_local_code_model() == "sonder:latest"
+    assert guard.selector_refusal("sonder", server.TIERS, server._RUNTIME_POLICY) == ""
+    policy = dict(server._RUNTIME_POLICY, tool_lane_denied_models={"names": ["sonder:latest"]})
+    assert guard.selector_refusal("sonder", server.TIERS, policy) == BLOCKED % "sonder:latest"
+
+
+@pytest.mark.parametrize("configured", (None, "", ALLOWED, DENIED, "Astra-Cyber-9B:latest", "policy-blocked-local"))
+def test_projected_local_code_model_matches_the_runtime_configuration(monkeypatch, configured):
+    from sonder_runtime.domain.runtime_model_configuration import RuntimeModelConfiguration
+
+    if configured is None:
+        monkeypatch.delenv("SONDER_CODE_LOCAL", raising=False)
+        env = {}
+    else:
+        monkeypatch.setenv("SONDER_CODE_LOCAL", configured)
+        env = {"SONDER_CODE_LOCAL": configured}
+    runtime = RuntimeModelConfiguration.from_environment(env)
+    assert guard.projected_local_code_model(runtime.stable_alias) == runtime.local_code_model
+
+
 def test_unrelated_loaded_server_module_cannot_break_default_route(monkeypatch):
     monkeypatch.setenv("SONDER_STRICT", "1")
     monkeypatch.setenv("SONDER_CODE_LOCAL", "policy-blocked-local")

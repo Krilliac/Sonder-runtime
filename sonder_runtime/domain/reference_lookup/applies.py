@@ -19,6 +19,7 @@ from ..tool_lane_models import (
     DEFAULT_DENIED_PREFIXES,
     name_candidates,
     normalize_name,
+    policy_candidates,
 )
 
 # The built-in models are the tool-lane deny list's: the same prefixes (so every
@@ -97,7 +98,7 @@ def decide(model: Any, rule: AppliesRule, *, kill_switch_off: bool = False) -> A
     normalized = normalize_name(model)
     if not normalized:
         return AppliesDecision(False, AppliesReason.NO_MODEL)
-    original_candidates = {normalized, normalized.replace("\\", "/").rsplit("/", 1)[-1]}
+    original_candidates = policy_candidates(normalized)
     for candidate in name_candidates(normalized):
         if candidate in original_candidates and candidate in rule.names:
             return AppliesDecision(True, AppliesReason.MATCHED_NAME, candidate)

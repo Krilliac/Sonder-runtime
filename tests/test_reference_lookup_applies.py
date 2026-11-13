@@ -116,6 +116,19 @@ def test_policy_names_and_prefixes_extend_the_defaults():
     assert rule.extended and not DEFAULT_RULE.extended
 
 
+def test_policy_entries_still_match_a_last_slash_segment_holding_a_backslash():
+    def bs(text):  # ``|`` stands for a backslash
+        return text.replace("|", chr(92))
+
+    rule = AppliesRule.from_policy({"enabled": True, "names": [bs("team|blocked")], "prefixes": ["pfx-"]})
+    for name in ("C:/models/pfx-model|weights.gguf", "hf.co/pfx-thing|team", "ollama/pfx-x|",
+                 "team/pfx-thing|:latest", "hf.co/team|blocked"):
+        name = bs(name)
+        assert chr(92) in name
+        assert decide(name, rule).applies is True
+        assert decide(name, DEFAULT_RULE).applies is False
+
+
 def test_disabled_policy_and_kill_switch_turn_it_off_for_everyone():
     off = AppliesRule.from_policy({"enabled": False, "names": ["custom:7b"]})
     for name in ("astra-cyber-9b", SOURCE_TAGS[0], "custom:7b"):
