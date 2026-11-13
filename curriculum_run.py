@@ -37,7 +37,7 @@ def practice_on(tasks):
     Returns (passed, new_lessons).
     """
     # Practice runs the code in the default route's reply: judge that route first.
-    if refusal := server._tool_lane_guard.selector_refusal("", server.TIERS):
+    if refusal := server._tool_lane_guard.selector_refusal("", server.TIERS, server._RUNTIME_POLICY):
         print("CURRICULUM: " + refusal)
         return 0, 0
     passed = 0
@@ -47,7 +47,7 @@ def practice_on(tasks):
         try:
             print("  practice: %s ..." % name)
             # A generated task's own text can pick a model (``use model X: ...``).
-            if refusal := server._tool_lane_guard.prompt_refusal(t["prompt"], server.natural_model_request, server.TIERS):
+            if refusal := server._tool_lane_guard.prompt_refusal(t["prompt"], server.natural_model_request, server.TIERS, server._RUNTIME_POLICY):
                 print("    -> SKIP " + refusal)
                 continue
             resp = server.sonder(t["prompt"])

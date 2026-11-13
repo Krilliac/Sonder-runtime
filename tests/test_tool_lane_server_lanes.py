@@ -24,11 +24,11 @@ from tests.support.tool_lane import (
     HF_ORNITH,
     HF_QWEN,
     RUNNABLE,
-    SERVED,
     UNKNOWN,
     UNKNOWN_OPENAI,
     UNREADABLE,
     clear_environment,
+    served_refusal,
     write_policy,
 )
 
@@ -522,7 +522,7 @@ BRIDGES = (
 @pytest.mark.parametrize("provider, label, env, served", BRIDGES)
 def test_agent_turn_refuses_a_tier_whose_served_model_is_denied(catalog, model_calls, monkeypatch, provider, label, env, served):
     bridge(monkeypatch, provider, **env)
-    expected = SERVED % ("code", label, served)
+    expected = served_refusal("code", label, served)
     assert server._agent_turn("list files", tier="code") == expected
     assert model_calls == []
     assert guard.resolved_refusal("code", ALLOWED, "code", server._RUNTIME_POLICY) == expected
@@ -536,7 +536,7 @@ def test_agent_turn_refuses_a_tier_whose_served_model_is_denied(catalog, model_c
 def test_codegen_build_loop_refuses_a_tier_whose_served_model_is_denied(
         catalog, work_started, model_calls, tmp_path, monkeypatch, provider, label, env, served):
     bridge(monkeypatch, provider, **env)
-    expected = SERVED % ("code", label, served)
+    expected = served_refusal("code", label, served)
     files = json.dumps({"a.c": "one C file"})
     assert server.codegen_build_loop(str(tmp_path), files, "build", tiers="code") == expected
     monkeypatch.setattr(server, "_configured_local_tiers", lambda: ("fast", "code", "general"))
@@ -568,7 +568,7 @@ def test_the_default_route_follows_a_bridged_chat_tier(catalog, work_started, mo
     monkeypatch.setenv("SONDER_GENERAL_PROVIDER", "sonder-inference")
     monkeypatch.setenv("SONDER_INFERENCE_TIER_MODELS", "general=astra-cyber-9b")
     monkeypatch.setattr(guard._policy, "route_tier", lambda lane, policy=None, fallback="code": "general")
-    expected = SERVED % ("general", "sonder_inference", "astra-cyber-9b")
+    expected = served_refusal("general", "sonder_inference", "astra-cyber-9b")
     for selector in ("", "sonder", "local"):
         assert guard.selector_refusal(selector, server.TIERS, server._RUNTIME_POLICY) == expected, selector
     assert server.campaign_generate_compile_execute_record(total=1, languages="python", tier="") == expected
@@ -576,8 +576,6 @@ def test_the_default_route_follows_a_bridged_chat_tier(catalog, work_started, mo
 
 
 @pytest.mark.parametrize("provider, label, env", [
-    pytest.param("sonder-inference", "sonder_inference", {}, id="inference-without-a-model"),
-    pytest.param("sonder-inference", "sonder_inference", {"SONDER_INFERENCE_MODEL": "default"}, id="inference-default"),
     pytest.param("openai_compatible", "openai_compatible", {}, id="openai-without-a-model"),
 ])
 def test_an_unknown_served_identity_is_refused_in_tool_lanes_but_chats(
@@ -633,7 +631,7 @@ def test_autopilot_planner_and_reviewer_refuse_a_tier_bound_to_a_denied_model(ca
 def test_autopilot_helpers_refuse_a_denied_served_model(catalog, model_calls, monkeypatch, provider, label, env, served):
     bridge(monkeypatch, provider, **env)
     monkeypatch.setattr(server.runtime_policy, "route_tier", lambda lane, policy=None, fallback="code": "code")
-    expected = SERVED % ("code", label, served)
+    expected = served_refusal("code", label, served)
     with pytest.raises(RuntimeError) as caught:
         server._autopilot_json_model({"tier": "code"}, "planner", "plan it", lambda payload: None)
     assert str(caught.value) == expected
@@ -700,15 +698,15 @@ def test_parallel_tools_refuse_a_tier_bound_to_a_denied_model(catalog, parallel_
 def test_parallel_tools_refuse_a_tier_whose_served_model_is_denied(
         catalog, parallel_work, monkeypatch, tool, provider, label, env, served):
     bridge(monkeypatch, provider, **env)
-    assert PARALLEL_TOOLS[tool]("code") == SERVED % ("code", label, served)
+    assert PARALLEL_TOOLS[tool]("code") == served_refusal("code", label, served)
     assert parallel_work == {"generated": [], "executed": []}
 
 
 @pytest.mark.parametrize("tool", PARALLEL_TOOLS)
 def test_parallel_tools_refuse_a_bridged_tier_with_an_undetermined_served_model(
         catalog, parallel_work, monkeypatch, tool):
-    bridge(monkeypatch, "sonder-inference")
-    assert PARALLEL_TOOLS[tool]("code") == UNKNOWN % ("code", "sonder_inference")
+    bridge(monkeypatch, "openai_compatible")
+    assert PARALLEL_TOOLS[tool]("code") == UNKNOWN_OPENAI % "code"
     assert parallel_work == {"generated": [], "executed": []}
 
 
@@ -779,7 +777,7 @@ def test_selfmod_ask_refuses_a_code_tier_whose_served_model_is_denied(
     bridge(monkeypatch, provider, **env)
     with pytest.raises(selfmod_job.refused) as caught:
         selfmod_job.module._ask(server, "improve f")
-    assert str(caught.value) == "model refused: " + SERVED % ("code", label, served)
+    assert str(caught.value) == "model refused: " + served_refusal("code", label, served)
     assert selfmod_job.asked == []
 
 
@@ -858,7 +856,7 @@ def test_mesh_generate_refuses_a_denied_tier_before_any_generation(catalog, mode
     with pytest.raises(SonderError) as caught:
         mesh_agent_tools.generate_mesh("a crate", tiers="code", output_dir=str(tmp_path),
                                        rt=server, runner=_MeshRunner)
-    assert str(caught.value) == SERVED % ("code", "sonder_inference", DENIED)
+    assert str(caught.value) == served_refusal("code", "sonder_inference", DENIED)
     assert generated == [] and model_calls == []
 
 

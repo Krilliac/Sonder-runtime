@@ -9,18 +9,29 @@ Every lane check takes the loaded runtime policy the caller already holds.  A
 missing policy is read from disk without creating it, and a policy that cannot
 be read fails closed for caller-named models.  The generation checks
 (``require_generation``, ``require_served``) read a deny list cached per
-version of the policy file, and refuse unless the call site is text-only.
+version of the policy file.
 
 A tier bound to a non-Ollama provider (``SONDER_<TIER>_PROVIDER`` /
 ``SONDER_MODEL_BACKEND``) is judged by the model that provider serves, which
 ``served_model`` reads from the same environment the provider reads on every
-call; the Ollama name in ``TIERS`` is not what answers such a tier.
+call; the Ollama name in ``TIERS`` is not what answers such a tier.  A
+bridged call is always a tier call (a model asked for by name stays on
+Ollama, and the bridged request carries no ``model`` option), so a blocked
+model never serves a tier: the bridge refuses it before sending when the
+provider is configured to serve it and after the reply when the reply
+reports it, on every lane, text-only or not.  ``text_only`` keeps its
+meaning for a model asked for by name through Ollama and for a bridged tier
+whose served model is undetermined.  Sonder Inference and OpenRouter name
+the served model in every reply, so an undetermined configured model is not
+refused up front for them; only the OpenAI-compatible transport, whose
+reply is never read for a model name, is refused in tool lanes when nothing
+names its model.
 
 A selector on the default route (``""``, ``sonder``, ``local``) is judged by
-every tier that route can answer on: the chat tier it starts on and every
-configured local tier its escalation can step up to
-(``default_route_refusal``).  ``prompt_refusal`` judges a model a prompt's own
-text selects, for lanes whose prompts come from data.
+every tier that route can answer on: its start and every configured local
+tier its escalation can reach (``default_route_refusal``).
+``prompt_refusal`` judges a model, an ensemble or a tier a prompt's own text
+selects, for lanes whose prompts come from data.
 """
 from __future__ import annotations
 
@@ -98,18 +109,78 @@ def generation_deny_list(policy: Mapping[str, Any] | None = None) -> _models.Too
     return deny
 
 
+_SONDER_INFERENCE = "sonder_inference"
+_OPENROUTER = "openrouter"
+_OPENAI_COMPATIBLE = "openai_compatible"
+# Providers whose reply always names the model it served: the Sonder
+# Inference gateway rejects a reply that does not, and OpenRouter reports
+# the reply's model, else the configured one it sent.  For them the reply's
+# model is judged, so an undetermined configured model is not refused first.
+REPLY_NAMES_MODEL = frozenset({_SONDER_INFERENCE, _OPENROUTER})
+
+
+def _served_setting(provider: str, tier: str) -> str:
+    """The provider setting that chooses the model it serves for ``tier``."""
+    if provider == _SONDER_INFERENCE:
+        return "SONDER_INFERENCE_TIER_MODELS entry %s=<model>, else SONDER_INFERENCE_MODEL" % tier
+    if provider == _OPENROUTER:
+        return ("SONDER_OPENROUTER_TIER_MODELS entry %s=<model> or the policy's "
+                "provider_models.openrouter, else SONDER_OPENROUTER_MODEL" % tier)
+    if provider == _OPENAI_COMPATIBLE:
+        return "SONDER_OPENAI_MODEL"
+    return ""
+
+
 def _served_message(tier: Any, provider: Any, verdict: _models.ModelLaneDecision) -> str:
-    """``served_refusal_message`` with the provider's own fix for an undetermined model.
+    """``served_refusal_message`` naming the provider's own setting.
 
     The OpenAI-compatible transport sends ``SONDER_OPENAI_MODEL``, else the
-    tier name, so with that variable unset nothing names the served model.
+    tier name, and reports what it sent, so with that variable unset nothing
+    names the served model.
     """
-    from sonder_runtime.adapters.provider_bindings import PROVIDER_LABEL_IDS
-
+    provider = str(provider or "")
+    tier = str(tier or "")
     fix = ""
-    if str(provider or "") == PROVIDER_LABEL_IDS["openai-compatible"]:
-        fix = "set SONDER_OPENAI_MODEL to the model that endpoint serves"
-    return _models.served_refusal_message(tier, provider, verdict, fix=fix)
+    if provider == _OPENAI_COMPATIBLE:
+        fix = ("SONDER_OPENAI_MODEL is not set and that transport never reads a model "
+               "name from the reply; set SONDER_OPENAI_MODEL to the model that endpoint serves")
+    return _models.served_refusal_message(
+        tier, provider, verdict, fix=fix, setting=_served_setting(provider, tier),
+    )
+
+
+def _configured_verdict(provider: str, model: Any, deny: _models.ToolLaneDenyList) -> _models.ModelLaneDecision:
+    """The verdict for the model ``provider`` is configured to serve, judged before any reply.
+
+    An undetermined model is not a refusal for a provider whose reply names
+    the model (``REPLY_NAMES_MODEL``): that reply is judged instead.
+    """
+    verdict = _models.decide_served(model, deny)
+    if verdict.status is _models.ModelLaneStatus.SERVED_UNKNOWN and provider in REPLY_NAMES_MODEL:
+        return _models.ModelLaneDecision(_models.ModelLaneStatus.ALLOWED, verdict.model)
+    return verdict
+
+
+def _reported_verdict(reported: Any, deny: _models.ToolLaneDenyList) -> _models.ModelLaneDecision:
+    """The verdict for the model a reply says it served.
+
+    An empty or ``default`` id, or one that only echoes a tier or the default
+    route back (what the OpenAI-compatible transport reports when no model is
+    configured), names no model.
+    """
+    from sonder_runtime.adapters.provider_bindings import PROVIDER_TIERS
+
+    raw = str(reported if reported is not None else "").strip()
+    if raw.lower() in PROVIDER_TIERS or raw.lower() in _DEFAULT_ROUTE:
+        return _models.ModelLaneDecision(_models.ModelLaneStatus.SERVED_UNKNOWN, raw)
+    return _models.decide_served(raw, deny)
+
+
+def _judge_reply(verdict: _models.ModelLaneDecision, text_only: bool) -> bool:
+    """Whether a reply's verdict refuses it: a blocked model always, an unnamed one unless text-only."""
+    if verdict.status is _models.ModelLaneStatus.SERVED_UNKNOWN:
+        return not text_only
+    return verdict.denied
 
 
 def _generation_refused(message: str) -> Exception:
@@ -129,30 +200,34 @@ def require_generation(
     payload: Mapping[str, Any] | None = None,
     policy: Mapping[str, Any] | None = None,
 ) -> None:
-    """Refuse one model call unless its caller declared it text-only.
+    """Refuse one model call before sending.
 
     The default for every generation is that the reply may be run, applied or
-    turned into a tool call, so a denied model is refused; a caller whose
-    reply is only returned or shown passes ``text_only=True`` and is never
-    judged (no policy read either).  Judged before sending: the model the
-    call names and the payload's own ``model`` (as tier-bound names, so an
+    turned into a tool call, so a denied model is refused: the model the call
+    names and the payload's own ``model`` (as tier-bound names, so an
     unreadable policy still refuses the built-in list without refusing an
-    ordinary model), and for a bridged ``rung`` the model its provider is
-    configured to serve.  When that served model cannot be determined here
-    the check is left to the reply (``require_served``).  Raises a
-    ``ModelCallError`` (kind ``configuration``, status 403, ``attempts=0``,
-    ``tool_lane_refused=True``) carrying the refusal text.
+    ordinary model).  A caller whose reply is only returned or shown passes
+    ``text_only=True`` and those names are not judged.
+
+    A bridged ``rung`` is a tier call, and a blocked model never serves a
+    tier: the model its provider is configured to serve is judged whatever
+    ``text_only`` says.  When that model cannot be determined here the check
+    is left to the reply (``require_served``).  A text-only call with no
+    bridged rung reads no policy.  Raises a ``ModelCallError`` (kind
+    ``configuration``, status 403, ``attempts=0``, ``tool_lane_refused=True``)
+    carrying the refusal text.
     """
-    if text_only:
+    if text_only and rung is None:
         return
     deny = generation_deny_list(policy)
-    names = [model]
-    if isinstance(payload, Mapping) and payload.get("model") != model:
-        names.append(payload.get("model"))
-    for name in names:
-        verdict = _models.decide(name, deny, free_form=False)
-        if verdict.denied:
-            raise _generation_refused(_models.refusal_message(verdict.model, verdict.status))
+    if not text_only:
+        names = [model]
+        if isinstance(payload, Mapping) and payload.get("model") != model:
+            names.append(payload.get("model"))
+        for name in names:
+            verdict = _models.decide(name, deny, free_form=False)
+            if verdict.denied:
+                raise _generation_refused(_models.refusal_message(verdict.model, verdict.status))
     if rung is None:
         return
     provider = str(getattr(rung, "provider", "") or "")
@@ -178,24 +253,18 @@ def require_served(
 
     The other half of ``require_generation`` for a bridged rung: after the
     provider answers, the model it says it served (``ModelResponse.model``)
-    is judged unless the caller declared the call text-only.  An empty or
+    is judged on every call.  A blocked model is refused whatever
+    ``text_only`` says (a blocked model never serves a tier).  An empty or
     ``default`` id, or one that only echoes a tier or the default route back
     (what the OpenAI-compatible transport reports when no model is
-    configured), names no model and is refused.  Raises the same 403
-    ``ModelCallError`` as ``require_generation``; the reply is discarded.
+    configured), names no model: refused unless the call is text-only.
+    Raises the same 403 ``ModelCallError`` as ``require_generation``; the
+    reply is discarded.
     """
-    if text_only:
-        return
-    from sonder_runtime.adapters.provider_bindings import PROVIDER_TIERS
-
     provider = str(getattr(rung, "provider", "") or "")
     tier = str(getattr(rung, "tier", "") or "").strip().lower()
-    raw = str(reported if reported is not None else "").strip()
-    if raw.lower() in PROVIDER_TIERS or raw.lower() in _DEFAULT_ROUTE:
-        verdict = _models.ModelLaneDecision(_models.ModelLaneStatus.SERVED_UNKNOWN, raw)
-    else:
-        verdict = _models.decide_served(raw, generation_deny_list(policy))
-    if verdict.denied:
+    verdict = _reported_verdict(reported, generation_deny_list(policy))
+    if _judge_reply(verdict, text_only):
         raise _generation_refused(_served_message(tier, provider, verdict))
 
 
@@ -267,7 +336,8 @@ def _provider_model(provider: str, key: str, explicit: str, env: Mapping[str, st
 
 
 def _served_refusal(tier: Any, deny: _models.ToolLaneDenyList) -> str:
-    """Refusal for a tier whose non-Ollama provider serves a blocked or unknown model."""
+    """Refusal for a tier whose non-Ollama provider serves a blocked model, or an
+    undetermined one that its reply cannot name (``_configured_verdict``)."""
     if not tier or _free_form(tier):
         return ""
     label = str(tier).strip().lower()
@@ -280,7 +350,7 @@ def _served_refusal(tier: Any, deny: _models.ToolLaneDenyList) -> str:
     if served is None:
         return ""
     provider, model = served
-    verdict = _models.decide_served(model, deny)
+    verdict = _configured_verdict(provider, model, deny)
     return _served_message(label, provider, verdict) if verdict.denied else ""
 
 
@@ -299,8 +369,9 @@ def gateway_refusal(
     the request; and, when the gateway routes the request to another
     provider (the tier's binding, else the default provider, which is what a
     uniform gateway uses for any name), the model that provider sends.  An
-    undeterminable served model refuses.  ``bindings`` is the gateway's own
-    ``ProviderBindings``.
+    undeterminable served model refuses, except for a provider whose reply
+    names the model (``REPLY_NAMES_MODEL``), whose reply ``reply_refusal``
+    judges.  ``bindings`` is the gateway's own ``ProviderBindings``.
     """
     from sonder_runtime.application.chat.provider_bridge import LEGACY_PROVIDER
 
@@ -328,8 +399,83 @@ def gateway_refusal(
         _warn_once("provider configuration could not be read", exc)
         verdict = _models.ModelLaneDecision(_models.ModelLaneStatus.SERVED_UNKNOWN, "")
         return _served_message(selector, "", verdict)
-    verdict = _models.decide_served(model, deny)
+    verdict = _configured_verdict(provider, model, deny)
     return _served_message(selector, provider, verdict) if verdict.denied else ""
+
+
+def _tier_call(tier: Any, explicit_model: Any) -> str:
+    """The routing key of a packaged request that asks for a tier, or ``""`` for one by name."""
+    from sonder_runtime.adapters.provider_bindings import PROVIDER_TIERS
+
+    selector = str(tier or "").strip().lower() or "sonder"
+    explicit = explicit_model.strip() if isinstance(explicit_model, str) else ""
+    if explicit or (selector not in PROVIDER_TIERS and selector != "sonder"):
+        return ""
+    return selector
+
+
+def _dispatched_provider(selector: str, bindings: Any) -> str:
+    """The provider a packaged gateway sends ``selector`` to (the tier's binding, else the default)."""
+    return str(bindings.tier_providers.get(selector) or bindings.default_generation_provider or "")
+
+
+def tier_serving_refusal(
+    tier: Any, explicit_model: Any, bindings: Any, policy: Mapping[str, Any] | None = None,
+) -> str:
+    """Before sending a packaged text request: refused when a bridged tier's provider serves a blocked model.
+
+    Only a tier call is judged (a request that names a model, by tier or by
+    an explicit ``model`` option, is a by-name request and answers as text).
+    An Ollama tier and an undetermined served model pass; the reply is judged
+    by ``reply_refusal``.  A provider configuration that cannot be read
+    passes too: the provider reads the same configuration and fails itself,
+    and any reply it produces is still judged.
+    """
+    from sonder_runtime.application.chat.provider_bridge import LEGACY_PROVIDER
+
+    selector = _tier_call(tier, explicit_model)
+    if not selector:
+        return ""
+    try:
+        provider = _dispatched_provider(selector, bindings)
+        if provider in ("", LEGACY_PROVIDER):
+            return ""
+        model = _provider_model(provider, selector, "", None)
+    except Exception as exc:  # noqa: BLE001 - the reply's served model is judged instead
+        _warn_once("provider configuration could not be read before sending", exc)
+        return ""
+    verdict = _models.decide_served(model, generation_deny_list(policy))
+    if verdict.status is _models.ModelLaneStatus.DENIED:
+        return _served_message(selector, provider, verdict)
+    return ""
+
+
+def reply_refusal(
+    tier: Any, explicit_model: Any, bindings: Any, reported: Any, *,
+    text_only: bool, policy: Mapping[str, Any] | None = None,
+) -> str:
+    """After a packaged reply from a non-Ollama provider: refused when it reports a blocked or unnamed model.
+
+    A blocked reported model refuses a tier call on every lane and any
+    request on a tool lane; an unnamed one refuses unless ``text_only``.  A
+    text request that names a model is not judged here, and neither is a
+    request the gateway sends to Ollama (judged before sending).
+    """
+    from sonder_runtime.application.chat.provider_bridge import LEGACY_PROVIDER
+
+    selector = _tier_call(tier, explicit_model)
+    if text_only and not selector:
+        return ""
+    key = selector or str(tier or "").strip().lower() or "sonder"
+    try:
+        provider = _dispatched_provider(key, bindings)
+    except Exception as exc:  # noqa: BLE001 - an unreadable binding fails closed
+        _warn_once("provider configuration could not be read after the reply", exc)
+        provider = ""
+    if provider == LEGACY_PROVIDER:
+        return ""
+    verdict = _reported_verdict(reported, generation_deny_list(policy))
+    return _served_message(key, provider, verdict) if _judge_reply(verdict, text_only) else ""
 
 
 def denied(model: Any, tier_label: Any = "", policy: Mapping[str, Any] | None = None) -> bool:
@@ -374,6 +520,41 @@ def _tier_refusal(tier: str, bindings: Mapping[str, str], deny: _models.ToolLane
     return _served_refusal(tier, deny)
 
 
+def default_route_reach(
+    bindings: Mapping[str, str], policy: Mapping[str, Any] | None = None,
+) -> tuple[str, tuple[str, ...]]:
+    """``(start, tiers)``: where the default route starts and every tier it can answer on.
+
+    ``server._serve_target`` starts the default route on the policy's chat
+    tier (on the ``sonder`` alias when ``SONDER_STRICT`` is on or that tier
+    is unbound), and ``server._default_route_plan`` hands
+    ``tier_escalation.plan`` the configured local tiers
+    (``runtime_policy.configured_tiers``) with no image.  The tiers it can
+    reach are asked of the plan's own filter (``tier_escalation.reachable_tiers``,
+    the union over prompts): a tier weaker than the start is never a rung,
+    ``vision`` never is without an image, and with ``SONDER_MODEL_ESCALATION``
+    off the start is the only rung.  An unbound tier is dropped (never a rung,
+    ``_local_tier_rung``).  A policy that cannot be read starts on the
+    fallback chat tier over every local tier in ``bindings`` (fails closed).
+    """
+    from sonder_runtime.application.routing import tier_escalation
+
+    try:
+        loaded = policy or _policy.load(create=False)
+        chat = _policy.route_tier("chat", loaded, fallback="general")
+        available = _policy.configured_tiers(loaded, bindings)
+    except Exception as exc:  # noqa: BLE001 - an unknown route fails closed
+        _warn_once("default route tiers could not be read", exc)
+        chat = "general"
+        available = tuple(tier for tier in _policy.LOCAL_TIERS if tier in bindings)
+    strict = str(os.environ.get("SONDER_STRICT", "")).strip().lower() in ("1", "true", "yes", "on")
+    start = "sonder" if strict or not str(bindings.get(chat) or "").strip() else chat
+    escalate = tier_escalation.enabled(os.environ.get(tier_escalation.KNOB))
+    reach = tier_escalation.reachable_tiers(start, available, escalate=escalate)
+    tiers = tuple(tier for tier in reach if str(bindings.get(tier) or "").strip())
+    return start, tiers
+
+
 def default_route_refusal(
     bindings: Mapping[str, str], policy: Mapping[str, Any] | None = None,
     deny: _models.ToolLaneDenyList | None = None,
@@ -381,37 +562,20 @@ def default_route_refusal(
     """Refusal for a lane that runs a reply from the default route, else ``""``.
 
     The default route (``""``, ``sonder``, ``local``) starts on the policy's
-    chat tier and escalates over the configured local tiers
-    (``runtime_policy.configured_tiers``, the ``available`` set
-    ``server._default_route_plan`` hands ``tier_escalation.plan``), the
-    optional reasoning tier included, when an answer fails or is empty.  The
-    lane cannot know which rung will answer, so every one is judged: the model
-    the tier is bound to and, for a bridged tier, the model its provider
-    serves (denied or undetermined both refuse).  The chat tier is refused
-    with its own text; any other tier names the escalation.  The escalation
-    knob is not consulted: ``/ensemble`` in a default-route prompt polls the
-    same tiers, and the check stays a function of the configuration alone.
-    A policy that cannot be read judges the policy's fallback chat tier and
-    every local tier in ``bindings``.
+    chat tier and escalates, when an answer fails or is empty, over the
+    configured local tiers the escalation plan can reach from there
+    (``default_route_reach``).  The lane cannot know which rung will answer,
+    so every one is judged: the model the tier is bound to and, for a bridged
+    tier, the model its provider serves (``_served_refusal``: denied, or
+    undetermined for a provider whose reply does not name it).  The start
+    tier is refused with its own text; any other tier names the escalation.
     """
     deny = deny_list(policy) if deny is None else deny
-    try:
-        loaded = policy or _policy.load(create=False)
-        chat = _policy.route_tier("chat", loaded, fallback="general")
-        reachable = _policy.configured_tiers(loaded, bindings)
-    except Exception as exc:  # noqa: BLE001 - an unknown route fails closed
-        _warn_once("default route tiers could not be read", exc)
-        chat = "general"
-        reachable = tuple(tier for tier in _policy.LOCAL_TIERS if tier in bindings)
-    refused = _tier_refusal(chat, bindings, deny)
-    if refused:
-        return refused
+    start, reachable = default_route_reach(bindings, policy)
     for tier in reachable:
-        if tier == chat or not str(bindings.get(tier) or "").strip():
-            continue  # an unbound tier is never a rung (``_local_tier_rung``)
         refused = _tier_refusal(tier, bindings, deny)
         if refused:
-            return _models.default_route_refusal_message(tier, refused)
+            return refused if tier == start else _models.default_route_refusal_message(tier, refused)
     return ""
 
 
@@ -454,14 +618,33 @@ def prompt_refusal(
     dataset or generated task) judges that target too.  A fanout request is
     not judged here: the fanout sweep leaves every denied model out
     (``sweep_skip_reason``).
+
+    A prompt that is a console command is answered by that command
+    (``server.control_command``).  ``/ensemble`` polls the bound local tiers,
+    which can include a tier the default route never reaches, so each
+    configured local tier is judged by name; ``/vision`` (``/analyzeimage``)
+    answers on the vision tier, which is judged.  The other commands that
+    generate (``/work``, ``/game``, ``/delegate``, ``/master``) reach lanes
+    that refuse on their own.
     """
     request = recognize(prompt)
-    if not isinstance(request, Mapping):
+    if isinstance(request, Mapping):
+        if request.get("kind") == "model":
+            return selector_refusal(request.get("model"), bindings, policy)
+        if request.get("kind") == "ensemble":
+            return selector_refusal(request.get("tiers"), bindings, policy)
         return ""
-    if request.get("kind") == "model":
-        return selector_refusal(request.get("model"), bindings, policy)
-    if request.get("kind") == "ensemble":
-        return selector_refusal(request.get("tiers"), bindings, policy)
+    command = str(prompt or "").strip().split(None, 1)
+    command = command[0].lower() if command else ""
+    if command == "/ensemble":
+        try:
+            tiers = _policy.configured_tiers(policy or _policy.load(create=False), bindings)
+        except Exception as exc:  # noqa: BLE001 - an unknown tier set fails closed
+            _warn_once("ensemble tiers could not be read", exc)
+            tiers = tuple(tier for tier in _policy.LOCAL_TIERS if tier in bindings)
+        return selector_refusal(",".join(tiers), bindings, policy) if tiers else ""
+    if command in ("/vision", "/analyzeimage"):
+        return selector_refusal("vision", bindings, policy)
     return ""
 
 

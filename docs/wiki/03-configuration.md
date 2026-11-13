@@ -407,51 +407,80 @@ model is refused.
 A tier bound to a provider other than Ollama is judged by the model that
 provider actually serves (`SONDER_INFERENCE_TIER_MODELS`, else
 `SONDER_INFERENCE_MODEL`; the OpenRouter tier model; `SONDER_OPENAI_MODEL`).
-When that model cannot be determined (unset, `default`, or unreadable
-configuration) the tier is refused in tool lanes and chat still works; for an
-OpenAI-compatible tier the refusal names the fix, setting `SONDER_OPENAI_MODEL`. With the
-whole process on Sonder Inference (`SONDER_MODEL_BACKEND=sonder-inference`)
-and `SONDER_INFERENCE_MODEL` unset, a packaged gateway lane on tier `sonder`
-is refused as undetermined (that provider sends `default` for it), while the
-server's own agent turn on tier `sonder` is judged by the policy's chat tier
-and, at generation, by the model the reply reports; set
-`SONDER_INFERENCE_MODEL` to name the served model.
+A blocked model never serves a tier, in any lane: a bridged call is always a
+tier call (a model asked for by name stays on Ollama, and the bridged request
+carries no model name), so when a tier's provider is configured to serve a
+blocked model, or its reply reports one, that call is refused on every lane,
+chat by tier included. The refusal names the tier, the provider, the model and
+the setting that chooses it, and says to ask the model by name for a text
+answer instead. Sonder Inference and OpenRouter name the served model in every
+reply (the Sonder Inference gateway rejects a reply that does not), so a tier
+on them with no model named is not refused up front: the model the reply
+reports is judged on every call, and the lane runs when it is an ordinary one.
+That includes the whole process on Sonder Inference
+(`SONDER_MODEL_BACKEND=sonder-inference`) with `SONDER_INFERENCE_MODEL` unset,
+the server's own agent turn on tier `sonder` included. The OpenAI-compatible
+transport never reads a model name from the reply, so with
+`SONDER_OPENAI_MODEL` unset (or a provider configuration that cannot be read)
+the served model cannot be determined: that tier is refused in tool lanes,
+with a refusal that names `SONDER_OPENAI_MODEL`, and chat still works.
 
-A lane on the default route (tier `""`, `sonder` or `local`) is judged by
-every tier that route can answer on, not only the chat tier it starts on: with
-`SONDER_MODEL_ESCALATION` at its default the default route steps up over the
-configured local tiers (the optional `reasoning` tier included) when an answer
-fails or is empty, so a lane that runs the reply (campaigns, game generation,
+A lane on the default route (tier `""`, `sonder` or `local`) is judged before
+it starts by every tier that route can answer on, not only the tier it starts
+on. The route starts on the policy's chat tier (on the `sonder` alias when
+`SONDER_STRICT` is on or that tier is unbound) and, with
+`SONDER_MODEL_ESCALATION` at its default, steps up when an answer fails or is
+empty. The tiers judged are the ones the escalation plan can reach from that
+start, asked of the plan's own filter (`tier_escalation.reachable_tiers` over
+the configured local tiers, `runtime_policy.configured_tiers`, with no image):
+the start, then every configured local tier at least as strong by role as the
+start (`fast` is below `general` and `code`) and the optional `reasoning` tier;
+never `vision` (the default route carries no image); with escalation off, the
+start alone. So a lane that runs the reply (campaigns, game generation,
 `/train`, `curriculum_run.py`, `eval_retrieval.py`, `game_ladder.py`) refuses
-when any configured local tier is bound to a blocked model or is bridged to a
-provider whose served model is blocked or cannot be determined. The refusal
-names the tier and its model, and the fix: bind that tier to an allowed model,
-or name an allowed tier for the lane (the model itself still answers chat by
-name). The check follows the configuration, not the escalation knob, and the
-set of tiers it judges is the escalation plan's own
-(`runtime_policy.configured_tiers`). With no such tier configured the default
-route escalates and the lanes run exactly as before. A lane whose prompt text
-it does not write itself (curriculum tasks, retrieval-eval tasks) also judges
-a model the prompt names for itself (`use model X: ...`, `ask code and
-reasoning models: ...`), which `sonder()` would otherwise switch to; the other
+when a reachable tier is bound to a blocked model, is bridged to a provider
+that serves one, or is on the OpenAI-compatible transport with no model named.
+The refusal names the tier and the reason, which names the setting that fixes
+it, or says to set `SONDER_MODEL_ESCALATION=0` to keep the route on its first
+tier. This up-front check gives one clear message before any work; it is no
+longer what keeps a blocked model's reply out of the lane: if a tier is bound
+while the lane is running, the bridge refuses that rung's call itself. With no
+such tier configured the default route escalates and the lanes run exactly as
+before. These lanes read the server's in-memory policy (the one the escalation
+plan uses), not the file on disk.
+
+A lane whose prompt text it does not write itself (curriculum tasks,
+retrieval-eval tasks) also judges what the prompt selects for itself: a model
+it names (`use model X: ...`), an ensemble it asks (`ask code and reasoning
+models: ...`), which `sonder()` would otherwise switch to, and a console
+command it starts with: `/ensemble` polls the bound local tiers, so every
+configured local tier is judged by name; `/vision` answers on the vision tier,
+which is judged. The other commands that generate (`/work`, `/game`,
+`/delegate`, `/master`) reach lanes that refuse on their own. The other
 default-route lanes build every prompt from fixed text.
 
 Generation itself is default-deny. Every model call reaches
-`server._chat_request`, which refuses a denied model (by name, by the request
-payload's model, and for a bridged tier by the model its provider is configured
-to serve) with a `configuration` error (status 403) before anything is sent,
-unless the call site passed `text_only=True`. A bridged reply is judged again
-by the model it reports serving; an empty id, `default` or an echo of the tier
-name counts as undetermined and is refused. A cloud fallback is judged again.
-Text lanes (chat by name or tier over MCP, HTTP and the REPL, structured chat,
-`ensemble_answer`, `consult`, offloads, `model_fanout`, vision, the LLM judge,
-conversation titles) declare themselves text-only and keep answering. The
-packaged gateway handed to the application is the checked one; only the text
-consumers (A2A, offloads, replay and the chat service) receive the unchecked
-gateway. Ordinary models are judged against a deny list cached per version of
-the policy file, so they pay no extra disk read per call.
+`server._chat_request`, which refuses a denied model by name and by the
+request payload's model with a `configuration` error (status 403) before
+anything is sent, unless the call site passed `text_only=True`. For a bridged
+tier the bridge judges the model its provider is configured to serve before
+sending, and the model the reply reports after it returns, on every call
+whatever `text_only` says: a blocked model is refused on every lane. An empty
+reported id, `default` or an echo of the tier name names no model: refused
+unless the call is text-only. A cloud fallback is judged again. Text lanes
+(chat by name over MCP, HTTP and the REPL, structured chat, `ensemble_answer`,
+`consult`, offloads, `model_fanout`, vision, the LLM judge, conversation
+titles) declare themselves text-only and keep answering a model asked for by
+name; chat by tier answers too, except on a tier whose bridged provider serves
+a blocked model. The packaged gateway handed to the application is the checked
+one; only the text consumers receive the unchecked gateway:
+`Application.model_gateway`, whose generating consumer is the legacy bridge
+above, and the chat service (A2A), which holds it through a handle that
+applies the same served-model rule to a tier request. Ordinary models are
+judged against a deny list cached per version of the policy file, so they pay
+no extra disk read per call.
 
-Two ordinary configurations fail closed where they did not before:
+Three configurations fail closed where they did not before:
 
 - With the policy file unreadable, a model named by the caller (not one a tier
   is bound to) is refused in tool lanes, and the chat code gate does not run
@@ -459,9 +488,12 @@ Two ordinary configurations fail closed where they did not before:
   it with `/runtime reset`.
 - An OpenAI-compatible bridged tier with `SONDER_OPENAI_MODEL` unset sends the
   tier name as the model and reports the id it sent, which names no model, so
-  every tool lane on that tier is refused (and, when that tier is a configured
-  local tier, every lane on the default route). Fix: set `SONDER_OPENAI_MODEL`
-  to the model the endpoint serves.
+  every tool lane on that tier is refused (and, when the default route can
+  reach that tier, every lane on the default route). Fix: set
+  `SONDER_OPENAI_MODEL` to the model the endpoint serves.
+- A tier whose bridged provider serves a blocked model no longer answers chat
+  by tier (MCP, HTTP, A2A, ensemble, consult). Fix: ask the model by name for
+  a text answer, or change the model that provider serves for the tier.
 
 A denied model's text is not barred from tool lanes as input: lesson
 candidates distilled from its answers, the agent `offload` tool's answer and
@@ -485,6 +517,10 @@ reporting a permitted one is not detected. The OpenAI-compatible gateway never
 reads the `model` field of the reply (its `ModelResponse.model` is always the
 id it sent), so for that provider the check after the reply adds nothing to the
 check before sending: the configured `SONDER_OPENAI_MODEL` is what is judged.
+Because that model cannot be identified at the bridge, an OpenAI-compatible
+tier with no model named that is bound while a default-route lane is running
+answers that lane's text call like any undetermined tier; only the lane's
+up-front check refuses it, and only for tiers configured when it ran.
 A streamed HTTP chat turn forwards a bridged reply's tokens to the client as
 they arrive; only that text chat turn streams (every tool-lane generation runs
 with the stream disarmed), so a tool-lane reply refused after it arrives was
@@ -518,20 +554,27 @@ a call of the original. Register the site in
 - `EXEC`: the reply drives tools, or is run, compiled or written. Leave
   `text_only` at its default. A caller of a text entry point or a raw endpoint
   must refuse first (`tool_lane_guard.selector_refusal`, `resolved_refusal`, or
-  `denied` with `refusal`), in the same function or a guard listed in the
-  entry's `guarded_by`. The refusal counts only when its result stops the
-  function (it is the test of an `if` that returns, raises, continues or
-  breaks, or a same-file helper that raises) and it judges the selector the
-  call passes (the same expression; a call that passes none is judged by `""`,
-  which covers every configured local tier). Where a different expression is
-  right by design, the entry says why in `selector_reason`.
+  `denied` with `refusal`), in the same function or in every guard listed in
+  the entry's `guarded_by` (each guard must refuse and judge on its own). The
+  refusal counts only when its result stops the function: it is a direct
+  statement of the function body, before the statement holding the call, not
+  nested in an `if`, `try`, `with` or loop (a loop body counts for a call in
+  the same loop body), and it is either an `if` whose test holds the refusal
+  and whose body ends in `return` or `raise` (`continue` or `break` in a loop
+  body), or a call statement of a same-file helper that refuses that way with
+  `raise`. It judges the selector the call passes when it judges the same
+  expression and no name in it is assigned between the refusal and the call (a
+  call that passes none is judged by `""`, the default route). Where a
+  different expression is right by design, the entry says why in
+  `selector_reason`.
 - `CHOKE`: the generation stack forwarding the flag, imports and re-exports.
 - `ACCEPTED`: a named exception with its reason.
 
 `GAP` (runs model output with no refusal) is not accepted: the list of
 tolerated gaps is empty. Limit: a name computed at run time
-(`getattr(server, "ens" + "emble_answer")`) cannot be seen statically, so the
-ratchet does not catch it; review has to.
+(`getattr(server, "ens" + "emble_answer")`, or `getattr(server, name)` with a
+variable) cannot be seen statically, so the ratchet does not catch it; review
+has to.
 
 #### Reference lookup
 

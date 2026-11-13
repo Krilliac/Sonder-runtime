@@ -29,8 +29,15 @@ def isolated(monkeypatch, tmp_path):
     clear_environment(monkeypatch)
     monkeypatch.setenv("SONDER_RUNTIME_POLICY", str(tmp_path / "runtime_policy.json"))
     monkeypatch.setattr(guard, "_GENERATION_CACHE", None, raising=False)
+    # The consumers judge the server's in-memory policy: refresh it from the temporary file.
+    before = dict(server.TIERS)
+    monkeypatch.setattr(server, "_RUNTIME_POLICY", server._RUNTIME_POLICY)
+    server._refresh_runtime_policy(create=False)
     for tier in TIER_NAMES:
         monkeypatch.setitem(server.TIERS, tier, ALLOWED)
+    yield
+    server.TIERS.clear()
+    server.TIERS.update(before)
 
 
 def deny_default_route(monkeypatch):
@@ -59,6 +66,7 @@ def fake_runtime(model=ALLOWED):
     asked = Asked()
     runtime = SimpleNamespace(
         TIERS={tier: model for tier in TIER_NAMES},
+        _RUNTIME_POLICY=server._RUNTIME_POLICY,
         _tool_lane_guard=guard,
         sonder=asked,
         ensemble_answer=asked,

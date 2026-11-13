@@ -2851,7 +2851,7 @@ def _do_train(n):
     from sonder_runtime.adapters import tool_lane_guard
 
     # Practice runs the code in the default route's reply: judge that route first.
-    if refusal := tool_lane_guard.selector_refusal("", server.TIERS):
+    if refusal := tool_lane_guard.selector_refusal("", server.TIERS, server._RUNTIME_POLICY):
         return refusal
     tasks = training_tasks.sample(n)
     passed = 0

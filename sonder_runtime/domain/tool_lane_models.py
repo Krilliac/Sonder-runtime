@@ -11,8 +11,9 @@ list but never shrink it.  When the policy file is unreadable the list is
 marked unreadable and caller-named (free-form) models fail closed.
 
 A tier bound to a provider other than Ollama is judged by the model that
-provider actually serves (:func:`decide_served`); when that model cannot be
-determined the tier is refused in tool-using lanes.
+provider actually serves (:func:`decide_served`).  A blocked model never
+serves a tier, in any lane; when the served model cannot be determined the
+tier is refused in tool-using lanes only.
 
 Limit: this is a name list.  It cannot recognise a renamed copy of a blocked
 model (``ollama cp astra-cyber-27b helper``), or an alias such as
@@ -126,12 +127,15 @@ def refusal_message(
 
 
 def served_refusal_message(
-    tier: Any, provider: Any, verdict: ModelLaneDecision, *, fix: str = "",
+    tier: Any, provider: Any, verdict: ModelLaneDecision, *, fix: str = "", setting: str = "",
 ) -> str:
     """The refusal for a bridged tier judged by the model its provider serves.
 
-    ``fix`` replaces the generic advice for an undetermined served model with
-    the provider's own setting (the caller knows which one it is).
+    A blocked served model is refused in every lane, chat by tier included:
+    a blocked model does not serve a tier.  ``setting`` names the provider
+    setting that chooses the served model.  An undetermined served model is
+    refused in tool-using lanes only; ``fix`` replaces the generic advice
+    for it with the provider's own setting (the caller knows which one it is).
     """
     if verdict.status is ModelLaneStatus.SERVED_UNKNOWN:
         return (
@@ -141,24 +145,31 @@ def served_refusal_message(
             + (fix or "name the served model for this tier in that provider's configuration")
             + " (chat still works)."
         )
+    change = (
+        f"change the model {provider} serves for tier '{tier}' ({setting})" if setting
+        else "change the model that provider serves for this tier in its configuration"
+    )
     return (
-        f"tier '{tier}' is served by {provider} with model '{verdict.model}', "
-        "which is blocked from tool-using lanes by runtime policy; it can be "
-        "used for chat only."
+        f"tier '{tier}' is served by {provider or 'a non-Ollama provider'} with model "
+        f"'{verdict.model}', which is blocked by runtime policy, and a blocked model "
+        f"does not serve a tier; ask for '{verdict.model}' by name for a text answer, "
+        f"or {change}."
     )
 
 
 def default_route_refusal_message(tier: Any, reason: str) -> str:
-    """The refusal for the default route when a tier it can step up to is refused.
+    """The refusal for the default route when a tier its escalation can reach is refused.
 
-    The default route escalates from the chat tier to the other configured
-    local tiers when an answer fails or is empty, so a lane that runs the
-    reply judges every one of them; ``reason`` is that tier's own refusal.
+    The default route steps up from its start to a stronger configured local
+    tier when an answer fails or is empty, so a lane that runs the reply
+    judges every tier that escalation can reach; ``reason`` is that tier's
+    own refusal, which names the setting that fixes it.  The other fix is to
+    keep the default route on its start tier.
     """
     return (
-        f"the default route can step up to tier '{tier}' (automatic escalation), "
-        f"and {reason} To run this lane, bind tier '{tier}' to an allowed model "
-        "or name an allowed tier for the lane."
+        f"the default route can step up to tier '{tier}' when an answer fails or "
+        f"is empty, and {reason} Alternatively set SONDER_MODEL_ESCALATION=0 to "
+        "keep the default route on its first tier."
     )
 
 
@@ -166,7 +177,8 @@ def decide_served(model: Any, deny: ToolLaneDenyList) -> ModelLaneDecision:
     """Decide for the model a non-Ollama provider serves for a tier.
 
     An empty or ``default`` id leaves the choice to the provider, so the
-    model is unknown and the tier is refused; anything else is judged as a
+    model is unknown (``SERVED_UNKNOWN``; the caller decides whether the
+    provider's reply can still name it); anything else is judged as a
     tier-bound model.
     """
     raw = str(model if model is not None else "").strip()

@@ -29,10 +29,9 @@ from tests.support.tool_lane import (
     DENIED,
     ESCALATION,
     RUNNABLE,
-    SERVED,
-    UNKNOWN,
     UNKNOWN_OPENAI,
     clear_environment,
+    served_refusal,
 )
 
 OTHER = "qwen2.5-coder:7b"
@@ -66,7 +65,7 @@ def bridge_code(monkeypatch, served=DENIED):
     monkeypatch.setenv("SONDER_INFERENCE_TIER_MODELS", "code=" + served)
 
 
-CODE_REFUSAL = ESCALATION % ("code", SERVED % ("code", "sonder_inference", DENIED), "code")
+CODE_REFUSAL = ESCALATION % ("code", served_refusal("code", "sonder_inference", DENIED))
 
 
 @pytest.fixture
@@ -185,7 +184,7 @@ def test_repl_train_refuses_a_ladder_tier_whose_served_model_is_denied(
         monkeypatch, capsys, answered, executed, one_task):
     bridge_code(monkeypatch)
     out = train_repl(capsys)
-    assert CODE_REFUSAL in out and out.count("blocked from tool-using lanes") == 1
+    assert CODE_REFUSAL in out and out.count("a blocked model does not serve a tier") == 1
     assert answered == [] and executed == []
 
 
@@ -263,7 +262,7 @@ def test_the_optional_reasoning_rung_is_judged(monkeypatch):
     monkeypatch.setenv("SONDER_REASONING_PROVIDER", "sonder-inference")
     monkeypatch.setenv("SONDER_INFERENCE_TIER_MODELS", "reasoning=" + DENIED)
     assert "reasoning" in runtime_policy.configured_tiers(policy, server.TIERS)
-    expected = ESCALATION % ("reasoning", SERVED % ("reasoning", "sonder_inference", DENIED), "reasoning")
+    expected = ESCALATION % ("reasoning", served_refusal("reasoning", "sonder_inference", DENIED))
     assert guard.selector_refusal("sonder", server.TIERS, policy) == expected
 
 
@@ -277,32 +276,35 @@ def test_an_unbound_tier_is_not_a_rung_and_is_not_judged(monkeypatch):
 
 def test_a_ladder_tier_bound_to_a_denied_name_is_judged(monkeypatch):
     monkeypatch.setitem(server.TIERS, "code", DENIED)
-    expected = ESCALATION % ("code", BLOCKED % DENIED, "code")
+    expected = ESCALATION % ("code", BLOCKED % DENIED)
     assert guard.selector_refusal("", server.TIERS, server._RUNTIME_POLICY) == expected
 
 
 def test_a_ladder_tier_with_an_undetermined_served_model_is_refused(monkeypatch):
     monkeypatch.setenv("SONDER_CODE_PROVIDER", "openai_compatible")
-    expected = ESCALATION % ("code", UNKNOWN_OPENAI % "code", "code")
+    expected = ESCALATION % ("code", UNKNOWN_OPENAI % "code")
     assert guard.selector_refusal("local", server.TIERS, server._RUNTIME_POLICY) == expected
+    # Sonder Inference names the served model in every reply, which the bridge judges.
     monkeypatch.setenv("SONDER_CODE_PROVIDER", "sonder-inference")
-    expected = ESCALATION % ("code", UNKNOWN % ("code", "sonder_inference"), "code")
-    assert guard.selector_refusal("local", server.TIERS, server._RUNTIME_POLICY) == expected
+    assert guard.selector_refusal("local", server.TIERS, server._RUNTIME_POLICY) == ""
 
 
 def test_the_chat_tier_keeps_its_own_refusal(monkeypatch):
     monkeypatch.setenv("SONDER_GENERAL_PROVIDER", "sonder-inference")
     monkeypatch.setenv("SONDER_INFERENCE_TIER_MODELS", "general=%s,code=%s" % (DENIED, DENIED))
-    expected = SERVED % ("general", "sonder_inference", DENIED)
+    expected = served_refusal("general", "sonder_inference", DENIED)
     assert guard.selector_refusal("", server.TIERS, server._RUNTIME_POLICY) == expected
 
 
-def test_the_knob_off_does_not_widen_what_an_explicit_tier_judges(monkeypatch):
-    """The default-route check is a function of the configuration, not of the escalation knob."""
+def test_the_knob_off_judges_the_one_rung_the_route_takes(monkeypatch):
+    """With escalation off the default route is its start alone, so only the start is judged."""
     bridge_code(monkeypatch)
     monkeypatch.setenv("SONDER_MODEL_ESCALATION", "0")
-    assert guard.selector_refusal("sonder", server.TIERS, server._RUNTIME_POLICY) == CODE_REFUSAL
+    assert guard.default_route_reach(server.TIERS, server._RUNTIME_POLICY) == ("general", ("general",))
+    assert guard.selector_refusal("sonder", server.TIERS, server._RUNTIME_POLICY) == ""
     assert guard.selector_refusal("general", server.TIERS, server._RUNTIME_POLICY) == ""
+    assert guard.selector_refusal("code", server.TIERS, server._RUNTIME_POLICY) == served_refusal(
+        "code", "sonder_inference", DENIED)
 
 
 # ---- a prompt that names its own model (``natural_model_request``) ---------------
@@ -386,3 +388,124 @@ def test_lanes_that_write_their_own_prompts_cannot_name_a_model():
     repair = re.search(r'prompt = \(\s*"([^"]+)"', inspect.getsource(server.campaign_repo_repair))
     assert repair and repair.group(1).startswith("A small Python project")
     assert _no_model_request(repair.group(1) + "rest of the prompt")
+
+
+# ---- what the default route can reach: the plan's own filter -----------------------
+
+def openai_compatible(monkeypatch, tier):
+    """``tier`` on the OpenAI-compatible transport with no model named: undeterminable."""
+    monkeypatch.setenv("SONDER_%s_PROVIDER" % tier.upper(), "openai_compatible")
+
+
+@pytest.mark.parametrize("tier", ["vision", "fast"])
+def test_a_tier_the_plan_cannot_reach_does_not_refuse_the_default_route(monkeypatch, tier):
+    policy = policy_with(monkeypatch, vision="qwen2.5vl:7b") if tier == "vision" else server._RUNTIME_POLICY
+    openai_compatible(monkeypatch, tier)
+    assert tier in runtime_policy.configured_tiers(policy, server.TIERS)
+    start, reach = guard.default_route_reach(server.TIERS, policy)
+    assert start == "general" and tier not in reach  # no image; fast is below the general start
+    plan = server._default_route_plan(TASK["prompt"], server.tier_escalation.Rung(
+        tier="general", model=server.TIERS["general"]))
+    assert set(rung.tier for rung in plan.rungs) <= set(reach)  # the plan stays inside what is judged
+    for selector in DEFAULT_SELECTORS:
+        assert guard.selector_refusal(selector, server.TIERS, policy) == "", selector
+    assert guard.selector_refusal(tier, server.TIERS, policy) == UNKNOWN_OPENAI % tier  # named, it refuses
+
+
+def test_a_reachable_undeterminable_tier_still_refuses_with_an_accurate_message(monkeypatch):
+    openai_compatible(monkeypatch, "code")
+    refusal = guard.selector_refusal("", server.TIERS, server._RUNTIME_POLICY)
+    assert refusal == ESCALATION % ("code", UNKNOWN_OPENAI % "code")
+    for part in ("tier 'code'", "openai_compatible", "never reads a model name", "set SONDER_OPENAI_MODEL"):
+        assert part in refusal, part
+    assert "name an allowed tier" not in refusal and "automatic escalation" not in refusal
+
+
+def test_the_reach_follows_the_start_and_the_plan_function(monkeypatch):
+    policy = policy_with(monkeypatch, reasoning=OTHER, vision="qwen2.5vl:7b")
+    tiers = runtime_policy.configured_tiers(policy, server.TIERS)
+    def reach(start, **kwargs):
+        found = server.tier_escalation.reachable_tiers(start, tiers, **kwargs)
+        assert found[0] == start
+        return set(found)
+
+    assert reach("general") == {"general", "code", "reasoning"}
+    assert reach("fast") == {"fast", "general", "code", "reasoning"}
+    assert reach("reasoning") == {"reasoning"}
+    assert reach("general", has_image=True) == {"general", "code", "reasoning", "vision"}
+    assert reach("general", escalate=False) == {"general"}
+
+
+def test_a_strict_start_reaches_the_working_tiers(monkeypatch):
+    monkeypatch.setenv("SONDER_STRICT", "1")
+    bridge_code(monkeypatch)
+    start, reach = guard.default_route_reach(server.TIERS, server._RUNTIME_POLICY)
+    assert start == "sonder" and "code" in reach and "general" in reach
+    assert guard.selector_refusal("", server.TIERS, server._RUNTIME_POLICY) == CODE_REFUSAL
+
+
+# ---- a data prompt that is a console command -------------------------------------
+
+def test_a_data_prompt_that_polls_the_ensemble_judges_every_configured_tier(monkeypatch):
+    openai_compatible(monkeypatch, "fast")  # not reachable by the default route, polled by /ensemble
+    assert guard.selector_refusal("", server.TIERS, server._RUNTIME_POLICY) == ""
+    refusal = guard.prompt_refusal("/ensemble write it", server.natural_model_request, server.TIERS,
+                                   server._RUNTIME_POLICY)
+    assert refusal == UNKNOWN_OPENAI % "fast"
+    assert guard.prompt_refusal("write it", server.natural_model_request, server.TIERS, server._RUNTIME_POLICY) == ""
+
+
+def test_a_data_prompt_that_asks_the_vision_tier_judges_it(monkeypatch):
+    policy = policy_with(monkeypatch, vision="qwen2.5vl:7b")
+    assert guard.prompt_refusal("/vision a.png | what", server.natural_model_request, server.TIERS, policy) == ""
+    openai_compatible(monkeypatch, "vision")
+    assert guard.prompt_refusal("/vision a.png | what", server.natural_model_request, server.TIERS,
+                                policy) == UNKNOWN_OPENAI % "vision"
+
+
+def test_ordinary_slash_prompts_are_not_refused():
+    for prompt in ("/ensemble write it", "/vision a.png | what", "/work fix it", "/search x"):
+        assert guard.prompt_refusal(prompt, server.natural_model_request, server.TIERS, server._RUNTIME_POLICY) == ""
+
+
+# ---- consumers outside server.py judge the server's in-memory policy -------------
+
+REASONING_REFUSAL = ESCALATION % ("reasoning", served_refusal("reasoning", "sonder_inference", DENIED))
+
+
+@pytest.fixture
+def reasoning_bound_in_memory_only(monkeypatch):
+    """The in-memory policy binds ``reasoning`` (``/runtime set``); the file on disk does not."""
+    policy = policy_with(monkeypatch, reasoning=OTHER)
+    monkeypatch.setattr(server, "_RUNTIME_POLICY", policy)
+    monkeypatch.setenv("SONDER_REASONING_PROVIDER", "sonder-inference")
+    monkeypatch.setenv("SONDER_INFERENCE_TIER_MODELS", "reasoning=" + DENIED)
+    assert "reasoning" not in runtime_policy.configured_tiers(runtime_policy.load(create=False), server.TIERS)
+    assert "reasoning" in runtime_policy.configured_tiers(policy, server.TIERS)
+
+
+def test_http_train_judges_the_in_memory_policy(reasoning_bound_in_memory_only, answered, executed, one_task):
+    assert train_http() == REASONING_REFUSAL
+    assert answered == [] and executed == []
+
+
+def test_repl_train_judges_the_in_memory_policy(reasoning_bound_in_memory_only, capsys, answered, executed, one_task):
+    assert REASONING_REFUSAL in train_repl(capsys)
+    assert answered == [] and executed == []
+
+
+def test_curriculum_practice_judges_the_in_memory_policy(reasoning_bound_in_memory_only, capsys, answered, executed):
+    import curriculum_run
+
+    assert curriculum_run.practice_on([dict(TASK)]) == (0, 0)
+    assert REASONING_REFUSAL in capsys.readouterr().out
+    assert answered == [] and executed == []
+
+
+def test_retrieval_eval_judges_the_in_memory_policy(reasoning_bound_in_memory_only, answered, executed):
+    import eval_retrieval
+
+    with pytest.raises(eval_retrieval.ModelRefused) as caught:
+        eval_retrieval.run_task(dict(TASK))
+    assert str(caught.value) == REASONING_REFUSAL
+    assert answered == [] and executed == []

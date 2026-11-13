@@ -133,17 +133,10 @@ def test_exec_consumers_the_bottom_check_cannot_see_refuse_first(scan):
             continue
         site = scan.sites[key]
         if entry.guarded_by:
-            judged = site.refused and site.judged
-            for guard in entry.guarded_by:
-                path, qualname = guard.split("::", 1)
-                judgements = calls.guard_judgements(path, qualname)
-                if not judgements:
-                    problems.append("%s guards %s :: %s :: %s but no refusal stops it" % ((guard,) + key))
-                    continue
-                judged = judged or all(
-                    any(calls.selector_matches(selector, item) for item in judgements)
-                    for selector in site.selectors
-                )
+            # Every guard must refuse and judge: one judging guard does not cover another.
+            judged, unrefused = calls.guards_judge(entry.guarded_by, site.selectors)
+            for guard in unrefused:
+                problems.append("%s guards %s :: %s :: %s but no refusal stops it" % ((guard,) + key))
             refused = True
         else:
             refused, judged = site.refused, site.judged
@@ -411,3 +404,134 @@ def test_the_registry_spells_every_key_as_the_scanner_does():
             or callee.startswith("raw-gateway:")
         ), callee
         ast.parse(callee if callee.isidentifier() else "x")
+
+
+# ---- the scanner credits only a refusal that really stops the call (review 4) ----
+
+EVASIONS = '''
+    import server
+    from sonder_runtime.adapters import tool_lane_guard as g
+
+    def dead_branch(p, tier):
+        if False:
+            if r := g.selector_refusal(tier, server.TIERS):
+                return r
+        exec(server.sonder(p, tier=tier))
+
+    def swallowed(p, tier):
+        try:
+            if r := g.selector_refusal(tier, server.TIERS):
+                raise ValueError(r)
+        except ValueError:
+            pass
+        exec(server.sonder(p, tier=tier))
+
+    def reassigned(p, tier):
+        if r := g.selector_refusal(tier, server.TIERS):
+            return r
+        tier = "astra-cyber-27b"
+        exec(server.sonder(p, tier=tier))
+
+    def _check(tier):
+        if g.selector_refusal(tier, server.TIERS):
+            raise RuntimeError("no")
+
+    def helper_swallowed(p, tier):
+        try:
+            _check(tier)
+        except RuntimeError:
+            pass
+        exec(server.ensemble_answer(p, tiers=tier))
+
+    def logs_only(p, tier):
+        r = g.selector_refusal(tier, server.TIERS)
+        if r:
+            print(r)
+            if p == "never":
+                return r
+        exec(server.offload(p, tier=tier))
+
+    def direct(p, tier):
+        if r := g.selector_refusal(tier, server.TIERS):
+            return r
+        with open("log") as handle:
+            exec(server.sonder(p, tier=tier))
+
+    def through_the_helper(p, tier):
+        _check(tier)
+        exec(server.ensemble_answer(p, tiers=tier))
+
+    def _dead_return(tier):
+        if False:
+            return g.selector_refusal(tier, server.TIERS)
+        return ""
+
+    def through_a_dead_return(p, tier):
+        if _dead_return(tier):
+            return
+        exec(server.sonder(p, tier=tier))
+'''
+
+
+@pytest.mark.parametrize("function, callee", [
+    ("dead_branch", "sonder"),          # the refusal sits under ``if False:``
+    ("swallowed", "sonder"),            # raised inside a ``try`` whose ``except`` swallows it
+    ("helper_swallowed", "ensemble_answer"),  # a raising helper wrapped in ``try/except: pass``
+    ("logs_only", "offload"),           # the ``return`` sits under an unrelated inner condition
+    ("through_a_dead_return", "sonder"),  # a helper whose refusal ``return`` is never reached
+])
+def test_a_refusal_that_does_not_stop_the_call_is_not_credited(tmp_path, monkeypatch, function, callee):
+    sites = _scan_source(tmp_path, monkeypatch, "scripts/evil.py", EVASIONS)
+    site = sites[("scripts/evil.py", function, callee)]
+    assert not site.refused and not site.judged, function
+
+
+def test_a_judged_name_assigned_after_the_refusal_is_not_judged(tmp_path, monkeypatch):
+    sites = _scan_source(tmp_path, monkeypatch, "scripts/evil.py", EVASIONS)
+    site = sites[("scripts/evil.py", "reassigned", "sonder")]
+    assert site.refused and not site.judged
+
+
+def test_a_direct_refusal_still_covers_a_call_nested_after_it(tmp_path, monkeypatch):
+    sites = _scan_source(tmp_path, monkeypatch, "scripts/evil.py", EVASIONS)
+    assert sites[("scripts/evil.py", "direct", "sonder")].judged
+    assert sites[("scripts/evil.py", "through_the_helper", "ensemble_answer")].judged
+
+
+GUARDS = '''
+    import server
+    from sonder_runtime.adapters import tool_lane_guard as g
+
+    def judging(p, tier):
+        if r := g.selector_refusal(tier, server.TIERS):
+            return r
+        return site(p, tier)
+
+    def judging_another(p, tier):
+        if r := g.selector_refusal("code", server.TIERS):
+            return r
+        return site(p, tier)
+
+    def swallowing(p, tier):
+        try:
+            if r := g.selector_refusal(tier, server.TIERS):
+                return r
+        except ValueError:
+            pass
+        return site(p, tier)
+
+    def site(p, tier):
+        exec(server.sonder(p, tier=tier))
+'''
+
+
+def test_every_guard_must_refuse_and_judge(tmp_path, monkeypatch):
+    sites = _scan_source(tmp_path, monkeypatch, "scripts/guards.py", GUARDS)
+    selectors = sites[("scripts/guards.py", "site", "sonder")].selectors
+    assert selectors == {"tier"}
+    judging, other, swallowing = ("scripts/guards.py::" + name for name in ("judging", "judging_another", "swallowing"))
+    assert calls.guards_judge([judging], selectors) == (True, [])
+    # One judging guard does not cover a guard that judges another selector (review 4, M2) ...
+    assert calls.guards_judge([judging, other], selectors) == (False, [])
+    # ... or one whose refusal a ``try`` swallows (review 4, M7).
+    assert calls.guards_judge([judging, swallowing], selectors) == (False, [swallowing])
