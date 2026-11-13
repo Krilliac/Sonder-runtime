@@ -3,9 +3,10 @@
 ``observe`` records tokens a second from a model response, averaging a new
 measurement with the figure already held.  ``up_front`` uses that figure for a
 model known to think: one too slow to write the caller's reply and a minimum
-of thought inside the request timeout is asked without thinking, and ``fit``
-cuts the headroom to what the timeout can deliver where thinking stays on (the
-rules and their reason are in ``sonder_runtime.domain.thinking_pace``).
+of thought inside the request timeout is asked without thinking, or, where it
+has to keep thinking, with its headroom cut to what the timeout can deliver
+(``fit``).  A model with time for both is sent its usual request (the rules
+and their reason are in ``sonder_runtime.domain.thinking_pace``).
 With no measurement yet a request is left exactly as it was, so the first call
 to a model is never changed.
 """
@@ -54,8 +55,9 @@ def rate(model: object) -> float | None:
 def fit(payload: dict, caller_payload: object, model: object, timeout_seconds: object) -> dict:
     """``payload`` with thinking headroom ``model`` can produce inside ``timeout_seconds``.
 
-    Unchanged when the model has not been measured, and never below the reply
-    budget in ``caller_payload``.
+    Unchanged when the model has not been measured or has time for the reply
+    and a minimum of thought, and never below the reply budget in
+    ``caller_payload``.
     """
     fitted = fit_headroom(payload, caller_payload, affordable_tokens(rate(model), timeout_seconds))
     if fitted is not payload:

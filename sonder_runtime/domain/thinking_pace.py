@@ -14,18 +14,28 @@ after 284 seconds as 900 tokens of thinking and no answer, and the second ask
 with thinking off took another 277 seconds.  A model that cannot write the
 caller's reply plus ``MIN_THINKING_TOKENS`` of thought inside the timeout has
 no time to think and then answer, so it is asked once, with thinking off, for
-the reply the timeout can deliver (``without_thinking``).  Every other request
-keeps thinking: its headroom is cut to what the model's measured speed can
-deliver, never below the budget the caller asked for (``fit_headroom``).
+the reply the timeout can deliver (``without_thinking``).  Where such a model
+cannot be asked without thinking (it refused the switch, or the caller chose),
+its headroom is cut to what its measured speed can deliver, never below the
+budget the caller asked for (``fit_headroom``).
+
+A model that does have time for the reply and that much thought is sent what
+it was always sent: nothing here changes its request.  Cutting its headroom
+too was tried and was not clearly better.  At 52.9 tokens a second under the
+45 second timeout of a fan-out call, one long question sat at the wall either
+way: uncut it was answered once in a single request of 43.9 seconds (2,267
+tokens, thought included) and timed out once; cut to the 1,871 tokens counted
+as affordable it used all of them on thought and needed a second request,
+without thinking, both times.  So the rule stays with models measured too
+slow, and a caller near the wall should pass a longer timeout.
 
 Where the line falls, with the two models measured that day.  At 52.9 tokens a
-second under the 45 second timeout of a fan-out call, 1,904 tokens are
-affordable: a 512-token reply needs 1,024, so the model keeps thinking with
-1,904 tokens of headroom.  At 3.4 tokens a second under 300 seconds, 811 are
-affordable: a 900-token reply needs 1,412, so thinking is switched off.  A
-request the caller sized at or above the headroom is given none and is never
-changed here.  Pure functions over Ollama's own timing fields; nothing here
-does I/O or keeps state.
+second under 45 seconds, 1,904 tokens are affordable: a 512-token reply needs
+1,024, so the request is left alone.  At 3.4 tokens a second under 300
+seconds, 811 are affordable: a 900-token reply needs 1,412, so thinking is
+switched off.  A request the caller sized at or above the headroom is given
+none and is never changed here.  Pure functions over Ollama's own timing
+fields; nothing here does I/O or keeps state.
 """
 from __future__ import annotations
 
@@ -97,15 +107,19 @@ def _num_predict(payload: object) -> int | None:
 
 
 def fit_headroom(payload: dict, caller_payload: object, affordable: int | None) -> dict:
-    """``payload`` with its thinking headroom cut to ``affordable`` tokens.
+    """``payload`` with its thinking headroom cut to ``affordable`` tokens, for a model too slow to think and answer.
 
     Only headroom is cut: the result never asks for less than the caller's own
     ``num_predict`` (``caller_payload``), and a payload that carries no headroom
-    over it comes back unchanged.  Returns ``payload`` itself when nothing
-    changes, a copy otherwise; the caller's dict is never mutated.
+    over it comes back unchanged.  So does the payload of a model that can
+    write the caller's reply and ``MIN_THINKING_TOKENS`` of thought inside the
+    timeout: its request is not changed.  Returns ``payload`` itself when
+    nothing changes, a copy otherwise; the caller's dict is never mutated.
     """
     budget, asked = _num_predict(payload), _num_predict(caller_payload)
     if affordable is None or budget is None or asked is None or budget <= asked:
+        return payload
+    if affordable >= asked + MIN_THINKING_TOKENS:
         return payload
     fitted = max(asked, min(budget, affordable))
     if fitted == budget:
