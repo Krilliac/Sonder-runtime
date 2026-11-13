@@ -1279,7 +1279,7 @@ def test_model_tag_selection_is_used_by_consult(monkeypatch):
     monkeypatch.setattr(sonder_repl.consult_flow, "default_tiers", lambda: ["code", "reasoning"])
     monkeypatch.setattr(
         sonder_repl.consult_flow, "consult",
-        lambda question, tiers: seen.update(question=question, tiers=tiers) or {
+        lambda question, tiers, **_kw: seen.update(question=question, tiers=tiers) or {
             "answers": [], "agree": None, "confidence": "unknown", "note": "",
         },
     )

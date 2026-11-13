@@ -108,6 +108,7 @@ from sonder_runtime.application.ports.model_gateway import ModelRequest
 from sonder_runtime.application.context import bind_operation_context
 from sonder_runtime.application.chat import provider_bridge as _provider_bridge
 from sonder_runtime.application.routing import long_context_overflow as _overflow
+import sonder_runtime.adapters.reference_lookup_lanes as _reference_lookup_lanes
 from sonder_runtime.domain import launcher_health as sonder_health
 from sonder_runtime.domain.common.errors import (
     Conflict,
@@ -7414,6 +7415,8 @@ class Handler(BaseHTTPRequestHandler):
         turn_overflow = self._turn_stack.enter_context(
             _overflow.notice_scope()
         ) if getattr(self, "_turn_stack", None) is not None else []
+        # No reference-lookup state from an earlier turn on this thread.
+        _reference_lookup_lanes.reset_turn()
         try:
             # SPEC-2 WP4 admission: bounded concurrency slot with queue
             # depth, admission deadline, drain and maintenance awareness,
@@ -7546,6 +7549,7 @@ class Handler(BaseHTTPRequestHandler):
                             )
                             _samples = []
                             _sample_turns = []
+                            _sample_lookups = {}  # each sample's own reference-lookup state
                             with _serve_temp_override(_sample_temp):
                                 for _si in range(int(_spanda_policy.k)):
                                     # Candidate samples must not admit durable
@@ -7570,6 +7574,7 @@ class Handler(BaseHTTPRequestHandler):
                                     )
                                     _samples.append(_sturn.content)
                                     _sample_turns.append(_sturn)
+                                    _sample_lookups[id(_sturn)] = _reference_lookup_lanes.take_turn()
                             _spanda_eval = _spanda_evaluate(
                                 _samples,
                                 alpha=_spanda_policy.alpha,
@@ -7606,6 +7611,8 @@ class Handler(BaseHTTPRequestHandler):
                             turn = next(
                                 t for t in _sample_turns if t.content == _dom
                             )
+                            # Sources and receipt come from the sample sent.
+                            _reference_lookup_lanes.restore_turn(_sample_lookups.get(id(turn)))
                             # Restore learning-feedback pointers to the answer
                             # the client actually receives (not the last sample).
                             state.last_iid = turn.iid
@@ -7836,6 +7843,9 @@ class Handler(BaseHTTPRequestHandler):
         refusal = _turn_refusal_receipt(turn_refusals)
         if refusal is not None:
             receipt["refusal"] = refusal
+        # A lookup turn's Sources block and receipt entry, added after the turn
+        # was recorded and captured so the stored reply never holds it.
+        content = _reference_lookup_lanes.finish_http(content, receipt)
         if stream:
             streamed = self._send_stream(
                 content, model, iid=response_iid, elapsed_ms=elapsed_ms,

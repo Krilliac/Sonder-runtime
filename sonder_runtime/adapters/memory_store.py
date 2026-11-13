@@ -1530,6 +1530,63 @@ def cancel_lesson_distillation(
     return cur.rowcount == 1
 
 
+# A chat turn answered with reference passages in its prompt is still captured
+# (its footer, outcome and session history work as usual), but it must never
+# become a lesson or a training example: the stored task is the bare question
+# and the answer leans on passages that are not stored with it.  The marker is
+# a terminal 'cancelled' distillation row carrying this reason, so the claim
+# logic never distills the turn; the training export skips the same reason.
+LEARNING_SKIP_REFERENCE_LOOKUP = "reference_lookup"
+
+
+def exclude_interaction_from_learning(conn, interaction_id, reason):
+    """Mark a captured interaction so lesson distillation and the training export skip it.
+
+    Writes (or turns a live job into) a cancelled distillation row with
+    ``reason`` as its result reason.  Returns True when the marker is in place.
+    """
+    interaction_id = str(interaction_id or "").strip()
+    reason = normalize_distillation_reason(reason)
+    if not interaction_id or reason is None:
+        return False
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO lesson_distillations("
+            "interaction_id, state, attempts, last_error, result_reason, completed_ts) "
+            "VALUES(?, ?, 0, ?, ?, CURRENT_TIMESTAMP)",
+            (interaction_id, DISTILLATION_CANCELLED, reason, reason),
+        )
+        if cur.rowcount != 1:
+            cur = conn.execute(
+                "UPDATE lesson_distillations SET state=?, claim_token=NULL, "
+                "owner_pid=NULL, owner_identity=NULL, claimed_at=NULL, last_error=?, "
+                "result_reason=?, updated_ts=CURRENT_TIMESTAMP, "
+                "completed_ts=CURRENT_TIMESTAMP WHERE interaction_id=? AND state IN (?, ?)",
+                (
+                    DISTILLATION_CANCELLED, reason, reason, interaction_id,
+                    DISTILLATION_CLAIMED, DISTILLATION_RETRYABLE,
+                ),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return cur.rowcount == 1
+
+
+def learning_excluded_interaction_ids(conn, reason):
+    """Interaction ids marked by ``exclude_interaction_from_learning`` with ``reason``."""
+    reason = normalize_distillation_reason(reason)
+    if reason is None:
+        return frozenset()
+    rows = conn.execute(
+        "SELECT interaction_id FROM lesson_distillations WHERE state=? AND result_reason=?",
+        (DISTILLATION_CANCELLED, reason),
+    ).fetchall()
+    return frozenset(row[0] for row in rows)
+
+
 # Reasons are short stable names ('semantic_duplicate' is the longest today).
 # The cap stops a finalizer that returns free text from turning the ledger into
 # a log; anything longer than this is not a reason worth grouping by.

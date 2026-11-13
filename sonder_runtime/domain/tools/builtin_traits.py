@@ -35,7 +35,7 @@ READ_ONLY_TOOLS = frozenset({
     "permission_approvals", "test_run_result", "build_model", "build_job_result",
     "build_fix_result", "crash_triage", "profile_digest", "debug_run_result",
     "process_list", "process_memory_risk_inspect", "approximate_location_lookup",
-    "compute_status", "compute_artifact_fetch", "tool_search",
+    "compute_status", "compute_artifact_fetch", "tool_search", "reference_search",
 })
 
 _ALIASES = {

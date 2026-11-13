@@ -57,6 +57,7 @@ from sonder_runtime.platform import debug_dump
 from sonder_runtime.adapters.repl_services import (
     code_improve, consult as consult_flow, tier_router,
 )
+from sonder_runtime.adapters import reference_lookup_multi as _reference_lookup_multi
 from sonder_runtime.interfaces.repl import command_router
 from sonder_runtime.interfaces.repl import style as S
 from sonder_runtime.application.ports import repl_notices
@@ -3970,12 +3971,17 @@ def main(*, machine_output=False):
                 tiers = [active_model] + tiers
         elif active_tier and active_tier not in tiers:
             tiers = [active_tier] + tiers
-        result = consult_flow.consult(question, tiers)
+        # Members share one reference lookup (as the MCP consult does); the
+        # judge runs without it.
+        result = consult_flow.consult(
+            question, tiers, lookup=_reference_lookup_multi.consult_scope(server._ensemble_targets))
         for answer in result["answers"]:
             _emit("\n=== %s ===\n%s" % (answer["tier"], answer["text"]))
         verdict = consult_flow.verdict_line(result)
         colour = "green" if result["agree"] is True else "amber"
         print("\n" + _paint(verdict, colour, "bold"))
+        if result.get("sources"):
+            _emit("\n" + result["sources"])
 
     def do_route(question):
         question = (question or "").strip()

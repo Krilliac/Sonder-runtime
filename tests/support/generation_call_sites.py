@@ -792,9 +792,12 @@ _ENTRIES = [
     ("server.py", "_agent_dispatch", "offload", 1, TEXT,
      "the agent offload tool: the answer returns to the agent as text, prompt input for its next step"),
     ("server.py", "_agent_turn", "_make_tier_generate", 1, EXEC, "agent decisions become tool calls"),
-    ("server.py", "_answer", "_make_generate", 1, TEXT, "chat answer (sonder, by tier or by name)"),
+    ("server.py", "_answer", "_make_generate", 1, TEXT,
+     ("chat answer (sonder, by tier or by name); handed to reference_lookup_lanes.chat_generate, "
+      "which forwards text_only to the framed call")),
     ("server.py", "_answer_with_history_impl", "_make_generate", 1, TEXT,
-     "chat answer with history (MCP and HTTP chat)"),
+     ("chat answer with history (MCP and HTTP chat); handed to reference_lookup_lanes.chat_generate, "
+      "which forwards text_only to the framed call")),
     ("server.py", "_answer_with_history_impl", "_answer", 1, TEXT,
      "chat answer with history (MCP and HTTP chat), default route or by tier"),
     ("server.py", "_autopilot_json_model", "_make_tier_generate", 1, EXEC,
@@ -881,8 +884,9 @@ _ENTRIES = [
     ("server.py", "control_command", "ensemble_answer", 1, TEXT, "/ensemble answer"),
     ("server.py", "control_command", "vision_analyze", 1, TEXT, "/vision answer"),
     ("server.py", "ensemble_answer", "/api/generate", 1, CHOKE, _UNLOAD),
-    ("server.py", "ensemble_answer", "_make_tier_generate", 2, TEXT,
-     "ensemble members and synthesis; the answer is returned"),
+    ("server.py", "ensemble_answer", "_make_tier_generate", 3, TEXT,
+     ("ensemble members and synthesis, and the factory handed to the shared reference lookup "
+      "for its search-terms call (parsed into query words); the answer is returned")),
     ("server.py", "improve_function.ask", "ensemble_answer", 1, EXEC, _REFUSES, (),
      "`ask` is code_improve's ask_fn, called only with tier=chosen, the selector refused above"),
     ("server.py", "model_fanout", "_model_fanout_authorized", 1, TEXT, "model_fanout answer"),
@@ -1038,6 +1042,12 @@ TEXT_ONLY_DECLARATIONS: dict[tuple[str, str, str], str] = {
     ("sonder_runtime/adapters/inference/ollama_gateway.py", "OllamaGateway.generate", "_generate_factory"):
         "the packaged Ollama gateway: callers that run or apply output hold the "
         "ToolLaneGateway, which judged the request first",
+    ("sonder_runtime/adapters/reference_lookup_lanes.py", "chat_generate.expander", "make_generate"):
+        "reference lookup's search-terms call on the single-model chat lanes: the reply is only "
+        "parsed into query words; make_generate is the lane's _make_generate",
+    ("sonder_runtime/adapters/reference_lookup_multi.py", "SharedLookup.retrieve.expand", "make_tier_generate"):
+        "reference lookup's search-terms call for ensemble_answer and consult members: the reply "
+        "is only parsed into query words; make_tier_generate is the ensemble's _make_tier_generate",
     ("sonder_runtime/adapters/tool_lane_gateway.py", "ServedTierGateway.generate", "reply_refusal"):
         "ChatService's text handle: a reply that names no model is kept as text; a blocked "
         "reported model is refused whatever the flag says",

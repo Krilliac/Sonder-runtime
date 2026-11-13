@@ -1417,6 +1417,12 @@
       "summary": "propose a guarded improvement to one function"
     },
     {
+      "category": "diagnostics",
+      "name": "/reference_search",
+      "risk": "safe",
+      "summary": "Search the local reference library (event ids, ATT&CK techniques, detection rules) and return up to k (1 to 8) framed passages with their sources."
+    },
+    {
       "category": "security",
       "name": "/register",
       "risk": "dangerous",
