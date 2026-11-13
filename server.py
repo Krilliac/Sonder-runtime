@@ -6526,6 +6526,7 @@ def _route_chat_web(prompt, session, project, location_consent):
     return reply
 
 
+@_reference_lookup_lanes.turn_scoped  # the turn's own lookup state; an enclosing turn's is put back
 @_prompts.turn_scoped
 @_capture_named_provider_request
 def _sonder_impl_serialized(
@@ -6777,14 +6778,14 @@ def _sonder_impl_serialized(
         # The refusal turn was already captured by _answer; purge it so it can
         # never distill into lessons or the training export.
         _discard_interaction(iid)
-        return _append_activity(replacement)
+        return _append_activity(_reference_lookup_lanes.replaced(replacement))  # a replacement reply carries no lookup Sources
     if web_tools.enabled() and web_intents.denies_web_access(response):
         # Guard miss (no re-dispatch possible), but the reply still denies web
         # access while web tools are actually enabled: keep the reply visible,
         # yet drop the captured interaction and suppress the footer so the
         # refusal never poisons lessons or the training export.
         _discard_interaction(iid)
-        return _append_activity(response)
+        return _append_activity(_reference_lookup_lanes.with_sources(response))  # the model's own reply: its Sources, as on HTTP
 
     # The code gate already ran on the attempt that stood (inside the loop).
     _capture_durable_session_turn(

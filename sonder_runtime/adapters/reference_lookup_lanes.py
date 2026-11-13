@@ -49,8 +49,10 @@ a bare answer that says why.
 """
 from __future__ import annotations
 
+import contextlib
+import functools
 import logging
-from collections.abc import Callable, Collection, Mapping, MutableMapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, MutableMapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
@@ -167,6 +169,33 @@ def _take() -> TurnLookup | None:
     record = _TURN.get()
     _TURN.set(None)
     return record
+
+
+@contextlib.contextmanager
+def own_turn() -> Iterator[None]:
+    """Run one chat turn with lookup state of its own.
+
+    On entry the enclosing turn's state (if any) is set aside and the turn
+    starts with none; on exit, normal or by an exception, the enclosing state
+    is put back and whatever the turn left is dropped.  A turn run inside
+    another (``/train`` practice inside an HTTP turn, a loop action) can
+    therefore neither take nor leave the enclosing turn's lookup state.
+    """
+    token = _TURN.set(None)
+    try:
+        yield
+    finally:
+        _TURN.reset(token)
+
+
+def turn_scoped(function: Callable[..., Any]) -> Callable[..., Any]:
+    """Decorate a chat turn's implementation so it runs under ``own_turn``."""
+    @functools.wraps(function)
+    def run(*args: Any, **kwargs: Any) -> Any:
+        with own_turn():
+            return function(*args, **kwargs)
+
+    return run
 
 
 def reset_turn() -> None:
@@ -429,6 +458,7 @@ __all__ = [
     "finish_http",
     "lookup_turn",
     "mark_learning_skip",
+    "own_turn",
     "receipt_entry",
     "replaced",
     "reset_turn",
@@ -436,5 +466,6 @@ __all__ = [
     "sources_text",
     "system_for",
     "take_turn",
+    "turn_scoped",
     "with_sources",
 ]
