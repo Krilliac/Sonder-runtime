@@ -31,13 +31,43 @@ EXPAND_PROMPT = (
     '(for example "disabled" for "turned off", "logon" for "signed in"), and any event '
     'IDs or technique IDs that the question itself mentions.\n\nQuestion: {question}')
 
+# Added to the search-terms request when the passages are for an answer: the same
+# short call also says whether the question is in the library's subjects at all.
+SCOPE_REQUEST = (
+    '\n\nFirst line: the search terms. Second line: RELATED if the question is about computers, '
+    'networks, accounts, logs or security in any way, or UNRELATED if it is about something else '
+    'entirely.')
+
 IDENTIFIER_RE = re.compile(
     r'0x[0-9a-f]+|\b(?:DET|AN|[TMSG])\d{3,4}(?:\.\d{3})?\b|\d{3,}', re.IGNORECASE)
 
+# The verdict word as the model writes it: upper case, standing alone.  Lower-case
+# "related" is an ordinary word and stays a search term.
+_VERDICT_RE = re.compile(r'(?<![A-Za-z0-9])(UNRELATED|RELATED)(?![A-Za-z0-9])')
+_LINE_LABEL_RE = re.compile(r'^[ \t]*(?:first|second)[ \t]+line[ \t]*:[ \t]*',
+                            re.IGNORECASE | re.MULTILINE)
 
-def build_expand_prompt(question: str) -> str:
-    """The user turn that asks the model for search terms (sent without a system prompt)."""
-    return EXPAND_PROMPT.format(question=question)
+
+def build_expand_prompt(question: str, *, scope: bool = False) -> str:
+    """The user turn that asks the model for search terms (sent without a system prompt).
+
+    With ``scope`` the request also asks for the RELATED / UNRELATED line.
+    """
+    prompt = EXPAND_PROMPT.format(question=question)
+    return prompt + SCOPE_REQUEST if scope else prompt
+
+
+def split_scope(content: str) -> tuple[str, bool]:
+    """(the reply without its verdict, True when the verdict is UNRELATED).
+
+    Models put the verdict on its own line, as the last item of the terms line
+    or after the last term without a comma; all three are read.  The last
+    verdict word decides.  A reply without one is not a verdict of UNRELATED,
+    so a model that ran out of room listing terms changes nothing.
+    """
+    verdicts = _VERDICT_RE.findall(content)
+    text = _LINE_LABEL_RE.sub('', _VERDICT_RE.sub('', content))
+    return text, bool(verdicts) and verdicts[-1] == 'UNRELATED'
 
 
 def query_terms(text: str | None, extra_terms: Iterable[object] = ()) -> list[str]:
