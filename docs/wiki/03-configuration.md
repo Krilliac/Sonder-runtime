@@ -379,8 +379,13 @@ Some installed models are text-only advisers: they may be chatted with by
 name, and used through text-only `ensemble_answer` and `consult`, but any
 lane that calls tools, or executes or applies model output (agent and
 workbench turns, repository and build fleet workers, campaigns, game generation,
-`codegen_build_loop`, `improve_function`), refuses them, the chat code gate
-never runs their replies, and they are never bound to a tier. The built-in
+`codegen_build_loop`, `improve_function`, `parallel_generate_run`,
+`parallel_generate_run_languages`, `mesh_generate`, and the self-modification
+job run by `scripts/nightly_self_improve.py` and `scripts/selfmod_forever.py`),
+refuses them, the chat code gate never runs their replies, and they are never
+bound to a tier. The self-modification job checks its model (`--model`, else
+the `code` tier) before it starts a run and stops with `model refused, no run
+started: ...`. The built-in
 list is the `astra-cyber-` prefix and the two `hf.co/...-GGUF` sources it was
 pulled from (every quantisation, tagged or not). Names are compared
 case-insensitively, without a trailing `:latest`, and by their last path
@@ -391,24 +396,81 @@ The runtime policy can add entries (`tool_lane_denied_models` in
 the built-in ones, and no tool or MCP parameter edits it. A malformed section
 makes the whole policy file invalid: it then loads as built-in defaults, which
 also reverts every tier binding, and caller-named models are refused in tool
-lanes until the file is repaired or reset (`/runtime reset`).
+lanes until the file is repaired or reset (`/runtime reset`). A `local_models`
+entry that names a blocked model does not invalidate the file: that one tier
+uses its default, the rest of the file applies, and `/runtime status` shows a
+`WARNING:` line for it. A runtime-policy update that would bind a blocked
+model is refused.
 
 A tier bound to a provider other than Ollama is judged by the model that
 provider actually serves (`SONDER_INFERENCE_TIER_MODELS`, else
 `SONDER_INFERENCE_MODEL`; the OpenRouter tier model; `SONDER_OPENAI_MODEL`).
 When that model cannot be determined (unset, `default`, or unreadable
-configuration) the tier is refused in tool lanes and chat still works.
+configuration) the tier is refused in tool lanes and chat still works. With the
+whole process on Sonder Inference (`SONDER_MODEL_BACKEND=sonder-inference`)
+and `SONDER_INFERENCE_MODEL` unset, a packaged gateway lane on tier `sonder`
+is refused as undetermined (that provider sends `default` for it), while the
+server's own agent turn on tier `sonder` is judged by the policy's chat tier
+and, at generation, by the model the reply reports; set
+`SONDER_INFERENCE_MODEL` to name the served model.
+
+Generation itself is default-deny. Every model call reaches
+`server._chat_request`, which refuses a denied model (by name, by the request
+payload's model, and for a bridged tier by the model its provider is configured
+to serve) with a `configuration` error (status 403) before anything is sent,
+unless the call site passed `text_only=True`. A bridged reply is judged again
+by the model it reports serving; an empty id, `default` or an echo of the tier
+name counts as undetermined and is refused. A cloud fallback is judged again.
+Text lanes (chat by name or tier over MCP, HTTP and the REPL, structured chat,
+`ensemble_answer`, `consult`, offloads, `model_fanout`, vision, the LLM judge,
+conversation titles) declare themselves text-only and keep answering. The
+packaged gateway handed to the application is the checked one; only the text
+consumers (A2A, offloads, replay and the chat service) receive the unchecked
+gateway. Ordinary models are judged against a deny list cached per version of
+the policy file, so they pay no extra disk read per call.
+
+The lanes that generate through a text entry point and then run, compile or
+write the reply refuse first: `/train` practice (HTTP and REPL),
+`curriculum_run.py`, `eval_retrieval.py`, `eval_harness.py` and `eval_solver.py`
+live runs, `promotion_eval.py`, `game_ladder.py` and the arena-shooter
+example drivers. `/run`, `/runproject` and the REPL `/refactor` (applied only
+after the user confirms the diff) still act on what any model wrote: the user
+typing the command is the explicit approval.
 
 Limits: this is a name list. A renamed copy (`ollama cp astra-cyber-27b
 helper`) or an alias such as `sonder:latest` pointed at a blocked model is not
-recognised, and a provider that serves a different model than the configured
-id is not detected. The packaged model-gateway lanes that call tools or
-apply output (interactive agent lanes, conversational subagents, `build_fix`
-candidates) and the autopilot planner and reviewer apply the same checks;
-text callers of the gateway (A2A, offloads, replay) answer a named blocked
-model as chat. `/run` and `/runproject` still execute the latest
-runnable block whatever model wrote it: the user typing the command is the
-explicit approval.
+recognised. A provider that maps the configured id to a different model while
+reporting a permitted one is not detected, and an OpenAI-compatible endpoint
+that echoes the requested id is judged by that id. Text-lane output applied by
+an external program (an MCP or HTTP client that splices `ensemble_answer`
+output, or executes tool calls returned by `/v1/chat/completions`) is outside
+the runtime's control.
+
+##### Tool-lane deny list: classifying a generation call site
+
+`tests/test_generation_call_sites.py` fails on any new call site of the
+generation stack (`_post_model`, `_chat_request`,
+`_chat_request_with_cloud_fallback`, `_make_generate`, `_make_tier_generate`,
+`_generate_text`, `_gateway_generate_text`), of a text entry point (`sonder`,
+`answer_with_history`, `structured_answer_with_history`, `ensemble_answer`,
+`consult`, `_offload_impl`, `model_fanout`), of a raw model endpoint path, of a
+packaged gateway `.generate`, or of the unchecked gateway in
+`sonder_runtime/bootstrap/app.py`. Register the site in
+`tests/support/generation_call_sites.py` with its count, class and reason:
+
+- `TEXT`: the reply is only shown, parsed or stored as text. Pass
+  `text_only=True` at a generation-stack call; a text entry point already
+  declares itself.
+- `EXEC`: the reply drives tools, or is run, compiled or written. Leave
+  `text_only` at its default. A caller of a text entry point or a raw endpoint
+  must refuse first (`tool_lane_guard.selector_refusal`, `resolved_refusal`, or
+  `denied` with `refusal`), in the same function or a guard listed in the
+  entry's `guarded_by`.
+- `CHOKE`: the generation stack forwarding the flag, imports and re-exports.
+- `ACCEPTED`: a named exception with its reason.
+
+`GAP` (runs model output with no refusal) is not accepted: the list of
+tolerated gaps is empty.
 
 #### Reference lookup
 

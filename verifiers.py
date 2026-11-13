@@ -856,7 +856,7 @@ def llm_judge(artifact, spec=None):
         model = server.resolve_sonder_model(False)
         judge_fn = server._make_generate(
             model, "You are a strict grader. Reply with one integer 0-10, then a brief reason.",
-            0.0, 256, 4096)
+            0.0, 256, 4096, text_only=True)
     resp = judge_fn("RUBRIC: %s\n\nOUTPUT TO GRADE:\n%s\n\nScore 0-10 (integer first):"
                     % (rubric, artifact)) or ""
     m = re.search(r"\d+", resp)

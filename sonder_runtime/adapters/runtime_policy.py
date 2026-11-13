@@ -308,6 +308,15 @@ def update(
                 raise ValueError(
                     "sonder-personal:latest is reserved for an active validated deployment"
                 )
+            # An explicit request to bind a blocked model is refused outright;
+            # only a file that already names one loads with that tier dropped.
+            blocked = _rules.denied_local_bindings(local_models, _rules.tool_lane_deny_list(candidate))
+            if blocked:
+                tier, model = blocked[0]
+                raise ValueError(
+                    f"runtime policy local_models.{tier} names a model blocked from "
+                    f"tool-using lanes: {model!r}"
+                )
             candidate["local_models"].update(local_models)
         if routing:
             if not isinstance(routing, dict):
@@ -359,6 +368,8 @@ def format_policy(policy=None) -> str:
     ]
     if policy.get("error"):
         lines.append("  ERROR: %s (safe defaults active)" % policy["error"])
+    for notice in policy.get("tool_lane_notices") or ():
+        lines.append(f"  WARNING: {notice}")
     lines.append("  local models:")
     for tier in LOCAL_TIERS:
         model = policy["local_models"].get(tier) or ""

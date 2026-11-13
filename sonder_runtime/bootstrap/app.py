@@ -683,7 +683,7 @@ def build_application(
         raise InvalidInput(str(exc)) from exc
     logger.info(f"provider bindings resolved, provider={provider_bindings.default_generation_provider!r}")
     logger.debug("building model gateway")
-    gateway = build_model_gateway(
+    raw_gateway = build_model_gateway(
         provider_bindings,
         target_resolver=target_resolver,
         generate_factory=generate_factory,
@@ -691,12 +691,15 @@ def build_application(
         fallback_observer=_report_provider_fallback,
     )
     logger.info("model gateway built")
-    # Lanes that call tools or apply model output get the guarded gateway;
-    # text callers (chat, A2A, offloads, replay) keep ``gateway``.
+    # ``gateway`` is the checked handle every consumer gets by default: it
+    # refuses a tool-lane-denied model before the request reaches the shared
+    # gateway.  Only the named text consumers below (Application.model_gateway,
+    # which serves chat, A2A, offloads and replay, and ChatService) are handed
+    # ``raw_gateway``; tests/support/generation_call_sites.py counts its uses.
     from ..adapters.tool_lane_gateway import ToolLaneGateway
 
-    tool_gateway = ToolLaneGateway(
-        gateway, resolve_target=target_resolver, bindings=provider_bindings,
+    gateway = ToolLaneGateway(
+        raw_gateway, resolve_target=target_resolver, bindings=provider_bindings,
     )
     logger.debug("composing vision service and context planning facade")
     vision = VisionService(
@@ -1433,7 +1436,7 @@ def build_application(
             )
             from ..adapters.workspace_reality import GitWorkspaceReality
             interactive_lanes = AgentLaneService(
-                lane_store, sessions, tool_gateway, lane_tools,
+                lane_store, sessions, gateway, lane_tools,
                 authorize_grant=authorize_lane_grant,
                 allowed_tools=tuple(item.name for item in lane_tools.graph.registry.list_all()),
                 context_planning=context_planning,
@@ -1513,7 +1516,7 @@ def build_application(
                 subagent_provider = LocalSubagentProvider(
                     continuation_service,
                     runner_factory=conversational_runner_factory(
-                        tool_gateway, get_session_repository(), get_session_capture_service(),
+                        gateway, get_session_repository(), get_session_capture_service(),
                     ),
                     effect_binding_factory=(
                         lambda request, _context: _compose_subagent_binding(
@@ -2002,7 +2005,7 @@ def build_application(
     build_tools = _compose_build_tools(
         config, runtime_redactor, developer_tools, get_job_registry, get_process_job_provider,
         build_grants, tools_getter=lambda: typed_tools_ref.get("tools"),
-        model_gateway_getter=lambda: tool_gateway,  # build_fix applies model patches
+        model_gateway_getter=lambda: gateway,  # build_fix applies model patches
         # Every fix edit is a ``build-fix`` effect in the worker effect
         # journal, under this host's worker identity and owner epoch.
         effect_binding_factory=lambda run_id, scope: worker_binding(
@@ -2046,14 +2049,14 @@ def build_application(
         profile=profile,
         runtime_policy=RuntimePolicyService(RuntimePolicyRepository()),
         provider_bindings=provider_bindings,
-        model_gateway=gateway,
+        model_gateway=raw_gateway,  # text consumers only (see above)
         provider_registry=provider_registry,
         provider_overrides=ProviderOverrideService(
             ProviderOverridePolicy({item.provider_id: item.provider_id for item in provider_registry.providers()})
         ),
         specialized_providers=specialized_bundle,
         chat=ChatService(
-            gateway,
+            raw_gateway,
             session_capture_service,
             chat_default_tier=lambda: target_resolver("sonder", None).tier_label or "sonder",
             strict_alias_provider_available="ollama" in provider_bindings.required_providers,

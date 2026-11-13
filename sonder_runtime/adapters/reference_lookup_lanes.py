@@ -299,10 +299,14 @@ def chat_generate(make_generate: Callable[..., Any], question: Any, model: Any, 
     if not record.applies:
         return make_generate(model, system, temperature, num_predict, num_ctx, **options)
     # Only the caller's own system message (kept by ``system_for``), never Sonder's.
+    # ``options`` (including the lane's ``text_only``) reach the framed call as given.
     inner = make_generate(model, record.caller_system, temperature, num_predict, num_ctx, **options)
+    expand_options = {key: value for key, value in options.items() if key != "text_only"}
 
     def expander() -> Callable[..., Any]:
-        return make_generate(model, "", EXPAND_TEMPERATURE, EXPAND_NUM_PREDICT, num_ctx, **options)
+        # The search-terms reply is only parsed into query words: a text call.
+        return make_generate(model, "", EXPAND_TEMPERATURE, EXPAND_NUM_PREDICT, num_ctx,
+                             text_only=True, **expand_options)
 
     return LookupGenerate(inner, record, question if isinstance(question, str) else "", expander,
                           num_ctx=num_ctx, num_predict=num_predict)

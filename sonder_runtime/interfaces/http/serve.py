@@ -2848,6 +2848,11 @@ def _do_runproject_from_messages(
 
 def _do_train(n):
     """Run grounded practice over n tasks; this records lessons, not weight updates."""
+    from sonder_runtime.adapters import tool_lane_guard
+
+    # Practice runs the code in the default route's reply: judge that route first.
+    if refusal := tool_lane_guard.selector_refusal("", server.TIERS):
+        return refusal
     tasks = training_tasks.sample(n)
     passed = 0
     lessons = 0

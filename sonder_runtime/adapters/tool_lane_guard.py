@@ -5,9 +5,11 @@ refuse a blocked model calls one function here.  The decision rule itself is
 the pure ``sonder_runtime.domain.tool_lane_models``; this adapter only supplies
 the deny list from the runtime policy and shapes the result for the caller.
 
-Every function takes the loaded runtime policy the caller already holds.  A
+Every lane check takes the loaded runtime policy the caller already holds.  A
 missing policy is read from disk without creating it, and a policy that cannot
-be read fails closed for caller-named models.
+be read fails closed for caller-named models.  The generation checks
+(``require_generation``, ``require_served``) read a deny list cached per
+version of the policy file, and refuse unless the call site is text-only.
 
 A tier bound to a non-Ollama provider (``SONDER_<TIER>_PROVIDER`` /
 ``SONDER_MODEL_BACKEND``) is judged by the model that provider serves, which
@@ -48,6 +50,133 @@ def deny_list(policy: Mapping[str, Any] | None = None) -> _models.ToolLaneDenyLi
     except Exception as exc:  # noqa: BLE001 - an unreadable policy fails closed
         _warn_once("runtime policy could not be loaded", exc)
         return _policy.tool_lane_deny_list(None)
+
+
+# The deny list the generation check last read, with the policy file identity
+# it was read for: ``(key, deny list)``.  Only a readable policy is cached.
+_GENERATION_CACHE: tuple[tuple, _models.ToolLaneDenyList] | None = None
+
+
+def _policy_file_key() -> tuple | None:
+    """Identity of the policy file (path, mtime, size, inode); None when it cannot be stat'ed."""
+    path = _policy.policy_path()
+    try:
+        stat = os.stat(path)
+    except FileNotFoundError:
+        return (str(path), None)
+    except OSError:
+        return None
+    return (str(path), stat.st_mtime_ns, stat.st_size, stat.st_ino)
+
+
+def generation_deny_list(policy: Mapping[str, Any] | None = None) -> _models.ToolLaneDenyList:
+    """The deny list for the generation check, read from disk at most once per file version.
+
+    Every model call asks, so the list is cached against the policy file's
+    path, modification time, size and inode; an edit, a replacement or a
+    removal reads it again.  A failed read is never cached: until the file is
+    readable each call reads it again (and fails closed).  Thread-safe: the
+    cache is one tuple replaced atomically, and a racing reader at worst
+    reads the file itself.
+    """
+    global _GENERATION_CACHE
+    if policy:
+        return deny_list(policy)
+    key = _policy_file_key()
+    cached = _GENERATION_CACHE
+    if key is not None and cached is not None and cached[0] == key:
+        return cached[1]
+    deny = deny_list(None)
+    if key is not None and deny.readable and _policy_file_key() == key:
+        _GENERATION_CACHE = (key, deny)
+    return deny
+
+
+def _generation_refused(message: str) -> Exception:
+    """The error a refused model call raises: a 403 configuration failure, no attempt made."""
+    from sonder_runtime.adapters.model_transport import ModelCallError
+
+    error = ModelCallError("configuration", message, status=403, attempts=0)
+    error.tool_lane_refused = True
+    return error
+
+
+def require_generation(
+    model: Any,
+    *,
+    rung: Any = None,
+    text_only: bool = False,
+    payload: Mapping[str, Any] | None = None,
+    policy: Mapping[str, Any] | None = None,
+) -> None:
+    """Refuse one model call unless its caller declared it text-only.
+
+    The default for every generation is that the reply may be run, applied or
+    turned into a tool call, so a denied model is refused; a caller whose
+    reply is only returned or shown passes ``text_only=True`` and is never
+    judged (no policy read either).  Judged before sending: the model the
+    call names and the payload's own ``model`` (as tier-bound names, so an
+    unreadable policy still refuses the built-in list without refusing an
+    ordinary model), and for a bridged ``rung`` the model its provider is
+    configured to serve.  When that served model cannot be determined here
+    the check is left to the reply (``require_served``).  Raises a
+    ``ModelCallError`` (kind ``configuration``, status 403, ``attempts=0``,
+    ``tool_lane_refused=True``) carrying the refusal text.
+    """
+    if text_only:
+        return
+    deny = generation_deny_list(policy)
+    names = [model]
+    if isinstance(payload, Mapping) and payload.get("model") != model:
+        names.append(payload.get("model"))
+    for name in names:
+        verdict = _models.decide(name, deny, free_form=False)
+        if verdict.denied:
+            raise _generation_refused(_models.refusal_message(verdict.model, verdict.status))
+    if rung is None:
+        return
+    provider = str(getattr(rung, "provider", "") or "")
+    tier = str(getattr(rung, "tier", "") or "").strip().lower()
+    try:
+        served = _provider_model(provider, tier, "", None)
+    except Exception as exc:  # noqa: BLE001 - the reply's served model is judged instead
+        _warn_once("provider configuration could not be read before sending", exc)
+        return
+    verdict = _models.decide_served(served, deny)
+    if verdict.status is _models.ModelLaneStatus.DENIED:
+        raise _generation_refused(_models.served_refusal_message(tier, provider, verdict))
+
+
+def require_served(
+    rung: Any,
+    reported: Any,
+    *,
+    text_only: bool = False,
+    policy: Mapping[str, Any] | None = None,
+) -> None:
+    """Refuse a bridged reply whose provider reports a denied or unnamed model.
+
+    The other half of ``require_generation`` for a bridged rung: after the
+    provider answers, the model it says it served (``ModelResponse.model``)
+    is judged unless the caller declared the call text-only.  An empty or
+    ``default`` id, or one that only echoes a tier or the default route back
+    (what the OpenAI-compatible transport reports when no model is
+    configured), names no model and is refused.  Raises the same 403
+    ``ModelCallError`` as ``require_generation``; the reply is discarded.
+    """
+    if text_only:
+        return
+    from sonder_runtime.adapters.provider_bindings import PROVIDER_TIERS
+
+    provider = str(getattr(rung, "provider", "") or "")
+    tier = str(getattr(rung, "tier", "") or "").strip().lower()
+    raw = str(reported if reported is not None else "").strip()
+    if raw.lower() in PROVIDER_TIERS or raw.lower() in _DEFAULT_ROUTE:
+        verdict = _models.ModelLaneDecision(_models.ModelLaneStatus.SERVED_UNKNOWN, raw)
+    else:
+        verdict = _models.decide_served(raw, generation_deny_list(policy))
+    if verdict.denied:
+        raise _generation_refused(_models.served_refusal_message(tier, provider, verdict))
 
 
 def decision(

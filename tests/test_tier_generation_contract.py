@@ -5,6 +5,7 @@ import json
 from types import SimpleNamespace
 import pytest
 
+from sonder_runtime.adapters import runtime_policy, tool_lane_guard
 from sonder_runtime.adapters.provider_bindings import ProviderBindings
 from sonder_runtime.application.ports.model_gateway import ModelResponse
 from sonder_runtime.adapters.model_transport import ModelCallError
@@ -306,6 +307,7 @@ def _generation_host(graph, wire):
     import os
     from sonder_runtime.adapters import agent_generation_budget, tier_generation
     from sonder_runtime.application.chat import provider_bridge
+    from sonder_runtime.domain.model_usage import response_metadata
 
     tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
     funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
@@ -336,6 +338,7 @@ def _generation_host(graph, wire):
         "context_policy": SimpleNamespace(native=False), "_keep_alive_for": lambda _: "5m",
         "_chat_request": chat, "ModelCallError": ModelCallError,
         "_model_usage_count": lambda x: x, "_model_usage_source": lambda *x: "measured",
+        "_response_metadata": response_metadata,
         "activity_tracker": SimpleNamespace(record_model_call=lambda **kw: None),
     }
     module = ast.Module(body=[funcs["_make_generate"], funcs["_make_tier_generate"]], type_ignores=[])
@@ -404,6 +407,8 @@ def test_isolated_planner_json_budget_and_thinking_are_provider_scoped(monkeypat
         _bridge_provider_for_tier=lambda _: "sonder_inference",
         _build_system=lambda *a, **kw: "system", _prompts=SimpleNamespace(render=lambda *a, **kw: "system"),
         _extract_agent_json=extract_agent_json,
+        # The real tool-lane check, on a default policy: an ordinary model is not refused.
+        _tool_lane_guard=tool_lane_guard, _RUNTIME_POLICY=runtime_policy.default_policy({}),
     )
     source = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
     function = next(n for n in source.body if isinstance(n, ast.FunctionDef) and n.name == "_autopilot_json_model")

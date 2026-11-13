@@ -22,6 +22,10 @@ def build_gen_fn():
     prompted with GEN_PROMPT at a higher temperature for task-generation variety.
     """
     model = server.resolve_sonder_model(False)
+    # Generated tasks carry check code that practice runs: one clear refusal
+    # instead of a harvest of refused candidates.
+    if refusal := server._tool_lane_guard.resolved_refusal("", model, ""):
+        raise SystemExit("CURRICULUM: " + refusal)
     raw_gen = server._make_generate(model, "", 0.7, 512, 4096)
     return lambda: raw_gen(self_curriculum.GEN_PROMPT)
 
@@ -32,6 +36,10 @@ def practice_on(tasks):
     Wrapped per-task in try/except so one bad task can't abort the whole run.
     Returns (passed, new_lessons).
     """
+    # Practice runs the code in the default route's reply: judge that route first.
+    if refusal := server._tool_lane_guard.selector_refusal("", server.TIERS):
+        print("CURRICULUM: " + refusal)
+        return 0, 0
     passed = 0
     new_lessons = 0
     for t in tasks:

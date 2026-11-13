@@ -98,6 +98,10 @@ class ModelConsistencyError(RuntimeError):
     """The pinned model changed while an opted-in evaluation was running."""
 
 
+class ModelRefused(RuntimeError):
+    """The evaluated model may not have its output run (tool-lane deny list)."""
+
+
 def _suite_digest(chunk, start, count):
     """Digest the held-out definitions without persisting their text."""
     encoded = json.dumps(
@@ -168,6 +172,9 @@ def _run_condition(prompt, check, generate_fn):
 def run_task(task, model=None, digest_probe=None, expected_digest=None):
     """Run one held-out task under both conditions. Never raises."""
     name, prompt, check = task["name"], task["prompt"], task["check"]
+    # Both conditions run the reply's code: refuse a denied model or route first.
+    if refusal := server._tool_lane_guard.selector_refusal(model or "", server.TIERS):
+        raise ModelRefused(refusal)
     def prove_model():
         if digest_probe is None:
             return
@@ -246,6 +253,9 @@ def main(argv):
                               if args.record_history else None),
                 expected_digest=model_digest,
             )
+        except ModelRefused as exc:
+            print(f"EVAL refused: {exc}")
+            return 2
         except ModelConsistencyError as exc:
             print("history: NOT recorded (%s)" % exc)
             return 2

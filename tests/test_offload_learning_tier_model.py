@@ -112,7 +112,7 @@ def test_unlearned_offload_on_a_bridged_tier_reaches_the_bound_provider(monkeypa
 
     seen = {}
 
-    def fake_bridge_chat_request(gateway, payload, rung, *, context):
+    def fake_bridge_chat_request(gateway, payload, rung, *, context, **_kwargs):
         seen["provider"], seen["tier"] = rung.provider, rung.tier
         seen["model"] = payload["model"]
         return {"message": {"content": "bridged"}, "model": payload["model"]}, "bridged"
