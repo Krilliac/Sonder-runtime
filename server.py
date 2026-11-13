@@ -435,6 +435,7 @@ from sonder_runtime.adapters.session_turn_claims import (
 from sonder_runtime.adapters.code_repair_persistence import (
     persist_verified_code_repair as _persist_verified_code_repair_policy,
 )
+from sonder_runtime.adapters import model_pace as _model_pace
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
     thinking_exhausted_budget as _thinking_exhausted_budget,
@@ -5238,7 +5239,7 @@ def _chat_request(
         # content, so a tight cap hits done_reason "length" having emitted
         # nothing. Give thinking headroom, as the cloud path does. Cache-only:
         # this must not add a speculative round trip to the hot path.
-        payload = _with_local_thinking_budget(payload)
+        payload = _model_pace.up_front(_with_local_thinking_budget(payload), caller_payload, model, _bound_request_timeout(timeout, TIMEOUT), _think_option_supported(model), planned=payload)
         # Never override an explicit choice; the cloud policy sets `think`
         # itself. Ollama returns message.thinking for these models regardless,
         # so this is belt-and-braces rather than the mechanism.
@@ -5259,6 +5260,7 @@ def _chat_request(
         local_only=local_only,
         single_send=single_send,
     )
+    _model_pace.observe(model, out, local=not (cloud or _is_cloud_model_name(model)))
     if not isinstance(out, dict):
         raise ModelCallError(
             "protocol", "Ollama response was not a JSON object",
@@ -5418,15 +5420,13 @@ def _chat_request(
             and payload.get("think") is not False
             and exhausted_thinking
         ):
-            roomier = _with_local_thinking_budget(payload)
+            roomier = _model_pace.room_to_retry(payload, _with_local_thinking_budget(payload), caller_payload, model, _bound_request_timeout(timeout, TIMEOUT))
             if not _budget_retried and roomier != payload:
                 # The model reasoned right up to the cap and never got to an answer.
                 # Now that the response has identified it, retry once with the
                 # headroom it needed rather than reporting an empty response.
                 return _chat_request(
-                    roomier,
-                    model=model,
-                    cloud=cloud,
+                    roomier, model=model, cloud=cloud,
                     timeout=timeout,
                     cancel_check=cancel_check,
                     accept_native_tool_calls=accept_native_tool_calls,

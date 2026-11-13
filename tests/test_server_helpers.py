@@ -821,7 +821,8 @@ def test_chat_request_retries_thinking_only_inline_length_completion(monkeypatch
     )
     with pytest.raises(server.ModelCallError, match="no assistant content"):
         server._chat_request({"options": {"num_predict": 8}}, model="local")
-    assert len(calls) == 2
+    # the tight budget, the headroom, then once with thinking off
+    assert len(calls) == 3
 
 
 def test_chat_request_keeps_nonleading_literal_think_tags(monkeypatch):
