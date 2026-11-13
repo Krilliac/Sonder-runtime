@@ -230,6 +230,12 @@ def _reload_preserved_state_names(spec):
     return tuple(names)
 
 
+def watched_modules():
+    """Names of the modules this process reloads when their source changes."""
+    with _LOCK:
+        return sorted(_SIGNATURES)
+
+
 def snapshot(module_names):
     rows = []
     with _LOCK:
