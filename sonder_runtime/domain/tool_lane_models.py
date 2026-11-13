@@ -255,8 +255,9 @@ _candidates = name_candidates  # the original private name, kept for existing ca
 def decide(model: Any, deny: ToolLaneDenyList, *, free_form: bool) -> ModelLaneDecision:
     """Decide whether ``model`` may be used in a tool-using lane.
 
-    Built-ins match every path segment; policy-added entries retain the
-    original full-name and last-segment matching. With an unreadable policy a
+    Built-ins match every path segment; policy-added entries are matched
+    against ``policy_candidates``: the original full name and last ``/``
+    segment, plus the last segment after either separator. With an unreadable policy a
     caller-named (``free_form``) model fails closed; a tier-bound model is
     still checked against the lists.
     """
