@@ -37,6 +37,7 @@ from sonder_runtime.domain.thinking_pace import (
     fit_headroom,
     output_rate,
     retry_with_room,
+    with_planned_room,
     without_thinking,
 )
 
@@ -113,7 +114,7 @@ def room_to_retry(payload: dict, with_headroom: dict, caller_payload: object, mo
 
 
 def up_front(payload: dict, caller_payload: object, model: object, timeout_seconds: object,
-             can_skip_thinking: bool, *, keep_room: bool = False) -> dict:
+             can_skip_thinking: bool, *, planned: dict | None = None) -> dict:
     """The request to send to a model known to think; ``payload`` carries its thinking headroom.
 
     A measured model too slow to write the caller's reply and a minimum of
@@ -122,11 +123,14 @@ def up_front(payload: dict, caller_payload: object, model: object, timeout_secon
     neither request sets ``think``.  Otherwise the headroom is fitted as in
     ``fit``.
 
-    ``keep_room`` is for the retry that ``room_to_retry`` already sized: it can
-    still become the ask without thinking, but its room is not fitted a second
-    time.  A slower reply from the same model measured in between would
-    otherwise shrink it back to the request that was just answered with
-    nothing.
+    ``planned`` is the request as it stood before the headroom was added, and
+    the result never has less room than it.  For a first request that is the
+    caller's own size, which the fitted headroom never goes below anyway.  For
+    the retry that ``room_to_retry`` sized a moment ago it matters: a slower
+    reply from the same model measured in between would otherwise shrink the
+    retry back to the request that was just answered with nothing.  A faster
+    one still gives it the usual headroom, and it can still become the ask
+    without thinking.
 
     A model that refuses the switch on that request is asked again by the
     transport without it and thinks inside the reply budget; if it writes no
@@ -136,7 +140,7 @@ def up_front(payload: dict, caller_payload: object, model: object, timeout_secon
     affordable = _affordable(model, timeout_seconds)
     plain = without_thinking(payload, caller_payload, *affordable) if can_skip_thinking else None
     if plain is None:
-        return payload if keep_room else _fit(payload, caller_payload, model, timeout_seconds, affordable)
+        return with_planned_room(_fit(payload, caller_payload, model, timeout_seconds, affordable), planned)
     sent, asked = plain["options"].get("num_predict"), caller_payload["options"].get("num_predict")
     _logger.log(
         logging.WARNING if sent < asked else logging.INFO,

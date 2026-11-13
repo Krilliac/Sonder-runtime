@@ -154,6 +154,21 @@ def retry_with_room(payload: dict, with_headroom: dict, caller_payload: object, 
     return fitted if (_num_predict(fitted) or 0) > (current or 0) else payload
 
 
+def with_planned_room(fitted: dict, planned: object) -> dict:
+    """``planned`` when it has more room than ``fitted``, else ``fitted``.
+
+    ``planned`` is a retry that ``retry_with_room`` sized a moment ago and
+    ``fitted`` the same request sized again just before it is sent.  The speed
+    held for the model can change in between (another request for it was
+    answered): a slower figure must not shrink the retry back to the request
+    that was just answered with nothing, and a faster one may still give it
+    the usual headroom.
+    """
+    if (_num_predict(planned) or 0) > (_num_predict(fitted) or 0):
+        return planned
+    return fitted
+
+
 def without_thinking(payload: dict, caller_payload: object, at_fastest: int | None,
                      at_slowest: int | None = None) -> dict | None:
     """The request to send with thinking off, or None when the model has time to think.

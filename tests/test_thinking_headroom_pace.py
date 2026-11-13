@@ -25,6 +25,7 @@ from sonder_runtime.domain.thinking_pace import (
     fit_headroom,
     output_rate,
     retry_with_room,
+    with_planned_room,
     without_thinking,
 )
 
@@ -307,19 +308,38 @@ def test_model_pace_one_slow_measurement_alone_is_enough_to_decide():
     assert model_pace.up_front(_payload(MINIMUM), _payload(900), "m", 300, True)["think"] is False
 
 
-def test_model_pace_keeps_the_room_of_a_request_that_was_already_sized():
+def test_with_planned_room_takes_whichever_request_has_more_room():
+    planned, smaller, larger = _payload(1080), _payload(900), _payload(MINIMUM)
+
+    assert with_planned_room(smaller, planned) is planned
+    assert with_planned_room(larger, planned) is larger
+    assert with_planned_room(_payload(1080), planned) is not planned
+    assert with_planned_room(smaller, None) is smaller
+    assert with_planned_room({"options": {}}, planned) is planned
+    assert with_planned_room(smaller, {"options": {"num_predict": "many"}}) is smaller
+
+
+def test_model_pace_never_gives_a_planned_retry_less_room_than_was_planned():
     model_pace.observe("m", SLOW)
-    sized = _payload(1080)
+    planned = _payload(1080)
     model_pace.observe("m", SLOWER)
 
-    assert model_pace.up_front(sized, _payload(900), "m", 300, False, keep_room=True) is sized
-    assert model_pace.up_front(sized, _payload(900), "m", 300, False)["options"]["num_predict"] == 900
+    assert model_pace.up_front(_payload(MINIMUM), _payload(900), "m", 300, False, planned=planned) is planned
+    assert model_pace.up_front(_payload(MINIMUM), _payload(900), "m", 300, False)["options"]["num_predict"] == 900
 
 
-def test_model_pace_can_still_drop_thinking_from_a_request_that_was_already_sized():
+def test_model_pace_gives_a_planned_retry_the_usual_headroom_once_the_model_is_fast():
+    model_pace.observe("m", SLOW)
+    planned, with_headroom = _payload(1080), _payload(MINIMUM)
+    model_pace.observe("m", FAST)
+
+    assert model_pace.up_front(with_headroom, _payload(900), "m", 300, True, planned=planned) is with_headroom
+
+
+def test_model_pace_can_still_drop_thinking_from_a_planned_retry():
     model_pace.observe("m", SLOW)
 
-    plain = model_pace.up_front(_payload(1080), _payload(900), "m", 300, True, keep_room=True)
+    plain = model_pace.up_front(_payload(MINIMUM), _payload(900), "m", 300, True, planned=_payload(1080))
 
     assert (plain["options"]["num_predict"], plain["think"]) == (900, False)
 
@@ -869,6 +889,29 @@ def test_the_headroom_retry_keeps_its_room_when_a_slower_reply_is_measured_meanw
     assert _affordable(SLOWER) < 900 < _affordable(SLOW)
     assert content == "the real answer"
     assert [budget for budget, _think in seen] == [900, _affordable(SLOW)]
+
+
+def test_the_headroom_retry_gets_the_usual_headroom_when_a_fast_reply_is_measured_meanwhile(monkeypatch):
+    """The opposite interleaving: the model turns out to have time to think after all (a fast
+    machine also serves it), so the retry is the one ``main`` sends, not the smaller one planned."""
+    server._model_pace.observe("r", SLOW)
+    decide = server._model_pace.room_to_retry
+
+    def decide_then_another_reply_lands(*args):
+        roomier = decide(*args)
+        server._model_pace.observe("r", FAST)
+        return roomier
+
+    monkeypatch.setattr(server._model_pace, "room_to_retry", decide_then_another_reply_lands)
+    seen = _record(monkeypatch, lambda payload, _index: (
+        {"message": {"content": "the real answer"}} if payload["options"]["num_predict"] == MINIMUM
+        else dict(THINKING_ONLY)))
+
+    _out, content = _ask(900)
+
+    assert 900 < _affordable(SLOW) < MINIMUM
+    assert content == "the real answer"
+    assert [budget for budget, _think in seen] == [900, MINIMUM]
 
 
 def test_no_headroom_retry_is_made_when_nothing_beyond_the_callers_budget_is_affordable(monkeypatch):
