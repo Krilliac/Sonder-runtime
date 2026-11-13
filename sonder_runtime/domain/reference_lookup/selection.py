@@ -94,7 +94,8 @@ def select_passages(rows: Sequence[RankedRow], k: int) -> tuple[Passage, ...]:
         per_doc[row.doc] = per_doc.get(row.doc, 0) + 1
         per_source[row.source] = per_source.get(row.source, 0) + 1
         results.append(Passage(title=row.title, heading=row.heading, source=row.source,
-                               url=row.url, path=row.path, text=row.body, score=-row.rank))
+                               url=row.url, path=row.path, text=row.body, score=-row.rank,
+                               rowid=row.rowid))
         if len(results) >= k:
             break
     return tuple(results)
