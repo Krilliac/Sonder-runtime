@@ -406,3 +406,32 @@ def test_explicit_judge_fn_asks_the_judge_and_never_the_members():
     assert asked == ["How?", "How?"]
     assert len(judged) == 1 and judged[0][0].startswith(JUDGE_MARK) and judged[0][1] == "code"
     assert result["agree"] is True and "sources" not in result
+
+
+# --- REPL /consult ----------------------------------------------------------------
+
+
+def test_repl_consult_shares_one_retrieval_and_prints_one_sources_block(models, retrievals, monkeypatch, capsys):
+    """The REPL /consult passes the same shared-lookup hook as the MCP consult."""
+    import sonder_runtime.interfaces.repl.repl as sonder_repl
+
+    monkeypatch.setattr(sonder_repl, "_legacy_runtime", None)
+    sonder_repl.configure_legacy_runtime(server)
+    lines = iter(("/consult " + QUESTION, "/exit"))
+    monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
+    monkeypatch.setattr(sonder_repl.consult_flow, "default_tiers", lambda *_a, **_k: ["cyber", "plain"])
+
+    sonder_repl.main()
+    out = capsys.readouterr().out
+
+    assert len(retrievals) == 1
+    members = models.of("member")
+    assert [call["model"] for call in members] == [LOOKUP_MODEL, PLAIN_MODEL]
+    assert members[0]["prompt"] == members[1]["prompt"] and PASSAGE_TEXT in members[0]["prompt"]
+    (judge,) = models.of("judge")
+    assert _clean(judge["prompt"]) and "Sources:" not in judge["prompt"]
+    assert out.count("Sources:") == 1 and "https://example.test/events/4625" in out
+    assert out.index("=== plain ===") < out.index("Sources:")
