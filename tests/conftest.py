@@ -199,6 +199,31 @@ def _isolate_fleet_ledger(_isolate_runtime_home):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_model_call_memory():
+    """Start and leave each test with no remembered model behaviour.
+
+    ``server`` remembers, per process, which models think, which refused the
+    ``think`` switch and how fast each one writes.  Left over from another test
+    in the same xdist worker, that memory changes how many requests one model
+    call makes (seen: ``test_chat_request_retries_thinking_only_inline_length_completion``
+    made one request instead of two after an earlier test had taught the
+    process that its model both thinks and refuses the switch).
+    """
+    import server
+    from sonder_runtime.adapters import model_pace
+
+    def forget():
+        with server._THINKING_CAPABILITY_LOCK:
+            server._THINKING_CAPABILITY_CACHE.clear()
+            server._THINK_OPTION_UNSUPPORTED_CACHE.clear()
+        model_pace.reset()
+
+    forget()
+    yield
+    forget()
+
+
+@pytest.fixture(autouse=True)
 def _isolate_legacy_server_graph():
     """Start each test without a graph ``server._application()`` built earlier.
 
