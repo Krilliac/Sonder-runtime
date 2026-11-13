@@ -3,7 +3,8 @@
 The reply is one line of query words.  Left to reason, a thinking model spent
 the call's 80 tokens on thought, was retried with the local thinking budget and
 could use that up too (measured live: two 4096-token thoughts, no terms).  The
-single-model lanes and the ensemble build the call through one helper.
+single-model lanes and the ensemble build the call through one helper, which
+asks again the old way when the no-thinking reply is lost to the option itself.
 """
 from __future__ import annotations
 
@@ -13,6 +14,8 @@ import pytest
 
 import server
 import sonder_runtime.adapters.reference_lookup_lanes as lanes
+from sonder_runtime.adapters.model_transport import ModelCallError
+from sonder_runtime.domain.common.errors import Cancelled
 from tests.test_reference_lookup_lanes import (  # noqa: F401  # ``lane`` is a fixture
     LOOKUP_MODEL,
     QUESTION,
@@ -87,18 +90,61 @@ def test_answer_call_is_not_told_to_stop_thinking(lane, monkeypatch):  # noqa: F
     assert answers and all(p.get("think") is not False for p in answers)
 
 
-class _Factory:
-    """Records how each generator was built; refuses ``think`` like a hosted target when told to."""
+def _stubborn_thinking_model(lane):  # noqa: F811
+    """A reasoning model whose route ignores ``think``: a small reply is all thought either way."""
+    answer = lane.__call__
 
-    def __init__(self, hosted=False):
+    def call(path, payload, *args, **kwargs):
+        if path != "/api/chat" or not _is_search_terms(payload):
+            return answer(path, payload, *args, **kwargs)
+        lane.payloads.append(json.loads(json.dumps(payload)))
+        if payload["options"]["num_predict"] < server.LOCAL_THINKING_MIN_NUM_PREDICT:
+            return {"message": {"content": "", "thinking": "considering " * 20},
+                    "done_reason": "length", "eval_count": payload["options"]["num_predict"]}
+        return {"message": {"content": TERMS, "thinking": "done"}, "done_reason": "stop"}
+
+    return call
+
+
+@pytest.mark.parametrize("ask", [_single, _ensemble], ids=["single", "ensemble"])
+def test_model_that_thinks_anyway_is_asked_again_as_before(lane, monkeypatch, ask):  # noqa: F811
+    monkeypatch.setattr(server, "_post", _stubborn_thinking_model(lane))
+    monkeypatch.setattr(server, "_THINKING_CAPABILITY_CACHE", {})
+
+    out = ask(monkeypatch)
+
+    # The empty reply showed the runtime a thinking model, so the second request
+    # is the call as it was for one: thinking left alone, the thinking budget.
+    calls = [(p.get("think"), p["options"]["num_predict"]) for p in _search_terms_calls(lane)]
+    assert calls == [(False, 80), (None, server.LOCAL_THINKING_MIN_NUM_PREDICT)]
+    assert "keyword expansion" not in out and "Sources:" in out
+
+
+class _Factory:
+    """Records how each generator was built.
+
+    ``hosted`` refuses ``think`` when a call is built, like a hosted target;
+    ``quick_error`` is raised by a generator that was built with thinking off.
+    """
+
+    def __init__(self, hosted=False, quick_error=None):
         self.hosted = hosted
+        self.quick_error = quick_error
         self.built = []
+        self.asked = []
 
     def __call__(self, *args, **options):
         if self.hosted and options.get("think") is not None:
             raise ValueError("hosted-model thinking is controlled by provider policy")
         self.built.append((args, options))
-        return lambda prompt, *a, **k: TERMS
+
+        def generate(prompt, *a, **k):
+            self.asked.append(options.get("think"))
+            if self.quick_error is not None and options.get("think") is False:
+                raise self.quick_error
+            return TERMS
+
+        return generate
 
 
 def test_helper_builds_the_bare_small_call_with_thinking_off():
@@ -113,15 +159,17 @@ def test_helper_builds_the_bare_small_call_with_thinking_off():
         (("general", LOOKUP_MODEL, "", lanes.EXPAND_TEMPERATURE, lanes.EXPAND_NUM_PREDICT, 4096),
          {"text_only": True, "think": False}),
     ]
+    assert factory.asked == []  # building asks nothing
 
 
-def test_callers_own_thinking_choice_does_not_reach_the_search_terms_call():
+def test_callers_own_thinking_choices_do_not_reach_the_search_terms_call():
     factory = _Factory()
 
-    lanes.terms_generate(factory, LOOKUP_MODEL, 8192, think=True)
+    lanes.terms_generate(factory, LOOKUP_MODEL, 8192, think=True, reasoning_continuation=True,
+                         reasoning_total_tokens=9000)
 
     ((_args, options),) = factory.built
-    assert options["think"] is False
+    assert options == {"text_only": True, "think": False}
 
 
 def test_hosted_target_gets_the_plain_call():
@@ -138,3 +186,37 @@ def test_the_runtime_refuses_the_option_for_a_hosted_model_when_the_call_is_buil
     """The contract the fallback above relies on: a refusal at build time, before any request."""
     with pytest.raises(ValueError, match="thinking"):
         server._make_generate(LOOKUP_MODEL, "", 0.0, 80, 4096, cloud=True, think=False)
+
+
+@pytest.mark.parametrize("error", [
+    ModelCallError("empty_response", "Ollama returned no assistant content"),
+    ModelCallError("http", "model does not support thinking", status=400),
+], ids=["empty_reply", "option_refused"])
+def test_a_reply_lost_to_the_option_is_asked_again_as_the_plain_call(error):
+    factory = _Factory(quick_error=error)
+
+    reply = lanes.terms_generate(factory, LOOKUP_MODEL, 8192, think=True)("prompt")
+
+    assert reply == TERMS
+    assert [options for _args, options in factory.built] == [
+        {"text_only": True, "think": False},
+        {"text_only": True, "think": True},  # the caller's own options, as the call was before
+    ]
+    assert factory.asked == [False, True]
+
+
+@pytest.mark.parametrize("error", [
+    ModelCallError("timeout", "model call timed out"),
+    ModelCallError("http", "service unavailable", status=503, transient=True),
+    ModelCallError("cancelled", "the caller cancelled the turn"),
+    Cancelled("the caller cancelled the turn"),
+    RuntimeError("anything else"),
+], ids=["timeout", "unavailable", "cancelled_call", "cancelled", "other"])
+def test_any_other_failure_is_raised_and_not_asked_again(error):
+    factory = _Factory(quick_error=error)
+
+    with pytest.raises(type(error)):
+        lanes.terms_generate(factory, LOOKUP_MODEL, 8192)("prompt")
+
+    assert factory.asked == [False]
+    assert len(factory.built) == 1

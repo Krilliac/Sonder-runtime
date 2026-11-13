@@ -330,21 +330,52 @@ class LookupGenerate:
         return reply if self._record.grounded else review.text
 
 
+# Options that only make sense for a call that thinks.
+_THINKING_ONLY_OPTIONS = frozenset({"reasoning_continuation", "reasoning_total_tokens"})
+
+
+def _thinking_was_needed(exc: BaseException) -> bool:
+    """True when a no-thinking call failed because of the option itself.
+
+    Either the reply came back empty (the model thought anyway: its route
+    dropped or ignored the option) or the request was refused (HTTP 400: the
+    model rejects the option and this route does not retry without it).
+    """
+    kind = getattr(exc, "kind", None)
+    return kind == "empty_response" or (kind == "http" and getattr(exc, "status", None) == 400)
+
+
 def terms_generate(make: Callable[..., Any], *target: Any, **options: Any) -> Any:
     """``make(*target, "", ...)`` for the search-terms call, with model thinking off.
 
     ``target`` is ``(model, num_ctx)``, after the tier for a tier-bound factory.
     The reply is one line of query words, so reasoning only delays it and can use
-    up the reply budget.  A hosted model's provider owns thinking and the factory
-    refuses the option for it (``ValueError``): that target gets the plain call.
+    up the reply budget.  Never worse than the call as it was:
+
+    * a hosted model's provider owns thinking and the factory refuses the option
+      for it (``ValueError``): that target gets the plain call;
+    * a call that comes back empty or refused because of the option (see
+      ``_thinking_was_needed``) is asked again once, as the plain call.
     """
     *head, num_ctx = target
     args = (*head, "", EXPAND_TEMPERATURE, EXPAND_NUM_PREDICT, num_ctx)
-    options = {**options, "text_only": True}
+    plain_options = {**options, "text_only": True}
+    quick_options = {key: value for key, value in plain_options.items()
+                     if key not in _THINKING_ONLY_OPTIONS}
     try:
-        return make(*args, **{**options, "think": False})
+        quick = make(*args, **{**quick_options, "think": False})
     except ValueError:
-        return make(*args, **options)
+        return make(*args, **plain_options)
+
+    def generate(prompt: Any, *call_args: Any, **call_kwargs: Any) -> Any:
+        try:
+            return quick(prompt, *call_args, **call_kwargs)
+        except Exception as exc:  # noqa: BLE001  # re-raised unless the option itself was the cause
+            if not _thinking_was_needed(exc):
+                raise
+        return make(*args, **plain_options)(prompt, *call_args, **call_kwargs)
+
+    return generate
 
 
 def chat_generate(make_generate: Callable[..., Any], question: Any, model: Any, system: Any,
