@@ -88,13 +88,12 @@ class ToolLaneGateway:
 
 
 class ServedTierGateway:
-    """The text consumers' handle: a bridged tier never answers with a blocked model.
+    """The text consumers' handle: a non-Ollama provider never serves a blocked model.
 
-    A request for a tier (or the default ``sonder`` route) that the gateway
-    sends to a non-Ollama provider is refused before sending when that
-    provider is configured to serve a blocked model, and after the reply
-    when the reply reports one; a request that names a model, an Ollama
-    tier and an undetermined served model answer as text.  Every other
+    Every request sent to a non-Ollama provider is judged by its configured
+    model before sending and by its reported model after the reply, including
+    a by-name request on a uniform provider. Ollama by-name requests and
+    an undetermined served model answer as text. Every other
     attribute (``generate_strict_alias``, status reads) is the wrapped
     gateway's own.
     """

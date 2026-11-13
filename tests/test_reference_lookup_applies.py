@@ -75,14 +75,20 @@ def test_every_quantisation_and_the_untagged_form_of_each_source_matches(name):
 
 
 @pytest.mark.parametrize("name", [
-    "hf.co/mradermacher/Qwen3.8-cyber-RedTeam-Surgical-Abliterated",
-    "hf.co/mradermacher/Qwen3.8-cyber-RedTeam-Surgical-Abliterated-AWQ:Q4",
-    "hf.co/other/Cyber-Ornith-1.5-9B-OBLITERATED-GGUF:Q8_0",
     "hf.co/DuoNeural/Cyber-Ornith-1.5-9B",
-    "Cyber-Ornith-1.5-9B-OBLITERATED-GGUF:Q8_0",
 ])
 def test_near_misses_of_the_built_in_sources_do_not_match(name):
     assert decide(name, DEFAULT_RULE).applies is False
+
+
+@pytest.mark.parametrize("name", [
+    "hf.co/mradermacher/Qwen3.8-cyber-RedTeam-Surgical-Abliterated",
+    "hf.co/mradermacher/Qwen3.8-cyber-RedTeam-Surgical-Abliterated-AWQ:Q4",
+    "hf.co/other/Cyber-Ornith-1.5-9B-OBLITERATED-GGUF:Q8_0",
+    "Cyber-Ornith-1.5-9B-OBLITERATED-GGUF:Q8_0",
+])
+def test_new_stem_and_segment_spellings_share_the_tool_lane_match(name):
+    assert decide(name, DEFAULT_RULE).applies is True
 
 
 def test_built_in_rule_reuses_the_deny_lists_defaults():
@@ -108,6 +114,19 @@ def test_policy_names_and_prefixes_extend_the_defaults():
     assert decide("astra-cyber-9b", rule).applies is True      # defaults stay
     assert decide("sonder:latest", rule).applies is False
     assert rule.extended and not DEFAULT_RULE.extended
+
+
+def test_policy_entries_still_match_a_last_slash_segment_holding_a_backslash():
+    def bs(text):  # ``|`` stands for a backslash
+        return text.replace("|", chr(92))
+
+    rule = AppliesRule.from_policy({"enabled": True, "names": [bs("team|blocked")], "prefixes": ["pfx-"]})
+    for name in ("C:/models/pfx-model|weights.gguf", "hf.co/pfx-thing|team", "ollama/pfx-x|",
+                 "team/pfx-thing|:latest", "hf.co/team|blocked"):
+        name = bs(name)
+        assert chr(92) in name
+        assert decide(name, rule).applies is True
+        assert decide(name, DEFAULT_RULE).applies is False
 
 
 def test_disabled_policy_and_kill_switch_turn_it_off_for_everyone():
