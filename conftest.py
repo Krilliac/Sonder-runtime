@@ -51,7 +51,8 @@ _CAPTURED_LIVE_PROVIDER_ENV = {
 
 # Test-harness controls, not runtime configuration: they survive the ambient
 # scrub so a developer can capture timings or rewrite REPL screen goldens.
-_HARNESS_VARIABLES = frozenset({"SONDER_TEST_TIMINGS", "SONDER_UPDATE_GOLDENS"})
+# SONDER_BLENDER lets the real-Blender integration tests (tests/test_meshgen_integration.py) run.
+_HARNESS_VARIABLES = frozenset({"SONDER_TEST_TIMINGS", "SONDER_UPDATE_GOLDENS", "SONDER_BLENDER"})
 
 
 def _clear_ambient_deployment_variables() -> None:
@@ -110,6 +111,22 @@ def _isolate_deployment_posture():
             os.environ.pop(name, None)
         else:
             os.environ[name] = value
+
+
+# The shared system TLS context is process-global. A test that patches
+# ``ssl.create_default_context`` and reaches it would otherwise leave its fake in
+# the slot for whichever test runs next, so the slot is emptied around every test.
+# The module is looked up, never imported, so tests that do no TLS pay nothing.
+@pytest.fixture(autouse=True)
+def _fresh_shared_tls_context():
+    def reset() -> None:
+        module = sys.modules.get("sonder_runtime.adapters.tls_contexts")
+        if module is not None:
+            module.reset_https_contexts()
+
+    reset()
+    yield
+    reset()
 
 
 @pytest.fixture

@@ -594,7 +594,7 @@ def test_run_prompt_reports_cache_status_and_metric(monkeypatch):
         kwargs["cache_observer"]("hit")
         return "cached answer"
 
-    monkeypatch.setattr(ts.server, "answer_with_history", fake_answer)
+    monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", fake_answer)
     result = ts._run_prompt(
         "hello", [], "general", return_result=True,
         metrics=_Metrics(), cache_scope="qc-owner",
@@ -620,7 +620,7 @@ def test_run_prompt_ignores_unknown_cache_status(monkeypatch):
         kwargs["cache_observer"]("weird-status")
         return "answer"
 
-    monkeypatch.setattr(ts.server, "answer_with_history", fake_answer)
+    monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", fake_answer)
     result = ts._run_prompt(
         "hello", [], "general", return_result=True,
         metrics=_Metrics(), cache_scope="qc-owner",
@@ -671,8 +671,8 @@ def _open_local_http(monkeypatch, fake_answer):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
-    monkeypatch.setattr(ts.server, "chat_web_response", lambda *a, **k: None)
-    monkeypatch.setattr(ts.server, "answer_with_history", fake_answer)
+    monkeypatch.setattr(ts._legacy_runtime(), "chat_web_response", lambda *a, **k: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", fake_answer)
 
 
 def test_http_chat_threads_scope_and_exposes_bounded_receipt(monkeypatch):

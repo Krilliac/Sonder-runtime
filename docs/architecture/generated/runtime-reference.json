@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "ca0e4140fdf8d4253743d8c4e4cf70182cdf60426b3b5c6e8b6f5bb586ebb412",
+    "catalog_digest": "b10db751338d281db38d1502089f7b49feb55679be53f158af1d17a50a9e4caf",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "ca0e4140fdf8d4253743d8c4e4cf70182cdf60426b3b5c6e8b6f5bb586ebb412",
+      "catalog_digest": "b10db751338d281db38d1502089f7b49feb55679be53f158af1d17a50a9e4caf",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -4302,6 +4302,90 @@
           "name": "memory_search"
         },
         {
+          "description": "Generate a low-poly 3D model (GLB/FBX) from a brief with a model-written Blender script. Runs candidates through build, render, vision critique and revision, and keeps the best. Needs Blender (SONDER_BLENDER). The model's script is recorded as data and never executed.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "api_doc_path": {
+                "default": "",
+                "title": "Api Doc Path",
+                "type": "string"
+              },
+              "brief": {
+                "title": "Brief",
+                "type": "string"
+              },
+              "candidates": {
+                "default": 3,
+                "title": "Candidates",
+                "type": "integer"
+              },
+              "export": {
+                "default": "glb",
+                "title": "Export",
+                "type": "string"
+              },
+              "height_m": {
+                "default": 0.0,
+                "title": "Height M",
+                "type": "number"
+              },
+              "kit_path": {
+                "default": "",
+                "title": "Kit Path",
+                "type": "string"
+              },
+              "max_tris": {
+                "default": 3000,
+                "title": "Max Tris",
+                "type": "integer"
+              },
+              "name": {
+                "default": "",
+                "title": "Name",
+                "type": "string"
+              },
+              "output_dir": {
+                "default": "",
+                "title": "Output Dir",
+                "type": "string"
+              },
+              "rounds": {
+                "default": 3,
+                "title": "Rounds",
+                "type": "integer"
+              },
+              "target_score": {
+                "default": 8,
+                "title": "Target Score",
+                "type": "integer"
+              },
+              "tiers": {
+                "default": "general,code",
+                "title": "Tiers",
+                "type": "string"
+              },
+              "timeout": {
+                "default": 1200,
+                "title": "Timeout",
+                "type": "integer"
+              },
+              "vision": {
+                "default": true,
+                "title": "Vision",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "brief"
+            ],
+            "title": "mesh_generateArguments",
+            "type": "object"
+          },
+          "name": "mesh_generate"
+        },
+        {
           "description": "Start a composed mission: set a goal, optionally decompose into tasks, optionally launch autopilot.\n\n    Bridges Goal, Task, and Autopilot subsystems into unified execution.\n    Use --auto to immediately launch autopilot toward the goal.\n    Use --plan to decompose goal criteria into a task plan.\n    ",
           "effects": [],
           "execution_class": "pure",
@@ -4571,7 +4655,7 @@
           "name": "npu_status"
         },
         {
-          "description": "Offload a self-contained subtask to a local or Ollama-cloud model.\n\n    Local aliases (fast/code/general, plus reasoning/vision when the operator\n    binds them) run privately through loopback Ollama by default on CPU or any\n    accelerator Ollama supports; an explicitly opted-in remote OLLAMA_HOST\n    leaves this machine. The learning tiers\n    (SONDER_LEARN_TIERS, default: every configured local tier) participate in the\n    lesson loop: with learn=True (default) the call is captured and the response ends\n    with a '[interaction_id: <id>]' footer you can pass to record_outcome once you know\n    whether it compiled / passed tests, so a good outcome distills a lesson. The local\n    'code' tier is also memory-augmented; cloud tiers answer without augmentation\n    but are still captured \u2014 so a paid frontier model's grounded wins become lessons and\n    fine-tuning data for the local model. 'fast'/'general' (mechanical work) and\n    learn=False run the plain path: no capture, no footer, just text.\n\n    Tiers: fast (default), code, general (operator-bound models: runtime_policy_status),\n    cloud-code / cloud-general (METERED, prompt leaves this machine). A learned Ollama\n    call runs the `sonder:latest` alias if installed; learn=False runs the tier's model.\n    Give a FULLY self-contained prompt (the model can't see this chat or your files).\n\n    schema: optional JSON Schema *as JSON text*, e.g.\n    '{\"type\": \"object\", \"required\": [\"name\"], \"properties\": {\"name\": {\"type\": \"string\"}}}'.\n    Full JSON Schema is accepted and is applied in full by the model's decoder.\n\n    It is then re-checked here, but only PARTIALLY: the in-process check covers\n    \"type\", \"required\", \"properties\" and \"items\". Everything else -- \"enum\",\n    \"minimum\", \"additionalProperties\", \"$ref\", \"oneOf\", and so on -- is\n    constrained during decoding and NOT re-checked. So is any node without an\n    explicit \"type\" (every \"$ref\" node, and \"properties\" written without\n    \"type\": \"object\"), which the check accepts unconditionally.\n\n    What that means for you:\n      - A response failing the re-checked part is REJECTED, with the failing\n        path named. It is never repaired into a passing one and never silently\n        retried.\n      - A response that passes gets back exactly the JSON text, and nothing\n        else, ONLY when the whole schema was re-checkable. Otherwise a\n        '[schema_unverified: <path> (<what went unchecked>)]' line follows the\n        JSON, so partial verification is never handed to you as complete.\n      - Stick to type/required/properties/items if you want the strongest\n        guarantee and clean parseable output.\n\n    Omit schema (the default) and this call behaves exactly as it always has:\n    no format constraint, no checking, raw text back.\n    Small object shapes work far better than deep ones on a 3B/7B local tier.\n\n    session: optional durable session identity. When supplied, the exact\n    model-visible request, effective provider attempts, and accepted response\n    are appended to that session; omitted calls retain the historical one-shot\n    persistence policy. Use ``session=\"none\"`` to explicitly opt out.\n    ",
+          "description": "Offload a self-contained subtask to a local or Ollama-cloud model.\n\n    Local aliases (fast/code/general, plus reasoning/vision when the operator\n    binds them) run privately through loopback Ollama by default on CPU or any\n    accelerator Ollama supports; an explicitly opted-in remote OLLAMA_HOST\n    leaves this machine. The learning tiers\n    (SONDER_LEARN_TIERS, default: every configured local tier) participate in the\n    lesson loop: with learn=True (default) the call is captured and the response ends\n    with a '[interaction_id: <id>]' footer you can pass to record_outcome once you know\n    whether it compiled / passed tests, so a good outcome distills a lesson. The local\n    'code' tier is also memory-augmented; cloud tiers answer without augmentation\n    but are still captured \u2014 so a paid frontier model's grounded wins become lessons and\n    fine-tuning data for the local model. 'fast'/'general' (mechanical work) and\n    learn=False run the plain path: no capture, no footer, just text.\n\n    Tiers: fast (default), code, general, optional reasoning/vision, and\n    cloud-code / cloud-general (METERED, prompt leaves this machine). Each tier\n    generates with the model its runtime-policy binding names (see\n    runtime_policy_status) -- with learn=True as well as learn=False.\n    Give a FULLY self-contained prompt (the model can't see this chat or your files).\n\n    schema: optional JSON Schema *as JSON text*, e.g.\n    '{\"type\": \"object\", \"required\": [\"name\"], \"properties\": {\"name\": {\"type\": \"string\"}}}'.\n    Full JSON Schema is accepted and is applied in full by the model's decoder.\n\n    It is then re-checked here, but only PARTIALLY: the in-process check covers\n    \"type\", \"required\", \"properties\" and \"items\". Everything else -- \"enum\",\n    \"minimum\", \"additionalProperties\", \"$ref\", \"oneOf\", and so on -- is\n    constrained during decoding and NOT re-checked. So is any node without an\n    explicit \"type\" (every \"$ref\" node, and \"properties\" written without\n    \"type\": \"object\"), which the check accepts unconditionally.\n\n    What that means for you:\n      - A response failing the re-checked part is REJECTED, with the failing\n        path named. It is never repaired into a passing one and never silently\n        retried.\n      - A response that passes gets back exactly the JSON text, and nothing\n        else, ONLY when the whole schema was re-checkable. Otherwise a\n        '[schema_unverified: <path> (<what went unchecked>)]' line follows the\n        JSON, so partial verification is never handed to you as complete.\n      - Stick to type/required/properties/items if you want the strongest\n        guarantee and clean parseable output.\n\n    Omit schema (the default) and this call behaves exactly as it always has:\n    no format constraint, no checking, raw text back.\n    Small object shapes work far better than deep ones on a small local model.\n\n    session: optional durable session identity. When supplied, the exact\n    model-visible request, effective provider attempts, and accepted response\n    are appended to that session; omitted calls retain the historical one-shot\n    persistence policy. Use ``session=\"none\"`` to explicitly opt out.\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -13069,6 +13153,101 @@
     },
     {
       "aliases": [],
+      "category": "execution",
+      "name": "/mesh_generate",
+      "native": false,
+      "params": [
+        {
+          "default": null,
+          "name": "brief",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "name",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "kit_path",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "api_doc_path",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": 3000,
+          "name": "max_tris",
+          "required": false,
+          "type": "int"
+        },
+        {
+          "default": 0.0,
+          "name": "height_m",
+          "required": false,
+          "type": "num"
+        },
+        {
+          "default": 3,
+          "name": "candidates",
+          "required": false,
+          "type": "int"
+        },
+        {
+          "default": 3,
+          "name": "rounds",
+          "required": false,
+          "type": "int"
+        },
+        {
+          "default": "general,code",
+          "name": "tiers",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": true,
+          "name": "vision",
+          "required": false,
+          "type": "bool"
+        },
+        {
+          "default": 8,
+          "name": "target_score",
+          "required": false,
+          "type": "int"
+        },
+        {
+          "default": "glb",
+          "name": "export",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "output_dir",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": 1200,
+          "name": "timeout",
+          "required": false,
+          "type": "int"
+        }
+      ],
+      "risk": "execution",
+      "summary": "Generate a low-poly 3D model (GLB/FBX) from a brief with a model-written Blender script.",
+      "tool": "mesh_generate"
+    },
+    {
+      "aliases": [],
       "category": "agents",
       "name": "/mission",
       "native": true,
@@ -19017,15 +19196,15 @@
   ],
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES plus sonder_runtime.platform.memory_replication_config",
   "counts": {
-    "capabilities": 229,
-    "commands": 347,
+    "capabilities": 230,
+    "commands": 348,
     "configuration": 249,
     "events": 43,
     "native_tools": 68,
     "schemas": 4,
-    "tools": 229
+    "tools": 230
   },
-  "digest": "11b859792d0a77d9f33a2f3d817f17d8c9a9c690d05115abda28fbfe8800508c",
+  "digest": "4e318ebfa6d8e7a9a729ddd7179216dae9c31a774f72419358389f4508692819",
   "events": [
     {
       "name": "session.started",
@@ -21687,9 +21866,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "ca0e4140fdf8d4253743d8c4e4cf70182cdf60426b3b5c6e8b6f5bb586ebb412",
+    "catalog_digest": "b10db751338d281db38d1502089f7b49feb55679be53f158af1d17a50a9e4caf",
     "client": {
-      "digest": "ca0e4140fdf8d4253743d8c4e4cf70182cdf60426b3b5c6e8b6f5bb586ebb412",
+      "digest": "b10db751338d281db38d1502089f7b49feb55679be53f158af1d17a50a9e4caf",
       "events": [
         {
           "name": "approval.denied",
@@ -22979,6 +23158,7 @@
           "memory_quality_repair",
           "memory_quality_report",
           "memory_search",
+          "mesh_generate",
           "mission_start",
           "mission_status",
           "model_fanout",
@@ -23709,6 +23889,11 @@
             "summary": "Search local lessons, facts, sessions, and recent interactions."
           },
           {
+            "name": "mesh_generate",
+            "schema_available": true,
+            "summary": "Generate a low-poly 3D model (GLB/FBX) from a brief with a model-written Blender script. Runs candidates through build, render, vision critique and revision, and keeps the best. Needs Blender (SONDER_BLENDER). The model's script is recorded as data and never executed."
+          },
+          {
             "name": "mission_start",
             "schema_available": true,
             "summary": "Start a composed mission: set a goal, optionally decompose into tasks, optionally launch autopilot.\n\n    Bridges Goal, Task, and Autopilot subsystems into unified execution.\n    Use --auto to immediately launch autopilot toward the goal.\n    Use --plan to decompose goal criteria into a task plan.\n    "
@@ -23756,7 +23941,7 @@
           {
             "name": "offload",
             "schema_available": true,
-            "summary": "Offload a self-contained subtask to a local or Ollama-cloud model.\n\n    Local aliases (fast/code/general, plus reasoning/vision when the operator\n    binds them) run privately through loopback Ollama by default on CPU or any\n    accelerator Ollama supports; an explicitly opted-in remote OLLAMA_HOST\n    leaves this machine. The learning tiers\n    (SONDER_LEARN_TIERS, default: every configured local tier) participate in the\n    lesson loop: with learn=True (default) the call is captured and the response ends\n    with a '[interaction_id: <id>]' footer you can pass to record_outcome once you know\n    whether it compiled / passed tests, so a good outcome distills a lesson. The local\n    'code' tier is also memory-augmented; cloud tiers answer without augmentation\n    but are still captured \u2014 so a paid frontier model's grounded wins become lessons and\n    fine-tuning data for the local model. 'fast'/'general' (mechanical work) and\n    learn=False run the plain path: no capture, no footer, just text.\n\n    Tiers: fast (default), code, general (operator-bound models: runtime_policy_status),\n    cloud-code / cloud-general (METERED, prompt leaves this machine). A learned Ollama\n    call runs the `sonder:latest` alias if installed; learn=False runs the tier's model.\n    Give a FULLY self-contained prompt (the model can't see this chat or your files).\n\n    schema: optional JSON Schema *as JSON text*, e.g.\n    '{\"type\": \"object\", \"required\": [\"name\"], \"properties\": {\"name\": {\"type\": \"string\"}}}'.\n    Full JSON Schema is accepted and is applied in full by the model's decoder.\n\n    It is then re-checked here, but only PARTIALLY: the in-process check covers\n    \"type\", \"required\", \"properties\" and \"items\". Everything else -- \"enum\",\n    \"minimum\", \"additionalProperties\", \"$ref\", \"oneOf\", and so on -- is\n    constrained during decoding and NOT re-checked. So is any node without an\n    explicit \"type\" (every \"$ref\" node, and \"properties\" written without\n    \"type\": \"object\"), which the check accepts unconditionally.\n\n    What that means for you:\n      - A response failing the re-checked part is REJECTED, with the failing\n        path named. It is never repaired into a passing one and never silently\n        retried.\n      - A response that passes gets back exactly the JSON text, and nothing\n        else, ONLY when the whole schema was re-checkable. Otherwise a\n        '[schema_unverified: <path> (<what went unchecked>)]' line follows the\n        JSON, so partial verification is never handed to you as complete.\n      - Stick to type/required/properties/items if you want the strongest\n        guarantee and clean parseable output.\n\n    Omit schema (the default) and this call behaves exactly as it always has:\n    no format constraint, no checking, raw text back.\n    Small object shapes work far better than deep ones on a 3B/7B local tier.\n\n    session: optional durable session identity. When supplied, the exact\n    model-visible request, effective provider attempts, and accepted response\n    are appended to that session; omitted calls retain the historical one-shot\n    persistence policy. Use ``session=\"none\"`` to explicitly opt out.\n    "
+            "summary": "Offload a self-contained subtask to a local or Ollama-cloud model.\n\n    Local aliases (fast/code/general, plus reasoning/vision when the operator\n    binds them) run privately through loopback Ollama by default on CPU or any\n    accelerator Ollama supports; an explicitly opted-in remote OLLAMA_HOST\n    leaves this machine. The learning tiers\n    (SONDER_LEARN_TIERS, default: every configured local tier) participate in the\n    lesson loop: with learn=True (default) the call is captured and the response ends\n    with a '[interaction_id: <id>]' footer you can pass to record_outcome once you know\n    whether it compiled / passed tests, so a good outcome distills a lesson. The local\n    'code' tier is also memory-augmented; cloud tiers answer without augmentation\n    but are still captured \u2014 so a paid frontier model's grounded wins become lessons and\n    fine-tuning data for the local model. 'fast'/'general' (mechanical work) and\n    learn=False run the plain path: no capture, no footer, just text.\n\n    Tiers: fast (default), code, general, optional reasoning/vision, and\n    cloud-code / cloud-general (METERED, prompt leaves this machine). Each tier\n    generates with the model its runtime-policy binding names (see\n    runtime_policy_status) -- with learn=True as well as learn=False.\n    Give a FULLY self-contained prompt (the model can't see this chat or your files).\n\n    schema: optional JSON Schema *as JSON text*, e.g.\n    '{\"type\": \"object\", \"required\": [\"name\"], \"properties\": {\"name\": {\"type\": \"string\"}}}'.\n    Full JSON Schema is accepted and is applied in full by the model's decoder.\n\n    It is then re-checked here, but only PARTIALLY: the in-process check covers\n    \"type\", \"required\", \"properties\" and \"items\". Everything else -- \"enum\",\n    \"minimum\", \"additionalProperties\", \"$ref\", \"oneOf\", and so on -- is\n    constrained during decoding and NOT re-checked. So is any node without an\n    explicit \"type\" (every \"$ref\" node, and \"properties\" written without\n    \"type\": \"object\"), which the check accepts unconditionally.\n\n    What that means for you:\n      - A response failing the re-checked part is REJECTED, with the failing\n        path named. It is never repaired into a passing one and never silently\n        retried.\n      - A response that passes gets back exactly the JSON text, and nothing\n        else, ONLY when the whole schema was re-checkable. Otherwise a\n        '[schema_unverified: <path> (<what went unchecked>)]' line follows the\n        JSON, so partial verification is never handed to you as complete.\n      - Stick to type/required/properties/items if you want the strongest\n        guarantee and clean parseable output.\n\n    Omit schema (the default) and this call behaves exactly as it always has:\n    no format constraint, no checking, raw text back.\n    Small object shapes work far better than deep ones on a small local model.\n\n    session: optional durable session identity. When supplied, the exact\n    model-visible request, effective provider attempts, and accepted response\n    are appended to that session; omitted calls retain the historical one-shot\n    persistence policy. Use ``session=\"none\"`` to explicitly opt out.\n    "
           },
           {
             "name": "ollama_pool_admin_status",
@@ -28459,6 +28644,90 @@
           "name": "memory_search"
         },
         {
+          "description": "Generate a low-poly 3D model (GLB/FBX) from a brief with a model-written Blender script. Runs candidates through build, render, vision critique and revision, and keeps the best. Needs Blender (SONDER_BLENDER). The model's script is recorded as data and never executed.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "api_doc_path": {
+                "default": "",
+                "title": "Api Doc Path",
+                "type": "string"
+              },
+              "brief": {
+                "title": "Brief",
+                "type": "string"
+              },
+              "candidates": {
+                "default": 3,
+                "title": "Candidates",
+                "type": "integer"
+              },
+              "export": {
+                "default": "glb",
+                "title": "Export",
+                "type": "string"
+              },
+              "height_m": {
+                "default": 0.0,
+                "title": "Height M",
+                "type": "number"
+              },
+              "kit_path": {
+                "default": "",
+                "title": "Kit Path",
+                "type": "string"
+              },
+              "max_tris": {
+                "default": 3000,
+                "title": "Max Tris",
+                "type": "integer"
+              },
+              "name": {
+                "default": "",
+                "title": "Name",
+                "type": "string"
+              },
+              "output_dir": {
+                "default": "",
+                "title": "Output Dir",
+                "type": "string"
+              },
+              "rounds": {
+                "default": 3,
+                "title": "Rounds",
+                "type": "integer"
+              },
+              "target_score": {
+                "default": 8,
+                "title": "Target Score",
+                "type": "integer"
+              },
+              "tiers": {
+                "default": "general,code",
+                "title": "Tiers",
+                "type": "string"
+              },
+              "timeout": {
+                "default": 1200,
+                "title": "Timeout",
+                "type": "integer"
+              },
+              "vision": {
+                "default": true,
+                "title": "Vision",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "brief"
+            ],
+            "title": "mesh_generateArguments",
+            "type": "object"
+          },
+          "name": "mesh_generate"
+        },
+        {
           "description": "Start a composed mission: set a goal, optionally decompose into tasks, optionally launch autopilot.\n\n    Bridges Goal, Task, and Autopilot subsystems into unified execution.\n    Use --auto to immediately launch autopilot toward the goal.\n    Use --plan to decompose goal criteria into a task plan.\n    ",
           "effects": [],
           "execution_class": "pure",
@@ -28728,7 +28997,7 @@
           "name": "npu_status"
         },
         {
-          "description": "Offload a self-contained subtask to a local or Ollama-cloud model.\n\n    Local aliases (fast/code/general, plus reasoning/vision when the operator\n    binds them) run privately through loopback Ollama by default on CPU or any\n    accelerator Ollama supports; an explicitly opted-in remote OLLAMA_HOST\n    leaves this machine. The learning tiers\n    (SONDER_LEARN_TIERS, default: every configured local tier) participate in the\n    lesson loop: with learn=True (default) the call is captured and the response ends\n    with a '[interaction_id: <id>]' footer you can pass to record_outcome once you know\n    whether it compiled / passed tests, so a good outcome distills a lesson. The local\n    'code' tier is also memory-augmented; cloud tiers answer without augmentation\n    but are still captured \u2014 so a paid frontier model's grounded wins become lessons and\n    fine-tuning data for the local model. 'fast'/'general' (mechanical work) and\n    learn=False run the plain path: no capture, no footer, just text.\n\n    Tiers: fast (default), code, general (operator-bound models: runtime_policy_status),\n    cloud-code / cloud-general (METERED, prompt leaves this machine). A learned Ollama\n    call runs the `sonder:latest` alias if installed; learn=False runs the tier's model.\n    Give a FULLY self-contained prompt (the model can't see this chat or your files).\n\n    schema: optional JSON Schema *as JSON text*, e.g.\n    '{\"type\": \"object\", \"required\": [\"name\"], \"properties\": {\"name\": {\"type\": \"string\"}}}'.\n    Full JSON Schema is accepted and is applied in full by the model's decoder.\n\n    It is then re-checked here, but only PARTIALLY: the in-process check covers\n    \"type\", \"required\", \"properties\" and \"items\". Everything else -- \"enum\",\n    \"minimum\", \"additionalProperties\", \"$ref\", \"oneOf\", and so on -- is\n    constrained during decoding and NOT re-checked. So is any node without an\n    explicit \"type\" (every \"$ref\" node, and \"properties\" written without\n    \"type\": \"object\"), which the check accepts unconditionally.\n\n    What that means for you:\n      - A response failing the re-checked part is REJECTED, with the failing\n        path named. It is never repaired into a passing one and never silently\n        retried.\n      - A response that passes gets back exactly the JSON text, and nothing\n        else, ONLY when the whole schema was re-checkable. Otherwise a\n        '[schema_unverified: <path> (<what went unchecked>)]' line follows the\n        JSON, so partial verification is never handed to you as complete.\n      - Stick to type/required/properties/items if you want the strongest\n        guarantee and clean parseable output.\n\n    Omit schema (the default) and this call behaves exactly as it always has:\n    no format constraint, no checking, raw text back.\n    Small object shapes work far better than deep ones on a 3B/7B local tier.\n\n    session: optional durable session identity. When supplied, the exact\n    model-visible request, effective provider attempts, and accepted response\n    are appended to that session; omitted calls retain the historical one-shot\n    persistence policy. Use ``session=\"none\"`` to explicitly opt out.\n    ",
+          "description": "Offload a self-contained subtask to a local or Ollama-cloud model.\n\n    Local aliases (fast/code/general, plus reasoning/vision when the operator\n    binds them) run privately through loopback Ollama by default on CPU or any\n    accelerator Ollama supports; an explicitly opted-in remote OLLAMA_HOST\n    leaves this machine. The learning tiers\n    (SONDER_LEARN_TIERS, default: every configured local tier) participate in the\n    lesson loop: with learn=True (default) the call is captured and the response ends\n    with a '[interaction_id: <id>]' footer you can pass to record_outcome once you know\n    whether it compiled / passed tests, so a good outcome distills a lesson. The local\n    'code' tier is also memory-augmented; cloud tiers answer without augmentation\n    but are still captured \u2014 so a paid frontier model's grounded wins become lessons and\n    fine-tuning data for the local model. 'fast'/'general' (mechanical work) and\n    learn=False run the plain path: no capture, no footer, just text.\n\n    Tiers: fast (default), code, general, optional reasoning/vision, and\n    cloud-code / cloud-general (METERED, prompt leaves this machine). Each tier\n    generates with the model its runtime-policy binding names (see\n    runtime_policy_status) -- with learn=True as well as learn=False.\n    Give a FULLY self-contained prompt (the model can't see this chat or your files).\n\n    schema: optional JSON Schema *as JSON text*, e.g.\n    '{\"type\": \"object\", \"required\": [\"name\"], \"properties\": {\"name\": {\"type\": \"string\"}}}'.\n    Full JSON Schema is accepted and is applied in full by the model's decoder.\n\n    It is then re-checked here, but only PARTIALLY: the in-process check covers\n    \"type\", \"required\", \"properties\" and \"items\". Everything else -- \"enum\",\n    \"minimum\", \"additionalProperties\", \"$ref\", \"oneOf\", and so on -- is\n    constrained during decoding and NOT re-checked. So is any node without an\n    explicit \"type\" (every \"$ref\" node, and \"properties\" written without\n    \"type\": \"object\"), which the check accepts unconditionally.\n\n    What that means for you:\n      - A response failing the re-checked part is REJECTED, with the failing\n        path named. It is never repaired into a passing one and never silently\n        retried.\n      - A response that passes gets back exactly the JSON text, and nothing\n        else, ONLY when the whole schema was re-checkable. Otherwise a\n        '[schema_unverified: <path> (<what went unchecked>)]' line follows the\n        JSON, so partial verification is never handed to you as complete.\n      - Stick to type/required/properties/items if you want the strongest\n        guarantee and clean parseable output.\n\n    Omit schema (the default) and this call behaves exactly as it always has:\n    no format constraint, no checking, raw text back.\n    Small object shapes work far better than deep ones on a small local model.\n\n    session: optional durable session identity. When supplied, the exact\n    model-visible request, effective provider attempts, and accepted response\n    are appended to that session; omitted calls retain the historical one-shot\n    persistence policy. Use ``session=\"none\"`` to explicitly opt out.\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -37154,6 +37423,88 @@
           "name": "memory_search"
         },
         {
+          "description": "Generate a low-poly 3D model (GLB/FBX) from a brief with a model-written Blender script. Runs candidates through build, render, vision critique and revision, and keeps the best. Needs Blender (SONDER_BLENDER). The model's script is recorded as data and never executed.",
+          "inputSchema": {
+            "properties": {
+              "api_doc_path": {
+                "default": "",
+                "title": "Api Doc Path",
+                "type": "string"
+              },
+              "brief": {
+                "title": "Brief",
+                "type": "string"
+              },
+              "candidates": {
+                "default": 3,
+                "title": "Candidates",
+                "type": "integer"
+              },
+              "export": {
+                "default": "glb",
+                "title": "Export",
+                "type": "string"
+              },
+              "height_m": {
+                "default": 0.0,
+                "title": "Height M",
+                "type": "number"
+              },
+              "kit_path": {
+                "default": "",
+                "title": "Kit Path",
+                "type": "string"
+              },
+              "max_tris": {
+                "default": 3000,
+                "title": "Max Tris",
+                "type": "integer"
+              },
+              "name": {
+                "default": "",
+                "title": "Name",
+                "type": "string"
+              },
+              "output_dir": {
+                "default": "",
+                "title": "Output Dir",
+                "type": "string"
+              },
+              "rounds": {
+                "default": 3,
+                "title": "Rounds",
+                "type": "integer"
+              },
+              "target_score": {
+                "default": 8,
+                "title": "Target Score",
+                "type": "integer"
+              },
+              "tiers": {
+                "default": "general,code",
+                "title": "Tiers",
+                "type": "string"
+              },
+              "timeout": {
+                "default": 1200,
+                "title": "Timeout",
+                "type": "integer"
+              },
+              "vision": {
+                "default": true,
+                "title": "Vision",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "brief"
+            ],
+            "title": "mesh_generateArguments",
+            "type": "object"
+          },
+          "name": "mesh_generate"
+        },
+        {
           "description": "Start a composed mission: set a goal, optionally decompose into tasks, optionally launch autopilot.\n\n    Bridges Goal, Task, and Autopilot subsystems into unified execution.\n    Use --auto to immediately launch autopilot toward the goal.\n    Use --plan to decompose goal criteria into a task plan.\n    ",
           "inputSchema": {
             "properties": {
@@ -37405,7 +37756,7 @@
           "name": "npu_status"
         },
         {
-          "description": "Offload a self-contained subtask to a local or Ollama-cloud model.\n\n    Local aliases (fast/code/general, plus reasoning/vision when the operator\n    binds them) run privately through loopback Ollama by default on CPU or any\n    accelerator Ollama supports; an explicitly opted-in remote OLLAMA_HOST\n    leaves this machine. The learning tiers\n    (SONDER_LEARN_TIERS, default: every configured local tier) participate in the\n    lesson loop: with learn=True (default) the call is captured and the response ends\n    with a '[interaction_id: <id>]' footer you can pass to record_outcome once you know\n    whether it compiled / passed tests, so a good outcome distills a lesson. The local\n    'code' tier is also memory-augmented; cloud tiers answer without augmentation\n    but are still captured \u2014 so a paid frontier model's grounded wins become lessons and\n    fine-tuning data for the local model. 'fast'/'general' (mechanical work) and\n    learn=False run the plain path: no capture, no footer, just text.\n\n    Tiers: fast (default), code, general (operator-bound models: runtime_policy_status),\n    cloud-code / cloud-general (METERED, prompt leaves this machine). A learned Ollama\n    call runs the `sonder:latest` alias if installed; learn=False runs the tier's model.\n    Give a FULLY self-contained prompt (the model can't see this chat or your files).\n\n    schema: optional JSON Schema *as JSON text*, e.g.\n    '{\"type\": \"object\", \"required\": [\"name\"], \"properties\": {\"name\": {\"type\": \"string\"}}}'.\n    Full JSON Schema is accepted and is applied in full by the model's decoder.\n\n    It is then re-checked here, but only PARTIALLY: the in-process check covers\n    \"type\", \"required\", \"properties\" and \"items\". Everything else -- \"enum\",\n    \"minimum\", \"additionalProperties\", \"$ref\", \"oneOf\", and so on -- is\n    constrained during decoding and NOT re-checked. So is any node without an\n    explicit \"type\" (every \"$ref\" node, and \"properties\" written without\n    \"type\": \"object\"), which the check accepts unconditionally.\n\n    What that means for you:\n      - A response failing the re-checked part is REJECTED, with the failing\n        path named. It is never repaired into a passing one and never silently\n        retried.\n      - A response that passes gets back exactly the JSON text, and nothing\n        else, ONLY when the whole schema was re-checkable. Otherwise a\n        '[schema_unverified: <path> (<what went unchecked>)]' line follows the\n        JSON, so partial verification is never handed to you as complete.\n      - Stick to type/required/properties/items if you want the strongest\n        guarantee and clean parseable output.\n\n    Omit schema (the default) and this call behaves exactly as it always has:\n    no format constraint, no checking, raw text back.\n    Small object shapes work far better than deep ones on a 3B/7B local tier.\n\n    session: optional durable session identity. When supplied, the exact\n    model-visible request, effective provider attempts, and accepted response\n    are appended to that session; omitted calls retain the historical one-shot\n    persistence policy. Use ``session=\"none\"`` to explicitly opt out.\n    ",
+          "description": "Offload a self-contained subtask to a local or Ollama-cloud model.\n\n    Local aliases (fast/code/general, plus reasoning/vision when the operator\n    binds them) run privately through loopback Ollama by default on CPU or any\n    accelerator Ollama supports; an explicitly opted-in remote OLLAMA_HOST\n    leaves this machine. The learning tiers\n    (SONDER_LEARN_TIERS, default: every configured local tier) participate in the\n    lesson loop: with learn=True (default) the call is captured and the response ends\n    with a '[interaction_id: <id>]' footer you can pass to record_outcome once you know\n    whether it compiled / passed tests, so a good outcome distills a lesson. The local\n    'code' tier is also memory-augmented; cloud tiers answer without augmentation\n    but are still captured \u2014 so a paid frontier model's grounded wins become lessons and\n    fine-tuning data for the local model. 'fast'/'general' (mechanical work) and\n    learn=False run the plain path: no capture, no footer, just text.\n\n    Tiers: fast (default), code, general, optional reasoning/vision, and\n    cloud-code / cloud-general (METERED, prompt leaves this machine). Each tier\n    generates with the model its runtime-policy binding names (see\n    runtime_policy_status) -- with learn=True as well as learn=False.\n    Give a FULLY self-contained prompt (the model can't see this chat or your files).\n\n    schema: optional JSON Schema *as JSON text*, e.g.\n    '{\"type\": \"object\", \"required\": [\"name\"], \"properties\": {\"name\": {\"type\": \"string\"}}}'.\n    Full JSON Schema is accepted and is applied in full by the model's decoder.\n\n    It is then re-checked here, but only PARTIALLY: the in-process check covers\n    \"type\", \"required\", \"properties\" and \"items\". Everything else -- \"enum\",\n    \"minimum\", \"additionalProperties\", \"$ref\", \"oneOf\", and so on -- is\n    constrained during decoding and NOT re-checked. So is any node without an\n    explicit \"type\" (every \"$ref\" node, and \"properties\" written without\n    \"type\": \"object\"), which the check accepts unconditionally.\n\n    What that means for you:\n      - A response failing the re-checked part is REJECTED, with the failing\n        path named. It is never repaired into a passing one and never silently\n        retried.\n      - A response that passes gets back exactly the JSON text, and nothing\n        else, ONLY when the whole schema was re-checkable. Otherwise a\n        '[schema_unverified: <path> (<what went unchecked>)]' line follows the\n        JSON, so partial verification is never handed to you as complete.\n      - Stick to type/required/properties/items if you want the strongest\n        guarantee and clean parseable output.\n\n    Omit schema (the default) and this call behaves exactly as it always has:\n    no format constraint, no checking, raw text back.\n    Small object shapes work far better than deep ones on a small local model.\n\n    session: optional durable session identity. When supplied, the exact\n    model-visible request, effective provider attempts, and accepted response\n    are appended to that session; omitted calls retain the historical one-shot\n    persistence policy. Use ``session=\"none\"`` to explicitly opt out.\n    ",
           "inputSchema": {
             "properties": {
               "learn": {
@@ -44846,6 +45197,91 @@
         },
         {
           "function": {
+            "description": "Generate a low-poly 3D model (GLB/FBX) from a brief with a model-written Blender script. Runs candidates through build, render, vision critique and revision, and keeps the best. Needs Blender (SONDER_BLENDER). The model's script is recorded as data and never executed.",
+            "name": "mesh_generate",
+            "parameters": {
+              "properties": {
+                "api_doc_path": {
+                  "default": "",
+                  "title": "Api Doc Path",
+                  "type": "string"
+                },
+                "brief": {
+                  "title": "Brief",
+                  "type": "string"
+                },
+                "candidates": {
+                  "default": 3,
+                  "title": "Candidates",
+                  "type": "integer"
+                },
+                "export": {
+                  "default": "glb",
+                  "title": "Export",
+                  "type": "string"
+                },
+                "height_m": {
+                  "default": 0.0,
+                  "title": "Height M",
+                  "type": "number"
+                },
+                "kit_path": {
+                  "default": "",
+                  "title": "Kit Path",
+                  "type": "string"
+                },
+                "max_tris": {
+                  "default": 3000,
+                  "title": "Max Tris",
+                  "type": "integer"
+                },
+                "name": {
+                  "default": "",
+                  "title": "Name",
+                  "type": "string"
+                },
+                "output_dir": {
+                  "default": "",
+                  "title": "Output Dir",
+                  "type": "string"
+                },
+                "rounds": {
+                  "default": 3,
+                  "title": "Rounds",
+                  "type": "integer"
+                },
+                "target_score": {
+                  "default": 8,
+                  "title": "Target Score",
+                  "type": "integer"
+                },
+                "tiers": {
+                  "default": "general,code",
+                  "title": "Tiers",
+                  "type": "string"
+                },
+                "timeout": {
+                  "default": 1200,
+                  "title": "Timeout",
+                  "type": "integer"
+                },
+                "vision": {
+                  "default": true,
+                  "title": "Vision",
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "brief"
+              ],
+              "title": "mesh_generateArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
             "description": "Start a composed mission: set a goal, optionally decompose into tasks, optionally launch autopilot.\n\n    Bridges Goal, Task, and Autopilot subsystems into unified execution.\n    Use --auto to immediately launch autopilot toward the goal.\n    Use --plan to decompose goal criteria into a task plan.\n    ",
             "name": "mission_start",
             "parameters": {
@@ -45124,7 +45560,7 @@
         },
         {
           "function": {
-            "description": "Offload a self-contained subtask to a local or Ollama-cloud model.\n\n    Local aliases (fast/code/general, plus reasoning/vision when the operator\n    binds them) run privately through loopback Ollama by default on CPU or any\n    accelerator Ollama supports; an explicitly opted-in remote OLLAMA_HOST\n    leaves this machine. The learning tiers\n    (SONDER_LEARN_TIERS, default: every configured local tier) participate in the\n    lesson loop: with learn=True (default) the call is captured and the response ends\n    with a '[interaction_id: <id>]' footer you can pass to record_outcome once you know\n    whether it compiled / passed tests, so a good outcome distills a lesson. The local\n    'code' tier is also memory-augmented; cloud tiers answer without augmentation\n    but are still captured \u2014 so a paid frontier model's grounded wins become lessons and\n    fine-tuning data for the local model. 'fast'/'general' (mechanical work) and\n    learn=False run the plain path: no capture, no footer, just text.\n\n    Tiers: fast (default), code, general (operator-bound models: runtime_policy_status),\n    cloud-code / cloud-general (METERED, prompt leaves this machine). A learned Ollama\n    call runs the `sonder:latest` alias if installed; learn=False runs the tier's model.\n    Give a FULLY self-contained prompt (the model can't see this chat or your files).\n\n    schema: optional JSON Schema *as JSON text*, e.g.\n    '{\"type\": \"object\", \"required\": [\"name\"], \"properties\": {\"name\": {\"type\": \"string\"}}}'.\n    Full JSON Schema is accepted and is applied in full by the model's decoder.\n\n    It is then re-checked here, but only PARTIALLY: the in-process check covers\n    \"type\", \"required\", \"properties\" and \"items\". Everything else -- \"enum\",\n    \"minimum\", \"additionalProperties\", \"$ref\", \"oneOf\", and so on -- is\n    constrained during decoding and NOT re-checked. So is any node without an\n    explicit \"type\" (every \"$ref\" node, and \"properties\" written without\n    \"type\": \"object\"), which the check accepts unconditionally.\n\n    What that means for you:\n      - A response failing the re-checked part is REJECTED, with the failing\n        path named. It is never repaired into a passing one and never silently\n        retried.\n      - A response that passes gets back exactly the JSON text, and nothing\n        else, ONLY when the whole schema was re-checkable. Otherwise a\n        '[schema_unverified: <path> (<what went unchecked>)]' line follows the\n        JSON, so partial verification is never handed to you as complete.\n      - Stick to type/required/properties/items if you want the strongest\n        guarantee and clean parseable output.\n\n    Omit schema (the default) and this call behaves exactly as it always has:\n    no format constraint, no checking, raw text back.\n    Small object shapes work far better than deep ones on a 3B/7B local tier.\n\n    session: optional durable session identity. When supplied, the exact\n    model-visible request, effective provider attempts, and accepted response\n    are appended to that session; omitted calls retain the historical one-shot\n    persistence policy. Use ``session=\"none\"`` to explicitly opt out.\n    ",
+            "description": "Offload a self-contained subtask to a local or Ollama-cloud model.\n\n    Local aliases (fast/code/general, plus reasoning/vision when the operator\n    binds them) run privately through loopback Ollama by default on CPU or any\n    accelerator Ollama supports; an explicitly opted-in remote OLLAMA_HOST\n    leaves this machine. The learning tiers\n    (SONDER_LEARN_TIERS, default: every configured local tier) participate in the\n    lesson loop: with learn=True (default) the call is captured and the response ends\n    with a '[interaction_id: <id>]' footer you can pass to record_outcome once you know\n    whether it compiled / passed tests, so a good outcome distills a lesson. The local\n    'code' tier is also memory-augmented; cloud tiers answer without augmentation\n    but are still captured \u2014 so a paid frontier model's grounded wins become lessons and\n    fine-tuning data for the local model. 'fast'/'general' (mechanical work) and\n    learn=False run the plain path: no capture, no footer, just text.\n\n    Tiers: fast (default), code, general, optional reasoning/vision, and\n    cloud-code / cloud-general (METERED, prompt leaves this machine). Each tier\n    generates with the model its runtime-policy binding names (see\n    runtime_policy_status) -- with learn=True as well as learn=False.\n    Give a FULLY self-contained prompt (the model can't see this chat or your files).\n\n    schema: optional JSON Schema *as JSON text*, e.g.\n    '{\"type\": \"object\", \"required\": [\"name\"], \"properties\": {\"name\": {\"type\": \"string\"}}}'.\n    Full JSON Schema is accepted and is applied in full by the model's decoder.\n\n    It is then re-checked here, but only PARTIALLY: the in-process check covers\n    \"type\", \"required\", \"properties\" and \"items\". Everything else -- \"enum\",\n    \"minimum\", \"additionalProperties\", \"$ref\", \"oneOf\", and so on -- is\n    constrained during decoding and NOT re-checked. So is any node without an\n    explicit \"type\" (every \"$ref\" node, and \"properties\" written without\n    \"type\": \"object\"), which the check accepts unconditionally.\n\n    What that means for you:\n      - A response failing the re-checked part is REJECTED, with the failing\n        path named. It is never repaired into a passing one and never silently\n        retried.\n      - A response that passes gets back exactly the JSON text, and nothing\n        else, ONLY when the whole schema was re-checkable. Otherwise a\n        '[schema_unverified: <path> (<what went unchecked>)]' line follows the\n        JSON, so partial verification is never handed to you as complete.\n      - Stick to type/required/properties/items if you want the strongest\n        guarantee and clean parseable output.\n\n    Omit schema (the default) and this call behaves exactly as it always has:\n    no format constraint, no checking, raw text back.\n    Small object shapes work far better than deep ones on a small local model.\n\n    session: optional durable session identity. When supplied, the exact\n    model-visible request, effective provider attempts, and accepted response\n    are appended to that session; omitted calls retain the historical one-shot\n    persistence policy. Use ``session=\"none\"`` to explicitly opt out.\n    ",
             "name": "offload",
             "parameters": {
               "properties": {
@@ -48515,7 +48951,7 @@
   },
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "4cb346a9a49aadadccf4df8f8e4db35913936bc2aad3fac47e0d8baf6a13a673",
+    "server.py": "6ccb60fc2989223c051f292c1f7178269dff845dfc36fbe708540cef9508f915",
     "sonder_runtime/application/tools/generated_catalogs.py": "332f23bad788ee427203c64a35f9e36affa2ec11af0ea08889ac9aaa821b0d89",
     "sonder_runtime/bootstrap/native_mcp.py": "2cbf4a0a006084aeb19c6615d04fffee9af89b1fdc8ee7d1fd582e1a9616c9f8",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
@@ -52498,6 +52934,88 @@
       }
     },
     {
+      "description": "Generate a low-poly 3D model (GLB/FBX) from a brief with a model-written Blender script. Runs candidates through build, render, vision critique and revision, and keeps the best. Needs Blender (SONDER_BLENDER). The model's script is recorded as data and never executed.",
+      "name": "mesh_generate",
+      "parameters": {
+        "properties": {
+          "api_doc_path": {
+            "default": "",
+            "title": "Api Doc Path",
+            "type": "string"
+          },
+          "brief": {
+            "title": "Brief",
+            "type": "string"
+          },
+          "candidates": {
+            "default": 3,
+            "title": "Candidates",
+            "type": "integer"
+          },
+          "export": {
+            "default": "glb",
+            "title": "Export",
+            "type": "string"
+          },
+          "height_m": {
+            "default": 0.0,
+            "title": "Height M",
+            "type": "number"
+          },
+          "kit_path": {
+            "default": "",
+            "title": "Kit Path",
+            "type": "string"
+          },
+          "max_tris": {
+            "default": 3000,
+            "title": "Max Tris",
+            "type": "integer"
+          },
+          "name": {
+            "default": "",
+            "title": "Name",
+            "type": "string"
+          },
+          "output_dir": {
+            "default": "",
+            "title": "Output Dir",
+            "type": "string"
+          },
+          "rounds": {
+            "default": 3,
+            "title": "Rounds",
+            "type": "integer"
+          },
+          "target_score": {
+            "default": 8,
+            "title": "Target Score",
+            "type": "integer"
+          },
+          "tiers": {
+            "default": "general,code",
+            "title": "Tiers",
+            "type": "string"
+          },
+          "timeout": {
+            "default": 1200,
+            "title": "Timeout",
+            "type": "integer"
+          },
+          "vision": {
+            "default": true,
+            "title": "Vision",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "brief"
+        ],
+        "title": "mesh_generateArguments",
+        "type": "object"
+      }
+    },
+    {
       "description": "Start a composed mission: set a goal, optionally decompose into tasks, optionally launch autopilot.\n\n    Bridges Goal, Task, and Autopilot subsystems into unified execution.\n    Use --auto to immediately launch autopilot toward the goal.\n    Use --plan to decompose goal criteria into a task plan.\n    ",
       "name": "mission_start",
       "parameters": {
@@ -52749,7 +53267,7 @@
       }
     },
     {
-      "description": "Offload a self-contained subtask to a local or Ollama-cloud model.\n\n    Local aliases (fast/code/general, plus reasoning/vision when the operator\n    binds them) run privately through loopback Ollama by default on CPU or any\n    accelerator Ollama supports; an explicitly opted-in remote OLLAMA_HOST\n    leaves this machine. The learning tiers\n    (SONDER_LEARN_TIERS, default: every configured local tier) participate in the\n    lesson loop: with learn=True (default) the call is captured and the response ends\n    with a '[interaction_id: <id>]' footer you can pass to record_outcome once you know\n    whether it compiled / passed tests, so a good outcome distills a lesson. The local\n    'code' tier is also memory-augmented; cloud tiers answer without augmentation\n    but are still captured \u2014 so a paid frontier model's grounded wins become lessons and\n    fine-tuning data for the local model. 'fast'/'general' (mechanical work) and\n    learn=False run the plain path: no capture, no footer, just text.\n\n    Tiers: fast (default), code, general (operator-bound models: runtime_policy_status),\n    cloud-code / cloud-general (METERED, prompt leaves this machine). A learned Ollama\n    call runs the `sonder:latest` alias if installed; learn=False runs the tier's model.\n    Give a FULLY self-contained prompt (the model can't see this chat or your files).\n\n    schema: optional JSON Schema *as JSON text*, e.g.\n    '{\"type\": \"object\", \"required\": [\"name\"], \"properties\": {\"name\": {\"type\": \"string\"}}}'.\n    Full JSON Schema is accepted and is applied in full by the model's decoder.\n\n    It is then re-checked here, but only PARTIALLY: the in-process check covers\n    \"type\", \"required\", \"properties\" and \"items\". Everything else -- \"enum\",\n    \"minimum\", \"additionalProperties\", \"$ref\", \"oneOf\", and so on -- is\n    constrained during decoding and NOT re-checked. So is any node without an\n    explicit \"type\" (every \"$ref\" node, and \"properties\" written without\n    \"type\": \"object\"), which the check accepts unconditionally.\n\n    What that means for you:\n      - A response failing the re-checked part is REJECTED, with the failing\n        path named. It is never repaired into a passing one and never silently\n        retried.\n      - A response that passes gets back exactly the JSON text, and nothing\n        else, ONLY when the whole schema was re-checkable. Otherwise a\n        '[schema_unverified: <path> (<what went unchecked>)]' line follows the\n        JSON, so partial verification is never handed to you as complete.\n      - Stick to type/required/properties/items if you want the strongest\n        guarantee and clean parseable output.\n\n    Omit schema (the default) and this call behaves exactly as it always has:\n    no format constraint, no checking, raw text back.\n    Small object shapes work far better than deep ones on a 3B/7B local tier.\n\n    session: optional durable session identity. When supplied, the exact\n    model-visible request, effective provider attempts, and accepted response\n    are appended to that session; omitted calls retain the historical one-shot\n    persistence policy. Use ``session=\"none\"`` to explicitly opt out.\n    ",
+      "description": "Offload a self-contained subtask to a local or Ollama-cloud model.\n\n    Local aliases (fast/code/general, plus reasoning/vision when the operator\n    binds them) run privately through loopback Ollama by default on CPU or any\n    accelerator Ollama supports; an explicitly opted-in remote OLLAMA_HOST\n    leaves this machine. The learning tiers\n    (SONDER_LEARN_TIERS, default: every configured local tier) participate in the\n    lesson loop: with learn=True (default) the call is captured and the response ends\n    with a '[interaction_id: <id>]' footer you can pass to record_outcome once you know\n    whether it compiled / passed tests, so a good outcome distills a lesson. The local\n    'code' tier is also memory-augmented; cloud tiers answer without augmentation\n    but are still captured \u2014 so a paid frontier model's grounded wins become lessons and\n    fine-tuning data for the local model. 'fast'/'general' (mechanical work) and\n    learn=False run the plain path: no capture, no footer, just text.\n\n    Tiers: fast (default), code, general, optional reasoning/vision, and\n    cloud-code / cloud-general (METERED, prompt leaves this machine). Each tier\n    generates with the model its runtime-policy binding names (see\n    runtime_policy_status) -- with learn=True as well as learn=False.\n    Give a FULLY self-contained prompt (the model can't see this chat or your files).\n\n    schema: optional JSON Schema *as JSON text*, e.g.\n    '{\"type\": \"object\", \"required\": [\"name\"], \"properties\": {\"name\": {\"type\": \"string\"}}}'.\n    Full JSON Schema is accepted and is applied in full by the model's decoder.\n\n    It is then re-checked here, but only PARTIALLY: the in-process check covers\n    \"type\", \"required\", \"properties\" and \"items\". Everything else -- \"enum\",\n    \"minimum\", \"additionalProperties\", \"$ref\", \"oneOf\", and so on -- is\n    constrained during decoding and NOT re-checked. So is any node without an\n    explicit \"type\" (every \"$ref\" node, and \"properties\" written without\n    \"type\": \"object\"), which the check accepts unconditionally.\n\n    What that means for you:\n      - A response failing the re-checked part is REJECTED, with the failing\n        path named. It is never repaired into a passing one and never silently\n        retried.\n      - A response that passes gets back exactly the JSON text, and nothing\n        else, ONLY when the whole schema was re-checkable. Otherwise a\n        '[schema_unverified: <path> (<what went unchecked>)]' line follows the\n        JSON, so partial verification is never handed to you as complete.\n      - Stick to type/required/properties/items if you want the strongest\n        guarantee and clean parseable output.\n\n    Omit schema (the default) and this call behaves exactly as it always has:\n    no format constraint, no checking, raw text back.\n    Small object shapes work far better than deep ones on a small local model.\n\n    session: optional durable session identity. When supplied, the exact\n    model-visible request, effective provider attempts, and accepted response\n    are appended to that session; omitted calls retain the historical one-shot\n    persistence policy. Use ``session=\"none\"`` to explicitly opt out.\n    ",
       "name": "offload",
       "parameters": {
         "properties": {

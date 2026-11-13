@@ -1093,6 +1093,12 @@
       "summary": "Search local lessons, facts, sessions, and recent interactions."
     },
     {
+      "category": "execution",
+      "name": "/mesh_generate",
+      "risk": "execution",
+      "summary": "Generate a low-poly 3D model (GLB/FBX) from a brief with a model-written Blender script."
+    },
+    {
       "category": "agents",
       "name": "/mission",
       "risk": "ask",
