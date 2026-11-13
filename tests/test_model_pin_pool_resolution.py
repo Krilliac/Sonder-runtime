@@ -541,3 +541,122 @@ def test_non_string_row_names_from_a_worker_never_escape_the_pin_path(rig, bad_n
     assert rig.chats == []
     assert _pin(LOCAL_ONLY) == "answered by %s" % LOCAL
     assert rig.chats == [(LOCAL_ONLY, LOCAL)]
+
+
+# ---- text lanes resolve by name against the pool (chat_target) -------------
+#
+# ``chat_target`` resolves an unknown name again with ``chat_only=True``, and
+# that call falls back to the pool-wide union.  The default ``_serve_target``
+# call (lanes that run or apply output) is never widened.
+
+from types import SimpleNamespace  # noqa: E402
+
+from sonder_runtime.adapters import tool_lane_guard as guard  # noqa: E402
+from sonder_runtime.adapters.model_bootstrap import LegacyModelBootstrapAdapter  # noqa: E402
+from sonder_runtime.adapters.model_transport import ModelCallError  # noqa: E402
+from tests.support.tool_lane import BLOCKED, DENIED, DENIED_SMALL  # noqa: E402
+
+WORKER_EMBED = "embed-worker:1"
+LOCAL_DENIED, WORKER_DENIED = DENIED, DENIED_SMALL  # both on the default deny list
+TEXT_TAGS = {
+    LOCAL: {"models": [_rec("shared:1"), _rec(LOCAL_ONLY), _rec(LOCAL_DENIED)]},
+    WORKER: {"models": [_rec("shared:1"), _rec("Worker-Only:7B"), _rec(WORKER_DENIED),
+                        _rec(WORKER_EMBED, ["embedding"])]},
+}
+
+
+@pytest.fixture
+def text_rig(monkeypatch, tmp_path):
+    """Real ``_serve_target`` and pool; the pooled /api/tags read is this host's catalog."""
+    monkeypatch.setenv("SONDER_RUNTIME_POLICY", str(tmp_path / "runtime_policy.json"))
+    monkeypatch.setattr(server, "TIERS", dict(server.TIERS))
+    monkeypatch.setattr(server, "_RUNTIME_POLICY", server._RUNTIME_POLICY)
+    server._refresh_runtime_policy(create=False)
+    pool = OllamaWorkerPool(
+        LOCAL, (WORKER,), allow_remote=True,
+        capability_prober=lambda origin: {"models": [r["name"] for r in TEXT_TAGS[origin]["models"]]},
+    )
+    pool.refresh_capabilities()
+    r = SimpleNamespace(pool=pool, reads=[], asked=[])
+    monkeypatch.setattr(server, "OLLAMA_POOL", pool)
+    monkeypatch.setattr(server, "_POOL_PIN_CATALOG", PoolCatalogCache())
+    monkeypatch.setattr(server, "_refresh_live_cloud_tiers", lambda: None)
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(server, "_get", lambda path: TEXT_TAGS[LOCAL])
+    monkeypatch.setattr(
+        server, "_pool_member_tags",
+        lambda origin, timeout=15: r.reads.append(origin) or TEXT_TAGS[origin],
+    )
+
+    def make(tier, model, *_a, **_k):
+        def generate(prompt, history=None, **_kw):
+            origin = pool.request(lambda o: o, model=model, idempotent=True)
+            r.asked.append((model, origin))
+            return "answer from %s" % model
+
+        return generate
+
+    monkeypatch.setattr(server, "_make_tier_generate", make)
+    monkeypatch.setattr(server, "_post", lambda *a, **k: {})
+    monkeypatch.setattr(server, "_auto_model_context", lambda model: 4096)
+    return r
+
+
+def test_ensemble_targets_return_a_local_only_and_a_worker_only_member(text_rig):
+    """THE LIVE DEFECT: the worker-only name was reported unknown."""
+    targets, unknown = server._ensemble_targets("%s,worker-only:7b" % LOCAL_ONLY)
+    assert unknown == []
+    assert targets == [(LOCAL_ONLY, LOCAL_ONLY), ("worker-only:7b", "Worker-Only:7B")]
+
+
+def test_ensemble_answer_asks_both_members_each_on_its_own_host(text_rig):
+    out = server.ensemble_answer("q", tiers="%s,WORKER-ONLY:7B" % LOCAL_ONLY)
+    assert text_rig.asked[:2] == [(LOCAL_ONLY, LOCAL), ("Worker-Only:7B", WORKER)]
+    assert "2 models answered" in out
+
+
+def test_worker_only_model_resolves_in_a_text_lane_under_its_catalog_name(text_rig):
+    assert guard.chat_target(server._serve_target, "WORKER-ONLY:7B", None) == (
+        "Worker-Only:7B", False, False, "model:Worker-Only:7B")
+    assert text_rig.reads, "an unknown name reads the pool union"
+
+
+def test_lanes_that_run_output_do_not_gain_a_worker_only_name(text_rig):
+    model, _cloud, _augment, label = server._serve_target("worker-only:7b", None)
+    assert (model, label) == (None, None)
+    target = LegacyModelBootstrapAdapter(SimpleNamespace(_serve_target=server._serve_target)) \
+        .resolve_target("worker-only:7b")
+    assert (target.model, target.tier_label) == (None, None)
+    assert text_rig.reads == []
+
+
+@pytest.mark.parametrize("name", [LOCAL_DENIED, WORKER_DENIED])
+def test_a_denied_model_behaves_the_same_wherever_it_is_installed(text_rig, name):
+    # Text lanes answer it by name...
+    assert guard.chat_target(server._serve_target, name, None) == (name, False, False, "model:" + name)
+    assert server._ensemble_targets(name) == ([(name, name)], [])
+    # ...and every lane that runs output refuses it, by name, before resolving.
+    assert guard.selector_refusal(name, server.TIERS, server._RUNTIME_POLICY) == BLOCKED % name
+    assert guard.denied(name, "model:" + name, server._RUNTIME_POLICY)  # the chat code gate
+    assert server._serve_target(name, None)[0] is None
+    gate = server._gate_answer_code(
+        "```python\nprint(1)\n```", iid=None, prompt="p", history=[], model=name, system="",
+        temperature=0.2, num_predict=64, num_ctx=0, cloud=False, tier_label="model:" + name)
+    assert gate[1:] == (None, False, {}), "a blocked model's reply is never run"
+
+
+def test_a_name_installed_nowhere_stays_unknown_with_unchanged_errors(text_rig):
+    assert guard.chat_target(server._serve_target, "ghost:1", None)[3] is None
+    assert server._ensemble_targets("ghost:1") == ([], ["ghost:1"])
+    assert server.ensemble_answer("q", tiers="ghost:1") == \
+        "ERROR: no bound local tiers to poll (unknown: ghost:1)."
+    with pytest.raises(ModelCallError) as raised:
+        server.structured_answer_with_history("q", [], {"type": "object"}, tier="ghost:1")
+    assert raised.value.detail == "unknown model 'ghost:1'. Valid: sonder, %s." % server._valid_tier_names()
+    assert text_rig.asked == []
+
+
+def test_an_embedding_only_worker_model_is_still_not_a_chat_target(text_rig):
+    assert guard.chat_target(server._serve_target, WORKER_EMBED, None)[3] is None
+    assert server._ensemble_targets(WORKER_EMBED) == ([], [WORKER_EMBED])
+    assert text_rig.reads, "the union was consulted and its record refused"
