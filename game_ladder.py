@@ -333,6 +333,9 @@ if __name__ == "__main__":
     _last_raw = {"text": None}
 
     def gen_fn(prompt):
+        # The ladder writes and runs the reply: refuse a denied default route.
+        if refusal := server._tool_lane_guard.selector_refusal("", server.TIERS):
+            raise SystemExit("GAUNTLET: " + refusal)
         # session="none": each call is single-turn; the repair context (prior code
         # + traceback) is embedded in the prompt itself, so no thread to balloon.
         text = server.sonder(prompt, session="none", num_ctx=6144, num_predict=4096)

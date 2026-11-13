@@ -615,6 +615,11 @@ def evaluate_model(
     """
     if not isinstance(model, str) or not model.strip() or model != model.strip():
         raise ValueError("model must be a non-empty exact model name")
+    from sonder_runtime.adapters import tool_lane_guard
+
+    # The generated SQL is run against the fixtures: refuse a denied model first.
+    if tool_lane_guard.denied(model):
+        raise ValueError(tool_lane_guard.refusal(model))
     generator = generate or _default_generate
     if not isinstance(challenge, str) or len(challenge) > 256:
         raise ValueError("challenge must be a bounded string")

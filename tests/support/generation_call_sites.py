@@ -41,7 +41,7 @@ Classes:
     after the user confirms it).
 ``GAP``
     Known to execute model output without a refusal.  The test allows only the
-    entries in ``ALLOWED_GAPS``.
+    entries in ``ALLOWED_GAPS``, which is empty: a new gap fails the ratchet.
 """
 from __future__ import annotations
 
@@ -371,27 +371,28 @@ _ENTRIES = [
     ("consult.py", "_default_ask", "ensemble_answer", 1, TEXT, "consult flow: the answer is shown"),
     ("curriculum_run.py", "build_gen_fn", "_make_generate", 1, EXEC,
      "generated tasks carry check code that practice runs"),
-    ("curriculum_run.py", "practice_on", "sonder", 1, GAP,
-     "runs the code in the default route's reply with no refusal"),
+    ("curriculum_run.py", "practice_on", "sonder", 1, EXEC,
+     "runs the code in the default route's reply; refuses a denied route first"),
     ("eval_duel.py", "mk", "_make_generate", 1, EXEC, "duel answers are run against task checks"),
     ("eval_harness.py", "OllamaProvider.__init__", "_make_generate", 1, EXEC,
      "harness answers are scored by running them"),
     ("eval_retrieval.py", "baseline_generate", "_make_generate", 1, EXEC,
      "the baseline answer's code is run against the task check"),
-    ("eval_retrieval.py", "run_task", "sonder", 1, GAP,
-     "runs the code in the reply with no refusal"),
+    ("eval_retrieval.py", "run_task", "sonder", 1, EXEC,
+     "runs the code in the reply; refuses a denied model or route first"),
     ("eval_solver.py", "_gen_fn.gen", "_make_generate", 1, EXEC, "solver attempts are run"),
-    ("examples/codegen-arena-shooter/build_skeleton.py", "main", "ensemble_answer", 1, GAP,
-     "writes and compiles the reply with no refusal"),
-    ("examples/codegen-arena-shooter/build_with_sonder.py", "generate", "ensemble_answer", 1, GAP,
-     "writes and compiles the reply with no refusal"),
-    ("examples/codegen-arena-shooter/build_with_sonder.py", "repair", "ensemble_answer", 1, GAP,
-     "writes and compiles the reply with no refusal"),
-    ("examples/codegen-arena-shooter/build_with_sonder.py", "repair_lines", "ensemble_answer", 1, GAP,
-     "writes and compiles the reply with no refusal"),
-    ("game_ladder.py", "gen_fn", "sonder", 1, GAP, "writes and runs the reply with no refusal"),
-    ("promotion_eval.py", "_local_ollama_url", "/api/generate", 1, GAP,
-     "the generated SQL is run in an in-memory database with no refusal"),
+    ("examples/codegen-arena-shooter/build_skeleton.py", "main", "ensemble_answer", 1, EXEC,
+     "writes and compiles the reply; refuses a denied tier first"),
+    ("examples/codegen-arena-shooter/build_with_sonder.py", "generate", "ensemble_answer", 1, EXEC,
+     "writes and compiles the reply; refuses a denied tier first"),
+    ("examples/codegen-arena-shooter/build_with_sonder.py", "repair", "ensemble_answer", 1, EXEC,
+     "writes and compiles the reply; refuses a denied tier first"),
+    ("examples/codegen-arena-shooter/build_with_sonder.py", "repair_lines", "ensemble_answer", 1, EXEC,
+     "writes and compiles the reply; refuses a denied tier first"),
+    ("game_ladder.py", "gen_fn", "sonder", 1, EXEC, "writes and runs the reply; refuses a denied route first"),
+    ("promotion_eval.py", "_local_ollama_url", "/api/generate", 1, EXEC,
+     "the generated SQL is run in an in-memory database; evaluate_model refuses a denied model first",
+     ("promotion_eval.py::evaluate_model",)),
     ("verifiers.py", "llm_judge", "_make_generate", 1, TEXT, "the judge's verdict is parsed as a score"),
     # -- scripts ---------------------------------------------------------------
     ("scripts/audit_live_slash_commands.py", "main", "/v1/chat/completions", 1, TEXT,
@@ -587,16 +588,16 @@ _ENTRIES = [
      "/v1/chat/completions", 2, TEXT, _OWN_CHAT),
     ("sonder_runtime/interfaces/http/serve.py", "Handler._reject_disallowed_origin", "/v1/chat/completions",
      1, TEXT, _OWN_CHAT),
-    ("sonder_runtime/interfaces/http/serve.py", "_do_train", "sonder", 1, GAP,
-     "runs the code in the default route's reply with no refusal"),
+    ("sonder_runtime/interfaces/http/serve.py", "_do_train", "sonder", 1, EXEC,
+     "runs the code in the default route's reply; refuses a denied route first"),
     ("sonder_runtime/interfaces/http/serve.py", "_handle_slash", "ensemble_answer", 1, TEXT, "/ensemble answer"),
     ("sonder_runtime/interfaces/http/serve.py", "_run_prompt", "answer_with_history", 1, TEXT, "HTTP chat"),
     ("sonder_runtime/interfaces/http/serve.py", "_run_structured_prompt", "structured_answer_with_history", 1,
      TEXT, "HTTP structured chat"),
     ("sonder_runtime/interfaces/repl/repl.py", "<module>", "consult", 1, CHOKE,
      "imports the consult service provider; not a call"),
-    ("sonder_runtime/interfaces/repl/repl.py", "_run_train", "sonder", 1, GAP,
-     "runs the code in the default route's reply with no refusal"),
+    ("sonder_runtime/interfaces/repl/repl.py", "_run_train", "sonder", 1, EXEC,
+     "runs the code in the default route's reply; refuses a denied route first"),
     ("sonder_runtime/interfaces/repl/repl.py", "main", "sonder", 1, TEXT, "REPL chat"),
     ("sonder_runtime/interfaces/repl/repl.py", "main.do_consult", "consult", 1, TEXT, "/consult answer"),
     ("sonder_runtime/interfaces/repl/repl.py", "main.do_refactor", "ensemble_answer", 1, ACCEPTED,
@@ -608,10 +609,8 @@ REGISTRY: dict[tuple[str, str, str], Entry] = {
     for path, qualname, callee, count, cls, reason, *extra in _ENTRIES
 }
 
-# GAP entries the ratchet still tolerates; every other GAP entry fails.
-ALLOWED_GAPS: frozenset[tuple[str, str, str]] = frozenset(
-    key for key, entry in REGISTRY.items() if entry.cls == GAP
-)
+# GAP entries the ratchet tolerates: none.  Every GAP entry fails.
+ALLOWED_GAPS: frozenset[tuple[str, str, str]] = frozenset()
 
 # ``text_only=True`` passed somewhere other than a registered TEXT site.
 TEXT_ONLY_DECLARATIONS: dict[tuple[str, str, str], str] = {
