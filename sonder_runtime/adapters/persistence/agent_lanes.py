@@ -20,6 +20,7 @@ import time
 import uuid
 from pathlib import Path
 from .fleet_store import _ensure_schema as _ensure_fleet_schema
+from .interactive_root_reconciliation import finish_cancelled_interactive_root
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS agent_lane_terminal_results (
@@ -411,6 +412,8 @@ class LaneTransaction:
             "UPDATE fleet_agents SET status=?,updated_ts=?,activity=? WHERE id=?",
             (status, time.time(), lane["status"], lane["id"]),
         )
+        if status in {"completed", "failed", "cancelled"}:
+            finish_cancelled_interactive_root(self.conn, lane.get("root_id", ""))
 
     def receipt(self, principal, command_id, digest):
         row = self.conn.execute(
@@ -718,6 +721,16 @@ class SQLiteAgentLaneStore:
         _ensure_fleet_schema(self.path)
         with self._connection_scope() as conn:
             conn.executescript(_SCHEMA)
+            # A process may have exited after the last child became terminal,
+            # before its synthetic parent could be retired. Reconcile only
+            # roots whose cancellation was already requested.
+            roots = conn.execute(
+                """SELECT id FROM fleet_agents
+                WHERE owner_id='interactive-lanes' AND role='agent_lane'
+                  AND parent_id='' AND status='running' AND cancel_requested=1"""
+            ).fetchall()
+            for row in roots:
+                finish_cancelled_interactive_root(conn, row["id"])
 
     def connect(self):
         conn = owned_sqlite_connect(self.path, timeout=5)

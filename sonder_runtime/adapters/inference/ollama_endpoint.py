@@ -5,12 +5,13 @@ from contextlib import contextmanager
 import logging
 import os
 from pathlib import Path
-import ssl
+import ssl  # noqa: F401 - tests patch ollama_endpoint.ssl.create_default_context
 import threading
 import weakref
 import urllib.parse
 import urllib.request
 
+from sonder_runtime.adapters.tls_contexts import bundle_https_context
 from sonder_runtime.domain import ollama_policy
 
 logger = logging.getLogger(__name__)
@@ -299,7 +300,7 @@ def open_url(request, timeout=30, *, allow_remote=None):
     if urllib.parse.urlsplit(canonical_url).scheme == "https":
         bundle = _ca_bundle()
         if bundle:
-            context = ssl.create_default_context(cafile=bundle)
+            context = bundle_https_context(bundle)
             opener = urllib.request.build_opener(
                 _PROXY_HANDLER, _NoRedirect(),
                 urllib.request.HTTPSHandler(context=context),
