@@ -380,8 +380,10 @@ name, and used through text-only `ensemble_answer` and `consult`, but any
 lane that calls tools, or executes or applies model output (agent and
 workbench turns, repository and build fleet workers, campaigns, game generation,
 `codegen_build_loop`, `improve_function`, `parallel_generate_run`,
-`parallel_generate_run_languages`, `mesh_generate`, and the self-modification
-job run by `scripts/nightly_self_improve.py` and `scripts/selfmod_forever.py`),
+`parallel_generate_run_languages`, `mesh_generate` (its script writer and its
+vision critique, which steers the next round's script), and the
+self-modification job run by `scripts/nightly_self_improve.py` and
+`scripts/selfmod_forever.py`),
 refuses them, the chat code gate never runs their replies, and they are never
 bound to a tier. The self-modification job checks its model (`--model`, else
 the `code` tier) before it starts a run and stops with `model refused, no run
@@ -406,13 +408,33 @@ A tier bound to a provider other than Ollama is judged by the model that
 provider actually serves (`SONDER_INFERENCE_TIER_MODELS`, else
 `SONDER_INFERENCE_MODEL`; the OpenRouter tier model; `SONDER_OPENAI_MODEL`).
 When that model cannot be determined (unset, `default`, or unreadable
-configuration) the tier is refused in tool lanes and chat still works. With the
+configuration) the tier is refused in tool lanes and chat still works; for an
+OpenAI-compatible tier the refusal names the fix, setting `SONDER_OPENAI_MODEL`. With the
 whole process on Sonder Inference (`SONDER_MODEL_BACKEND=sonder-inference`)
 and `SONDER_INFERENCE_MODEL` unset, a packaged gateway lane on tier `sonder`
 is refused as undetermined (that provider sends `default` for it), while the
 server's own agent turn on tier `sonder` is judged by the policy's chat tier
 and, at generation, by the model the reply reports; set
 `SONDER_INFERENCE_MODEL` to name the served model.
+
+A lane on the default route (tier `""`, `sonder` or `local`) is judged by
+every tier that route can answer on, not only the chat tier it starts on: with
+`SONDER_MODEL_ESCALATION` at its default the default route steps up over the
+configured local tiers (the optional `reasoning` tier included) when an answer
+fails or is empty, so a lane that runs the reply (campaigns, game generation,
+`/train`, `curriculum_run.py`, `eval_retrieval.py`, `game_ladder.py`) refuses
+when any configured local tier is bound to a blocked model or is bridged to a
+provider whose served model is blocked or cannot be determined. The refusal
+names the tier and its model, and the fix: bind that tier to an allowed model,
+or name an allowed tier for the lane (the model itself still answers chat by
+name). The check follows the configuration, not the escalation knob, and the
+set of tiers it judges is the escalation plan's own
+(`runtime_policy.configured_tiers`). With no such tier configured the default
+route escalates and the lanes run exactly as before. A lane whose prompt text
+it does not write itself (curriculum tasks, retrieval-eval tasks) also judges
+a model the prompt names for itself (`use model X: ...`, `ask code and
+reasoning models: ...`), which `sonder()` would otherwise switch to; the other
+default-route lanes build every prompt from fixed text.
 
 Generation itself is default-deny. Every model call reaches
 `server._chat_request`, which refuses a denied model (by name, by the request
@@ -429,6 +451,25 @@ consumers (A2A, offloads, replay and the chat service) receive the unchecked
 gateway. Ordinary models are judged against a deny list cached per version of
 the policy file, so they pay no extra disk read per call.
 
+Two ordinary configurations fail closed where they did not before:
+
+- With the policy file unreadable, a model named by the caller (not one a tier
+  is bound to) is refused in tool lanes, and the chat code gate does not run
+  its reply. Fix: repair the file (`/runtime status` shows the error) or reset
+  it with `/runtime reset`.
+- An OpenAI-compatible bridged tier with `SONDER_OPENAI_MODEL` unset sends the
+  tier name as the model and reports the id it sent, which names no model, so
+  every tool lane on that tier is refused (and, when that tier is a configured
+  local tier, every lane on the default route). Fix: set `SONDER_OPENAI_MODEL`
+  to the model the endpoint serves.
+
+A denied model's text is not barred from tool lanes as input: lesson
+candidates distilled from its answers, the agent `offload` tool's answer and
+any text a person pastes are prompt input that another, permitted model (or a
+person) chooses to act on. What the deny list guarantees is that the denied
+model's own reply is never run, applied or turned into a tool call by the
+runtime.
+
 The lanes that generate through a text entry point and then run, compile or
 write the reply refuse first: `/train` practice (HTTP and REPL),
 `curriculum_run.py`, `eval_retrieval.py`, `eval_harness.py` and `eval_solver.py`
@@ -440,8 +481,14 @@ typing the command is the explicit approval.
 Limits: this is a name list. A renamed copy (`ollama cp astra-cyber-27b
 helper`) or an alias such as `sonder:latest` pointed at a blocked model is not
 recognised. A provider that maps the configured id to a different model while
-reporting a permitted one is not detected, and an OpenAI-compatible endpoint
-that echoes the requested id is judged by that id. Text-lane output applied by
+reporting a permitted one is not detected. The OpenAI-compatible gateway never
+reads the `model` field of the reply (its `ModelResponse.model` is always the
+id it sent), so for that provider the check after the reply adds nothing to the
+check before sending: the configured `SONDER_OPENAI_MODEL` is what is judged.
+A streamed HTTP chat turn forwards a bridged reply's tokens to the client as
+they arrive; only that text chat turn streams (every tool-lane generation runs
+with the stream disarmed), so a tool-lane reply refused after it arrives was
+never shown. Text-lane output applied by
 an external program (an MCP or HTTP client that splices `ensemble_answer`
 output, or executes tool calls returned by `/v1/chat/completions`) is outside
 the runtime's control.
@@ -451,11 +498,18 @@ the runtime's control.
 `tests/test_generation_call_sites.py` fails on any new call site of the
 generation stack (`_post_model`, `_chat_request`,
 `_chat_request_with_cloud_fallback`, `_make_generate`, `_make_tier_generate`,
-`_generate_text`, `_gateway_generate_text`), of a text entry point (`sonder`,
-`answer_with_history`, `structured_answer_with_history`, `ensemble_answer`,
-`consult`, `_offload_impl`, `model_fanout`), of a raw model endpoint path, of a
-packaged gateway `.generate`, or of the unchecked gateway in
-`sonder_runtime/bootstrap/app.py`. Register the site in
+`_generate_text`, `_gateway_generate_text`), of a text entry point (every
+wrapper over a stack that declares `text_only=True`: `sonder`, `_sonder_impl`,
+`_sonder_impl_serialized`, `_answer`, `answer_with_history`,
+`_answer_with_history_impl`, `structured_answer_with_history`,
+`ensemble_answer`, `consult`, `offload`, `_offload_impl`, `_offload_tier_impl`,
+`model_fanout` and its run, resume and synthesis helpers, `vision_analyze`,
+`_vision_analyze_impl`, `_internal_generate_for_route`), of a raw model
+endpoint path, of a packaged gateway `.generate` (two or more positional
+arguments or a `request=`/`context=` keyword, anywhere), or of the unchecked
+gateway (`raw_gateway`, or any read of `.model_gateway`). A call through an
+imported alias, a name bound to one of these or a `functools.partial` counts as
+a call of the original. Register the site in
 `tests/support/generation_call_sites.py` with its count, class and reason:
 
 - `TEXT`: the reply is only shown, parsed or stored as text. Pass
@@ -465,12 +519,19 @@ packaged gateway `.generate`, or of the unchecked gateway in
   `text_only` at its default. A caller of a text entry point or a raw endpoint
   must refuse first (`tool_lane_guard.selector_refusal`, `resolved_refusal`, or
   `denied` with `refusal`), in the same function or a guard listed in the
-  entry's `guarded_by`.
+  entry's `guarded_by`. The refusal counts only when its result stops the
+  function (it is the test of an `if` that returns, raises, continues or
+  breaks, or a same-file helper that raises) and it judges the selector the
+  call passes (the same expression; a call that passes none is judged by `""`,
+  which covers every configured local tier). Where a different expression is
+  right by design, the entry says why in `selector_reason`.
 - `CHOKE`: the generation stack forwarding the flag, imports and re-exports.
 - `ACCEPTED`: a named exception with its reason.
 
 `GAP` (runs model output with no refusal) is not accepted: the list of
-tolerated gaps is empty.
+tolerated gaps is empty. Limit: a name computed at run time
+(`getattr(server, "ens" + "emble_answer")`) cannot be seen statically, so the
+ratchet does not catch it; review has to.
 
 #### Reference lookup
 

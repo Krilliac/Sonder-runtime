@@ -175,6 +175,9 @@ def run_task(task, model=None, digest_probe=None, expected_digest=None):
     # Both conditions run the reply's code: refuse a denied model or route first.
     if refusal := server._tool_lane_guard.selector_refusal(model or "", server.TIERS):
         raise ModelRefused(refusal)
+    # A task's own text can pick a model (``use model X: ...``) over ``model``.
+    if refusal := server._tool_lane_guard.prompt_refusal(prompt, server.natural_model_request, server.TIERS):
+        raise ModelRefused(refusal)
     def prove_model():
         if digest_probe is None:
             return

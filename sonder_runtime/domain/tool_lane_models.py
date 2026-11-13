@@ -125,19 +125,40 @@ def refusal_message(
     )
 
 
-def served_refusal_message(tier: Any, provider: Any, verdict: ModelLaneDecision) -> str:
-    """The refusal for a bridged tier judged by the model its provider serves."""
+def served_refusal_message(
+    tier: Any, provider: Any, verdict: ModelLaneDecision, *, fix: str = "",
+) -> str:
+    """The refusal for a bridged tier judged by the model its provider serves.
+
+    ``fix`` replaces the generic advice for an undetermined served model with
+    the provider's own setting (the caller knows which one it is).
+    """
     if verdict.status is ModelLaneStatus.SERVED_UNKNOWN:
         return (
             f"tier '{tier}' is served by {provider or 'a non-Ollama provider'} "
             "and the model it serves cannot be determined, so it cannot be "
-            "used in tool-using lanes; name the served model for this tier in "
-            "that provider's configuration (chat still works)."
+            "used in tool-using lanes; "
+            + (fix or "name the served model for this tier in that provider's configuration")
+            + " (chat still works)."
         )
     return (
         f"tier '{tier}' is served by {provider} with model '{verdict.model}', "
         "which is blocked from tool-using lanes by runtime policy; it can be "
         "used for chat only."
+    )
+
+
+def default_route_refusal_message(tier: Any, reason: str) -> str:
+    """The refusal for the default route when a tier it can step up to is refused.
+
+    The default route escalates from the chat tier to the other configured
+    local tiers when an answer fails or is empty, so a lane that runs the
+    reply judges every one of them; ``reason`` is that tier's own refusal.
+    """
+    return (
+        f"the default route can step up to tier '{tier}' (automatic escalation), "
+        f"and {reason} To run this lane, bind tier '{tier}' to an allowed model "
+        "or name an allowed tier for the lane."
     )
 
 

@@ -970,10 +970,7 @@ def _refresh_runtime_policy(create=True):
 
 def _configured_local_tiers():
     """Local tiers the shared policy currently binds to a model."""
-    bound = runtime_policy.bound_tiers(
-        _RUNTIME_POLICY or _refresh_runtime_policy(create=True)
-    )
-    return tuple(tier for tier in bound if tier in TIERS)
+    return runtime_policy.configured_tiers(_RUNTIME_POLICY or _refresh_runtime_policy(create=True), TIERS)
 
 
 _refresh_runtime_policy(create=True)

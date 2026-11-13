@@ -28,6 +28,7 @@ from tests.support.tool_lane import (
     HF_QWEN,
     SERVED,
     UNKNOWN,
+    UNKNOWN_OPENAI,
     UNREADABLE,
     RecordingGateway,
     clear_environment,
@@ -187,7 +188,8 @@ def test_an_unknown_served_identity_is_refused(catalog, monkeypatch, provider, l
     for call in (tool.generate, tool.resolve_route):
         with pytest.raises(Forbidden) as caught:
             call(request("code"), operation_context())
-        assert str(caught.value) == UNKNOWN % ("code", label)
+        assert str(caught.value) == (
+            UNKNOWN_OPENAI % "code" if provider == "openai_compatible" else UNKNOWN % ("code", label))
     assert inner.calls == [] and inner.routes == []
 
 

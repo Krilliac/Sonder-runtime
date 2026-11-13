@@ -26,6 +26,7 @@ from tests.support.tool_lane import (
     RUNNABLE,
     SERVED,
     UNKNOWN,
+    UNKNOWN_OPENAI,
     UNREADABLE,
     clear_environment,
     write_policy,
@@ -274,7 +275,9 @@ def test_code_gate_skips_a_model_added_by_the_policy(catalog, code_runs, policy_
 
 
 def chat_environment(monkeypatch, reply=RUNNABLE):
-    monkeypatch.setenv("SONDER_MODEL_ESCALATION", "0")
+    # Escalation stays at its default: every caller here names its tier or
+    # model, which never escalates; the default route's ladder is covered in
+    # tests/test_tool_lane_default_route.py with the real escalation.
     monkeypatch.setattr(server.web_tools, "enabled", lambda: False)
     monkeypatch.setattr(server, "_answer", lambda *a, **k: (reply, "iid-1", None))
 
@@ -580,7 +583,7 @@ def test_the_default_route_follows_a_bridged_chat_tier(catalog, work_started, mo
 def test_an_unknown_served_identity_is_refused_in_tool_lanes_but_chats(
         catalog, model_calls, code_runs, monkeypatch, provider, label, env):
     bridge(monkeypatch, provider, **env)
-    expected = UNKNOWN % ("code", label)
+    expected = UNKNOWN_OPENAI % "code" if provider == "openai_compatible" else UNKNOWN % ("code", label)
     assert server._agent_turn("list files", tier="code") == expected
     assert guard.selector_refusal("code", server.TIERS, server._RUNTIME_POLICY) == expected
     assert model_calls == []
@@ -857,3 +860,29 @@ def test_mesh_generate_refuses_a_denied_tier_before_any_generation(catalog, mode
                                        rt=server, runner=_MeshRunner)
     assert str(caught.value) == SERVED % ("code", "sonder_inference", DENIED)
     assert generated == [] and model_calls == []
+
+
+@pytest.mark.parametrize("vision_model", [DENIED, ALLOWED])
+def test_mesh_vision_critique_is_refused_for_a_denied_vision_tier(catalog, monkeypatch, tmp_path, vision_model):
+    """The critique steers the next round's script: a denied vision tier turns it off, nothing else."""
+    from sonder_runtime.bootstrap import mesh_agent_tools
+
+    asked = []
+    monkeypatch.setitem(server.TIERS, "vision", vision_model)
+    monkeypatch.setattr(server, "_vision_analyze_impl", lambda *a, **k: asked.append(a) or "looks fine")
+    critiques = []
+
+    def run_loop(request, *, critique, **_kwargs):
+        critiques.append(critique(str(tmp_path / "sheet.png")))
+        return {"ok": False, "within_budget": True, "vision": "on", "elapsed_s": 0, "candidates": []}
+
+    monkeypatch.setattr(mesh_agent_tools, "run_loop", run_loop)
+    monkeypatch.setattr(server.assetgen, "workspace_root", lambda: str(tmp_path))
+    report = mesh_agent_tools.generate_mesh("a crate", tiers="general", output_dir=str(tmp_path),
+                                            rt=server, runner=_MeshRunner)
+    if vision_model == DENIED:
+        assert critiques == [None] and asked == []
+        assert report["vision"] == "unavailable: " + BLOCKED % DENIED
+    else:
+        assert critiques == ["looks fine"] and len(asked) == 1
+        assert report["vision"] == "on"
