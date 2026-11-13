@@ -87,9 +87,16 @@ RECEIPT_KEY = "reference_lookup"
 # The receipt says a lookup turn was sent none of the runtime's system prompt.
 RECEIPT_SYSTEM_PROMPT_KEY = "runtime_system_prompt_sent"
 
+# The first line of a Sources block whose passages the answer never cites: the
+# passages were handed to the model, but nothing in the reply points at them, so
+# the reader is told not to take them as the answer's support.
+SOURCES_HEAD = "Sources:"
+UNCITED_SOURCES_HEAD = "Sources: retrieved but not cited in the answer"
+
 _FAILED = frozenset({_lookup.LookupReason.INDEX_UNAVAILABLE, _lookup.LookupReason.SEARCH_FAILED})
 _NONE_TEXT = {
     _lookup.LookupReason.NO_MATCH: _lookup.NO_MATCH_WARNING,
+    _lookup.LookupReason.LOW_RELEVANCE: _lookup.LOW_RELEVANCE_WARNING,
     _lookup.LookupReason.NO_ROOM: _lookup.NO_ROOM_WARNING,
     _lookup.LookupReason.EMPTY_QUESTION: "the question was empty",
     _lookup.LookupReason.DISABLED: "reference lookup is off",
@@ -311,6 +318,7 @@ class LookupGenerate:
         history = args[0] if args else kwargs.get("history")
         bundle = _service.retrieve_for(
             self._question, self._expand, _service.DEFAULT_K, self._budget(prompt, history),
+            for_answer=True,
         )
         self._record.bundle = bundle
         raw: list[Any] = []
@@ -426,10 +434,17 @@ def mark_learning_skip(conn: Any, interaction_id: Any) -> bool:
 def bundle_sources_text(bundle: _lookup.Bundle, cited: Collection[int] = (),
                         warnings: Sequence[str] = ()) -> str:
     """The Sources block for ``bundle``: its passages (``cited`` ones starred) or
-    why there are none, then the bundle's warnings and ``warnings``."""
+    why there are none, then the bundle's warnings and ``warnings``.
+
+    When the answer cites none of the passages, the first line says so
+    (``UNCITED_SOURCES_HEAD``) instead of the plain ``Sources:``.
+    """
     shown = ""
     if bundle.applied and bundle.passages:
         head = format_sources(bundle.passages, cited)
+        if (head.startswith(SOURCES_HEAD + "\n")
+                and not any(1 <= number <= len(bundle.passages) for number in cited)):
+            head = UNCITED_SOURCES_HEAD + head[len(SOURCES_HEAD):]
     elif bundle.reason in _FAILED:
         head = format_unavailable(bundle.reason_text)
     else:

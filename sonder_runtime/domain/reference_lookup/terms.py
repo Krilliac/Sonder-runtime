@@ -40,13 +40,12 @@ def build_expand_prompt(question: str) -> str:
     return EXPAND_PROMPT.format(question=question)
 
 
-def fts_query(text: str | None, extra_terms: Iterable[object] = ()) -> str:
-    """Build a safe FTS5 MATCH expression: quoted terms joined by OR, or ''.
+def query_terms(text: str | None, extra_terms: Iterable[object] = ()) -> list[str]:
+    """The lower-cased search terms of one query, in order, at most ``MAX_QUERY_TERMS``.
 
-    Every term is emitted as a double-quoted string, so user input can never
-    add FTS5 operators, column filters or prefix/NEAR syntax.  Extra terms are
-    emitted as a quoted phrase and then as each of its individual words, so
-    "security log cleared" also finds "audit log was cleared".
+    The words of ``text`` come first.  Each extra term follows as a phrase and
+    then as each of its individual words, so "security log cleared" also finds
+    "audit log was cleared".  Stop words without a digit and repeats are left out.
     """
     candidates = [m.group(0) for m in TERM_RE.finditer(text or '')]
     for extra in extra_terms or ():
@@ -66,7 +65,21 @@ def fts_query(text: str | None, extra_terms: Iterable[object] = ()) -> str:
         terms.append(term)
         if len(terms) >= MAX_QUERY_TERMS:
             break
-    return ' OR '.join('"' + t.replace('"', '""') + '"' for t in terms)
+    return terms
+
+
+def quoted(term: str) -> str:
+    """One term as a double-quoted FTS5 string: it can add no operator, column filter or NEAR."""
+    return '"' + term.replace('"', '""') + '"'
+
+
+def fts_query(text: str | None, extra_terms: Iterable[object] = ()) -> str:
+    """Build a safe FTS5 MATCH expression: the quoted ``query_terms`` joined by OR, or ''.
+
+    Every term is emitted as a double-quoted string, so user input can never
+    add FTS5 operators, column filters or prefix/NEAR syntax.
+    """
+    return ' OR '.join(quoted(t) for t in query_terms(text, extra_terms))
 
 
 def identifiers(text: str | None) -> set[str]:

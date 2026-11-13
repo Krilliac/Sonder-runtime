@@ -31,16 +31,22 @@ from sonder_runtime.domain.reference_lookup.models import (
     IndexStatus,
     RankedRow,
     ReferenceIndexError,
+    TermStats,
 )
 from sonder_runtime.domain.reference_lookup.sanitize import sanitize
 from sonder_runtime.domain.reference_lookup.selection import priority_rows
+from sonder_runtime.domain.reference_lookup.terms import MAX_QUERY_TERMS, quoted
 
 REQUIRED_COLUMNS = frozenset({"title", "heading", "body", "source", "url", "path", "doc"})
 BUSY_TIMEOUT_SECONDS = 5.0
 TITLE_TOPUP_LIMIT = 50
 
 _SEARCH_COLUMNS = ("title, heading, body, source, url, path, doc, "
-                   "bm25(passages, 4.0, 2.0, 1.0) AS rank")
+                   "bm25(passages, 4.0, 2.0, 1.0) AS rank, rowid")
+# Rows asked about in one ``term_stats`` call: more than any selection returns.
+MAX_STATS_ROWS = 16
+_COUNT_SQL = "SELECT count(*) FROM passages"
+_TERM_COUNT_SQL = "SELECT count(*) FROM passages WHERE passages MATCH ?"
 _SEARCH_SQL = (f"SELECT {_SEARCH_COLUMNS} FROM passages "
                "WHERE passages MATCH ? ORDER BY rank LIMIT ?")
 _TITLE_SQL = (f"SELECT {_SEARCH_COLUMNS} FROM passages WHERE passages MATCH ? "
@@ -73,6 +79,7 @@ def _row(values: Sequence[object]) -> RankedRow:
         source=_text(values[3]), url=_text(values[4]), path=_text(values[5]),
         doc=values[6],  # type: ignore[arg-type]  # opaque, only compared and hashed
         rank=float(values[7]),  # type: ignore[arg-type]
+        rowid=int(values[8]),  # type: ignore[call-overload]
     )
 
 
@@ -152,6 +159,42 @@ class ReferenceIndex:
         except (sqlite3.Error, OSError, ValueError) as exc:
             raise ReferenceIndexError(classify_error(exc), sanitize(exc)) from None
         return tuple(rows)
+
+    def term_stats(self, terms: Sequence[str], rowids: Sequence[int]) -> TermStats:
+        """How common each term is, and which of ``terms`` each of ``rowids`` holds.
+
+        Terms are matched the way a search matches them (each as a quoted
+        string, through the index's own tokenizer), so "cleared" counts for a
+        passage that says "clearing".  Read-only: two small queries per term.
+        At most ``MAX_QUERY_TERMS`` terms and ``MAX_STATS_ROWS`` rows are
+        looked at.  Raises ReferenceIndexError when the index is unusable or a
+        query fails.
+        """
+        status = self.status()
+        if not status.ready:
+            raise ReferenceIndexError(status.state, status.detail)
+        wanted = list(dict.fromkeys(term for term in terms if isinstance(term, str) and term))
+        wanted = wanted[:MAX_QUERY_TERMS]
+        rows = list(dict.fromkeys(
+            row for row in rowids if isinstance(row, int) and not isinstance(row, bool) and row > 0
+        ))[:MAX_STATS_ROWS]
+        matching: dict[str, int] = {}
+        held: dict[int, set[str]] = {row: set() for row in rows}
+        in_rows_sql = ("SELECT rowid FROM passages WHERE passages MATCH ? AND rowid IN (%s)"
+                       % ", ".join("?" * len(rows)))
+        try:
+            with self.connect() as conn:
+                passage_count = int(conn.execute(_COUNT_SQL).fetchone()[0])
+                for term in wanted:
+                    match = quoted(term)
+                    matching[term] = int(conn.execute(_TERM_COUNT_SQL, (match,)).fetchone()[0])
+                    if rows and matching[term]:
+                        for (row,) in conn.execute(in_rows_sql, (match, *rows)):
+                            held[int(row)].add(term)
+        except (sqlite3.Error, OSError, ValueError, TypeError, KeyError) as exc:
+            raise ReferenceIndexError(classify_error(exc), sanitize(exc)) from None
+        return TermStats(passage_count=passage_count, matching=matching,
+                         held={row: frozenset(found) for row, found in held.items()})
 
     def _probe(self, path_text: str) -> IndexStatus:
         try:

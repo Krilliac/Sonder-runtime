@@ -36,6 +36,7 @@ from sonder_runtime.application.chat import reference_lookup as _lookup
 from sonder_runtime.domain.reference_lookup import applies as _applies
 from sonder_runtime.domain.reference_lookup.answer_check import format_sources
 from sonder_runtime.domain.reference_lookup.prompt import build_prompt
+from sonder_runtime.domain.reference_lookup.relevance import MIN_COVERAGE
 from sonder_runtime.domain.reference_lookup.sanitize import (
     one_line,
     sanitize,
@@ -156,8 +157,15 @@ def retrieve_for(
     expand_fn: Callable[[str], str] | None,
     k: int,
     char_budget: int,
+    *,
+    for_answer: bool = False,
 ) -> _lookup.Bundle:
     """Retrieve passages for a question with the configured index.
+
+    ``for_answer=True`` is for passages that will be put in front of a model
+    without anyone asking for them: the relevance floor applies, so a question
+    the library does not cover gets none.  The default is a plain search (the
+    ``reference_search`` tool), which returns the nearest passages as they are.
 
     Never raises, except to pass on a cancelled search-terms call.
     """
@@ -165,6 +173,7 @@ def retrieve_for(
         bundle = _lookup.retrieve(
             question, expand_fn, k, char_budget,
             index=_state.index(), enabled=not _state.kill_switch_off(),
+            min_coverage=MIN_COVERAGE if for_answer else 0.0,
         )
     except Exception as exc:  # fail open
         if _lookup.is_cancellation(exc):
