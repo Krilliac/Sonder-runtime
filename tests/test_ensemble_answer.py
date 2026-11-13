@@ -108,7 +108,8 @@ def test_implicit_default_never_includes_cloud(monkeypatch):
 def test_targets_report_unknown_tiers(monkeypatch):
     monkeypatch.setattr(
         server, "_serve_target",
-        lambda tier, strict: (None, False, False, None),
+        # An unknown name is resolved again for text (chat_only=True); still unknown.
+        lambda tier, strict, **_kw: (None, False, False, None),
     )
     targets, unknown = server._ensemble_targets("nope")
     assert targets == []
