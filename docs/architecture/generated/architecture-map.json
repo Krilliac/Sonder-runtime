@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 420,
+      "file_count": 421,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -219,6 +219,7 @@
         "sonder_runtime/adapters/inference/openrouter_gateway.py",
         "sonder_runtime/adapters/inference/overflow_availability.py",
         "sonder_runtime/adapters/inference/overflow_route.py",
+        "sonder_runtime/adapters/inference/pool_model_catalog.py",
         "sonder_runtime/adapters/inference/prefix_cache.py",
         "sonder_runtime/adapters/inference/prewarm_gate.py",
         "sonder_runtime/adapters/inference/production_tier_router.py",
@@ -318,6 +319,7 @@
         "sonder_runtime/adapters/persistence/fleet_registry.py",
         "sonder_runtime/adapters/persistence/fleet_store.py",
         "sonder_runtime/adapters/persistence/http_work_runs.py",
+        "sonder_runtime/adapters/persistence/interactive_root_reconciliation.py",
         "sonder_runtime/adapters/persistence/lane_owner.py",
         "sonder_runtime/adapters/persistence/migration_rehearsal.py",
         "sonder_runtime/adapters/persistence/migrations.py",
@@ -435,7 +437,6 @@
         "sonder_runtime/adapters/testing/detection.py",
         "sonder_runtime/adapters/testing/launcher.py",
         "sonder_runtime/adapters/tier_generation.py",
-        "sonder_runtime/adapters/tls_contexts.py",
         "sonder_runtime/adapters/tool_executor.py",
         "sonder_runtime/adapters/training/__init__.py",
         "sonder_runtime/adapters/typed_tool_executor.py",
