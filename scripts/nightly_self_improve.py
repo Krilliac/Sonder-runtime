@@ -180,7 +180,7 @@ def _prewarm_code_model(server, timeout_seconds: int = 60) -> str:
             with local_only():
                 response = server._generate_text(
                     "Reply READY.", tier="code", num_predict=32,
-                    timeout=max(60, int(timeout_seconds or 60)),
+                    timeout=max(60, int(timeout_seconds or 60)), text_only=True,
                 )
             if not str(response or "").strip():
                 raise _CodeModelUnavailable("bound code provider returned no readiness response")

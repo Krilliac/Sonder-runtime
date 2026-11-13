@@ -12,8 +12,8 @@ A *site* is one reference, in one enclosing function, to one of:
 * a choke point of the generation stack (``CHOKE_POINTS``);
 * a text entry point whose reply a caller may run or apply (``TEXT_ENTRY_POINTS``);
 * a raw model HTTP path (``ENDPOINT_PATHS``) in a string without whitespace;
-* a two-argument ``.generate(request, context)`` call under ``sonder_runtime``
-  (the packaged ``ModelGateway`` port);
+* a ``.generate(request, context, ...)`` call with two positional arguments
+  under ``sonder_runtime`` (the packaged ``ModelGateway`` port);
 * the raw (unwrapped) packaged gateway handle in the composition root.
 
 References are calls, bare names (``chat_request=_chat_request``), imports
@@ -275,7 +275,7 @@ class _Scanner(ast.NodeVisitor):
     def visit_Call(self, node):
         if (
             isinstance(node.func, ast.Attribute) and node.func.attr == "generate"
-            and len(node.args) == 2 and not node.keywords
+            and len(node.args) == 2
             and self.path.startswith("sonder_runtime/")
         ):
             self._record(GATEWAY_GENERATE, "call", node, node)
@@ -351,9 +351,9 @@ FLAGGED_CHOKE_POINTS = (
     "_generate_text",
 )
 
-# Until the generation stack takes ``text_only`` the literal-flag checks are
-# off; every other check (unlisted, stale, counts, choke points, floors) runs.
-DECLARATIONS_ENFORCED = False
+# The literal-flag checks (TEXT passes text_only=True, EXEC never does, and no
+# undeclared text_only=True anywhere) are on.
+DECLARATIONS_ENFORCED = True
 
 _UNLOAD = "unloads a model (keep_alive 0); generates nothing"
 _LABEL = "route or metric label for this path; generates nothing"
@@ -552,6 +552,8 @@ _ENTRIES = [
      "packaged gateway plumbing"),
     ("sonder_runtime/application/model_gateway/facade.py", "ModelGatewayFacade.generate",
      GATEWAY_GENERATE, 2, CHOKE, "packaged gateway plumbing"),
+    ("sonder_runtime/application/model_gateway/facade.py", "ModelGatewayFacade.generate_for_role",
+     GATEWAY_GENERATE, 2, CHOKE, "packaged gateway plumbing"),
     ("sonder_runtime/application/model_gateway/health_and_roles.py", "ModelGatewayContract.generate",
      GATEWAY_GENERATE, 1, CHOKE, "packaged gateway plumbing"),
     ("sonder_runtime/application/prefix_cache_report.py", "prewarm_request", "/api/chat", 1, CHOKE,
@@ -610,7 +612,11 @@ ALLOWED_GAPS: frozenset[tuple[str, str, str]] = frozenset(
 )
 
 # ``text_only=True`` passed somewhere other than a registered TEXT site.
-TEXT_ONLY_DECLARATIONS: dict[tuple[str, str, str], str] = {}
+TEXT_ONLY_DECLARATIONS: dict[tuple[str, str, str], str] = {
+    ("sonder_runtime/adapters/inference/ollama_gateway.py", "OllamaGateway.generate", "_generate_factory"):
+        "the packaged Ollama gateway: callers that run or apply output hold the "
+        "ToolLaneGateway, which judged the request first",
+}
 
 
 def function_refuses(path: str, qualname: str) -> bool | None:

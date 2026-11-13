@@ -1065,7 +1065,7 @@ def test_fanout_k3_402_records_the_requested_target_without_cloud_fallback(monke
 
     def fake_chat(
         _payload, *, model, cloud, timeout=None, cancel_check=None,
-        accept_native_tool_calls=False, idempotent=False,
+        accept_native_tool_calls=False, idempotent=False, **_kwargs,
     ):
         calls.append((model, cloud, idempotent))
         raise server.ModelCallError(

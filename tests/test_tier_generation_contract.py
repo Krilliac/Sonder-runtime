@@ -306,6 +306,7 @@ def _generation_host(graph, wire):
     import os
     from sonder_runtime.adapters import agent_generation_budget, tier_generation
     from sonder_runtime.application.chat import provider_bridge
+    from sonder_runtime.domain.model_usage import response_metadata
 
     tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
     funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
@@ -336,6 +337,7 @@ def _generation_host(graph, wire):
         "context_policy": SimpleNamespace(native=False), "_keep_alive_for": lambda _: "5m",
         "_chat_request": chat, "ModelCallError": ModelCallError,
         "_model_usage_count": lambda x: x, "_model_usage_source": lambda *x: "measured",
+        "_response_metadata": response_metadata,
         "activity_tracker": SimpleNamespace(record_model_call=lambda **kw: None),
     }
     module = ast.Module(body=[funcs["_make_generate"], funcs["_make_tier_generate"]], type_ignores=[])

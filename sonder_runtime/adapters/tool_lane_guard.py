@@ -50,6 +50,101 @@ def deny_list(policy: Mapping[str, Any] | None = None) -> _models.ToolLaneDenyLi
         return _policy.tool_lane_deny_list(None)
 
 
+# The deny list the generation check last read, with the policy file identity
+# it was read for: ``(key, deny list)``.  Only a readable policy is cached.
+_GENERATION_CACHE: tuple[tuple, _models.ToolLaneDenyList] | None = None
+
+
+def _policy_file_key() -> tuple | None:
+    """Identity of the policy file (path, mtime, size, inode); None when it cannot be stat'ed."""
+    path = _policy.policy_path()
+    try:
+        stat = os.stat(path)
+    except FileNotFoundError:
+        return (str(path), None)
+    except OSError:
+        return None
+    return (str(path), stat.st_mtime_ns, stat.st_size, stat.st_ino)
+
+
+def generation_deny_list(policy: Mapping[str, Any] | None = None) -> _models.ToolLaneDenyList:
+    """The deny list for the generation check, read from disk at most once per file version.
+
+    Every model call asks, so the list is cached against the policy file's
+    path, modification time, size and inode; an edit, a replacement or a
+    removal reads it again.  A failed read is never cached: until the file is
+    readable each call reads it again (and fails closed).  Thread-safe: the
+    cache is one tuple replaced atomically, and a racing reader at worst
+    reads the file itself.
+    """
+    global _GENERATION_CACHE
+    if policy:
+        return deny_list(policy)
+    key = _policy_file_key()
+    cached = _GENERATION_CACHE
+    if key is not None and cached is not None and cached[0] == key:
+        return cached[1]
+    deny = deny_list(None)
+    if key is not None and deny.readable and _policy_file_key() == key:
+        _GENERATION_CACHE = (key, deny)
+    return deny
+
+
+def _generation_refused(message: str) -> Exception:
+    """The error a refused model call raises: a 403 configuration failure, no attempt made."""
+    from sonder_runtime.adapters.model_transport import ModelCallError
+
+    error = ModelCallError("configuration", message, status=403, attempts=0)
+    error.tool_lane_refused = True
+    return error
+
+
+def require_generation(
+    model: Any,
+    *,
+    rung: Any = None,
+    text_only: bool = False,
+    payload: Mapping[str, Any] | None = None,
+    policy: Mapping[str, Any] | None = None,
+) -> None:
+    """Refuse one model call unless its caller declared it text-only.
+
+    The default for every generation is that the reply may be run, applied or
+    turned into a tool call, so a denied model is refused; a caller whose
+    reply is only returned or shown passes ``text_only=True`` and is never
+    judged (no policy read either).  Judged before sending: the model the
+    call names and the payload's own ``model`` (as tier-bound names, so an
+    unreadable policy still refuses the built-in list without refusing an
+    ordinary model), and for a bridged ``rung`` the model its provider is
+    configured to serve.  When that served model cannot be determined here
+    the check is left to the reply (``require_served``).  Raises a
+    ``ModelCallError`` (kind ``configuration``, status 403, ``attempts=0``,
+    ``tool_lane_refused=True``) carrying the refusal text.
+    """
+    if text_only:
+        return
+    deny = generation_deny_list(policy)
+    names = [model]
+    if isinstance(payload, Mapping) and payload.get("model") != model:
+        names.append(payload.get("model"))
+    for name in names:
+        verdict = _models.decide(name, deny, free_form=False)
+        if verdict.denied:
+            raise _generation_refused(_models.refusal_message(verdict.model, verdict.status))
+    if rung is None:
+        return
+    provider = str(getattr(rung, "provider", "") or "")
+    tier = str(getattr(rung, "tier", "") or "").strip().lower()
+    try:
+        served = _provider_model(provider, tier, "", None)
+    except Exception as exc:  # noqa: BLE001 - the reply's served model is judged instead
+        _warn_once("provider configuration could not be read before sending", exc)
+        return
+    verdict = _models.decide_served(served, deny)
+    if verdict.status is _models.ModelLaneStatus.DENIED:
+        raise _generation_refused(_models.served_refusal_message(tier, provider, verdict))
+
+
 def decision(
     model: Any, policy: Mapping[str, Any] | None = None, *, free_form: bool,
 ) -> _models.ModelLaneDecision:

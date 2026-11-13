@@ -96,6 +96,7 @@ from sonder_runtime.platform.deployment_auth import (
 from sonder_runtime.domain.model_usage import usage_count as _model_usage_count
 from sonder_runtime.domain.model_usage import (
     merge_reasoning_response_usage as _merge_reasoning_response_usage,
+    response_metadata as _response_metadata,
 )
 from sonder_runtime.domain.memory.fact_validity import (
     fact_write_inputs as _surface_fact_metadata,
@@ -927,7 +928,7 @@ def _cloud_extra_usage_fallback(model, error):
 def _chat_request_with_cloud_fallback(
     payload, *, model, timeout=None, cancel_check=None,
     accept_native_tool_calls=False, compact_cloud_reasoning=False,
-    allow_cloud_fallback=True,
+    allow_cloud_fallback=True, text_only=False,
 ):
     """Make one cloud request, optionally falling back once on K3 HTTP 402."""
     return _chat_request_with_cloud_fallback_policy(
@@ -935,7 +936,7 @@ def _chat_request_with_cloud_fallback(
         accept_native_tool_calls=accept_native_tool_calls,
         compact_cloud_reasoning=compact_cloud_reasoning,
         allow_cloud_fallback=allow_cloud_fallback,
-        chat_request=_chat_request,
+        chat_request=functools.partial(_chat_request, text_only=text_only),
         apply_thinking_policy=_apply_cloud_thinking_policy,
         fallback_model=CLOUD_EXTRA_USAGE_FALLBACK_MODEL,
     )
@@ -1784,7 +1785,7 @@ def _make_generate(
     cancel_check=None, accept_native_tool_calls=False,
     compact_cloud_reasoning=False, schema=None, allow_cloud_fallback=True,
     think=None, reasoning_continuation=False, reasoning_total_tokens=None,
-    single_send=False,
+    single_send=False, text_only=False,
 ):
     """Build a generate(prompt, history) closure for `model`.
 
@@ -1882,7 +1883,7 @@ def _make_generate(
                     cancel_check=cancel_check,
                     accept_native_tool_calls=accept_native_tool_calls,
                     compact_cloud_reasoning=compact_cloud_reasoning,
-                    allow_cloud_fallback=allow_cloud_fallback,
+                    allow_cloud_fallback=allow_cloud_fallback, text_only=text_only,
                 )
             else:
                 local_chat_options = {}
@@ -1900,7 +1901,7 @@ def _make_generate(
                     accept_native_tool_calls=accept_native_tool_calls,
                     idempotent=not single_send,
                     local_only=single_send,
-                    single_send=single_send,
+                    single_send=single_send, text_only=text_only,
                     **local_chat_options,
                 )
                 if (
@@ -1922,38 +1923,7 @@ def _make_generate(
                 "token_source": source,
             }
             gen.last_usage = dict(usage)
-            # Keep only the backend's bounded, non-content inference metadata.
-            # Gateways can expose measured phase timing without retaining prompts,
-            # responses, or arbitrary provider fields.
-            thinking = out.get("message", {}).get("thinking", "") if isinstance(out.get("message"), dict) else ""
-            aggregate_thinking_chars = (
-                _model_usage_count(out.get("thinking_chars"))
-                if "reasoning_segments" in out else None
-            )
-            thinking_chars = (
-                aggregate_thinking_chars
-                if aggregate_thinking_chars is not None
-                else len(thinking) if isinstance(thinking, str) else 0
-            )
-            response_metadata = {
-                "done_reason": str(out.get("done_reason") or "").strip().casefold(),
-                **{
-                    key: out.get(key)
-                    for key in (
-                        "total_duration", "load_duration",
-                        "prompt_eval_count", "prompt_eval_cached_count",
-                        "prompt_eval_duration",
-                        "eval_count", "eval_duration",
-                        "load_state", "cold_start",
-                        "reasoning_segments", "finish_reason",
-                    )
-                    if key in out
-                },
-                # Preserve the historical empty-metadata contract.  A positive
-                # scalar lets fanout explain output budgets without retaining
-                # private reasoning text.
-                **({"thinking_chars": thinking_chars} if thinking_chars > 0 else {}),
-            }
+            response_metadata = _response_metadata(out)  # bounded, non-content fields only
             gen.last_response_meta = response_metadata
             if (metadata_local := getattr(gen, "_response_metadata_local", None)) is not None:
                 metadata_local.value = response_metadata
@@ -1998,12 +1968,12 @@ def _make_tier_generate(tier, *args, **kwargs):
 
 
 def _generate_text(prompt, tier="fast", system="", temperature=0.2,
-                   num_predict=256, num_ctx=0, timeout=None):
+                   num_predict=256, num_ctx=0, timeout=None, text_only=False):
     _refresh_live_cloud_tiers()
     model = TIERS.get(tier, TIERS["fast"])
     return _make_tier_generate(
         tier if tier in TIERS else "fast", model, system, temperature, num_predict,
-        num_ctx, timeout=timeout,
+        num_ctx, timeout=timeout, text_only=text_only,
     )(prompt)
 
 
@@ -2344,7 +2314,7 @@ def _internal_generate_for_route(model, cloud):
     of silently loading a local model between cloud calls.
     """
     if not cloud:
-        return _generate_text
+        return functools.partial(_generate_text, text_only=True)
     if not str(model or "").strip():
         raise ModelCallError(
             "configuration",
@@ -2360,7 +2330,7 @@ def _internal_generate_for_route(model, cloud):
         generate.last_usage = {}
         gen = _make_generate(
             model, system, temperature, num_predict, num_ctx,
-            cloud=True, timeout=timeout,
+            cloud=True, timeout=timeout, text_only=True,
         )
         response = gen(prompt)
         generate.last_usage = dict(getattr(gen, "last_usage", None) or {})
@@ -4147,7 +4117,7 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
     )
     gen = _make_generate(
         model, effective_system, temperature, num_predict, num_ctx,
-        cloud=cloud, allow_cloud_fallback=allow_cloud_fallback,
+        cloud=cloud, allow_cloud_fallback=allow_cloud_fallback, text_only=True,
     )
     qv = embeddings.embed(prompt)
     if not embeddings.valid_vector(qv):
@@ -5207,6 +5177,7 @@ def _chat_request(
     _reasoning_segments: int = 0,
     _reasoning_checkpoint: str = "",
     _reasoning_deadline: float | None = None,
+    text_only: bool = False,
 ) -> tuple[dict, str]:
     if not isinstance(reasoning_continuation, bool):
         raise ValueError("reasoning_continuation must be a boolean")
@@ -5215,6 +5186,7 @@ def _chat_request(
     if cloud and reasoning_continuation:
         raise ValueError("reasoning continuation is available only for local models")
     bridged_rung = None if cloud else _provider_bridge.active_rung()
+    _tool_lane_guard.require_generation(model, rung=bridged_rung, text_only=text_only, payload=payload)  # deny list unless text-only
     rerouted = None if bridged_rung is None else _legacy_chat_bridge.ollama_only_reroute(  # a step Inference cannot carry
         _application().model_gateway, payload, bridged_rung, model=model, graph=_APP_GRAPH,
         loopback_endpoint=ollama_endpoint.is_loopback(BASE), context_probe=lambda: _auto_model_context(model))
@@ -5390,7 +5362,7 @@ def _chat_request(
                         _reasoning_spent=spent,
                         _reasoning_segments=completed_segments,
                         _reasoning_checkpoint=checkpoint,
-                        _reasoning_deadline=_reasoning_deadline,
+                        _reasoning_deadline=_reasoning_deadline, text_only=text_only,
                     )
                 except ModelCallError as error:
                     _preserve_reasoning_failure_usage(
@@ -5428,7 +5400,7 @@ def _chat_request(
                 accept_native_tool_calls=accept_native_tool_calls,
                 idempotent=idempotent,
                 local_only=local_only,
-                _budget_retried=True,
+                _budget_retried=True, text_only=text_only,
             )
         if (
             not cloud
@@ -5449,7 +5421,7 @@ def _chat_request(
                 accept_native_tool_calls=accept_native_tool_calls,
                 idempotent=idempotent,
                 local_only=local_only,
-                _budget_retried=True,
+                _budget_retried=True, text_only=text_only,
             )
         raise ModelCallError(
             "empty_response",
@@ -5859,12 +5831,12 @@ def _offload_tier_impl(
                     payload,
                     model=model,
                     timeout=request_timeout,
-                    cancel_check=cancel_check,
+                    cancel_check=cancel_check, text_only=True,
                 )
             else:  # a bridged tier must reach its provider, not Ollama with num_ctx=0
                 with _provider_bridge.bind_rung(provider, tier) if provider is not None else contextlib.nullcontext():
                     out, msg = _chat_request(payload, model=model, cloud=False, timeout=request_timeout,
-                                             cancel_check=cancel_check, idempotent=True)
+                                             cancel_check=cancel_check, idempotent=True, text_only=True)
             if provider is not None:
                 used_model = out.get("model") or model
             tokens_in = _model_usage_count(out.get("prompt_eval_count"))
@@ -5937,7 +5909,7 @@ def _offload_tier_impl(
             cloud=True,
             timeout=request_timeout,
             cancel_check=cancel_check,
-            schema=schema, queue=False,
+            schema=schema, queue=False, text_only=True,
         )
         retrieve_kwargs["retrieve_fn"] = _no_retrieve_policy
     else:
@@ -5951,7 +5923,7 @@ def _offload_tier_impl(
             num_ctx,
             timeout=request_timeout,
             cancel_check=cancel_check,
-            schema=schema, queue=False,
+            schema=schema, queue=False, text_only=True,
         )
     if capture_session is not None:
         gen = wrap_model_generator(
@@ -7176,7 +7148,7 @@ def _answer_with_history_impl(
                     if response is None:
                         gen = _make_generate(
                             model, effective_system, temperature, 1024, req_ctx,
-                            cloud=cloud,
+                            cloud=cloud, text_only=True,
                             allow_cloud_fallback=_allow_cloud_fallback_for_target(tier_label),
                         )
                         response = gen(prompt, history or None)
@@ -7393,7 +7365,7 @@ def structured_answer_with_history(
     # cannot carry ``format``) instead of reaching an absent Ollama.
     with _provider_bridge.bind_rung(bridged_provider, tier_label):
         response = _make_generate(
-            model, system, 0.2, 1024, req_ctx, cloud=cloud, schema=schema,
+            model, system, 0.2, 1024, req_ctx, cloud=cloud, schema=schema, text_only=True,
             allow_cloud_fallback=_allow_cloud_fallback_for_target(tier_label),
         )(prompt, history or None)
     try:
@@ -14369,7 +14341,7 @@ def _vision_analyze_impl(
     }
     _out, content = _chat_request(
         payload, model=model, cloud=False, timeout=timeout, idempotent=True,
-        local_only=True,
+        local_only=True, text_only=True,
     )
     return content.strip()
 
@@ -24611,7 +24583,7 @@ def _execute_fanout_run(run_id):
 
             generate = _make_generate(model, "", 0.2, limits["num_predict"], 4096,
                                       timeout=limits["timeout"],
-                                      allow_cloud_fallback=False,
+                                      allow_cloud_fallback=False, text_only=True,
                                       cancel_check=dispatch_cancelled)
             # A consent or ownership fence which wins before the durable
             # handoff has made no provider request, so it remains resumable.
@@ -25186,7 +25158,7 @@ def ensemble_answer(
                 0 if _is_cloud_tier(tier, model) or _bridge_provider_for_tier(tier) else _auto_model_context(model)
             )
             gen = _make_tier_generate(
-                tier, model, "", 0.2, max(64, int(num_predict)), target_num_ctx,
+                tier, model, "", 0.2, max(64, int(num_predict)), target_num_ctx, text_only=True,
             )
             text = (gen(question) or "").strip()
         except ModelCallError as error:
@@ -25264,7 +25236,7 @@ def ensemble_answer(
         gen = _make_tier_generate(
             synth_label, synth_model, "", 0.2, _fleet_synthesis.json_num_predict(
                 max(256, int(num_predict)), bridged=_bridge_provider_for_tier(synth_label) == "sonder_inference"),
-            synth_num_ctx,
+            synth_num_ctx, text_only=True,
         )
         merged = _fleet_synthesis.generate_synthesis(gen, build_prompt(question, answers)).strip()
     except Exception as exc:
