@@ -24,7 +24,7 @@ from ...domain.cluster_availability import (
     validate_replication_acknowledgement,
 )
 from ...domain.common.errors import DependencyUnavailable
-
+from ..tls_contexts import https_handler
 
 _MIN_REQUEST_BYTES = 512
 _MAX_REQUEST_BYTES = 8 * 1024 * 1024
@@ -40,7 +40,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def _default_opener(request: urllib.request.Request, *, timeout: float):
     return urllib.request.build_opener(
-        urllib.request.ProxyHandler({}), _NoRedirect()
+        urllib.request.ProxyHandler({}), _NoRedirect(), https_handler(),
     ).open(request, timeout=timeout)
 
 

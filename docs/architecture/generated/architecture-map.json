@@ -319,6 +319,7 @@
         "sonder_runtime/adapters/persistence/fleet_registry.py",
         "sonder_runtime/adapters/persistence/fleet_store.py",
         "sonder_runtime/adapters/persistence/http_work_runs.py",
+        "sonder_runtime/adapters/persistence/interactive_root_reconciliation.py",
         "sonder_runtime/adapters/persistence/lane_owner.py",
         "sonder_runtime/adapters/persistence/migration_rehearsal.py",
         "sonder_runtime/adapters/persistence/migrations.py",
@@ -436,6 +437,7 @@
         "sonder_runtime/adapters/testing/detection.py",
         "sonder_runtime/adapters/testing/launcher.py",
         "sonder_runtime/adapters/tier_generation.py",
+        "sonder_runtime/adapters/tls_contexts.py",
         "sonder_runtime/adapters/tool_executor.py",
         "sonder_runtime/adapters/tool_lane_gateway.py",
         "sonder_runtime/adapters/tool_lane_guard.py",
@@ -885,7 +887,7 @@
       ]
     },
     {
-      "file_count": 75,
+      "file_count": 76,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -962,6 +964,7 @@
         "sonder_runtime/bootstrap/subprocess_mcp.py",
         "sonder_runtime/bootstrap/thread_resources.py",
         "sonder_runtime/bootstrap/typed_tools.py",
+        "sonder_runtime/bootstrap/verified_bytecode.py",
         "sonder_runtime/bootstrap/work_narration.py"
       ]
     },

@@ -291,7 +291,7 @@ class _ScopedToken(_LimitToken):
         self.results = list(results)
         self.calls: list[bool] = []
 
-    def quiesce(self, *, force: bool) -> ProcessContainmentResult:
+    def quiesce(self, *, force: bool, exit_grace: float = 0.0) -> ProcessContainmentResult:
         self.calls.append(force)
         if self.results:
             return self.results.pop(0)
@@ -1304,7 +1304,7 @@ class _TerminateJobToken(_ScopedToken):
         self.process = process
         self.waiter = None
 
-    def quiesce(self, *, force: bool) -> ProcessContainmentResult:
+    def quiesce(self, *, force: bool, exit_grace: float = 0.0) -> ProcessContainmentResult:
         self.calls.append(force)
         if force and not self.process.exited.is_set():
             self.process.exited.set()
@@ -1730,3 +1730,124 @@ def test_unsupported_isolated_systemd_environment_refuses_before_launch(key):
         provider.start(request)
     assert not launches and commands and not provider._processes and not provider._memory_tokens
     assert all("secret-value" not in str(command) for command in commands)
+
+
+class _GraceRecordingToken(_ScopedToken):
+    def __init__(self) -> None:
+        super().__init__()
+        self.graces: list[tuple[bool, float]] = []
+
+    def quiesce(self, *, force: bool, exit_grace: float = 0.0) -> ProcessContainmentResult:
+        self.graces.append((force, exit_grace))
+        return ProcessContainmentResult(True)
+
+
+class _ExitedProcess(_Process):
+    def poll(self):
+        return self.exit_code
+
+
+class _NoTimer:
+    def __init__(self, delay, callback, args=()):
+        self.delay = delay
+        self.daemon = False
+
+    def start(self):
+        return None
+
+    def cancel(self):
+        return None
+
+
+def _grace_provider(job_id, process, *, deadline_seconds=None):
+    token = _GraceRecordingToken()
+    provider = SubprocessJobProvider(
+        DurableJobRegistry(),
+        process_cleanup=_Cleanup(complete=True),
+        launcher=lambda _argv, **_kwargs: process,
+        platform_name="posix",
+        memory_limiter=_ScopedLimiter(token),
+        timer_factory=_NoTimer,
+        process_identity_resolver=lambda _pid: "birth-" + job_id,
+    )
+    provider.start(ProcessJobRequest(
+        JobIdentity(job_id, "compute-test", "controller", "idem-" + job_id),
+        ("python", "-c", "pass"),
+        deadline_seconds=deadline_seconds,
+        require_job_scope=True,
+    ))
+    return provider, token
+
+
+def _override_deadline(provider, job_id, raw):
+    """Make the registry report ``raw`` as hard_deadline_at (an exact string)."""
+    real_view = provider._registry.view
+
+    class _View:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        @property
+        def metadata(self):
+            return {**(self._inner.metadata or {}), "hard_deadline_at": raw}
+
+    provider._registry.view = lambda jid: _View(real_view(jid)) if jid == job_id else real_view(jid)
+
+
+def test_root_exit_wait_settles_with_a_grace_and_cancel_forces_at_once():
+    from sonder_runtime.adapters.execution import process_jobs
+    assert process_jobs.ROOT_EXIT_SETTLE_SECONDS >= 1.0
+    provider, token = _grace_provider("grace-wait", _Process())
+    provider.wait("grace-wait")
+    assert token.graces and token.graces[0][0] is True
+    assert token.graces[0][1] > 0.0
+
+    provider, token = _grace_provider("grace-cancel", _Process())
+    provider.cancel("grace-cancel", "operator cancellation")
+    assert token.graces == [(True, 0.0)]
+
+
+def test_root_exit_grace_capped_at_hard_deadline():
+    from datetime import datetime, timedelta, timezone
+    from sonder_runtime.adapters.execution.process_jobs import ROOT_EXIT_SETTLE_SECONDS
+    job_id = "grace-cap"
+    provider, _ = _grace_provider(job_id, _Process())
+
+    def grace_for(raw):
+        _override_deadline(provider, job_id, raw)
+        return provider._root_exit_grace(job_id)
+
+    soon = (datetime.now(timezone.utc) + timedelta(seconds=1.5)).isoformat()
+    assert 0.0 < grace_for(soon) <= 1.5
+    past = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
+    assert grace_for(past) == 0.0
+    far = (datetime.now(timezone.utc) + timedelta(seconds=300)).isoformat()
+    assert grace_for(far) == ROOT_EXIT_SETTLE_SECONDS
+    assert grace_for(None) == ROOT_EXIT_SETTLE_SECONDS
+    assert grace_for("not-a-timestamp") == 0.0
+
+    def broken_view(_job_id):
+        raise RuntimeError("registry unavailable")
+
+    provider._registry.view = broken_view
+    assert provider._root_exit_grace(job_id) == 0.0
+
+
+def test_deadline_expiry_after_root_exit_forces_without_grace():
+    from datetime import datetime, timedelta, timezone
+    job_id = "grace-deadline-expired"
+    provider, token = _grace_provider(job_id, _ExitedProcess(), deadline_seconds=30)
+    record = provider.poll(job_id)
+    assert not record.is_terminal and record.status is not JobStatus.CANCELLATION_REQUESTED
+    _override_deadline(
+        provider, job_id,
+        (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat(),
+    )
+
+    provider._expire_deadline_owned(job_id)
+
+    assert token.graces, "deadline expiry never quiesced the owned containment"
+    assert token.graces[0] == (True, 0.0), token.graces

@@ -11,6 +11,7 @@ import io
 import json
 import logging
 import socket
+import ssl
 import threading
 import urllib.error
 from datetime import datetime, timezone
@@ -18,6 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+from sonder_runtime.adapters.inference import sonder_inference_gateway as gateway_module
 from sonder_runtime.adapters.inference.sonder_inference_gateway import (
     DEFAULT_BASE_URL,
     DEFAULT_MODEL,
@@ -29,6 +31,7 @@ from sonder_runtime.adapters.inference.sonder_inference_gateway import (
     correlation_headers,
     direct_get_transport,
 )
+from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.model_gateway import ModelRequest
 from sonder_runtime.application.ports.model_gateway_contract import Capability
@@ -319,6 +322,10 @@ def test_connect_failures_on_send_are_unreachable(error):
     (socket.timeout("timed out"), DeadlineExceeded),
     (urllib.error.URLError(TimeoutError()), DeadlineExceeded),
     (ConnectionResetError(104, "reset"), DependencyUnavailable),
+    # What a peer that answers and closes with the request body unread
+    # produces on Windows (WinError 10053): bytes were sent, so never
+    # "unreachable".
+    (urllib.error.URLError(ConnectionAbortedError(10053, "aborted")), DependencyUnavailable),
 ])
 def test_post_send_failures_are_never_unreachable(error, expected):
     fake = FakeInference(chat=lambda *a: error)
@@ -940,6 +947,18 @@ def test_redirects_are_never_followed_and_never_carry_the_key(loopback_server):
 
         class Redirecting(handler):
             def do_GET(self):
+                # Consume the request body before answering.  http.client
+                # sends a POST's headers and body in two writes; a handler
+                # that answers after the headers and closes with the body
+                # unread (or still in flight) makes the server RST, and on
+                # Windows the RST discards the unread 302 on the client
+                # (WinError 10053/10054).  That turned this redirect test
+                # into a scheduler race under load.  A reset after the send
+                # is pinned separately in
+                # test_post_send_failures_are_never_unreachable.
+                length = int(self.headers.get("Content-Length") or 0)
+                if length:
+                    self.rfile.read(length)
                 self.send_response(302)
                 self.send_header("Location", target)
                 self.send_header("Content-Length", "0")
@@ -993,35 +1012,149 @@ def test_a_non_http_peer_is_a_reported_failure_not_a_crash():
         close()
 
 
-def test_health_probe_is_bounded_by_wall_clock_not_per_read():
-    import time as _time
+def _run_bounded(fn, seconds: float):
+    """Run ``fn`` on a worker; return ``(finished, outcome)`` after at most
+    ``seconds``.  ``outcome`` is ``("ok", value)`` or ``("raised", exc)``."""
+    outcome: list = []
+
+    def run():
+        try:
+            outcome.append(("ok", fn()))
+        except BaseException as exc:  # noqa: BLE001 - reported to the test thread
+            outcome.append(("raised", exc))
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(seconds)
+    return not worker.is_alive(), (outcome[0] if outcome else None)
+
+
+# A wall-clock budget fires after 0.5-0.6s; this is how long the test waits
+# before concluding the exchange is not bounded at all.  It is a hang
+# detector, not a latency threshold: under CPU load the budget's timer thread
+# is scheduled late (an elapsed-time bound of 3x the budget was measured at
+# 1.55-2.34s with 36 busy processes on 24 hardware threads).
+_UNBOUNDED_AFTER_SECONDS = 15.0
+
+
+def test_health_probe_is_bounded_by_wall_clock_not_per_read(monkeypatch):
+    # The peer starts a response and then never finishes it: one byte every
+    # 20 ms, far inside any per-read socket timeout, until the test ends.
+    # A per-read timeout should never fire against it.  That is not enough to
+    # prove the budget ended the exchange: a peer thread descheduled for longer
+    # than the per-read timeout would produce the same timeout outcome.  So the
+    # test observes the mechanism directly: every exchange's _ExchangeBudget is
+    # recorded, and each must have its ``expired`` flag set, which only the
+    # watchdog sets.  A per-read timeout leaves it False, and so does a
+    # disabled watchdog (which also never ends the trickle: the hang guard).
+    stop = threading.Event()
+    budgets: list = []
+
+    class _RecordingBudget(gateway_module._ExchangeBudget):
+        def __init__(self, seconds):
+            super().__init__(seconds)
+            budgets.append(self)
+
+    monkeypatch.setattr(gateway_module, "_ExchangeBudget", _RecordingBudget)
 
     def trickle(conn):
         _read_request(conn)
-        for byte in _http_response(200, _health()):
-            conn.sendall(bytes([byte]))
-            _time.sleep(0.05)
+        conn.sendall(b"HTTP/1.1 200 OK\r\nX-Trickle: ")
+        while not stop.wait(0.02):
+            conn.sendall(b"a")
 
     port, close = _serve_raw(trickle)
     try:
         gateway = SonderInferenceGateway(SonderInferenceConfig(base_url="http://127.0.0.1:%d" % port))
-        started = _time.monotonic()
-        snapshot = gateway.health(timeout=0.5, refresh=True)
-        elapsed = _time.monotonic() - started
-        assert snapshot.state == "unavailable" and "timed out" in snapshot.detail
-        assert elapsed < 1.5, elapsed
+        finished, outcome = _run_bounded(
+            lambda: gateway.health(timeout=0.5, refresh=True), _UNBOUNDED_AFTER_SECONDS,
+        )
+        assert finished, (
+            "a health probe with a 0.5s budget was still reading a trickling "
+            "response after %.0fs: it is bounded per read, not by wall clock"
+            % _UNBOUNDED_AFTER_SECONDS
+        )
+        kind, snapshot = outcome
+        assert kind == "ok", snapshot
+        assert snapshot.state == "unavailable" and snapshot.timed_out
+        assert "timed out" in snapshot.detail
+        assert budgets and all(b.expired for b in budgets), (
+            "the probe timed out without the wall-clock budget firing: it was "
+            "ended by a per-read timeout, not by the budget"
+        )
+        probe_budgets = len(budgets)
 
         # The send is bounded by the operation deadline the same way.
         send_only = SonderInferenceGateway(
             SonderInferenceConfig(base_url="http://127.0.0.1:%d" % port),
             get_transport=FakeInference().get,
         )
-        started = _time.monotonic()
-        with pytest.raises(DeadlineExceeded):
-            send_only.generate(ModelRequest(prompt="x", tier="fast"), _ctx(timeout=0.6))
-        assert _time.monotonic() - started < 1.6
+        finished, outcome = _run_bounded(
+            lambda: send_only.generate(ModelRequest(prompt="x", tier="fast"), _ctx(timeout=0.6)),
+            _UNBOUNDED_AFTER_SECONDS,
+        )
+        assert finished, (
+            "a send with a 0.6s operation deadline was still reading a "
+            "trickling response after %.0fs" % _UNBOUNDED_AFTER_SECONDS
+        )
+        kind, error = outcome
+        assert kind == "raised" and isinstance(error, DeadlineExceeded), outcome
+        send_budgets = budgets[probe_budgets:]
+        assert send_budgets and all(b.expired for b in send_budgets), (
+            "the send hit its deadline without the wall-clock budget firing: "
+            "it was ended by a per-read timeout, not by the budget"
+        )
     finally:
+        stop.set()
         close()
+
+
+def test_requests_never_reload_the_tls_trust_store(loopback_server, monkeypatch, tmp_path):
+    # Loading the platform trust store costs ~150-200 ms on Windows.  Every
+    # exchange used to do it, plain-HTTP loopback included: our HTTPS
+    # handler built a fresh context, and build_opener() built another for
+    # its default HTTPS handler.  Each small loopback request took ~200 ms
+    # instead of ~2 ms.
+    from sonder_runtime.adapters.inference.openai_compat_gateway import (
+        OpenAICompatibleGateway,
+        shared_https_context,
+    )
+
+    server, handler = loopback_server
+    base = "http://127.0.0.1:%d" % server.server_address[1]
+    handler.routes.update({
+        "/v1/sonder/health": (200, _health()),
+        "/v1/chat/completions": (200, _chat("ok")),
+    })
+    gateway = SonderInferenceGateway(SonderInferenceConfig(base_url=base, health_ttl_seconds=0))
+    chat = {"model": "m", "messages": [{"role": "user", "content": "x"}]}
+
+    def every_transport():
+        gateway.generate(ModelRequest(prompt="x", tier="fast"), _ctx())  # health GET + POST
+        OpenAICompatibleGateway._default_get_transport(base + "/v1/sonder/health", {}, 5)
+        OpenAICompatibleGateway._default_transport(
+            base + "/v1/chat/completions", chat, {"Content-Type": "application/json"}, 5,
+        )
+
+    every_transport()  # the shared context may load the store once per process
+    loads = []
+    real_load = ssl.SSLContext.load_default_certs
+
+    def counting_load(self, *args, **kwargs):
+        loads.append(1)
+        return real_load(self, *args, **kwargs)
+
+    monkeypatch.setattr(ssl.SSLContext, "load_default_certs", counting_load)
+    for _ in range(3):
+        every_transport()
+    assert loads == [], "%d trust-store loads in 3 rounds of requests" % len(loads)
+
+    # The shared context still verifies.
+    context = shared_https_context()
+    assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname
+    # OpenSSL's trust-path variables are still honoured per request.
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "bundle.pem"))
+    assert shared_https_context() is not context
 
 
 OVERLOADED = {"error": {"message": "too many connections", "type": "service_unavailable",
@@ -1369,6 +1502,58 @@ def test_a3_reasoning_budget_and_sampling_reach_request_body():
     for key, value in options.items():
         if key != "think":
             assert body[key] == value
+
+
+def test_empty_length_without_explicit_thinking_retries_once_with_thinking_off():
+    first = _chat("")
+    first["choices"][0]["finish_reason"] = "length"
+    responses = iter((first, _chat("OK")))
+    fake = FakeInference(chat=lambda *_: next(responses))
+    gateway = SonderInferenceGateway(
+        SonderInferenceConfig(), transport=fake.post, get_transport=fake.get,
+        env={"SONDER_INFERENCE_THINKING": "on"},
+    )
+
+    response = gateway.generate(ModelRequest(prompt="Reply OK", tier="general"), _ctx())
+
+    assert response.text == "OK"
+    assert len(fake.posts) == 2
+    assert fake.posts[0][1]["messages"] == fake.posts[1][1]["messages"]
+    assert fake.posts[1][1]["chat_template_kwargs"]["enable_thinking"] is False
+    assert fake.posts[1][1]["stream"] is False
+    assert gateway.last_response_meta["empty_length_recovered"] is True
+
+
+@pytest.mark.parametrize("think", [True, False])
+def test_empty_length_with_explicit_thinking_choice_is_not_replayed(think):
+    first = _chat("")
+    first["choices"][0]["finish_reason"] = "length"
+    fake = FakeInference(chat=lambda *_: first)
+    gateway = SonderInferenceGateway(
+        SonderInferenceConfig(), transport=fake.post, get_transport=fake.get,
+        env={"SONDER_INFERENCE_THINKING": "on"},
+    )
+
+    with pytest.raises(ModelCallError, match="done_reason"):
+        gateway.generate(ModelRequest(prompt="Reply OK", tier="general",
+                                      options={"think": think}), _ctx())
+
+    assert len(fake.posts) == 1
+
+
+def test_empty_length_repair_is_bounded_when_second_response_is_empty():
+    empty = _chat("")
+    empty["choices"][0]["finish_reason"] = "length"
+    fake = FakeInference(chat=lambda *_: empty)
+    gateway = SonderInferenceGateway(
+        SonderInferenceConfig(), transport=fake.post, get_transport=fake.get,
+        env={"SONDER_INFERENCE_THINKING": "on"},
+    )
+
+    with pytest.raises(ModelCallError, match="done_reason"):
+        gateway.generate(ModelRequest(prompt="Reply OK", tier="general"), _ctx())
+
+    assert len(fake.posts) == 2
 
 
 @pytest.mark.parametrize("location", ["nested", "cached_tokens", "missing"])
