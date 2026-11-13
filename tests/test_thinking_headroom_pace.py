@@ -289,6 +289,24 @@ def test_model_pace_a_model_also_served_by_a_fast_machine_keeps_its_usual_reques
     assert model_pace.room_to_retry(_payload(900), payload, _payload(900), "m", 300) is payload
 
 
+def test_model_pace_warns_when_the_reply_is_cut_below_what_the_caller_asked(caplog):
+    model_pace.observe("m", SLOW)
+
+    with caplog.at_level("INFO", logger="sonder.model_pace"):
+        model_pace.up_front(_payload(MINIMUM), _payload(900), "m", 300, True)
+        model_pace.up_front(_payload(MINIMUM), _payload(2000), "m", 300, True)
+
+    levels = [(record.levelname, record.args[1], record.args[2]) for record in caplog.records]
+    assert levels == [("INFO", 900, 900), ("WARNING", 1080, 2000)]
+
+
+def test_model_pace_one_slow_measurement_alone_is_enough_to_decide():
+    """Stated in the module docstring: the window protects a model only once a fast sample is held."""
+    model_pace.observe("m", SLOW)
+
+    assert model_pace.up_front(_payload(MINIMUM), _payload(900), "m", 300, True)["think"] is False
+
+
 def test_model_pace_sizes_the_reply_on_the_slowest_recent_measurement():
     """Too slow even at 4.5; what is asked for has to arrive at 3.3 as well."""
     model_pace.observe("m", SLOW)

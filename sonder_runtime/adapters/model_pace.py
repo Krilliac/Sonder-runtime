@@ -11,10 +11,18 @@ request (the rules and their reason are in
 
 The speed is held per model name.  The worker pool can serve one model from
 machines of different speed and does not say which one answered, which is why
-the fastest recent measurement decides: a model is treated as slow only after
-``RATE_WINDOW`` measurements in a row were slow.
-With no measurement yet a request is left exactly as it was, so the first call
-to a model is never changed.
+the fastest recent measurement decides: once a fast measurement is held, the
+model is treated as slow only after ``RATE_WINDOW`` slow ones in a row.  A
+single measurement is enough to decide, though: at process start one slow
+reply makes the model slow until a fast one is seen (replies without thinking
+are measured too, so the next reply from the fast machine restores it).
+
+With no measurement yet a request is left exactly as it was, so the first
+request to a model is never changed.  A retry inside that same call can be:
+it uses the speed measured from the first reply.
+
+A reply cut below what the caller asked for is logged as a warning; the reply
+itself ends with ``done_reason`` "length" and carries no other mark.
 """
 from __future__ import annotations
 
@@ -83,7 +91,12 @@ def fit(payload: dict, caller_payload: object, model: object, timeout_seconds: o
     and a minimum of thought, and never below the reply budget in
     ``caller_payload``.
     """
-    fitted = fit_headroom(payload, caller_payload, *_affordable(model, timeout_seconds))
+    return _fit(payload, caller_payload, model, timeout_seconds, _affordable(model, timeout_seconds))
+
+
+def _fit(payload: dict, caller_payload: object, model: object, timeout_seconds: object,
+         affordable: tuple[int | None, int | None]) -> dict:
+    fitted = fit_headroom(payload, caller_payload, *affordable)
     if fitted is not payload:
         _logger.info(
             "thinking headroom for %s cut from %s to %s tokens: at %.1f tokens/s more would not arrive in %ss",
@@ -114,15 +127,15 @@ def up_front(payload: dict, caller_payload: object, model: object, timeout_secon
     answer that call fails as an empty response.  The refusal is remembered, so
     later calls keep thinking with the fitted headroom.
     """
-    plain = None
-    if can_skip_thinking:
-        plain = without_thinking(payload, caller_payload, *_affordable(model, timeout_seconds))
+    affordable = _affordable(model, timeout_seconds)
+    plain = without_thinking(payload, caller_payload, *affordable) if can_skip_thinking else None
     if plain is None:
-        return fit(payload, caller_payload, model, timeout_seconds)
-    _logger.info(
-        "%s asked without thinking for %s tokens (reply cut if under the %s asked): at %.1f tokens/s a %s-token reply and %s tokens of thought would not arrive in %ss",
-        _key(model)[:80], plain["options"].get("num_predict"), caller_payload["options"].get("num_predict"), rate(model) or 0.0,
-        caller_payload["options"].get("num_predict"), MIN_THINKING_TOKENS, timeout_seconds,
+        return _fit(payload, caller_payload, model, timeout_seconds, affordable)
+    sent, asked = plain["options"].get("num_predict"), caller_payload["options"].get("num_predict")
+    _logger.log(
+        logging.WARNING if sent < asked else logging.INFO,
+        "%s asked without thinking for %s of the %s tokens asked: at %.1f to %.1f tokens/s the reply and %s tokens of thought would not arrive in %ss",
+        _key(model)[:80], sent, asked, slowest(model) or 0.0, rate(model) or 0.0, MIN_THINKING_TOKENS, timeout_seconds,
     )
     return plain
 

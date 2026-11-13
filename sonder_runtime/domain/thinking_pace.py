@@ -40,7 +40,7 @@ Two figures are used, because a speed is held per model and one model can be
 served by machines of different speed.  Whether a model is too slow is decided
 on the fastest of its recent measurements (``at_fastest``): a request is only
 changed when even that would not do, so a model that a fast machine also
-serves keeps its usual request.  How much to ask for is taken from the slowest
+serves keeps its usual request while a fast measurement is among them.  How much to ask for is taken from the slowest
 (``at_slowest``), so that what is asked for arrives.  A reply cut this way
 ends with ``done_reason`` "length" like any reply that reached its budget;
 nothing else marks it as cut.  Pure functions over Ollama's own timing fields;
