@@ -72,7 +72,7 @@ from sonder_runtime.adapters.web import live_reload
 from sonder_runtime.platform import system_profile
 import emotion_vectors
 import preference_learning
-from sonder_runtime.adapters import process_liveness
+from sonder_runtime.adapters import process_liveness, loaded_source as _loaded_source
 import web_tools
 import local_service_probe as local_probe
 import web_intents
@@ -587,7 +587,7 @@ def _running_source_commit_at_import():
 # Keep this separate from the mutable on-disk HEAD used by /updatecheck.
 # After a fast-forward, the difference is exactly the restart boundary users
 # need to see before assuming the new source is executing.
-RUNNING_SOURCE_COMMIT = _running_source_commit_at_import()
+RUNNING_SOURCE_COMMIT = _loaded_source.running_commit(_running_source_commit_at_import)
 
 BASE = ollama_endpoint.normalize()
 OLLAMA_HOST = urllib.parse.urlparse(BASE).netloc

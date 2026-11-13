@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 431,
+      "file_count": 432,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -248,6 +248,7 @@
         "sonder_runtime/adapters/learning_health.py",
         "sonder_runtime/adapters/learning_tier_formatting.py",
         "sonder_runtime/adapters/legacy_chat_bridge.py",
+        "sonder_runtime/adapters/loaded_source.py",
         "sonder_runtime/adapters/local_observability.py",
         "sonder_runtime/adapters/location.py",
         "sonder_runtime/adapters/logging_event_sink.py",
