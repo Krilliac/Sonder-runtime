@@ -166,6 +166,33 @@ def test_ambiguous_resume_never_starts_runner(tmp_path):
     assert effects == [] and repo.get("child-1").status.value == "running"
 
 
+def test_orphaned_create_intent_still_makes_spawn_ambiguous(tmp_path):
+    """Fail-closed guard: an exact create intent with no receipt and no live
+    writer (planted by a raw row insert, as a crashed writer leaves it) must
+    still stop ``spawn`` before any runner starts or child row is written."""
+    import sqlite3
+
+    path = tmp_path / "children.db"
+    repo = SQLiteDurableContinuationRepository(path)
+    service = DurableContinuationService(repo)
+    orphan = prepare_call("create", _seed_value())
+    connection = sqlite3.connect(path)
+    try:
+        with connection:
+            connection.execute(
+                "INSERT INTO continuation_intent(operation_id,child_id,kind,digest,payload) VALUES(?,?,?,?,?)",
+                (orphan.operation_id, orphan.child_id, orphan.kind, orphan.request_sha256, orphan.payload),
+            )
+    finally:
+        connection.close()
+    assert repo.unresolved_mutation("child-1") == orphan
+    effects = []
+    with pytest.raises(ContinuationCommitAmbiguous):
+        service.spawn(_request(), _context(), lambda *args: effects.append("run"))
+    assert effects == [] and repo.get("child-1") is None
+    assert repo.unresolved_mutation("child-1") == orphan
+
+
 @pytest.mark.parametrize("after_commit", [False, True])
 def test_process_exit_retains_exact_intent_and_prevents_automatic_resume(
     tmp_path, after_commit

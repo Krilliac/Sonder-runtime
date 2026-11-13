@@ -1179,9 +1179,18 @@ def test_timeout_terminates_control_grandchild_and_bounds_output(
     monkeypatch,
     tmp_path,
 ):
+    hang_guard = 60.0
+    grandchild_ready = tmp_path / "grandchild.ready"
+    control_ready = tmp_path / "control.ready"
+    monkeypatch.setenv("TEST_GRANDCHILD_READY", str(grandchild_ready))
+    monkeypatch.setenv("TEST_CONTROL_READY", str(control_ready))
+    # The control command signals readiness through marker files: the grandchild
+    # writes its marker only after SIGTERM is ignored, and the control command
+    # writes its own only after the grandchild marker exists and both output
+    # lines are flushed.
     (tmp_path / "sonder_headless.py").write_text(
         """
-import signal
+import os
 import subprocess
 import sys
 import time
@@ -1189,19 +1198,46 @@ import time
 if sys.stdin.buffer.read(2) != b"\\x01":
     raise SystemExit(2)
 child = subprocess.Popen(
-    [sys.executable, "-c", "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)"],
+    [
+        sys.executable,
+        "-c",
+        "import os,signal,time;"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+        "open(os.environ['TEST_GRANDCHILD_READY'], 'w').close();"
+        "time.sleep(120)",
+    ],
     stdin=subprocess.DEVNULL,
     stdout=subprocess.DEVNULL,
     stderr=subprocess.DEVNULL,
 )
+guard = time.monotonic() + 60
+while not os.path.exists(os.environ["TEST_GRANDCHILD_READY"]):
+    if time.monotonic() > guard:
+        raise SystemExit(3)
+    time.sleep(0.01)
 print("x" * 100000, flush=True)
 print("child=%s" % child.pid, flush=True)
+open(os.environ["TEST_CONTROL_READY"], "w").close()
 time.sleep(30)
 """,
         encoding="utf-8",
     )
     monkeypatch.setattr(sonder_launcher, "CONTROL_TERMINATE_GRACE_SECONDS", 0.1)
-    monkeypatch.setattr(sonder_launcher, "CONTROL_KILL_GRACE_SECONDS", 1.0)
+    # Only reached on a hang: SIGKILL reaping normally takes milliseconds.
+    monkeypatch.setattr(sonder_launcher, "CONTROL_KILL_GRACE_SECONDS", 15.0)
+
+    class ReadyGatedPopen(subprocess.Popen):
+        """Never let the launcher's deadline run before the child is ready."""
+
+        def wait(self, timeout=None):
+            deadline = time.monotonic() + hang_guard
+            while not control_ready.exists():
+                if time.monotonic() > deadline:
+                    pytest.fail("control command never reported ready")
+                time.sleep(0.01)
+            return super().wait(timeout=timeout)
+
+    monkeypatch.setattr(sonder_launcher.subprocess, "Popen", ReadyGatedPopen)
     controller = make_controller(tmp_path, python=sys.executable)
 
     code, output, _ = controller._run("start", timeout=0.2)
@@ -1215,8 +1251,15 @@ time.sleep(30)
             "=", 1
         )[1]
     )
-    fields = sonder_launcher._linux_process_fields(child_pid)
-    assert not fields or fields["state"] == "Z"
+    # The launcher only returns after confirming the group is gone, but poll
+    # (bounded) so a slow reaper cannot make the final observation flaky.
+    deadline = time.monotonic() + hang_guard
+    while True:
+        fields = sonder_launcher._linux_process_fields(child_pid)
+        if not fields or fields["state"] == "Z":
+            break
+        assert time.monotonic() < deadline, "grandchild survived the timeout"
+        time.sleep(0.05)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX detached-process regression")
