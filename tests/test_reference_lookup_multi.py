@@ -128,6 +128,11 @@ def retrievals(monkeypatch):
     return seen
 
 
+def _untimed(calls):
+    """The calls with elapsed times removed: a member's "in 3ms" footer reaches later prompts."""
+    return [{**call, "prompt": TIMINGS.sub("", call["prompt"])} for call in calls]
+
+
 def _clean(text):
     return PASSAGE_TEXT not in text and not MARKER_RE.search(text) and ESC not in text
 
@@ -221,7 +226,7 @@ def test_ensemble_with_no_matching_member_is_what_it_was(models, retrievals, mon
     second = server.ensemble_answer(QUESTION, tiers="plain,other")
 
     assert retrievals == []
-    assert with_feature == models.calls
+    assert _untimed(with_feature) == _untimed(models.calls)
     assert [models.kind(call) for call in with_feature] == ["member", "member", "synth"]
     assert TIMINGS.sub("", first) == TIMINGS.sub("", second)
     assert "Sources:" not in first
@@ -352,7 +357,7 @@ def test_consult_with_no_matching_member_is_what_it_was(models, retrievals, monk
     second = server.consult(QUESTION, tiers="plain,other")
 
     assert retrievals == []
-    assert with_feature == models.calls
+    assert _untimed(with_feature) == _untimed(models.calls)
     assert [models.kind(call) for call in with_feature] == ["member", "member", "judge"]
     assert TIMINGS.sub("", first) == TIMINGS.sub("", second)
     assert "Sources:" not in first
