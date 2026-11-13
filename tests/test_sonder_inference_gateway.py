@@ -19,6 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+from sonder_runtime.adapters.inference import sonder_inference_gateway as gateway_module
 from sonder_runtime.adapters.inference.sonder_inference_gateway import (
     DEFAULT_BASE_URL,
     DEFAULT_MODEL,
@@ -321,6 +322,10 @@ def test_connect_failures_on_send_are_unreachable(error):
     (socket.timeout("timed out"), DeadlineExceeded),
     (urllib.error.URLError(TimeoutError()), DeadlineExceeded),
     (ConnectionResetError(104, "reset"), DependencyUnavailable),
+    # What a peer that answers and closes with the request body unread
+    # produces on Windows (WinError 10053): bytes were sent, so never
+    # "unreachable".
+    (urllib.error.URLError(ConnectionAbortedError(10053, "aborted")), DependencyUnavailable),
 ])
 def test_post_send_failures_are_never_unreachable(error, expected):
     fake = FakeInference(chat=lambda *a: error)
@@ -942,6 +947,18 @@ def test_redirects_are_never_followed_and_never_carry_the_key(loopback_server):
 
         class Redirecting(handler):
             def do_GET(self):
+                # Consume the request body before answering.  http.client
+                # sends a POST's headers and body in two writes; a handler
+                # that answers after the headers and closes with the body
+                # unread (or still in flight) makes the server RST, and on
+                # Windows the RST discards the unread 302 on the client
+                # (WinError 10053/10054).  That turned this redirect test
+                # into a scheduler race under load.  A reset after the send
+                # is pinned separately in
+                # test_post_send_failures_are_never_unreachable.
+                length = int(self.headers.get("Content-Length") or 0)
+                if length:
+                    self.rfile.read(length)
                 self.send_response(302)
                 self.send_header("Location", target)
                 self.send_header("Content-Length", "0")
@@ -995,34 +1012,100 @@ def test_a_non_http_peer_is_a_reported_failure_not_a_crash():
         close()
 
 
-def test_health_probe_is_bounded_by_wall_clock_not_per_read():
-    import time as _time
+def _run_bounded(fn, seconds: float):
+    """Run ``fn`` on a worker; return ``(finished, outcome)`` after at most
+    ``seconds``.  ``outcome`` is ``("ok", value)`` or ``("raised", exc)``."""
+    outcome: list = []
+
+    def run():
+        try:
+            outcome.append(("ok", fn()))
+        except BaseException as exc:  # noqa: BLE001 - reported to the test thread
+            outcome.append(("raised", exc))
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(seconds)
+    return not worker.is_alive(), (outcome[0] if outcome else None)
+
+
+# A wall-clock budget fires after 0.5-0.6s; this is how long the test waits
+# before concluding the exchange is not bounded at all.  It is a hang
+# detector, not a latency threshold: under CPU load the budget's timer thread
+# is scheduled late (an elapsed-time bound of 3x the budget was measured at
+# 1.55-2.34s with 36 busy processes on 24 hardware threads).
+_UNBOUNDED_AFTER_SECONDS = 15.0
+
+
+def test_health_probe_is_bounded_by_wall_clock_not_per_read(monkeypatch):
+    # The peer starts a response and then never finishes it: one byte every
+    # 20 ms, far inside any per-read socket timeout, until the test ends.
+    # A per-read timeout should never fire against it.  That is not enough to
+    # prove the budget ended the exchange: a peer thread descheduled for longer
+    # than the per-read timeout would produce the same timeout outcome.  So the
+    # test observes the mechanism directly: every exchange's _ExchangeBudget is
+    # recorded, and each must have its ``expired`` flag set, which only the
+    # watchdog sets.  A per-read timeout leaves it False, and so does a
+    # disabled watchdog (which also never ends the trickle: the hang guard).
+    stop = threading.Event()
+    budgets: list = []
+
+    class _RecordingBudget(gateway_module._ExchangeBudget):
+        def __init__(self, seconds):
+            super().__init__(seconds)
+            budgets.append(self)
+
+    monkeypatch.setattr(gateway_module, "_ExchangeBudget", _RecordingBudget)
 
     def trickle(conn):
         _read_request(conn)
-        for byte in _http_response(200, _health()):
-            conn.sendall(bytes([byte]))
-            _time.sleep(0.05)
+        conn.sendall(b"HTTP/1.1 200 OK\r\nX-Trickle: ")
+        while not stop.wait(0.02):
+            conn.sendall(b"a")
 
     port, close = _serve_raw(trickle)
     try:
         gateway = SonderInferenceGateway(SonderInferenceConfig(base_url="http://127.0.0.1:%d" % port))
-        started = _time.monotonic()
-        snapshot = gateway.health(timeout=0.5, refresh=True)
-        elapsed = _time.monotonic() - started
-        assert snapshot.state == "unavailable" and "timed out" in snapshot.detail
-        assert elapsed < 1.5, elapsed
+        finished, outcome = _run_bounded(
+            lambda: gateway.health(timeout=0.5, refresh=True), _UNBOUNDED_AFTER_SECONDS,
+        )
+        assert finished, (
+            "a health probe with a 0.5s budget was still reading a trickling "
+            "response after %.0fs: it is bounded per read, not by wall clock"
+            % _UNBOUNDED_AFTER_SECONDS
+        )
+        kind, snapshot = outcome
+        assert kind == "ok", snapshot
+        assert snapshot.state == "unavailable" and snapshot.timed_out
+        assert "timed out" in snapshot.detail
+        assert budgets and all(b.expired for b in budgets), (
+            "the probe timed out without the wall-clock budget firing: it was "
+            "ended by a per-read timeout, not by the budget"
+        )
+        probe_budgets = len(budgets)
 
         # The send is bounded by the operation deadline the same way.
         send_only = SonderInferenceGateway(
             SonderInferenceConfig(base_url="http://127.0.0.1:%d" % port),
             get_transport=FakeInference().get,
         )
-        started = _time.monotonic()
-        with pytest.raises(DeadlineExceeded):
-            send_only.generate(ModelRequest(prompt="x", tier="fast"), _ctx(timeout=0.6))
-        assert _time.monotonic() - started < 1.6
+        finished, outcome = _run_bounded(
+            lambda: send_only.generate(ModelRequest(prompt="x", tier="fast"), _ctx(timeout=0.6)),
+            _UNBOUNDED_AFTER_SECONDS,
+        )
+        assert finished, (
+            "a send with a 0.6s operation deadline was still reading a "
+            "trickling response after %.0fs" % _UNBOUNDED_AFTER_SECONDS
+        )
+        kind, error = outcome
+        assert kind == "raised" and isinstance(error, DeadlineExceeded), outcome
+        send_budgets = budgets[probe_budgets:]
+        assert send_budgets and all(b.expired for b in send_budgets), (
+            "the send hit its deadline without the wall-clock budget firing: "
+            "it was ended by a per-read timeout, not by the budget"
+        )
     finally:
+        stop.set()
         close()
 
 
