@@ -1,12 +1,18 @@
 """The measured writing speed of each local model in this process.
 
-``observe`` records tokens a second from a model response, averaging a new
-measurement with the figure already held.  ``up_front`` uses that figure for a
-model known to think: one too slow to write the caller's reply and a minimum
-of thought inside the request timeout is asked without thinking, or, where it
-has to keep thinking, with its headroom cut to what the timeout can deliver
-(``fit``).  A model with time for both is sent its usual request (the rules
-and their reason are in ``sonder_runtime.domain.thinking_pace``).
+``observe`` keeps the last few tokens-a-second measurements of each model.
+``up_front`` uses them for a model known to think: one that even at its
+fastest recent speed is too slow to write the caller's reply and a minimum of
+thought inside the request timeout is asked without thinking, or, where it has
+to keep thinking, with its headroom cut (``fit``); what is asked for is sized
+on its slowest recent speed.  A model with time for both is sent its usual
+request (the rules and their reason are in
+``sonder_runtime.domain.thinking_pace``).
+
+The speed is held per model name.  The worker pool can serve one model from
+machines of different speed and does not say which one answered, which is why
+the fastest recent measurement decides: a model is treated as slow only after
+``RATE_WINDOW`` measurements in a row were slow.
 With no measurement yet a request is left exactly as it was, so the first call
 to a model is never changed.
 """
@@ -14,20 +20,21 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections import deque
 
 from sonder_runtime.domain.thinking_pace import (
     MIN_THINKING_TOKENS,
+    RATE_WINDOW,
     affordable_tokens,
     fit_headroom,
     output_rate,
     retry_with_room,
-    smoothed_rate,
     without_thinking,
 )
 
 _logger = logging.getLogger("sonder.model_pace")
 _LOCK = threading.Lock()
-_RATES: dict[str, float] = {}
+_RATES: dict[str, deque[float]] = {}
 
 
 def _key(model: object) -> str:
@@ -43,13 +50,30 @@ def observe(model: object, response: object, *, local: bool = True) -> None:
     if not name or measured is None:
         return
     with _LOCK:
-        _RATES[name] = smoothed_rate(_RATES.get(name), measured)
+        _RATES.setdefault(name, deque(maxlen=RATE_WINDOW)).append(measured)
 
 
 def rate(model: object) -> float | None:
-    """The held tokens a second for ``model`` (later measurements averaged in), or None.  Never does I/O."""
+    """The fastest recent tokens a second measured for ``model``, or None.  Never does I/O."""
     with _LOCK:
-        return _RATES.get(_key(model))
+        recent = _RATES.get(_key(model))
+        return max(recent) if recent else None
+
+
+def slowest(model: object) -> float | None:
+    """The slowest recent tokens a second measured for ``model``, or None.  Never does I/O."""
+    with _LOCK:
+        recent = _RATES.get(_key(model))
+        return min(recent) if recent else None
+
+
+def _affordable(model: object, timeout_seconds: object) -> tuple[int | None, int | None]:
+    """Tokens ``model`` can write inside ``timeout_seconds`` at its fastest and at its slowest recent speed."""
+    with _LOCK:
+        recent = tuple(_RATES.get(_key(model)) or ())
+    if not recent:
+        return None, None
+    return affordable_tokens(max(recent), timeout_seconds), affordable_tokens(min(recent), timeout_seconds)
 
 
 def fit(payload: dict, caller_payload: object, model: object, timeout_seconds: object) -> dict:
@@ -59,12 +83,12 @@ def fit(payload: dict, caller_payload: object, model: object, timeout_seconds: o
     and a minimum of thought, and never below the reply budget in
     ``caller_payload``.
     """
-    fitted = fit_headroom(payload, caller_payload, affordable_tokens(rate(model), timeout_seconds))
+    fitted = fit_headroom(payload, caller_payload, *_affordable(model, timeout_seconds))
     if fitted is not payload:
         _logger.info(
             "thinking headroom for %s cut from %s to %s tokens: at %.1f tokens/s more would not arrive in %ss",
             _key(model)[:80], payload["options"].get("num_predict"), fitted["options"].get("num_predict"),
-            rate(model) or 0.0, timeout_seconds,
+            slowest(model) or 0.0, timeout_seconds,
         )
     return fitted
 
@@ -72,8 +96,7 @@ def fit(payload: dict, caller_payload: object, model: object, timeout_seconds: o
 def room_to_retry(payload: dict, with_headroom: dict, caller_payload: object, model: object,
                   timeout_seconds: object) -> dict:
     """The retry for a reply that was all thought, or ``payload`` itself when there is no more room to give."""
-    return retry_with_room(payload, with_headroom, caller_payload,
-                           affordable_tokens(rate(model), timeout_seconds))
+    return retry_with_room(payload, with_headroom, caller_payload, *_affordable(model, timeout_seconds))
 
 
 def up_front(payload: dict, caller_payload: object, model: object, timeout_seconds: object,
@@ -93,12 +116,12 @@ def up_front(payload: dict, caller_payload: object, model: object, timeout_secon
     """
     plain = None
     if can_skip_thinking:
-        plain = without_thinking(payload, caller_payload, affordable_tokens(rate(model), timeout_seconds))
+        plain = without_thinking(payload, caller_payload, *_affordable(model, timeout_seconds))
     if plain is None:
         return fit(payload, caller_payload, model, timeout_seconds)
     _logger.info(
-        "%s asked without thinking for %s tokens: at %.1f tokens/s a %s-token reply and %s tokens of thought would not arrive in %ss",
-        _key(model)[:80], plain["options"].get("num_predict"), rate(model) or 0.0,
+        "%s asked without thinking for %s tokens (reply cut if under the %s asked): at %.1f tokens/s a %s-token reply and %s tokens of thought would not arrive in %ss",
+        _key(model)[:80], plain["options"].get("num_predict"), caller_payload["options"].get("num_predict"), rate(model) or 0.0,
         caller_payload["options"].get("num_predict"), MIN_THINKING_TOKENS, timeout_seconds,
     )
     return plain

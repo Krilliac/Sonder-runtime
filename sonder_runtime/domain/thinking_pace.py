@@ -31,11 +31,20 @@ slow, and a caller near the wall should pass a longer timeout.
 
 Where the line falls, with the two models measured that day.  At 52.9 tokens a
 second under 45 seconds, 1,904 tokens are affordable: a 512-token reply needs
-1,024, so the request is left alone.  At 3.4 tokens a second under 300
+1,024, so the request is left alone.  At 3.38 tokens a second under 300
 seconds, 811 are affordable: a 900-token reply needs 1,412, so thinking is
 switched off.  A request the caller sized at or above the headroom is given
-none and is never changed here.  Pure functions over Ollama's own timing
-fields; nothing here does I/O or keeps state.
+none and is never changed here.
+
+Two figures are used, because a speed is held per model and one model can be
+served by machines of different speed.  Whether a model is too slow is decided
+on the fastest of its recent measurements (``at_fastest``): a request is only
+changed when even that would not do, so a model that a fast machine also
+serves keeps its usual request.  How much to ask for is taken from the slowest
+(``at_slowest``), so that what is asked for arrives.  A reply cut this way
+ends with ``done_reason`` "length" like any reply that reached its budget;
+nothing else marks it as cut.  Pure functions over Ollama's own timing fields;
+nothing here does I/O or keeps state.
 """
 from __future__ import annotations
 
@@ -52,10 +61,10 @@ MIN_FITTED_TOKENS = 64
 # thinking.  A chosen value: the measured thinking of one answer ran from about
 # 120 tokens (a one-line question) to over 3,000 (a long design question).
 MIN_THINKING_TOKENS = 512
-# Weight of a new speed measurement against the figure already held, so that
-# one reply written while the machine was busy does not decide the next request
+# Measurements kept for each model.  One reply written while the machine was
+# busy, or by the slower of two machines, must not decide the next request
 # alone (the slower model measured 3.3 to 4.5 tokens a second within one day).
-RATE_SMOOTHING = 0.5
+RATE_WINDOW = 5
 _NANOSECONDS = 1_000_000_000
 
 
@@ -81,13 +90,6 @@ def output_rate(response: object) -> float | None:
     return tokens * _NANOSECONDS / duration
 
 
-def smoothed_rate(previous: float | None, measured: float, weight: float = RATE_SMOOTHING) -> float:
-    """The figure to hold after a new measurement: the first one as it is, later ones averaged in."""
-    if previous is None:
-        return measured
-    return previous + (measured - previous) * weight
-
-
 def affordable_tokens(rate: object, timeout_seconds: object, margin: float = PACE_MARGIN) -> int | None:
     """Tokens a model writing ``rate`` a second can produce inside ``timeout_seconds``, or None.
 
@@ -106,22 +108,25 @@ def _num_predict(payload: object) -> int | None:
     return _positive_int(options.get("num_predict")) if isinstance(options, Mapping) else None
 
 
-def fit_headroom(payload: dict, caller_payload: object, affordable: int | None) -> dict:
-    """``payload`` with its thinking headroom cut to ``affordable`` tokens, for a model too slow to think and answer.
+def fit_headroom(payload: dict, caller_payload: object, at_fastest: int | None,
+                 at_slowest: int | None = None) -> dict:
+    """``payload`` with its thinking headroom cut to ``at_slowest`` tokens, for a model too slow to think and answer.
 
-    Only headroom is cut: the result never asks for less than the caller's own
-    ``num_predict`` (``caller_payload``), and a payload that carries no headroom
-    over it comes back unchanged.  So does the payload of a model that can
+    ``at_fastest`` and ``at_slowest`` are the tokens affordable at the fastest
+    and the slowest recent speed (one figure given: both).  Only headroom is
+    cut: the result never asks for less than the caller's own ``num_predict``
+    (``caller_payload``), and a payload that carries no headroom over it comes
+    back unchanged.  So does the payload of a model that at its fastest can
     write the caller's reply and ``MIN_THINKING_TOKENS`` of thought inside the
     timeout: its request is not changed.  Returns ``payload`` itself when
     nothing changes, a copy otherwise; the caller's dict is never mutated.
     """
     budget, asked = _num_predict(payload), _num_predict(caller_payload)
-    if affordable is None or budget is None or asked is None or budget <= asked:
+    if at_fastest is None or budget is None or asked is None or budget <= asked:
         return payload
-    if affordable >= asked + MIN_THINKING_TOKENS:
+    if at_fastest >= asked + MIN_THINKING_TOKENS:
         return payload
-    fitted = max(asked, min(budget, affordable))
+    fitted = max(asked, min(budget, at_fastest if at_slowest is None else at_slowest))
     if fitted == budget:
         return payload
     fitted_payload = dict(payload)
@@ -129,7 +134,8 @@ def fit_headroom(payload: dict, caller_payload: object, affordable: int | None) 
     return fitted_payload
 
 
-def retry_with_room(payload: dict, with_headroom: dict, caller_payload: object, affordable: int | None) -> dict:
+def retry_with_room(payload: dict, with_headroom: dict, caller_payload: object, at_fastest: int | None,
+                    at_slowest: int | None = None) -> dict:
     """The request to send again after a reply that was all thought, or ``payload`` itself.
 
     ``payload`` was answered with thinking and no content; ``with_headroom`` is
@@ -144,19 +150,20 @@ def retry_with_room(payload: dict, with_headroom: dict, caller_payload: object, 
     current, asked = _num_predict(payload), _num_predict(caller_payload)
     if current is not None and asked is not None and current > asked:
         return payload
-    fitted = fit_headroom(with_headroom, caller_payload, affordable)
+    fitted = fit_headroom(with_headroom, caller_payload, at_fastest, at_slowest)
     return fitted if (_num_predict(fitted) or 0) > (current or 0) else payload
 
 
-def without_thinking(payload: dict, caller_payload: object, affordable: int | None) -> dict | None:
+def without_thinking(payload: dict, caller_payload: object, at_fastest: int | None,
+                     at_slowest: int | None = None) -> dict | None:
     """The request to send with thinking off, or None when the model has time to think.
 
     ``payload`` is the request with the thinking headroom added.  A model that
-    cannot write the caller's reply and ``MIN_THINKING_TOKENS`` of thought
-    inside the timeout (``affordable`` is under their sum) is asked the
-    caller's own request with ``think`` False, its reply budget cut to
-    ``affordable`` when even that would not arrive (never under
-    ``MIN_FITTED_TOKENS``).
+    even at its fastest cannot write the caller's reply and
+    ``MIN_THINKING_TOKENS`` of thought inside the timeout (``at_fastest`` is
+    under their sum) is asked the caller's own request with ``think`` False,
+    its reply budget cut to ``at_slowest`` (one figure given: both) when even
+    that would not arrive (never under ``MIN_FITTED_TOKENS``).
 
     None, so the caller keeps thinking on, when nothing was measured, when the
     reply and that much thought are affordable, when the request was given no
@@ -165,14 +172,15 @@ def without_thinking(payload: dict, caller_payload: object, affordable: int | No
     the inputs are never mutated.
     """
     budget, asked = _num_predict(payload), _num_predict(caller_payload)
-    if affordable is None or budget is None or asked is None or budget <= asked:
+    if at_fastest is None or budget is None or asked is None or budget <= asked:
         return None
-    if affordable >= asked + MIN_THINKING_TOKENS:
+    if at_fastest >= asked + MIN_THINKING_TOKENS:
         return None
     if "think" in payload or "think" in caller_payload:
         return None
+    deliverable = at_fastest if at_slowest is None else at_slowest
     plain = dict(caller_payload)
     plain["think"] = False
     plain["options"] = dict(caller_payload["options"],
-                            num_predict=min(asked, max(affordable, MIN_FITTED_TOKENS)))
+                            num_predict=min(asked, max(deliverable, MIN_FITTED_TOKENS)))
     return plain

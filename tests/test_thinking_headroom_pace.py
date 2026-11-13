@@ -20,18 +20,18 @@ from sonder_runtime.domain.thinking_pace import (
     MIN_SAMPLE_TOKENS,
     MIN_THINKING_TOKENS,
     PACE_MARGIN,
-    RATE_SMOOTHING,
+    RATE_WINDOW,
     affordable_tokens,
     fit_headroom,
     output_rate,
     retry_with_room,
-    smoothed_rate,
     without_thinking,
 )
 
 MINIMUM = server.LOCAL_THINKING_MIN_NUM_PREDICT
 THINKING_ONLY = {"message": {"thinking": "long deliberation", "content": ""}, "done_reason": "length"}
 SLOW = {"eval_count": 45, "eval_duration": 10_000_000_000}  # 4.5 tokens a second
+SLOWER = {"eval_count": 33, "eval_duration": 10_000_000_000}  # 3.3, the same model on a busy day
 FAST = {"eval_count": 500, "eval_duration": 10_000_000_000}  # 50 tokens a second
 VERY_SLOW = {"eval_count": 16, "eval_duration": 100_000_000_000}  # 0.16 tokens a second
 MEASURED_FAST = {"eval_count": 529, "eval_duration": 10_000_000_000}  # 52.9, the larger model live
@@ -253,11 +253,52 @@ def test_model_pace_unmeasurable_response_keeps_the_earlier_measurement(unmeasur
     assert model_pace.rate("m") == 4.5
 
 
-def test_model_pace_a_later_measurement_is_averaged_with_the_earlier_one():
-    model_pace.observe("m", SLOW)
-    model_pace.observe("m", FAST)
+@pytest.mark.parametrize("order", [(SLOW, FAST), (FAST, SLOW), (SLOW, FAST, SLOWER)])
+def test_model_pace_holds_the_fastest_and_the_slowest_recent_measurement(order):
+    for timing in order:
+        model_pace.observe("m", timing)
 
-    assert model_pace.rate("m") == pytest.approx(27.25)
+    assert model_pace.rate("m") == 50.0
+    assert model_pace.slowest("m") == min(output_rate(timing) for timing in order)
+
+
+def test_model_pace_forgets_a_measurement_after_the_window():
+    model_pace.observe("m", FAST)
+    for _ in range(RATE_WINDOW - 1):
+        model_pace.observe("m", SLOW)
+    assert model_pace.rate("m") == 50.0
+
+    model_pace.observe("m", SLOW)
+
+    assert model_pace.rate("m") == 4.5
+    assert RATE_WINDOW >= 2
+
+
+def test_model_pace_slowest_is_none_for_an_unmeasured_model():
+    assert model_pace.slowest("m") is None
+
+
+def test_model_pace_a_model_also_served_by_a_fast_machine_keeps_its_usual_request():
+    """The pool does not say which machine answered: slow samples among fast ones change nothing."""
+    for timing in (FAST, SLOW, SLOW, SLOWER, SLOW):
+        model_pace.observe("m", timing)
+    payload = _payload(MINIMUM)
+
+    assert model_pace.up_front(payload, _payload(900), "m", 300, True) is payload
+    assert model_pace.fit(payload, _payload(900), "m", 300) is payload
+    assert model_pace.room_to_retry(_payload(900), payload, _payload(900), "m", 300) is payload
+
+
+def test_model_pace_sizes_the_reply_on_the_slowest_recent_measurement():
+    """Too slow even at 4.5; what is asked for has to arrive at 3.3 as well."""
+    model_pace.observe("m", SLOW)
+    model_pace.observe("m", SLOWER)
+
+    plain = model_pace.up_front(_payload(MINIMUM), _payload(2000), "m", 300, True)
+    fitted = model_pace.up_front(_payload(MINIMUM), _payload(700), "m", 300, False)
+
+    assert (plain["options"]["num_predict"], plain["think"]) == (int(3.3 * 300 * PACE_MARGIN), False)
+    assert fitted["options"]["num_predict"] == int(3.3 * 300 * PACE_MARGIN) and "think" not in fitted
 
 
 def test_model_pace_one_slow_reply_does_not_cost_a_fast_model_its_thinking():
@@ -273,15 +314,14 @@ def test_model_pace_one_slow_reply_does_not_cost_a_fast_model_its_thinking():
     assert sent is payload
 
 
-def test_smoothed_rate_takes_the_first_measurement_as_it_is():
-    assert smoothed_rate(None, 4.5) == 4.5
+def test_the_decision_is_made_on_the_fastest_figure_and_the_size_on_the_slowest():
+    caller = _payload(2000)
 
-
-def test_smoothed_rate_moves_part_of_the_way_to_a_new_measurement():
-    assert 0 < RATE_SMOOTHING < 1
-    assert smoothed_rate(10.0, 20.0) == pytest.approx(10.0 + 10.0 * RATE_SMOOTHING)
-    assert smoothed_rate(20.0, 10.0) == pytest.approx(20.0 - 10.0 * RATE_SMOOTHING)
-    assert smoothed_rate(10.0, 20.0, 0.25) == pytest.approx(12.5)
+    assert without_thinking(_payload(MINIMUM), caller, 2000 + MIN_THINKING_TOKENS, 100) is None
+    assert without_thinking(_payload(MINIMUM), caller, 1080, 792)["options"]["num_predict"] == 792
+    assert fit_headroom(_payload(MINIMUM), _payload(700), 700 + MIN_THINKING_TOKENS, 100)["options"]["num_predict"] == MINIMUM
+    assert fit_headroom(_payload(MINIMUM), _payload(700), 1080, 792)["options"]["num_predict"] == 792
+    assert retry_with_room(_payload(700), _payload(MINIMUM), _payload(700), 1080, 792)["options"]["num_predict"] == 792
 
 
 def test_model_pace_names_are_stripped_and_blank_names_are_ignored():
@@ -699,7 +739,7 @@ def test_a_fitted_request_that_came_back_all_thought_is_not_sent_again(monkeypat
 
     fitted = _affordable(SLOW)
     assert 900 < fitted < 900 + MIN_THINKING_TOKENS
-    assert int(server._model_pace.rate("r") * server.TIMEOUT * PACE_MARGIN) != fitted
+    assert (server._model_pace.rate("r"), server._model_pace.slowest("r")) != (4.5, 4.5)
     assert raised.value.kind == "empty_response"
     assert seen == [(fitted, None)]
 
