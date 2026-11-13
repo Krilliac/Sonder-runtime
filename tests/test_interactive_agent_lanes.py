@@ -8,6 +8,7 @@ from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.model_gateway import ModelResponse
 from sonder_runtime.application.agents.interactive_lanes import AgentLaneService
 from sonder_runtime.adapters.persistence.agent_lanes import SQLiteAgentLaneStore
+from sonder_runtime.adapters.persistence import fleet_store
 from sonder_runtime.adapters.persistence.session_repository import (
     SQLiteSessionRepository,
 )
@@ -46,6 +47,73 @@ def spawn(env, command="spawn-1"):
         workspace_root=str(root / "child"),
         context=context,
     )
+
+
+def test_cancelled_parent_retires_after_its_completed_child(env, monkeypatch):
+    service, store, _, _, context, _ = env
+    monkeypatch.setenv("SONDER_FLEET_DB", store.path)
+    lane = spawn(env)["lane"]
+    service.run_pending(lane["id"], context)
+    with store.transaction() as tx:
+        root_id = tx.lane(lane["id"])["root_id"]
+
+    fleet_store.cancel_agents(root_id)
+
+    with store.connect() as conn:
+        root = conn.execute(
+            "SELECT status, finished_ts FROM fleet_agents WHERE id=?",
+            (root_id,),
+        ).fetchone()
+    assert root["status"] == "cancelled"
+    assert root["finished_ts"] is not None
+
+
+def test_cancelled_parent_waits_for_running_child_then_retires(env, monkeypatch):
+    _, store, _, _, _, _ = env
+    monkeypatch.setenv("SONDER_FLEET_DB", store.path)
+    lane = spawn(env)["lane"]
+    with store.transaction() as tx:
+        current = tx.lane(lane["id"])
+        root_id = current["root_id"]
+        current["status"] = "running"
+        tx.save(current)
+
+    fleet_store.cancel_agents(root_id)
+    with store.connect() as conn:
+        root = conn.execute(
+            "SELECT status FROM fleet_agents WHERE id=?", (root_id,)
+        ).fetchone()
+    assert root["status"] == "running"
+
+    with store.transaction() as tx:
+        current = tx.lane(lane["id"])
+        current["status"] = "cancelled"
+        tx.save(current)
+    with store.connect() as conn:
+        root = conn.execute(
+            "SELECT status FROM fleet_agents WHERE id=?", (root_id,)
+        ).fetchone()
+    assert root["status"] == "cancelled"
+
+
+def test_store_reopen_reconciles_cancelled_parent_after_process_exit(env):
+    service, store, sessions, _, context, _ = env
+    lane = spawn(env)["lane"]
+    service.run_pending(lane["id"], context)
+    with store.transaction() as tx:
+        root_id = tx.lane(lane["id"])["root_id"]
+        tx.conn.execute(
+            "UPDATE fleet_agents SET cancel_requested=1 WHERE id=?", (root_id,),
+        )
+
+    SQLiteAgentLaneStore(store.path, sessions)
+
+    with store.connect() as conn:
+        root = conn.execute(
+            "SELECT status, finished_ts FROM fleet_agents WHERE id=?", (root_id,),
+        ).fetchone()
+    assert root["status"] == "cancelled"
+    assert root["finished_ts"] is not None
 
 
 def test_spawn_is_durable_idempotent_and_real_independent_turn(env):
