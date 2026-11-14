@@ -51,3 +51,10 @@ def test_operator_pin_detection(monkeypatch):
     assert dc.operator_pinned() is False
     monkeypatch.setenv("SONDER_CONTEXT_SIZE", "16k")
     assert dc.operator_pinned() is True
+
+
+def test_declared_ceiling_only_lowers_the_automatic_window():
+    assert dc.apply_declared_ceiling(32768, 8192) == 8192
+    assert dc.apply_declared_ceiling(32768, 131072) == 32768
+    assert dc.apply_declared_ceiling(32768, None) == 32768
+    assert dc.apply_declared_ceiling(32768, 0) == 32768

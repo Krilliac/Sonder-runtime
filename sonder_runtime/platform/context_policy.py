@@ -71,13 +71,16 @@ def _parameter_billions(value):
 # models spend more bytes of KV per token (more layers and wider heads), so
 # the auto-selected window shrinks as the weights grow.  The ladder is a
 # planning envelope, not a measured residency report.
-METADATA_UNAVAILABLE_CONTEXT = 8_192
-
 _PARAMETER_CONTEXT_BANDS = (
     (48.0, 8_192, "parameters>=48B"),
     (24.0, 16_384, "parameters>=24B"),
     (12.0, 24_576, "parameters>=12B"),
 )
+
+
+# Window for a model that has never been probed successfully in this process:
+# the smallest window a successful probe can choose (the >=48B band).
+METADATA_UNAVAILABLE_CONTEXT = 8_192
 
 
 def auto_context_plan(model_context=None, parameter_size=None, residency_ceiling=None) -> dict:

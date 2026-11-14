@@ -104,7 +104,7 @@ def test_auto_context_adds_a_70b_class_band(monkeypatch):
     assert context_policy.auto_context(131072, "32B") == 16384
 
 
-def test_auto_context_ignores_unknown_or_malformed_metadata(monkeypatch):
+def test_auto_context_never_probed_model_gets_conservative_window_for_unknown_metadata(monkeypatch):
     monkeypatch.delenv("SONDER_CONTEXT_SIZE", raising=False)
     monkeypatch.delenv("SONDER_SESSION_NUM_CTX", raising=False)
     monkeypatch.setenv("OLLAMA_KV_CACHE_TYPE", "q8_0")

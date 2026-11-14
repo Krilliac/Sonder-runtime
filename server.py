@@ -1595,6 +1595,11 @@ _MODEL_GEOMETRY_CACHE = {}
 # _MODEL_CONTEXT_CACHE_LOCK.  Written only by a successful /api/show and kept
 # across later probe failures so one model never changes window between turns.
 _MODEL_DECLARED_CONTEXT_CACHE = {}
+# The last SUCCESSFUL (context_length, parameter_size) per model, same lock.  A
+# failed probe reuses it so the window is identical whether the latest probe
+# worked; _MODEL_UNPROBED_LOGGED notes models already logged as never probed.
+_MODEL_LAST_SUCCESS_METADATA = {}
+_MODEL_UNPROBED_LOGGED = set()
 _RESIDENCY_FEEDBACK = None
 _RESIDENCY_FEEDBACK_LOCK = threading.Lock()
 
@@ -1706,9 +1711,13 @@ def _model_context_metadata(model):
                 else _MODEL_CONTEXT_CACHE_NEGATIVE_TTL
             )
             if now - cached[0] < ttl:
+                if cached[1] is None and cached[2] is None:
+                    return _MODEL_LAST_SUCCESS_METADATA.get(key, (None, None))
                 return cached[1], cached[2]
     context_length = None
     parameter_size = None
+    declared = None
+    succeeded = False
     try:
         # "model" is the current /api/show field and the pool's routing hint;
         # "name" is the older field, kept for older Ollama servers.
@@ -1718,11 +1727,6 @@ def _model_context_metadata(model):
         declared = declared_context.declared_num_ctx(
             details.get("parameters") if isinstance(details, dict) else None
         )
-        with _MODEL_CONTEXT_CACHE_LOCK:
-            if declared:
-                _MODEL_DECLARED_CONTEXT_CACHE[key] = declared
-            else:
-                _MODEL_DECLARED_CONTEXT_CACHE.pop(key, None)
         for name, value in info.items():
             if str(name).casefold().endswith("context_length"):
                 context_length = context_policy.parse_strict(value)
@@ -1737,12 +1741,22 @@ def _model_context_metadata(model):
                 parameter_size = float(count) / 1_000_000_000.0
         with _MODEL_CONTEXT_CACHE_LOCK:
             _MODEL_GEOMETRY_CACHE[key] = _kv_budget.geometry_from_model_info(info)
+        succeeded = True
     except Exception:
         # Metadata is an optimization and cannot make an otherwise valid model
         # unavailable. The deterministic context-policy fallback remains safe.
         pass
     with _MODEL_CONTEXT_CACHE_LOCK:
         _MODEL_CONTEXT_CACHE[key] = (now, context_length, parameter_size)
+        if succeeded:
+            _MODEL_LAST_SUCCESS_METADATA[key] = (context_length, parameter_size)
+            resolved = declared_context.resolve_declared_context(declared, context_length)
+            if resolved:
+                _MODEL_DECLARED_CONTEXT_CACHE[key] = resolved
+            else:
+                _MODEL_DECLARED_CONTEXT_CACHE.pop(key, None)
+        elif key in _MODEL_LAST_SUCCESS_METADATA:
+            return _MODEL_LAST_SUCCESS_METADATA[key]
     return context_length, parameter_size
 
 
@@ -1782,21 +1796,32 @@ def _auto_model_context(model):
     GPU-resident again.  See ``adapters.inference.residency_feedback``.
     """
     context_length, parameter_size = _model_context_metadata(model)
-    if not _is_cloud_model_name(model) and not declared_context.operator_pinned():
+    cloud_name = _is_cloud_model_name(model)
+    key = str(model or "").strip().casefold()
+    if not cloud_name and context_length is None and parameter_size is None:
         with _MODEL_CONTEXT_CACHE_LOCK:
-            declared = _MODEL_DECLARED_CONTEXT_CACHE.get(str(model or "").strip().casefold())
-        resolved = declared_context.resolve_declared_context(declared, context_length)
-        if resolved is not None:
-            return resolved
-    feedback = None if _is_cloud_model_name(model) else _residency_feedback()
+            first = key not in _MODEL_UNPROBED_LOGGED
+            _MODEL_UNPROBED_LOGGED.add(key)
+        if first:
+            logging.getLogger("sonder.server").info(
+                "model %r has no successful metadata probe yet; context is capped at %d",
+                key[:128], context_policy.METADATA_UNAVAILABLE_CONTEXT,
+            )
+    feedback = None if cloud_name else _residency_feedback()
     if feedback is None:
-        return context_policy.auto_context(context_length, parameter_size)
+        auto = context_policy.auto_context(context_length, parameter_size)
+    else:
+        with _MODEL_CONTEXT_CACHE_LOCK:
+            geometry = _MODEL_GEOMETRY_CACHE.get(key)
+        feedback.refresh(model, geometry=geometry, kv_type=context_policy.kv_cache_type()[0])
+        auto = context_policy.auto_context(
+            context_length, parameter_size, feedback.ceiling(model),
+        )
+    if cloud_name or declared_context.operator_pinned():
+        return auto
     with _MODEL_CONTEXT_CACHE_LOCK:
-        geometry = _MODEL_GEOMETRY_CACHE.get(str(model or "").strip().casefold())
-    feedback.refresh(model, geometry=geometry, kv_type=context_policy.kv_cache_type()[0])
-    return context_policy.auto_context(
-        context_length, parameter_size, feedback.ceiling(model),
-    )
+        declared = _MODEL_DECLARED_CONTEXT_CACHE.get(key)
+    return declared_context.apply_declared_ceiling(auto, declared)
 
 
 def _make_generate(

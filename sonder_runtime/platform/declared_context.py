@@ -49,3 +49,10 @@ def resolve_declared_context(declared, advertised) -> int | None:
     if isinstance(advertised, int) and not isinstance(advertised, bool) and 0 < advertised < declared:
         return advertised
     return declared
+
+
+def apply_declared_ceiling(auto_window, declared) -> int:
+    """A declared window only lowers the automatic one, never raises it."""
+    if isinstance(declared, int) and not isinstance(declared, bool) and declared > 0:
+        return min(auto_window, declared)
+    return auto_window
