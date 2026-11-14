@@ -71,6 +71,8 @@ def _parameter_billions(value):
 # models spend more bytes of KV per token (more layers and wider heads), so
 # the auto-selected window shrinks as the weights grow.  The ladder is a
 # planning envelope, not a measured residency report.
+METADATA_UNAVAILABLE_CONTEXT = 8_192
+
 _PARAMETER_CONTEXT_BANDS = (
     (48.0, 8_192, "parameters>=48B"),
     (24.0, 16_384, "parameters>=24B"),
@@ -114,6 +116,16 @@ def auto_context_plan(model_context=None, parameter_size=None, residency_ceiling
                     chosen = ceiling
                     clamps.append(reason)
                 break
+    if (
+        parameters is None
+        and parse_strict(model_context) is None
+        and not has_explicit_environment
+        and METADATA_UNAVAILABLE_CONTEXT < chosen
+    ):
+        # No metadata is what a failed probe looks like.  It must never size a
+        # window above what a successful probe of the largest model would.
+        chosen = METADATA_UNAVAILABLE_CONTEXT
+        clamps.append("metadata-unavailable")
     measured = parse_strict(residency_ceiling)
     if measured is not None and not has_explicit_environment and measured < chosen:
         chosen = measured

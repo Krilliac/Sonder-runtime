@@ -143,7 +143,7 @@ import sqlite_mutate as sqlite_mutate_module
 import symbol_index
 import git_history
 import sonder_runtime.adapters.archive_create as archive_create_tool
-from sonder_runtime.platform import context_policy
+from sonder_runtime.platform import context_policy, declared_context
 import command_registry
 import adaptive_training
 import selfmod
@@ -1591,6 +1591,10 @@ _MODEL_CONTEXT_CACHE_NEGATIVE_TTL = 30.0
 # Attention geometry parsed from the same /api/show response, guarded by
 # _MODEL_CONTEXT_CACHE_LOCK; None records "not modelled", not a failure.
 _MODEL_GEOMETRY_CACHE = {}
+# The num_ctx a model declares in its own parameters, guarded by
+# _MODEL_CONTEXT_CACHE_LOCK.  Written only by a successful /api/show and kept
+# across later probe failures so one model never changes window between turns.
+_MODEL_DECLARED_CONTEXT_CACHE = {}
 _RESIDENCY_FEEDBACK = None
 _RESIDENCY_FEEDBACK_LOCK = threading.Lock()
 
@@ -1706,9 +1710,19 @@ def _model_context_metadata(model):
     context_length = None
     parameter_size = None
     try:
-        details = _post("/api/show", {"name": model}, timeout=30)
+        # "model" is the current /api/show field and the pool's routing hint;
+        # "name" is the older field, kept for older Ollama servers.
+        details = _post("/api/show", {"model": model, "name": model}, timeout=30)
         info = details.get("model_info") if isinstance(details, dict) else {}
         info = info if isinstance(info, dict) else {}
+        declared = declared_context.declared_num_ctx(
+            details.get("parameters") if isinstance(details, dict) else None
+        )
+        with _MODEL_CONTEXT_CACHE_LOCK:
+            if declared:
+                _MODEL_DECLARED_CONTEXT_CACHE[key] = declared
+            else:
+                _MODEL_DECLARED_CONTEXT_CACHE.pop(key, None)
         for name, value in info.items():
             if str(name).casefold().endswith("context_length"):
                 context_length = context_policy.parse_strict(value)
@@ -1768,6 +1782,12 @@ def _auto_model_context(model):
     GPU-resident again.  See ``adapters.inference.residency_feedback``.
     """
     context_length, parameter_size = _model_context_metadata(model)
+    if not _is_cloud_model_name(model) and not declared_context.operator_pinned():
+        with _MODEL_CONTEXT_CACHE_LOCK:
+            declared = _MODEL_DECLARED_CONTEXT_CACHE.get(str(model or "").strip().casefold())
+        resolved = declared_context.resolve_declared_context(declared, context_length)
+        if resolved is not None:
+            return resolved
     feedback = None if _is_cloud_model_name(model) else _residency_feedback()
     if feedback is None:
         return context_policy.auto_context(context_length, parameter_size)
