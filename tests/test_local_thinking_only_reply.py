@@ -359,3 +359,26 @@ def test_a_reasoning_continuation_that_stops_without_an_answer_keeps_its_own_rul
 
     assert caught.value.kind == "empty_response"
     assert len(seen) == 1
+
+
+def test_a_known_thinking_model_that_stops_after_its_headroom_is_asked_with_the_callers_budget(monkeypatch):
+    server._remember_thinking_model("r")
+    seen = _record(monkeypatch, _stops_without_an_answer_while_thinking)
+
+    _out, content = _ask(260)
+
+    assert content == "the real answer"
+    assert [budget for budget, _think in seen] == [MINIMUM, 260]
+    assert seen[1][1] is False
+
+
+def test_a_native_tool_call_with_thought_and_no_text_is_returned_not_asked_again(monkeypatch):
+    seen = _record(monkeypatch, lambda _payload, _index: {
+        "message": {"thinking": "long deliberation", "content": "", "tool_calls": [{
+            "function": {"name": "file_read_range", "arguments": {"path": "README.md", "start_line": 1}}}]},
+        "done_reason": "stop"})
+
+    _out, content = _ask(260, accept_native_tool_calls=True)
+
+    assert '"file_read_range"' in content and "long deliberation" not in content
+    assert len(seen) == 1
