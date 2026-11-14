@@ -56,3 +56,8 @@ def apply_declared_ceiling(auto_window, declared) -> int:
     if isinstance(declared, int) and not isinstance(declared, bool) and declared > 0:
         return min(auto_window, declared)
     return auto_window
+
+
+def declared_from_show(details) -> int | None:
+    """``declared_num_ctx`` of an ``/api/show`` answer; ``None`` if it is no dict."""
+    return declared_num_ctx(details.get("parameters") if isinstance(details, dict) else None)

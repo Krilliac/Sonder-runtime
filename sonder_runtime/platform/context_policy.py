@@ -78,12 +78,16 @@ _PARAMETER_CONTEXT_BANDS = (
 )
 
 
-# Window for a model that has never been probed successfully in this process:
-# the smallest window a successful probe can choose (the >=48B band).
+# Window for a local model that has never been probed successfully in this
+# process (``metadata_unavailable``): the smallest window a successful probe can
+# choose (the >=48B band).
 METADATA_UNAVAILABLE_CONTEXT = 8_192
 
 
-def auto_context_plan(model_context=None, parameter_size=None, residency_ceiling=None) -> dict:
+def auto_context_plan(
+    model_context=None, parameter_size=None, residency_ceiling=None,
+    metadata_unavailable=False,
+) -> dict:
     """Explain a model-aware native context choice with clamp provenance.
 
     Returns a dict with the selected ``context`` plus the intermediate facts
@@ -120,13 +124,13 @@ def auto_context_plan(model_context=None, parameter_size=None, residency_ceiling
                     clamps.append(reason)
                 break
     if (
-        parameters is None
-        and parse_strict(model_context) is None
+        metadata_unavailable
         and not has_explicit_environment
         and METADATA_UNAVAILABLE_CONTEXT < chosen
     ):
-        # No metadata is what a failed probe looks like.  It must never size a
-        # window above what a successful probe of the largest model would.
+        # The caller says no probe of this model has ever succeeded.  Never
+        # size a window above what a successful probe of the largest model
+        # would; once a probe has succeeded its metadata is replayed instead.
         chosen = METADATA_UNAVAILABLE_CONTEXT
         clamps.append("metadata-unavailable")
     measured = parse_strict(residency_ceiling)
@@ -158,7 +162,10 @@ def auto_context_plan(model_context=None, parameter_size=None, residency_ceiling
     }
 
 
-def auto_context(model_context=None, parameter_size=None, residency_ceiling=None) -> int:
+def auto_context(
+    model_context=None, parameter_size=None, residency_ceiling=None,
+    metadata_unavailable=False,
+) -> int:
     """Choose a model-aware native context when the caller did not pin one.
 
     Ollama's server default is process-wide, but model weights and KV-cache
@@ -167,7 +174,9 @@ def auto_context(model_context=None, parameter_size=None, residency_ceiling=None
     the selected model's advertised maximum. Operators can still override the
     result with ``SONDER_CONTEXT_SIZE`` or an explicit request value.
     """
-    return auto_context_plan(model_context, parameter_size, residency_ceiling)["context"]
+    return auto_context_plan(
+        model_context, parameter_size, residency_ceiling, metadata_unavailable,
+    )["context"]
 
 
 def parse_strict(value):

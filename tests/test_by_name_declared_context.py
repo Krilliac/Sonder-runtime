@@ -34,10 +34,8 @@ def _not_found():
 
 def _clear_caches():
     server._MODEL_CONTEXT_CACHE.clear()
-    server._MODEL_DECLARED_CONTEXT_CACHE.clear()
     server._MODEL_GEOMETRY_CACHE.clear()
-    server._MODEL_LAST_SUCCESS_METADATA.clear()
-    server._MODEL_UNPROBED_LOGGED.clear()
+    server._MODEL_CONTEXT_MEMORY.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -156,7 +154,7 @@ def test_declared_value_is_clamped_to_the_advertised_length_and_survives_failure
         "parameters": "num_ctx 8192",
     }
     assert _chat_context(monkeypatch, [show, None]) == [2048, 2048]
-    assert server._MODEL_DECLARED_CONTEXT_CACHE[MODEL] == 2048
+    assert server._MODEL_CONTEXT_MEMORY.declared_for(MODEL) == 2048
 
 
 def test_operator_pin_beats_the_declared_value(monkeypatch):
@@ -166,6 +164,53 @@ def test_operator_pin_beats_the_declared_value(monkeypatch):
 
 
 def test_cloud_model_name_skips_the_declared_path(monkeypatch):
-    monkeypatch.setattr(server, "_MODEL_DECLARED_CONTEXT_CACHE", {"qwen3-coder:cloud": 4096})
+    server._MODEL_CONTEXT_MEMORY.settle(
+        "qwen3-coder:cloud", 4096, 262144, "30B",
+    )
     assert server._is_cloud_model_name("qwen3-coder:cloud")
-    assert server._auto_model_context("qwen3-coder:cloud") != 4096
+    # Exactly what the base produced for a cloud name: the unclamped
+    # quantised-KV default, with neither the floor nor a declared ceiling.
+    assert server._auto_model_context("qwen3-coder:cloud") == context_policy.DEFAULT_CONTEXT_QUANTISED_KV
+
+
+def test_probe_that_succeeds_with_no_metadata_is_not_a_never_probed_model(monkeypatch, caplog):
+    caplog.set_level("INFO", logger="sonder.server")
+    sent = _chat_context(monkeypatch, [{"details": {}, "model_info": {}}])
+    assert sent == [context_policy.DEFAULT_CONTEXT_QUANTISED_KV]
+    assert "no successful metadata probe" not in caplog.text
+
+
+def test_never_probed_model_is_logged_once(monkeypatch, caplog):
+    caplog.set_level("INFO", logger="sonder.server")
+    _chat_context(monkeypatch, [None, None])
+    assert caplog.text.count("no successful metadata probe") == 1
+
+
+def test_never_probed_model_is_not_logged_as_capped_under_an_operator_pin(monkeypatch, caplog):
+    caplog.set_level("INFO", logger="sonder.server")
+    monkeypatch.setenv("SONDER_CONTEXT_SIZE", "16384")
+    assert _chat_context(monkeypatch, [None]) == [16384]
+    assert "capped at" not in caplog.text
+
+
+def test_untagged_and_latest_spellings_are_one_model(monkeypatch):
+    small = {
+        "details": {"parameter_size": "7.6B"},
+        "model_info": {"x.context_length": 32768},
+    }
+    sent = []
+    results = iter([small, None])
+
+    def fake_post(path, payload, **_kwargs):
+        if path == "/api/show":
+            result = next(results)
+            if result is None:
+                raise _not_found()
+            return result
+        sent.append(payload["options"]["num_ctx"])
+        return {"message": {"content": "ok"}}
+
+    monkeypatch.setattr(server, "_post", fake_post)
+    for spelling in ("x", "x:latest"):
+        server._make_generate(spelling, "", 0.2, 32, 0, text_only=True)("hello")
+    assert sent == [32768, 32768], sent

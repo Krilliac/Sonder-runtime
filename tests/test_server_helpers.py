@@ -534,8 +534,10 @@ def test_make_generate_auto_sizes_context_from_selected_model(monkeypatch):
 
 
 def test_model_context_metadata_failure_is_cached_only_briefly(monkeypatch):
-    """A failed /api/show pins the conservative context fallback; that verdict
-    must expire on the short negative TTL, not the 5-minute positive TTL."""
+    """For a model that has never been probed successfully, a failed /api/show
+    yields no metadata; that verdict must expire on the short negative TTL, not
+    the 5-minute positive TTL.  (A model with an earlier success replays its
+    last good metadata instead.)"""
     calls = []
 
     def failing_post(path, payload, **_kwargs):

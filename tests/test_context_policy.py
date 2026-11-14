@@ -104,17 +104,30 @@ def test_auto_context_adds_a_70b_class_band(monkeypatch):
     assert context_policy.auto_context(131072, "32B") == 16384
 
 
-def test_auto_context_never_probed_model_gets_conservative_window_for_unknown_metadata(monkeypatch):
+def test_auto_context_ignores_unknown_or_malformed_metadata(monkeypatch):
     monkeypatch.delenv("SONDER_CONTEXT_SIZE", raising=False)
     monkeypatch.delenv("SONDER_SESSION_NUM_CTX", raising=False)
     monkeypatch.setenv("OLLAMA_KV_CACHE_TYPE", "q8_0")
 
-    # No usable metadata is what a failed /api/show looks like: conservative,
-    # never above what a successful probe of the largest model would pick.
-    assert context_policy.auto_context(None, None) == 8192
-    assert context_policy.auto_context("garbage", "unknown") == 8192
+    assert context_policy.auto_context(None, None) == 32768
+    assert context_policy.auto_context("garbage", "unknown") == 32768
     # Sub-billion models never hit a band.
     assert context_policy.auto_context(None, "780M") == 32768
+
+
+def test_never_probed_model_gets_the_conservative_window_only_when_flagged(monkeypatch):
+    monkeypatch.delenv("SONDER_CONTEXT_SIZE", raising=False)
+    monkeypatch.delenv("SONDER_SESSION_NUM_CTX", raising=False)
+    monkeypatch.setenv("OLLAMA_KV_CACHE_TYPE", "q8_0")
+
+    assert context_policy.auto_context(None, None, None, True) == 8192
+    plan = context_policy.auto_context_plan(metadata_unavailable=True)
+    assert "metadata-unavailable" in plan["clamps"]
+    # The default is the unflagged base value, and an operator pin is an
+    # informed override of the floor.
+    assert context_policy.auto_context(None, None) == 32768
+    monkeypatch.setenv("SONDER_CONTEXT_SIZE", "32k")
+    assert context_policy.auto_context(None, None, None, True) == 32000
 
 
 def test_explicit_operator_context_overrides_the_parameter_band(monkeypatch):
