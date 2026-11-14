@@ -5414,14 +5414,14 @@ def _chat_request(
                 local_only=local_only,
                 _budget_retried=True, text_only=text_only,
             )
+        thought = message.get("thinking") if isinstance(message, dict) else None
         if (
-            not cloud
-            and not reasoning_continuation
-            and payload.get("think") is not False
-            and exhausted_thinking
+            not cloud and not reasoning_continuation and payload.get("think") is not False
+            # all thought and no answer: cut at the budget, or ended by the model itself
+            and (exhausted_thinking or inline_thinking or (isinstance(thought, str) and bool(thought.strip())))
         ):
             roomier = _model_pace.room_to_retry(payload, _with_local_thinking_budget(payload), caller_payload, model, _bound_request_timeout(timeout, TIMEOUT))
-            if not _budget_retried and roomier != payload:
+            if exhausted_thinking and not _budget_retried and roomier != payload:
                 # The model reasoned right up to the cap and never got to an answer.
                 # Now that the response has identified it, retry once with the
                 # headroom it needed rather than reporting an empty response.
@@ -5438,14 +5438,14 @@ def _chat_request(
             if _think_option_supported(model):
                 # The headroom went on thought too (seen live: 4096 tokens of
                 # thinking, no answer, where the same turn with thinking off was
-                # answered in seconds).  More of the same request will not help,
-                # so ask once with thinking off and the reply budget the caller
-                # chose.  If that ask fails as well, the thinking-only reply
-                # below stays the reported failure; a cancellation stays one.
+                # answered in seconds), or the model thought and then stopped by
+                # itself.  More of the same request will not help, so ask once with
+                # thinking off and the reply budget the caller chose.  If that fails
+                # too, the thinking-only reply below stays the failure; a cancellation stays one.
                 fallback_payload = dict(caller_payload)
                 fallback_payload["think"] = False
                 activity_tracker.record_event("model_thinking_fallback", model=str(model or "")[:80],
-                                              reason="thinking_exhausted_budget")
+                                              reason="thinking_exhausted_budget" if exhausted_thinking else "thinking_without_answer")
                 try:
                     return _chat_request(
                         fallback_payload,
