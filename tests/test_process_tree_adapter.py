@@ -122,6 +122,34 @@ def test_sweep_can_be_declined_for_a_child_that_daemonises_on_purpose(tmp_path):
     assert _gone(grandchild)
 
 
+def test_release_leaves_a_detached_survivor_running(tmp_path):
+    tree, grandchild = _spawn(tmp_path, mode="exit-early")
+    try:
+        result = tree.wait(timeout=30, sweep_on_exit=False)
+        assert result.state is process_tree.TreeState.EXITED
+        tree.release()
+        time.sleep(0.3)
+        assert process_liveness.pid_alive(grandchild), "release must not kill survivors"
+    finally:
+        _force_kill(grandchild)
+
+
+def _force_kill(pid):
+    """Test cleanup for a survivor the test deliberately kept alive."""
+    import subprocess
+
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/F"], capture_output=True, check=False,
+        )
+        return
+    import signal
+
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+
 def test_clean_exit_reports_exit_without_force(tmp_path):
     tree = process_tree.ProcessTree.start([sys.executable, "-c", "raise SystemExit(3)"])
     try:
