@@ -44,6 +44,7 @@ import sys
 from collections.abc import Callable, Mapping, MutableMapping
 from typing import Any
 
+import sonder_runtime.adapters.model_tool_policy as _model_tool_policy
 import sonder_runtime.adapters.runtime_policy as _policy
 from sonder_runtime.domain import tool_lane_models as _models
 
@@ -79,15 +80,21 @@ _GENERATION_CACHE: tuple[tuple, _models.ToolLaneDenyList] | None = None
 
 
 def _policy_file_key() -> tuple | None:
-    """Identity of the policy file (path, mtime, size, inode); None when it cannot be stat'ed."""
+    """Identity of the policy file and both model tool policy files (path, mtime, size, inode).
+
+    None when any of them cannot be stat'ed.
+    """
     path = _policy.policy_path()
+    config_key = _model_tool_policy.identity_key()
+    if config_key is None:
+        return None
     try:
         stat = os.stat(path)
     except FileNotFoundError:
-        return (str(path), None)
+        return (str(path), None, config_key)
     except OSError:
         return None
-    return (str(path), stat.st_mtime_ns, stat.st_size, stat.st_ino)
+    return (str(path), stat.st_mtime_ns, stat.st_size, stat.st_ino, config_key)
 
 
 def generation_deny_list(policy: Mapping[str, Any] | None = None) -> _models.ToolLaneDenyList:
@@ -108,7 +115,7 @@ def generation_deny_list(policy: Mapping[str, Any] | None = None) -> _models.Too
     if key is not None and cached is not None and cached[0] == key:
         return cached[1]
     deny = deny_list(None)
-    if key is not None and deny.readable and _policy_file_key() == key:
+    if key is not None and deny.readable and deny.floor.available and _policy_file_key() == key:
         _GENERATION_CACHE = (key, deny)
     return deny
 
@@ -182,7 +189,9 @@ def _reported_verdict(reported: Any, deny: _models.ToolLaneDenyList) -> _models.
 
 def _judge_reply(verdict: _models.ModelLaneDecision, text_only: bool) -> bool:
     """Whether a reply's verdict refuses it: a blocked model always, an unnamed one unless text-only."""
-    if verdict.status is _models.ModelLaneStatus.SERVED_UNKNOWN:
+    if verdict.status in (
+        _models.ModelLaneStatus.SERVED_UNKNOWN, _models.ModelLaneStatus.CONFIG_UNAVAILABLE,
+    ):
         return not text_only
     return verdict.denied
 
@@ -231,7 +240,7 @@ def require_generation(
         for name in names:
             verdict = _models.decide(name, deny, free_form=False)
             if verdict.denied:
-                raise _generation_refused(_models.refusal_message(verdict.model, verdict.status))
+                raise _generation_refused(_models.refusal_message(verdict.model, verdict.status, verdict.matched))
     if rung is None:
         return
     provider = str(getattr(rung, "provider", "") or "")
@@ -390,7 +399,7 @@ def gateway_refusal(
     for name in named:
         verdict = _models.decide(name, deny, free_form=True)
         if verdict.denied:
-            return _models.refusal_message(verdict.model, verdict.status)
+            return _models.refusal_message(verdict.model, verdict.status, verdict.matched)
     refused = resolved_refusal(selector, getattr(target, "model", None), label, policy)
     if refused:
         return refused
@@ -476,7 +485,8 @@ def denied(model: Any, tier_label: Any = "", policy: Mapping[str, Any] | None = 
 
 def refusal(name: Any, policy: Mapping[str, Any] | None = None) -> str:
     """The refusal text for a caller-named model blocked from tool-using lanes."""
-    return _models.refusal_message(name, decision(name, policy, free_form=True).status)
+    verdict = decision(name, policy, free_form=True)
+    return _models.refusal_message(name, verdict.status, verdict.matched)
 
 
 def resolved_refusal(
@@ -493,7 +503,7 @@ def resolved_refusal(
     deny = deny_list(policy)
     verdict = _models.decide(model, deny, free_form=_free_form(tier_label))
     if verdict.denied:
-        return _models.refusal_message(verdict.model, verdict.status)
+        return _models.refusal_message(verdict.model, verdict.status, verdict.matched)
     return _served_refusal(tier_label, deny)
 
 
@@ -501,7 +511,7 @@ def _tier_refusal(tier: str, bindings: Mapping[str, str], deny: _models.ToolLane
     """Refusal for one tier: the model it is bound to, then the model a bridge serves for it."""
     verdict = _models.decide(bindings.get(tier, ""), deny, free_form=False)
     if verdict.denied:
-        return _models.refusal_message(verdict.model, verdict.status)
+        return _models.refusal_message(verdict.model, verdict.status, verdict.matched)
     return _served_refusal(tier, deny)
 
 
@@ -549,8 +559,8 @@ def projected_local_code_model(stable_alias: str = "sonder:latest") -> str:
     it is quiet, cheap and cannot go stale; a test pins the two together.
     """
     configured = str(os.environ.get("SONDER_CODE_LOCAL", stable_alias))
-    builtin = _models.ToolLaneDenyList.from_policy(None)
-    if _models.decide(configured, builtin, free_form=False).denied:
+    builtin = _models.ToolLaneDenyList.from_policy(None, floor=_model_tool_policy.shipped_floor())
+    if _models.decide_listed(configured, builtin, free_form=False).denied:
         return stable_alias
     return configured
 
@@ -586,7 +596,7 @@ def default_route_refusal(
         for model in possible_starts:
             verdict = _models.decide(model, deny, free_form=False)
             if verdict.denied:
-                return _models.refusal_message(verdict.model, verdict.status)
+                return _models.refusal_message(verdict.model, verdict.status, verdict.matched)
     for tier in reachable:
         refused = _tier_refusal(tier, bindings, deny)
         if refused:
@@ -611,7 +621,7 @@ def selector_refusal(
         else:
             verdict = _models.decide_selector(selector, bindings, deny)
             if verdict.denied:
-                return _models.refusal_message(verdict.model, verdict.status)
+                return _models.refusal_message(verdict.model, verdict.status, verdict.matched)
             key = selector.strip().lower()
             refused = _served_refusal(key, deny) if key in bindings else ""
         if refused:
@@ -666,7 +676,9 @@ def prompt_refusal(
 def seed_bindings(bindings: Mapping[str, str]) -> dict[str, str]:
     """The environment's tier map with any blocked model replaced by its default."""
     return _models.allowed_bindings(
-        bindings, _models.ToolLaneDenyList.from_policy(None), _policy.DEFAULT_MODELS,
+        bindings,
+        _models.ToolLaneDenyList.from_policy(None, floor=_model_tool_policy.shipped_floor()),
+        _policy.DEFAULT_MODELS,
     )
 
 
@@ -682,7 +694,7 @@ def bind_local_tiers(tiers: MutableMapping[str, str], policy: Mapping[str, Any])
     deny = deny_list(policy)
     for tier in _policy.LOCAL_TIERS:
         model = str(policy["local_models"].get(tier) or "").strip()
-        if _models.decide(model, deny, free_form=False).denied:
+        if _models.decide_listed(model, deny, free_form=False).denied:
             model = _policy.DEFAULT_MODELS.get(tier, "")
         if model:
             tiers[tier] = model

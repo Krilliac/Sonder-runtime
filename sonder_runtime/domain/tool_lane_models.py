@@ -5,10 +5,14 @@ select or call tools, and nothing they write may be executed.  This module is
 the pure decision rule; callers supply the deny list (read from the runtime
 policy) and act on the typed result.  No I/O happens here.
 
-The list is add-only: the built-in defaults are always part of every deny list
-built by :meth:`ToolLaneDenyList.from_policy`, so configuration can extend the
-list but never shrink it.  When the policy file is unreadable the list is
-marked unreadable and caller-named (free-form) models fail closed.
+The list is add-only: the shipped floor (:class:`ToolLaneFloor`, loaded by
+``adapters.model_tool_policy`` from the shipped ``model_tool_policy.json``) is
+always part of every deny list built by :meth:`ToolLaneDenyList.from_policy`,
+so configuration can extend the list but never shrink it.  No model name is
+written in this module: the floor is passed in.  When the policy file is
+unreadable the list is marked unreadable and caller-named (free-form) models
+fail closed; when the shipped config itself is unavailable the floor says so
+(``available=False``) and every tool-using lane refuses every model.
 
 A tier bound to a provider other than Ollama is judged by the model that
 provider actually serves (:func:`decide_served`).  A blocked model never
@@ -38,6 +42,8 @@ class ModelLaneStatus(str, Enum):
     POLICY_UNREADABLE = "policy_unreadable"
     # A bridged tier whose served model is unknown (or the provider default).
     SERVED_UNKNOWN = "served_unknown"
+    # The shipped model/tool config is missing or invalid: no model can be judged.
+    CONFIG_UNAVAILABLE = "config_unavailable"
 
 
 @dataclass(frozen=True)
@@ -59,22 +65,26 @@ def normalize_name(name: Any) -> str:
     return text
 
 
-# Derive hosted ids, hostless ids and repository stems from one source list.
-_DENIED_SOURCES = (
-    "mradermacher/Qwen3.8-cyber-RedTeam-Surgical-Abliterated-GGUF",
-    "DuoNeural/Cyber-Ornith-1.5-9B-OBLITERATED-GGUF",
-)
-DEFAULT_DENIED_PREFIXES = ("astra-cyber-",) + tuple(
-    normalize_name(host + source if host else source)
-    for source in _DENIED_SOURCES
-    for host in ("hf.co/", "huggingface.co/", "")
-) + tuple(
-    normalize_name(source.rsplit("/", 1)[-1].removesuffix("-GGUF"))
-    for source in _DENIED_SOURCES
-)
-DEFAULT_DENIED_NAMES: tuple[str, ...] = ()
-# Served-model ids that do not name a model: the provider picks one itself.
-UNDETERMINED_SERVED_MODELS = frozenset({"", "default"})
+@dataclass(frozen=True)
+class ToolLaneFloor:
+    """The shipped, non-removable part of the deny list (no I/O; built by the adapter).
+
+    ``names`` and ``prefixes`` are already normalised.  ``undetermined_served``
+    holds the served-model ids that do not name a model (the provider picks
+    one itself).  ``available`` is False when the shipped config could not be
+    loaded; ``detail`` then says which file and why, and every tool-using lane
+    refuses every model.
+    """
+
+    names: frozenset[str] = frozenset()
+    prefixes: tuple[str, ...] = ()
+    undetermined_served: frozenset[str] = frozenset()
+    available: bool = True
+    detail: str = ""
+
+    @classmethod
+    def unavailable(cls, detail: str) -> "ToolLaneFloor":
+        return cls(available=False, detail=str(detail))
 
 
 def _clean_entries(values: Any) -> list[str]:
@@ -88,33 +98,41 @@ class ToolLaneDenyList:
     names: frozenset[str]
     prefixes: tuple[str, ...]
     readable: bool = True
+    floor: ToolLaneFloor = ToolLaneFloor()
 
     @classmethod
     def from_policy(
-        cls, section: Mapping[str, Any] | None, *, readable: bool = True,
+        cls, section: Mapping[str, Any] | None, *, floor: ToolLaneFloor, readable: bool = True,
     ) -> "ToolLaneDenyList":
-        """Defaults unioned with the policy section's ``names``/``prefixes``."""
+        """The floor unioned with the policy section's ``names``/``prefixes``."""
         raw = section if isinstance(section, Mapping) else {}
-        names = frozenset(DEFAULT_DENIED_NAMES) | frozenset(_clean_entries(raw.get("names")))
-        prefixes = list(DEFAULT_DENIED_PREFIXES)
+        names = floor.names | frozenset(_clean_entries(raw.get("names")))
+        prefixes = list(floor.prefixes)
         for prefix in _clean_entries(raw.get("prefixes")):
             if prefix not in prefixes:
                 prefixes.append(prefix)
-        return cls(names=names, prefixes=tuple(prefixes), readable=bool(readable))
+        return cls(names=names, prefixes=tuple(prefixes), readable=bool(readable), floor=floor)
 
     @property
     def extended(self) -> bool:
-        """True when the list holds anything beyond the built-in defaults."""
-        return (
-            self.names != frozenset(DEFAULT_DENIED_NAMES)
-            or self.prefixes != DEFAULT_DENIED_PREFIXES
-        )
+        """True when the list holds anything beyond the shipped floor."""
+        return self.names != self.floor.names or self.prefixes != self.floor.prefixes
 
 
 def refusal_message(
-    model: Any, status: ModelLaneStatus = ModelLaneStatus.DENIED,
+    model: Any, status: ModelLaneStatus = ModelLaneStatus.DENIED, detail: str = "",
 ) -> str:
-    """The user-facing refusal for a model blocked from tool-using lanes."""
+    """The user-facing refusal for a model blocked from tool-using lanes.
+
+    ``detail`` is the decision's ``matched`` text; for ``CONFIG_UNAVAILABLE``
+    it names the shipped config file and why it cannot be used.
+    """
+    if status is ModelLaneStatus.CONFIG_UNAVAILABLE:
+        return (
+            "model '%s' cannot be used in tool-using lanes while the shipped model "
+            "tool policy is unavailable (%s); restore that file from the install "
+            "(`/runtime status` shows the error)." % (model, detail or "model_tool_policy.json")
+        )
     if status is ModelLaneStatus.POLICY_UNREADABLE:
         return (
             "model '%s' cannot be used in tool-using lanes while the runtime "
@@ -138,6 +156,13 @@ def served_refusal_message(
     refused in tool-using lanes only; ``fix`` replaces the generic advice
     for it with the provider's own setting (the caller knows which one it is).
     """
+    if verdict.status is ModelLaneStatus.CONFIG_UNAVAILABLE:
+        return (
+            f"tier '{tier}' is served by {provider or 'a non-Ollama provider'} and the "
+            "shipped model tool policy is unavailable "
+            f"({verdict.matched or 'model_tool_policy.json'}), so it cannot be used in "
+            "tool-using lanes; restore that file from the install (chat still works)."
+        )
     if verdict.status is ModelLaneStatus.SERVED_UNKNOWN:
         return (
             f"tier '{tier}' is served by {provider or 'a non-Ollama provider'} "
@@ -183,7 +208,9 @@ def decide_served(model: Any, deny: ToolLaneDenyList) -> ModelLaneDecision:
     tier-bound model.
     """
     raw = str(model if model is not None else "").strip()
-    if normalize_name(raw) in UNDETERMINED_SERVED_MODELS:
+    if not deny.floor.available:
+        return ModelLaneDecision(ModelLaneStatus.CONFIG_UNAVAILABLE, raw, deny.floor.detail)
+    if normalize_name(raw) in deny.floor.undetermined_served:
         return ModelLaneDecision(ModelLaneStatus.SERVED_UNKNOWN, raw)
     return decide(raw, deny, free_form=False)
 
@@ -198,7 +225,7 @@ def allowed_bindings(
     """
     result: dict[str, str] = {}
     for tier, model in bindings.items():
-        if decide(model, deny, free_form=False).denied:
+        if decide_listed(model, deny, free_form=False).denied:
             if tier in defaults:
                 result[tier] = defaults[tier]
             continue
@@ -216,6 +243,8 @@ def decide_selector(
     """
     text = str(selector if selector is not None else "").strip()
     key = text.lower()
+    if not deny.floor.available:
+        return ModelLaneDecision(ModelLaneStatus.CONFIG_UNAVAILABLE, text, deny.floor.detail)
     if key in ("", "sonder", "local"):
         return ModelLaneDecision(ModelLaneStatus.ALLOWED, text)
     if key in bindings:
@@ -255,11 +284,27 @@ _candidates = name_candidates  # the original private name, kept for existing ca
 def decide(model: Any, deny: ToolLaneDenyList, *, free_form: bool) -> ModelLaneDecision:
     """Decide whether ``model`` may be used in a tool-using lane.
 
-    Built-ins match every path segment; policy-added entries are matched
+    Floor entries match every path segment; policy-added entries are matched
     against ``policy_candidates``: the original full name and last ``/``
     segment, plus the last segment after either separator. With an unreadable policy a
     caller-named (``free_form``) model fails closed; a tier-bound model is
-    still checked against the lists.
+    still checked against the lists.  When the shipped config is unavailable
+    (``deny.floor.available`` False) every model is refused
+    (``CONFIG_UNAVAILABLE``).
+    """
+    if not deny.floor.available:
+        raw = str(model if model is not None else "").strip()
+        return ModelLaneDecision(ModelLaneStatus.CONFIG_UNAVAILABLE, raw, deny.floor.detail)
+    return decide_listed(model, deny, free_form=free_form)
+
+
+def decide_listed(model: Any, deny: ToolLaneDenyList, *, free_form: bool) -> ModelLaneDecision:
+    """Whether ``model`` is on the lists, whether or not the shipped config loaded.
+
+    For places that replace a blocked binding with a default (seeding a tier,
+    loading a policy, binding the live tier map): a broken shipped config
+    must refuse tool lanes (``decide``) without also rewriting the operator's
+    tier bindings.  Lane decisions use ``decide``, never this.
     """
     raw = str(model if model is not None else "").strip()
     normalized = normalize_name(raw)
@@ -271,7 +316,7 @@ def decide(model: Any, deny: ToolLaneDenyList, *, free_form: bool) -> ModelLaneD
             return ModelLaneDecision(ModelLaneStatus.DENIED, raw, candidate)
         for prefix in deny.prefixes:
             if candidate.startswith(prefix) and (
-                prefix in DEFAULT_DENIED_PREFIXES or candidate in original_candidates
+                prefix in deny.floor.prefixes or candidate in original_candidates
             ):
                 return ModelLaneDecision(ModelLaneStatus.DENIED, raw, prefix)
     if free_form and not deny.readable:

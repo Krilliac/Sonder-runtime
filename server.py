@@ -163,6 +163,7 @@ from sonder_runtime.bootstrap.work_narration import narrated as _narrated_work
 from sonder_runtime.application.ports.work_narration import route_reason as _narration_reason
 import creative_router
 import intents
+import sonder_runtime.adapters.model_tool_policy as _model_tool_policy
 import sonder_runtime.adapters.runtime_policy as runtime_policy
 from sonder_runtime.adapters import tool_lane_guard as _tool_lane_guard
 from sonder_runtime.adapters import chat_observers as _chat_observers, reference_lookup_lanes as _reference_lookup_lanes, reference_lookup_multi as _reference_lookup_multi
@@ -623,7 +624,7 @@ def _keep_alive_for(model):
 
 
 TIMEOUT = int(os.environ.get("SONDER_TIMEOUT", "300"))
-_RUNTIME_MODEL_CONFIGURATION = RuntimeModelConfiguration.from_environment(os.environ)
+_RUNTIME_MODEL_CONFIGURATION = RuntimeModelConfiguration.from_environment(os.environ, floor=_model_tool_policy.shipped_floor())
 SONDER_STABLE_ALIAS = _RUNTIME_MODEL_CONFIGURATION.stable_alias
 LOCAL_CODE_MODEL = _RUNTIME_MODEL_CONFIGURATION.local_code_model
 DEFAULT_CLOUD_CODE_MODEL = _RUNTIME_MODEL_CONFIGURATION.default_cloud_code_model

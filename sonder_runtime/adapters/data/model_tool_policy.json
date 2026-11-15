@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "model_profiles": [
+    {
+      "id": "security-advisers",
+      "floor": true,
+      "match": {
+        "names": [],
+        "prefixes": [
+          "astra-cyber-",
+          "hf.co/mradermacher/qwen3.8-cyber-redteam-surgical-abliterated-gguf",
+          "huggingface.co/mradermacher/qwen3.8-cyber-redteam-surgical-abliterated-gguf",
+          "mradermacher/qwen3.8-cyber-redteam-surgical-abliterated-gguf",
+          "hf.co/duoneural/cyber-ornith-1.5-9b-obliterated-gguf",
+          "huggingface.co/duoneural/cyber-ornith-1.5-9b-obliterated-gguf",
+          "duoneural/cyber-ornith-1.5-9b-obliterated-gguf",
+          "qwen3.8-cyber-redteam-surgical-abliterated",
+          "cyber-ornith-1.5-9b-obliterated"
+        ]
+      },
+      "tools": [],
+      "lanes": []
+    }
+  ],
+  "undetermined_served_models": ["", "default"]
+}

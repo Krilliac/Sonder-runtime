@@ -10,6 +10,7 @@ from sonder_runtime.domain.routing.route_planner import (
     RoutingRequest,
 )
 from sonder_runtime.domain.runtime_policy.rules import default_policy
+from tests.support.tool_lane import FLOOR
 
 
 @pytest.fixture
@@ -19,7 +20,7 @@ def planner():
 
 @pytest.fixture
 def policy():
-    return default_policy(env={})
+    return default_policy(env={}, floor=FLOOR)
 
 
 @pytest.fixture

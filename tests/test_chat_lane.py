@@ -12,6 +12,7 @@ from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.model_gateway import ModelResponse
 from sonder_runtime.domain.routing.route_planner import RoutePlanner, RoutingRequest
 from sonder_runtime.domain.runtime_policy import rules
+from tests.support.tool_lane import FLOOR
 
 
 class _Gateway:
@@ -93,17 +94,17 @@ def test_chat_service_refuses_execution_lanes_at_the_model_boundary():
 
 
 def test_runtime_policy_has_a_chat_lane_with_legacy_policy_fallback():
-    policy = rules.default_policy({})
+    policy = rules.default_policy({}, floor=FLOOR)
     assert policy["routing"]["chat"] == "general"
 
-    legacy = rules.default_policy({})
+    legacy = rules.default_policy({}, floor=FLOOR)
     legacy["routing"].pop("chat")
-    normalized = rules.normalize(legacy)
+    normalized = rules.normalize(legacy, floor=FLOOR)
     assert normalized["routing"]["chat"] == "general"
 
 
 def test_route_planner_keeps_ordinary_chat_on_the_policy_general_lane():
-    policy = rules.default_policy({})
+    policy = rules.default_policy({}, floor=FLOOR)
     route = RoutePlanner().select(
         RoutingRequest(lane="chat", prompt="hello there"),
         policy,
