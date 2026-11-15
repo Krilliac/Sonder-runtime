@@ -84,7 +84,7 @@ jobs:
       # request --against keeps both lists one-way relative to the base branch.
       - name: Enforce typing ratchet
         env:
-          TYPING_RATCHET_BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || '' }}
+          TYPING_RATCHET_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
         run: python scripts/check_typing_ratchet.py ${TYPING_RATCHET_BASE:+--against "$TYPING_RATCHET_BASE"}
       - name: Prevent new Git-history privacy debt
         run: python scripts/check_history_privacy.py --json
