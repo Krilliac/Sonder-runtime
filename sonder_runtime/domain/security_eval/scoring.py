@@ -12,6 +12,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from math import comb
 
+from .records import HypothesisRecord
+from .verdict import ParsedHypothesis
+
 OUTCOMES = ("SCORED", "UNPARSED", "MODEL_ERROR", "SOURCE_ERROR", "CONTEXT_ERROR")
 _ERROR_FIELD = {"UNPARSED": "unparsed", "MODEL_ERROR": "model_error",
                 "SOURCE_ERROR": "source_error", "CONTEXT_ERROR": "context_error"}
@@ -228,3 +231,36 @@ def score_chunks(outcomes) -> dict:
             else:
                 total.matched_uncertain += 1
     return result
+
+
+def _overlap(first_start: int, first_end: int, second_start: int, second_end: int) -> int:
+    return min(first_end, second_end) - max(first_start, second_start) + 1
+
+
+def match_findings(findings, records, tolerance: int) -> tuple[HypothesisRecord, ...]:
+    """Match each located finding to at most one labelled record, each record at most once.
+
+    A finding matches a record whose line range, widened by ``tolerance`` lines, overlaps the
+    finding's range. Among candidates the largest overlap wins, then the nearest start, then the
+    lower ``hid``. A finding with no line range matches nothing (it still counts as generated).
+    """
+    taken: set[str] = set()
+    matched: list[HypothesisRecord] = []
+    for finding in findings:
+        if not isinstance(finding, ParsedHypothesis) or finding.lines is None:
+            continue
+        best = None
+        for record in records:
+            if record.hid in taken:
+                continue
+            size = _overlap(finding.lines.start, finding.lines.end,
+                            record.lines.start - tolerance, record.lines.end + tolerance)
+            if size < 1:
+                continue
+            rank = (-size, abs(finding.lines.start - record.lines.start), record.hid)
+            if best is None or rank < best[0]:
+                best = (rank, record)
+        if best is not None:
+            taken.add(best[1].hid)
+            matched.append(best[1])
+    return tuple(matched)
