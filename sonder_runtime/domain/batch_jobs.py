@@ -295,7 +295,7 @@ def validate_items(raw, spec: JobSpec, limits: Limits, *, existing_keys: Iterabl
         if not isinstance(values, Mapping) or set(values) != set(spec.fields):
             raise InvalidInput("item fields must be exactly: " + ", ".join(spec.fields))
         total = 0
-        for name, value in values.items():
+        for value in values.values():
             if not isinstance(value, str):
                 raise InvalidInput("item field values must be strings")
             total += len(value)
@@ -444,6 +444,52 @@ def served_model_counts(states: Iterable[StepState]) -> dict[str, int]:
         if state.served_model:
             counted[state.served_model] = counted.get(state.served_model, 0) + 1
     return dict(sorted(counted.items()))
+
+
+MAX_LISTED_STEPS = 200
+
+
+def step_entry(state: StepState, status: StepStatus | None = None) -> dict:
+    """A step as a receipt row: models, tokens and timing, never any content."""
+    return {
+        "stage": state.stage, "item_key": state.item_key, "status": (status or state.status).value,
+        "requested_model": state.requested_model or None, "served_model": state.served_model or None,
+        "tokens_in": state.tokens_in, "tokens_out": state.tokens_out,
+        "token_source": state.token_source or None, "elapsed_ms": state.elapsed_ms,
+        "attempts": state.attempts, "failure_class": state.failure_class, "reason": state.reason or None,
+        "answer_truncated": state.answer_truncated if state.answer_truncation_known else None,
+    }
+
+
+def receipt_body(spec: JobSpec, item_keys: Sequence[str], states: Mapping[tuple[str, str], StepState],
+                 *, segment_start: float | None, eta_window: int, eta_min_samples: int) -> dict:
+    """Progress, token totals, per-stage rollups, failures and blocked steps for a job receipt."""
+    effective = effective_statuses(spec, item_keys, states)
+    stages = []
+    for stage in spec.stages:
+        own = [state for (name, _), state in states.items() if name == stage.name]
+        stage_counts = {status.value: 0 for status in StepStatus}
+        for (name, _), status in effective.items():
+            if name == stage.name:
+                stage_counts[status.value] += 1
+        stages.append({
+            "name": stage.name, "requested_model": stage.model, "counts": stage_counts,
+            "served_models": served_model_counts(own), **token_rollup(own),
+        })
+    listed = [
+        step_entry(state) for key in sorted(states) if (state := states[key]).status in (StepStatus.FAILED, StepStatus.UNKNOWN)
+    ]
+    blocked = [{"stage": name, "item_key": key} for (name, key), status in effective.items()
+               if status is StepStatus.BLOCKED]
+    return {
+        "progress": progress(spec, item_keys, states, segment_start=segment_start,
+                             eta_window=eta_window, eta_min_samples=eta_min_samples),
+        "tokens": token_rollup(states.values()),
+        "served_models": served_model_counts(states.values()),
+        "stages": stages,
+        "failures": listed[:MAX_LISTED_STEPS], "failures_truncated": len(listed) > MAX_LISTED_STEPS,
+        "blocked": blocked[:MAX_LISTED_STEPS], "blocked_truncated": len(blocked) > MAX_LISTED_STEPS,
+    }
 
 
 def breaker_trips(consecutive: int, limit: int) -> bool:

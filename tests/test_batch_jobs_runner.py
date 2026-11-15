@@ -1,8 +1,6 @@
 """The batch runner with in-memory fake ports: ordering, dependencies, breaker, cancel, resume."""
 from __future__ import annotations
 
-from dataclasses import replace
-
 import pytest
 
 from sonder_runtime.application.batch_jobs.runner import run_job
@@ -104,7 +102,7 @@ def test_stage_major_runs_every_stage_one_step_first_with_one_model_switch():
     assert [(call[0], call[1]) for call in executor.calls] == [
         ("r1", "a"), ("r1", "b"), ("r1", "c"), ("r2", "a"), ("r2", "b"), ("r2", "c")]
     models = [call[2] for call in executor.calls]
-    assert sum(1 for left, right in zip(models, models[1:]) if left != right) == 1
+    assert sum(1 for left, right in zip(models, models[1:], strict=False) if left != right) == 1
     assert outcome.steps_run == 6 and store.heartbeats == 6
 
 

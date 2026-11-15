@@ -26923,6 +26923,8 @@ _register_openrouter(mcp, _record_direct_tool)
 from sonder_runtime.bootstrap import agent_help_tools as _agent_help_tools  # noqa: E402
 # Convention: a registrar parameter named ``runtime`` receives this server-module provider.
 _agent_help_tools.register_agent_tools(mcp, _record_direct_tool, lambda: sys.modules[__name__])
+from sonder_runtime.bootstrap.batch_job_tools import register as _register_batch_jobs  # noqa: E402
+_register_batch_jobs(mcp, _record_direct_tool, lambda: sys.modules[__name__])
 
 
 def route_computer_use(text):

@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from sonder_runtime.domain.batch_jobs import (
-    ItemSpec, JobSpec, Limits, StageSpec, StepState, StepStatus, counts, effective_statuses,
+    ItemSpec, Limits, StepState, StepStatus, counts, effective_statuses,
     is_finished, next_step, progress, render_prompt, served_model_counts, token_rollup,
     validate_items, validate_spec,
 )

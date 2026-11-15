@@ -412,6 +412,10 @@ _DANGEROUS = frozenset({
 # ``ask`` default above is the right answer for anything unverified.
 _READ_ONLY = frozenset({
     "playbook_read",
+    # Batch-job reads (bootstrap/batch_job_tools.py): status and results read
+    # job state and the caller's own sealed answers, recent lists ids and
+    # counts only; none starts, resumes or cancels work, calls a model or writes.
+    "batch_job_status", "batch_job_results", "batch_job_recent",
     "computer_use_status",
     "task_list", "task_show", "checklist_show", "admin_status",
     "admin_whoami", "autopilot_status", "calibration_status", "learn_tiers",
