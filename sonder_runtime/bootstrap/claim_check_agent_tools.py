@@ -13,6 +13,7 @@ neither checked nor quoted back as evidence.
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import os
 import time
@@ -20,14 +21,22 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from ..adapters.claim_checker import ClaimChecker, claim_from_mapping
+from ..application.ports.tool_registry import ToolSchemaSelection
 from ..domain.claim_check import ClaimError, ClaimReport
 from ..interfaces.mcp.transport import McpTransportLimits
 from ..platform.claim_check_config import ClaimCheckConfig
 
 MAX_OUTPUT_CHARS = 200_000
 # Room kept inside a native frame for the JSON-RPC envelope around the tool result
-# ({"jsonrpc","id","result"}); request ids are short in practice.
+# ({"jsonrpc","id","result"}); request ids are short in practice. This is the envelope
+# only: the evidence the native execute() wrapper adds is measured, not reserved here
+# (see ``_wrapper_evidence``).
 _FRAME_ENVELOPE_BYTES = 1_024
+# Upper bound on a registered tool name; native_mcp imports this module, so the registry
+# cannot be read from here, and a test pins every registered name under the bound.
+_MAX_TOOL_NAME_CHARS = 64
+_MAX_SELECTED_TOOLS = 8  # ToolDiscovery.load accepts at most 8 names per selection
+_DIGEST_HEX = "0" * 64  # inventory_digest and the selection_id are sha256 hex
 _ITEM_SEPARATOR = ", "  # json.dumps' default item separator between array elements
 _VERDICTS = ("reject", "flag", "keep")
 
@@ -121,11 +130,8 @@ def _check_reports(arguments: Mapping, config: ClaimCheckConfig | None,
         except (OSError, ValueError, PermissionError):
             return False
 
-    try:
-        with _read_policy_scope(file_guard is None):
-            return None, ClaimChecker(resolved, config, read_guard=read_guard).check_many(claims)
-    except (OSError, ValueError, PermissionError) as exc:
-        return _error("root_refused", str(exc)), []
+    with _read_policy_scope(file_guard is None):
+        return None, ClaimChecker(resolved, config, read_guard=read_guard).check_many(claims)
 
 
 def _read_policy_scope(default_guard: bool):
@@ -155,7 +161,8 @@ def _assemble(reports: list[ClaimReport], body: list[dict]) -> dict:
 def run_claim_check(arguments: Mapping, *, config: ClaimCheckConfig | None = None,
                     root_guard: Callable[[str], str] | None = None,
                     file_guard: Callable[[str], str] | None = None) -> dict:
-    """Check one claim or a batch; returns a JSON-serializable dict, never raises."""
+    """Check one claim or a batch; returns a JSON-serializable dict. Refusals are typed
+    errors; an unexpected fault in the checker propagates to the caller."""
     error, reports = _check_reports(arguments, config, root_guard, file_guard)
     if error is not None:
         return error
@@ -187,6 +194,18 @@ def _wire_cost(text: str) -> int:
     ascii_once = len(json.dumps(text)) - 2
     escaped = json.dumps(text, ensure_ascii=False)[1:-1]
     return ascii_once + len(json.dumps(escaped)) - 2
+
+
+@functools.cache
+def _wrapper_evidence() -> dict:
+    """The evidence native ``execute()`` adds after ``native_claim_check`` returns, at its
+    worst case: the progressive-tools schema-selection marker (``_MAX_SELECTED_TOOLS``
+    names at ``_MAX_TOOL_NAME_CHARS``, a 64-hex selection id), the
+    inventory digest and the compatibility flag."""
+    names = {str(index).ljust(_MAX_TOOL_NAME_CHARS, "x") for index in range(_MAX_SELECTED_TOOLS)}
+    marker = ToolSchemaSelection(frozenset(names), selection_id=_DIGEST_HEX).marker()
+    return {"tool_schema_selection": marker, "inventory_digest": _DIGEST_HEX,
+            "native_compatibility_path": True}
 
 
 def native_frame_bytes(result: Mapping) -> int:
@@ -233,7 +252,12 @@ def native_claim_check(arguments: Mapping, roots=None, *, config: ClaimCheckConf
         return _native_result(error)
     limit = McpTransportLimits().max_frame_bytes if max_frame_bytes is None else max_frame_bytes
     # Overhead of everything but the reports; omitted_reports is counted at its maximum.
-    fixed = native_frame_bytes(_native_result(_assemble(reports, [])))
+    # Native execute() and the transport wrap this result afterwards, so the frame is
+    # measured with that wrapper's worst-case evidence (written twice by
+    # StdioMcpTransport._standard_tool_result) plus the JSON-RPC envelope reserve.
+    shell = _native_result(_assemble(reports, []))
+    shell["evidence"] = {**shell["evidence"], **_wrapper_evidence()}
+    fixed = native_frame_bytes(shell)
     budget = limit - _FRAME_ENVELOPE_BYTES - fixed
     return _native_result(_assemble(reports, _fit_reports(reports, budget, _wire_cost)))
 

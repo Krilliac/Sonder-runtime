@@ -251,3 +251,95 @@ def test_read_policy_snapshot_resolves_the_control_plane_once_and_still_refuses(
                 str(tmp_path / "sonder.env"), extra_roots=str(tmp_path))
     assert unscoped >= 5 and len(inventories) <= 2
     assert file_ops._POLICY_SNAPSHOT.get() is None
+
+
+def _executed_frame(result, registry_names):
+    """The frame for ``result`` after native execute() adds its progressive-tools evidence."""
+    from sonder_runtime.application.ports.tool_registry import ToolSchemaSelection
+
+    longest = tool._MAX_TOOL_NAME_CHARS
+    names = {str(index).ljust(longest, "z") for index in range(8)}
+    evidence = dict(result["evidence"])
+    evidence.update({"tool_schema_selection": ToolSchemaSelection(
+        frozenset(names), selection_id="f" * 64).marker(),
+        "inventory_digest": "e" * 64, "native_compatibility_path": True})
+    return _frame_for({**result, "evidence": evidence})
+
+
+def test_native_cut_covers_the_evidence_execute_adds_after_the_handler(tmp_path):
+    from sonder_runtime.bootstrap.native_mcp import native_tool_registry
+
+    registry_names = [item.name for item in native_tool_registry().list_all()]
+    assert max(map(len, registry_names)) <= tool._MAX_TOOL_NAME_CHARS
+    root = tmp_path / "repo"
+    root.mkdir()
+    count = 60
+    for index in range(count):
+        (root / f"f{index}.cs").write_text(PUMP, newline="\n")
+    limit = 20_000
+    worst_slack = limit
+    # Claim-id length moves the report size, so some length leaves almost no slack.
+    for pad in range(1, 90):
+        claims = [{"id": ("c%d-" % index).ljust(pad, "q"), "file": f"f{index}.cs", "line": 99}
+                  for index in range(count)]
+        result = tool.native_claim_check(
+            {"root": str(root), "claims_json": json.dumps(claims)},
+            root_guard=allow_all, file_guard=allow_all, max_frame_bytes=limit)
+        frame = _executed_frame(result, registry_names)
+        assert frame <= limit, "id length %d overflows by %d bytes" % (pad, frame - limit)
+        worst_slack = min(worst_slack, limit - frame)
+    # the sweep reached frames that nearly fill the limit (the envelope reserve is all that is left)
+    assert worst_slack < 1_024 + 400
+
+
+def test_default_guard_opens_the_policy_snapshot_scope_once(repo, monkeypatch):
+    from sonder_runtime.adapters.filesystem import file_ops
+
+    for index in range(6):
+        (repo / f"g{index}.cs").write_text(PUMP, newline="\n")
+    claims = [{"file": f"g{index}.cs", "line": 3} for index in range(6)]
+    args = {"root": str(repo), "claims_json": json.dumps(claims)}
+    inventories = []
+    real = file_ops.live_control_plane_inventory
+
+    def counting(*a, **kw):
+        inventories.append(1)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(file_ops, "live_control_plane_inventory", counting)
+    scoped = tool.run_claim_check(args, root_guard=allow_all)
+    assert scoped["ok"] is True and scoped["summary"]["total"] == 6
+    scoped_calls = len(inventories)
+    inventories.clear()
+    tool.run_claim_check(args, root_guard=allow_all, file_guard=lambda path: str(
+        file_ops.resolve_repository_read_path(path, extra_roots=str(repo))))
+    assert scoped_calls <= 2 < len(inventories)
+
+
+@pytest.mark.parametrize("fault", [OSError("disk"), ValueError("bad"), PermissionError("no")])
+def test_a_fault_during_the_checks_is_not_labelled_root_refused(repo, monkeypatch, fault):
+    from sonder_runtime.adapters.claim_checker import ClaimChecker
+
+    def boom(self, claims):
+        raise fault
+
+    monkeypatch.setattr(ClaimChecker, "check_many", boom)
+    with pytest.raises(type(fault)):
+        tool.run_claim_check({"root": str(repo), "file": "P.cs", "line": 3}, root_guard=allow_all)
+    registered = {}
+
+    class Mcp:
+        def tool(self):
+            return lambda fn: registered.setdefault("fn", fn)
+
+    tool.register(Mcp(), None, root_guard=allow_all, file_guard=allow_all)
+    out = json.loads(registered["fn"](root=str(repo), file="P.cs", line=3))
+    assert out["error"]["code"] == "internal_error"
+
+
+def test_a_refused_root_is_still_root_refused(repo):
+    def refuse(root):
+        raise PermissionError("outside")
+
+    out = tool.run_claim_check({"root": str(repo), "file": "P.cs", "line": 3}, root_guard=refuse)
+    assert out["error"]["code"] == "root_refused"
