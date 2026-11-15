@@ -35,7 +35,7 @@ from sonder_runtime.domain import model_tool_grants as _rules
 from sonder_runtime.domain.runtime_policy.rules import _MODEL_RE
 from sonder_runtime.domain.tool_lane_models import normalize_name
 
-WRITE_ACTIONS = frozenset({"allow", "revoke", "deny", "undeny"})
+WRITE_ACTIONS = frozenset({"allow", "revoke", "deny", "undeny", "reload"})
 GRANT_PREFIX = "grant-"
 DENY_PREFIX = "deny-"
 USAGE = (
@@ -45,6 +45,7 @@ USAGE = (
     "  /runtime tools revoke <model|prefix*> <tool>\n"
     "  /runtime tools deny <model|prefix*>\n"
     "  /runtime tools undeny <model|prefix*>\n"
+    "  /runtime tools reload                           pin the shipped policy file now on disk\n"
     "A model a profile lists is refused in every other tool lane; a granted model gets only\n"
     "read-only project tools, in the listed lanes, with a project root and the secret globs."
 )
@@ -77,7 +78,7 @@ def command(arg: Any, *, operator_attended: bool, policy: Mapping[str, Any] | No
         ))
     words = rest.split()
     handlers: dict[str, Callable[[list[str], Mapping[str, Any] | None], str]] = {
-        "allow": _allow, "revoke": _revoke, "deny": _deny, "undeny": _undeny,
+        "allow": _allow, "revoke": _revoke, "deny": _deny, "undeny": _undeny, "reload": _reload,
     }
     try:
         return handlers[action](words, policy)
@@ -89,6 +90,35 @@ def show(policy: Mapping[str, Any] | None = None) -> str:
     config = _mtp.load()
     legacy = policy.get("tool_lane_denied_models") if isinstance(policy, Mapping) else None
     return "\n".join(_mtp.describe(config) + _grants.describe_lines(config, legacy))
+
+
+def _reload(words: list[str], policy: Mapping[str, Any] | None) -> str:
+    """Pin the shipped file as it is now, and show what the operator is accepting.
+
+    The pin exists so that a write nobody guarded cannot change the floor; a
+    reload re-pins whatever is on disk, so it prints both hashes and every
+    floor name and prefix that differs, for the operator to compare with the
+    committed file (``git diff`` on the shipped policy) before trusting it.
+    """
+    if words:
+        raise _Refused("reload takes no arguments")
+    report = _mtp.repin_shipped()
+    if not report.available:
+        raise _Refused("the shipped file is not usable, so nothing was pinned (%s)" % "; ".join(report.problems))
+    lines = [
+        "pinned the shipped model tool policy: %s" % report.path,
+        "  previous sha256: %s" % (report.old_sha256 or "(none)"),
+        "  now pinned     : %s" % report.new_sha256,
+    ]
+    for label, values in (
+        ("floor names added", report.added_names), ("floor names removed", report.removed_names),
+        ("floor prefixes added", report.added_prefixes), ("floor prefixes removed", report.removed_prefixes),
+    ):
+        if values:
+            lines.append("  %s: %s" % (label, ", ".join(values)))
+    if report.old_sha256 == report.new_sha256:
+        lines.append("  the file is unchanged since it was pinned")
+    return "\n".join(lines)
 
 
 # ---- selectors and ids --------------------------------------------------------

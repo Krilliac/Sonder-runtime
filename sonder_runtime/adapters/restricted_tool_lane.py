@@ -287,10 +287,16 @@ class RestrictedRun:
 
         Read again at every dispatch and every observation filter, so a glob
         the operator adds mid-turn applies at once; one removed mid-turn keeps
-        applying until the turn ends.
+        applying until the turn ends.  The files are loaded once, and an unusable
+        shipped file (missing, invalid, or changed since the startup pin) or
+        overlay (present but invalid) gives None, so a turn that started under a
+        grant withholds everything once the files stop being trustworthy.
         """
         try:
-            current = tuple(_grants.grant_set(_mtp.load()).secret_globs)
+            config = _mtp.load()
+            if not (config.readable_shipped and config.readable_overlay) or config.overlay_problem:
+                return None
+            current = tuple(_grants.grant_set(config).secret_globs)
         except Exception:  # noqa: BLE001 - unreadable globs: the caller refuses or withholds
             return None
         return tuple(dict.fromkeys(self.secret_globs + current))

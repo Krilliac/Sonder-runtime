@@ -38,6 +38,18 @@ thing that restricted a model, and an unusable file cannot say which.  The
 error is reported and the file is never rewritten.  A missing overlay is
 normal.
 
+The shipped file is also pinned.  The first valid read of a path records the
+sha256 of its bytes (the module pins ``SHIPPED_PATH`` when it is imported); a
+later read that finds other bytes makes the floor unavailable, which refuses
+every tool-using lane exactly like a missing file, until the process restarts
+or the console operator runs ``/runtime tools reload`` (:func:`repin_shipped`),
+which pins what is on disk and reports both hashes.  This holds the floor
+against a write that reaches the file by a route nobody guarded.  Putting the
+pinned bytes back makes the floor available again without a reload; a rewrite
+with identical bytes is not a change.  ``runtime_source_update`` and a
+reviewed self-modification deploy change the shipped file legitimately, so
+after either one the floor stays unavailable until a restart or a reload.
+
 The pure rule is ``sonder_runtime.domain.tool_lane_models``; this module only
 supplies its inputs.  Results are cached against each file's identity (path,
 modification time, size, inode); a failed read is reused for the same
@@ -45,9 +57,11 @@ identity for at most ``FAILED_READ_TTL_SECONDS`` and refuses while it is.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -81,6 +95,14 @@ _PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 # A secret path glob: a short relative pattern, no drive, no parent step.
 _GLOB_RE = re.compile(r"^[A-Za-z0-9._*?/\[\]!-]{1,128}$")
+
+
+class ShippedPin(str, Enum):
+    """How the shipped file compares with the hash pinned for its path."""
+
+    PINNED = "pinned"  # read, valid, and the bytes are the pinned ones
+    CHANGED = "changed"  # the bytes differ from the pinned ones: the floor is unavailable
+    UNREAD = "unread"  # missing, unreadable or invalid: nothing was pinned from this read
 
 
 class ConfigSource(str, Enum):
@@ -156,6 +178,8 @@ class ModelToolConfig:
     profiles: tuple[MergedProfile, ...] = ()
     tool_ceiling: tuple[str, ...] = ()
     secret_path_globs: tuple[Entry, ...] = ()
+    shipped_pin: ShippedPin = ShippedPin.UNREAD
+    shipped_sha256: str = ""
 
     def profile(self, profile_id: str) -> MergedProfile | None:
         return next((item for item in self.profiles if item.id == profile_id), None)
@@ -313,16 +337,23 @@ def _identity(path: Path) -> tuple | None:
     return (str(path), stat.st_mtime_ns, stat.st_size, stat.st_ino)
 
 
-def _read_json(path: Path) -> tuple[Any, str]:
-    """``(decoded document, "")`` or ``(None, reason)``; never raises."""
+def _read_json_hashed(path: Path) -> tuple[Any, str, str]:
+    """``(decoded document, "", sha256 of the bytes read)`` or ``(None, reason, "")``; never raises."""
     try:
         if path.stat().st_size > MAX_FILE_BYTES:
-            return None, "the file is larger than %d bytes" % MAX_FILE_BYTES
-        return json.loads(path.read_text(encoding="utf-8")), ""
+            return None, "the file is larger than %d bytes" % MAX_FILE_BYTES, ""
+        data = path.read_bytes()
+        return json.loads(data.decode("utf-8")), "", hashlib.sha256(data).hexdigest()
     except FileNotFoundError:
-        return None, "the file does not exist"
+        return None, "the file does not exist", ""
     except (OSError, ValueError) as exc:  # UnicodeDecodeError and JSONDecodeError are ValueErrors
-        return None, "%s: %s" % (type(exc).__name__, exc)
+        return None, "%s: %s" % (type(exc).__name__, exc), ""
+
+
+def _read_json(path: Path) -> tuple[Any, str]:
+    """``(decoded document, "")`` or ``(None, reason)``; never raises."""
+    raw, reason, _digest = _read_json_hashed(path)
+    return raw, reason
 
 
 def read_document(path: Path) -> tuple[Any, str]:
@@ -345,22 +376,137 @@ def _safe_overlay_path() -> tuple[Path | None, str]:
         return None, "%s: %s" % (type(exc).__name__, exc)
 
 
-def _load_shipped(path: Path) -> tuple[ToolLaneFloor, _Document | None, list[ConfigIssue]]:
-    raw, reason = _read_json(path)
-    problems: list[str] = [reason] if reason else []
-    document: _Document | None = None
-    if not reason:
-        document = _parse_document(raw)
-        problems = list(document.problems)
-        if not any(profile.floor for profile in document.profiles):
-            problems.append("no profile is marked \"floor\": true")
-    if problems or document is None:
-        issues = [ConfigIssue(ConfigSource.SHIPPED, str(path), problem) for problem in problems]
-        return ToolLaneFloor.unavailable("%s: %s" % (path, "; ".join(problems))), None, issues
+# ---- the startup pin ---------------------------------------------------------
+
+@dataclass(frozen=True)
+class _Pin:
+    """What was pinned for one path: the sha256 and the floor it held (so a reload can show what changed)."""
+
+    sha256: str
+    names: frozenset[str]
+    prefixes: tuple[str, ...]
+
+
+# normcased path -> the pin made at its first valid read.  Guarded by
+# ``_PIN_LOCK``; an entry is only ever added, except by ``repin_shipped``.
+_PINNED: dict[str, _Pin] = {}
+_PIN_LOCK = threading.Lock()
+
+
+def _pin_key(path: Path) -> str:
+    return os.path.normcase(str(path))
+
+
+def _pin_state(path: Path, made: _Pin) -> tuple[ShippedPin, _Pin]:
+    """Pin ``made`` for ``path`` when it has no pin yet; ``(state, the pin in force)``."""
+    with _PIN_LOCK:
+        pinned = _PINNED.setdefault(_pin_key(path), made)
+    return (ShippedPin.PINNED if pinned.sha256 == made.sha256 else ShippedPin.CHANGED), pinned
+
+
+def _floor_of(document: _Document) -> tuple[frozenset[str], tuple[str, ...]]:
     names = frozenset(name for profile in document.profiles for name in profile.names)
     prefixes = tuple(dict.fromkeys(item for profile in document.profiles for item in profile.prefixes))
+    return names, prefixes
+
+
+@dataclass(frozen=True)
+class _Shipped:
+    """One read of the shipped file."""
+
+    floor: ToolLaneFloor
+    document: _Document | None
+    issues: tuple[ConfigIssue, ...]
+    pin: ShippedPin
+    sha256: str
+
+
+def _validated_document(raw: Any, reason: str) -> tuple[_Document | None, list[str]]:
+    """The parsed shipped document (None when it could not be read) and every problem with it."""
+    if reason:
+        return None, [reason]
+    document = _parse_document(raw)
+    problems = list(document.problems)
+    if not any(profile.floor for profile in document.profiles):
+        problems.append("no profile is marked \"floor\": true")
+    return document, problems
+
+
+def _load_shipped(path: Path) -> _Shipped:
+    raw, reason, digest = _read_json_hashed(path)
+    document, problems = _validated_document(raw, reason)
+    pin = ShippedPin.UNREAD
+    if document is not None and not problems:
+        names, prefixes = _floor_of(document)
+        pin, pinned = _pin_state(path, _Pin(digest, names, prefixes))
+        if pin is ShippedPin.CHANGED:
+            problems.append(
+                "the file changed since it was pinned at startup (sha256 %s, now %s); restart Sonder "
+                "or run /runtime tools reload at the console" % (pinned.sha256, digest)
+            )
+    if problems or document is None:
+        issues = tuple(ConfigIssue(ConfigSource.SHIPPED, str(path), problem) for problem in problems)
+        floor = ToolLaneFloor.unavailable("%s: %s" % (path, "; ".join(problems)))
+        return _Shipped(floor, None, issues, pin, digest)
+    names, prefixes = _floor_of(document)
     floor = ToolLaneFloor(names=names, prefixes=prefixes, undetermined_served=document.undetermined)
-    return floor, document, []
+    return _Shipped(floor, document, (), pin, digest)
+
+
+@dataclass(frozen=True)
+class PinReport:
+    """What :func:`repin_shipped` did: the hash pinned before and now, and whether the file is usable."""
+
+    path: str
+    old_sha256: str
+    new_sha256: str
+    available: bool
+    problems: tuple[str, ...]
+    added_names: tuple[str, ...] = ()
+    removed_names: tuple[str, ...] = ()
+    added_prefixes: tuple[str, ...] = ()
+    removed_prefixes: tuple[str, ...] = ()
+
+
+def repin_shipped() -> PinReport:
+    """Pin whatever valid shipped file is on disk now (the console operator's ``reload``).
+
+    An unreadable or invalid file is not pinned: the old pin stays and the
+    report says why.  The cached config is dropped either way.
+    """
+    path = SHIPPED_PATH
+    raw, reason, digest = _read_json_hashed(path)
+    document, problems = _validated_document(raw, reason)
+    if document is None or problems:
+        return PinReport(str(path), _pinned_sha256(path), "", False, tuple(problems))
+    names, prefixes = _floor_of(document)
+    with _PIN_LOCK:
+        old = _PINNED.get(_pin_key(path))
+        _PINNED[_pin_key(path)] = _Pin(digest, names, prefixes)
+    clear_cache()
+    before_names = old.names if old is not None else frozenset()
+    before_prefixes = old.prefixes if old is not None else ()
+    return PinReport(
+        str(path), old.sha256 if old is not None else "", digest, True, (),
+        added_names=tuple(sorted(names - before_names)),
+        removed_names=tuple(sorted(before_names - names)),
+        added_prefixes=tuple(item for item in prefixes if item not in before_prefixes),
+        removed_prefixes=tuple(item for item in before_prefixes if item not in prefixes),
+    )
+
+
+def _pinned_sha256(path: Path) -> str:
+    with _PIN_LOCK:
+        pinned = _PINNED.get(_pin_key(path))
+    return pinned.sha256 if pinned is not None else ""
+
+
+def _pin_at_import() -> None:
+    """Pin the shipped file as the process starts; a file that cannot be read pins at its first valid read."""
+    try:
+        _load_shipped(SHIPPED_PATH)
+    except Exception:  # noqa: BLE001 - importing this module must never fail
+        pass
 
 
 def overlay_problems(raw: Any, shipped: _Document | None) -> tuple[_Document, list[str]]:
@@ -461,12 +607,13 @@ def identity_key() -> tuple | None:
 
 def load_shipped_document() -> tuple[_Document | None, list[ConfigIssue]]:
     """The validated shipped document (None when unusable), for the console editor."""
-    _floor, document, issues = _load_shipped(SHIPPED_PATH)
-    return document, issues
+    shipped = _load_shipped(SHIPPED_PATH)
+    return shipped.document, list(shipped.issues)
 
 
 def _build() -> ModelToolConfig:
-    floor, shipped, issues = _load_shipped(SHIPPED_PATH)
+    loaded = _load_shipped(SHIPPED_PATH)
+    floor, shipped, issues = loaded.floor, loaded.document, list(loaded.issues)
     path, reason = _safe_overlay_path()
     overlay = _load_overlay(path, reason, shipped)
     document = overlay.document
@@ -498,6 +645,8 @@ def _build() -> ModelToolConfig:
         profiles=_merge_profiles(shipped, document) if shipped is not None else (),
         tool_ceiling=shipped.ceiling if shipped is not None else (),
         secret_path_globs=globs,
+        shipped_pin=loaded.pin,
+        shipped_sha256=loaded.sha256,
     )
 
 
@@ -542,6 +691,8 @@ def describe(config: ModelToolConfig | None = None) -> list[str]:
         config.shipped_path,
         "" if config.readable_shipped else " ERROR: every tool-using lane is refused until it is restored",
     )]
+    if config.shipped_sha256:
+        lines.append("  shipped sha256 %s (%s)" % (config.shipped_sha256, config.shipped_pin.value))
     if not config.overlay_present and config.readable_overlay:
         overlay_state = "(absent: optional operator overlay)"
     elif config.readable_overlay:
@@ -553,3 +704,6 @@ def describe(config: ModelToolConfig | None = None) -> list[str]:
     lines.append("model tool policy (overlay): %s %s" % (config.overlay_path or "(unknown)", overlay_state))
     lines.extend("  ERROR: %s" % error for error in config.errors)
     return lines
+
+
+_pin_at_import()
