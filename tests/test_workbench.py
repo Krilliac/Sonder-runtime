@@ -55,14 +55,16 @@ def test_text_search_has_a_real_traversal_budget(monkeypatch, tmp_path):
 
 def test_text_search_skips_hidden_files_unless_explicit(monkeypatch, tmp_path):
     _guard_root(monkeypatch, tmp_path)
-    (tmp_path / ".env").write_text("TOKEN=private-marker\n", encoding="utf-8")
+    # A hidden file that is not a secret: ``.env`` is withheld from every
+    # search (tests/test_search_secret_exclusion.py), include_hidden or not.
+    (tmp_path / ".notes").write_text("private-marker\n", encoding="utf-8")
 
     safe = workbench.text_search("private-marker", root=".")
     explicit = workbench.text_search("private-marker", root=".", include_hidden=True)
 
     assert safe["matches"] == []
     assert safe["skipped_by_reason"]["hidden"] == 1
-    assert explicit["matches"][0]["relative"] == ".env"
+    assert explicit["matches"][0]["relative"] == ".notes"
 
 
 def test_script_search_identifies_runners(monkeypatch, tmp_path):

@@ -43,7 +43,7 @@ from .ports.compaction import CompactionSummary, SessionHistoryEvent
 
 # ---------------------------------------------------------------------------
 # SCHEMA BUMP RULE -- read before changing anything in this module or in the
-# schema-2 branch of ``application/compaction.py::_summary_from``.
+# schema-2 branch of ``application/compaction/engine.py::_summary_from``.
 #
 # A persisted summary is accepted on replay only if it EXACTLY equals the
 # canonical projection re-derived from its source events for its recorded

@@ -28,14 +28,16 @@ extension _ConnectionPage on _SettingsScreenState {
           children: [
             SettingsFieldRow(
               label: 'Server URL',
-              description:
-                  'HTTPS off this device; plain HTTP only on loopback.',
+              description: Settings.pageOrigin != null
+                  ? 'The browser app talks to the server that served it.'
+                  : 'HTTPS off this device; plain HTTP only on loopback.',
               modified: _serverChanged,
               field: LabeledTextField(
                 fieldKey: const Key('settings-server-url'),
                 label: 'Server URL',
                 controller: _server,
                 hint: 'https://your-host.example',
+                readOnly: Settings.pageOrigin != null,
                 mono: true,
                 keyboardType: TextInputType.url,
               ),

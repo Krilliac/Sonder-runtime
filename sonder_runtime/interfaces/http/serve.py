@@ -37,6 +37,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from sonder_runtime.interfaces.http.artifact_transfer import handle_artifact_transfer, is_artifact_route
+from sonder_runtime.interfaces.http import web_app
 from sonder_runtime.interfaces.http.connection_limit import BoundedConnectionsMixin
 from sonder_runtime.interfaces.http.host_policy import (
     HOST_NOT_ALLOWED_REMEDY, HOST_TRUSTED, forwarded_client_ip, host_decision,
@@ -79,6 +80,7 @@ import sonder_runtime.adapters.observability.activity_tracker as activity_tracke
 import sonder_runtime.adapters.observability.chat_formatting as chat_formatting
 import sonder_runtime.adapters.secrets as sonder_secrets
 import sonder_runtime.adapters.web.lifecycle as sonder_lifecycle
+from sonder_runtime.adapters.web import login_throttle_http
 import sonder_runtime.platform.config as runtime_config
 import sonder_runtime.platform.paths as runtime_paths
 from sonder_runtime.adapters.command_catalog import command_catalog
@@ -95,7 +97,7 @@ from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.adapters.execution import effect_fence
 from sonder_runtime.adapters.persistence import served_action_receipts
 from sonder_runtime.adapters.persistence import http_work_runs
-from sonder_runtime.adapters.security import unsafe_lab
+from sonder_runtime.adapters.security import role_tool_policy, unsafe_lab
 from sonder_runtime.adapters.security.account_auth import account_auth as admin_auth
 from sonder_runtime.adapters.web import live_reload
 from sonder_runtime.application.chat.handoff_receipts import (
@@ -110,6 +112,7 @@ from sonder_runtime.application.chat import provider_bridge as _provider_bridge
 from sonder_runtime.application.routing import long_context_overflow as _overflow
 import sonder_runtime.adapters.reference_lookup_lanes as _reference_lookup_lanes
 from sonder_runtime.domain import launcher_health as sonder_health
+from sonder_runtime.domain import public_policy
 from sonder_runtime.domain.common.errors import (
     Conflict,
     DependencyUnavailable,
@@ -732,6 +735,7 @@ HOST = os.environ.get("SONDER_HOST", "127.0.0.1")
 REQUIRE_ACCOUNT = _env_flag("SONDER_REQUIRE_ACCOUNT")
 AUTH_MODE = _resolve_auth_mode(API_KEY, REQUIRE_ACCOUNT)
 CORS_ORIGINS = _parse_cors_origins(os.environ.get("SONDER_CORS_ORIGINS", ""))
+_WEB_APP = web_app.WebAppSettings.disabled()
 
 
 def _parse_allowed_hosts(values):
@@ -1221,6 +1225,8 @@ def configure_typed_config(config) -> None:
     CORS_ORIGINS = frozenset(server_config.cors_origins)
     global ALLOWED_HOSTS
     ALLOWED_HOSTS = _parse_allowed_hosts(server_config.allowed_hosts)
+    global _WEB_APP
+    _WEB_APP = web_app.WebAppSettings(server_config.web_app_enabled, runtime_config.web_app_root(config))
     OBSERVATORY_ORIGINS = frozenset(
         origin for origin in config.observability.live_export_origins
         if origin and origin != "*"
@@ -2059,6 +2065,28 @@ def _admin_authorized(context):
     return bool(context.get("api_key"))
 
 
+def _restricted_tool_role(context):
+    """``user`` when the role tool gate binds this caller, else None.
+
+    Local-open and the trusted local surface (no context) are never
+    restricted. Any served caller that is not developer-authorized is: the
+    gate is deny-by-default, so an unrecognised role falls on this side.
+    """
+    if context is None or context.get("mode") == "local-open":
+        return None
+    try:
+        unrestricted = _developer_authorized(context)
+    except (KeyError, TypeError):
+        unrestricted = False
+    return None if unrestricted else public_policy.ROLE_USER
+
+
+def _role_tool_refusal_reason(tool, context):
+    """"" when this caller's role may run ``tool``, else why not."""
+    role = _restricted_tool_role(context)
+    return role_tool_policy.refusal_reason(tool, role) if role else ""
+
+
 # Operations that alter shared runtime authority or persist privileged state.
 # Keep this at the HTTP boundary: hiding a command in the app does not stop a
 # crafted request, and a prompt must never be the thing that confers a role.
@@ -2106,7 +2134,7 @@ SYSTEM_OPERATION_TOOLS = {
     "autopilot_start": "automation_lifecycle",
     "autopilot_resume": "automation_lifecycle",
     "autopilot_pause": "automation_lifecycle",
-    "autopilot_cancel": "automation_lifecycle",
+    "autopilot_cancel": "automation_lifecycle", "mission_start": "automation_lifecycle",
     # The workflow store is process-wide.  Listing it reveals every saved
     # action payload and description, which can include repository paths,
     # command arguments, and operator-authored context.  It is therefore not
@@ -3059,10 +3087,12 @@ def _loop_global_operation_refusal(actions_json, context=None):
         if not isinstance(action, dict):
             continue
         action_type = str(action.get("type") or action.get("action") or "").strip().lower()
-        operation = _http_system_operation_for(
-            server._loop_action_tool(action_type)
-        )
+        action_tool = server._loop_action_tool(action_type)
+        operation = _http_system_operation_for(action_tool)
         if not operation:
+            role_error = _role_tool_refusal_reason(action_tool, context) if action_tool else ""
+            if role_error:
+                return "refused /loop: %s" % role_error
             continue
         if operation == tool_contract.SYSTEM_OPERATION_UNBOUND:
             if not _admin_authorized(context):
@@ -3123,6 +3153,14 @@ def _http_tool_refusal(tools, label, context=None, arguments=None):
                 authority_error = _system_operation_authority_error(operation, context)
                 if authority_error:
                     return "refused %s: %s" % (label, authority_error)
+    # Deny by default, ahead of the permission decision: the mode is
+    # process-wide and says nothing about who is calling. After every tool's
+    # own authority check, so a mixed alias still names the operation's role.
+    for tool in tools:
+        role_error = _role_tool_refusal_reason(tool, context)
+        if role_error:
+            return "refused %s: %s" % (label, role_error)
+    for tool in tools:
         decision = permission_policy.decide_for_caller(
             tool, interactive=False, gate_control_exempt=True, surface="http",
             arguments=arguments if (len(tools) == 1 and isinstance(arguments, dict)) else None,
@@ -4877,6 +4915,8 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         if origin is None or origin in CORS_ORIGINS:
             return False
+        if _WEB_APP.enabled and getattr(self, "_host_trusted", False) and web_app.same_origin_request(self.headers, https_declared=TLS_TERMINATED_BY_PROXY):
+            return False
         if self._observatory_origin_request(origin):
             return False
         _serve_logger.debug(f"_reject_disallowed_origin: rejecting origin={origin!r}")
@@ -4903,6 +4943,7 @@ class Handler(BaseHTTPRequestHandler):
         # A served account's agent turn must never carry the owner's build
         # model: the brief shows only the principal this request declares.
         _bind_request_build_principal(context)
+        role_tool_policy.bind_caller_role(_restricted_tool_role(context))
         return context
 
     def _peer(self):
@@ -4938,8 +4979,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def _auth_rate_limited(self):
         """Token-bucket authentication-failure limiter (admission step 3)."""
+        return self._auth_throttle_gate(reserve=False)
+
+    def _auth_reserve_refused(self):
+        """Credential-checking routes (``login_throttle_http``): spend a token
+        in the same locked step as the check; the route refunds it on success.
+        """
+        return self._auth_throttle_gate(reserve=True)
+
+    def _auth_throttle_gate(self, *, reserve):
         client = self._client_ip()
-        if sonder_lifecycle.get().auth_attempt_allowed(client):
+        lifecycle = sonder_lifecycle.get()
+        if (lifecycle.reserve_auth_attempt(client) if reserve
+                else lifecycle.auth_attempt_allowed(client)):
             return False
         _serve_logger.error(f"auth rate limit exceeded for client={client!r}")
         _serve_logger.debug(f"_auth_rate_limited: rate-limited client={client!r}")
@@ -4951,16 +5003,7 @@ class Handler(BaseHTTPRequestHandler):
                 sonder_lifecycle.get(), "auth_rate_limited",
                 getattr(self, "_request_started", time.monotonic()),
             )
-        self._send_json_payload(
-            sonder_lifecycle.error_envelope(
-                "AUTH_RATE_LIMITED",
-                "too many failed authentication attempts; retry later",
-                self._correlation(),
-                retryable=True,
-            ),
-            status=429,
-            headers={"Retry-After": "2"},
-        )
+        login_throttle_http.send_throttled(self)
         return True
 
     def _peer_is_loopback(self):
@@ -5484,6 +5527,8 @@ class Handler(BaseHTTPRequestHandler):
                 work_binding=_app_managed_work_binding):
             return
         if handle_artifact_transfer(self, "GET", _ARTIFACT_TRANSFER_BINDING, max_request_bytes=MAX_REQUEST_BYTES):
+            return
+        if web_app.handle_web_app(self, _WEB_APP):
             return
         if self._reject_disallowed_origin():
             return
@@ -7012,58 +7057,14 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_permission_mode_post(req, context=context)
             return
         if path == "/v1/sonder/register":
-            conn = server._open_db()
-            try:
-                account = admin_auth.register(
-                    conn,
-                    req.get("username", ""),
-                    req.get("password", ""),
-                    trusted_local=False,
-                    bootstrap_secret=self.headers.get(
-                        "X-Sonder-Bootstrap-Secret", ""
-                    ),
-                    allow_additional=ALLOW_REGISTRATION,
-                    actor=context["account"] if context["authorized"] else None,
-                )
-                # ``message`` lets a client that only reads ``ok``/``message``
-                # (older apps) report the success instead of a bare 201.
-                self._send_json_payload({
-                    "ok": True, "account": account,
-                    "message": _account_created_message(account),
-                }, status=201)
-            except PermissionError as error:
-                self._send_json_payload({"ok": False, "message": str(error)}, status=403)
-            except sqlite3.IntegrityError:
-                self._send_json_payload({"ok": False, "message": "account already exists"}, status=409)
-            except ValueError as error:
-                self._send_json_payload({"ok": False, "message": str(error)}, status=400)
-            except Exception as error:
-                _serve_logger.error(f"account registration failed, correlation={self._correlation()!r}", exc_info=True)
-                self.log_error("registration failed: %s", type(error).__name__)
-                self._send_json_payload({"ok": False, "message": "registration failed"}, status=500)
-            finally:
-                conn.close()
+            login_throttle_http.handle_register(
+                self, req, context, runtime=server, admin_auth=admin_auth,
+                allow_registration=ALLOW_REGISTRATION,
+                created_message=_account_created_message)
             return
         if path == "/v1/sonder/login":
-            if context["mode"] in ("api-key", "both") and not context["api_key"]:
-                self._send_auth_error()
-                return
-            conn = server._open_db()
-            try:
-                token, account = admin_auth.login(
-                    conn, req.get("username", ""), req.get("password", "")
-                )
-                self._send_json_payload({"ok": True, "token": token, "account": account})
-            except (ValueError, PermissionError):
-                self._send_json_payload(
-                    {"ok": False, "message": "invalid username or password"}, status=401
-                )
-            except Exception as error:
-                _serve_logger.error(f"login failed, correlation={self._correlation()!r}", exc_info=True)
-                self.log_error("login failed: %s", type(error).__name__)
-                self._send_json_payload({"ok": False, "message": "login failed"}, status=500)
-            finally:
-                conn.close()
+            login_throttle_http.handle_login(
+                self, req, context, runtime=server, admin_auth=admin_auth)
             return
         if path == "/v1/sonder/admin/account":
             if not context["authorized"]:
@@ -7400,6 +7401,9 @@ class Handler(BaseHTTPRequestHandler):
             model_operation != "responses"
             and _uses_default_model_route(model)
         )
+        # A user-role caller reaches no computer-use or web tool route: those
+        # dispatch tools outside the role allowlist (public-mode P2).
+        role_runs_tools = _restricted_tool_role(context) is None
         # From here every exit records a terminal chat metric, so this is the
         # turn's start for the Observatory (early validation rejections above
         # never start one).  Ollama-only steps a non-Ollama turn has to skip
@@ -7481,7 +7485,7 @@ class Handler(BaseHTTPRequestHandler):
                             natural_model["prompt"], tiers=natural_model["tiers"],
                             project=storage_project, require_all_tiers=True,
                         )
-                    if structured_schema is None and allow_control_routes and reply is None:
+                    if structured_schema is None and allow_control_routes and role_runs_tools and reply is None:
                         reply = (None if natural_model else server.route_computer_use(prompt)) or server.chat_web_response(  # desktop requests: gated computer use first
                             prompt,
                             history=history,

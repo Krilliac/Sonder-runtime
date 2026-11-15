@@ -47,6 +47,7 @@ from sonder_runtime.platform.artifact_mobility_source_config import (
 )
 from sonder_runtime.platform.app_control_config import AppControlConfig, app_control_errors
 from sonder_runtime.platform.computer_use_config import ComputerUseConfig, computer_use_errors
+from sonder_runtime.platform.health_alerts_config import HealthAlertsConfig, health_alerts_errors
 from sonder_runtime.platform.control_state_rehearsal_config import (
     ControlStateRehearsalConfig,
     control_state_rehearsal_errors,
@@ -60,6 +61,7 @@ from sonder_runtime.platform.memory_replication_config import (
     memory_replication_errors,
 )
 from sonder_runtime.platform.spanda_config import SpandaConfig, spanda_errors
+from sonder_runtime.platform.claim_check_config import ClaimCheckConfig, claim_check_errors
 from sonder_runtime.platform.playbooks_config import PlaybooksConfig, playbooks_errors
 from sonder_runtime.platform import unsafe_lab_policy
 from sonder_runtime.platform.config_environment import (
@@ -94,6 +96,7 @@ SECRET_ENV_KEYS = (
     "SONDER_BACKUP_KEY_FILE",
     "SONDER_LAUNCHER_HEALTH_TOKEN",
     "SONDER_CONTROL_STATE_REHEARSAL_API_KEY",
+    "SONDER_HEALTH_ALERT_NTFY_URL",
 )
 _SECRET_TOML_KEYS = frozenset(
     {
@@ -105,6 +108,7 @@ _SECRET_TOML_KEYS = frozenset(
         "membership_client_cert_file",
         "membership_client_key_file",
         "control_state_rehearsal_key",
+        "health_alert_ntfy_url",
         "auth_secret",
         "backup_key",
         "backup_key_file",
@@ -161,6 +165,11 @@ class ServerConfig:
     # the Host header besides loopback names.  Everything else is refused
     # with 421 before routing (DNS-rebinding defence).
     allowed_hosts: tuple[str, ...] = ()
+    # Serve the Flutter web build at /app/ from the HTTP server.  Off by
+    # default; ``web_app_dir`` must be absolute and empty selects
+    # <state home>/web_app (written by scripts/build_web_app.py).
+    web_app_enabled: bool = False
+    web_app_dir: str = ""
     # Routed HTTP work (workbench/fleet/autopilot chat turns): how long the
     # request waits before answering with a work-run id, the wall-clock budget
     # after which the run may no longer change anything, and how many such
@@ -462,6 +471,7 @@ class Secrets:
     membership_client_cert_file: str = field(default="", repr=False)
     membership_client_key_file: str = field(default="", repr=False)
     control_state_rehearsal_key: str = field(default="", repr=False)
+    health_alert_ntfy_url: str = field(default="", repr=False)
 
     def as_redacted_dict(self) -> dict:
         return {
@@ -479,6 +489,7 @@ class Secrets:
             "control_state_rehearsal_key": redact_presence(
                 self.control_state_rehearsal_key
             ),
+            "health_alert_ntfy_url": redact_presence(self.health_alert_ntfy_url),
             "auth_secret": redact_presence(self.auth_secret),
             "backup_key_file": redact_presence(self.backup_key_file),
         }
@@ -641,12 +652,14 @@ class SonderConfig:
     child_storage: ChildStorageConfig = field(default_factory=ChildStorageConfig)
     app_control: AppControlConfig = field(default_factory=AppControlConfig)
     computer_use: ComputerUseConfig = field(default_factory=ComputerUseConfig)
+    health_alerts: HealthAlertsConfig = field(default_factory=HealthAlertsConfig)
     membership: MembershipConfig = field(default_factory=MembershipConfig)
     control_state_rehearsal: ControlStateRehearsalConfig = field(
         default_factory=ControlStateRehearsalConfig
     )
     spanda: SpandaConfig = field(default_factory=SpandaConfig)
     playbooks: PlaybooksConfig = field(default_factory=PlaybooksConfig)
+    claim_check: ClaimCheckConfig = field(default_factory=ClaimCheckConfig)
     build_tools: BuildToolsConfig = field(default_factory=BuildToolsConfig)
 
     def as_redacted_dict(self) -> dict:
@@ -672,6 +685,7 @@ class SonderConfig:
             "backup",
             "spanda",
             "playbooks",
+            "claim_check",
         ):
             value = getattr(self, section)
             out[section] = {
@@ -777,6 +791,10 @@ class SonderConfig:
         out['computer_use'] = {
             item.name: getattr(self.computer_use, item.name)
             for item in fields(self.computer_use)
+        }
+        out['health_alerts'] = {
+            item.name: getattr(self.health_alerts, item.name)
+            for item in fields(self.health_alerts)
         }
         out['child_storage'] = {
             item.name: ('<configured>' if self.child_storage.binding_file else '<unset>')
@@ -966,6 +984,7 @@ _SECTION_TYPES = {
     "child_storage": ChildStorageConfig,
     "app_control": AppControlConfig,
     "computer_use": ComputerUseConfig,
+    "health_alerts": HealthAlertsConfig,
     "control_state_rehearsal": ControlStateRehearsalConfig,
     "state": StateConfig,
     "context": ContextConfig,
@@ -976,6 +995,7 @@ _SECTION_TYPES = {
     "backup": BackupConfig,
     "spanda": SpandaConfig,
     "playbooks": PlaybooksConfig,
+    "claim_check": ClaimCheckConfig,
 }
 
 
@@ -1499,6 +1519,10 @@ def _apply_environment(
                 if part.strip()
             ),
         )
+    if "SONDER_WEB_APP" in env:
+        server = replace(server, web_app_enabled=_env_bool(env["SONDER_WEB_APP"]))
+    if "SONDER_WEB_APP_DIR" in env:
+        server = replace(server, web_app_dir=env["SONDER_WEB_APP_DIR"].strip())
     if "SONDER_REQUIRE_ACCOUNT" in env:
         server = replace(server, require_account=_env_bool(env["SONDER_REQUIRE_ACCOUNT"]))
     if "SONDER_ALLOW_REGISTRATION" in env:
@@ -1692,6 +1716,10 @@ def _apply_environment(
                 "SONDER_CONTROL_STATE_REHEARSAL_API_KEY"
             ].strip(),
         )
+    if env.get("SONDER_HEALTH_ALERT_NTFY_URL", "").strip():
+        secrets = replace(
+            secrets, health_alert_ntfy_url=env["SONDER_HEALTH_ALERT_NTFY_URL"].strip(),
+        )
     if env.get("SONDER_AUTH_SECRET", "").strip():
         secrets = replace(secrets, auth_secret=env["SONDER_AUTH_SECRET"].strip())
     backup_key_file = env.get("SONDER_BACKUP_KEY_FILE", "")
@@ -1794,6 +1822,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
     errors.extend(child_storage_errors(config))
     errors.extend(app_control_errors(config))
     errors.extend(computer_use_errors(config))
+    errors.extend(health_alerts_errors(config))
     errors.extend(artifact_transfer_errors(config))
     errors.extend(memory_replication_errors(config))
     errors.extend(artifact_mobility_source_errors(config))
@@ -1802,6 +1831,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
     errors.extend(control_state_rehearsal_errors(config))
     errors.extend(spanda_errors(config))
     errors.extend(playbooks_errors(config))
+    errors.extend(claim_check_errors(config))
     errors.extend(deployment_errors(config))
     if config.schema_version != 1:
         errors.append(
@@ -1872,6 +1902,11 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
     for entry in server.allowed_hosts:
         if not _valid_allowed_host(entry):
             errors.append(f"[server].allowed_hosts entry invalid: {entry!r}")
+    if type(server.web_app_enabled) is not bool:
+        errors.append("[server].web_app_enabled must be a boolean")
+    if type(server.web_app_dir) is not str or (
+            server.web_app_dir and not Path(server.web_app_dir).is_absolute()):
+        errors.append("[server].web_app_dir must be an absolute path")
 
     api_key = getattr(config.secrets, "api_key", None)
     loopback = _is_loopback_host(server_host) if host_is_exact_string else False
@@ -2318,6 +2353,16 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
     for name in ("retention_daily", "retention_weekly", "retention_monthly"):
         if getattr(config.backup, name) < 1:
             errors.append(f"[backup].{name} must be >= 1")
+
+
+def web_app_root(config: "SonderConfig") -> Path:
+    """Where the Flutter web bundle lives: ``[server].web_app_dir`` or
+    ``<state home>/web_app`` (published by ``scripts/build_web_app.py``)."""
+    configured = (config.server.web_app_dir or "").strip()
+    if configured:
+        return Path(configured)
+    home = (config.state.home or "").strip()
+    return (Path(home) if home else sonder_paths.default_home()) / "web_app"
 
 
 def load_config(

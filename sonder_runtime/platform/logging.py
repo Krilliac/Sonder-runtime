@@ -36,6 +36,7 @@ SECRET_ENV_VARS = (
     "SONDER_BACKUP_KEY_FILE",
     "SONDER_LAUNCHER_HEALTH_TOKEN",
     "SONDER_CONTROL_STATE_REHEARSAL_API_KEY",
+    "SONDER_HEALTH_ALERT_NTFY_URL",
     # Compatibility execution gates are also authority-bearing and therefore
     # never cross into model-authored child processes.
     "SONDER_FILE_APPROVAL_CODE",
@@ -47,6 +48,8 @@ SECRET_ENV_VARS = (
     "SONDER_OPENAI_API_KEY",
     "SONDER_INFERENCE_API_KEY",
     "OPENROUTER_API_KEY",
+    "SONDER_ANTHROPIC_API_KEY",
+    "SONDER_ANTHROPIC_API_KEY_2",
 )
 
 _unsafe_child_secret_name = unsafe_child_secret_name

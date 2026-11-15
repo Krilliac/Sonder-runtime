@@ -350,6 +350,31 @@ def is_approved_retired_shim(
     return actual == expected
 
 
+def shadowed_module_violations(tracked: set[Path]) -> list[str]:
+    """Report production module files hidden by a same-named package.
+
+    ``pkg.py`` next to ``pkg/__init__.py`` can never be imported: the package
+    wins.  Such a file is either dead code or reachable only through a path
+    hack the import system, type checker and packaging cannot see.
+    """
+    packages = {
+        path.parent.as_posix()
+        for path in tracked
+        if path.name == "__init__.py" and path.parts[:1] == ("sonder_runtime",)
+    }
+    violations: list[str] = []
+    for path in sorted(tracked, key=Path.as_posix):
+        if path.parts[:1] != ("sonder_runtime",) or path.name == "__init__.py":
+            continue
+        package_dir = path.with_suffix("").as_posix()
+        if package_dir in packages:
+            violations.append(
+                f"{path.as_posix()}: module is shadowed by package "
+                f"{package_dir}/__init__.py and can never be imported"
+            )
+    return violations
+
+
 def _repo_relative_path(repo_root: Path, relative: Path) -> Path:
     """Resolve policy paths written with either host's separators."""
     parts = str(relative).replace("\\", "/").split("/")
@@ -557,12 +582,16 @@ def module_name(path: Path) -> str:
     return ".".join(parts)
 
 
-def resolve_relative(module: str, node: ast.ImportFrom) -> str:
+def resolve_relative(
+    module: str, node: ast.ImportFrom, is_package: bool = False,
+) -> str:
     if node.level == 0:
         return node.module or ""
     base = module.split(".")
-    # A module's package is itself minus the module component.
-    package_parts = base[:-1] if not module.endswith("__init__") else base
+    # A module's package is itself minus the module component; a package's
+    # ``__init__`` already names its own package (module_name drops the
+    # ``__init__`` component), so its relative imports anchor at itself.
+    package_parts = base if is_package else base[:-1]
     anchor = package_parts[: len(package_parts) - (node.level - 1)]
     return ".".join(anchor + ([node.module] if node.module else []))
 
@@ -709,6 +738,7 @@ def check(diagnostics: dict[str, int] | None = None) -> list[str]:
     tracked_files = tracked_production_python_files()
     tracked = {path.relative_to(REPO_ROOT) for path in tracked_files}
     violations.extend(retired_module_violations(tracked))
+    violations.extend(shadowed_module_violations(tracked))
     unexpected_legacy = ROOT_LEGACY_MODULES - BASELINE_ROOT_LEGACY_MODULES
     if unexpected_legacy:
         violations.append(
@@ -843,7 +873,7 @@ def check(diagnostics: dict[str, int] | None = None) -> list[str]:
                 for alias in node.names:
                     imported.add(alias.name)
             elif isinstance(node, ast.ImportFrom):
-                imported.add(resolve_relative(module, node))
+                imported.add(resolve_relative(module, node, path.name == "__init__.py"))
             elif isinstance(node, ast.Attribute):
                 # os.environ reads in domain/application
                 if (

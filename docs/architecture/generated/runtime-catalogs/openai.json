@@ -585,6 +585,59 @@
     },
     {
       "function": {
+        "description": "Check a model's code claim against the repository, read-only",
+        "name": "claim_check",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "category": {
+              "type": "string"
+            },
+            "claim_id": {
+              "type": "string"
+            },
+            "claim_text": {
+              "maxLength": 8192,
+              "type": "string"
+            },
+            "claims_json": {
+              "maxLength": 60000,
+              "type": "string"
+            },
+            "entry_point": {
+              "type": "string"
+            },
+            "file": {
+              "type": "string"
+            },
+            "guard": {
+              "type": "string"
+            },
+            "line": {
+              "type": "integer"
+            },
+            "line_end": {
+              "type": "integer"
+            },
+            "root": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "symbols": {
+              "maxLength": 1024,
+              "type": "string"
+            }
+          },
+          "required": [
+            "root"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
         "description": "Fetch one small digest-verified compute artifact through the authenticated transport",
         "name": "compute_artifact_fetch",
         "parameters": {

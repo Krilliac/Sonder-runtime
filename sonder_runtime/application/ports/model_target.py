@@ -79,6 +79,7 @@ class ModelGenerateFactory(Protocol):
         think: bool | None = None,
         reasoning_continuation: bool = False,
         reasoning_total_tokens: int | None = None,
+        schema: dict | None = None,
     ): ...
 
 

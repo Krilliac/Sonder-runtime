@@ -40,6 +40,24 @@ def configured(monkeypatch, tmp_path):
     return project, stage
 
 
+@linux_build
+def test_compose_passes_detected_runtime_name_to_image_inspection(monkeypatch, configured):
+    project, _stage = configured
+    seen = []
+    monkeypatch.setattr(
+        isolated_runner, "detect_runtime",
+        lambda: ("podman", "/usr/bin/podman", ("--url", "ssh://core@127.0.0.1:2222/run/podman.sock")),
+    )
+    monkeypatch.setattr(
+        isolated_runner, "_inspect_image_policy",
+        lambda *args: seen.append(args) or "sha256:" + "b" * 64,
+    )
+    compose_isolated_codegen_build(project_dir=str(project), declared_sources=("src/main.c",))
+    assert seen and seen[0][:3] == (
+        "podman", "/usr/bin/podman", ("--url", "ssh://core@127.0.0.1:2222/run/podman.sock"),
+    )
+
+
 def test_disabled_without_exact_host_grants_and_linux(monkeypatch, configured):
     project, _stage = configured
     monkeypatch.delenv(build.IMAGE_ENV)

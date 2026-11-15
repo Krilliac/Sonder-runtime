@@ -19,6 +19,7 @@ Commands:
     control-state-rehearsal  collect disposable provider evidence without promotion
     eval-history  inspect or explicitly record precomputed evaluation evidence
     openrouter    list OpenRouter models / account credits, map a tier to a model
+    anthropic     Anthropic provider status: key slots, SDK, today's spend vs cap
 """
 from __future__ import annotations
 
@@ -447,6 +448,10 @@ def cmd_doctor(args) -> int:
         _emit(report, as_json=True)
     else:
         print(render_report(report))
+    if args.alert:
+        from sonder_runtime.bootstrap.health_alerts import run_health_alerts
+
+        run_health_alerts(config, report)
     return 1 if report.get("overall") == STATUS_FAIL else 0
 
 
@@ -1878,6 +1883,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--storage-probe", action="store_true",
         help="explicitly run an 8 MiB/5 second state-storage throughput probe",
     )
+    p.add_argument(
+        "--alert", action="store_true",
+        help="notify on failed checks and watched scheduled jobs that missed "
+             "their window ([health_alerts]); writes the rate-limit state file",
+    )
     p.set_defaults(func=cmd_doctor)
 
     p = sub.add_parser("status", help="local build/config/schema status")
@@ -2099,6 +2109,9 @@ def build_parser() -> argparse.ArgumentParser:
     from sonder_runtime.bootstrap.openrouter_cli import add_parser as add_openrouter_parser
 
     add_openrouter_parser(sub)
+    from sonder_runtime.bootstrap.anthropic_cli import add_parser as add_anthropic_parser
+
+    add_anthropic_parser(sub)
     return parser
 
 
