@@ -13058,8 +13058,8 @@ def text_search(
         _record_direct_tool("text_search", args, ok=False, started=started, summary=str(exc))
         return "ERROR: %s" % exc
     lines = [
-        "text search: %r under %s (%d files scanned)" %
-        (data["query"], data["root"], data["files_scanned"]),
+        "text search: %r under %s (%d files scanned%s)" %
+        (data["query"], data["root"], data["files_scanned"], data.get("withheld_note", "")),
     ]
     lines.extend(
         "  %(relative)s:%(line)s:%(column)s: %(text)s" % row

@@ -44,6 +44,17 @@ def require_bounded_real_runtime_closure():
     """
     base = Path(sys.base_prefix).resolve()
     dependencies = Path(sys.prefix).resolve() / "Lib" / "site-packages"
+    try:
+        runtime_payload._declared_site_package_paths(dependencies)
+    except OwnerRefused as exc:
+        # The owner refuses a host site-packages whose .pth files name
+        # absolute paths (for example a workstation-local sitecustomize
+        # hook). That refusal is the intended behaviour, not a failure of
+        # the interpreter under test, so it only disqualifies this host.
+        pytest.skip(
+            "real managed-child integration needs a dedicated test venv: "
+            + str(exc)
+        )
     external = [(str(base / "Lib"), True), (str(base / "DLLs"), False),
                 (str(dependencies), False)]
     external.extend((str(path), False) for path in runtime_payload.base_runtime_files(base))

@@ -343,3 +343,48 @@ def test_bytecode_write_failure_leaves_no_partial_file(tmp_path, monkeypatch):
         assert owner._payload.bytecode_binding() is None
     finally:
         owner.close()
+
+
+def _identity_stub(python, tmp_path):
+    from sonder_runtime.adapters.execution.runtime_payload import RuntimePayload
+
+    class _Anchor:
+        def validate(self):
+            pass
+
+    payload = object.__new__(RuntimePayload)
+    payload.anchor = _Anchor()
+    payload.path = tmp_path / "payload"
+    payload.digest = ""
+    payload.manifest = {
+        "schema": 2, "payload": str(payload.path), "python": python,
+        "source": str(tmp_path / "src"), "paths": [], "dll_paths": [],
+        "executable": str(tmp_path / "python.exe"), "profile": "",
+    }
+    return payload
+
+
+def test_recheck_identity_follows_the_running_managed_minor(tmp_path, monkeypatch):
+    import sys
+    from collections import namedtuple
+
+    version = namedtuple("version", "major minor micro releaselevel serial")
+    monkeypatch.setattr(sys, "version_info", version(3, 14, 0, "final", 0))
+    _identity_stub([3, 14], tmp_path).recheck_identity(())
+    with pytest.raises(OwnerRefused, match="profile changed"):
+        _identity_stub([3, 12], tmp_path).recheck_identity(())
+    monkeypatch.setattr(sys, "version_info", version(3, 13, 0, "final", 0))
+    with pytest.raises(OwnerRefused, match="profile changed"):
+        _identity_stub([3, 13], tmp_path).recheck_identity(())
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows payload profile required")
+@pytest.mark.usefixtures("small_managed_runtime_layout")
+def test_manifest_records_the_running_interpreter_minor(tmp_path):
+    import sys
+
+    owner = _selected_owner(tmp_path)
+    try:
+        assert owner._payload.manifest["python"] == list(sys.version_info[:2])
+    finally:
+        owner.close()
