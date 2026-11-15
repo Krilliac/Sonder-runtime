@@ -79,11 +79,13 @@ def test_computer_use_chat_route_is_refused_by_the_agent_gate_for_user(
 
 # --- the web tool loop of a chat turn ---------------------------------------
 
-from tests.test_role_tool_gate import _CLICK, chat_server  # noqa: E402,F401  (fixture reuse)
+from tests.test_role_tool_gate import chat_server  # noqa: E402,F401  (fixture reuse)
 
 
 @pytest.mark.parametrize("role,expected", (("user", False), ("developer", True), ("admin", True)))
-def test_chat_turn_web_tool_loop_runs_only_above_user(monkeypatch, chat_server, role, expected):
+def test_chat_turn_web_tool_loop_runs_only_above_user(
+    monkeypatch, chat_server, role, expected,  # noqa: F811 - imported pytest fixture
+):
     import sonder_runtime.interfaces.http.serve as serve
 
     web_calls = []
