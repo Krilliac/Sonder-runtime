@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 441,
+      "file_count": 443,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -257,6 +257,7 @@
         "sonder_runtime/adapters/learning_health.py",
         "sonder_runtime/adapters/learning_tier_formatting.py",
         "sonder_runtime/adapters/legacy_chat_bridge.py",
+        "sonder_runtime/adapters/live_checkout.py",
         "sonder_runtime/adapters/loaded_source.py",
         "sonder_runtime/adapters/local_observability.py",
         "sonder_runtime/adapters/location.py",
@@ -310,6 +311,7 @@
         "sonder_runtime/adapters/ollama_lifecycle.py",
         "sonder_runtime/adapters/openai_compat/__init__.py",
         "sonder_runtime/adapters/operations_event_sink.py",
+        "sonder_runtime/adapters/operator_attendance.py",
         "sonder_runtime/adapters/optional_slash_menu.py",
         "sonder_runtime/adapters/optional_slash_menu_impl.py",
         "sonder_runtime/adapters/pdf_risk.py",

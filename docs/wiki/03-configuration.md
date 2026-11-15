@@ -490,40 +490,82 @@ data directory holding it):
   does not open the two policy files (or a recursive delete of a folder that
   holds one): only the attended `/runtime tools` editor writes the overlay,
   and nothing at run time writes the shipped file. The token still opens the
-  rest of the package data directory and the other control-plane state.
+  rest of the package data directory and the other control-plane state. A
+  developer-token recursive delete removes a symlink or junction itself and
+  never follows it into another folder.
 - `fetch_artifact`: a destination, staging file or provenance sidecar there.
+  `archive_extract` refuses a destination directory that would hold a policy
+  file (a missing overlay included).
 - `apply_patch`: it lists every path a patch would write (`git apply
   --numstat`, both names of a rename) and refuses the patch when any is
-  protected.
+  protected, in any repository, attended or not.
 - `rename_symbol`: every file it would rewrite gets the file tools' check, and
   one protected file refuses the whole rename (the preview still runs).
 - `format_code` and `lint_run` with `fix`: the formatter is not run when its
   path (or the root) is or holds a protected place (the workspace root, the
   package data directory, Sonder's own code directories, the overlay, the
-  Sonder home's control files) or lies inside one, or when a symlink or
-  junction under it leads to one. A check-only run is unchanged.
-- In the live runtime checkout (a repository holding the workspace root, the
-  package data directory, the overlay or the Sonder home): `git_checkout`,
-  `git_branch` with a base, `git_stash` push/pop, `git_merge` and
-  `git_cherry_pick` refuse when the paths they would change include a
-  protected one (a list git cannot produce refuses too). There `git_checkout`
-  and `git_branch` resolve the ref once and run exactly what was checked: a
-  local branch is switched to, any other commit (a tag, a SHA, `:/<message>`,
-  a remote-tracking ref) is checked out detached at its id, and anything else
-  is a pathspec that must match a tracked path. git's guesses are off, so a
-  name that exists only as `<remote>/<name>` does not create a branch and
-  `A...B` is not read as a merge base.
+  Sonder home's control files) or lies inside one, when a symlink or junction
+  under it leads to one, or when it holds a hard link to a protected file. The
+  folder is scanned for hard links only when a protected file has more than
+  one name, so a pnpm store or a uv environment is not refused. A check-only
+  run is unchanged. These path checks are defence in depth: a formatter runs a
+  program, so it is an execution-risk tool (below).
 
-Other names for the same file count: a Windows `\\?\` spelling is compared in
+The live runtime checkout. The checkout Sonder runs from (the repository
+holding the workspace root, the package data directory, the overlay or the
+Sonder home) is never changed by a model. Production is fast-forwarded from
+origin/main and self-modification has its own reviewed pipeline, so in that
+checkout `git_checkout`, `git_branch`, `git_stash` push and pop, `git_merge`,
+`git_cherry_pick`, `apply_patch` (without `check_only`), `format_code` and
+`lint_run` with `fix` refuse unless the operator typed that very tool at the
+console (`/git_checkout ...`) with a person present. The rule does not try to
+predict what a call would write or which commit a ref names, and runs no git:
+it looks at the paths and at the attendance signal
+(`adapters/operator_attendance.py`), which the console dispatcher sets only
+around the tool the operator typed, so a model loop started by `/agent` is not
+attended and neither is a piped or scripted console. No token opens it.
+
+A repository that is not the live checkout is unaffected: a user's project, a
+git worktree of the runtime (its `.git` is a file, so it has its own files)
+and a nested repository keep every git tool as plain git, and a junction,
+symlink or different spelling of the live checkout is still the live checkout
+(identified by directory identity, not by name).
+
+The shipped file is pinned. The first valid read of the shipped policy (the
+module reads it as the process starts) records its SHA-256. A later read that
+finds other bytes makes the floor unavailable, so every tool-using lane
+refuses every model, exactly as for a missing file, until Sonder is restarted
+or the operator runs `/runtime tools reload` at the console. `reload` pins
+what is on disk and prints the old and the new hash and every floor name and
+prefix that differs, so compare it with the committed file before trusting it
+(`git diff` on `model_tool_policy.json`). Writing the pinned bytes back
+restores the floor without a reload, and a rewrite with identical bytes is not
+a change. `runtime_source_update` and a reviewed self-modification deploy
+change the shipped file on purpose; after either, the floor stays unavailable
+until a restart or a `reload`. An observation filter already running for a
+granted turn withholds everything once the shipped file stops matching its pin
+or the overlay turns invalid.
+
+Other names for the same file count. A Windows `\\?\` spelling is compared in
 its ordinary form (a namespace with no ordinary form, such as `\\.\` or
 `GLOBALROOT`, counts as protected), a UNC spelling of a local folder and a hard
 link are compared by file identity, and no file tool writes in place to a file
-that has more than one hard link without a developer token.
+that has more than one hard link without a developer token. On Windows every
+file tool (reads included) refuses the caller's path when a component ends in
+a dot or a space, or holds `:` after the drive (`overlay.json.`, `overlay.json `,
+`overlay.json::$DATA`), because Windows treats those as the trimmed name; `.`
+and `..` components are fine. A name that starts like the overlay
+(`model_tool_policy*`, or the stem of an overlay renamed with
+`SONDER_MODEL_TOOL_POLICY`) in the overlay's folder or the state home is
+refused for create, write, move, copy and delete, with or without a developer
+token.
 
 Not covered: the tools that run programs (`build_run`, `test_run`,
 `dependency_add`/`remove`/`update`, `build_clean`, `run_code` and the rest)
 can change any file their program writes; they are execution-risk tools
-(`permission_modes.risk_of`), gated as such, not by these path checks.
+(`permission_modes.risk_of`), gated as such, not by these path checks. The
+shipped-file pin is what keeps the floor in force when such a write succeeds,
+for the life of the process.
 
 The shipped file also holds `restricted_tool_ceiling` (the only tools any
 profile may ever grant: `text_search`, `repository_symbol_index`,

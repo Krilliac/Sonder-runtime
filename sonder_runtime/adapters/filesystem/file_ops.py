@@ -1006,9 +1006,15 @@ def _delete_tree_developer(root: Path) -> None:
             if directory:
                 pending.append(child)
             elif not link:
-                refusal = _policy_file_refusal(child, holding=False)
-                if refusal is not None:
-                    raise refusal
+                try:
+                    blocked = _operator_only.is_policy_file(_protection_spelling(child), files)
+                except (OSError, ValueError):
+                    blocked = True
+                if blocked:
+                    raise PermissionError(
+                        "refusing to delete a tree holding a model tool policy file (%s); "
+                        "those files change only from the attended operator console" % child
+                    )
     for child, link, directory in reversed(entries):
         try:
             if link:
