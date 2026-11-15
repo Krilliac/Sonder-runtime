@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 437,
+      "file_count": 439,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -159,6 +159,7 @@
         "sonder_runtime/adapters/extensions/host.py",
         "sonder_runtime/adapters/extensions/memory_limits.py",
         "sonder_runtime/adapters/external_mcp.py",
+        "sonder_runtime/adapters/fanout_execution.py",
         "sonder_runtime/adapters/fanout_failures.py",
         "sonder_runtime/adapters/fanout_health.py",
         "sonder_runtime/adapters/fanout_receipt.py",
@@ -318,6 +319,7 @@
         "sonder_runtime/adapters/persistence/autopilot_repository.py",
         "sonder_runtime/adapters/persistence/autopilot_store.py",
         "sonder_runtime/adapters/persistence/background_work.py",
+        "sonder_runtime/adapters/persistence/batch_store.py",
         "sonder_runtime/adapters/persistence/checkpoint_store.py",
         "sonder_runtime/adapters/persistence/child_migration.py",
         "sonder_runtime/adapters/persistence/composition_store.py",
@@ -481,7 +483,7 @@
       ]
     },
     {
-      "file_count": 417,
+      "file_count": 420,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -515,6 +517,8 @@
         "sonder_runtime/application/automation/automation_service.py",
         "sonder_runtime/application/backup/__init__.py",
         "sonder_runtime/application/backup/use_cases.py",
+        "sonder_runtime/application/batch_jobs/__init__.py",
+        "sonder_runtime/application/batch_jobs/runner.py",
         "sonder_runtime/application/build/__init__.py",
         "sonder_runtime/application/build/fix_effects.py",
         "sonder_runtime/application/build/fix_ports.py",
@@ -692,6 +696,7 @@
         "sonder_runtime/application/ports/artifact_store.py",
         "sonder_runtime/application/ports/artifact_transfer.py",
         "sonder_runtime/application/ports/backup.py",
+        "sonder_runtime/application/ports/batch_jobs.py",
         "sonder_runtime/application/ports/child_migration.py",
         "sonder_runtime/application/ports/clock.py",
         "sonder_runtime/application/ports/command_catalog.py",
@@ -904,7 +909,7 @@
       ]
     },
     {
-      "file_count": 78,
+      "file_count": 80,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -923,6 +928,8 @@
         "sonder_runtime/bootstrap/artifact_mobility.py",
         "sonder_runtime/bootstrap/artifact_mobility_source.py",
         "sonder_runtime/bootstrap/artifact_transfer.py",
+        "sonder_runtime/bootstrap/batch_job_executor.py",
+        "sonder_runtime/bootstrap/batch_job_tools.py",
         "sonder_runtime/bootstrap/build_tools.py",
         "sonder_runtime/bootstrap/capabilities.py",
         "sonder_runtime/bootstrap/child_migration.py",
@@ -988,7 +995,7 @@
       ]
     },
     {
-      "file_count": 304,
+      "file_count": 305,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1026,6 +1033,7 @@
         "sonder_runtime/domain/automation/state_machine.py",
         "sonder_runtime/domain/backpressure.py",
         "sonder_runtime/domain/batch_coalescing.py",
+        "sonder_runtime/domain/batch_jobs.py",
         "sonder_runtime/domain/binaries/__init__.py",
         "sonder_runtime/domain/binaries/elf_ids.py",
         "sonder_runtime/domain/binaries/pdb_info.py",
@@ -1381,7 +1389,7 @@
       ]
     },
     {
-      "file_count": 53,
+      "file_count": 54,
       "name": "platform",
       "python_files": [
         "sonder_runtime/platform/__init__.py",
@@ -1389,6 +1397,7 @@
         "sonder_runtime/platform/artifact_mobility_config.py",
         "sonder_runtime/platform/artifact_mobility_source_config.py",
         "sonder_runtime/platform/artifact_transfer_config.py",
+        "sonder_runtime/platform/batch_jobs_config.py",
         "sonder_runtime/platform/child_environment_policy.py",
         "sonder_runtime/platform/child_storage_config.py",
         "sonder_runtime/platform/client_fallback.py",
