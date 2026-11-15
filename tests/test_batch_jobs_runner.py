@@ -265,3 +265,24 @@ def test_a_claim_that_fails_returns_interrupted_without_dispatch():
     store.claim_job = lambda *args: None
     executor = FakeExecutor(store)
     assert _run(store, executor).status is JobStatus.INTERRUPTED and executor.calls == []
+
+
+def test_a_non_final_step_state_stops_the_job_interrupted_instead_of_looping():
+    store = FakeStore(["a"], _spec(("m:1",)))
+    executor = FakeExecutor(store)
+
+    def execute(request):
+        key = (request.stage.name, request.item_key)
+        executor.calls.append((*key, request.stage.model, request.prompt))
+        return StepState(*key, status=StepStatus.PENDING, run_id="run-x", requested_model=request.stage.model)
+
+    def fail(request, reason):
+        key = (request.stage.name, request.item_key)
+        return StepState(*key, status=StepStatus.PENDING, run_id="run-x")
+
+    executor.execute = execute
+    executor.fail = fail
+    outcome = _run(store, executor)
+    assert outcome.status is JobStatus.INTERRUPTED
+    assert store.finished[0] is JobStatus.INTERRUPTED
+    assert len(executor.calls) == 1

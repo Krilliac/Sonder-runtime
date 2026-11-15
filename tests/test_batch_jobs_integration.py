@@ -239,3 +239,37 @@ def test_a_step_retried_after_failing_without_a_model_call_carries_the_rendered_
     retried = harness.calls[1]
     assert retried.prompt.startswith("R2 ") and "answer to" in retried.prompt
     assert harness.tool("batch_job_status", job_id=job_id)["job"]["progress"]["answered"] == 2
+
+
+def test_an_interrupted_child_run_with_a_pending_row_is_resumed_not_spun_on(harness, monkeypatch):
+    created = harness.create(two_stages(), items=1, start=False)
+    job_id = created["job"]["job_id"]
+    batch_store.start_job(job_id, max_active=4)
+    harness.crash_on_call = 1
+    with pytest.raises(SimulatedCrash):
+        run_job(job_id, store=batch_store, executor=harness.service.executor(),
+                owner_id="doomed-worker", owner_pid=os.getpid())
+    dead = _dead_pid()
+    with fanout_store._write_transaction() as conn:
+        for table in ("batch_jobs", "fanout_runs", "fanout_results"):
+            conn.execute("UPDATE %s SET owner_pid=? WHERE owner_pid<>0" % table, (dead,))
+        # The process died after claim_run and before claim_next_result: the row never left 'pending'.
+        conn.execute("UPDATE fanout_results SET status='pending' WHERE status='running'")
+    harness.crash_on_call = None
+    assert fanout_store.reconcile_stale_runs() >= 1
+
+    original = server._execute_fanout_run
+    count = {"n": 0}
+
+    def counting(run_id, *args, **kwargs):
+        count["n"] += 1
+        if count["n"] > 12:
+            harness.tool("batch_job_cancel", job_id=job_id)
+        return original(run_id, *args, **kwargs)
+
+    monkeypatch.setattr(server, "_execute_fanout_run", counting)
+    assert harness.tool("batch_job_resume", job_id=job_id)["ok"] is True
+    harness.wait()
+    assert count["n"] <= 4
+    final = harness.tool("batch_job_status", job_id=job_id)["job"]
+    assert final["status"] == "completed" and final["progress"]["answered"] == 2

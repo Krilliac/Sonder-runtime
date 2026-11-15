@@ -104,6 +104,13 @@ class FanoutStepExecutor:
             )
             if resumed is None:
                 raise IntegrityFailure("batch step could not be resumed")
+        else:
+            # A finished child run whose single row never left 'pending' (the worker died between the
+            # run claim and the row claim) reads as PENDING; resume_run requeues it, a live run is left alone.
+            run = fanout_store.get_run(prior.run_id)
+            if run is not None and run["status"] in fanout_store.TERMINAL_RUNS:
+                if fanout_store.resume_run(prior.run_id) is None:
+                    raise IntegrityFailure("batch step could not be resumed")
         return prior.run_id
 
     def _state(self, run_id: str) -> StepState:

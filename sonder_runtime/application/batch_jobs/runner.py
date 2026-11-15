@@ -106,6 +106,10 @@ def run_job(job_id: str, *, store: BatchStorePort, executor: StepExecutorPort,
             result = executor.fail(request, reason)
         else:
             result = executor.execute(request)
+        if result.status in (StepStatus.PENDING, StepStatus.RUNNING):
+            # A step the executor could not bring to a final state would be picked again at once, forever.
+            logger.warning("batch job %s stopped: step %s/%s ended non-final (%s)", job_id, stage_name, key, result.status.value)
+            return stop(JobStatus.INTERRUPTED)
         states[(stage_name, key)] = result
         retry.discard((stage_name, key))
         steps_run += 1
