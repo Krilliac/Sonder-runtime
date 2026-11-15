@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 431,
+      "file_count": 437,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -186,6 +186,12 @@
         "sonder_runtime/adapters/git_mutation_guard.py",
         "sonder_runtime/adapters/git_program_guard.py",
         "sonder_runtime/adapters/goal_formatting.py",
+        "sonder_runtime/adapters/health_alerts/__init__.py",
+        "sonder_runtime/adapters/health_alerts/_child.py",
+        "sonder_runtime/adapters/health_alerts/date_order.py",
+        "sonder_runtime/adapters/health_alerts/notifiers.py",
+        "sonder_runtime/adapters/health_alerts/schtasks.py",
+        "sonder_runtime/adapters/health_alerts/state_store.py",
         "sonder_runtime/adapters/host_terminal_projection.py",
         "sonder_runtime/adapters/host_terminal_result.py",
         "sonder_runtime/adapters/host_tools/__init__.py",
@@ -475,7 +481,7 @@
       ]
     },
     {
-      "file_count": 415,
+      "file_count": 417,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -611,6 +617,7 @@
         "sonder_runtime/application/extensions/quarantine.py",
         "sonder_runtime/application/extensions/registry.py",
         "sonder_runtime/application/foreground_turns.py",
+        "sonder_runtime/application/health_alerts.py",
         "sonder_runtime/application/host_tools/__init__.py",
         "sonder_runtime/application/host_tools/service.py",
         "sonder_runtime/application/inference_membership/__init__.py",
@@ -701,6 +708,7 @@
         "sonder_runtime/application/ports/execution_world.py",
         "sonder_runtime/application/ports/extensions.py",
         "sonder_runtime/application/ports/filesystem.py",
+        "sonder_runtime/application/ports/health_alerts.py",
         "sonder_runtime/application/ports/host_final.py",
         "sonder_runtime/application/ports/host_tools.py",
         "sonder_runtime/application/ports/host_turn_links.py",
@@ -896,7 +904,7 @@
       ]
     },
     {
-      "file_count": 77,
+      "file_count": 78,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -935,6 +943,7 @@
         "sonder_runtime/bootstrap/doctor_formatting.py",
         "sonder_runtime/bootstrap/evaluation.py",
         "sonder_runtime/bootstrap/generic_agent_dispatch.py",
+        "sonder_runtime/bootstrap/health_alerts.py",
         "sonder_runtime/bootstrap/host_tools.py",
         "sonder_runtime/bootstrap/http_command_narration.py",
         "sonder_runtime/bootstrap/http_work_narration.py",
@@ -979,7 +988,7 @@
       ]
     },
     {
-      "file_count": 303,
+      "file_count": 304,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1123,6 +1132,7 @@
         "sonder_runtime/domain/fleet_briefing.py",
         "sonder_runtime/domain/fleet_intent.py",
         "sonder_runtime/domain/fleet_pressure.py",
+        "sonder_runtime/domain/health_alerts.py",
         "sonder_runtime/domain/health_formatting.py",
         "sonder_runtime/domain/host_tools/__init__.py",
         "sonder_runtime/domain/host_tools/model.py",
@@ -1371,7 +1381,7 @@
       ]
     },
     {
-      "file_count": 52,
+      "file_count": 53,
       "name": "platform",
       "python_files": [
         "sonder_runtime/platform/__init__.py",
@@ -1395,6 +1405,7 @@
         "sonder_runtime/platform/environment_probe.py",
         "sonder_runtime/platform/hardware_identity.py",
         "sonder_runtime/platform/hardware_probe.py",
+        "sonder_runtime/platform/health_alerts_config.py",
         "sonder_runtime/platform/local_retry_policy.py",
         "sonder_runtime/platform/location_consent.py",
         "sonder_runtime/platform/logging.py",
