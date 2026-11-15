@@ -57,6 +57,36 @@ def synthesis_rows(run, rows):
     return projected
 
 
+PROVIDER_TOKEN_SOURCES = frozenset(("ollama", "provider"))
+
+
+def token_usage(rows):
+    """Token totals with provider-counted and estimated counts kept apart.
+
+    A row whose count is a local estimate (or a mix) never lands in the
+    provider total, and a row with no recorded tokens is counted as unknown
+    rather than as zero, so no blended number hides how it was measured.
+    """
+    provider = {"tokens_in": 0, "tokens_out": 0}
+    estimated = {"tokens_in": 0, "tokens_out": 0}
+    estimated_rows = unknown_rows = 0
+    for row in rows:
+        if row.get("tokens_in") is None and row.get("tokens_out") is None:
+            if row.get("status") == "answered":
+                unknown_rows += 1
+            continue
+        bucket = provider if row.get("token_source") in PROVIDER_TOKEN_SOURCES else estimated
+        if bucket is estimated:
+            estimated_rows += 1
+        for key in ("tokens_in", "tokens_out"):
+            bucket[key] += max(0, int(row.get(key) or 0))
+    return {
+        "tokens_in_provider": provider["tokens_in"], "tokens_out_provider": provider["tokens_out"],
+        "tokens_in_estimated": estimated["tokens_in"], "tokens_out_estimated": estimated["tokens_out"],
+        "rows_with_estimated_tokens": estimated_rows, "rows_with_unknown_tokens": unknown_rows,
+    }
+
+
 def build_receipt(run_id, *, admission):
     """Build a serializable receipt without exposing the sealed prompt.
 
@@ -69,6 +99,16 @@ def build_receipt(run_id, *, admission):
     limits = fanout_limits(run)
     rows = fanout_store.list_results(run_id)
     now = time.time()
+    def token_fields(row):
+        # NULL tokens are a legacy or unreported row: unknown, never 0.
+        return {
+            "requested_model": row["model"],
+            "served_model": row.get("served_model") or None,
+            "tokens_in": row.get("tokens_in"),
+            "tokens_out": row.get("tokens_out"),
+            "token_source": row.get("token_source") or None,
+        }
+
     def result_usage(row):
         truncation_known = bool(row.get("answer_truncation_known"))
         return {
@@ -83,7 +123,7 @@ def build_receipt(run_id, *, admission):
         }
 
     answers = [{"model": row["model"], "answer": row["answer"], "elapsed_ms": row["elapsed_ms"],
-                **result_usage(row)}
+                **token_fields(row), **result_usage(row)}
                for row in rows if row["status"] == "answered"]
     def failure_receipt(row):
         item = {
@@ -93,6 +133,7 @@ def build_receipt(run_id, *, admission):
             "status": row["status"],
             # Null means a legacy receipt predates the closed vocabulary.
             "failure_class": fanout_store.normalize_failure_class(row.get("failure_class")),
+            **token_fields(row),
             **result_usage(row),
         }
         # The database stores an absolute expiry so a process restart cannot
@@ -168,6 +209,7 @@ def build_receipt(run_id, *, admission):
             "models_with_observed_thinking": sum(
                 1 for row in rows if int(row.get("thinking_chars") or 0) > 0
             ),
+            **token_usage(rows),
         },
         "admission": admission(run, rows, limits),
         "answers": sorted(answers, key=lambda row: row["model"].casefold()),
