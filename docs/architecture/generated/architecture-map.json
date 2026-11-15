@@ -1369,7 +1369,7 @@
       ]
     },
     {
-      "file_count": 50,
+      "file_count": 52,
       "name": "platform",
       "python_files": [
         "sonder_runtime/platform/__init__.py",
@@ -1387,6 +1387,7 @@
         "sonder_runtime/platform/context_selection.py",
         "sonder_runtime/platform/control_state_rehearsal_config.py",
         "sonder_runtime/platform/debug_dump.py",
+        "sonder_runtime/platform/declared_context.py",
         "sonder_runtime/platform/deployment_auth.py",
         "sonder_runtime/platform/environment_options.py",
         "sonder_runtime/platform/environment_probe.py",
@@ -1397,6 +1398,7 @@
         "sonder_runtime/platform/logging.py",
         "sonder_runtime/platform/memory_replication_config.py",
         "sonder_runtime/platform/metrics.py",
+        "sonder_runtime/platform/model_context_memory.py",
         "sonder_runtime/platform/model_paths.py",
         "sonder_runtime/platform/model_retry_policy.py",
         "sonder_runtime/platform/netns_probe.py",
