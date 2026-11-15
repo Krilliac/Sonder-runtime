@@ -738,26 +738,33 @@ turn used passages, the reply ends with a `Sources:` block that lists them, and
 `Sources: none (<reason>)` says why none were used (no passage was close enough,
 or the library is unavailable). Nothing is fetched at question time.
 
-1. Get the builder, a separate repository, `Krilliac/sonder-references`.
+1. Get the builder, a separate repository, `Krilliac/sonder-references`. It
+needs Python 3.12 or newer and no packages outside the standard library.
 
 ```
 git clone https://github.com/Krilliac/sonder-references.git
-```
-
-2. Fetch the sources. `<fetch command>` and `<sources>` are the command and the
-source names that repository's README gives (its exact names are not fixed yet).
-
-```
 cd sonder-references
-<fetch command> <sources>
+```
+
+2. Fetch the sources. `--all` fetches all of them; `--list` prints their names
+and licences, and you can name a subset instead (for example `attack sigma
+cwe`). `--verify` then reports any file that is missing, for example one an
+antivirus removed. On Linux or macOS use `python3` in place of `py -3.12`.
+
+```
+py -3.12 -I fetch_references.py --all
+py -3.12 -I fetch_references.py --verify
 ```
 
 3. Build the index, either straight into the default location below or into a
 file of your choice (`<index path>`) that you point Sonder at.
 
 ```
-<build command> --out "<index path>"
+py -3.12 -I sentinel.py index --out "<index path>"
 ```
+
+That repository's README covers updating, antivirus false positives, the
+licences of each source and troubleshooting.
 
 Connect the index to Sonder in one of two ways.
 

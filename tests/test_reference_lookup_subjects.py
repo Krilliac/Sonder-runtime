@@ -68,7 +68,10 @@ def test_missing_sources_key_in_version_2_warns_and_keeps_the_index_usable(tmp_p
     assert status.ready and status.library == () and "no sources row" in status.warnings[0]
 
 
-@pytest.mark.parametrize("raw", ["not json", '{"a": 1}', "x" * 70000])
+# Short ids: pytest puts the test id in PYTEST_CURRENT_TEST, and Windows caps an
+# environment variable at 32767 characters.
+@pytest.mark.parametrize("raw", ["not json", '{"a": 1}', "x" * 70000],
+                         ids=["not-json", "object", "oversized"])
 def test_unusable_sources_row_is_ignored_with_a_warning(tmp_path, raw):
     status = _status(tmp_path, schema_version=2, sources=raw)
     assert status.ready and status.library == () and len(status.warnings) == 1

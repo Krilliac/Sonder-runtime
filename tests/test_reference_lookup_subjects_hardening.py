@@ -27,7 +27,10 @@ def _meta(subject):
 
 # ---- deeply nested JSON ------------------------------------------------------
 
-@pytest.mark.parametrize("raw", ["[" * 5000 + "]" * 5000, "[" * 60000])
+# Short ids: pytest puts the test id in PYTEST_CURRENT_TEST, and Windows caps an
+# environment variable at 32767 characters.
+@pytest.mark.parametrize("raw", ["[" * 5000 + "]" * 5000, "[" * 60000],
+                         ids=["balanced-5000", "open-60000"])
 def test_deeply_nested_sources_is_a_warning_not_an_exception(raw):
     meta = parse_library_meta("2", raw)
     assert meta.library == () and "not valid JSON" in meta.warnings[0]
