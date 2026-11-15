@@ -132,6 +132,8 @@ def test_a_renamed_overlay_protects_names_that_start_with_its_stem(policy_files,
 
 # ---- reading the same file under another name ---------------------------------------------
 
+# Preservation test, not a RED test: the read tools already refused this spelling on 73ee5116 (round-2
+# probes only bypassed the write tools), so it passes there and here. It guards against a regression.
 @windows_only
 def test_an_alternate_data_stream_spelling_does_not_read_a_secret_file(policy_files):
     secret = policy_files.project / "server.pem"
