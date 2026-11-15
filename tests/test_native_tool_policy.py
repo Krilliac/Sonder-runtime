@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+import time
 
-from sonder_runtime.domain.native_tool_policy import native_tool_call_decision
+from sonder_runtime.domain.native_tool_policy import (
+    MAX_ARGUMENT_DEPTH,
+    native_tool_call_decision,
+)
 
 
 def test_native_tool_policy_serializes_one_valid_call():
@@ -22,3 +26,50 @@ def test_native_tool_policy_rejects_ambiguous_or_oversized_calls():
     assert native_tool_call_decision({
         "tool_calls": [{"function": {"name": "x", "arguments": "x" * 65537}}]
     }) is None
+
+
+def _call(arguments):
+    return native_tool_call_decision(
+        {"tool_calls": [{"function": {"name": "x", "arguments": arguments}}]}
+    )
+
+
+def _nested(depth):
+    # The outer object is depth 1.
+    return '{"a":' * (depth - 1) + "{}" + "}" * (depth - 1)
+
+
+def test_native_tool_policy_nesting_limit_is_exact():
+    assert _call(_nested(MAX_ARGUMENT_DEPTH)) is not None
+    assert _call(_nested(MAX_ARGUMENT_DEPTH + 1)) is None
+
+
+def test_native_tool_policy_ignores_brackets_inside_strings():
+    noisy = "[" * 500 + '\\"' + "{" * 500
+    arguments = json.dumps({"k": noisy})
+    assert '\\"' in arguments
+    assert _call(arguments) is not None
+    # An escaped quote must not end the string early and expose its brackets.
+    assert _call('{"k":"\\"' + "[" * 500 + '"}') is not None
+
+
+def test_native_tool_policy_refuses_huge_nesting_quickly():
+    # Stay under MAX_ARGUMENT_CHARS so the depth guard, not the size guard,
+    # is what refuses these.
+    started = time.monotonic()
+    assert _call("[" * 60000) is None
+    assert _call('{"a":' * 10000 + "{}" + "}" * 10000) is None
+    assert time.monotonic() - started < 2.0
+    # 100k-deep already-parsed value (no text, no recursion in the checker).
+    value = {}
+    for _ in range(100000):
+        value = {"a": value}
+    assert _call(value) is None
+    assert time.monotonic() - started < 5.0
+
+
+def test_native_tool_policy_refuses_deep_dict_arguments():
+    value = {}
+    for _ in range(MAX_ARGUMENT_DEPTH + 5):
+        value = {"a": value}
+    assert _call(value) is None
