@@ -31,6 +31,8 @@ _ALIASES = {
     "openrouter": "openrouter",
     "open-router": "openrouter",
     "open_router": "openrouter",
+    # Hosted and metered, like openrouter above (see AnthropicGateway).
+    "anthropic": "anthropic",
 }
 # "sonder" names the logical chat tier and the local model alias, so it must
 # never silently select a transport.  It stays an unknown-provider error with
@@ -53,6 +55,7 @@ PROVIDER_LABEL_IDS = MappingProxyType({
     "openai-compatible": "openai_compatible",
     "sonder-inference": "sonder_inference",
     "openrouter": "openrouter",
+    "anthropic": "anthropic",
 })
 
 

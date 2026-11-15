@@ -506,12 +506,51 @@ def _is_base_secret_path(path: Path) -> bool:
     )
 
 
+_POLICY_SNAPSHOT: contextvars.ContextVar[tuple | None] = contextvars.ContextVar(
+    "sonder_read_policy_snapshot", default=None,
+)
+
+
+@contextlib.contextmanager
+def read_policy_snapshot():
+    """Resolve the control-plane inventory once for the read checks in the body.
+
+    ``resolve_repository_read_path`` re-derives the live control-plane inventory
+    on every call (hundreds of path resolutions, ~150 ms), which makes a scan that
+    guards thousands of files unusable. Inside this scope the inventory and the
+    exact control files are resolved once, at entry, and reused. Nothing else is
+    relaxed: every other check still runs per path. A control path that changes
+    while the scope is open is not seen until the next scope, so keep it to one
+    bounded read-only operation. Scopes do not nest; an inner one reuses the outer
+    snapshot. Failures at entry propagate and no snapshot is installed.
+    """
+    if _POLICY_SNAPSHOT.get() is not None:
+        yield
+        return
+    snapshot = (_control_plane_paths(), live_control_plane_inventory())
+    token = _POLICY_SNAPSHOT.set(snapshot)
+    try:
+        yield
+    finally:
+        _POLICY_SNAPSHOT.reset(token)
+
+
+def _current_control_paths() -> set[Path]:
+    snapshot = _POLICY_SNAPSHOT.get()
+    return snapshot[0] if snapshot is not None else _control_plane_paths()
+
+
+def _current_control_inventory():
+    snapshot = _POLICY_SNAPSHOT.get()
+    return snapshot[1] if snapshot is not None else live_control_plane_inventory()
+
+
 def _is_sensitive_control_path(path: Path) -> bool:
     path = _resolve_best_effort(path)
     name = path.name.lower()
     return (
-        path in _control_plane_paths()
-        or live_control_plane_inventory().protects(path)
+        path in _current_control_paths()
+        or _current_control_inventory().protects(path)
         or name in CONTROL_CONFIG_FILES
         or name in {
             "memory.db", "memory.db-wal", "memory.db-shm",

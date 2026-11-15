@@ -226,10 +226,10 @@ def test_runtime_embedding_binding_uses_show_when_tags_omit_capabilities(
 
     assert "embeddings: bge-m3:latest" in result
     assert show_calls == [
-        ("/api/show", {"name": "bge-m3:latest"}, 30),
+        ("/api/show", {"model": "bge-m3:latest", "name": "bge-m3:latest"}, 30),
         # The post-update status now checks that restored/seeding policy is
         # genuinely embedding-capable before printing readiness.
-        ("/api/show", {"name": "bge-m3:latest"}, 30),
+        ("/api/show", {"model": "bge-m3:latest", "name": "bge-m3:latest"}, 30),
     ]
 
 
