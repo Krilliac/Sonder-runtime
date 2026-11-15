@@ -7,7 +7,12 @@ import sonder_runtime.interfaces.http.serve as serve
 
 
 def _account(name):
-    return {"account": {"username": name, "role": "user"}}
+    # Developer role: these tests are about account scoping. The role tool gate
+    # (tests/test_role_tool_gate.py) leaves a user-role account no task tools.
+    return {
+        "mode": "account", "authorized": True, "api_key": False,
+        "account": {"username": name, "role": "developer"},
+    }
 
 
 def _task_id(text):
