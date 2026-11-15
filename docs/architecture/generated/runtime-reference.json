@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "06a23910286b111ecd38de3372e416a1c18c6c5e042ff673e81a82e9a9a0bd4a",
+    "catalog_digest": "fa7fd5a9d17e8308c68e8b770061e29b3cf49078af9b9a5d910ecadf6dde03c7",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "06a23910286b111ecd38de3372e416a1c18c6c5e042ff673e81a82e9a9a0bd4a",
+      "catalog_digest": "fa7fd5a9d17e8308c68e8b770061e29b3cf49078af9b9a5d910ecadf6dde03c7",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -1516,6 +1516,75 @@
             "type": "object"
           },
           "name": "checklist_update"
+        },
+        {
+          "description": "Check a model's code claim against the repository, read-only: is the cited file,\n        line and are the named symbols real, and is a guard of the claimed category nearby\n        (verdict reject = the citation is wrong; flag = a guard-shaped line was found nearby, which\n        says nothing about whether the claim is true; keep = nothing contradicts the citation).\n        Pass file (+ line, symbols, category, guard, entry_point, claim_text) or claims_json.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "category": {
+                "default": "",
+                "title": "Category",
+                "type": "string"
+              },
+              "claim_id": {
+                "default": "",
+                "title": "Claim Id",
+                "type": "string"
+              },
+              "claim_text": {
+                "default": "",
+                "title": "Claim Text",
+                "type": "string"
+              },
+              "claims_json": {
+                "default": "",
+                "title": "Claims Json",
+                "type": "string"
+              },
+              "entry_point": {
+                "default": "",
+                "title": "Entry Point",
+                "type": "string"
+              },
+              "file": {
+                "default": "",
+                "title": "File",
+                "type": "string"
+              },
+              "guard": {
+                "default": "",
+                "title": "Guard",
+                "type": "string"
+              },
+              "line": {
+                "default": 0,
+                "title": "Line",
+                "type": "integer"
+              },
+              "line_end": {
+                "default": 0,
+                "title": "Line End",
+                "type": "integer"
+              },
+              "root": {
+                "title": "Root",
+                "type": "string"
+              },
+              "symbols": {
+                "default": "",
+                "title": "Symbols",
+                "type": "string"
+              }
+            },
+            "required": [
+              "root"
+            ],
+            "title": "claim_checkArguments",
+            "type": "object"
+          },
+          "name": "claim_check"
         },
         {
           "description": "Show, enable, or revoke process-local hosted/cloud model consent.\n\n    Enabling is explicit consent for later ``cloud-*`` prompts to leave this\n    machine and potentially incur provider usage. The setting resets on restart.\n    ",
@@ -9890,6 +9959,83 @@
       "risk": "ask",
       "summary": "Update one checklist item by 1-based index or id prefix.",
       "tool": "checklist_update"
+    },
+    {
+      "aliases": [],
+      "category": "dev",
+      "name": "/claim_check",
+      "native": false,
+      "params": [
+        {
+          "default": null,
+          "name": "root",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "file",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": 0,
+          "name": "line",
+          "required": false,
+          "type": "int"
+        },
+        {
+          "default": 0,
+          "name": "line_end",
+          "required": false,
+          "type": "int"
+        },
+        {
+          "default": "",
+          "name": "symbols",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "category",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "guard",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "entry_point",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "claim_text",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "claim_id",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "claims_json",
+          "required": false,
+          "type": "str"
+        }
+      ],
+      "risk": "safe",
+      "summary": "Check a model's code claim against the repository, read-only: is the cited file, line and are the named symbols real, and is a guard of the claimed category nearby (verdict reject = the citation is wrong; flag = a guard-shaped line was found nearby, which says nothing about whether the claim is true; keep = nothing contradicts the citation).",
+      "tool": "claim_check"
     },
     {
       "aliases": [],
@@ -18418,6 +18564,12 @@
     },
     {
       "default": null,
+      "field": "claim_check",
+      "section": "root",
+      "type": "ClaimCheckConfig"
+    },
+    {
+      "default": null,
       "field": "build_tools",
       "section": "root",
       "type": "BuildToolsConfig"
@@ -19039,6 +19191,91 @@
       "field": "cancel_timeout_seconds",
       "section": "child_storage",
       "type": "<class 'int'>"
+    },
+    {
+      "default": 10,
+      "field": "symbol_window_lines",
+      "section": "claim_check",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 15,
+      "field": "guard_window_lines",
+      "section": "claim_check",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 8,
+      "field": "caller_window_lines",
+      "section": "claim_check",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 10,
+      "field": "duplicate_window_lines",
+      "section": "claim_check",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 2000000,
+      "field": "max_file_bytes",
+      "section": "claim_check",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 10,
+      "field": "max_callers",
+      "section": "claim_check",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 2000,
+      "field": "max_caller_files",
+      "section": "claim_check",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 64000000,
+      "field": "max_cache_bytes",
+      "section": "claim_check",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 20,
+      "field": "max_evidence",
+      "section": "claim_check",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 10000,
+      "field": "max_batch_claims",
+      "section": "claim_check",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": [
+        ".git",
+        "node_modules",
+        "bin",
+        "obj",
+        ".vs",
+        "__pycache__"
+      ],
+      "field": "skip_dirs",
+      "section": "claim_check",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": [],
+      "field": "extra_guard_patterns",
+      "section": "claim_check",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": "all",
+      "field": "symbol_match",
+      "section": "claim_check",
+      "type": "<class 'str'>"
     },
     {
       "default": false,
@@ -19941,15 +20178,15 @@
   ],
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES plus sonder_runtime.platform.memory_replication_config",
   "counts": {
-    "capabilities": 239,
-    "commands": 357,
-    "configuration": 278,
+    "capabilities": 240,
+    "commands": 358,
+    "configuration": 292,
     "events": 43,
-    "native_tools": 68,
+    "native_tools": 69,
     "schemas": 4,
-    "tools": 239
+    "tools": 240
   },
-  "digest": "914faaccf90db0de1c4f64bbd2bf0228be812f9667c8b805e272d63c31b32a87",
+  "digest": "62f84438e7f25cb441ee63e419edb1265e4eb76ffd397fbaa7bec0f406fed683",
   "events": [
     {
       "name": "session.started",
@@ -20963,6 +21200,56 @@
             "type": "string"
           }
         },
+        "type": "object"
+      }
+    },
+    {
+      "description": "Check a model's code claim against the repository, read-only",
+      "name": "claim_check",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "category": {
+            "type": "string"
+          },
+          "claim_id": {
+            "type": "string"
+          },
+          "claim_text": {
+            "maxLength": 8192,
+            "type": "string"
+          },
+          "claims_json": {
+            "maxLength": 60000,
+            "type": "string"
+          },
+          "entry_point": {
+            "type": "string"
+          },
+          "file": {
+            "type": "string"
+          },
+          "guard": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer"
+          },
+          "line_end": {
+            "type": "integer"
+          },
+          "root": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "symbols": {
+            "maxLength": 1024,
+            "type": "string"
+          }
+        },
+        "required": [
+          "root"
+        ],
         "type": "object"
       }
     },
@@ -22611,9 +22898,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "06a23910286b111ecd38de3372e416a1c18c6c5e042ff673e81a82e9a9a0bd4a",
+    "catalog_digest": "fa7fd5a9d17e8308c68e8b770061e29b3cf49078af9b9a5d910ecadf6dde03c7",
     "client": {
-      "digest": "06a23910286b111ecd38de3372e416a1c18c6c5e042ff673e81a82e9a9a0bd4a",
+      "digest": "fa7fd5a9d17e8308c68e8b770061e29b3cf49078af9b9a5d910ecadf6dde03c7",
       "events": [
         {
           "name": "approval.denied",
@@ -23822,6 +24109,7 @@
           "checklist_create",
           "checklist_show",
           "checklist_update",
+          "claim_check",
           "cloud_opt_in",
           "codegen_build_loop",
           "command_registry_list",
@@ -24236,6 +24524,11 @@
             "name": "checklist_update",
             "schema_available": true,
             "summary": "Update one checklist item by 1-based index or id prefix."
+          },
+          {
+            "name": "claim_check",
+            "schema_available": true,
+            "summary": "Check a model's code claim against the repository, read-only: is the cited file,\n        line and are the named symbols real, and is a guard of the claimed category nearby\n        (verdict reject = the citation is wrong; flag = a guard-shaped line was found nearby, which\n        says nothing about whether the claim is true; keep = nothing contradicts the citation).\n        Pass file (+ line, symbols, category, guard, entry_point, claim_text) or claims_json."
           },
           {
             "name": "cloud_opt_in",
@@ -26657,6 +26950,75 @@
             "type": "object"
           },
           "name": "checklist_update"
+        },
+        {
+          "description": "Check a model's code claim against the repository, read-only: is the cited file,\n        line and are the named symbols real, and is a guard of the claimed category nearby\n        (verdict reject = the citation is wrong; flag = a guard-shaped line was found nearby, which\n        says nothing about whether the claim is true; keep = nothing contradicts the citation).\n        Pass file (+ line, symbols, category, guard, entry_point, claim_text) or claims_json.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "category": {
+                "default": "",
+                "title": "Category",
+                "type": "string"
+              },
+              "claim_id": {
+                "default": "",
+                "title": "Claim Id",
+                "type": "string"
+              },
+              "claim_text": {
+                "default": "",
+                "title": "Claim Text",
+                "type": "string"
+              },
+              "claims_json": {
+                "default": "",
+                "title": "Claims Json",
+                "type": "string"
+              },
+              "entry_point": {
+                "default": "",
+                "title": "Entry Point",
+                "type": "string"
+              },
+              "file": {
+                "default": "",
+                "title": "File",
+                "type": "string"
+              },
+              "guard": {
+                "default": "",
+                "title": "Guard",
+                "type": "string"
+              },
+              "line": {
+                "default": 0,
+                "title": "Line",
+                "type": "integer"
+              },
+              "line_end": {
+                "default": 0,
+                "title": "Line End",
+                "type": "integer"
+              },
+              "root": {
+                "title": "Root",
+                "type": "string"
+              },
+              "symbols": {
+                "default": "",
+                "title": "Symbols",
+                "type": "string"
+              }
+            },
+            "required": [
+              "root"
+            ],
+            "title": "claim_checkArguments",
+            "type": "object"
+          },
+          "name": "claim_check"
         },
         {
           "description": "Show, enable, or revoke process-local hosted/cloud model consent.\n\n    Enabling is explicit consent for later ``cloud-*`` prompts to leave this\n    machine and potentially incur provider usage. The setting resets on restart.\n    ",
@@ -35898,6 +36260,73 @@
           "name": "checklist_update"
         },
         {
+          "description": "Check a model's code claim against the repository, read-only: is the cited file,\n        line and are the named symbols real, and is a guard of the claimed category nearby\n        (verdict reject = the citation is wrong; flag = a guard-shaped line was found nearby, which\n        says nothing about whether the claim is true; keep = nothing contradicts the citation).\n        Pass file (+ line, symbols, category, guard, entry_point, claim_text) or claims_json.",
+          "inputSchema": {
+            "properties": {
+              "category": {
+                "default": "",
+                "title": "Category",
+                "type": "string"
+              },
+              "claim_id": {
+                "default": "",
+                "title": "Claim Id",
+                "type": "string"
+              },
+              "claim_text": {
+                "default": "",
+                "title": "Claim Text",
+                "type": "string"
+              },
+              "claims_json": {
+                "default": "",
+                "title": "Claims Json",
+                "type": "string"
+              },
+              "entry_point": {
+                "default": "",
+                "title": "Entry Point",
+                "type": "string"
+              },
+              "file": {
+                "default": "",
+                "title": "File",
+                "type": "string"
+              },
+              "guard": {
+                "default": "",
+                "title": "Guard",
+                "type": "string"
+              },
+              "line": {
+                "default": 0,
+                "title": "Line",
+                "type": "integer"
+              },
+              "line_end": {
+                "default": 0,
+                "title": "Line End",
+                "type": "integer"
+              },
+              "root": {
+                "title": "Root",
+                "type": "string"
+              },
+              "symbols": {
+                "default": "",
+                "title": "Symbols",
+                "type": "string"
+              }
+            },
+            "required": [
+              "root"
+            ],
+            "title": "claim_checkArguments",
+            "type": "object"
+          },
+          "name": "claim_check"
+        },
+        {
           "description": "Show, enable, or revoke process-local hosted/cloud model consent.\n\n    Enabling is explicit consent for later ``cloud-*`` prompts to leave this\n    machine and potentially incur provider usage. The setting resets on restart.\n    ",
           "inputSchema": {
             "properties": {
@@ -43709,6 +44138,76 @@
         },
         {
           "function": {
+            "description": "Check a model's code claim against the repository, read-only: is the cited file,\n        line and are the named symbols real, and is a guard of the claimed category nearby\n        (verdict reject = the citation is wrong; flag = a guard-shaped line was found nearby, which\n        says nothing about whether the claim is true; keep = nothing contradicts the citation).\n        Pass file (+ line, symbols, category, guard, entry_point, claim_text) or claims_json.",
+            "name": "claim_check",
+            "parameters": {
+              "properties": {
+                "category": {
+                  "default": "",
+                  "title": "Category",
+                  "type": "string"
+                },
+                "claim_id": {
+                  "default": "",
+                  "title": "Claim Id",
+                  "type": "string"
+                },
+                "claim_text": {
+                  "default": "",
+                  "title": "Claim Text",
+                  "type": "string"
+                },
+                "claims_json": {
+                  "default": "",
+                  "title": "Claims Json",
+                  "type": "string"
+                },
+                "entry_point": {
+                  "default": "",
+                  "title": "Entry Point",
+                  "type": "string"
+                },
+                "file": {
+                  "default": "",
+                  "title": "File",
+                  "type": "string"
+                },
+                "guard": {
+                  "default": "",
+                  "title": "Guard",
+                  "type": "string"
+                },
+                "line": {
+                  "default": 0,
+                  "title": "Line",
+                  "type": "integer"
+                },
+                "line_end": {
+                  "default": 0,
+                  "title": "Line End",
+                  "type": "integer"
+                },
+                "root": {
+                  "title": "Root",
+                  "type": "string"
+                },
+                "symbols": {
+                  "default": "",
+                  "title": "Symbols",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "root"
+              ],
+              "title": "claim_checkArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
             "description": "Show, enable, or revoke process-local hosted/cloud model consent.\n\n    Enabling is explicit consent for later ``cloud-*`` prompts to leave this\n    machine and potentially incur provider usage. The setting resets on restart.\n    ",
             "name": "cloud_opt_in",
             "parameters": {
@@ -50635,13 +51134,13 @@
   },
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "ec1e1263facc9c653bcebbea92dc3bb096578f19d50f30ca90fdaf0829ba3df8",
+    "server.py": "03ddf8d938aa5a0032496148dbe249a743b7505a627e3c6de0de66560ef538e3",
     "sonder_runtime/application/tools/generated_catalogs.py": "332f23bad788ee427203c64a35f9e36affa2ec11af0ea08889ac9aaa821b0d89",
-    "sonder_runtime/bootstrap/native_mcp.py": "2cbf4a0a006084aeb19c6615d04fffee9af89b1fdc8ee7d1fd582e1a9616c9f8",
+    "sonder_runtime/bootstrap/native_mcp.py": "52cf0331617bcf57cc5fe77a0166c3d4191fc499a3537bbf78f1bd9f3e6b110b",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/domain/operational_capabilities.py": "6f8f2083343ac1b0de076cd4d545b5f99602a9916c185bd15d965ffa0c405fe6",
     "sonder_runtime/interfaces/sdk/discovery.py": "db8aeca8dd84d06cbbf834495db30b211956393375676f23899a28685aea015b",
-    "sonder_runtime/platform/config.py": "3e64ce05faebd176bafd8632cdf87c7c7af60fec2dc82017f76897b58af18173",
+    "sonder_runtime/platform/config.py": "64c68d40cfde244556b3c6291ee26797c4915c6c0f7113c1c04532988e1f4dd2",
     "sonder_runtime/platform/memory_replication_config.py": "f9fc0a642812bdc456ac082f0f8c52f051822f0160e16882b634895feb0cea61"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
@@ -51992,6 +52491,73 @@
           "status"
         ],
         "title": "checklist_updateArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Check a model's code claim against the repository, read-only: is the cited file,\n        line and are the named symbols real, and is a guard of the claimed category nearby\n        (verdict reject = the citation is wrong; flag = a guard-shaped line was found nearby, which\n        says nothing about whether the claim is true; keep = nothing contradicts the citation).\n        Pass file (+ line, symbols, category, guard, entry_point, claim_text) or claims_json.",
+      "name": "claim_check",
+      "parameters": {
+        "properties": {
+          "category": {
+            "default": "",
+            "title": "Category",
+            "type": "string"
+          },
+          "claim_id": {
+            "default": "",
+            "title": "Claim Id",
+            "type": "string"
+          },
+          "claim_text": {
+            "default": "",
+            "title": "Claim Text",
+            "type": "string"
+          },
+          "claims_json": {
+            "default": "",
+            "title": "Claims Json",
+            "type": "string"
+          },
+          "entry_point": {
+            "default": "",
+            "title": "Entry Point",
+            "type": "string"
+          },
+          "file": {
+            "default": "",
+            "title": "File",
+            "type": "string"
+          },
+          "guard": {
+            "default": "",
+            "title": "Guard",
+            "type": "string"
+          },
+          "line": {
+            "default": 0,
+            "title": "Line",
+            "type": "integer"
+          },
+          "line_end": {
+            "default": 0,
+            "title": "Line End",
+            "type": "integer"
+          },
+          "root": {
+            "title": "Root",
+            "type": "string"
+          },
+          "symbols": {
+            "default": "",
+            "title": "Symbols",
+            "type": "string"
+          }
+        },
+        "required": [
+          "root"
+        ],
+        "title": "claim_checkArguments",
         "type": "object"
       }
     },

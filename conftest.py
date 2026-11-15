@@ -48,6 +48,21 @@ _CAPTURED_LIVE_PROVIDER_ENV = {
     if name in os.environ
 }
 
+# Opt-in inputs of tests/live/test_isolated_live.py; captured before the scrub
+# below and restored only by the live_isolated_environment fixture.
+_LIVE_ISOLATED_VARIABLES = (
+    "SONDER_ISOLATED_LIVE",
+    "SONDER_ISOLATED_RUNTIME",
+    "SONDER_ISOLATED_ROOTS",
+    "SONDER_ISOLATED_IMAGE",
+    "SONDER_ISOLATED_VOLUME_IMAGE",
+)
+_CAPTURED_LIVE_ISOLATED_ENV = {
+    name: os.environ[name]
+    for name in _LIVE_ISOLATED_VARIABLES
+    if name in os.environ
+}
+
 
 # Test-harness controls, not runtime configuration: they survive the ambient
 # scrub so a developer can capture timings or rewrite REPL screen goldens.
@@ -145,6 +160,20 @@ def live_provider_environment(request, monkeypatch):
         for name, value in values.items():
             monkeypatch.setenv(name, value)
     yield
+
+
+def _restore_live_isolated_environment(monkeypatch, captured=None):
+    """Set the captured SONDER_ISOLATED_* inputs through *monkeypatch* and return them."""
+    values = dict(_CAPTURED_LIVE_ISOLATED_ENV if captured is None else captured)
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+    return values
+
+
+@pytest.fixture
+def live_isolated_environment(monkeypatch):
+    """Restore the captured SONDER_ISOLATED_* inputs for one live test only."""
+    yield _restore_live_isolated_environment(monkeypatch)
 
 
 def _cleanup_test_state() -> None:
