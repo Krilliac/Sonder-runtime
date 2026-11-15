@@ -484,11 +484,11 @@ def test_cost_is_computed_from_usage_with_the_documented_price_table(ledger):
 
 def test_price_table_rows_and_the_long_prompt_tier():
     cost = anthropic_policy.usage_cost_usd
-    assert cost("claude-opus-5-5", input_tokens=1_000_000, output_tokens=1_000_000) == Decimal("24")
-    assert cost("claude-fable-5-2", input_tokens=1_000_000, output_tokens=1_000_000) == Decimal("48")
+    assert cost("claude-opus-5-5", input_tokens=1_000_000, output_tokens=1_000_000) == Decimal(24)
+    assert cost("claude-fable-5-2", input_tokens=1_000_000, output_tokens=1_000_000) == Decimal(48)
     assert cost("claude-haiku-5-5", input_tokens=100_000, output_tokens=0) == Decimal("0.01")
     assert cost("claude-haiku-5-5", input_tokens=100_001, output_tokens=1_000_000) == Decimal("2.550001")
-    assert cost("claude-opus-5-5-20260101", input_tokens=1_000_000, output_tokens=0) == Decimal("4")
+    assert cost("claude-opus-5-5-20260101", input_tokens=1_000_000, output_tokens=0) == Decimal(4)
     with pytest.raises(anthropic_policy.AnthropicPolicyError):
         cost("claude-nonesuch", input_tokens=1, output_tokens=1)
 
@@ -507,26 +507,26 @@ def test_usage_is_exported_with_backend_anthropic_and_the_model(ledger, caplog):
 
 
 def test_daily_cap_refuses_the_next_call_after_spend_crosses_it_and_persists(ledger, tmp_path):
-    # opus 5.5: 1000 in + 1000 out = $0.024 per call
+    # opus 5.5: 1000 in + 1000 out = $0.024 per call; worst case for max_tokens 1000 is ~$0.0223
     sdk = FakeSdk(lambda k, p: _message(input_tokens=1_000, output_tokens=1_000))
-    settings = _settings(daily_usd=Decimal("0.03"))
+    settings = _settings(daily_usd=Decimal("0.05"))
     gateway = _gateway(sdk, ledger, settings)
-    gateway.generate(_request(), _context())   # $0.024 < cap: allowed
-    gateway.generate(_request(), _context())   # $0.024 spent at send time: allowed, ends at $0.048
+    gateway.generate(_request(options={"num_predict": 1000}), _context())   # worst case fits the cap: allowed
+    gateway.generate(_request(options={"num_predict": 1000}), _context())   # $0.024 + worst case still fits: allowed, ends at $0.048
     assert Decimal(ledger.snapshot()["usd"]) == Decimal("0.048")
     with pytest.raises(AnthropicDailyCapReached) as caught:
-        gateway.generate(_request(), _context())
+        gateway.generate(_request(options={"num_predict": 1000}), _context())
     assert len(sdk.calls) == 2  # the refused call never reached the SDK
     message = str(caught.value)
-    assert "$0.0480" in message and "$0.0300" in message and "SONDER_ANTHROPIC_DAILY_USD" in message
-    assert caught.value.cap_usd == Decimal("0.03") and caught.value.spent_usd == Decimal("0.048")
+    assert "$0.0480" in message and "$0.0500" in message and "SONDER_ANTHROPIC_DAILY_USD" in message
+    assert caught.value.cap_usd == Decimal("0.05") and caught.value.spent_usd == Decimal("0.048")
     assert not isinstance(caught.value, CapacityExceeded)  # a hard stop, not a retryable 429
     # A brand new gateway and ledger object over the same file still refuses.
     fresh = _gateway(sdk, SpendLedger(tmp_path / "anthropic-spend.json"), settings)
     with pytest.raises(AnthropicDailyCapReached):
-        fresh.generate(_request(), _context())
+        fresh.generate(_request(options={"num_predict": 1000}), _context())
     with pytest.raises(AnthropicDailyCapReached):
-        list(fresh.stream(_request(), _context()))
+        list(fresh.stream(_request(options={"num_predict": 1000}), _context()))
     assert len(sdk.calls) == 2
 
 
@@ -615,7 +615,7 @@ def test_stream_errors_never_carry_the_key_either(ledger, caplog):
 
 
 def test_status_reports_key_slots_as_booleans_and_spend_against_the_cap(ledger):
-    gateway = _gateway(FakeSdk(), ledger, _settings(api_key_2="", daily_usd=Decimal("5")))
+    gateway = _gateway(FakeSdk(), ledger, _settings(api_key_2="", daily_usd=Decimal(5)))
     gateway.generate(_request(), _context())
     entry = gateway.provider_status()["anthropic"]
     assert entry["state"] == "configured" and entry["healthy"] is True
@@ -950,9 +950,9 @@ def test_concurrent_calls_near_the_cap_cannot_both_be_admitted(ledger):
         return _message()
 
     sdk = FakeSdk(behave)
-    # opus 5.5 worst case for max_tokens 1000 is about $0.022: one call passes the
-    # check under a $0.02 cap, but its reservation then fills the cap.
-    gateway = _gateway(sdk, ledger, _settings(daily_usd=Decimal("0.02")))
+    # opus 5.5 worst case for max_tokens 1000 is about $0.0223: one call fits under
+    # a $0.03 cap, but its reservation leaves no room for a second.
+    gateway = _gateway(sdk, ledger, _settings(daily_usd=Decimal("0.03")))
     outcome = {}
 
     def first():
@@ -968,18 +968,96 @@ def test_concurrent_calls_near_the_cap_cannot_both_be_admitted(ledger):
     worker.join(5)
     assert outcome["first"].text == "hello from claude"
     # The reservation is gone and the real (tiny) cost counts: the next call is fine.
-    gateway.generate(_request(), _context())
+    gateway.generate(_request(options={"num_predict": 10}), _context())
     assert len(sdk.calls) == 2
 
 
 def test_reservation_is_released_after_a_failed_call(ledger):
     sdk = FakeSdk(lambda k, p: (_ for _ in ()).throw(FakeApiError(500, "x")))
-    gateway = _gateway(sdk, ledger, _settings(daily_usd=Decimal("0.02")))
+    gateway = _gateway(sdk, ledger, _settings(daily_usd=Decimal("0.03")))
     for _ in range(3):
         with pytest.raises(DependencyUnavailable):
             gateway.generate(_request(options={"num_predict": 1000}), _context())
     assert len(sdk.calls) == 3
     assert ledger._inflight == {}
+
+
+# -- the cap counts the call being admitted --------------------------------------------------------------
+
+
+def test_try_reserve_refuses_a_call_whose_worst_case_would_pass_the_cap(ledger):
+    ledger.record(usd=Decimal("4.99"), slot=1, input_tokens=1, output_tokens=1)
+    token, spent, inflight = ledger.try_reserve(Decimal(3), Decimal(5))
+    assert token is None and spent == Decimal("4.99") and inflight == Decimal(0)
+    assert ledger._inflight == {}
+    token, spent, inflight = ledger.try_reserve(Decimal("0.01"), Decimal(5))  # exact fit
+    assert token is not None and spent == Decimal("4.99")
+    assert ledger._inflight == {token: Decimal("0.01")}
+    # In-flight reservations count too: nothing more fits once the cap is exactly full.
+    assert ledger.try_reserve(Decimal("0.0001"), Decimal(5))[0] is None
+    ledger.release(token)
+    assert ledger.try_reserve(Decimal("0.01"), Decimal(5))[0] is not None
+
+
+def test_try_reserve_counts_inflight_plus_amount_against_the_cap(ledger):
+    first, _, _ = ledger.try_reserve(Decimal(2), Decimal(5))
+    assert first is not None
+    assert ledger.try_reserve(Decimal("3.01"), Decimal(5))[0] is None
+    assert ledger.try_reserve(Decimal(3), Decimal(5))[0] is not None  # 2 + 3 == cap
+
+
+def test_a_call_whose_worst_case_exceeds_the_whole_cap_is_refused_with_that_reason(ledger):
+    sdk = FakeSdk()
+    gateway = _gateway(sdk, ledger, _settings(daily_usd=Decimal("0.01")))
+    with pytest.raises(AnthropicDailyCapReached) as caught:
+        gateway.generate(_request(options={"num_predict": 1000}), _context())  # worst ~ $0.0223
+    assert sdk.calls == [] and ledger._inflight == {}
+    message = str(caught.value)
+    assert "larger than the whole $0.0100 daily cap" in message
+    assert "cap reached" not in message and "SONDER_ANTHROPIC_DAILY_USD" in message
+    assert caught.value.spent_usd == Decimal(0)
+
+
+def test_a_call_that_would_pass_the_cap_names_its_worst_case_in_the_refusal(ledger):
+    sdk = FakeSdk()
+    ledger.record(usd=Decimal("0.02"), slot=1, input_tokens=1, output_tokens=1)
+    gateway = _gateway(sdk, ledger, _settings(daily_usd=Decimal("0.03")))
+    with pytest.raises(AnthropicDailyCapReached) as caught:
+        gateway.generate(_request(options={"num_predict": 1000}), _context())  # $0.02 + ~$0.0223
+    assert sdk.calls == []
+    message = str(caught.value)
+    assert "$0.0200 spent today" in message and "worst-case cost $0.0223" in message
+    assert "would take the day over the $0.0300 cap" in message
+
+
+def test_a_response_without_usage_is_charged_the_reserved_worst_case(ledger, caplog):
+    def no_usage(key, params):
+        message = _message()
+        message.usage = None
+        return message
+
+    sdk = FakeSdk(no_usage)
+    gateway = _gateway(sdk, ledger, _settings(daily_usd=Decimal(1)))
+    with caplog.at_level(logging.WARNING):
+        gateway.generate(_request(options={"num_predict": 1000}), _context())
+    spent = ledger.today_usd()
+    assert Decimal("0.02") < spent < Decimal("0.03")  # the reservation (~$0.0223), not zero
+    assert "worst-case cost was charged" in caplog.text
+    assert ledger._inflight == {}
+    streamed = _gateway(FakeSdk(no_usage), ledger, _settings(daily_usd=Decimal(1)))
+    list(streamed.stream(_request(options={"num_predict": 1000}), _context()))
+    assert ledger.today_usd() > spent * 2 - Decimal("0.001")
+
+
+def test_a_response_with_partial_usage_keeps_per_field_defaults(ledger):
+    def partial(key, params):
+        message = _message()
+        message.usage = SimpleNamespace(input_tokens=1_000, output_tokens=None)
+        return message
+
+    gateway = _gateway(FakeSdk(partial), ledger, _settings(daily_usd=Decimal(1)))
+    gateway.generate(_request(options={"num_predict": 1000}), _context())
+    assert ledger.today_usd() == Decimal("0.004")  # 1000 input tokens only
 
 
 # -- pricing multiplier and client reuse --------------------------------------------------------------------
@@ -1066,9 +1144,9 @@ def test_a_429_on_key_one_blocks_new_calls_with_a_message_naming_the_slot(ledger
 
 
 def _near_cap_gateway(sdk, ledger):
-    # opus 5.5 worst case for max_tokens 1000 is about $0.022, which fills a $0.02 cap
-    # while the reservation is held.
-    return _gateway(sdk, ledger, _settings(daily_usd=Decimal("0.02")))
+    # opus 5.5 worst case for max_tokens 1000 is about $0.0223: one reservation fits a
+    # $0.03 cap but leaves no room for a second while it is held.
+    return _gateway(sdk, ledger, _settings(daily_usd=Decimal("0.03")))
 
 
 def _admitted_after(gateway, sdk):

@@ -107,9 +107,13 @@ rate limited, not for the other one. Which slot served each call is shown in
 
 Each response's token usage is priced from the table and added to a ledger in
 the Sonder state home (`anthropic-spend.json`, per UTC day), so the total
-survives restarts and is shared by every process on that home. Once today's
-total reaches `SONDER_ANTHROPIC_DAILY_USD`, new calls are refused with an error
-that names the cap and today's spend, until 00:00 UTC or until you raise the cap.
+survives restarts and is shared by every process on that home. A call is
+refused if its worst-case cost (below) would take the day over
+`SONDER_ANTHROPIC_DAILY_USD`; the error names the cap and today's spend, and
+lasts until 00:00 UTC or until you raise the cap. A single call whose worst case
+alone exceeds the cap is refused with a message saying so (lower `max_tokens`
+or raise the cap). A successful response that carries no usage block is charged
+that worst-case amount rather than zero.
 A call already in flight is never cut off. Before each send the gateway
 reserves a worst-case cost (`max_tokens` of output plus the prompt's byte length
 as input) that counts against the cap until the call finishes, so concurrent

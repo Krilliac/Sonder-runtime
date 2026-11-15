@@ -48,9 +48,10 @@ import-time failure of the runtime.
 * **Accounting and spend cap.** The token usage the API returns is recorded
   per call with ``backend=anthropic`` and the model id; the USD cost comes from
   the price table in :mod:`...domain.anthropic_policy`.  A daily total persists
-  in the state home (:mod:`anthropic_spend`), and once it reaches
-  ``SONDER_ANTHROPIC_DAILY_USD`` (default 10) new calls are refused with
-  :class:`AnthropicDailyCapReached`.  A call already in flight is never cut off.
+  in the state home (:mod:`anthropic_spend`), and a call is
+  refused with :class:`AnthropicDailyCapReached` if its worst-case cost would
+  take the day over ``SONDER_ANTHROPIC_DAILY_USD`` (default 10).  A response
+  with no usage block is charged that worst case.  A call already in flight is never cut off.
 * **Errors.** 401, credit exhaustion (400/402), 429 (``retry-after`` becomes a
   local cool-down for that key slot only), 529 overloaded and 5xx map onto the
   domain taxonomy with actionable text.
@@ -440,6 +441,7 @@ class _Prepared:
     model: str
     params: dict
     reservation: int
+    reserved_usd: Decimal
 
 
 class AnthropicGateway:
@@ -545,8 +547,13 @@ class AnthropicGateway:
                 "for another %.0fs" % (slot, remaining), retry_after=remaining,
             )
 
-    def _reserve(self, settings: AnthropicSettings, model: str, params: dict) -> int:
-        """Refuse at the cap; else reserve this call's worst-case cost in the ledger."""
+    def _reserve(
+        self, settings: AnthropicSettings, model: str, params: dict,
+    ) -> tuple[int, Decimal]:
+        """Refuse a call whose worst case would pass the cap; else reserve that cost.
+
+        Returns ``(reservation token, worst-case USD)``.
+        """
         sized = {name: params[name] for name in ("system", "messages") if name in params}
         prompt_bytes = len(json.dumps(sized).encode("utf-8"))  # a token is at least a byte
         worst = usage_cost_usd(
@@ -554,14 +561,23 @@ class AnthropicGateway:
         )
         token, spent, inflight = self._ledger.try_reserve(worst, settings.daily_usd)
         if token is None:
+            if worst > settings.daily_usd:
+                raise AnthropicDailyCapReached(
+                    "Anthropic call refused: its worst-case cost %s (max_tokens of output "
+                    "plus the prompt size) is larger than the whole %s daily cap (%s); "
+                    "lower max_tokens, shorten the prompt, or raise the cap"
+                    % (_usd(worst), _usd(settings.daily_usd), ENV_DAILY_USD),
+                    cap_usd=settings.daily_usd, spent_usd=spent,
+                )
             raise AnthropicDailyCapReached(
-                "Anthropic daily spend cap reached: %s spent today (UTC)%s of the %s cap "
-                "(%s); new calls resume after 00:00 UTC, or raise the cap"
+                "Anthropic daily spend cap reached: %s spent today (UTC)%s, and this call's "
+                "worst-case cost %s would take the day over the %s cap (%s); new calls "
+                "resume after 00:00 UTC, or raise the cap"
                 % (_usd(spent), (" plus up to %s in flight" % _usd(inflight)) if inflight else "",
-                   _usd(settings.daily_usd), ENV_DAILY_USD),
+                   _usd(worst), _usd(settings.daily_usd), ENV_DAILY_USD),
                 cap_usd=settings.daily_usd, spent_usd=spent,
             )
-        return token
+        return token, worst
 
     # -- request building --------------------------------------------------
 
@@ -635,7 +651,8 @@ class AnthropicGateway:
         if self._client_factory is None:
             load_sdk()  # a missing SDK fails here, before any admission or spend check
         self._check_cooldown(settings.key_slots[0][0])
-        return _Prepared(settings, model, params, self._reserve(settings, model, params))
+        token, worst = self._reserve(settings, model, params)
+        return _Prepared(settings, model, params, token, worst)
 
     # -- errors --------------------------------------------------------------
 
@@ -799,13 +816,19 @@ class AnthropicGateway:
             },
         }
 
-    def _account(self, data: dict, model: str, slot: int) -> None:
+    def _account(
+        self, data: dict, model: str, slot: int, reserved: Decimal | None = None,
+    ) -> None:
         """The sole accounting boundary: runs for every completed physical response.
 
         A completed response can be billable even when a later cancellation
         prevents publishing it, so spend is recorded here, not in ``_finish``.
+        When the response carries no usage and ``reserved`` (the call's
+        worst-case cost) is known, that worst case is recorded instead of zero.
         """
         usage = data.get("usage")
+        if not isinstance(usage, Mapping):
+            usage = None
         counts = {name: int((usage or {}).get(name) or 0) for name in (
             "input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens",
         )}
@@ -816,7 +839,14 @@ class AnthropicGateway:
             us_only=data.get("inference_geo") == "us",
         )
         if usage is None:
-            logger.warning("anthropic: response carried no usage; spend recorded as zero")
+            if reserved is not None and reserved.is_finite() and reserved > 0:
+                cost = reserved
+                logger.warning(
+                    "anthropic: response carried no usage; the call's worst-case cost "
+                    "was charged against the cap"
+                )
+            else:
+                logger.warning("anthropic: response carried no usage; spend recorded as zero")
         self._ledger.record(
             usd=cost, slot=slot, input_tokens=counts["input_tokens"] + counts["cache_read_input_tokens"]
             + counts["cache_creation_input_tokens"], output_tokens=counts["output_tokens"],
@@ -855,7 +885,7 @@ class AnthropicGateway:
 
     def _attempt(
         self, settings: AnthropicSettings, slot: int, key: str, model: str, params: dict,
-        context: OperationContext, timeout: float, sink, stop,
+        context: OperationContext, timeout: float, sink, stop, reserved: Decimal | None = None,
     ) -> dict:
         self._check_liveness(context, phase="before provider send")
         self._admit()
@@ -889,7 +919,7 @@ class AnthropicGateway:
                 failure = None
                 raise error
             data = self._normalize(final, model)
-            self._account(data, model, slot)
+            self._account(data, model, slot, reserved)
             return data
 
         # Evidence capture commits the effective body (never the key) before send.
@@ -897,7 +927,7 @@ class AnthropicGateway:
 
     def _invoke(
         self, settings: AnthropicSettings, model: str, params: dict, context: OperationContext,
-        timeout: float, *, sink=None, stop=None,
+        timeout: float, *, sink=None, stop=None, reserved: Decimal | None = None,
     ) -> dict:
         """Key 1, then key 2 once, only after a 401 or credit-exhausted refusal."""
         slots = settings.key_slots
@@ -912,7 +942,7 @@ class AnthropicGateway:
             try:
                 return self._attempt(
                     settings, slot, key, model, params, context, timeout,
-                    mark if sink is not None else None, stop,
+                    mark if sink is not None else None, stop, reserved,
                 )
             except SonderError as error:
                 if (getattr(error, _FAILOVER_FLAG, False) and not delivered
@@ -947,7 +977,10 @@ class AnthropicGateway:
         try:
             timeout = self._call_timeout(prepared.settings, context)
             started = time.monotonic()
-            data = self._invoke(prepared.settings, prepared.model, prepared.params, context, timeout)
+            data = self._invoke(
+                prepared.settings, prepared.model, prepared.params, context, timeout,
+                reserved=prepared.reserved_usd,
+            )
         finally:
             self._ledger.release(prepared.reservation)
         self._check_liveness(context, phase="during model call")
@@ -990,7 +1023,7 @@ class AnthropicGateway:
             try:
                 terminal.append(("done", self._invoke(
                     prepared.settings, prepared.model, prepared.params, context, timeout,
-                    sink=publish, stop=stop,
+                    sink=publish, stop=stop, reserved=prepared.reserved_usd,
                 )))
             except BaseException as exc:  # noqa: BLE001 - re-raised on the consumer thread
                 terminal.append(("error", exc))
