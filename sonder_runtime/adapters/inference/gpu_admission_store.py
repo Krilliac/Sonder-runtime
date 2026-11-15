@@ -29,6 +29,7 @@ from typing import Callable
 from sonder_runtime.adapters.process_liveness import (
     PROCESS_DEAD, probe_process, process_identity,
 )
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
 from sonder_runtime.domain.gpu_admission import QueueEntry, queue_order
 from sonder_runtime.platform.private_files import prepare_private_sqlite
 
@@ -133,7 +134,7 @@ class GpuAdmissionStore:
         if self.path.is_symlink():
             raise StoreUnavailable("admission store must not be a symlink")
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        return sqlite3.connect(str(self.path), timeout=self._busy)
+        return owned_sqlite_connect(str(self.path), timeout=self._busy)
 
     def _begin(self, connection: sqlite3.Connection) -> None:
         connection.execute("BEGIN IMMEDIATE")

@@ -874,9 +874,13 @@ def service_for_environment(environment: Mapping[str, str]) -> GpuAdmission:
 def configure_typed_gpu_admission(config: GpuAdmissionConfig) -> None:
     """Bind the validated ``[gpu_admission]`` section for this process.
 
-    Called next to ``configure_typed_workers``, before the pool is built."""
+    Called next to ``configure_typed_workers``, before the pool is built. The
+    documented ``SONDER_GPU_*`` environment overrides apply to the section here
+    too, so a section built in code obeys them like one loaded from TOML."""
     global _typed_config, _process_service
-    problems = gpu_admission_errors(config)
+    errors: list[str] = []
+    config = apply_gpu_admission_environment(config, os.environ, errors)
+    problems = errors + gpu_admission_errors(config)
     if problems:
         raise ValueError("; ".join(problems))
     with _configuration_lock:
