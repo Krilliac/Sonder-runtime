@@ -370,7 +370,7 @@ class RuntimePayload:
                 "paths": [str(self.path), str(base / "Lib"), str(base / "DLLs"),
                           *(str(path) for path in site_paths)],
                 "dll_paths": dll_paths, "source": str(source), "roots": roots,
-                "files": rows, "python": [3, 12],
+                "files": rows, "python": list(sys.version_info[:2]),
                 "profile": str(runtime_venv) if runtime_venv else "",
             }
             if len(canonical(self.manifest)) > MAX_MANIFEST:
@@ -409,7 +409,7 @@ class RuntimePayload:
         value = self.manifest
         if expected is not None and self.digest != expected:
             raise OwnerRefused("runtime artifact digest changed")
-        if value["schema"] != 2 or value["python"] != [3, 12] or value["payload"] != str(self.path):
+        if value["schema"] != 2 or value["python"] != list(sys.version_info[:2]) or tuple(value["python"]) not in MANAGED_PYTHON_MINORS or value["payload"] != str(self.path):
             raise OwnerRefused("runtime artifact profile changed")
         disjoint((value["source"], *value["paths"], *value["dll_paths"], value["executable"],
                   *((value["profile"],) if value["profile"] else ())), tuple(writable_roots))
