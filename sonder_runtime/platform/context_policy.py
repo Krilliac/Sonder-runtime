@@ -79,8 +79,8 @@ _PARAMETER_CONTEXT_BANDS = (
 
 
 # Window for a local model that has never been probed successfully in this
-# process (``metadata_unavailable``): the smallest window a successful probe can
-# choose (the >=48B band).
+# process (``metadata_unavailable``): the smallest parameter band (>=48B).  An
+# advertised maximum or a residency ceiling can still choose less.
 METADATA_UNAVAILABLE_CONTEXT = 8_192
 
 
@@ -93,7 +93,9 @@ def auto_context_plan(
     Returns a dict with the selected ``context`` plus the intermediate facts
     that produced it: the starting ``base`` and its ``source``, the parsed
     ``parameter_billions`` and ``advertised`` maximum, and the ordered list of
-    ``clamps`` that actually reduced (or raised) the value.  A
+    ``clamps`` that actually reduced (or raised) the value.  ``metadata_unavailable``
+    marks a local model never probed successfully and caps the window at
+    ``METADATA_UNAVAILABLE_CONTEXT`` unless the operator pinned a size.  A
     ``residency_ceiling`` is a window measured to fit (the model spilled to
     system RAM at a larger one); like the parameter bands it bounds only
     automatic selection, never an operator pin.  The physical

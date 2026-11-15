@@ -214,3 +214,46 @@ def test_untagged_and_latest_spellings_are_one_model(monkeypatch):
     for spelling in ("x", "x:latest"):
         server._make_generate(spelling, "", 0.2, 32, 0, text_only=True)("hello")
     assert sent == [32768, 32768], sent
+
+
+def test_partial_probe_is_a_failure_so_cached_calls_keep_the_same_window(monkeypatch):
+    good = {"details": {"parameter_size": "7.6B"}, "model_info": {"x.context_length": 32768}}
+    partial = {
+        "details": {},
+        "model_info": {"x.context_length": 4096, "general.parameter_count": "unknown"},
+    }
+    results = iter([good, partial])
+    sent = []
+
+    def fake_post(path, payload, **_kwargs):
+        if path == "/api/show":
+            return next(results)
+        sent.append(payload["options"]["num_ctx"])
+        return {"message": {"content": "ok"}}
+
+    monkeypatch.setattr(server, "_post", fake_post)
+    server._make_generate(MODEL, "", 0.2, 32, 0, text_only=True)("hello")
+    _expire_cache()
+    for _ in range(2):  # the second of these is served from the cache
+        server._make_generate(MODEL, "", 0.2, 32, 0, text_only=True)("hello")
+    assert sent == [32768, 32768, 32768], sent
+
+
+def test_declared_context_below_the_minimum_window_is_sent_as_declared(monkeypatch):
+    show = {
+        "details": {"parameter_size": "100M"},
+        "model_info": {"x.context_length": 256},
+        "parameters": "num_ctx 256",
+    }
+    assert _chat_context(monkeypatch, [show]) == [256]
+    assert 256 < context_policy.MIN_CONTEXT
+
+
+def test_never_probed_log_is_not_spent_by_an_operator_pin(monkeypatch, caplog):
+    caplog.set_level("INFO", logger="sonder.server")
+    monkeypatch.setenv("SONDER_CONTEXT_SIZE", "16384")
+    _chat_context(monkeypatch, [None])
+    assert "no successful metadata probe" not in caplog.text
+    monkeypatch.delenv("SONDER_CONTEXT_SIZE")
+    _chat_context(monkeypatch, [None])
+    assert caplog.text.count("no successful metadata probe") == 1

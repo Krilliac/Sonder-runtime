@@ -1728,7 +1728,7 @@ def _model_context_metadata(model):
         # unavailable. The deterministic context-policy fallback remains safe.
         pass
     with _MODEL_CONTEXT_CACHE_LOCK:
-        _MODEL_CONTEXT_CACHE[key] = (now, context_length, parameter_size)
+        _MODEL_CONTEXT_CACHE[key] = (now, None, None) if declared is False else (now, context_length, parameter_size)
     return _MODEL_CONTEXT_MEMORY.settle(model, declared, context_length, parameter_size)
 
 

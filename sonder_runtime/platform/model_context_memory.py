@@ -81,7 +81,8 @@ class ModelContextMemory:
                 else:
                     self._declared.pop(key, None)
                 return context_length, parameter_size
-            return self._last_success.get(key, (context_length, parameter_size))
+            # A probe that did not finish is a failure, partial fields included.
+            return self._last_success.get(key, (None, None))
 
     def metadata_unavailable(self, model, context_length, parameter_size, *, cloud, pinned) -> bool:
         """True for a local model that has never been probed successfully.
@@ -98,9 +99,10 @@ class ModelContextMemory:
         with self._lock:
             if key in self._last_success:
                 return False
-            first = key not in self._unprobed_logged
-            self._unprobed_logged.add(key)
-        if first and not pinned:
+            first = key not in self._unprobed_logged and not pinned
+            if first:  # a pin skips the log, so the line still appears once unpinned
+                self._unprobed_logged.add(key)
+        if first:
             _LOG.info(
                 "model %r has no successful metadata probe yet; context is capped at %d",
                 key[:128], context_policy.METADATA_UNAVAILABLE_CONTEXT,
@@ -112,7 +114,10 @@ class ModelContextMemory:
 
         The context policy picks the automatic window (with the never-probed
         floor for local models); the model's declared window then only lowers
-        it.  Cloud models and operator pins get exactly the policy's value.
+        it.  Cloud models and operator pins get exactly the policy's value.  A
+        declared ``num_ctx`` below ``MIN_CONTEXT`` is sent as declared: it is the
+        model's own Modelfile value (and normally its advertised maximum), so a
+        larger window cannot help.
         """
         pinned = declared_context.operator_pinned()
         unavailable = self.metadata_unavailable(
