@@ -101,8 +101,25 @@ class Settings {
 
   static const defaultModel = 'sonder';
 
-  /// The server a fresh install talks to: the local runtime on loopback.
-  static const defaultServerUrl = 'http://127.0.0.1:11435';
+  /// The saved server. In a browser it is always the page origin: a stored
+  /// or typed URL must never make the page a credentialed cross-origin client.
+  static String _storedServer(SharedPreferences p) =>
+      pageOrigin ?? p.getString(_kServer) ?? defaultServerUrl;
+
+  /// Test-only page origin; non-null makes [defaultServerUrl] behave as it
+  /// does in a browser.
+  @visibleForTesting
+  static String? debugPageOrigin;
+
+  /// The origin that served the app when it runs in a browser (the Sonder
+  /// server's `/app/`), else null. The browser app talks only to this origin.
+  static String? get pageOrigin =>
+      debugPageOrigin ?? (kIsWeb ? Uri.base.origin : null);
+
+  /// The server a fresh install talks to: the page origin in a browser, the
+  /// local runtime on loopback elsewhere.
+  static String get defaultServerUrl =>
+      pageOrigin ?? 'http://127.0.0.1:11435';
 
   String serverUrl;
   String apiKey;
@@ -136,7 +153,7 @@ class Settings {
   List<String> cleartextKeyHosts;
 
   Settings({
-    this.serverUrl = defaultServerUrl,
+    String? serverUrl,
     this.apiKey = '',
     this.accountSession,
     this.themeMode = 'dark',
@@ -150,7 +167,7 @@ class Settings {
     this.observatoryExecutable = '',
     this.observatoryWebUrl = '',
     this.cleartextKeyHosts = const [],
-  });
+  }) : serverUrl = serverUrl ?? defaultServerUrl;
 
   bool get isConfigured => serverUrl.trim().isNotEmpty;
 
@@ -272,7 +289,7 @@ class Settings {
     return Settings(
       cleartextKeyHosts: cleartextKeyHosts,
       accountSession: account,
-      serverUrl: p.getString(_kServer) ?? defaultServerUrl,
+      serverUrl: _storedServer(p),
       apiKey: apiKey,
       themeMode: _themeModeFrom(p),
       model: p.getString(_kModel) ?? defaultModel,
@@ -418,7 +435,7 @@ class Settings {
     CredentialStore? credentialStore,
   }) async {
     final p = await SharedPreferences.getInstance();
-    final storedServer = p.getString(_kServer) ?? defaultServerUrl;
+    final storedServer = _storedServer(p);
     if (!session.matches(serverUrl) || !session.matches(storedServer)) {
       throw StateError('The session belongs to a server that is not saved');
     }

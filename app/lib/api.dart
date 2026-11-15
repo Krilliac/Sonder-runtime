@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:http/http.dart' as http;
 
 import 'account_session.dart';
@@ -905,7 +906,8 @@ class SonderApi implements SonderApiPort {
     required this.baseUrl,
     this.apiKey = '',
     this.accountSession,
-    this.localFallbackUrl = 'http://127.0.0.1:11435',
+    // A page served from another origin must not fire requests at 127.0.0.1.
+    this.localFallbackUrl = kIsWeb ? '' : 'http://127.0.0.1:11435',
     this.chatTimeout = const Duration(minutes: 5),
     this.streamStallTimeout = const Duration(seconds: 45),
   });
