@@ -31,7 +31,7 @@ except ImportError:  # pragma: no cover - exercised on minimal installs
 # Bounded ``backend`` label values for inference measurements; any other
 # backend is folded into "other" so label cardinality stays fixed.
 _INFERENCE_BACKEND_LABELS = frozenset({
-    "ollama", "openai_compatible", "sonder_inference", "openrouter",
+    "ollama", "openai_compatible", "sonder_inference", "openrouter", "anthropic",
 })
 # The upstream host a router reports (OpenRouter's ``provider``) is external
 # text: it is folded to a lowercase slug and at most this many distinct values

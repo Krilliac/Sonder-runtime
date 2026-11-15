@@ -133,12 +133,14 @@ def test_loop_alias_spellings_still_meet_the_admin_boundary():
 
 def test_loop_payloads_stay_open_for_the_trusted_surfaces():
     """The closure keys on served authority: local-open and the owner key
-    lose nothing, and ordinary read/code actions stay open for everyone."""
+    lose nothing, and ordinary read/code actions stay open above the user
+    role (a user-role account is held to the role tool allowlist instead)."""
     admin_payload = json.dumps({"actions": [{"type": "memory_privacy_repair"}]})
     assert serve._loop_global_operation_refusal(admin_payload, LOCAL_OPEN) == ""
     assert serve._loop_global_operation_refusal(admin_payload, _context("admin")) == ""
     benign = json.dumps({"actions": [{"type": "code", "code": "print(1)"}]})
-    assert serve._loop_global_operation_refusal(benign, _context("user")) == ""
+    assert serve._loop_global_operation_refusal(benign, _context("developer")) == ""
+    assert serve._loop_global_operation_refusal(benign, _context("user")).startswith("refused /loop")
     # Malformed payloads keep reaching server.loop's own JSON contract.
     assert serve._loop_global_operation_refusal("not json", _context("user")) == ""
 
@@ -465,8 +467,10 @@ def test_an_unbound_durable_tool_keeps_its_actionable_refusal():
     """`admin_login` is durable-authority and deliberately unbound; the
     refusal an ordinary account sees must be the durable one that names the
     remedy, not the generic unbound-system-operation message."""
-    refusal = serve._http_tool_refusal(("admin_login",), "/login", _context("user"))
+    refusal = serve._http_tool_refusal(("admin_login",), "/login", _context("developer"))
     assert "console" in refusal or "allow rule" in refusal, refusal
+    # A user-role account never gets as far as the permission decision.
+    assert "account role" in serve._http_tool_refusal(("admin_login",), "/login", _context("user"))
 
 
 def test_a_binding_deleted_at_runtime_fails_closed_for_served_accounts(every_tool_allowed_by_rule, monkeypatch):

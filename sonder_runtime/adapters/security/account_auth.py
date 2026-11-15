@@ -26,8 +26,8 @@ class AccountAuthProvider:
             actor=actor,
         )
 
-    def login(self, connection, username, password):
-        return _engine().login(connection, username, password)
+    def login(self, connection, username, password, *, client_ip=None):
+        return _engine().login(connection, username, password, client_ip=client_ip)
 
     def reauthenticate(self, connection, token, password):
         return _engine().reauthenticate(connection, token, password)

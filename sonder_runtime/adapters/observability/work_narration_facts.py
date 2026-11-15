@@ -18,6 +18,7 @@ _ENV_BY_PROVIDER = {
     "openai_compat": "SONDER_OPENAI_BASE_URL",
     "openai_compatible": "SONDER_OPENAI_BASE_URL",
     "openrouter": "SONDER_OPENROUTER_BASE_URL",
+    "anthropic": "SONDER_ANTHROPIC_BASE_URL",
 }
 
 

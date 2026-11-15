@@ -62,6 +62,10 @@ def test_interrupted_action_is_uncertain_and_never_replayed(monkeypatch, tmp_pat
     sonder_lifecycle.reset_for_tests()
 
 
+# The owner API key carries developer authority; a full context, as the server builds it.
+OWNER_KEY = {"mode": "api-key", "authorized": True, "api_key": True, "account": None}
+
+
 def test_work_retry_is_idempotent_per_principal_and_exact_action(monkeypatch):
     sonder_lifecycle.reset_for_tests()
     calls = []
@@ -71,15 +75,15 @@ def test_work_retry_is_idempotent_per_principal_and_exact_action(monkeypatch):
     )
 
     first = serve._handle_slash(
-        "/work inspect and repair", project="demo", context={"api_key": True},
+        "/work inspect and repair", project="demo", context=OWNER_KEY,
         idempotency_key="lost-connection-1",
     )
     retry = serve._handle_slash(
-        "/work inspect and repair", project="demo", context={"api_key": True},
+        "/work inspect and repair", project="demo", context=OWNER_KEY,
         idempotency_key="lost-connection-1",
     )
     changed_action = serve._handle_slash(
-        "/work inspect and validate", project="demo", context={"api_key": True},
+        "/work inspect and validate", project="demo", context=OWNER_KEY,
         idempotency_key="lost-connection-1",
     )
 
