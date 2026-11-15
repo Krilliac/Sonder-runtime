@@ -189,7 +189,10 @@ def test_read_chunks_split_on_line_boundaries(repo_root, tmp_path):
     assert "".join(chunk.text for chunk in chunks).count("ReadBlock") == 1
 
 
-@pytest.mark.parametrize("rel", ["deploy/prod.env", "config/secrets.yaml", ".docker/config.json"])
+@pytest.mark.parametrize("rel", [
+    "deploy/prod.env", "config/secrets.yaml", ".docker/config.json",
+    ".env-prod", "config/.env_local", "deploy/.envs", "deploy/.ENV-Staging",
+])
 def test_env_suffix_credential_named_and_docker_config_files_are_skipped_and_refused(repo_root, tmp_path, rel):
     target = repo_root / rel
     target.parent.mkdir(parents=True, exist_ok=True)

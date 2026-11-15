@@ -394,6 +394,21 @@ def test_chunk_mode_matches_findings_to_labels_and_reports_a_precision_floor(wor
     assert request.tier == MODEL and request.system.strip() and request.routing_metadata["purpose"] == "security_eval"
 
 
+def test_chunk_mode_scores_a_fileless_finding_in_its_chunk_and_never_one_in_another_file(world):
+    reply = json.dumps([
+        {"lines": "13-14", "category": "bounds", "hypothesis": "no file named"},
+        {"file": "src/Other.cs", "lines": "21-22", "category": "bounds", "hypothesis": "other file"},
+    ])
+    gateway = FakeGateway(lambda hypothesis, has_context: reply)
+    runner, _ = make_runner(world, gateway)
+    result = runner.run(world.records, plan(mode="chunk", arms=("none",), chunk_chars=100_000,
+                                            match_line_tolerance=0))
+    chunk = result.report["chunk_scores"]["none"]
+    assert chunk["generated"] == 2
+    assert chunk["matched_confirmed"] == 1, "a finding with no file was not scored in its chunk"
+    assert chunk["matched_refuted"] == 0, "a finding in another file matched this chunk's labels"
+
+
 def test_chunk_mode_with_an_unparseable_reply_is_a_failed_chunk(world):
     gateway = FakeGateway(lambda hypothesis, has_context: "nothing structured")
     runner, _ = make_runner(world, gateway)

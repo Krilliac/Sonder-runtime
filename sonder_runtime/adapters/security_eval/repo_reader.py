@@ -6,8 +6,9 @@ Confinement rules (every one is enforced here, none is delegated to the caller):
 - a record's ``file`` field may not hold ``..``, an absolute path, a drive letter or an alternate
   data stream;
 - the walk never follows a symlink or junction and never lists one; ``.git`` and credential
-  directories, secret files (the ``file_ops`` definition: ``.env*``, ``*.env``, credential/secret
-  named configs, ``.docker/config.json``), binary files and files over the byte cap are skipped;
+  directories, secret files (any ``.env*`` name, plus the ``file_ops`` definition: ``*.env``,
+  credential/secret named configs, ``.docker/config.json``), binary files and files over the byte
+  cap are skipped, and ``read_window`` refuses the same paths;
 - every open is a no-follow open (``FILE_FLAG_OPEN_REPARSE_POINT`` on Windows, ``O_NOFOLLOW`` on
   POSIX) whose handle path is checked to lie inside the root, so a directory swapped for a link after
   indexing is refused at open time instead of read.
@@ -83,14 +84,19 @@ def _is_reparse(path: str) -> bool:
 
 
 def _sensitive_rel(rel: str) -> bool:
-    """True when the repo-relative path is a secret file by the ``file_ops`` definition.
+    """True when the repo-relative path is a secret file.
 
-    Uses ``file_ops._is_secret_path`` (secret names and suffixes, ``.env*``, ``*.env``, and
-    credential/secret named config files) plus ``file_ops._credential_part`` (credential stores
-    such as ``.docker/config.json``) so the two lists cannot drift apart.
+    Uses ``file_ops._is_secret_path`` (secret names and suffixes, ``.env``, ``.envrc``, ``.env.*``,
+    ``*.env``, and credential/secret named config files) plus ``file_ops._credential_part``
+    (credential stores such as ``.docker/config.json``) so the two lists cannot drift apart. On top
+    of that, any name starting with ``.env`` (``.env-prod``, ``.env_local``, ``.envs``) is secret
+    here: these windows can reach a cloud model, so this reader stays wider than ``file_ops``.
     """
     parts = rel.split("/")
-    return file_ops._is_secret_path(PurePosixPath(parts[-1])) or bool(file_ops._credential_part(parts))
+    name = parts[-1]
+    return (name.casefold().startswith(".env")
+            or file_ops._is_secret_path(PurePosixPath(name))
+            or bool(file_ops._credential_part(parts)))
 
 
 def _opened_handle_path(fd: int) -> str | None:
