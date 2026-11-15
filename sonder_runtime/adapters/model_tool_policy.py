@@ -380,11 +380,45 @@ def _safe_overlay_path() -> tuple[Path | None, str]:
 
 @dataclass(frozen=True)
 class _Pin:
-    """What was pinned for one path: the sha256 and the floor it held (so a reload can show what changed)."""
+    """What was pinned for one path: the sha256 and what the file held (so a reload can show what changed)."""
 
     sha256: str
     names: frozenset[str]
     prefixes: tuple[str, ...]
+    ceiling: tuple[str, ...] = ()
+    globs: tuple[str, ...] = ()
+    undetermined: frozenset[str] = frozenset()
+    profile_tools: tuple[tuple[str, tuple[str, ...]], ...] = ()
+
+
+def _pin_of(digest: str, document: _Document) -> _Pin:
+    names, prefixes = _floor_of(document)
+    return _Pin(
+        digest, names, prefixes, ceiling=document.ceiling, globs=document.globs,
+        undetermined=document.undetermined,
+        profile_tools=tuple((profile.id, profile.tools) for profile in document.profiles),
+    )
+
+
+def _pin_changes(old: _Pin | None, new: _Pin) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """``(label, values)`` for every floor name, prefix, ceiling tool, secret glob, undetermined name and
+    profile tool that differs between ``old`` (nothing, when there was no pin) and ``new``."""
+    before = old if old is not None else _Pin("", frozenset(), ())
+    pairs: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = [
+        ("floor names", tuple(sorted(before.names)), tuple(sorted(new.names))),
+        ("floor prefixes", before.prefixes, new.prefixes),
+        ("restricted tool ceiling", before.ceiling, new.ceiling),
+        ("restricted secret path globs", before.globs, new.globs),
+        ("undetermined served models", tuple(sorted(before.undetermined)), tuple(sorted(new.undetermined))),
+    ]
+    old_tools, new_tools = dict(before.profile_tools), dict(new.profile_tools)
+    for profile_id in dict.fromkeys((*new_tools, *old_tools)):
+        pairs.append(("profile %s tools" % profile_id, old_tools.get(profile_id, ()), new_tools.get(profile_id, ())))
+    changes: list[tuple[str, tuple[str, ...]]] = []
+    for label, was, now in pairs:
+        changes.append(("%s added" % label, tuple(item for item in now if item not in was)))
+        changes.append(("%s removed" % label, tuple(item for item in was if item not in now)))
+    return tuple((label, values) for label, values in changes if values)
 
 
 # normcased path -> the pin made at its first valid read.  Guarded by
@@ -437,8 +471,7 @@ def _load_shipped(path: Path) -> _Shipped:
     document, problems = _validated_document(raw, reason)
     pin = ShippedPin.UNREAD
     if document is not None and not problems:
-        names, prefixes = _floor_of(document)
-        pin, pinned = _pin_state(path, _Pin(digest, names, prefixes))
+        pin, pinned = _pin_state(path, _pin_of(digest, document))
         if pin is ShippedPin.CHANGED:
             problems.append(
                 "the file changed since it was pinned at startup (sha256 %s, now %s); restart Sonder "
@@ -462,10 +495,9 @@ class PinReport:
     new_sha256: str
     available: bool
     problems: tuple[str, ...]
-    added_names: tuple[str, ...] = ()
-    removed_names: tuple[str, ...] = ()
-    added_prefixes: tuple[str, ...] = ()
-    removed_prefixes: tuple[str, ...] = ()
+    # ``(label, values)``, e.g. ``("restricted tool ceiling removed", ("context_pack",))``: every
+    # floor name, prefix, ceiling tool, secret glob, undetermined name and profile tool that differs.
+    changes: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 
 def repin_shipped() -> PinReport:
@@ -479,19 +511,13 @@ def repin_shipped() -> PinReport:
     document, problems = _validated_document(raw, reason)
     if document is None or problems:
         return PinReport(str(path), _pinned_sha256(path), "", False, tuple(problems))
-    names, prefixes = _floor_of(document)
+    new = _pin_of(digest, document)
     with _PIN_LOCK:
         old = _PINNED.get(_pin_key(path))
-        _PINNED[_pin_key(path)] = _Pin(digest, names, prefixes)
+        _PINNED[_pin_key(path)] = new
     clear_cache()
-    before_names = old.names if old is not None else frozenset()
-    before_prefixes = old.prefixes if old is not None else ()
     return PinReport(
-        str(path), old.sha256 if old is not None else "", digest, True, (),
-        added_names=tuple(sorted(names - before_names)),
-        removed_names=tuple(sorted(before_names - names)),
-        added_prefixes=tuple(item for item in prefixes if item not in before_prefixes),
-        removed_prefixes=tuple(item for item in before_prefixes if item not in prefixes),
+        str(path), old.sha256 if old is not None else "", digest, True, (), changes=_pin_changes(old, new),
     )
 
 

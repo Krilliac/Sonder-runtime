@@ -123,3 +123,28 @@ def test_each_shipped_path_is_pinned_on_its_own(shipped, tmp_path, monkeypatch):
     mtp.clear_cache()
     config = mtp.load()
     assert config.readable_shipped is True and "extra-prefix-" in config.floor.prefixes
+
+
+def test_the_reload_report_lists_every_change_the_operator_accepts(shipped):
+    """Not just floor names and prefixes: the ceiling, the secret globs, undetermined names and profile tools."""
+    assert mtp.load().readable_shipped  # pin the original
+    document = json.loads(shipped.read_text(encoding="utf-8"))
+    ceiling = document[mtp.CEILING_KEY]
+    dropped_tool = ceiling.pop()
+    document[mtp.SECRET_GLOBS_KEY].append("*.kdbx")
+    document["undetermined_served_models"].append("auto")
+    document["model_profiles"][0]["tools"] = [ceiling[0]]
+    shipped.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    assert mtp.load().readable_shipped is False, mtp.load().issues  # changed after the pin
+
+    report = editor.command("reload", operator_attended=True)
+    profile_id = document["model_profiles"][0]["id"]
+    expected = [
+        "restricted tool ceiling removed: %s" % dropped_tool,
+        "restricted secret path globs added: *.kdbx",
+        "undetermined served models added: auto",
+        "profile %s tools added: %s" % (profile_id, ceiling[0]),
+    ]
+    for line in expected:
+        assert line in report, report
+    assert mtp.load().readable_shipped is True, mtp.load().issues

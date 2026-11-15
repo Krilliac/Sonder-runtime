@@ -262,15 +262,27 @@ def _git():
     return shutil.which("git") or "git"
 
 
-_GIT_LOCATION_VARIABLES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")
+# Variables that make git use another repository, index or object store than
+# the tree that was checked, or inject config entries (``-c`` by environment).
+_GIT_LOCATION_VARIABLES = frozenset({
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS",
+})
+_GIT_LOCATION_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
+
+
+def _is_git_location_variable(name):
+    upper = name.upper()  # Windows environment names are case-insensitive
+    return upper in _GIT_LOCATION_VARIABLES or upper.startswith(_GIT_LOCATION_PREFIXES)
 
 
 def _git_env():
     env = _child_env()
     env["GIT_TERMINAL_PROMPT"] = "0"
     # Git must work on the tree that was checked, not one the environment names.
-    for name in _GIT_LOCATION_VARIABLES:
-        env.pop(name, None)
+    for name in [key for key in env if _is_git_location_variable(key)]:
+        del env[name]
     return env
 
 

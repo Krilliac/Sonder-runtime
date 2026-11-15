@@ -97,8 +97,10 @@ def _reload(words: list[str], policy: Mapping[str, Any] | None) -> str:
 
     The pin exists so that a write nobody guarded cannot change the floor; a
     reload re-pins whatever is on disk, so it prints both hashes and every
-    floor name and prefix that differs, for the operator to compare with the
-    committed file (``git diff`` on the shipped policy) before trusting it.
+    floor name and prefix, restricted ceiling tool, secret path glob,
+    undetermined served name and per-profile tool that differs, for the
+    operator to compare with the committed file (``git diff`` on the shipped
+    policy) before trusting it.
     """
     if words:
         raise _Refused("reload takes no arguments")
@@ -110,12 +112,8 @@ def _reload(words: list[str], policy: Mapping[str, Any] | None) -> str:
         "  previous sha256: %s" % (report.old_sha256 or "(none)"),
         "  now pinned     : %s" % report.new_sha256,
     ]
-    for label, values in (
-        ("floor names added", report.added_names), ("floor names removed", report.removed_names),
-        ("floor prefixes added", report.added_prefixes), ("floor prefixes removed", report.removed_prefixes),
-    ):
-        if values:
-            lines.append("  %s: %s" % (label, ", ".join(values)))
+    for label, values in report.changes:
+        lines.append("  %s: %s" % (label, ", ".join(repr(value) if not value else value for value in values)))
     if report.old_sha256 == report.new_sha256:
         lines.append("  the file is unchanged since it was pinned")
     return "\n".join(lines)
