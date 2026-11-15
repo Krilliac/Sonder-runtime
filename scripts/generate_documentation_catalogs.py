@@ -5,6 +5,7 @@ import argparse
 import dataclasses
 import hashlib
 import importlib
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -107,10 +108,12 @@ def _runtime_reference() -> dict[str, Any]:
         } for command in command_catalog.catalog()),
         key=lambda item: item["name"],
     )
+    # Python 3.13+ strips docstring indentation at compile time; cleandoc
+    # gives 3.12 and 3.14 the same description text (and so the same digest).
     try:
         server = importlib.import_module("server")
         result["tools"] = sorted(({
-            "description": tool.description or "",
+            "description": inspect.cleandoc(tool.description or ""),
             "name": tool.name,
             "parameters": _jsonable(tool.parameters or {}),
         } for tool in server.mcp._tool_manager.list_tools()), key=lambda item: item["name"])
@@ -124,7 +127,7 @@ def _runtime_reference() -> dict[str, Any]:
     # one and the notes point at this table instead of enumerating names.
     native_mcp = importlib.import_module("sonder_runtime.bootstrap.native_mcp")
     result["native_tools"] = sorted(({
-        "description": descriptor.description or "",
+        "description": inspect.cleandoc(descriptor.description or ""),
         "name": descriptor.name,
         "parameters": _jsonable(dict(descriptor.input_schema or {})),
     } for descriptor in native_mcp.native_tool_registry().list_all()),
