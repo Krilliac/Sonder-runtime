@@ -817,3 +817,24 @@ def test_production_inventory_ignores_generated_tree_but_catches_tracked_offende
         "memory_store", Path("memory_store.py"), repo
     ) == (Path("real_offender.py"),)
 
+
+def test_no_module_file_is_shadowed_by_a_same_named_package():
+    checker = _architecture_module()
+    tracked = {
+        path.relative_to(_REPO_ROOT)
+        for path in checker.tracked_production_python_files(_REPO_ROOT)
+    }
+    assert checker.shadowed_module_violations(tracked) == []
+
+
+def test_shadowed_module_gate_names_both_files():
+    checker = _architecture_module()
+    tracked = {
+        Path("sonder_runtime/application/widget.py"),
+        Path("sonder_runtime/application/widget/__init__.py"),
+        Path("sonder_runtime/application/plain.py"),
+        Path("sonder_runtime/application/other/__init__.py"),
+    }
+    (violation,) = checker.shadowed_module_violations(tracked)
+    assert "sonder_runtime/application/widget.py" in violation
+    assert "sonder_runtime/application/widget/__init__.py" in violation

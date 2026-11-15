@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 432,
+      "file_count": 431,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -154,7 +154,6 @@
         "sonder_runtime/adapters/execution/sandbox.py",
         "sonder_runtime/adapters/execution/subagent_dispatch_verifier.py",
         "sonder_runtime/adapters/execution/worlds.py",
-        "sonder_runtime/adapters/execution_tools.py",
         "sonder_runtime/adapters/execution_tools/__init__.py",
         "sonder_runtime/adapters/execution_tools/code_runner.py",
         "sonder_runtime/adapters/extensions/host.py",

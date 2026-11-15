@@ -350,6 +350,31 @@ def is_approved_retired_shim(
     return actual == expected
 
 
+def shadowed_module_violations(tracked: set[Path]) -> list[str]:
+    """Report production module files hidden by a same-named package.
+
+    ``pkg.py`` next to ``pkg/__init__.py`` can never be imported: the package
+    wins.  Such a file is either dead code or reachable only through a path
+    hack the import system, type checker and packaging cannot see.
+    """
+    packages = {
+        path.parent.as_posix()
+        for path in tracked
+        if path.name == "__init__.py" and path.parts[:1] == ("sonder_runtime",)
+    }
+    violations: list[str] = []
+    for path in sorted(tracked, key=Path.as_posix):
+        if path.parts[:1] != ("sonder_runtime",) or path.name == "__init__.py":
+            continue
+        package_dir = path.with_suffix("").as_posix()
+        if package_dir in packages:
+            violations.append(
+                f"{path.as_posix()}: module is shadowed by package "
+                f"{package_dir}/__init__.py and can never be imported"
+            )
+    return violations
+
+
 def _repo_relative_path(repo_root: Path, relative: Path) -> Path:
     """Resolve policy paths written with either host's separators."""
     parts = str(relative).replace("\\", "/").split("/")
@@ -576,6 +601,7 @@ def check(diagnostics: dict[str, int] | None = None) -> list[str]:
     tracked_files = tracked_production_python_files()
     tracked = {path.relative_to(REPO_ROOT) for path in tracked_files}
     violations.extend(retired_module_violations(tracked))
+    violations.extend(shadowed_module_violations(tracked))
     unexpected_legacy = ROOT_LEGACY_MODULES - BASELINE_ROOT_LEGACY_MODULES
     if unexpected_legacy:
         violations.append(
