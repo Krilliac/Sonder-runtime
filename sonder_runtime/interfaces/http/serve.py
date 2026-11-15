@@ -37,6 +37,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from sonder_runtime.interfaces.http.artifact_transfer import handle_artifact_transfer, is_artifact_route
+from sonder_runtime.interfaces.http import web_app
 from sonder_runtime.interfaces.http.connection_limit import BoundedConnectionsMixin
 from sonder_runtime.interfaces.http.host_policy import (
     HOST_NOT_ALLOWED_REMEDY, HOST_TRUSTED, forwarded_client_ip, host_decision,
@@ -732,6 +733,7 @@ HOST = os.environ.get("SONDER_HOST", "127.0.0.1")
 REQUIRE_ACCOUNT = _env_flag("SONDER_REQUIRE_ACCOUNT")
 AUTH_MODE = _resolve_auth_mode(API_KEY, REQUIRE_ACCOUNT)
 CORS_ORIGINS = _parse_cors_origins(os.environ.get("SONDER_CORS_ORIGINS", ""))
+_WEB_APP = web_app.WebAppSettings.disabled()
 
 
 def _parse_allowed_hosts(values):
@@ -1221,6 +1223,8 @@ def configure_typed_config(config) -> None:
     CORS_ORIGINS = frozenset(server_config.cors_origins)
     global ALLOWED_HOSTS
     ALLOWED_HOSTS = _parse_allowed_hosts(server_config.allowed_hosts)
+    global _WEB_APP
+    _WEB_APP = web_app.WebAppSettings(server_config.web_app_enabled, runtime_config.web_app_root(config))
     OBSERVATORY_ORIGINS = frozenset(
         origin for origin in config.observability.live_export_origins
         if origin and origin != "*"
@@ -4877,6 +4881,8 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         if origin is None or origin in CORS_ORIGINS:
             return False
+        if _WEB_APP.enabled and getattr(self, "_host_trusted", False) and web_app.same_origin_request(self.headers, https_declared=TLS_TERMINATED_BY_PROXY):
+            return False
         if self._observatory_origin_request(origin):
             return False
         _serve_logger.debug(f"_reject_disallowed_origin: rejecting origin={origin!r}")
@@ -5484,6 +5490,8 @@ class Handler(BaseHTTPRequestHandler):
                 work_binding=_app_managed_work_binding):
             return
         if handle_artifact_transfer(self, "GET", _ARTIFACT_TRANSFER_BINDING, max_request_bytes=MAX_REQUEST_BYTES):
+            return
+        if web_app.handle_web_app(self, _WEB_APP):
             return
         if self._reject_disallowed_origin():
             return

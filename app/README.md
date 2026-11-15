@@ -347,7 +347,7 @@ with `-EngineBundle` to avoid assembling it on every app build. The build keeps
 the Flutter/Android `local-system.zip` code-only and attaches the large sealed
 engine only to the desktop sibling folder, avoiding a duplicate embedded copy.
 
-The repo commits only `lib/`, `test/`, `pubspec.yaml`, the resolved
+The repo commits only `lib/`, `test/`, `web/`, `pubspec.yaml`, the resolved
 `pubspec.lock`, the pinned `.flutter-version` and the rendered app icons in
 `assets/brand/` (regenerate them with `scripts/generate_app_icons.py` only
 when the S mark changes). Generate the native project scaffolding locally with
@@ -373,6 +373,16 @@ build against a loopback or LAN server without HTTPS, opt in explicitly with
 `--allow-android-cleartext-for-development`. The PowerShell helper exposes the
 same development-only choice as `-AllowAndroidCleartextForDevelopment`; do not
 use either override for distributed APKs or when sending bearer credentials.
+
+### Web build (served by the runtime)
+
+`web/` is committed (unlike the other platform folders). Publish it for the
+runtime to serve at `/app/` with `python scripts/build_web_app.py`; see
+[Serving the web app](../docs/wiki/03-configuration.md#serving-the-web-app).
+In a browser the app talks only to the origin that served it, keeps API keys
+and account sessions in memory (a reload means signing in again), and stores
+chat history in the browser's `localStorage` in plain text. Local-model and
+launcher features are unavailable there.
 
 Requires the [Flutter SDK](https://docs.flutter.dev/get-started/install)
 at the stable version pinned in `app/.flutter-version` (CI installs exactly

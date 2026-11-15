@@ -150,6 +150,9 @@ class LabeledTextField extends StatelessWidget {
   final TextAlign textAlign;
   final String? suffixText;
 
+  /// Shown but not editable (a value the platform fixes).
+  final bool readOnly;
+
   const LabeledTextField({
     super.key,
     this.fieldKey,
@@ -167,6 +170,7 @@ class LabeledTextField extends StatelessWidget {
     this.focusNode,
     this.textAlign = TextAlign.start,
     this.suffixText,
+    this.readOnly = false,
   });
 
   @override
@@ -184,6 +188,7 @@ class LabeledTextField extends StatelessWidget {
         controller: controller,
         focusNode: focusNode,
         obscureText: obscureText,
+        readOnly: readOnly,
         autocorrect: false,
         enableSuggestions: !obscureText,
         keyboardType: keyboardType,
