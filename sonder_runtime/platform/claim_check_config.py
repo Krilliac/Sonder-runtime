@@ -1,6 +1,7 @@
 """Bounded windows and limits for the deterministic claim checker."""
 from dataclasses import dataclass
 import re
+from typing import Protocol
 
 _MAX_PATTERNS = 32
 _MAX_PATTERN_CHARS = 200
@@ -39,7 +40,13 @@ _INT_BOUNDS = (
 )
 
 
-def claim_check_errors(config) -> list[str]:
+class _HasClaimCheck(Protocol):
+    """The slice of the app config this module validates (avoids a config import cycle)."""
+
+    claim_check: ClaimCheckConfig
+
+
+def claim_check_errors(config: _HasClaimCheck) -> list[str]:
     section = config.claim_check
     errors = []
     for name, low, high in _INT_BOUNDS:

@@ -27,11 +27,13 @@ _LOG = logging.getLogger(__name__)
 
 ALLOWLIST_PATH = Path(__file__).resolve().parents[1] / "data" / "user_tool_allowlist.json"
 
-_CALLER_ROLE = contextvars.ContextVar("sonder_caller_role", default=None)
+_CALLER_ROLE: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "sonder_caller_role", default=None
+)
 
 
 @functools.lru_cache(maxsize=1)
-def user_tool_allowlist() -> frozenset:
+def user_tool_allowlist() -> frozenset[str]:
     try:
         payload = json.loads(ALLOWLIST_PATH.read_text(encoding="utf-8"))
         return public_policy.parse_allowlist(payload)
@@ -40,18 +42,18 @@ def user_tool_allowlist() -> frozenset:
         return frozenset()
 
 
-def refusal_reason(tool, role) -> str:
+def refusal_reason(tool: object, role: str) -> str:
     """"" when ``role`` may run ``tool``, else the refusal reason."""
     decision = public_policy.decide_tool(str(tool or ""), role, user_tool_allowlist())
     return decision.reason if isinstance(decision, public_policy.ToolRefused) else ""
 
 
-def bind_caller_role(role) -> None:
+def bind_caller_role(role: str | None) -> None:
     """Declare the role the current handler thread serves (None: unrestricted)."""
     _CALLER_ROLE.set(role)
 
 
-def agent_refusal(tool) -> str:
+def agent_refusal(tool: object) -> str:
     """The agent loop's HOST POLICY observation for a restricted caller, or ""."""
     role = _CALLER_ROLE.get()
     if role is None:

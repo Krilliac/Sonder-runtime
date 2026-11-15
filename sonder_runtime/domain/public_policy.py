@@ -48,7 +48,7 @@ class ToolRefused:
 ToolDecision = Union[ToolAllowed, ToolRefused]
 
 
-def decide_tool(tool: str, role: str, user_allowlist: frozenset) -> ToolDecision:
+def decide_tool(tool: str, role: str, user_allowlist: frozenset[str]) -> ToolDecision:
     """Allow an unrestricted role, or any role for a tool on the allowlist."""
     if role in UNRESTRICTED_ROLES:
         return ToolAllowed()
@@ -57,7 +57,7 @@ def decide_tool(tool: str, role: str, user_allowlist: frozenset) -> ToolDecision
     return ToolRefused(tool=str(tool), role=str(role))
 
 
-def parse_allowlist(payload) -> frozenset:
+def parse_allowlist(payload: object) -> frozenset[str]:
     """The allowed tool names from a decoded allowlist document.
 
     Raises ValueError for any shape problem so the caller can fail closed.
