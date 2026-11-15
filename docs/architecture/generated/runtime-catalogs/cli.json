@@ -304,7 +304,7 @@
       "category": "dev",
       "name": "/claim_check",
       "risk": "safe",
-      "summary": "Check a model's code claim against the repository, read-only: is the cited file, line and are the named symbols real, and is a guard of the claimed category nearby (verdict reject = citation wrong, flag = guard found, keep = nothing contradicts it)."
+      "summary": "Check a model's code claim against the repository, read-only: is the cited file, line and are the named symbols real, and is a guard of the claimed category nearby (verdict reject = the citation is wrong; flag = a guard-shaped line was found nearby, which says nothing about whether the claim is true; keep = nothing contradicts the citation)."
     },
     {
       "category": "basic",

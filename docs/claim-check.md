@@ -20,10 +20,15 @@ text alone:
 
 Every check returns `pass`, `fail` or `not_checkable` with evidence
 (`file:line` and the line text). The verdict is `reject` when a citation check
-failed, `flag` when a guard shape was found, and `keep` otherwise. A flag is a
-hint, not a verdict: it means a person or model should look at that line first.
-Files that are binary, unreadable, over `max_file_bytes`, or refused by the read
-policy are `not_checkable` and never rejected.
+failed, `flag` when a guard-shaped line was found nearby, and `keep` otherwise.
+`flag` carries no signal about whether the claim is true: on a private labelled
+set of 943 security claims it fired on 64% of confirmed and 52% of refuted
+claims. `reject` catches only bad citations: 0 of 53 confirmed claims were
+rejected and 17 of 888 refuted claims (about 2%). Files that are binary,
+unreadable or over `max_file_bytes` are `not_checkable` and never rejected. A
+file the read policy refuses answers exactly like a missing file (`fail`, "no
+such file in the repository"), so the checker cannot be used to probe which
+paths exist.
 
 ## Surfaces
 
@@ -53,7 +58,11 @@ The `[claim_check]` section holds every window and limit: `symbol_window_lines`,
   line past the end of the file, a symbol that is nowhere near the cited line).
 - It cannot tell whether an attacker can reach the code, or whether a guard
   elsewhere makes the claim false. Most refuted claims in practice are of that
-  kind, so the guard flag is a pointer to read, not a reason to discard.
+  kind. A `flag` (a guard-shaped line was found nearby) is not evidence for or
+  against the claim: it fired on 64% of confirmed and 52% of refuted claims in
+  the private set of 943, so do not rank, discard or accept claims by it.
+- A `reject` is reliable but rare: it caught 17 of 888 refuted claims (about 2%)
+  and none of the 53 confirmed ones. Most refuted claims pass the citation checks.
 - The guard shapes are regular expressions over text, not a parser. Comment
   lines are skipped; code in languages other than the cited file's extension is
   not searched for callers.

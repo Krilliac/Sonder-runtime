@@ -318,7 +318,72 @@ def test_read_guard_refuses_the_cited_file_and_hides_other_files_from_caller_sea
     report = ClaimChecker(repo, cfg, read_guard=guard).check(claim)
     assert report.guards == ()  # Caller.cs holds the guard but the policy refuses it
     assert "Caller.cs" in refused
-    gate = ClaimChecker(repo, cfg, read_guard=lambda path: False).check(claim)
-    assert names(gate) == {"file_in_root": CheckStatus.NOT_CHECKABLE}
-    assert "read policy" in gate.checks[0].detail
-    assert gate.verdict is Verdict.KEEP
+
+
+def test_refused_file_answers_exactly_like_a_missing_file(repo):
+    refused = ClaimChecker(repo, read_guard=lambda path: False).check(
+        Claim(file="src/Pump.cs", line_start=4))
+    missing = ClaimChecker(repo).check(Claim(file="src/Nope.cs", line_start=4))
+    assert refused.checks == missing.checks
+    assert refused.verdict is missing.verdict is Verdict.REJECT
+
+
+def test_caller_search_does_not_follow_a_file_symlink_out_of_the_root(repo, tmp_path):
+    (repo / "src" / "Caller.cs").unlink()
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "Out.cs").write_text(CALLER, newline="\n")
+    try:
+        os.symlink(outside / "Out.cs", repo / "src" / "Linked.cs")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted here")
+    seen = []
+
+    def guard(path):
+        seen.append(path)
+        return True
+
+    cfg = replace(ClaimCheckConfig(), guard_window_lines=0)
+    claim = Claim(file="src/Pump.cs", line_start=7, symbols=("Fill",), category=DOS)
+    report = ClaimChecker(repo, cfg, read_guard=guard).check(claim)
+    assert report.guards == ()
+    root = os.path.realpath(repo)
+    assert all(os.path.realpath(p).startswith(root) for p in seen)
+    assert not any(p.endswith("Out.cs") for p in seen)
+
+
+def test_caller_search_consults_the_read_guard_before_reading(repo, monkeypatch):
+    order = []
+    real_read = ClaimChecker._read
+
+    def read(self, real):
+        order.append(("read", os.path.basename(real)))
+        return real_read(self, real)
+
+    def guard(path):
+        order.append(("guard", os.path.basename(path)))
+        return True
+
+    monkeypatch.setattr(ClaimChecker, "_read", read)
+    cfg = replace(ClaimCheckConfig(), guard_window_lines=0)
+    ClaimChecker(repo, cfg, read_guard=guard).check(
+        Claim(file="src/Pump.cs", line_start=7, symbols=("Fill",), category=DOS))
+    assert order.index(("guard", "Caller.cs")) < order.index(("read", "Caller.cs"))
+
+
+def test_caller_search_skips_non_regular_files(repo):
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no FIFOs on this platform")
+    os.mkfifo(repo / "src" / "Pipe.cs")
+    cfg = replace(ClaimCheckConfig(), guard_window_lines=0)
+    report = ClaimChecker(repo, cfg).check(
+        Claim(file="src/Pump.cs", line_start=7, symbols=("Fill",), category=DOS))
+    assert any(g.path == "src/Caller.cs" for g in report.guards)
+
+
+def test_caller_search_works_without_os_path_isjunction(repo, monkeypatch):
+    monkeypatch.delattr(os.path, "isjunction", raising=False)
+    cfg = replace(ClaimCheckConfig(), guard_window_lines=0)
+    report = ClaimChecker(repo, cfg).check(
+        Claim(file="src/Pump.cs", line_start=7, symbols=("Fill",), category=DOS))
+    assert any(g.path == "src/Caller.cs" for g in report.guards)

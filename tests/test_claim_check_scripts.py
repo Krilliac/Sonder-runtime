@@ -54,3 +54,12 @@ def test_eval_counts_labels_by_verdict_without_printing_rows(repo, tmp_path, cap
     assert "REFUTED" in printed and "Missing" not in printed and "P.cs" not in printed
     off = claim_check_eval.evaluate(src, symbols="off")
     assert off["table"][("REFUTED", "reject")] == 1
+
+
+def test_eval_without_any_root_is_an_error_not_the_cwd(tmp_path, capsys):
+    src = tmp_path / "rows.jsonl"
+    src.write_text(json.dumps({"file": "P.cs", "hypothesis": "Line 4 x", "label": "REFUTED"}) + "\n")
+    with pytest.raises(ValueError, match="no repository root"):
+        claim_check_eval.evaluate(src)
+    assert claim_check_eval.main([str(src)]) == 2
+    assert "no repository root" in capsys.readouterr().err

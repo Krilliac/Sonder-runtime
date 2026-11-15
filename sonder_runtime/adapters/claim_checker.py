@@ -28,6 +28,7 @@ from sonder_runtime.platform.claim_check_config import ClaimCheckConfig
 
 _MIN_NEEDLE = 3
 _NOT_NEEDLES = frozenset({"if", "for", "new", "get", "set", "var", "int", "the"})
+_NO_SUCH_FILE = "no such file in the repository"
 
 
 def _split_lines(text: str) -> list[str]:
@@ -73,9 +74,13 @@ class ClaimChecker:
         if not self._within(real):
             return None, CheckResult(
                 "file_in_root", CheckStatus.FAIL, "path resolves outside the repository root")
-        if not real.is_file():
-            return None, CheckResult("file_in_root", CheckStatus.FAIL, "no such file in the repository")
+        # A refused file answers exactly like a missing one, so the checker is no existence oracle.
+        if not real.is_file() or not self._allowed(str(real)):
+            return None, CheckResult("file_in_root", CheckStatus.FAIL, _NO_SUCH_FILE)
         return str(real), None
+
+    def _allowed(self, real: str) -> bool:
+        return self._read_guard is None or bool(self._read_guard(real))
 
     def _read(self, real: str) -> str | None:
         """File text, or None when too large, binary or unreadable. Cached up to a budget."""
@@ -119,21 +124,27 @@ class ClaimChecker:
             return real
 
     def _candidates(self, suffix: str) -> list[str]:
-        """Sorted real paths of files under the root with this suffix; skip dirs pruned."""
+        """Sorted real paths of regular files inside the root with this suffix; skip dirs pruned.
+
+        A file symlink is followed only when its target is a regular file inside the root."""
         key = suffix.lower()
         if key in self._listing:
             return self._listing[key]
         skip = set(self._config.skip_dirs)
+        is_junction = getattr(os.path, "isjunction", lambda value: False)  # 3.12+
         found: list[str] = []
         for base, dirs, files in os.walk(self._root):
             dirs[:] = sorted(
                 d for d in dirs
                 if d not in skip and not os.path.islink(os.path.join(base, d))
-                and not os.path.isjunction(os.path.join(base, d)))
+                and not is_junction(os.path.join(base, d)))
             for name in files:
-                if name.lower().endswith(key):
-                    found.append(os.path.join(base, name))
-        found.sort()
+                if not name.lower().endswith(key):
+                    continue
+                real = Path(os.path.realpath(os.path.join(base, name)))
+                if self._within(real) and os.path.isfile(real):
+                    found.append(str(real))
+        found = sorted(set(found))
         self._listing[key] = found
         return found
 
@@ -143,10 +154,6 @@ class ClaimChecker:
         real, failure = self._resolve(claim.file)
         if failure is not None:
             return ClaimReport(claim, decide_verdict((failure,), ()), (failure,), ())
-        if self._read_guard is not None and not self._read_guard(real):
-            note = CheckResult(
-                "file_in_root", CheckStatus.NOT_CHECKABLE, "file is refused by the read policy")
-            return ClaimReport(claim, Verdict.KEEP, (note,), ())
         lines = self._lines(real)
         if lines is None:
             note = CheckResult(
@@ -215,14 +222,14 @@ class ClaimChecker:
         for path in files:
             if uses >= cfg.max_callers or len(hits) >= cfg.max_evidence:
                 break
+            if path != real and not self._allowed(path):
+                continue
             text = self._read(path)
             if text is None:
                 continue
             for needle, where in needles:
                 if needle not in text:
                     continue
-                if path != real and self._read_guard is not None and not self._read_guard(path):
-                    break
                 file_lines = self._lines(path)
                 if file_lines is None:
                     continue

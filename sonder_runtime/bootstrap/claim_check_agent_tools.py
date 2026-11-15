@@ -121,16 +121,26 @@ def run_claim_check(arguments: Mapping, *, config: ClaimCheckConfig | None = Non
     for report in reports:
         verdicts[report.verdict.value] += 1
         duplicates += bool(report.duplicate_of)
-    body = [report.to_dict() for report in reports]
-    omitted = 0
-    while body and len(json.dumps(body, ensure_ascii=False)) > MAX_OUTPUT_CHARS:
-        body.pop()
-        omitted += 1
+    body = _fit_reports(reports)
+    omitted = len(reports) - len(body)
     out = {"ok": True, "reports": body,
            "summary": {"total": len(reports), "duplicates": duplicates, "verdicts": verdicts}}
     if omitted:
         out["summary"]["omitted_reports"] = omitted
     return out
+
+
+def _fit_reports(reports) -> list[dict]:
+    """Leading reports whose JSON array fits MAX_OUTPUT_CHARS; each is serialized once."""
+    body: list[dict] = []
+    used = 2  # "[" and "]"
+    for report in reports:
+        row = report.to_dict()
+        used += len(json.dumps(row, ensure_ascii=False)) + (2 if body else 0)  # ", " separator
+        if used > MAX_OUTPUT_CHARS:
+            break
+        body.append(row)
+    return body
 
 
 def _within_roots(roots) -> Callable[[str], str]:
@@ -168,7 +178,8 @@ def register(mcp, record, project_root=None, *, config_provider=None, root_guard
                     claims_json: str = "") -> str:
         """Check a model's code claim against the repository, read-only: is the cited file,
         line and are the named symbols real, and is a guard of the claimed category nearby
-        (verdict reject = citation wrong, flag = guard found, keep = nothing contradicts it).
+        (verdict reject = the citation is wrong; flag = a guard-shaped line was found nearby, which
+        says nothing about whether the claim is true; keep = nothing contradicts the citation).
         Pass file (+ line, symbols, category, guard, entry_point, claim_text) or claims_json."""
         started = time.time()
         args = {"root": root, "file": file, "line": line, "line_end": line_end,

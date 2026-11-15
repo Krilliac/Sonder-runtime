@@ -50,6 +50,8 @@ def evaluate(path, root=None, *, text_field="hypothesis", label_field="label",
         if symbols == "off" or not use_symbols:
             claim = replace(claim, symbols=())
         base = str(root or row.get("repo_root") or "")
+        if not base:
+            raise ValueError("no repository root: pass --root or give every row a repo_root")
         checker = checkers.get(base)
         if checker is None:
             checker = checkers[base] = ClaimChecker(base, config)
@@ -96,8 +98,12 @@ def main(argv=None) -> int:
         if not hasattr(config, name) or not value.lstrip("-").isdigit():
             parser.error(f"--set needs an integer [claim_check] field, got {item!r}")
         config = replace(config, **{name: int(value)})
-    result = evaluate(args.rows, args.root, text_field=args.text_field,
-                      label_field=args.label_field, symbols=args.symbols, config=config)
+    try:
+        result = evaluate(args.rows, args.root, text_field=args.text_field,
+                          label_field=args.label_field, symbols=args.symbols, config=config)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     print(render(result))
     return 0
 

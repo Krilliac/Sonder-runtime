@@ -96,8 +96,32 @@ def test_read_guard_hides_sensitive_files(repo):
         {"root": str(repo), "claims_json": json.dumps([{"file": "secret.cs", "line": 99}])},
         root_guard=allow_all, file_guard=deny_secret)
     report = out["reports"][0]
-    assert report["verdict"] == "keep"
-    assert report["checks"][0]["status"] == "not_checkable"
+    missing = tool.run_claim_check(
+        {"root": str(repo), "claims_json": json.dumps([{"file": "absent.cs", "line": 99}])},
+        root_guard=allow_all, file_guard=deny_secret)["reports"][0]
+    assert report["verdict"] == missing["verdict"] == "reject"
+    assert report["checks"] == missing["checks"]
+
+
+def test_truncation_serializes_each_report_once(repo, monkeypatch):
+    calls = []
+    real_dumps = json.dumps
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return real_dumps(*args, **kwargs)
+
+    monkeypatch.setattr(tool.json, "dumps", counting)
+    monkeypatch.setattr(tool, "MAX_OUTPUT_CHARS", 3_000)
+    count = 400
+    claims = [{"id": str(i), "file": "P.cs", "line": 99} for i in range(count)]
+    config = replace(ClaimCheckConfig(), max_batch_claims=count)
+    out = tool.run_claim_check({"root": str(repo), "claims_json": real_dumps(claims)},
+                               config=config, root_guard=allow_all)
+    omitted = out["summary"]["omitted_reports"]
+    assert 0 < omitted < count and len(out["reports"]) == count - omitted
+    assert len(calls) <= len(out["reports"]) + 1  # work is bounded by what is kept
+    assert len(real_dumps(out["reports"], ensure_ascii=False)) <= 3_000
 
 
 class FakeMcp:
