@@ -32,6 +32,10 @@ from urllib.parse import urlsplit
 
 from sonder_runtime.platform import paths as sonder_paths
 from sonder_runtime.platform.secret_presence import redact_presence
+from sonder_runtime.platform.security_eval_config import (
+    SecurityEvalConfig,
+    security_eval_config_from_env,
+)
 from sonder_runtime.platform.artifact_transfer_config import (
     ArtifactTransferConfig,
     artifact_transfer_errors,
@@ -659,6 +663,7 @@ class SonderConfig:
     spanda: SpandaConfig = field(default_factory=SpandaConfig)
     playbooks: PlaybooksConfig = field(default_factory=PlaybooksConfig)
     build_tools: BuildToolsConfig = field(default_factory=BuildToolsConfig)
+    security_eval: SecurityEvalConfig = field(default_factory=SecurityEvalConfig)
 
     def as_redacted_dict(self) -> dict:
         out: dict = {
@@ -1739,6 +1744,7 @@ def _apply_environment(
         secrets=secrets,
         child_storage=apply_child_storage_environment(config.child_storage, env, errors),
         build_tools=build_tools_config_from_env(env, errors),
+        security_eval=security_eval_config_from_env(env, errors),
     )
 
 
