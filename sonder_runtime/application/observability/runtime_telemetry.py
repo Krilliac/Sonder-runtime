@@ -35,6 +35,7 @@ PROVIDER_IDS: Mapping[str, str] = {
     "openai-compatible": "openai_compatible",
     "sonder-inference": "sonder_inference",
     "openrouter": "openrouter",
+    "anthropic": "anthropic",
 }
 
 # The same mapping the sonder_inference gateway sends as X-Sonder-Workload.

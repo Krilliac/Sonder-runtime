@@ -756,8 +756,8 @@ def test_a_junction_is_a_link_without_direntry_is_junction(junctioned):
     from sonder_runtime.adapters.filesystem import workbench
 
     entries = {entry.name: entry for entry in os.scandir(junctioned)}
-    assert workbench._is_link(_EntryWithoutJunctionCheck(entries["docs"])) is True
-    assert workbench._is_link(_EntryWithoutJunctionCheck(entries["src"])) is False
+    assert workbench._reparse_entry(_EntryWithoutJunctionCheck(entries["docs"])) is True
+    assert workbench._reparse_entry(_EntryWithoutJunctionCheck(entries["src"])) is False
 
 
 @windows_only

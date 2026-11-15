@@ -305,9 +305,9 @@ def test_a_bad_secret_glob_makes_the_overlay_invalid(overlay_file, glob):
     "aws_credentials.json", "github_token.txt", ".git/config", ".netrc", "SERVER.PEM", "a\\b\\.env",
 ])
 def test_secret_paths_match_a_shipped_glob(path):
-    assert rules.secret_glob_match(path, mtp.load().secret_globs), path
+    assert rules.restricted_glob_match(path, mtp.load().secret_globs), path
 
 
 @pytest.mark.parametrize("path", ["src/app.py", "README.md", "docs/environment.md", ".", "", "envoy/main.go"])
 def test_ordinary_paths_match_no_shipped_glob(path):
-    assert rules.secret_glob_match(path, mtp.load().secret_globs) == "", path
+    assert rules.restricted_glob_match(path, mtp.load().secret_globs) == "", path

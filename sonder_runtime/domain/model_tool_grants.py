@@ -23,7 +23,7 @@ Three rules live here, as code rather than lists:
   ``OVERLAY_UNUSABLE``.  A
   profile with no tools left after the predicate is a plain deny entry, so a
   model whose profiles grant nothing is ``DENIED`` exactly as before.
-* :func:`secret_glob_match` - whether a path (relative to the project root)
+* :func:`restricted_glob_match` - whether a path (relative to the project root)
   matches one of the configured secret globs.
 
 Nothing here reads a file, the environment or a clock.
@@ -231,7 +231,7 @@ def decide_tools_served(
     return ModelToolDecision(ModelToolStatus(verdict.status.value), verdict.model, verdict.matched)
 
 
-def secret_glob_match(relative: str, globs: Iterable[str]) -> str:
+def restricted_glob_match(relative: str, globs: Iterable[str]) -> str:
     """The first glob in ``globs`` that ``relative`` matches, or ``""``.
 
     ``relative`` is a path relative to the project root (either separator).
@@ -264,5 +264,5 @@ def secret_glob_match(relative: str, globs: Iterable[str]) -> str:
 __all__ = [
     "AGENT_LANE", "WORKBENCH_AGENT_LANE", "RESTRICTED_LANES",
     "ModelToolStatus", "ToolFacts", "ToolGrant", "ModelToolDecision",
-    "restricted_tool_refusal", "decide_tools", "decide_tools_served", "secret_glob_match",
+    "restricted_tool_refusal", "decide_tools", "decide_tools_served", "restricted_glob_match",
 ]

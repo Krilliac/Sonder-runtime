@@ -41,10 +41,36 @@ _LIVE_PROVIDER_VARIABLES = (
     "SONDER_OPENROUTER_PROVIDER",
     "SONDER_OPENROUTER_PROVIDER_ORDER",
     "SONDER_OPENROUTER_TIER_PROVIDER",
+    "SONDER_LIVE_ANTHROPIC",
+    "SONDER_ANTHROPIC_API_KEY",
+    "SONDER_ANTHROPIC_API_KEY_2",
+    "SONDER_ANTHROPIC_MODEL",
+    "SONDER_ANTHROPIC_BASE_URL",
+)
+_ANTHROPIC_SDK_VARIABLES = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_CUSTOM_HEADERS",
 )
 _CAPTURED_LIVE_PROVIDER_ENV = {
     name: os.environ[name]
     for name in _LIVE_PROVIDER_VARIABLES
+    if name in os.environ
+}
+
+# Opt-in inputs of tests/live/test_isolated_live.py; captured before the scrub
+# below and restored only by the live_isolated_environment fixture.
+_LIVE_ISOLATED_VARIABLES = (
+    "SONDER_ISOLATED_LIVE",
+    "SONDER_ISOLATED_RUNTIME",
+    "SONDER_ISOLATED_ROOTS",
+    "SONDER_ISOLATED_IMAGE",
+    "SONDER_ISOLATED_VOLUME_IMAGE",
+)
+_CAPTURED_LIVE_ISOLATED_ENV = {
+    name: os.environ[name]
+    for name in _LIVE_ISOLATED_VARIABLES
     if name in os.environ
 }
 
@@ -63,6 +89,10 @@ def _clear_ambient_deployment_variables() -> None:
     # A hosted-provider key outside the SONDER_ namespace: tests must never
     # see (or send) an operator's real key.
     os.environ.pop("OPENROUTER_API_KEY", None)
+    # The Anthropic SDK reads these itself: a base URL or custom header from the
+    # operator's (or Claude Code's) environment must never reach a test client.
+    for _anthropic_variable in _ANTHROPIC_SDK_VARIABLES:
+        os.environ.pop(_anthropic_variable, None)
 
 
 _clear_ambient_deployment_variables()
@@ -145,6 +175,20 @@ def live_provider_environment(request, monkeypatch):
         for name, value in values.items():
             monkeypatch.setenv(name, value)
     yield
+
+
+def _restore_live_isolated_environment(monkeypatch, captured=None):
+    """Set the captured SONDER_ISOLATED_* inputs through *monkeypatch* and return them."""
+    values = dict(_CAPTURED_LIVE_ISOLATED_ENV if captured is None else captured)
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+    return values
+
+
+@pytest.fixture
+def live_isolated_environment(monkeypatch):
+    """Restore the captured SONDER_ISOLATED_* inputs for one live test only."""
+    yield _restore_live_isolated_environment(monkeypatch)
 
 
 def _cleanup_test_state() -> None:

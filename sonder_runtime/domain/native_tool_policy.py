@@ -6,7 +6,55 @@ import re
 
 
 MAX_ARGUMENT_CHARS = 65536
+MAX_ARGUMENT_DEPTH = 64
 TOOL_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.:-]{0,127}\Z")
+
+
+def _json_text_depth_within(text: str, limit: int) -> bool:
+    """Return False once bracket nesting outside string literals exceeds limit.
+
+    A single linear pass (string/escape state machine, no regex, no
+    backtracking), independent of the interpreter recursion limit, so the
+    verdict and the cost are the same on every Python version. An unterminated
+    string swallows the rest of the text; json.loads rejects such input anyway.
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char == "{" or char == "[":
+            depth += 1
+            if depth > limit:
+                return False
+        elif char == "}" or char == "]":
+            depth -= 1
+    return True
+
+
+def _value_depth_within(value, limit: int) -> bool:
+    """Iteratively check container nesting of a parsed value against limit."""
+    stack = [(value, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if isinstance(item, dict):
+            children = item.values()
+        elif isinstance(item, (list, tuple)):
+            children = item
+        else:
+            continue
+        if depth > limit:
+            return False
+        stack.extend((child, depth + 1) for child in children)
+    return True
 
 
 def native_tool_call_decision(message) -> str | None:
@@ -32,11 +80,15 @@ def native_tool_call_decision(message) -> str | None:
     if isinstance(arguments, str):
         if len(arguments) > MAX_ARGUMENT_CHARS:
             return None
+        if not _json_text_depth_within(arguments, MAX_ARGUMENT_DEPTH):
+            return None
         try:
             arguments = json.loads(arguments)
         except (TypeError, ValueError, RecursionError):
             return None
     if not isinstance(arguments, dict):
+        return None
+    if not _value_depth_within(arguments, MAX_ARGUMENT_DEPTH):
         return None
     try:
         encoded_arguments = json.dumps(
@@ -57,4 +109,4 @@ def native_tool_call_decision(message) -> str | None:
         return None
 
 
-__all__ = ["MAX_ARGUMENT_CHARS", "TOOL_NAME_RE", "native_tool_call_decision"]
+__all__ = ["MAX_ARGUMENT_CHARS", "MAX_ARGUMENT_DEPTH", "TOOL_NAME_RE", "native_tool_call_decision"]

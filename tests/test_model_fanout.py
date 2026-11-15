@@ -1358,7 +1358,7 @@ def test_fanout_synthesis_uses_local_model_show_metadata_when_tags_omit_capabili
     )
 
     assert server._fanout_synthesis_model("ordinary-ollama") == "ordinary-ollama"
-    assert seen == [("/api/show", {"name": "ordinary-ollama"})]
+    assert seen == [("/api/show", {"name": "ordinary-ollama", "model": "ordinary-ollama"})]
 
 
 def test_fanout_synthesis_uses_nested_tag_capability_without_show(monkeypatch):

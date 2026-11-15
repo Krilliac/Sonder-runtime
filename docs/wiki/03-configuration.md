@@ -660,7 +660,9 @@ selects secret files and `include_hidden` / `include_ignored`. `text_search`,
 model, the activity record or the caller sees them: a row or tree entry naming
 a secret path (as spelled or after following links), an entry inside a
 directory that matches a glob, or a line that does not parse, is withheld and
-counted. Tree walks never follow a symlink, junction or other reparse point.
+counted. Tree walks never follow a symlink, a junction or any other name-surrogate
+reparse point (one whose tag cannot be read counts as a link); other reparse points,
+such as cloud-file placeholders, are walked as ordinary content.
 
 The grant is decided again during the turn: at every model call the files must
 still grant every tool the turn was opened with (revoking any one stops the
@@ -1041,10 +1043,13 @@ model name. A `sonder-inference` binding therefore sends the request to
 `SONDER_INFERENCE_BASE_URL` and cannot silently enter the Ollama pool.
 
 The supported provider values are `sonder-inference`, `openai_compatible`,
-`ollama`, and `openrouter`. Loopback OpenAI-compatible endpoints remain local; remote
+`ollama`, `openrouter`, and `anthropic`. Loopback OpenAI-compatible endpoints remain local; remote
 endpoints require the operation's cloud consent and the provider's transport
 policy. OpenRouter requires `SONDER_ALLOW_CLOUD=1`, an API key, and the
-operation's cloud consent. Autopilot
+operation's cloud consent. Anthropic requires the same, with
+`SONDER_ANTHROPIC_API_KEY` (optional `SONDER_ANTHROPIC_API_KEY_2`), the optional
+`anthropic` SDK, and a local daily cap `SONDER_ANTHROPIC_DAILY_USD` (default 10);
+see `docs/integration/anthropic.md`. Autopilot
 and other local-only routes refuse a hosted binding rather than silently
 changing providers. Ollama-bound tiers retain the existing request payload
 and route behavior byte-for-byte.

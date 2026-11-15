@@ -65,7 +65,7 @@ def test_installer_provisions_a_separate_opt_in_managed_runtime_profile():
     text = _text()
 
     assert "[switch] $ManagedRuntime" in text
-    assert "sys.version_info[:2] == (3, 12)" in text
+    assert "sys.version_info[:2] in ((3, 12), (3, 14))" in text
     assert "Join-Path $repo 'venv-managed'" in text
     assert "'-r', $requirementsFile" in text
     assert "'sonder_runtime.adapters.execution.runtime_profile', 'seal'" in text

@@ -398,7 +398,7 @@ class RestrictedRun:
                     "tool '%s': %s %r is outside the project root of restricted model '%s'."
                     % (tool_name, key, value, self.model)
                 )
-            matched = _rules.secret_glob_match(relative, globs)
+            matched = _rules.restricted_glob_match(relative, globs)
             if matched:
                 return _refusal(
                     "tool '%s': %s %r matches the restricted secret path glob %r; restricted model "
@@ -441,7 +441,7 @@ class RestrictedRun:
                 return _refusal("tool '%s': the restricted secret path globs could not be read." % tool_name)
             pattern = args.get("glob")
             if isinstance(pattern, str) and pattern.strip():
-                matched = _rules.secret_glob_match(pattern.strip(), globs)
+                matched = _rules.restricted_glob_match(pattern.strip(), globs)
                 if matched:
                     return _refusal(
                         "tool '%s': glob %r selects files matching the restricted secret path glob %r."
@@ -474,7 +474,7 @@ class RestrictedRun:
                 return True
             if relative == ".." or relative.startswith("../"):
                 return True
-            if _rules.secret_glob_match(relative, globs):
+            if _rules.restricted_glob_match(relative, globs):
                 return True
         return False
 
