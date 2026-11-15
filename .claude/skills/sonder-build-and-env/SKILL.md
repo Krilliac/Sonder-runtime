@@ -12,7 +12,7 @@ description: >-
 
 # Sonder Runtime: environment setup and verification gates
 
-Sonder Runtime is pure Python 3.12. There is deliberately **no `pyproject.toml`,
+Sonder Runtime is pure Python (CI 3.14, 3.12 still supported for one release). There is deliberately **no `pyproject.toml`,
 no `setup.cfg`, and no installed package** — the repo runs from source via
 `sys.path`, and tests depend on being launched from the repo root. Everything
 below was verified against the real files at commit `99162cf9`.
@@ -223,7 +223,7 @@ tooling: match the file you are editing; comments explain *why*
 
 ## CI reference (`.github/workflows/`)
 
-- `ci.yml`: ubuntu-latest, **Python 3.12 only** (single version), checkout
+- `ci.yml`: ubuntu-latest, **Python 3.14** (plus a non-required `python-3-12-compat` job for the one-release 3.12 window), checkout
   with `fetch-depth: 0` because the history-privacy and ratchet checks need
   full history. The exact gate order (and what it means for merging) is owned
   by `sonder-change-control` §2; reproducing CI locally = the Fast path above

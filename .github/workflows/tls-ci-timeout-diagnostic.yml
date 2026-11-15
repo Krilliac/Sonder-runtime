@@ -23,7 +23,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         timeout-minutes: 2
         with:
-          python-version: "3.12"
+          python-version: "3.14"
       - name: Install authorized diagnostic dependencies
         timeout-minutes: 3
         run: |
@@ -76,7 +76,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         timeout-minutes: 2
         with:
-          python-version: "3.12"
+          python-version: "3.14"
       - name: Install same requirement set and uv pin
         timeout-minutes: 3
         working-directory: source
