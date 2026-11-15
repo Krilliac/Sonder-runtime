@@ -273,6 +273,8 @@ def _line_pair(row: Mapping) -> tuple[int | None, int | None]:
     start, end = row.get("line_start"), row.get("line_end")
     if start is not None:
         return start, end
+    if end is not None:
+        raise ClaimError("line_end needs line_start")
     for key in ("line", "lines"):
         value = row.get(key)
         if value is None or value == "":
@@ -379,7 +381,7 @@ def check_jsonl(source, destination, root, config: ClaimCheckConfig | None = Non
     for row_root, members in groups.items():
         checker = ClaimChecker(row_root, config)
         reports = checker.check_many([claim for _, claim in members])
-        for (position, _), report in zip(members, reports):
+        for (position, _), report in zip(members, reports, strict=True):
             body = report.to_dict()
             body["line_no"] = rows[position][0]
             outputs[position] = body

@@ -56,6 +56,17 @@ _AGENT_ASSIST_TOOLS = (
         effects=frozenset({ToolEffect.READ_FILES, ToolEffect.EXECUTE}),
         execution_class=ExecutionClass.HOST,
     ),
+    ToolDescriptor(
+        "claim_check", "Check a model's code claim against the repository, read-only",
+        {"type": "object", "properties": {
+            "root": _PATH, "file": {"type": "string"}, "line": _INT, "line_end": _INT,
+            "symbols": {"type": "string"}, "category": {"type": "string"},
+            "guard": {"type": "string"}, "entry_point": {"type": "string"},
+            "claim_text": {"type": "string"}, "claim_id": {"type": "string"},
+            "claims_json": {"type": "string"},
+        }, "required": ["root"], "additionalProperties": False},
+        effects=frozenset({ToolEffect.READ_FILES}),
+    ),
 )
 _ARCHIVE_ENTRIES = {"type": "integer", "minimum": 1, "maximum": 10_000}
 _ARCHIVE_FILE_BYTES = {"type": "integer", "minimum": 1, "maximum": 256_000_000}
@@ -1383,6 +1394,9 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
             from .code_check_agent_tools import native_agent_assist
             return native_agent_assist(canonical_name, canonical_arguments, registry,
                                        context.workspace_roots)
+        if canonical_name == "claim_check":
+            from .claim_check_agent_tools import native_claim_check
+            return native_claim_check(canonical_arguments, context.workspace_roots)
         if canonical_name in _INSPECTION_NAMES:
             logger.debug(f"routing to inspection service: {canonical_name!r}")
             result = application.inspections.inspect(
