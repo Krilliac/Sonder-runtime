@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -35,40 +34,17 @@ import sonder_runtime.adapters.artifact_fetch as artifact_fetch
 from sonder_runtime.adapters import model_tool_policy as mtp
 from sonder_runtime.adapters.filesystem import file_ops
 
-PROTECTED = "control-plane|control state|hard link|protected"
-FORGED = json.dumps({"version": 1, "model_profiles": [
-    {"id": "forged", "match": {"names": [], "prefixes": ["astra-cyber-"]},
-     "tools": ["text_search"], "lanes": ["agent"]},
-]}) + "\n"
-windows_only = pytest.mark.skipif(sys.platform != "win32", reason="Windows path namespaces")
+from tests.support.policy_checkout import (
+    FORGED,
+    PROTECTED,
+    windows_only,
+)
+from tests.support.policy_checkout import evil_branch as _evil_branch
+from tests.support.policy_checkout import git as _git
+from tests.support.policy_checkout import plain_branch as _plain_branch
+from tests.support.policy_checkout import targets as _targets
 
-
-@pytest.fixture
-def policy_files(monkeypatch, tmp_path):
-    """A package data directory (with the shipped policy) and an overlay, both under tmp_path.
-
-    The tree is a git repository so the git tools treat it as the live runtime
-    checkout (it holds the package data directory).
-    """
-    repo = tmp_path / "checkout"
-    data = repo / "pkg" / "data"
-    data.mkdir(parents=True)
-    shipped = data / "model_tool_policy.json"
-    shutil.copyfile(mtp.SHIPPED_PATH, shipped)
-    overlay = repo / "state" / mtp.OVERLAY_FILE_NAME
-    overlay.parent.mkdir()
-    overlay.write_text('{"version": 1, "model_profiles": []}\n', encoding="utf-8")
-    monkeypatch.setattr(file_ops, "RUNTIME_PACKAGE_DATA_DIR", data)
-    monkeypatch.setenv(mtp.OVERLAY_ENV, str(overlay))
-    monkeypatch.setenv("SONDER_FILE_ROOTS", str(tmp_path))
-    (repo / "proj").mkdir()
-    assert file_ops._is_protected_mutation_path(shipped)
-    assert file_ops._is_protected_mutation_path(overlay)
-    return SimpleNamespace(repo=repo, data=data, shipped=shipped, overlay=overlay, project=repo / "proj")
-
-
-def _targets(files):
-    return {"shipped": files.shipped, "overlay": files.overlay}
+pytest_plugins = ("tests.support.policy_checkout",)  # the policy_files and checkout fixtures
 
 
 # ---- other names for the same file ------------------------------------------------
@@ -198,23 +174,6 @@ def test_fetch_artifact_never_writes_a_protected_path(policy_files, monkeypatch,
 
 # ---- apply_patch and the git tools ---------------------------------------------------
 
-def _git(repo, *args, check=True):
-    return subprocess.run(["git", "-C", str(repo), *args], check=check, capture_output=True, text=True)
-
-
-@pytest.fixture
-def checkout(policy_files):
-    """The live checkout as a git repository, with the policy files committed."""
-    repo = policy_files.repo
-    _git(repo, "init", "-q", "-b", "master")
-    _git(repo, "config", "user.email", "test@test.invalid")
-    _git(repo, "config", "user.name", "Test")
-    (repo / "hello.txt").write_text("hello\n", encoding="utf-8")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-q", "-m", "initial")
-    return policy_files
-
-
 def _patch(relative, old, new):
     return (
         "--- a/{0}\n+++ b/{0}\n@@ -1 +1 @@\n-{1}\n+{2}\n".format(relative, old, new)
@@ -264,28 +223,6 @@ def test_apply_patch_check_only_still_reports(checkout):
     result = harness_tools.apply_patch(str(checkout.repo), _patch(relative, first_line, "{}"), check_only=True)
     assert "protected" not in str(result.get("error", ""))
     assert checkout.shipped.read_bytes() == before
-
-
-def _evil_branch(files, name="evil"):
-    """A branch that rewrites both policy files, then back on master."""
-    repo = files.repo
-    _git(repo, "checkout", "-q", "-b", name)
-    files.shipped.write_text(FORGED, encoding="utf-8")
-    files.overlay.write_text(FORGED, encoding="utf-8")
-    _git(repo, "commit", "-q", "-am", "grant everything")
-    sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
-    _git(repo, "checkout", "-q", "master")
-    return sha
-
-
-def _plain_branch(files, name="plain"):
-    repo = files.repo
-    _git(repo, "checkout", "-q", "-b", name)
-    (repo / "hello.txt").write_text("changed\n", encoding="utf-8")
-    _git(repo, "commit", "-q", "-am", "plain change")
-    sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
-    _git(repo, "checkout", "-q", "master")
-    return sha
 
 
 def _unchanged(files, before):

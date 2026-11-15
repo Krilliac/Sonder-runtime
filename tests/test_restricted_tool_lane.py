@@ -801,3 +801,51 @@ def test_the_search_filter_withholds_a_row_reached_through_a_junction(junctioned
     filtered = run.filter_observation("text_search", {"root": str(junctioned)}, observation)
     assert "OUTSIDE_CONTENT" not in filtered
     assert r"  src\app.py:1:5: def needle():" in filtered.split("\n")
+
+
+# ---- the in-flight filter fails closed when the files stop being trustworthy ----------------
+
+def _search(_project):
+    return "\n".join(["matches for 'needle':", "  src/app.py:1:5: def needle():"])
+
+
+def test_the_filter_withholds_everything_when_the_overlay_turns_invalid_mid_turn(catalog, overlay, project):
+    overlay()
+    run = _run()
+    run.project_root = str(project)
+    search = _search(project)
+    assert run.current_secret_globs() is not None
+    assert "app.py" in run.filter_observation("text_search", {"root": str(project)}, search)
+    # Between dispatch and filter, the overlay becomes invalid JSON (a write nobody guarded).
+    (project.parent / "overlay" / "model_tool_policy.json").write_text("{bad", encoding="utf-8")
+    assert run.current_secret_globs() is None
+    filtered = run.filter_observation("text_search", {"root": str(project)}, search)
+    assert "withheld" in filtered and "app.py" not in filtered, filtered
+    # Control: with a valid overlay again, results flow.
+    overlay()
+    assert run.current_secret_globs() is not None
+    assert "app.py" in run.filter_observation("text_search", {"root": str(project)}, search)
+
+
+def test_the_filter_withholds_everything_when_the_shipped_file_changes_mid_turn(
+    catalog, overlay, project, monkeypatch, tmp_path,
+):
+    import shutil
+
+    copy = tmp_path / "pkg" / "model_tool_policy.json"
+    copy.parent.mkdir()
+    shutil.copyfile(mtp.SHIPPED_PATH, copy)
+    monkeypatch.setattr(mtp, "SHIPPED_PATH", copy)
+    mtp.clear_cache()
+    overlay()
+    run = _run()
+    run.project_root = str(project)
+    search = _search(project)
+    assert run.current_secret_globs() is not None  # the shipped file is read (and pinned) here
+    assert "app.py" in run.filter_observation("text_search", {"root": str(project)}, search)
+    document = json.loads(copy.read_text(encoding="utf-8"))
+    document["restricted_secret_path_globs"] = [".env"]  # a rewrite that drops most shipped secret globs
+    copy.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    assert run.current_secret_globs() is None
+    filtered = run.filter_observation("text_search", {"root": str(project)}, search)
+    assert "withheld" in filtered and "app.py" not in filtered, filtered
