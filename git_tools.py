@@ -623,35 +623,116 @@ def _resolve_diff_path(root, path, *, extra_roots):
     return relative.as_posix()
 
 
-def repo_diff(root=".", *, staged=False, path="", context=3,
-              timeout=DEFAULT_TIMEOUT, max_output=DEFAULT_OUTPUT_BYTES,
-              extra_roots="", bypass=False):
-    """Return a bounded working-tree or staged diff with optional path scope."""
-    root = _resolve_root(root, extra_roots=extra_roots, bypass=bypass)
-    top = _require_repository_root(root, timeout=timeout, max_output=max_output)
-    relative = _resolve_diff_path(top, path, extra_roots=extra_roots)
-    context = _bounded_int(context, 3, 0, MAX_DIFF_CONTEXT)
+_DIFF_PATHSPEC_CHUNK = 200
+
+
+def _diff_changed_paths(top, scope, *, staged, timeout):
+    """List the changed paths as groups; a rename or copy links both sides."""
     arguments = [
         "-c", "color.ui=false", "-c", "core.pager=cat",
         "--no-pager", "--literal-pathspecs", "diff", "--no-ext-diff",
-        "--no-textconv",
-        "--unified=%d" % context,
+        "--no-textconv", "-M", "-C", "--name-status", "-z",
     ]
     if staged is True:
         arguments.append("--cached")
     arguments.append("--")
-    if relative:
-        arguments.append(relative)
+    if scope:
+        arguments.append(scope)
     result = _checked_git(
-        top, arguments, timeout=timeout, max_output=max_output,
-        operation="diff",
+        top, arguments, timeout=timeout, max_output=MAX_OUTPUT_BYTES,
+        operation="diff path listing",
     )
+    if result["truncated"]:
+        raise ValueError("diff changes too many paths to screen for secrets")
+    tokens = result["stdout"].split(chr(0))
+    if tokens and not tokens[-1]:
+        tokens.pop()
+    groups = []
+    index = 0
+    while index < len(tokens):
+        status = tokens[index]
+        width = 2 if status[:1] in ("R", "C") else 1
+        group = tokens[index + 1:index + 1 + width]
+        if len(group) != width or not all(group):
+            raise ValueError("unparseable git diff path listing")
+        groups.append(group)
+        index += 1 + width
+    return groups
+
+
+def _screen_diff_paths(top, groups, *, extra_roots):
+    """Split changed paths into allowed and withheld with the shared predicate.
+
+    A group (rename or copy) is allowed only when every path in it is allowed,
+    so moving a secret to or from an ordinary name never exposes its contents.
+    """
+    allowed = []
+    withheld = 0
+    with file_ops.read_policy_snapshot():
+        for group in groups:
+            ok = True
+            for name in group:
+                try:
+                    _resolve_diff_path(top, name, extra_roots=extra_roots)
+                except (PermissionError, ValueError, OSError):
+                    ok = False
+            if ok:
+                allowed.extend(group)
+            else:
+                withheld += len(group)
+    return allowed, withheld
+
+
+def repo_diff(root=".", *, staged=False, path="", context=3,
+              timeout=DEFAULT_TIMEOUT, max_output=DEFAULT_OUTPUT_BYTES,
+              extra_roots="", bypass=False):
+    """Return a bounded working-tree or staged diff with optional path scope.
+
+    Changed paths are listed first and screened with the same secret/control
+    predicate that guards an explicit ``path``; only allowed paths reach the
+    real diff, and ``withheld`` reports how many were left out.
+    """
+    root = _resolve_root(root, extra_roots=extra_roots, bypass=bypass)
+    top = _require_repository_root(root, timeout=timeout, max_output=max_output)
+    relative = _resolve_diff_path(top, path, extra_roots=extra_roots)
+    context = _bounded_int(context, 3, 0, MAX_DIFF_CONTEXT)
+    groups = _diff_changed_paths(top, relative, staged=staged, timeout=timeout)
+    allowed, withheld = _screen_diff_paths(top, groups, extra_roots=extra_roots)
+    base = [
+        "-c", "color.ui=false", "-c", "core.pager=cat",
+        "--no-pager", "--literal-pathspecs", "diff", "--no-ext-diff",
+        "--no-textconv", "--no-renames",
+        "--unified=%d" % context,
+    ]
+    if staged is True:
+        base.append("--cached")
+    base.append("--")
+    result = {
+        "stdout": "", "elapsed_ms": 0, "truncated": False,
+        "output_bytes": 0, "output_limit": max_output,
+    }
+    # Never run a diff with an empty pathspec list: that means "everything".
+    remaining = max_output
+    for start in range(0, len(allowed), _DIFF_PATHSPEC_CHUNK):
+        part = _checked_git(
+            top, base + allowed[start:start + _DIFF_PATHSPEC_CHUNK],
+            timeout=timeout, max_output=remaining, operation="diff",
+        )
+        result["stdout"] += part["stdout"]
+        result["elapsed_ms"] += part["elapsed_ms"]
+        result["output_bytes"] += part["output_bytes"]
+        result["output_limit"] = part["output_limit"]
+        remaining = max(1, remaining - part["output_bytes"])
+        if part["truncated"]:
+            result["truncated"] = True
+            break
     return {
         "root": str(top),
         "staged": staged is True,
         "path": relative,
         "context": context,
         "diff": result["stdout"],
+        "withheld": withheld,
         "elapsed_ms": result["elapsed_ms"],
         "truncated": result["truncated"],
         "output_bytes": result["output_bytes"],

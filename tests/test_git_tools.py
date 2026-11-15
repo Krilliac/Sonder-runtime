@@ -691,3 +691,115 @@ def test_runtime_update_format_marks_cached_remote_ref_as_known():
     })
 
     assert "newest known origin/main" in text
+
+SECRET_BODY = {
+    ".env": "STRIPE_LIVE=sk_live_abcdef0123456789\n",
+    "id_rsa": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n",
+    ".git-credentials": "https://user:hunter2token@example.invalid\n",
+}
+SECRET_MARKERS = ("sk_live_", "b3BlbnNzaC1rZXktdjEAAAAA", "hunter2token")
+
+
+def _secret_repo(tmp_path):
+    repo = _repo(tmp_path)
+    (repo / "config").mkdir()
+    files = dict(SECRET_BODY)
+    files["ordinary.txt"] = "base\n"
+    files["config/app.txt"] = "base\n"
+    files["config/.env"] = "PGPASS=base\n"
+    for name in files:
+        (repo / name).write_text("old\n", encoding="utf-8")
+    _git(repo, "add", "-f", ".")
+    _git(repo, "commit", "-m", "secrets")
+    for name, body in files.items():
+        if name == "config/.env":
+            body = "PGPASS=changed-pgpass\n"
+        else:
+            body = body + "new-line\n"
+        (repo / name).write_text(body, encoding="utf-8")
+    return repo
+
+
+def _assert_no_secret(text):
+    for marker in SECRET_MARKERS + ("PGPASS", "changed-pgpass"):
+        assert marker not in text
+
+
+@pytest.mark.parametrize("staged", [False, True])
+@pytest.mark.parametrize("scope", ["", "config/", "config"])
+def test_repo_diff_unscoped_or_directory_scope_withholds_secret_paths(
+    tmp_path, staged, scope,
+):
+    repo = _secret_repo(tmp_path)
+    if staged:
+        _git(repo, "add", "-f", "-A")
+    result = _diff(repo, staged=staged, path=scope, context=0)
+    _assert_no_secret(result["diff"])
+    assert "config/app.txt" in result["diff"]
+    assert ("ordinary.txt" in result["diff"]) == (scope == "")
+    assert result["withheld"] == (1 if scope else 4)
+
+
+def test_repo_diff_all_changes_withheld_returns_empty_diff_with_count(tmp_path):
+    repo = _secret_repo(tmp_path)
+    _git(repo, "checkout", "--", "ordinary.txt", "config/app.txt")
+    result = _diff(repo, context=0)
+    assert result["diff"] == ""
+    assert result["withheld"] == 4
+    assert result["truncated"] is False
+
+
+def test_repo_diff_scoped_ordinary_file_is_unchanged(tmp_path):
+    repo = _secret_repo(tmp_path)
+    result = _diff(repo, path="ordinary.txt")
+    assert "+new-line" in result["diff"]
+    assert result["withheld"] == 0
+    _assert_no_secret(result["diff"])
+
+
+@pytest.mark.parametrize("staged", [False, True])
+def test_repo_diff_withholds_renames_to_and_from_secret_paths(tmp_path, staged):
+    repo = _repo(tmp_path)
+    (repo / "plain.txt").write_text("plain-body-line\n" * 5, encoding="utf-8")
+    (repo / ".env").write_text("STRIPE_LIVE=sk_live_renamed0123\n" * 5, encoding="utf-8")
+    _git(repo, "add", "-f", ".")
+    _git(repo, "commit", "-m", "base")
+    _git(repo, "mv", "plain.txt", ".env.new")
+    _git(repo, "mv", ".env", "ordinary-name.txt")
+    if not staged:
+        _git(repo, "reset", "-q")
+    result = _diff(repo, staged=staged, context=0)
+    assert "sk_live_" not in result["diff"]
+    assert staged is False or "plain-body-line" not in result["diff"]
+    assert result["withheld"] == (4 if staged else 1)
+
+
+@pytest.mark.parametrize("name", ["*", ":(glob)**"])
+def test_repo_diff_pathspec_named_files_cannot_widen_the_diff(tmp_path, name):
+    repo = _secret_repo(tmp_path)
+    blob = subprocess.run(
+        ["git", "-C", str(repo), "hash-object", "-w", "--stdin"],
+        input="odd\n", capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    try:
+        _git(repo, "update-index", "--add", "--cacheinfo", "100644,%s,%s" % (blob, name))
+    except AssertionError:
+        pytest.skip("this platform cannot hold a tracked path named %r" % name)
+    _git(repo, "commit", "-m", "odd name")
+    (repo / "ordinary.txt").write_text("again\n", encoding="utf-8")
+    result = _diff(repo, context=0)
+    _assert_no_secret(result["diff"])
+    assert "+again" in result["diff"]
+
+@pytest.mark.parametrize("name", ["*", ":(glob)**", ":(top)."])
+def test_repo_diff_listed_pathspec_looking_names_stay_literal(
+    monkeypatch, tmp_path, name,
+):
+    repo = _secret_repo(tmp_path)
+    monkeypatch.setattr(
+        git_tools, "_diff_changed_paths", lambda *a, **k: [[name]],
+    )
+    result = _diff(repo, context=0)
+    _assert_no_secret(result["diff"])
+    assert result["diff"] == ""
+
