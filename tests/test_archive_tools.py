@@ -351,3 +351,126 @@ def test_archive_extract_is_self_validating_for_agent_bookkeeping(workspace):
     mutations = [{"tool": "archive_extract", "path": server._agent_normalized_path(args["destination"])}]
     observation = json.dumps({"ok": True, "validation_passed": True})
     assert server._agent_validation_covers("archive_extract", args, mutations, observation)
+
+
+@pytest.mark.parametrize("member", [
+    ".npmrc", "kubeconfig", ".htpasswd", "pkg/.npmrc", "vault/passwords.kdbx",
+    ".config/gcloud/credentials.db", ".config/gh/hosts.yml",
+])
+def test_tarball_with_token_store_names_extracts_but_reads_stay_refused(workspace, member):
+    # Policy: ordinary repositories ship .npmrc, so extraction is not refused
+    # for the token-store names added to the read guard; reading them still is.
+    _tar(workspace / "repo.tar", [("README.md", b"hi"), (member, b"TOKEN-MATERIAL")])
+
+    listed = archive_tools.list_archive("repo.tar")
+    extracted = archive_tools.extract_archive("repo.tar", "output")
+
+    assert listed["valid"] is True
+    assert extracted["validation_passed"] is True
+    assert (workspace / "output" / member).read_bytes() == b"TOKEN-MATERIAL"
+    assert file_ops.read_file("output/README.md")["text"] == "hi"
+    with pytest.raises(PermissionError, match="credential store"):
+        file_ops.read_file("output/" + member)
+
+
+@pytest.mark.parametrize("name", [
+    ".env", "id_rsa", ".netrc", ".pgpass", "key.pem",
+    "application_default_credentials.json", "credentials.tfrc.json",
+    ".env.kdbx", ".env.prod.kdbx",
+])
+def test_extraction_still_refuses_what_it_refused_before(workspace, name):
+    _zip(workspace / "bad.zip", [(name, b"SECRET")])
+    data = archive_tools.list_archive("bad.zip")
+    assert data["valid"] is False
+    assert "sensitive" in data["errors"][0]
+
+
+def _frozen_pre_branch_refuses(name: str) -> bool:
+    """Frozen copy of the extraction secret-name rules as of d17a377d."""
+    from pathlib import PurePosixPath
+    parts = name.split("/")
+    directories = {".git", ".ssh", ".aws", ".azure", ".gnupg", ".kube"}
+    if any(part.casefold() in directories for part in parts):
+        return True
+    path = PurePosixPath(name)
+    lowered = path.name.lower()
+    suffix = path.suffix.lower()
+    secret_files = {
+        ".credentials.json", ".netrc", ".token", "auth.json",
+        "credentials.json", "secrets.json", "token.json",
+        "id_dsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk", "id_rsa",
+    }
+    credential_files = {
+        ".netrc", "_netrc", ".git-credentials", ".pgpass",
+        "id_dsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk", "id_rsa",
+    }
+    if (
+        lowered in secret_files or lowered in credential_files
+        or suffix in {".key", ".p12", ".pem", ".pfx"}
+    ):
+        return True
+    if lowered in {".env", ".envrc"} or lowered.startswith(".env.") or suffix == ".env":
+        return True
+    return (
+        suffix in {".cfg", ".ini", ".json", ".toml", ".txt", ".yaml", ".yml"}
+        and ("credential" in lowered or "secret" in lowered)
+    )
+
+
+TRICKY_NAMES = [
+    # unchanged base rules
+    ".env", ".ENV", ".envrc", ".env.local", ".env.prod.kdbx", ".env.kdbx",
+    "prod.env", "Secrets.ENV", "id_rsa", "ID_ED25519", "id_ed25519.pub",
+    "key.pem", "KEY.PEM", "a.key.txt", "cert.p12", "cert.PFX", "x.pem.bak",
+    ".netrc", "_NETRC", ".pgpass", ".git-credentials", "token.json", "AUTH.JSON",
+    # *credential* / *secret* with config suffixes
+    "application_default_credentials.json", "credentials.tfrc.json",
+    "my-credentials.toml", "Credential.YAML", "secret.ini", "secrets.cfg",
+    "notes-secret.txt", "credentials.md", "secret.py", "credentials.tfrc.md",
+    # suffix stacking
+    "vault.kdbx", "vault.KDBX", "vault.kdbx.bak", "archive.pem.kdbx", "db.kdbx.json",
+    "credentials.kdbx", "secret.kdbx",
+    # names added by this branch only
+    ".npmrc", ".NPMRC", "pkg/.npmrc", "kubeconfig", ".htpasswd", ".boto", ".s3cfg",
+    ".pypirc", ".terraformrc", "terraform.rc", ".vault-token", "service-account.json",
+    "service_account.json", "serviceaccount.json", "service.json",
+    # directories
+    ".gcloud/access_tokens.db", ".config/gcloud/credentials.db", ".ssh/config",
+    ".kube/config", ".azure/x", ".GIT/config", "src/.gcloud/x.txt",
+    # ordinary
+    "README.md", "src/app.py", "config.json", "npmrc.md", "hosts.yml",
+]
+
+
+@pytest.mark.parametrize("name", TRICKY_NAMES)
+def test_extraction_refusals_match_the_pre_branch_predicate(name):
+    refused = False
+    try:
+        archive_tools._portable_member_path(name, is_directory=False, max_depth=20)
+    except archive_tools.ArchiveRejected as exc:
+        refused = "sensitive" in str(exc)
+    assert refused == _frozen_pre_branch_refuses(name), name
+
+
+@pytest.mark.parametrize("name", TRICKY_NAMES)
+def test_secret_predicate_is_base_or_added(name):
+    from pathlib import Path
+    path = Path(name)
+    added = (
+        path.name.lower() in file_ops.ADDED_CREDENTIAL_READ_FILES
+        or path.suffix.lower() in file_ops.ADDED_SECRET_SUFFIXES
+    )
+    assert file_ops._is_base_secret_path(path) == _frozen_pre_branch_refuses(path.name)
+    assert file_ops._is_secret_path(path) == (file_ops._is_base_secret_path(path) or added)
+
+
+@pytest.mark.parametrize("name", [
+    ".env", "id_rsa", ".netrc", ".pgpass", "key.pem",
+    "application_default_credentials.json", "credentials.tfrc.json",
+    ".env.kdbx", ".env.prod.kdbx", ".env.anything.kdbx",
+])
+def test_extraction_refuses_names_flagged_by_the_base_rules(workspace, name):
+    _zip(workspace / "bad2.zip", [(name, b"SECRET")])
+    data = archive_tools.list_archive("bad2.zip")
+    assert data["valid"] is False
+    assert "sensitive" in data["errors"][0]

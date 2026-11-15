@@ -728,3 +728,163 @@ def test_every_guard_must_refuse_and_judge(tmp_path, monkeypatch):
     assert calls.guards_judge([judging, other], selectors) == (False, [])
     # ... or one whose refusal a ``try`` swallows (review 4, M7).
     assert calls.guards_judge([judging, swallowing], selectors) == (False, [swallowing])
+
+
+# ---- call-time seams (``late`` / ``value``) -------------------------------------
+#
+# Each case runs twice on the same synthetic source: with the extension on it is
+# seen, with ``SEAM_EXTENSION_ENABLED`` off it goes undetected, so the test
+# cannot pass by finding nothing.
+
+def test_no_bundle_field_is_fed_by_a_misnamed_late_seam(scan):
+    assert scan.errors == [], "misnamed late() seam bindings:\n" + "\n".join(scan.errors)
+
+
+def _scan_full(tmp_path, monkeypatch, relpath, source):
+    path = tmp_path / relpath
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(textwrap.dedent(source), encoding="utf-8")
+    monkeypatch.setattr(calls, "REPO_ROOT", tmp_path)
+    return calls.collect({"sonder_runtime": [path]})
+
+
+_SEAM_MODULE = "sonder_runtime/application/moved.py"
+_SEAM_SOURCE = '''
+    from sonder_runtime.bootstrap.legacy_seams import late, value
+
+    def build(namespace):
+        return late(namespace, "sonder")
+
+    def pick(namespace):
+        return value(namespace, "_make_generate")
+
+    def untracked(namespace):
+        return late(namespace, "some_other_name"), value(namespace, "TIERS")
+'''
+
+
+def test_late_and_value_record_seam_sites_in_the_enclosing_function(tmp_path, monkeypatch):
+    sites = _scan_full(tmp_path, monkeypatch, _SEAM_MODULE, _SEAM_SOURCE).sites
+    build = sites[(_SEAM_MODULE, "build", "sonder")]
+    pick = sites[(_SEAM_MODULE, "pick", "_make_generate")]
+    assert build.kinds == {"seam"} and build.count == 1
+    # The string is not also counted as a choke-point lookup.
+    assert pick.kinds == {"seam"} and pick.count == 1
+    # Names the scan does not track are not sites, and the helper import is not one.
+    assert not any(key[1] == "untracked" for key in sites)
+    assert not any(key[1] == "<module>" for key in sites)
+
+
+def test_seam_sites_are_undetected_with_the_extension_disabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(calls, "SEAM_EXTENSION_ENABLED", False)
+    sites = _scan_full(tmp_path, monkeypatch, _SEAM_MODULE, _SEAM_SOURCE).sites
+    assert (_SEAM_MODULE, "build", "sonder") not in sites
+    # Only the old string spelling of a choke point remains, and it is not a seam.
+    assert sites[(_SEAM_MODULE, "pick", "_make_generate")].kinds == {"str"}
+
+
+_BUNDLE_SOURCE = '''
+    from sonder_runtime.bootstrap.legacy_seams import late, value
+
+    def good(namespace):
+        return CampaignDeps(sonder=late(globals(), "sonder"))
+
+    def misnamed(namespace):
+        return CampaignDeps(ask=late(globals(), "sonder"))
+
+    def getter_is_not_a_late_binding(namespace):
+        return CampaignDeps(generate=value(globals(), "_make_generate"))
+'''
+
+
+def test_a_keyword_fed_by_late_must_carry_the_server_name(tmp_path, monkeypatch):
+    scan = _scan_full(tmp_path, monkeypatch, _SEAM_MODULE, _BUNDLE_SOURCE)
+    assert len(scan.errors) == 1
+    error = scan.errors[0]
+    assert "misnamed" in error and "'ask'" in error and "'sonder'" in error
+    assert _SEAM_MODULE in error
+    # The misnamed binding is still a site, so it cannot hide as unclassified.
+    assert (_SEAM_MODULE, "misnamed", "sonder") in scan.sites
+
+
+def test_a_misnamed_late_keyword_is_undetected_with_the_extension_disabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(calls, "SEAM_EXTENSION_ENABLED", False)
+    scan = _scan_full(tmp_path, monkeypatch, _SEAM_MODULE, _BUNDLE_SOURCE)
+    assert scan.errors == []
+    assert (_SEAM_MODULE, "misnamed", "sonder") not in scan.sites
+
+
+_DEPS_SOURCE = '''
+    def chat(deps, prompt):
+        return deps.sonder(prompt, tier="code")
+
+    def renamed_field(deps, prompt):
+        return deps.ask(prompt, tier="code")
+'''
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_deps_attribute_call_in_a_packaged_module_is_a_site(tmp_path, monkeypatch, enabled):
+    # ``deps.<tracked>(...)`` is seen by the existing attribute visitor, with or
+    # without the seam extension: this pins that behaviour.  It is not vacuous:
+    # the same call through a field with another name is not a site.
+    monkeypatch.setattr(calls, "SEAM_EXTENSION_ENABLED", enabled)
+    sites = _scan_full(tmp_path, monkeypatch, _SEAM_MODULE, _DEPS_SOURCE).sites
+    chat = sites[(_SEAM_MODULE, "chat", "sonder")]
+    assert chat.kinds == {"call"} and chat.selectors == {"'code'"}
+    assert not any(key[1] == "renamed_field" for key in sites)
+
+
+_TIER_SOURCE = '''
+    from sonder_runtime.adapters import tool_lane_guard as g
+    from sonder_runtime.bootstrap.legacy_seams import value
+
+    def via_value(deps, namespace, p, tier):
+        if g.selector_refusal(tier, value(namespace, "TIERS")()): return
+        exec(deps.sonder(p, tier=tier))
+
+    def via_deps(deps, p, tier):
+        if g.selector_refusal(tier, deps.TIERS()): return
+        exec(deps.sonder(p, tier=tier))
+
+    def via_other_getter(deps, p, tier):
+        if g.selector_refusal(tier, deps.OTHER()): return
+        exec(deps.sonder(p, tier=tier))
+
+    def via_other_name(deps, namespace, p, tier):
+        if g.selector_refusal(tier, value(namespace, "NOT_TIERS")()): return
+        exec(deps.sonder(p, tier=tier))
+
+    def via_getter_with_arguments(deps, p, tier):
+        if g.selector_refusal(tier, deps.TIERS(1)): return
+        exec(deps.sonder(p, tier=tier))
+'''
+
+
+def test_an_injected_tier_map_is_a_real_refusal_binding(tmp_path, monkeypatch):
+    sites = _scan_full(tmp_path, monkeypatch, _SEAM_MODULE, _TIER_SOURCE).sites
+    assert sites[(_SEAM_MODULE, "via_value", "sonder")].judged
+    assert sites[(_SEAM_MODULE, "via_deps", "sonder")].judged
+    for rejected in ("via_other_getter", "via_other_name", "via_getter_with_arguments"):
+        assert not sites[(_SEAM_MODULE, rejected, "sonder")].refused, rejected
+
+
+def test_an_injected_tier_map_is_not_credited_with_the_extension_disabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(calls, "SEAM_EXTENSION_ENABLED", False)
+    sites = _scan_full(tmp_path, monkeypatch, _SEAM_MODULE, _TIER_SOURCE).sites
+    assert not sites[(_SEAM_MODULE, "via_value", "sonder")].refused
+    assert not sites[(_SEAM_MODULE, "via_deps", "sonder")].refused
+
+
+def test_a_value_helper_the_file_defines_itself_is_not_a_real_tier_map(tmp_path, monkeypatch):
+    sites = _scan_full(tmp_path, monkeypatch, _SEAM_MODULE, '''
+        from sonder_runtime.adapters import tool_lane_guard as g
+
+        def value(namespace, name):
+            return lambda: {}
+
+        def run(deps, namespace, p, tier):
+            if g.selector_refusal(tier, value(namespace, "TIERS")()): return
+            exec(deps.sonder(p, tier=tier))
+    ''').sites
+    assert not sites[(_SEAM_MODULE, "run", "sonder")].refused

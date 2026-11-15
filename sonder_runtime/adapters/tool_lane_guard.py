@@ -115,12 +115,13 @@ def generation_deny_list(policy: Mapping[str, Any] | None = None) -> _models.Too
 
 _SONDER_INFERENCE = "sonder_inference"
 _OPENROUTER = "openrouter"
+_ANTHROPIC = "anthropic"
 _OPENAI_COMPATIBLE = "openai_compatible"
 # Providers whose reply always names the model it served: the Sonder
 # Inference gateway rejects a reply that does not, and OpenRouter reports
 # the reply's model, else the configured one it sent.  For them the reply's
 # model is judged, so an undetermined configured model is not refused first.
-REPLY_NAMES_MODEL = frozenset({_SONDER_INFERENCE, _OPENROUTER})
+REPLY_NAMES_MODEL = frozenset({_SONDER_INFERENCE, _OPENROUTER, _ANTHROPIC})
 
 
 def _served_setting(provider: str, tier: str) -> str:
@@ -130,6 +131,8 @@ def _served_setting(provider: str, tier: str) -> str:
     if provider == _OPENROUTER:
         return ("SONDER_OPENROUTER_TIER_MODELS entry %s=<model> or the policy's "
                 "provider_models.openrouter, else SONDER_OPENROUTER_MODEL" % tier)
+    if provider == _ANTHROPIC:
+        return ("SONDER_ANTHROPIC_TIER_MODELS entry %s=<model>, else SONDER_ANTHROPIC_MODEL" % tier)
     if provider == _OPENAI_COMPATIBLE:
         return "SONDER_OPENAI_MODEL"
     return ""
@@ -316,6 +319,7 @@ def _provider_model(provider: str, key: str, explicit: str, env: Mapping[str, st
     itself, which names a model only when it is not a tier or the alias.
     """
     from sonder_runtime.adapters.inference import (
+        anthropic_gateway,
         openrouter_gateway,
         sonder_inference_gateway,
     )
@@ -331,6 +335,8 @@ def _provider_model(provider: str, key: str, explicit: str, env: Mapping[str, st
         return str(settings.tier_models.get(key, settings.model) or "").strip()
     if provider == openrouter_gateway.PROVIDER_ID:
         return str(openrouter_gateway.config_from_env(env).model_for_tier(key) or "").strip()
+    if provider == anthropic_gateway.PROVIDER_ID:
+        return str(anthropic_gateway.config_from_env(env).model_for_tier(key) or "").strip()
     if provider == PROVIDER_LABEL_IDS["openai-compatible"]:
         source = os.environ if env is None else env
         configured = str(source.get("SONDER_OPENAI_MODEL", "") or "").strip()
