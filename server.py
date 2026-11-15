@@ -12770,10 +12770,9 @@ def repo_diff(
             scope, data["context"], data["elapsed_ms"],
         ),
     ]
-    if data["diff"]:
-        lines.append(data["diff"].rstrip())
-    else:
-        lines.append("  (no diff)")
+    lines.append(data["diff"].rstrip() or "  (no diff)")
+    if data.get("withheld"):
+        lines.append("  %d path(s) withheld (secret or control state)" % data["withheld"])
     if data["truncated"]:
         lines.append(
             "  ... output truncated at %d bytes" % data["output_limit"]

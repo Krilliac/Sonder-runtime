@@ -803,3 +803,110 @@ def test_repo_diff_listed_pathspec_looking_names_stay_literal(
     _assert_no_secret(result["diff"])
     assert result["diff"] == ""
 
+def _file_dir_repo(tmp_path, *, file_to_dir, staged):
+    repo = _repo(tmp_path)
+    secret = "STRIPE=sk_live_filedir0123\n"
+    if file_to_dir:
+        (repo / "deploy").write_text("plain\n", encoding="utf-8")
+    else:
+        (repo / "deploy").mkdir()
+        (repo / "deploy" / ".env").write_text(secret, encoding="utf-8")
+    _git(repo, "add", "-f", "-A")
+    _git(repo, "commit", "-m", "base")
+    if file_to_dir:
+        _git(repo, "rm", "-q", "-f", "deploy")
+        (repo / "deploy").mkdir()
+        (repo / "deploy" / ".env").write_text(secret, encoding="utf-8")
+        _git(repo, "add", "-f", "deploy/.env")
+    else:
+        _git(repo, "rm", "-q", "-f", "deploy/.env")
+        (repo / "deploy").write_text("plain\n", encoding="utf-8")
+        _git(repo, "add", "deploy")
+    if not staged:
+        _git(repo, "reset", "-q")
+    return repo
+
+
+@pytest.mark.parametrize("staged", [True, False])
+@pytest.mark.parametrize("file_to_dir", [True, False])
+@pytest.mark.parametrize("scope", ["", "deploy"])
+def test_repo_diff_file_directory_swap_never_prints_secret_section(
+    tmp_path, staged, file_to_dir, scope,
+):
+    repo = _file_dir_repo(tmp_path, file_to_dir=file_to_dir, staged=staged)
+    result = _diff(repo, staged=staged, path=scope, context=0)
+    assert "sk_live_" not in result["diff"]
+    assert "deploy/.env" not in result["diff"]
+    if staged:
+        assert result["withheld"] >= 1
+
+
+def test_repo_diff_drops_and_counts_sections_outside_the_screened_set(
+    monkeypatch, tmp_path,
+):
+    repo = _secret_repo(tmp_path)
+    real = git_tools._checked_git
+
+    def racy(root, arguments, **kwargs):
+        result = real(root, arguments, **kwargs)
+        if kwargs.get("operation") == "diff":
+            result = dict(result)
+            result["stdout"] += (
+                "diff --git a/raced/.env b/raced/.env\n"
+                "+++ b/raced/.env\n+STRIPE=sk_live_race\n"
+                "diff --git a/mismatch b/other\n+sk_live_mismatch\n"
+            )
+        return result
+
+    monkeypatch.setattr(git_tools, "_checked_git", racy)
+    result = _diff(repo, context=0)
+    assert "sk_live_" not in result["diff"]
+    assert "config/app.txt" in result["diff"]
+    assert result["withheld"] == 4 + 1 + 1
+
+
+def test_repo_diff_refuses_unknown_status_token_and_truncated_listing(
+    monkeypatch, tmp_path,
+):
+    repo = _secret_repo(tmp_path)
+    real = git_tools._checked_git
+
+    def bad_status(root, arguments, **kwargs):
+        result = dict(real(root, arguments, **kwargs))
+        if kwargs.get("operation") == "diff path listing":
+            result["stdout"] = "Z" + chr(0) + "ordinary.txt" + chr(0)
+        return result
+
+    monkeypatch.setattr(git_tools, "_checked_git", bad_status)
+    with pytest.raises(ValueError, match="unparseable"):
+        _diff(repo)
+
+    def truncated(root, arguments, **kwargs):
+        result = dict(real(root, arguments, **kwargs))
+        if kwargs.get("operation") == "diff path listing":
+            result["truncated"] = True
+        return result
+
+    monkeypatch.setattr(git_tools, "_checked_git", truncated)
+    with pytest.raises(ValueError, match="too many paths"):
+        _diff(repo)
+
+
+def test_repo_diff_section_parser_handles_quoting_and_fails_closed():
+    quoted = 'diff --git "a/tab\\there" "b/tab\\there"'
+    assert git_tools._section_path(quoted) == "tab\there"
+    octal = 'diff --git "a/caf\\303\\251" "b/caf\\303\\251"'
+    assert git_tools._section_path(octal) == "café"
+    assert git_tools._section_path("diff --git a/with space b/with space") == "with space"
+    assert git_tools._section_path("diff --cc plain.txt") == "plain.txt"
+    assert git_tools._section_path("diff --git a/x b/y") is None
+    assert git_tools._section_path('diff --git "a/x" b/x') is None
+    assert git_tools._section_path('diff --git "a/\\q" "b/\\q"') is None
+    text = (
+        "diff --git a/ok b/ok\n+1\n"
+        "diff --git a/deploy/.env b/deploy/.env\n+secret\n"
+    )
+    kept, dropped, bad = git_tools._filter_diff_sections(text, {"ok"})
+    assert kept == "diff --git a/ok b/ok\n+1\n"
+    assert dropped == ["deploy/.env"] and bad == 0
+
