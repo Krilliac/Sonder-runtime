@@ -66,10 +66,14 @@ Mitigations that are already in place and worth knowing about:
   a secret or credential store (the same `file_ops` predicates), whatever
   `include_hidden`, the glob or a bypass say, and reports how many it
   skipped. It never enters `.git`, `.ssh`, `.aws` and the other sensitive
-  directories, even with `include_ignored`. It judges and opens the resolved
-  file, and the directory walks used by search, tree and inventory do not
-  follow symlinks, junctions or other reparse points. They also skip Windows
-  names that end in a dot or space, because those open a different file.
+  directories, even with `include_ignored`. The one exception matches
+  `file_read`: a credential directory that an operator-configured file root
+  names is entered, although secret files inside it, such as OpenSSH keys,
+  are still withheld. It judges and opens the resolved file. The directory
+  walks used by search, tree and inventory do not follow symlinks, junctions
+  or other name-surrogate reparse points, but they do walk cloud-file
+  placeholders and dedup files. They also skip Windows names that end in a
+  dot or space, because those open a different file.
   Control-plane files that `file_read` refuses without a developer token
   (`permissions.json`, `workflows.json`, `system_profile.md`, root-level
   modules) are Sonder's own code and configuration, not credentials. They

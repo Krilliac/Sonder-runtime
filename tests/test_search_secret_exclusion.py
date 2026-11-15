@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import types
 from pathlib import Path
 
 import pytest
@@ -341,3 +342,73 @@ def test_resolved_path_check_holds_when_the_walk_misses_an_alias(
     _assert_no_secret_content(repr(result))
     assert "outside-roots" not in repr(result)
     assert "real-id_rsa" not in repr(result)
+
+
+# --- Reparse tags: only name surrogates are links; placeholders are content.
+
+CLOUD_FILES_TAG = 0x9000001A  # IO_REPARSE_TAG_CLOUD_A: no name-surrogate bit
+MOUNT_POINT_TAG = 0xA0000003  # IO_REPARSE_TAG_MOUNT_POINT (a junction)
+FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+
+
+class _TaggedEntry:
+    """A real DirEntry whose no-follow stat reports a chosen reparse tag."""
+
+    def __init__(self, entry, tag):
+        self._entry = entry
+        self._tag = tag
+
+    def __getattr__(self, name):
+        return getattr(self._entry, name)
+
+    def is_junction(self):
+        return False
+
+    def stat(self, *, follow_symlinks=True):
+        real = self._entry.stat(follow_symlinks=follow_symlinks)
+        if follow_symlinks:
+            return real
+        return types.SimpleNamespace(
+            st_size=real.st_size,
+            st_file_attributes=real.st_file_attributes | FILE_ATTRIBUTE_REPARSE_POINT,
+            st_reparse_tag=self._tag,
+        )
+
+
+@windows_only
+def test_only_name_surrogate_reparse_points_are_skipped(workspace, monkeypatch):
+    tags = {"cloud.txt": CLOUD_FILES_TAG, "mount.txt": MOUNT_POINT_TAG, "untagged.txt": 0}
+    for name in tags:
+        (workspace / "src" / name).write_text("%s %s\n" % (MARK, name))
+    real_scandir = os.scandir
+
+    class _Scan:
+        def __init__(self, path):
+            self._scan = real_scandir(path)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._scan.close()
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            entry = next(self._scan)
+            if entry.name in tags:
+                return _TaggedEntry(entry, tags[entry.name])
+            return entry
+
+    monkeypatch.setattr(workbench.os, "scandir", _Scan)
+    result = workbench.text_search(MARK, root=".", include_hidden=True)
+    inventory = workbench.workspace_inventory(".", top_n=50, include_hidden=True)
+
+    # A cloud-files placeholder is walked and searched; a mount point and a
+    # reparse point whose tag cannot be read (0) are skipped.
+    assert _matched(result) == {"src/ok.txt", "src/.hidden-notes", "src/cloud.txt"}
+    assert result["skipped_by_reason"]["reparse_point"] == 2
+    assert inventory["skipped_by_reason"]["reparse_point"] == 2
+    largest = {Path(row["relative"]).name for row in inventory["largest_files"]}
+    assert "cloud.txt" in largest and "mount.txt" not in largest

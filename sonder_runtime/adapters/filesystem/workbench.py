@@ -99,21 +99,39 @@ def _skip_dir(name: str, include_ignored=False) -> bool:
     return not include_ignored and name.casefold() in SKIP_DIRS_CASEFOLD
 
 
+# Windows reparse tags with this bit set are name surrogates: the entry
+# stands for another name (IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK
+# and similar). IsReparseTagNameSurrogate in the Windows SDK tests it. The
+# stdlib ``stat`` module exposes no constant for it.
+_REPARSE_TAG_NAME_SURROGATE = 0x20000000
+
+
 def _reparse_entry(entry) -> bool:
-    """Whether a scandir entry is a symlink, junction or other reparse point.
+    """Whether a scandir entry is a link the walk must not follow.
 
     On Windows ``DirEntry.is_symlink()`` is False for a junction, and
     ``is_dir(follow_symlinks=False)`` is True for one, so a walk that only
     checks ``is_symlink`` enters junctions and can leave every allowed root.
-    ``is_junction`` (3.12+) and the reparse-point attribute both catch it.
+    ``is_junction`` (3.12+) catches it, and the reparse tag catches any other
+    name surrogate. Non-surrogate reparse points (OneDrive / cloud-files
+    placeholders, dedup files, AppExecLinks) are ordinary local content and
+    are walked. A reparse point whose tag cannot be read is treated as a
+    link (fail closed). On POSIX no extra stat is done: ``is_symlink`` is
+    the whole answer there.
     """
     if entry.is_symlink():
         return True
     is_junction = getattr(entry, "is_junction", None)
     if is_junction is not None and is_junction():
         return True
-    attributes = getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0)
-    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+    if os.name != "nt":
+        return False
+    metadata = entry.stat(follow_symlinks=False)
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    if not attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400):
+        return False
+    tag = getattr(metadata, "st_reparse_tag", 0)
+    return not tag or bool(tag & _REPARSE_TAG_NAME_SURROGATE)
 
 
 def _noncanonical_name(name: str) -> bool:
@@ -198,9 +216,10 @@ def _bounded_walk(
 
     The caller already resolved ``root`` through ``file_ops``. Entries are
     yielded depth-first in case-insensitive path order. Symlinks, junctions
-    and other reparse points are never followed, and on Windows a name with a
-    trailing dot or space (which opens as a different file) is skipped. Both inspected directory entries and wall time are bounded, so a
-    small output limit cannot hide an unbounded filesystem walk. ``prune_dir``
+    and other name-surrogate reparse points are never followed (see
+    ``_reparse_entry``), and on Windows a name with a trailing dot or space
+    (which opens as a different file) is skipped. Both inspected directory
+    entries and wall time are bounded, so a small output limit cannot hide an unbounded filesystem walk. ``prune_dir``
     maps a directory path to a skip reason ("" to enter it); a pruned
     directory is neither yielded nor entered.
     """
