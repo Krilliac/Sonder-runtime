@@ -304,3 +304,21 @@ def test_named_guard_in_a_direct_caller_is_found(repo):
     report = check_claim(repo, claim, cfg)
     assert [(g.path, g.kind, g.where) for g in report.guards if g.where == "caller"] \
         == [("src/Caller.cs", "named", "caller")]
+
+
+def test_read_guard_refuses_the_cited_file_and_hides_other_files_from_caller_search(repo):
+    refused = []
+
+    def guard(path):
+        refused.append(os.path.basename(path))
+        return os.path.basename(path) != "Caller.cs"
+
+    cfg = replace(ClaimCheckConfig(), guard_window_lines=0)
+    claim = Claim(file="src/Pump.cs", line_start=7, symbols=("Fill",), category=DOS)
+    report = ClaimChecker(repo, cfg, read_guard=guard).check(claim)
+    assert report.guards == ()  # Caller.cs holds the guard but the policy refuses it
+    assert "Caller.cs" in refused
+    gate = ClaimChecker(repo, cfg, read_guard=lambda path: False).check(claim)
+    assert names(gate) == {"file_in_root": CheckStatus.NOT_CHECKABLE}
+    assert "read policy" in gate.checks[0].detail
+    assert gate.verdict is Verdict.KEEP

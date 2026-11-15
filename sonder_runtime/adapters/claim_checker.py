@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -46,8 +46,12 @@ def _needle(symbol: str) -> str:
 class ClaimChecker:
     """Checks claims against one repository root."""
 
-    def __init__(self, root: str | os.PathLike[str], config: ClaimCheckConfig | None = None):
+    def __init__(self, root: str | os.PathLike[str], config: ClaimCheckConfig | None = None,
+                 read_guard: Callable[[str], bool] | None = None):
+        """``read_guard(real_path) -> bool`` lets the host refuse files it must not expose
+        (credentials, control state); a refused file is neither checked nor searched."""
         self._config = config or ClaimCheckConfig()
+        self._read_guard = read_guard
         self._root = Path(os.path.realpath(root))
         self._text: dict[str, str | None] = {}
         self._cached_bytes = 0
@@ -139,6 +143,10 @@ class ClaimChecker:
         real, failure = self._resolve(claim.file)
         if failure is not None:
             return ClaimReport(claim, decide_verdict((failure,), ()), (failure,), ())
+        if self._read_guard is not None and not self._read_guard(real):
+            note = CheckResult(
+                "file_in_root", CheckStatus.NOT_CHECKABLE, "file is refused by the read policy")
+            return ClaimReport(claim, Verdict.KEEP, (note,), ())
         lines = self._lines(real)
         if lines is None:
             note = CheckResult(
@@ -213,6 +221,8 @@ class ClaimChecker:
             for needle, where in needles:
                 if needle not in text:
                     continue
+                if path != real and self._read_guard is not None and not self._read_guard(path):
+                    break
                 file_lines = self._lines(path)
                 if file_lines is None:
                     continue
