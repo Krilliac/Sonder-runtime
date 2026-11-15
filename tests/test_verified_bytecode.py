@@ -192,7 +192,7 @@ def test_compile_bytecode_aborts_at_the_limit_before_marshalling(tmp_path, monke
     assert compile_bytecode(((str(root), False),), limit=8 * 1024) == (None, {})
 
 
-def test_compile_bytecode_bytes_are_identical_across_calls_and_processes(tmp_path):
+def test_compile_bytecode_container_encoding_is_stable_across_calls_and_processes(tmp_path):
     root = _bulk_root(tmp_path)
     code = ("import sys\n"
             "from sonder_runtime.adapters.execution.runtime_payload import compile_bytecode\n"
@@ -205,8 +205,11 @@ def test_compile_bytecode_bytes_are_identical_across_calls_and_processes(tmp_pat
             for _ in range(2)]
     (cold_a, warm_a), (cold_b, warm_b) = runs
     assert cold_a
-    # A warm second call in one process and a fresh process's first call must
-    # all produce the same bytes (marshal version 4 differs on a warm call).
+    # The modules' names are interned nowhere else, so their pyc values are
+    # stable and this pins only the container encoding: a warm second call and
+    # a fresh process's first call give the same bytes (marshal version 4
+    # differs on a warm call). It does not prove the table is byte-identical
+    # for sources the process has already imported.
     assert cold_a == warm_a == cold_b == warm_b
 
 

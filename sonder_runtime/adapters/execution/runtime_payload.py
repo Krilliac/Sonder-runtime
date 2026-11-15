@@ -214,8 +214,10 @@ def compile_bytecode(entries, *, limit=None):
     # Version 2 makes the container encoding deterministic: it writes no
     # reference flags and no interned flag. Version 4 emits both from object
     # identity and refcounts, so identical calls in one process can differ
-    # (seen on 3.14; not on 3.12 in tests). The pyc values themselves still differ per
-    # interpreter version; only the same interpreter yields the same bytes.
+    # (seen on 3.14; not on 3.12 in tests). The table is still not
+    # byte-reproducible: importlib marshals each pyc value at its default
+    # version, so on 3.14 a value can vary with what the process has already
+    # imported, and values always differ across interpreter versions.
     return marshal.dumps(table, 2), digests
 
 
