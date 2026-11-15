@@ -182,16 +182,37 @@ def evaluate(
     return violations, promotable
 
 
-def _git_show(root: Path, ref: str, relative: Path) -> list[str] | None:
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     try:
-        completed = subprocess.run(
-            ["git", "show", "%s:%s" % (ref, relative.as_posix())],
-            cwd=root, capture_output=True, text=True, check=False,
+        return subprocess.run(
+            ["git", *args], cwd=root, capture_output=True, text=True, check=False,
         )
     except OSError as exc:
         raise RatchetError("could not run git: %s" % exc) from exc
+
+
+def _verify_ref(root: Path, ref: str) -> None:
+    completed = _git(root, "rev-parse", "--verify", "--quiet", "%s^{commit}" % ref)
     if completed.returncode != 0:
+        raise RatchetError(
+            "--against %s does not resolve to a commit (typo, shallow checkout or missing fetch?)" % ref
+        )
+
+
+def _git_show(root: Path, ref: str, relative: Path) -> list[str] | None:
+    """Lines of *relative* at *ref*, or None when the ref resolves but has no such file.
+
+    An unresolvable ref or any other git failure raises, so it cannot read as "no lists yet".
+    """
+    _verify_ref(root, ref)
+    listing = _git(root, "ls-tree", "--name-only", ref, "--", relative.as_posix())
+    if listing.returncode != 0:
+        raise RatchetError("git ls-tree %s failed: %s" % (ref, listing.stderr.strip()))
+    if not listing.stdout.strip():
         return None
+    completed = _git(root, "show", "%s:%s" % (ref, relative.as_posix()))
+    if completed.returncode != 0:
+        raise RatchetError("git show %s:%s failed: %s" % (ref, relative.as_posix(), completed.stderr.strip()))
     return [
         line.strip() for line in completed.stdout.splitlines()
         if line.strip() and not line.strip().startswith("#")

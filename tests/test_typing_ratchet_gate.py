@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -98,6 +99,52 @@ def test_untrustworthy_mypy_results_are_tool_failures(tmp_path, monkeypatch, ret
     monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: Done())
     with pytest.raises(module.RatchetError):
         module.run_mypy(tmp_path)
+
+
+def _git(root, *args):
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+        cwd=root, check=True, capture_output=True, text=True,
+    )
+
+
+def _repo_with_lists(tmp_path, module, baseline_text):
+    _git(tmp_path, "init", "-q")
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "typing_baseline.txt").write_text(baseline_text, encoding="utf-8")
+    (scripts / "typing_strict_modules.txt").write_text("m/strict.py\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "lists")
+
+
+def test_against_ref_that_does_not_resolve_is_a_tool_failure(tmp_path):
+    module = _load_gate()
+    _repo_with_lists(tmp_path, module, "m/legacy.py\n")
+    with pytest.raises(module.RatchetError):
+        module.compare_against(
+            tmp_path, "origin/nonexistent-ref", MODULES, ["m/strict.py"], ["m/legacy.py", "m/new.py"],
+        )
+
+
+def test_against_ref_with_lists_flags_baseline_growth(tmp_path):
+    module = _load_gate()
+    _repo_with_lists(tmp_path, module, "m/legacy.py\n")
+    violations = module.compare_against(
+        tmp_path, "HEAD", MODULES, ["m/strict.py"], ["m/legacy.py", "m/new.py"],
+    )
+    assert any("baseline gained m/new.py" in line for line in violations)
+
+
+def test_against_resolvable_ref_without_lists_yet_is_not_an_error(tmp_path):
+    module = _load_gate()
+    _git(tmp_path, "init", "-q")
+    (tmp_path / "other.txt").write_text("x\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "no lists")
+    assert module.compare_against(
+        tmp_path, "HEAD", MODULES, ["m/strict.py"], ["m/legacy.py"],
+    ) == []
 
 
 def test_checked_in_lists_match_the_tree():
