@@ -80,6 +80,7 @@ import sonder_runtime.adapters.observability.activity_tracker as activity_tracke
 import sonder_runtime.adapters.observability.chat_formatting as chat_formatting
 import sonder_runtime.adapters.secrets as sonder_secrets
 import sonder_runtime.adapters.web.lifecycle as sonder_lifecycle
+from sonder_runtime.adapters.security.login_throttle import LoginThrottled
 import sonder_runtime.platform.config as runtime_config
 import sonder_runtime.platform.paths as runtime_paths
 from sonder_runtime.adapters.command_catalog import command_catalog
@@ -4957,6 +4958,10 @@ class Handler(BaseHTTPRequestHandler):
                 sonder_lifecycle.get(), "auth_rate_limited",
                 getattr(self, "_request_started", time.monotonic()),
             )
+        self._send_auth_throttled()
+        return True
+
+    def _send_auth_throttled(self, retry_after=2):
         self._send_json_payload(
             sonder_lifecycle.error_envelope(
                 "AUTH_RATE_LIMITED",
@@ -4965,9 +4970,11 @@ class Handler(BaseHTTPRequestHandler):
                 retryable=True,
             ),
             status=429,
-            headers={"Retry-After": "2"},
+            headers={"Retry-After": str(retry_after)},
         )
-        return True
+
+    def _record_login_failure(self, reason):
+        sonder_lifecycle.get().record_auth_failure(self._client_ip(), reason)
 
     def _peer_is_loopback(self):
         # A loopback peer earns its conveniences only through a trusted Host
@@ -7020,6 +7027,8 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_permission_mode_post(req, context=context)
             return
         if path == "/v1/sonder/register":
+            if self._auth_rate_limited():
+                return
             conn = server._open_db()
             try:
                 account = admin_auth.register(
@@ -7040,6 +7049,7 @@ class Handler(BaseHTTPRequestHandler):
                     "message": _account_created_message(account),
                 }, status=201)
             except PermissionError as error:
+                self._record_login_failure("registration-denied")
                 self._send_json_payload({"ok": False, "message": str(error)}, status=403)
             except sqlite3.IntegrityError:
                 self._send_json_payload({"ok": False, "message": "account already exists"}, status=409)
@@ -7056,13 +7066,19 @@ class Handler(BaseHTTPRequestHandler):
             if context["mode"] in ("api-key", "both") and not context["api_key"]:
                 self._send_auth_error()
                 return
+            if self._auth_rate_limited():
+                return
             conn = server._open_db()
             try:
                 token, account = admin_auth.login(
                     conn, req.get("username", ""), req.get("password", "")
                 )
                 self._send_json_payload({"ok": True, "token": token, "account": account})
+            except LoginThrottled as error:
+                self._record_login_failure("login-throttled")
+                self._send_auth_throttled(error.retry_after_seconds)
             except (ValueError, PermissionError):
+                self._record_login_failure("invalid-credentials")
                 self._send_json_payload(
                     {"ok": False, "message": "invalid username or password"}, status=401
                 )

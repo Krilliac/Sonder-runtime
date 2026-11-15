@@ -10,6 +10,7 @@ from pathlib import Path
 
 import sonder_paths
 import sonder_runtime.adapters.secrets as sonder_secrets
+from sonder_runtime.adapters.security import login_throttle
 
 
 SESSION_TTL_SECONDS = 60 * 60 * 24 * 14
@@ -100,6 +101,19 @@ def _password(value, *, generic_error: bool = False) -> str:
     if not isinstance(value, str) or not 8 <= len(value) <= MAX_PASSWORD_CHARS:
         raise ValueError(message)
     return value
+
+
+# Stand-in credentials for the unknown-username path of ``login``.
+_DUMMY_SALT = "00" * 16
+_DUMMY_DIGEST = "00" * 32
+
+
+def _throttle_key(conn: sqlite3.Connection, username: str) -> str:
+    """Scope the username to its account database (one process may host several)."""
+    path = next(
+        (row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main"), ""
+    )
+    return f"{path}|{username}"
 
 
 def _new_token() -> str:
@@ -266,14 +280,26 @@ def login(conn: sqlite3.Connection, username: str, password: str) -> tuple[str, 
     init(conn)
     username = _username(username, generic_error=True)
     password = _password(password, generic_error=True)
+    throttle_key = _throttle_key(conn, username)
+    decision = login_throttle.check(throttle_key)
+    if not decision.allowed:
+        raise login_throttle.LoginThrottled(decision.retry_after_seconds)
     row = conn.execute("SELECT * FROM accounts WHERE username=?", (username,)).fetchone()
-    if not row:
+    # An unknown username pays the same PBKDF2 cost as a wrong password, so
+    # response time does not reveal which names exist.  The ban check follows
+    # the password check for the same reason.
+    salt, expected = (
+        (row["password_salt"], row["password_hash"]) if row else (_DUMMY_SALT, _DUMMY_DIGEST)
+    )
+    _, digest = _hash_password(password, salt)
+    matched = hmac.compare_digest(digest, expected) and row is not None
+    if not matched:
+        login_throttle.record_failure(throttle_key)
         raise ValueError("invalid username or password")
     if row["banned"]:
+        login_throttle.record_failure(throttle_key)
         raise PermissionError("account is banned")
-    _, digest = _hash_password(password, row["password_salt"])
-    if not hmac.compare_digest(digest, row["password_hash"]):
-        raise ValueError("invalid username or password")
+    login_throttle.record_success(throttle_key)
     token = _new_token()
     conn.execute(
         "INSERT INTO account_sessions(token_hash, username, created_ts, expires_ts) "
