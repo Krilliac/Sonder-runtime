@@ -12,8 +12,10 @@ runs in the live checkout unless the console operator typed it":
 * ``operator_attendance`` is a context variable bound to one tool name, set
   only by the console's ``/<tool>`` dispatcher while a person is present;
 * the guard runs no git at all (nothing to resolve, nothing to mis-resolve);
-* a repository that is not the live checkout (a user's repository, a git
-  worktree of the runtime, a nested repository) keeps every behaviour.
+* a repository that is not the live checkout (a user's repository and the
+  repositories nested in it, a git worktree of the runtime outside the live
+  tree) keeps every behaviour; ``test_live_checkout_detection`` covers which
+  paths are live.
 
 Each refusal is paired with a control showing the same call works elsewhere.
 """
