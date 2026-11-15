@@ -31,7 +31,7 @@ def _has_bare_mcp_install(text):
 
 def test_mcp_runtime_dependency_is_exactly_pinned():
     runtime = (ROOT / "requirements-runtime.txt").read_text(encoding="utf-8")
-    assert "mcp==2.0.0" in runtime.splitlines()
+    assert "mcp==2.2.0" in runtime.splitlines()
     assert "cryptography==50.0.0" in runtime.splitlines()
     # An unpinned or ranged MCP is what makes an unattended bootstrap install a
     # release nobody probed. 1.x specifically no longer satisfies the imports.

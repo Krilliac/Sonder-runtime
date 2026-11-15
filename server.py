@@ -9079,7 +9079,7 @@ def policy_explain(tool_name: str) -> str:
     _maybe_live_reload()
     name = str(tool_name or "").strip().lstrip("/")
     if not name:
-        raise ValueError("tool_name must name a registered MCP tool")
+        raise InvalidInput("tool_name must name a registered MCP tool")
     try:
         registered = {
             str(tool.name) for tool in mcp._tool_manager.list_tools()
@@ -9089,7 +9089,7 @@ def policy_explain(tool_name: str) -> str:
         # false assurance.  Match the catalog's fail-closed posture instead.
         raise RuntimeError("the MCP tool registry could not be read: %s" % exc) from exc
     if name not in registered:
-        raise ValueError("unknown registered MCP tool: %s" % name)
+        raise InvalidInput("unknown registered MCP tool: %s" % name)
 
     # This mirrors reloadable_mcp._refuse_if_gated(), the actual direct-MCP
     # choke point.  It deliberately does not call the target, inspect target
