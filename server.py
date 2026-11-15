@@ -18273,7 +18273,7 @@ _AGENT_SYSTEM_OPERATOR_TOOLS = frozenset({
     "elevate", "permission_mode", "permission_rule_set", "permission_approve",
     "runtime_policy_update", "update_system_profile",
     "runtime_source_update", "runtime_source_stash",
-    "autopilot_start", "autopilot_resume", "autopilot_pause", "autopilot_cancel",
+    "autopilot_start", "autopilot_resume", "autopilot_pause", "autopilot_cancel", "mission_start",
     "self_heal_repair", "memory_export", "memory_privacy_repair",
     "memory_quality_repair", "workflow_list", "workflow_save", "workflow_delete", "workflow_run",
     # These process-wide controls require a human operator at an authenticated
