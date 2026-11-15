@@ -315,7 +315,9 @@ def compose_build(*, project_dir: str | None, declared_sources: tuple[str, ...])
         runtime = isolated_runner.detect_runtime()
         if runtime is None:
             return None
-        inspected = isolated_runner._inspect_image_policy(runtime[1], runtime[2], image)
+        inspected = isolated_runner._inspect_image_policy(
+            runtime[0], runtime[1], runtime[2], image
+        )
         if inspected != image:
             return None
         return CodegenContainerBuild(project, stage_root, image, names, frozenset(inputs))
