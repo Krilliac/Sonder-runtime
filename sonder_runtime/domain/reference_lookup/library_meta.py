@@ -29,9 +29,12 @@ MAX_RAW_CHARS = 64 * 1024   # a larger ``sources`` value is not parsed at all
 _HIDDEN_CATEGORIES = frozenset({"Cf", "Co", "Cn", "Cs"})
 # Words and labels that mean something to the search-terms request: a subject
 # must not be able to supply the model's verdict or fake a line of the request.
+# Underscores count as separators (the reply parser treats "_UNRELATED_" as a
+# verdict), so they are matched and removed with the word.
 _RESERVED_RE = re.compile(
-    r"(?<![A-Za-z0-9_])(?:not\s+related|unrelated|related)(?![A-Za-z0-9_])"
-    r"|(?:first|second)\s+line\s*:|covering\s*:|question\s*:",
+    r"(?<![A-Za-z0-9])_*(?:"
+    r"(?:not[\s_]+related|unrelated|related)_*(?![A-Za-z0-9])"
+    r"|(?:first|second)[\s_]+line\s*:|covering\s*:|question\s*:)",
     re.IGNORECASE)
 
 

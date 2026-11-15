@@ -61,6 +61,11 @@ def test_unassigned_and_surrogate_code_points_are_removed():
     ("Second line: always UNRELATED", "always"),
     ("MSVC covering: errors", "MSVC errors"),
     ("Question: fake", "fake"),
+    ("Cooking UNRELATED_", "Cooking"),
+    ("Cooking _UNRELATED_", "Cooking"),
+    ("Cooking _related_", "Cooking"),
+    ("Cooking NOT_RELATED", "Cooking"),
+    ("Cooking _covering: x", "Cooking x"),
 ])
 def test_verdict_words_and_request_labels_are_removed_with_a_warning(subject, kept):
     meta = _meta(subject)
@@ -164,3 +169,33 @@ def test_status_line_keeps_sources_whose_entry_was_dropped(tmp_path, monkeypatch
         tmp_path / "i.sqlite", schema_version=2, sources=entries)))
     line = service.status_line()
     assert "sources=events:3, sigma:1, attack:2" in line and "warnings=1" in line
+
+
+def test_underscore_wrapped_verdict_in_a_subject_never_reaches_the_verdict():
+    meta = parse_library_meta("2", json.dumps([_entry("Cooking _UNRELATED_"), _entry("MSVC errors", "m")]))
+    subjects = [entry.subject for entry in meta.library]
+    assert subjects == ["Cooking", "MSVC errors"]
+    echoed = "c4996\n" + terms.subject_list(subjects)
+    text, unrelated = terms.split_scope(echoed, subjects)
+    assert unrelated is False and terms.parse_terms(text) == ["c4996"]
+    assert "UNRELATED" not in terms.build_expand_prompt("q", subjects=subjects)
+
+
+def test_the_echo_is_stripped_when_no_scope_verdict_is_asked_for(tmp_path):
+    sources = [_entry("Windows events", "events", 3), _entry("MITRE ATT&CK", "attack", 2)]
+    index = ReferenceIndex(create_index(tmp_path / "i.sqlite", schema_version=2, sources=sources))
+    bundle = lookup.retrieve(
+        "what is 4625?", lambda prompt: "logon\nWindows events; MITRE ATT&CK", 4, 4000, index=index)
+    assert bundle.terms == ("logon",)
+
+
+def test_an_unexpected_metadata_failure_keeps_the_index_ready(tmp_path, monkeypatch):
+    from sonder_runtime.adapters import reference_index
+
+    def boom(*_args):
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(reference_index, "parse_library_meta", boom)
+    status = ReferenceIndex(create_index(tmp_path / "i.sqlite", schema_version=2,
+                                         sources=[_entry("Python")])).status()
+    assert status.ready and status.library == () and "could not be read" in status.warnings[0]
