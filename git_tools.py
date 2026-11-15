@@ -780,7 +780,12 @@ def _filter_diff_sections(text, allowed):
     unparseable = 0
     sections = []
     current = None
-    for line in text.splitlines(keepends=True):
+    # Split on "\n" only. git ends patch lines with "\n", but str.splitlines also breaks on
+    # "\r", "\f", "\x1c"-"\x1e", "\x85", "\u2028" and "\u2029", which file content can carry,
+    # and that would let a hunk line start a forged section header.
+    pieces = text.split("\n")
+    lines = [piece + "\n" for piece in pieces[:-1]] + ([pieces[-1]] if pieces[-1] else [])
+    for line in lines:
         if line.startswith(_DIFF_SECTION_MARKERS):
             current = [line]
             sections.append(current)

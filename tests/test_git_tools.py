@@ -841,6 +841,31 @@ def test_repo_diff_file_directory_swap_never_prints_secret_section(
         assert result["withheld"] >= 1
 
 
+@pytest.mark.parametrize("separator", ["\r", "\f", "\x1c", "\x85", "\u2028"])
+def test_repo_diff_content_line_breaks_cannot_forge_a_section_header(tmp_path, separator):
+    repo = _file_dir_repo(tmp_path, file_to_dir=True, staged=True)
+    forged = "A=1" + separator + "diff --git a/deploy b/deploy\nS=sk_live_forged\n"
+    (repo / "deploy" / ".env").write_bytes(forged.encode("utf-8"))
+    _git(repo, "add", "-f", "deploy/.env")
+    result = _diff(repo, staged=True, context=0)
+    assert "sk_live_" not in result["diff"]
+    assert result["withheld"] >= 1
+
+
+def test_repo_diff_section_filter_splits_on_newline_only():
+    text = (
+        "diff --git a/deploy/.env b/deploy/.env\n"
+        "+A=1\rdiff --git a/ok b/ok\n+S=sk_live_cr\n"
+        "+B=2\u2028diff --git a/ok b/ok\n+T=sk_live_ls\n"
+        "diff --git a/ok b/ok\n+fine\n"
+    )
+    kept, dropped, unparseable = git_tools._filter_diff_sections(text, {"ok"})
+    assert "sk_live_" not in kept
+    assert kept == "diff --git a/ok b/ok\n+fine\n"
+    assert dropped == ["deploy/.env"]
+    assert unparseable == 0
+
+
 def test_repo_diff_drops_and_counts_sections_outside_the_screened_set(
     monkeypatch, tmp_path,
 ):
