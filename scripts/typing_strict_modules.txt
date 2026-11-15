@@ -39,6 +39,12 @@ sonder_runtime/adapters/filesystem/typed.py
 sonder_runtime/adapters/fleet_synthesis.py
 sonder_runtime/adapters/git/__init__.py
 sonder_runtime/adapters/goal_formatting.py
+sonder_runtime/adapters/health_alerts/__init__.py
+sonder_runtime/adapters/health_alerts/_child.py
+sonder_runtime/adapters/health_alerts/date_order.py
+sonder_runtime/adapters/health_alerts/notifiers.py
+sonder_runtime/adapters/health_alerts/schtasks.py
+sonder_runtime/adapters/health_alerts/state_store.py
 sonder_runtime/adapters/host_tools/__init__.py
 sonder_runtime/adapters/host_tools/linux.py
 sonder_runtime/adapters/inference/__init__.py
@@ -176,6 +182,7 @@ sonder_runtime/application/extensions/experiments.py
 sonder_runtime/application/extensions/provenance_inventory.py
 sonder_runtime/application/extensions/quarantine.py
 sonder_runtime/application/foreground_turns.py
+sonder_runtime/application/health_alerts.py
 sonder_runtime/application/host_tools/__init__.py
 sonder_runtime/application/host_tools/service.py
 sonder_runtime/application/inference_membership/__init__.py
@@ -225,6 +232,7 @@ sonder_runtime/application/ports/execution_tools.py
 sonder_runtime/application/ports/execution_world.py
 sonder_runtime/application/ports/extensions.py
 sonder_runtime/application/ports/filesystem.py
+sonder_runtime/application/ports/health_alerts.py
 sonder_runtime/application/ports/host_tools.py
 sonder_runtime/application/ports/inference_membership.py
 sonder_runtime/application/ports/jobs.py
@@ -335,6 +343,7 @@ sonder_runtime/bootstrap/control_state_rehearsal.py
 sonder_runtime/bootstrap/diagnostics.py
 sonder_runtime/bootstrap/doctor_checks.py
 sonder_runtime/bootstrap/doctor_formatting.py
+sonder_runtime/bootstrap/health_alerts.py
 sonder_runtime/bootstrap/main.py
 sonder_runtime/bootstrap/managed_http.py
 sonder_runtime/bootstrap/model_gateways.py
@@ -389,6 +398,7 @@ sonder_runtime/domain/extensions/__init__.py
 sonder_runtime/domain/extensions/artifact.py
 sonder_runtime/domain/fleet_intent.py
 sonder_runtime/domain/fleet_pressure.py
+sonder_runtime/domain/health_alerts.py
 sonder_runtime/domain/host_tools/__init__.py
 sonder_runtime/domain/host_tools/registry.py
 sonder_runtime/domain/json_reply.py
@@ -476,6 +486,7 @@ sonder_runtime/interfaces/sdk/plugins.py
 sonder_runtime/platform/__init__.py
 sonder_runtime/platform/child_environment_policy.py
 sonder_runtime/platform/config_environment.py
+sonder_runtime/platform/health_alerts_config.py
 sonder_runtime/platform/model_retry_policy.py
 sonder_runtime/platform/netns_probe.py
 sonder_runtime/platform/npu_policy.py
