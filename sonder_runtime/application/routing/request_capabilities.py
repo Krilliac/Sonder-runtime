@@ -36,7 +36,12 @@ The character estimate is deliberately conservative (UTF-8 bytes / 3); it is
     has_tools = bool(tools or value.get("tools") or options.get("tools"))
     formats = (value.get("format"), options.get("format"))
     response_formats = (value.get("response_format"), options.get("response_format"))
+    # generate_structured carries its JSON Schema as the ``schema`` request
+    # option (top level when options are used as the payload, or nested).
+    schemas = (value.get("schema"), options.get("schema"))
     has_schema = bool(structured_output) or any(
+        isinstance(item, Mapping) for item in schemas
+    ) or any(
         isinstance(item, Mapping) or item == "json" for item in formats
     ) or any(isinstance(item, Mapping) and item.get("type") != "text"
              for item in response_formats)
