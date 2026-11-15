@@ -475,7 +475,7 @@
       ]
     },
     {
-      "file_count": 414,
+      "file_count": 415,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -840,6 +840,7 @@
         "sonder_runtime/application/strategy/codegen_result.py",
         "sonder_runtime/application/strategy/controller.py",
         "sonder_runtime/application/strategy/tracing.py",
+        "sonder_runtime/application/structured_output.py",
         "sonder_runtime/application/subagents/__init__.py",
         "sonder_runtime/application/subagents/admission.py",
         "sonder_runtime/application/subagents/checkpoint_provenance.py",
@@ -978,7 +979,7 @@
       ]
     },
     {
-      "file_count": 302,
+      "file_count": 303,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1131,6 +1132,7 @@
         "sonder_runtime/domain/inference_membership.py",
         "sonder_runtime/domain/inference_profiles.py",
         "sonder_runtime/domain/interaction_footer.py",
+        "sonder_runtime/domain/json_reply.py",
         "sonder_runtime/domain/kv_budget.py",
         "sonder_runtime/domain/launcher_health.py",
         "sonder_runtime/domain/learning_tier.py",
