@@ -366,6 +366,13 @@ class OllamaGateway:
         generate_options = {}
         if think_supplied:
             generate_options["think"] = think
+        schema = options.get("schema")
+        if schema is not None:
+            # Structured output: handed to Ollama as the decoder-side ``format``
+            # constraint.  The caller still validates the reply it gets back.
+            if not isinstance(schema, dict):
+                raise InvalidInput("model option schema must be a JSON object")
+            generate_options["schema"] = schema
         if reasoning_continuation:
             generate_options.update({
                 "reasoning_continuation": True,
