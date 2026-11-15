@@ -5,7 +5,7 @@ import pytest
 
 import server
 from tests.support.gpu_admission_harness import (
-    MODEL, FakeOllama, chat_body, make_service, wire,
+    FakeOllama, chat_body, make_service, wire,
 )
 
 

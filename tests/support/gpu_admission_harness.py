@@ -44,6 +44,10 @@ class FakeOllama:
         self.max_probe_active = 0
         self.show_gate: threading.Event | None = None
         self.gate_timeout = 1.5
+        self.chat_delay = 0.0
+        self.chat_active = 0
+        self.max_chat_active = 0
+        self.chat_intervals: list[tuple[float, float]] = []
 
     # -- what admission reads --------------------------------------------
     def ps(self, origin=None):
@@ -98,6 +102,16 @@ class FakeOllama:
             if model in self.loaded and self.loaded[model] != ctx:
                 self.reloads += 1
             self.loaded[model] = ctx
+            self.chat_active += 1
+            self.max_chat_active = max(self.max_chat_active, self.chat_active)
+        started = time.monotonic()
+        try:
+            if self.chat_delay:
+                time.sleep(self.chat_delay)
+        finally:
+            with self.lock:
+                self.chat_active -= 1
+                self.chat_intervals.append((started, time.monotonic()))
         return {"model": model, "message": {"role": "assistant", "content": "ok"}, "done": True}
 
     @property
@@ -147,6 +161,7 @@ def make_service(tmp_path, fake, *, host=None, metrics=None, **config):
     return adapter.GpuAdmission(
         GpuAdmissionConfig(**values),
         host_reader=lambda: reading, ps_reader=fake.ps, tags_reader=fake.tags,
+        memory_reader=lambda _key: None, show_reader=lambda _origin, _model: None,
         metrics=metrics, background=lambda work: work(),
     )
 
