@@ -108,3 +108,18 @@ def test_queue_mode_gives_up_at_the_deadline_with_the_evidence(monkeypatch, tmp_
     assert refused.value.kind == "admission"
     assert refused.value.refusal.reason.name == "HOST_RAM_FLOOR"
     assert fake.chat_bodies == []
+
+
+def test_an_unreadable_ps_is_unknown_not_cold(monkeypatch, tmp_path):
+    # The model is loaded but /api/ps cannot be read: no host-memory refusal.
+    fake = FakeOllama()
+    fake.loaded[MODEL] = 16384
+    service = make_service(tmp_path, fake, host=LOW_HOST, on_host_floor="refuse")
+    service._ps_reader = lambda _origin: None
+    wire(monkeypatch, server, fake, service)
+    _seed_measured(service)
+
+    server._post_model("/api/chat", chat_body(16384), model=MODEL)
+
+    assert len(fake.chat_bodies) == 1
+    assert service.snapshot()["refused"] == 0

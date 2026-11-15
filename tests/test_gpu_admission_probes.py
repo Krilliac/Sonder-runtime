@@ -1,4 +1,5 @@
 """Probes (/api/show, the pool prober) pass through one bounded admission gate."""
+import contextlib
 import threading
 import time
 
@@ -80,7 +81,7 @@ def test_a_probe_busy_deferral_is_not_a_worker_failure():
     refusal = domain.Refused(domain.RefusalReason.PROBE_BUSY, "probe gate busy")
 
     class Busy:
-        def admit(self, *args, **kwargs):
+        def acquire_probe(self, *args, **kwargs):
             raise adapter.GpuAdmissionRefused(refusal)
 
     pool.gpu_admission = Busy()
@@ -91,3 +92,91 @@ def test_a_probe_busy_deferral_is_not_a_worker_failure():
     assert state.capabilities is None
     assert not state.capability_probe_failed
     assert not state.capability_probe_inflight
+
+
+LOCAL = "http://127.0.0.1:11434"
+REMOTE = "https://worker.example:11434"
+
+
+def _ready(_origin):
+    return {"protocol": ollama_pool._PROTOCOL, "version": "test", "models": ("m",)}
+
+
+@contextlib.contextmanager
+def _probe_slot_held(service, seconds):
+    """Another probe (a slow /api/show) holds the local probe slot for ``seconds``."""
+    held, done = threading.Event(), threading.Event()
+
+    def hold():
+        with service.admit("/api/show", {"model": "m"}, origin=LOCAL):
+            held.set()
+            done.wait(seconds)
+
+    thread = threading.Thread(target=hold)
+    thread.start()
+    assert held.wait(5)
+    try:
+        yield
+    finally:
+        done.set()
+        thread.join(5)
+
+
+def test_waiting_for_the_probe_gate_is_not_a_worker_failure(tmp_path):
+    # parallelism 4 > probe_slots 1; the slot is busy for longer than the probe
+    # timeout and one worker is slow. Only the slow worker's own timeout counts.
+    service = make_service(tmp_path, FakeOllama(), probe_slots=1, probe_wait_ms=5000)
+    healthy = ("http://127.0.0.1:11435", "http://127.0.0.1:11436", "http://127.0.0.1:11437")
+
+    def prober(origin):
+        if origin == LOCAL:
+            time.sleep(0.8)
+        return _ready(origin)
+
+    pool = ollama_pool.OllamaWorkerPool(
+        LOCAL, healthy, failure_threshold=1, capability_probe_parallelism=4,
+        capability_probe_timeout_seconds=0.3, capability_prober=prober,
+        gpu_admission=service,
+    )
+    with _probe_slot_held(service, 0.8):
+        pool.refresh_capabilities(force=True)
+
+    states = {state.endpoint.origin: state for state in pool._states}
+    for origin in healthy:
+        assert states[origin].consecutive_failures == 0, origin
+        assert not states[origin].capability_probe_failed, origin
+        assert states[origin].capabilities is not None, origin
+    assert states[LOCAL].capability_probe_failed  # its own transport timeout
+    assert wait_until(lambda: not any(s.capability_probe_inflight for s in pool._states))
+
+
+def test_remote_origins_skip_the_local_probe_gate(tmp_path):
+    service = make_service(tmp_path, FakeOllama(), probe_slots=1, probe_wait_ms=200)
+    pool = ollama_pool.OllamaWorkerPool(
+        LOCAL, (REMOTE,), allow_remote=True, failure_threshold=1,
+        capability_probe_timeout_seconds=1.0, capability_prober=_ready,
+        gpu_admission=service,
+    )
+    with _probe_slot_held(service, 3.0):
+        pool.refresh_capabilities(force=True)
+        started = time.monotonic()
+        with service.admit("/api/tags", None, origin=REMOTE):
+            pass
+        assert time.monotonic() - started < 0.15
+
+    states = {state.endpoint.origin: state for state in pool._states}
+    assert states[REMOTE].capabilities is not None
+    assert states[REMOTE].consecutive_failures == 0
+    # The loopback probe found the local slot busy: deferred, not failed.
+    assert states[LOCAL].capabilities is None
+    assert states[LOCAL].consecutive_failures == 0
+    assert not states[LOCAL].capability_probe_failed
+
+
+def test_a_management_post_holds_no_probe_slot(tmp_path):
+    service = make_service(tmp_path, FakeOllama(), probe_slots=1, probe_wait_ms=300)
+    with _probe_slot_held(service, 3.0):
+        started = time.monotonic()
+        with service.admit("/api/pull", {"name": "m"}, origin=LOCAL) as ticket:
+            assert ticket.lane is None
+        assert time.monotonic() - started < 0.15

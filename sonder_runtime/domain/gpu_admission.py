@@ -41,6 +41,7 @@ class AdmissionLane(enum.Enum):
     INFERENCE = "inference"  # chat / generate with content
     EMBED = "embed"          # /api/embeddings, /api/embed
     UNLOAD = "unload"        # keep_alive 0 with nothing to generate
+    MANAGE = "manage"        # /api/pull, /api/create, /api/delete ...: not gated
 
 
 class RefusalReason(enum.Enum):
@@ -228,10 +229,12 @@ def classify_operation(
 ) -> AdmissionLane:
     """Lane for one Ollama request.
 
-    Control-plane reads and unknown paths are PROBE: they never load a model,
-    so they take no GPU slot. A keep_alive of zero is UNLOAD only when there is
-    nothing to generate; a request with content and keep_alive 0 still loads the
-    model and runs, so it stays INFERENCE.
+    Control-plane reads (GET, /api/show) are PROBE: short, never load a model,
+    no GPU slot. Any other POST (/api/pull, /api/create, /api/copy, /api/delete,
+    /api/push) is MANAGE: it neither loads nor runs a model but can take minutes,
+    so it holds neither a probe slot nor a GPU slot. A keep_alive of zero is
+    UNLOAD only when there is nothing to generate; a request with content and
+    keep_alive 0 still loads the model and runs, so it stays INFERENCE.
     """
     clean = _path_only(path)
     body = payload if isinstance(payload, Mapping) else {}
@@ -246,7 +249,7 @@ def classify_operation(
         if prewarm or not generates:
             return AdmissionLane.LOAD
         return AdmissionLane.INFERENCE
-    return AdmissionLane.PROBE
+    return AdmissionLane.MANAGE
 
 
 def priority_rank(caller: str) -> int:

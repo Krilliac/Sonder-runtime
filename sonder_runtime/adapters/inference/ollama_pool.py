@@ -213,6 +213,18 @@ def admitted(pool, path: str, payload, origin: str, *, deadline: float | None = 
     )
 
 
+@contextmanager
+def admitted_get(pool, origin: str, path: str, *, timeout: float):
+    """GET ``origin + path`` through ``pool.open_url`` inside one admission.
+
+    Yields the open response; the admission (a PROBE slot for a loopback
+    origin) is held until the caller has read it and leaves the block.
+    """
+    with admitted(pool, path, None, origin, deadline=time.monotonic() + timeout):
+        with pool.open_url(urllib.request.Request(origin + path), timeout=timeout) as response:
+            yield response
+
+
 def _safe_error(error: BaseException) -> str:
     """Return bounded single-line diagnostics without response bodies."""
     if isinstance(error, urllib.error.HTTPError):
@@ -1074,18 +1086,22 @@ class OllamaWorkerPool:
     def origins(self) -> tuple[str, ...]:
         return tuple(state.endpoint.origin for state in self._states)
 
-    def _admitted_probe(self, origin: str):
-        """Run the capability prober inside one PROBE admission.
+    def _probe_permit(self, origin: str) -> Callable[[], None]:
+        """Take the PROBE admission for one capability probe; return its release.
 
-        A refused probe is a deferred check, not a worker fault: it surfaces as
+        Called before the probe's bounded timer starts, so time spent waiting
+        for a slot can never read as the worker timing out. The gate bounds its
+        own wait (``probe_wait_ms``) and skips remote origins. A refusal is a
+        deferred check, not a worker fault: it surfaces as
         ``CapabilityProbeDeferred``, which the refresh skips without touching
         the worker's failure count, circuit or capabilities (the next refresh
         asks again because the cached capabilities stay stale).
         """
+        acquire = getattr(self.gpu_admission, "acquire_probe", None)
+        if acquire is None:
+            return lambda: None
         try:
-            with admitted(self, "/api/tags", None, origin,
-                          deadline=time.monotonic() + self._probe_timeout):
-                return self._capability_prober(origin)
+            return acquire("/api/tags", origin=origin)
         except gpu_admission_module.GpuAdmissionRefused as refused:
             raise CapabilityProbeDeferred(
                 "capability probe deferred: %s" % refused.refusal.reason.value) from None
@@ -1337,17 +1353,33 @@ class OllamaWorkerPool:
                 return
 
             def run(state: _WorkerState):
-                started = self._clock()
                 def clear_inflight():
                     with self._condition:
                         state.capability_probe_inflight = False
                         self._condition.notify_all()
 
+                # Admission first, outside the bounded timer; the slot is held
+                # until the probe thread really finishes (even past a timeout).
+                try:
+                    release = self._probe_permit(state.endpoint.origin)
+                except BaseException as refused:
+                    clear_inflight()
+                    if isinstance(refused, CapabilityProbeDeferred):
+                        return None, 0.0, refused
+                    raise
+
+                def complete():
+                    try:
+                        release()
+                    finally:
+                        clear_inflight()
+
+                started = self._clock()
                 payload, error = _bounded_capability_probe(
-                    self._admitted_probe,
+                    self._capability_prober,
                     state.endpoint.origin,
                     self._probe_timeout,
-                    clear_inflight,
+                    complete,
                 )
                 elapsed_ms = max(0.0, (self._clock() - started) * 1000.0)
                 return payload, elapsed_ms, error
@@ -2878,6 +2910,7 @@ __all__ = [
     "WorkerPoolUnavailable",
     "WorkerSnapshot",
     "admitted",
+    "admitted_get",
     "configure_typed_workers",
     "configure_typed_pool",
     "from_environment",

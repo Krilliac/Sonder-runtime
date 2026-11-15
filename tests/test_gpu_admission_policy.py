@@ -35,7 +35,9 @@ POLICY = ga.GpuAdmissionPolicy(
     ("/api/embeddings", {"model": "m", "prompt": "x"}, "POST", False, ga.AdmissionLane.EMBED),
     ("/api/embed", {"model": "m", "input": "x"}, "POST", False, ga.AdmissionLane.EMBED),
     ("/api/embeddings", {"model": "m", "keep_alive": 0}, "POST", False, ga.AdmissionLane.UNLOAD),
-    ("/api/pull", {"name": "m"}, "POST", False, ga.AdmissionLane.PROBE),
+    ("/api/pull", {"name": "m"}, "POST", False, ga.AdmissionLane.MANAGE),
+    ("/api/create", {"model": "m"}, "POST", False, ga.AdmissionLane.MANAGE),
+    ("/api/pull", None, "GET", False, ga.AdmissionLane.PROBE),
 ])
 def test_lane_classification(path, payload, method, prewarm, lane):
     assert ga.classify_operation(path, payload, method=method, prewarm=prewarm) is lane

@@ -5585,8 +5585,7 @@ def _get(path: str) -> dict:
     _require_ollama_endpoint()
 
     def send(origin):
-        req = urllib.request.Request(f"{origin}{path}")
-        with ollama_pool.admitted(OLLAMA_POOL, path, None, origin, deadline=time.monotonic() + 15),                 OLLAMA_POOL.open_url(req, timeout=15) as resp:
+        with ollama_pool.admitted_get(OLLAMA_POOL, origin, path, timeout=15) as resp:
             raw = _read_ollama_response_bytes(resp)
             return json.loads(raw.decode("utf-8"))
 
@@ -23418,7 +23417,7 @@ def _route_work_request(
 
 
 def _pool_member_tags(origin: str, timeout: float = 15) -> dict:
-    with ollama_pool.admitted(OLLAMA_POOL, "/api/tags", None, origin, deadline=time.monotonic() + timeout),             OLLAMA_POOL.open_url(urllib.request.Request(f"{origin}/api/tags"), timeout=timeout) as resp:
+    with ollama_pool.admitted_get(OLLAMA_POOL, origin, "/api/tags", timeout=timeout) as resp:
         return json.loads(_read_ollama_response_bytes(resp).decode("utf-8"))
 
 

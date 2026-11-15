@@ -65,3 +65,22 @@ def test_the_check_runs_on_the_first_load_even_inside_the_interval(monkeypatch, 
     server._post("/api/chat", chat_body(16384))
 
     assert len(_records(caplog, logging.ERROR, "num_ctx mismatch")) == 1
+
+
+def test_mismatch_logging_stays_bounded_once_the_tuple_set_is_full(monkeypatch, tmp_path, caplog):
+    from sonder_runtime.adapters.inference import gpu_admission as adapter
+    monkeypatch.setattr(adapter, "_BOUND_LOG_TUPLES", 1)
+    fake = FakeOllama()
+    metrics = FakeMetrics()
+    service = make_service(tmp_path, fake, metrics=metrics)
+    wire(monkeypatch, server, fake, service)
+    caplog.set_level(logging.DEBUG)
+
+    for model, effective in ((MODEL, 8192), ("other:1b", 4096), ("third:1b", 2048)):
+        fake.ps_context_override[model] = effective
+        server._post("/api/chat", chat_body(16384, model=model))
+
+    # The first tuple fills the bound; later mismatches are neither logged nor counted.
+    assert len(_records(caplog, logging.ERROR, "num_ctx mismatch")) == 1
+    assert metrics.mismatches == 1
+    assert service.snapshot()["num_ctx_mismatches"] == 1

@@ -120,6 +120,10 @@ def passthrough_ticket(payload: Mapping | None) -> AdmissionTicket:
     return AdmissionTicket(None, payload)
 
 
+def _no_release() -> None:
+    """The release of a probe that took no slot (off, observe, remote origin)."""
+
+
 @dataclasses.dataclass
 class _Entry:
     ticket: AdmissionTicket
@@ -403,9 +407,15 @@ class GpuAdmission:
         body = payload if isinstance(payload, Mapping) else None
         lane = policy.classify_operation(
             path, body, method="GET" if payload is None else "POST", prewarm=prewarm)
+        if lane is AdmissionLane.MANAGE:
+            yield passthrough_ticket(payload)
+            return
         if lane is AdmissionLane.PROBE:
-            with self._probe_gate(path, deadline):
+            release = self.acquire_probe(path, origin=origin, deadline=deadline)
+            try:
                 yield passthrough_ticket(payload)
+            finally:
+                release()
             return
         key = model_key(body.get("model") if body is not None else None)
         if not key or is_cloud_model_name(key):
@@ -426,8 +436,20 @@ class GpuAdmission:
             self._leave(entry, succeeded)
 
     # -- PROBE lane ---------------------------------------------------------------
-    @contextlib.contextmanager
-    def _probe_gate(self, path: str, deadline: float | None):
+    def acquire_probe(self, path: str, *, origin: str,
+                      deadline: float | None = None) -> Callable[[], None]:
+        """Take one PROBE slot for a control-plane read of ``origin``; return its release.
+
+        Only loopback origins are gated: the slots keep probes from piling onto
+        the local Ollama (and so the local GPU); a remote worker's probe never
+        waits behind them. The wait is bounded by ``probe_wait_ms`` and, when
+        given, ``deadline``; running out raises ``GpuAdmissionRefused(PROBE_BUSY)``
+        (observe mode logs it and admits without a slot). The returned release
+        is thread-agnostic and idempotent: only its first call frees the slot,
+        so a caller may hand it to whichever thread finishes the read.
+        """
+        if self.config.mode == "off" or not ollama_policy.is_loopback(origin):
+            return _no_release
         wait = self.config.probe_wait_ms / 1000.0
         if deadline is not None:
             wait = min(wait, max(0.0, deadline - self._clock()))
@@ -439,13 +461,15 @@ class GpuAdmission:
                 retry_after_seconds=max(0.1, wait))
             if self.config.mode == "observe":
                 logger.warning("gpu admission (observe): would refuse probe: %s", refusal.detail)
-                yield
-                return
+                return _no_release
             self._refuse(refusal)
-        try:
-            yield
-        finally:
-            self._probe_sem.release()
+        once = threading.Lock()
+
+        def release() -> None:
+            if once.acquire(blocking=False):
+                self._probe_sem.release()
+
+        return release
 
     # -- LOAD / INFERENCE / EMBED lanes -------------------------------------------
     def _refuse(self, refusal: Refused) -> None:
@@ -617,7 +641,9 @@ class GpuAdmission:
             reserve_tokens=policy.requested_reserve_tokens(body),
             repins_in_window=store.repins_in_window(origin, key, self._policy.repin_window_seconds),
             max_repins=self._policy.max_repins_per_model)
-        cold = row is None and holders == 0
+        # An unreadable /api/ps says nothing about residency: "unknown" is not
+        # "cold", so it never triggers a host-memory refusal or a measurement.
+        cold = rows is not None and row is None and holders == 0
         tag = self._read_tags(origin).get(key)
         digest = tag.digest if tag and tag.digest else "name:" + key
         file_size = tag.size if tag else 0
@@ -750,10 +776,10 @@ class GpuAdmission:
         if verdict is CtxCheck.MISMATCH:
             tuple_key = (entry.origin, entry.model_key, sent, row.context_length)
             with self._lock:
-                first = tuple_key not in self._mismatch_seen
-                if first and len(self._mismatch_seen) < _BOUND_LOG_TUPLES:
-                    self._mismatch_seen.add(tuple_key)
+                first = (tuple_key not in self._mismatch_seen
+                         and len(self._mismatch_seen) < _BOUND_LOG_TUPLES)
                 if first:
+                    self._mismatch_seen.add(tuple_key)
                     self._counters["num_ctx_mismatches"] += 1
             if first:
                 logger.error(

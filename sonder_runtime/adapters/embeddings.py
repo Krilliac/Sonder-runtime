@@ -729,10 +729,12 @@ def _embed_at(text, timeout=30, base=None, model=None, force_cpu=False):
                 return vector
         except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc:
             code = getattr(exc, "code", None)
+            # An admission refusal (queue, memory floor, store) says nothing
+            # about the embed endpoint's transport, so it never trips its circuit.
             _EMBED_STATE.transport_failed = (
                 code in _UNAVAILABLE_HTTP_CODES
                 if isinstance(exc, urllib.error.HTTPError)
-                else not isinstance(exc, ValueError)
+                else not isinstance(exc, (ValueError, gpu_admission.GpuAdmissionRefused))
             )
             if npu_fallback_pending:
                 _record_npu_fallback_handler(False)
