@@ -6,6 +6,8 @@ Events go to Python logging; the operations.db persistence adapter
 """
 from __future__ import annotations
 
+from typing import Any
+
 import logging
 
 logger = logging.getLogger("sonder_runtime.events")
@@ -17,7 +19,7 @@ class LoggingEventSink:
         event_code: str,
         *,
         summary: str,
-        detail: dict | None = None,
+        detail: dict[str, Any] | None = None,
         severity: str = "INFO",
         correlation_id: str | None = None,
         operation_id: str | None = None,

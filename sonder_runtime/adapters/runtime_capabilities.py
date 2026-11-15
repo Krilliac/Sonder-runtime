@@ -6,6 +6,8 @@ state lives in the packaged runtime boundary.
 """
 from __future__ import annotations
 
+from typing import Any
+
 from dataclasses import dataclass
 
 
@@ -18,7 +20,7 @@ class RuntimeCapabilities:
     def full_autonomy(self) -> bool:
         return self.unrestricted_tools and self.unrestricted_selfmod
 
-    def status_dict(self) -> dict:
+    def status_dict(self) -> dict[str, Any]:
         return {
             "unrestricted_tools": self.unrestricted_tools,
             "unrestricted_selfmod": self.unrestricted_selfmod,

@@ -6,13 +6,15 @@ cannot mutate the event after it has crossed the adapter boundary.
 """
 from __future__ import annotations
 
+from typing import Any
+
 from collections.abc import Callable, Mapping
 
 
 class ChecklistEventSinkAdapter:
     """Publish immutable-at-boundary checklist snapshots to a callback."""
 
-    def __init__(self, publish_fn: Callable[[dict], None]) -> None:
+    def __init__(self, publish_fn: Callable[[dict[str, Any]], None]) -> None:
         self._publish_fn = publish_fn
 
     def publish(self, checklist: Mapping[str, object]) -> None:

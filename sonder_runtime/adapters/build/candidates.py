@@ -43,7 +43,7 @@ class ModelCandidateGenerator:
     """Propose one ``CandidatePatch`` per call through the model gateway."""
 
     def __init__(self, gateway: Any, *, route: str = DEFAULT_ROUTE, alternate_route: str = "",
-                 options: dict | None = None,
+                 options: dict[str, Any] | None = None,
                  redact: Callable[[str], str] | None = None) -> None:
         for name, value in (("route", route), ("alternate_route", alternate_route)):
             if value and not _ROUTE_RE.fullmatch(value):

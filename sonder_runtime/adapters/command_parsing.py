@@ -1,7 +1,9 @@
 """Small parsers shared by the runtime command interfaces."""
 from __future__ import annotations
 
-def _parse_game_campaign_command(arg: str) -> dict | None:
+from typing import Any
+
+def _parse_game_campaign_command(arg: str) -> dict[str, Any] | None:
     parts = [part.strip() for part in str(arg or "").split("|", 3)]
     if len(parts) < 2 or not parts[0] or not parts[1]:
         return None

@@ -1,8 +1,10 @@
 """Human-readable formatting for goal records."""
 from __future__ import annotations
 
+from typing import Any
 
-def format_goal(goal: dict | None) -> str:
+
+def format_goal(goal: dict[str, Any] | None) -> str:
     """Render one goal record for the user-facing ``/goal`` command."""
     if not goal:
         return "no active goal"
