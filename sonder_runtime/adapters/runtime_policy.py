@@ -21,6 +21,7 @@ import threading
 import time
 from pathlib import Path
 
+import sonder_runtime.adapters.model_tool_grants as _model_tool_grants
 import sonder_runtime.adapters.model_tool_policy as _model_tool_policy
 import sonder_runtime.adapters.reference_lookup_state as _lookup_state
 from sonder_runtime.adapters.filesystem import atomic_json as _atomic_json
@@ -442,6 +443,9 @@ def format_policy(policy=None) -> str:
         ))
     lines.append("  " + format_tool_lane_denied_models(policy))
     lines.extend("  " + line for line in _model_tool_policy.describe())
+    lines.extend("  " + line for line in _model_tool_grants.describe_lines(
+        legacy_section=policy.get("tool_lane_denied_models"),
+    ))
     lines.append("  " + format_reference_lookup(policy))
     lines.append("  cloud tiers remain separate explicit opt-in configuration")
     return "\n".join(lines)

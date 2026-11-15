@@ -22,5 +22,32 @@
       "lanes": []
     }
   ],
-  "undetermined_served_models": ["", "default"]
+  "undetermined_served_models": ["", "default"],
+  "restricted_tool_ceiling": [
+    "text_search",
+    "repository_symbol_index",
+    "file_read_range",
+    "directory_tree",
+    "context_pack"
+  ],
+  "restricted_secret_path_globs": [
+    ".env",
+    ".env.*",
+    "*.pem",
+    "*.key",
+    "*.pfx",
+    "*.p12",
+    "id_rsa*",
+    "id_ed25519*",
+    "id_ecdsa*",
+    ".ssh/**",
+    "**/secrets/**",
+    "*credential*",
+    "*token*",
+    "*secret*",
+    ".git/config",
+    ".netrc",
+    ".npmrc",
+    ".pypirc"
+  ]
 }

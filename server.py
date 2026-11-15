@@ -165,7 +165,7 @@ import creative_router
 import intents
 import sonder_runtime.adapters.model_tool_policy as _model_tool_policy
 import sonder_runtime.adapters.runtime_policy as runtime_policy
-from sonder_runtime.adapters import tool_lane_guard as _tool_lane_guard
+from sonder_runtime.adapters import tool_lane_guard as _tool_lane_guard, model_tool_grants as _model_tool_grants, model_tool_policy_editor as _model_tool_policy_editor, restricted_tool_lane as _restricted_tool_lane
 from sonder_runtime.adapters import chat_observers as _chat_observers, reference_lookup_lanes as _reference_lookup_lanes, reference_lookup_multi as _reference_lookup_multi
 import sonder_runtime.adapters.accelerators.npu.contract as npu_contract
 import sonder_runtime.adapters.accelerators.npu.service as npu_service
@@ -2750,7 +2750,7 @@ def _autopilot_command(arg: str, project: str = "", request_owner: str | None = 
     return "ERROR: unknown autopilot action '%s'; try /autopilot help." % action
 
 
-def _runtime_command(arg: str) -> str:
+def _runtime_command(arg: str, *, operator_approved: bool = False) -> str:
     text = str(arg or "").strip()
     if not text or text.lower() in {"status", "show", "list"}:
         return runtime_policy_status()
@@ -2761,6 +2761,8 @@ def _runtime_command(arg: str) -> str:
     rest = rest.strip()
     if action == "reset":
         return runtime_policy_update(reset=True)
+    if action == "tools":  # writes only with the console operator attending
+        return _model_tool_policy_editor.command(rest, operator_attended=bool(operator_approved), policy=_RUNTIME_POLICY)
     if action == "overflow":
         result = runtime_policy.overflow_command(rest)
         _refresh_runtime_policy(create=False)
@@ -2811,6 +2813,7 @@ def _runtime_command(arg: str) -> str:
             "  /runtime set chat=<tier> router=<tier> workbench=<tier> "
             "autopilot=<tier> fleet=<tier> review=<tier>\n"
             "  /runtime overflow [status|on|off|threshold <n>|model <m>]   (long-context overflow)\n"
+            "  /runtime tools [allow|revoke|deny|undeny ...]   (per-model tool lists; /runtime tools help)\n"
             "  /runtime reset\n"
             "Only installed local models are accepted. Embedding changes affect "
             "future vectors only; use /embeddings apply to refresh stored memory. "
@@ -3694,7 +3697,7 @@ def control_command(prompt: str, history=None, session="", project="",
     if cmd in ("/autopilot", "/auto"):
         return _autopilot_command(arg, project=project, request_owner=autopilot_request_owner)
     if cmd in ("/runtime", "/models"):
-        return _runtime_command(arg)
+        return _runtime_command(arg, operator_approved=bool(operator_approved))
     if cmd == "/updatecheck":
         if arg.strip():
             return "usage: /updatecheck"
@@ -15496,14 +15499,9 @@ def _loop_dispatch(action):
             project=action.get("project", ""),
         ))
     if action_type in ("work", "agent", "workbench_agent"):
-        return _loop_text_result("workbench_agent", workbench_agent(
-            prompt=action.get("task", action.get("prompt", "")),
-            tier=action.get("tier", "auto"),
-            max_steps=action.get("max_steps", 12),
-            allow_web=action.get("allow_web", True),
-            project=action.get("project", ""),
-            allow_location=action.get("allow_location", False),
-        ))
+        with _restricted_tool_lane.suppressed():  # a model chose this action: never a restricted entry
+            return _loop_text_result("workbench_agent", workbench_agent(prompt=action.get("task", action.get("prompt", "")), tier=action.get("tier", "auto"), max_steps=action.get("max_steps", 12),
+                                                                      allow_web=action.get("allow_web", True), project=action.get("project", ""), allow_location=action.get("allow_location", False)))
     if action_type == "workspace_inventory":
         return _loop_text_result("workspace_inventory", workspace_inventory(
             path=action.get("path", action.get("root", ".")),
@@ -19813,7 +19811,7 @@ _RENDERED_VERDICT_TOOLS = frozenset({
 
 def _agent_dispatch_observed(
     tool_name, args, allow_web=True, read_only=False, allow_location=False,
-    project="",
+    project="", observation_filter=None,
 ):
     started = time.time()
     ok = False
@@ -19867,6 +19865,7 @@ def _agent_dispatch_observed(
             )
             from sonder_runtime.bootstrap.code_check_agent_tools import post_edit_file_check
             observation = post_edit_file_check(tool_name, args, observation, lambda name, payload: _agent_dispatch_observed(name, payload, project=project, read_only=read_only, **dispatch_options))
+        observation = observation if observation_filter is None else observation_filter(observation)  # before the activity record sees it
         dispatched = True
         ok = not str(observation).startswith("ERROR:")
         if tool_name == "ensemble_codegen_build_loop":
@@ -20499,7 +20498,7 @@ def _agent_turn(
     session: str | None = None,
     pre_model_context=None,
     require_guarded_project: bool = False,
-    tool_help_kind=None,
+    tool_help_kind=None, restricted_lane=None,
 ) -> str:
     """Run a Claude-like local agent loop that can call tools.
 
@@ -20546,7 +20545,11 @@ def _agent_turn(
         from sonder_runtime.bootstrap.prepared_workbench import prepared_tool_allowlist
         tool_allowlist = prepared_tool_allowlist(tool_allowlist)
     model, cloud, augment, tier_label = pinned_target if pinned_target is not None else _serve_target(tier, None)
-    if refusal := _tool_lane_guard.resolved_refusal(tier, model, tier_label, _RUNTIME_POLICY):
+    restricted, refusal = _restricted_tool_lane.admit(restricted_lane, tier, tier_label, _RUNTIME_POLICY, unsafe=unsafe, prepared=pinned_target is not None, resolve=lambda: _serve_target(tier, None, chat_only=True), provider_for=_bridge_provider_for_tier)
+    if restricted is not None:  # granted tools only, read-only, no web or location (restricted_tool_lane)
+        (model, cloud, _augment, tier_label), tool_allowlist, tool_policy = restricted.target, restricted.allowlist(tool_allowlist), restricted.tool_policy(tool_policy, _project_scope_args)
+        allow_web, allow_location, read_only, lane_read_only = False, False, True, True
+    elif refusal := refusal or _tool_lane_guard.resolved_refusal(tier, model, tier_label, _RUNTIME_POLICY):
         return refusal  # before any model call or tool dispatch
     if tier_label == "cloud-disabled":
         return _cloud_disabled_message()
@@ -20572,6 +20575,8 @@ def _agent_turn(
             )
         return project_error
     wants_ensemble_compiler = intents.requests_ensemble_compiler_retries(prompt)
+    if restricted is not None and (refusal := restricted.bind_project(project_scope, codegen_requested=wants_ensemble_compiler)):
+        return refusal
     if wants_ensemble_compiler and cloud:
         # This remains a host-owned policy denial, rather than an inference
         # failure the agent might retry or work around.
@@ -20600,7 +20605,7 @@ def _agent_turn(
         # picks the right command shape instead of guessing. Never send this
         # private machine inventory to a hosted agent.
         default_agent_system = _prompts.render(
-            "agent_local", host_brief=_local_agent_brief(project_scope),
+            "agent_local", host_brief="" if restricted is not None else _local_agent_brief(project_scope),
         )
     # Hosted agents receive only the explicitly supplied/default hosted
     # system text. _build_system also appends mutable local profile, emotion,
@@ -20608,7 +20613,7 @@ def _agent_turn(
     # are not part of the caller's cloud disclosure consent.
     system = (
         system or default_agent_system
-        if cloud
+        if cloud or restricted is not None  # a restricted model gets no private profile either
         # cloud is False in this branch, so the identity block correctly
         # describes a locally served model.
         else _build_system(
@@ -20756,7 +20761,7 @@ def _agent_turn(
     # at most one wasted read-only call and never touches durable state).
     _predictor = sonder_speculation.default_predictor()
     _spec_enabled = (
-        sonder_speculation.speculation_enabled() and not cloud
+        sonder_speculation.speculation_enabled() and not cloud and restricted is None
     )
 
     def _spec_dispatch(tool_name, args):
@@ -20817,7 +20822,7 @@ def _agent_turn(
         )
         pre_model_context_rendered = bool(context_text)
         transcript += context_text
-    transcript, _ = playbook_context.augment(transcript, prompt, cloud=cloud or _provider_bridge.hosted_rung_active())
+    transcript, _ = playbook_context.augment(transcript, prompt, cloud=cloud or restricted is not None or _provider_bridge.hosted_rung_active())
 
     def ensure_not_cancelled():
         if (
@@ -21131,11 +21136,8 @@ def _agent_turn(
         else:
             ensure_not_cancelled()
             observation_text = str(_agent_dispatch_observed(
-                tool_name,
-                policy_tool_args,
-                allow_web=False,
-                read_only=True,
-                project=project_scope,
+                tool_name, policy_tool_args, allow_web=False, read_only=True, project=project_scope,
+                **({"observation_filter": restricted.observation_filter(tool_name, policy_tool_args)} if restricted is not None else {}),
             ))
         tool_ok = _agent_tool_observation_ok(tool_name, observation_text)
         if tool_ok:
@@ -21603,10 +21605,9 @@ def _agent_turn(
                     min(_tool_wall, time.monotonic() - _spec_decision_t0)
                 )
             else:
-                dispatch_options = {
-                    "allow_web": allow_web,
-                    "read_only": read_only,
-                }
+                dispatch_options = {"allow_web": allow_web, "read_only": read_only}
+                if restricted is not None:
+                    dispatch_options["observation_filter"] = restricted.observation_filter(tool_name, policy_tool_args)
                 if allow_location:
                     dispatch_options["allow_location"] = True
                 tool_dispatched = True
@@ -22043,6 +22044,7 @@ def agent(
     refusal = intents.containment_egress_refusal(prompt)
     if refusal:
         return refusal
+    restricted_lane = _restricted_tool_lane.entry("agent", project)  # before a default project is bound
     project, project_error = prepare_writing_project(project, prompt)
     if project_error:
         return project_error
@@ -22065,6 +22067,7 @@ def agent(
                 project=project,
                 allow_location=bool(allow_location),
                 session=session,
+                restricted_lane=restricted_lane,
             )
     # Keep the report bound to this invocation's span.  Once an outer span
     # closes, ``latest()`` is a process-global last-completed value; another
@@ -22104,6 +22107,7 @@ def _work_expects_effects(prompt):
 
 
 @_narrated_work("workbench", lambda: globals())
+@_restricted_tool_lane.suppressing  # its rungs are tiers, never a restricted entry
 def _workbench_agent_escalating(
     prompt, tier, *, max_steps, allow_web, project, allow_location,
     prepared_plan=None, session=None,
@@ -22237,16 +22241,8 @@ def workbench_agent(
             project=project, allow_location=allow_location, session=session,
         )
         return output
-    return agent(
-        prompt=prompt,
-        tier=lane_tier,
-        max_steps=max_steps,
-        allow_web=allow_web,
-        project=project,
-        checklist=True,
-        allow_location=allow_location,
-        session=session,
-    )
+    with _restricted_tool_lane.entering("workbench_agent"):
+        return agent(prompt=prompt, tier=lane_tier, max_steps=max_steps, allow_web=allow_web, project=project, checklist=True, allow_location=allow_location, session=session)
 
 
 # These two sets are not policy alone.  _agent_impl renders the selected one
@@ -23525,6 +23521,7 @@ def runtime_policy_data() -> dict:
                 data["capability_errors"]["embedding"] = "does not declare embedding capability"
     except Exception as exc:
         data["inventory_error"] = "%s: %s" % (type(exc).__name__, exc)
+    data["model_tool_policy"] = _model_tool_grants.status_payload(legacy_section=policy.get("tool_lane_denied_models"))
     _remember_runtime_readiness(data)
     return data
 

@@ -468,15 +468,90 @@ The model lists live in two JSON files, not in Python:
 - **Operator overlay**, `<state home>/model_tool_policy.json` (the path in
   `SONDER_MODEL_TOOL_POLICY` instead, when set), same schema, optional. It is a
   separate file from `runtime_policy.json` so that `runtime_policy_update` can
-  never reach it. Phase 1a reads it only: edit it by hand; nothing in Sonder
-  writes or rewrites it. It can add names and prefixes (in a new profile, or in
-  a floor profile's `match`) and add served-model ids that name no model. It
-  cannot set `"floor"`, cannot give a floor profile `tools`, and cannot remove
-  or narrow a floor: the floor's names and prefixes are always in force
-  whatever the overlay says. A profile's `tools` are validated but not yet
-  enforced in this phase, so every model an overlay profile matches is chat by
-  name only. A profile that matches no model, an unknown key, a duplicate
-  `id`, a bad name or a file over 1 MiB makes the overlay invalid.
+  never reach it. Edit it by hand, or at the console with `/runtime tools`
+  (below); nothing else in Sonder writes it. It can add names and prefixes (in
+  a new profile, or in a floor profile's `match`), add `tools` and `lanes` to
+  any profile (a floor included), add served-model ids that name no model and
+  add `restricted_secret_path_globs`. It cannot set `"floor"`, cannot set
+  `restricted_tool_ceiling`, and cannot remove or narrow anything shipped: the
+  floor's names and prefixes, shipped tools and shipped globs are always in
+  force whatever the overlay says (the overlay's entries are unioned in). A
+  profile that matches no model, an unknown key, a duplicate `id`, a bad name
+  or glob or a file over 1 MiB makes the overlay invalid.
+
+The shipped file also holds `restricted_tool_ceiling` (the only tools any
+profile may ever grant: `text_search`, `repository_symbol_index`,
+`file_read_range`, `directory_tree`, `context_pack`) and
+`restricted_secret_path_globs` (`.env`, `.env.*`, `*.pem`, `*.key`, `*.pfx`,
+`*.p12`, `id_rsa*`, `id_ed25519*`, `id_ecdsa*`, `.ssh/**`, `**/secrets/**`,
+`*credential*`, `*token*`, `*secret*`, `.git/config`, `.netrc`, `.npmrc`,
+`.pypirc`).
+
+##### Restricted tool grants
+
+A model that a profile with `tools` matches is *restricted*: still refused in
+every tool lane and still chat by name everywhere, except in the lanes the
+profile lists (`agent`, the `agent` tool; `workbench_agent`, `workbench_agent`
+with an explicit tier), where it may drive only the granted tools. Every
+profile match keeps the model on the deny list, so a grant never opens any
+other lane (`codegen_build_loop`, `mesh_generate`, campaigns, the code gate, the
+default route, a tier binding, fan-out and the rest refuse it exactly as
+before). A profile with `tools: []` (the shipped `security-advisers`) is chat by
+name only, as it always was.
+
+A model is restricted only when all of these hold: the caller named it (by
+name, not through a tier, a prepared target, a bridged provider or the default
+route); the deny list matches it; no profile with no tools, no overlay `deny-`
+entry and no legacy `tool_lane_denied_models` entry matches it; every matching
+grant lists the lane; and the intersection of the matching grants' tools is
+not empty. An unreadable policy file, an unreadable overlay or a missing
+shipped file grants nothing. The `agent` entry is opened only by a direct
+`agent` call and `workbench_agent` with an explicit tier; a model-planned
+`loop` action, `/work` on tier `auto` (its escalation rungs), chat file routing
+and a prepared plan never open it.
+
+A tool is granted only when it is in the shipped ceiling *and* passes a code
+check: its risk grade is `safe`; it does not reach the network, read or change
+memory or learning state, operate the system, or start a program (`run_*`,
+`*_run`, `build_*`); and it is a read-only, project-confined tool the agent
+lane dispatches. A tool that fails is dropped and `/runtime status` shows a
+`DROPPED` line with the reason (the overlay is otherwise applied). Granting
+also needs at least one secret glob.
+
+A restricted run is read-only, with no web or location access, no host
+profile or brief, no playbook memory and no speculative tool calls. It is
+offered only the granted tools (the caller's `allowed_tools`, if any,
+intersected with them) and every call is checked at dispatch, so a forged call
+to any other tool is refused. It needs a project: the caller must pass
+`project=` naming an existing directory (a missing project or a memory-project
+label is refused: "a restricted model needs a project root"). Every path
+argument is resolved against that root and refused when it leaves it or
+matches a secret glob (case-insensitive; a glob without `/` matches any path
+component, one with `/` any tail of the path); so is a search `glob` that
+selects secret files and `include_hidden` / `include_ignored`. `text_search`
+and `repository_symbol_index` results are filtered before the model, the
+activity record or the caller sees them: a row naming a secret path, or one
+that does not parse, is withheld and counted.
+
+At the console:
+
+```text
+/runtime tools                                   show profiles (with sources), ceiling, globs, DROPPED and ERROR lines
+/runtime tools allow <model|prefix*> <tool> [agent|workbench_agent]
+/runtime tools revoke <model|prefix*> <tool>
+/runtime tools deny <model|prefix*>
+/runtime tools undeny <model|prefix*>
+```
+
+Writes happen only at the REPL with an operator present; from MCP, HTTP, a
+piped console or an agent they are refused and the file is not touched. A
+write takes the overlay's lock, refuses to overwrite an unreadable or invalid
+overlay, validates the result and replaces the file atomically. `allow`
+refuses a tool outside the ceiling or failing the check, and a model that a
+tool-less profile also matches (grant on that profile's own selector, e.g.
+`/runtime tools allow astra-cyber-* text_search`). Shipped entries cannot be
+revoked or undenied. `runtime_policy_data()` carries the same view under
+`model_tool_policy`.
 
 Both are read again when their size or modification time changes. `/runtime
 status` shows both paths and every load error.
@@ -485,7 +560,7 @@ The `tool_lane_denied_models` section of `runtime_policy.json` (`{"names":
 [...], "prefixes": [...]}`) is deprecated in favour of the overlay but still read
 and unioned (add-only), so existing files keep working. Neither it nor the
 overlay can remove a floor entry, and no tool or MCP parameter edits either
-list. A malformed section
+list (`/runtime tools` at an attended console is the only writer of the overlay). A malformed section
 makes the whole policy file invalid: it then loads as built-in defaults, which
 also reverts every tier binding, and caller-named models are refused in tool
 lanes until the file is repaired or reset (`/runtime reset`). A `local_models`

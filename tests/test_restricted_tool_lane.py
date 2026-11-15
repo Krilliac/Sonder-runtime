@@ -1,0 +1,441 @@
+"""A restricted model in the ``agent`` lane, end to end through ``server``, with the model faked.
+
+The security-advisers floor profile is given read-only tools by an operator
+overlay; the model is a scripted generator, the catalog a dictionary, and the
+tools are the real dispatcher against a temporary project.  Every forged call
+must be refused before dispatch, every other lane must keep refusing, and a
+model with no tools granted must be refused exactly as before.
+"""
+from __future__ import annotations
+
+import ast
+import json
+import re
+from pathlib import Path
+
+import pytest
+
+import server
+from sonder_runtime.adapters import model_tool_policy as mtp
+from sonder_runtime.adapters import restricted_tool_lane as lane
+from sonder_runtime.adapters import tool_lane_guard as guard
+from tests.support.tool_lane import ALLOWED, BLOCKED, DENIED, DENIED_SMALL, RUNNABLE, clear_environment
+
+REPO = Path(__file__).resolve().parent.parent
+GRANTED = ["text_search", "file_read_range", "directory_tree", "context_pack", "repository_symbol_index"]
+
+
+@pytest.fixture(autouse=True)
+def isolated(monkeypatch, tmp_path):
+    clear_environment(monkeypatch)
+    monkeypatch.setenv("SONDER_RUNTIME_POLICY", str(tmp_path / "runtime_policy.json"))
+    (tmp_path / "overlay").mkdir()
+    monkeypatch.setenv(mtp.OVERLAY_ENV, str(tmp_path / "overlay" / "model_tool_policy.json"))
+    monkeypatch.setenv("SONDER_SPECULATION", "0")
+    monkeypatch.setattr(guard, "_GENERATION_CACHE", None, raising=False)
+    monkeypatch.setattr(server, "_RUNTIME_POLICY", server._RUNTIME_POLICY)
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda *a, **k: None)
+    server._refresh_runtime_policy(create=False)
+    before = dict(server.TIERS)
+    for tier in ("fast", "code", "general"):
+        server.TIERS[tier] = ALLOWED
+    mtp.clear_cache()
+    yield
+    mtp.clear_cache()
+    server.TIERS.clear()
+    server.TIERS.update(before)
+
+
+@pytest.fixture
+def catalog(monkeypatch):
+    names = {DENIED: DENIED, DENIED_SMALL: DENIED_SMALL, ALLOWED: ALLOWED}
+
+    def record(selector):
+        key = str(selector or "").strip().casefold()
+        return (names[key], {"name": names[key]}) if key in names else None
+
+    monkeypatch.setattr(server, "resolve_discovered_model_record", record)
+    monkeypatch.setattr(server, "_fanout_nonchat_reason", lambda record: "")
+    return names
+
+
+@pytest.fixture
+def overlay(tmp_path):
+    path = tmp_path / "overlay" / "model_tool_policy.json"
+
+    def write(tools=GRANTED, lanes=("agent", "workbench_agent"), **extra):
+        path.write_text(json.dumps({"version": 1, "model_profiles": [
+            {"id": "security-advisers", "tools": list(tools), "lanes": list(lanes)},
+        ], **extra}), encoding="utf-8")
+        mtp.clear_cache()
+
+    return write
+
+
+@pytest.fixture
+def project(tmp_path):
+    root = tmp_path / "proj"
+    (root / "src").mkdir(parents=True)
+    (root / "config").mkdir()
+    (root / "src" / "app.py").write_text("def needle():\n    return 1\n", encoding="utf-8")
+    (root / ".env").write_text("needle=TOPSECRET\n", encoding="utf-8")
+    (root / "config" / "credentials.json").write_text('{"needle": "TOPSECRET"}\n', encoding="utf-8")
+    (root / "server.pem").write_text("needle TOPSECRET\n", encoding="utf-8")
+    return root
+
+
+class Script:
+    """A scripted model: returns each decision in turn and records every prompt."""
+
+    def __init__(self, *decisions):
+        self.decisions = [json.dumps(item) for item in decisions]
+        self.prompts = []
+        self.built = []
+
+    def make(self, tier_label, model, *args, **kwargs):
+        self.built.append((tier_label, model))
+
+        def generate(prompt, *a, **k):
+            self.prompts.append(prompt)
+            return self.decisions.pop(0) if self.decisions else '{"final": "done"}'
+
+        return generate
+
+
+@pytest.fixture
+def dispatched(monkeypatch):
+    calls = []
+    real = server._agent_dispatch_observed
+
+    def record(tool_name, args, *a, **k):
+        calls.append((tool_name, dict(args) if isinstance(args, dict) else args))
+        return real(tool_name, args, *a, **k)
+
+    monkeypatch.setattr(server, "_agent_dispatch_observed", record)
+    return calls
+
+
+def run(monkeypatch, script, **kwargs):
+    monkeypatch.setattr(server, "_make_tier_generate", script.make)
+    return server.agent("inspect the project", tier=DENIED, checklist=False, **kwargs)
+
+
+def advertised(prompt):
+    names = set(re.findall(r"^- ([a-z_]+):", prompt, flags=re.M))
+    other = re.search(r"^other tools \(.*?\): (.*)$", prompt, flags=re.M)
+    if other:
+        names.update(item.strip() for item in other.group(1).split(","))
+    return names
+
+
+# ---- the restricted run ---------------------------------------------------------
+
+def test_restricted_model_is_offered_only_granted_tools_and_searches_without_secrets(
+    catalog, overlay, project, monkeypatch, dispatched,
+):
+    overlay()
+    script = Script({"tool": "text_search", "args": {"query": "needle"}}, {"final": "found it"})
+    output = run(monkeypatch, script, project=str(project))
+    assert script.built == [("model:" + DENIED, DENIED)]  # the named model really answered
+    offered = advertised(script.prompts[0])
+    assert offered and offered <= set(GRANTED), offered
+    assert dispatched and dispatched[0][0] == "text_search"
+    observation = script.prompts[1]
+    assert "app.py" in observation
+    assert "TOPSECRET" not in observation and "TOPSECRET" not in output
+    assert "found it" in output
+
+
+@pytest.mark.parametrize("forged", [
+    {"tool": "file_write", "args": {"path": "x.txt", "content": "x", "mode": "create"}},
+    {"tool": "web_fetch", "args": {"url": "http://example.com"}},
+    {"tool": "run_code", "args": {"code": "print(1)", "language": "python"}},
+    {"tool": "memory_search", "args": {"query": "anything"}},
+    {"tool": "file_read", "args": {"path": "src/app.py"}},
+    {"tool": "tool_manifest", "args": {}},
+])
+def test_a_forged_call_to_an_ungranted_tool_is_refused_at_dispatch(
+    catalog, overlay, project, monkeypatch, dispatched, forged,
+):
+    overlay()
+    script = Script(forged, {"final": "done"})
+    run(monkeypatch, script, project=str(project))
+    assert dispatched == []
+    assert "outside this autonomous run's allowlist" in script.prompts[1]
+    assert not (project / "x.txt").exists()
+
+
+@pytest.mark.parametrize("call", [
+    {"tool": "file_read_range", "args": {"path": ".env"}},
+    {"tool": "file_read_range", "args": {"path": "config/credentials.json"}},
+    {"tool": "file_read_range", "args": {"path": "server.pem"}},
+    {"tool": "context_pack", "args": {"paths_json": json.dumps(["src/app.py", ".env"])}},
+    {"tool": "directory_tree", "args": {"path": ".ssh"}},
+    {"tool": "text_search", "args": {"query": "needle", "glob": "*.pem"}},
+    {"tool": "text_search", "args": {"query": "needle", "include_hidden": True}},
+    {"tool": "file_read_range", "args": {"path": "../outside.txt"}},
+])
+def test_secret_or_outside_paths_are_refused(catalog, overlay, project, monkeypatch, dispatched, call):
+    overlay()
+    script = Script(call, {"final": "done"})
+    output = run(monkeypatch, script, project=str(project))
+    assert dispatched == []
+    assert "HOST POLICY" in script.prompts[1]
+    assert "TOPSECRET" not in script.prompts[1] and "TOPSECRET" not in output
+
+
+def test_no_project_is_refused(catalog, overlay, monkeypatch):
+    overlay()
+    script = Script({"final": "done"})
+    output = run(monkeypatch, script)
+    assert "a restricted model needs a project root" in output
+    assert script.prompts == []
+
+
+def test_a_project_label_is_not_a_project_root(catalog, overlay, monkeypatch):
+    overlay()
+    script = Script({"final": "done"})
+    output = run(monkeypatch, script, project="default")
+    assert "a restricted model needs a project root" in output
+    assert script.prompts == []
+
+
+def test_a_lane_not_listed_in_the_profile_keeps_the_refusal(catalog, overlay, project, monkeypatch):
+    overlay(lanes=["agent"])
+    script = Script({"final": "done"})
+    monkeypatch.setattr(server, "_make_tier_generate", script.make)
+    output = server.workbench_agent("inspect", tier=DENIED, project=str(project))
+    assert (BLOCKED % DENIED).lower() in output.lower()
+    assert script.prompts == []
+
+
+def test_explicit_tier_workbench_agent_is_a_restricted_lane(catalog, overlay, project, monkeypatch, dispatched):
+    overlay(lanes=["workbench_agent"])
+    script = Script({"tool": "directory_tree", "args": {}}, {"final": "listed"})
+    monkeypatch.setattr(server, "_make_tier_generate", script.make)
+    output = server.workbench_agent("inspect", tier=DENIED, project=str(project))
+    assert "listed" in output
+    assert [name for name, _args in dispatched] == ["directory_tree"]
+    # ...but the agent tool itself is not, with that profile
+    script = Script({"final": "done"})
+    assert (BLOCKED % DENIED).lower() in run(monkeypatch, script, project=str(project)).lower()
+
+
+@pytest.mark.parametrize("grant", [None, {"tools": [], "lanes": ["agent", "workbench_agent"]}, {"tools": [], "lanes": []}])
+def test_with_no_tools_granted_the_refusal_is_identical_to_today(catalog, overlay, project, monkeypatch, grant):
+    if grant is not None:
+        overlay(**grant)
+    script = Script({"final": "done"})
+    monkeypatch.setattr(server, "_make_tier_generate", script.make)
+    assert server._agent_turn("list files", tier=DENIED, project=str(project)) == BLOCKED % DENIED
+    assert (BLOCKED % DENIED).lower() in server.agent("list files", tier=DENIED, project=str(project)).lower()
+    assert script.prompts == []
+
+
+def test_a_direct_agent_impl_call_never_opens_a_restricted_lane(catalog, overlay, project, monkeypatch):
+    overlay()
+    script = Script({"final": "done"})
+    monkeypatch.setattr(server, "_make_tier_generate", script.make)
+    assert server._agent_impl("list", tier=DENIED, project=str(project)) == BLOCKED % DENIED
+    assert script.prompts == []
+
+
+def test_suppression_wins_over_an_inner_entry(catalog, overlay, project, monkeypatch):
+    overlay()
+    script = Script({"final": "done"})
+    monkeypatch.setattr(server, "_make_tier_generate", script.make)
+    with lane.suppressed():
+        output = server.workbench_agent("inspect", tier=DENIED, project=str(project))
+    assert (BLOCKED % DENIED).lower() in output.lower()
+    assert script.prompts == []
+
+
+def test_unsafe_lab_keeps_the_refusal(catalog, overlay, project, monkeypatch):
+    overlay()
+    monkeypatch.setattr(server.unsafe_lab, "active", lambda: True)
+    script = Script({"final": "done"})
+    monkeypatch.setattr(server, "_make_tier_generate", script.make)
+    entry = lane.LaneEntry("agent", str(project))
+    assert server._agent_turn("x", tier=DENIED, project=str(project), restricted_lane=entry) == BLOCKED % DENIED
+    assert script.prompts == []
+
+
+def test_the_loop_action_never_opens_a_restricted_lane(catalog, overlay, project, monkeypatch):
+    overlay()
+    seen = []
+    monkeypatch.setattr(server, "agent", lambda **kwargs: seen.append(lane.entry("agent", kwargs.get("project"))) or "ok")
+    monkeypatch.setattr(server, "_loop_permission_refusal", lambda *a, **k: None)
+    server._loop_dispatch({"type": "agent", "task": "x", "tier": DENIED, "project": str(project)})
+    assert seen == [None]
+
+
+# ---- every other lane still refuses ------------------------------------------------
+
+@pytest.fixture
+def granted(catalog, overlay):
+    overlay()
+    assert lane.decide(DENIED, server._RUNTIME_POLICY).permits("agent")
+
+
+def test_codegen_build_loop_still_refuses(granted, tmp_path, monkeypatch):
+    started = []
+    monkeypatch.setattr(server, "_make_tier_generate", lambda *a, **k: started.append(a))
+    files = json.dumps({"a.c": "one C file"})
+    assert server.codegen_build_loop(str(tmp_path), files, "build", tiers=DENIED) == BLOCKED % DENIED
+    monkeypatch.setitem(server.TIERS, "code", DENIED)
+    assert server.codegen_build_loop(str(tmp_path), files, "build", tiers="code") == BLOCKED % DENIED
+    assert started == []
+
+
+def test_consult_by_name_still_executes_nothing(granted, monkeypatch):
+    """Chat by name stays text only: a grant adds no code execution to consult."""
+    runs, asked = [], []
+    monkeypatch.setattr(server, "_code_gate_enabled", lambda: True)
+    monkeypatch.setattr(server.grounding, "run_code_detail", lambda code, **k: runs.append(code))
+    monkeypatch.setattr(server.grounding, "run_code", lambda *a, **k: runs.append(a))
+    monkeypatch.setattr(server.web_tools, "enabled", lambda: False)
+
+    def make(tier, model, *args, **kwargs):
+        return lambda prompt, history=None, **kw: asked.append(model) or RUNNABLE
+
+    monkeypatch.setattr(server, "_make_tier_generate", make)
+    out = server.consult("q", tiers=DENIED)
+    assert asked == [DENIED] and runs == []
+    assert "blocked from tool-using" not in out
+
+
+def test_the_chat_code_gate_never_runs_a_restricted_models_reply(granted, monkeypatch):
+    runs = []
+    monkeypatch.setattr(server, "_code_gate_enabled", lambda: True)
+    monkeypatch.setattr(server.grounding, "run_code_detail", lambda code, **k: runs.append(code))
+    monkeypatch.setattr(server.grounding, "run_code", lambda *a, **k: runs.append(a))
+    common = {"iid": None, "prompt": "p", "history": [], "system": "", "temperature": 0.2,
+              "num_predict": 64, "num_ctx": 0, "cloud": False}
+    for label in ("model:" + DENIED, "general"):
+        assert server._gate_answer_code(RUNNABLE, model=DENIED, tier_label=label, **common) == (RUNNABLE, None, False, {})
+    assert runs == []
+
+
+def test_tool_lane_guard_lanes_still_refuse(granted):
+    policy = server._RUNTIME_POLICY
+    assert guard.denied(DENIED, "model:" + DENIED, policy)
+    assert guard.resolved_refusal(DENIED, None, guard.DENIED_LABEL, policy) == BLOCKED % DENIED
+    assert guard.selector_refusal(DENIED, dict(server.TIERS), policy) == BLOCKED % DENIED
+    assert guard.sweep_skip_reason(DENIED, policy)
+    assert server._serve_target(DENIED, None)[3] == guard.DENIED_LABEL
+    # The agent turn itself, entered without the agent lane, refuses as today.
+    assert server._agent_turn("x", tier=DENIED) == BLOCKED % DENIED
+
+
+def test_the_default_route_still_refuses_a_restricted_model_in_a_tier(granted):
+    refused = guard.default_route_refusal({**server.TIERS, "general": DENIED}, server._RUNTIME_POLICY)
+    assert DENIED in refused and "blocked" in refused
+
+
+def test_mesh_agent_tools_still_refuse(granted, tmp_path):
+    from types import SimpleNamespace
+
+    from sonder_runtime.bootstrap import mesh_agent_tools
+    from sonder_runtime.domain.common.errors import SonderError
+
+    runner = SimpleNamespace(locate_blender=lambda: str(tmp_path / "blender.exe"))
+    rt = SimpleNamespace(TIERS={"general": DENIED, "code": ALLOWED}, _RUNTIME_POLICY=server._RUNTIME_POLICY)
+    with pytest.raises(SonderError, match="blocked from tool-using lanes"):
+        mesh_agent_tools.generate_mesh("a crate", tiers="general", rt=rt, runner=runner, output_dir=str(tmp_path))
+
+
+def test_no_other_lane_reads_the_restricted_decision():
+    """Only the agent turn, the console editor and this lane's own modules may ask for a grant."""
+    allowed = {
+        "server.py", "sonder_runtime/adapters/restricted_tool_lane.py",
+        "sonder_runtime/adapters/model_tool_policy_editor.py",
+        "sonder_runtime/adapters/chat_file_routing.py",
+        "sonder_runtime/adapters/model_tool_grants.py",  # its docstring names the lane
+        "sonder_runtime/bootstrap/prepared_workbench.py",  # suppresses it
+    }
+    readers = set()
+    for path in [REPO / "server.py", *REPO.glob("sonder_runtime/**/*.py"), *REPO.glob("*.py")]:
+        text = path.read_text(encoding="utf-8")
+        if "restricted_tool_lane" in text and path.name != "test_restricted_tool_lane.py":
+            readers.add(path.relative_to(REPO).as_posix())
+    assert readers == allowed, readers
+    tree = ast.parse((REPO / "server.py").read_text(encoding="utf-8"))
+    admitters = {
+        function.name for function in ast.walk(tree)
+        if isinstance(function, ast.FunctionDef)
+        and any(
+            isinstance(node, ast.Attribute) and node.attr == "admit"
+            and isinstance(node.value, ast.Name) and node.value.id == "_restricted_tool_lane"
+            for node in ast.walk(function)
+        )
+    }
+    assert admitters == {"_agent_turn"}
+
+
+# Every in-process caller of the two entry points, by enclosing function, and
+# why each is safe.  A new caller runs ``agent`` or ``workbench_agent`` on
+# behalf of some lane: decide whether it may open a restricted lane (wrap it in
+# ``restricted_tool_lane.suppressed()`` if not), then add it here.
+ENTRY_CALLERS = {
+    # /work without a tier: "auto", the escalating path, which is suppressed.
+    ("server.py", "control_command", "workbench_agent"),
+    # The REPL's /work with the operator's own explicit tier: the
+    # workbench_agent lane, only when the profile lists it.
+    ("server.py", "_run_managed_repl_work", "workbench_agent"),
+    # A model-planned loop action: suppressed.
+    ("server.py", "_loop_dispatch", "workbench_agent"),
+    # Escalation rungs: inside the suppressed _workbench_agent_escalating.
+    ("server.py", "_workbench_agent_escalating_owned", "workbench_agent"),
+    # The explicit-tier branch enters the workbench_agent lane.
+    ("server.py", "workbench_agent", "agent"),
+    # Chat file routing with a pinned model: suppressed.
+    ("sonder_runtime/adapters/chat_file_routing.py", "route_file_request", "workbench_agent"),
+    # A prepared plan from another surface: suppressed.
+    ("sonder_runtime/bootstrap/prepared_workbench.py", "execute_prepared_workbench", "agent"),
+    # HTTP /work: tier "auto", the suppressed escalating path.
+    ("sonder_runtime/interfaces/http/serve.py", "_handle_slash", "workbench_agent"),
+}
+
+
+def _entry_calls(path):
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    found = set()
+
+    def visit(node, scope):
+        for child in ast.iter_child_nodes(node):
+            inner = child.name if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) else scope
+            if isinstance(child, ast.Call):
+                func = child.func
+                if isinstance(func, ast.Name):
+                    name = func.id
+                elif isinstance(func, ast.Attribute) and not (
+                    isinstance(func.value, ast.Name) and func.value.id == "self"
+                ):
+                    name = func.attr  # host.agent, server.workbench_agent, self.runtime.agent
+                else:
+                    name = ""
+                if name in ("agent", "workbench_agent"):
+                    found.add((path.relative_to(REPO).as_posix(), scope, name))
+            visit(child, inner)
+
+    visit(tree, "<module>")
+    return found
+
+
+def test_every_caller_of_an_entry_point_is_reviewed():
+    calls = set()
+    for path in [*REPO.glob("*.py"), *REPO.glob("sonder_runtime/**/*.py")]:
+        calls |= _entry_calls(path)
+    assert calls == ENTRY_CALLERS, sorted(calls ^ ENTRY_CALLERS)
+
+
+def test_the_auto_tier_path_is_suppressed(catalog, overlay, project, monkeypatch):
+    """/work's "auto" path escalates over tiers; its rungs never open a restricted lane."""
+    overlay()
+    seen = []
+    monkeypatch.setattr(server, "agent", lambda **kwargs: seen.append(lane.entry("agent", kwargs.get("project"))) or "ok")
+    monkeypatch.setattr(server, "_local_tier_rung", lambda tier: None)
+    server._workbench_agent_escalating(
+        "inspect", "general", max_steps=2, allow_web=False, project=str(project), allow_location=False,
+    )
+    assert seen == [None]

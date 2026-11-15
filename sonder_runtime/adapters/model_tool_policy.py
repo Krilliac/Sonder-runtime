@@ -7,16 +7,26 @@ Two JSON files describe which models may drive tool-using lanes:
 * an optional operator overlay, ``<state home>/model_tool_policy.json``
   (``SONDER_MODEL_TOOL_POLICY`` names another path).  It is a different file
   from ``runtime_policy.json`` so that ``runtime_policy_update`` can never
-  touch it.  This module only reads it: nothing here writes or rewrites
-  either file, so a bad overlay is left exactly as the operator wrote it.
+  touch it.  This module only reads it; the one writer is the console
+  editor (``adapters.model_tool_policy_editor``, operator-attended only), and
+  nothing rewrites a bad overlay: it is left exactly as the operator wrote it.
 
 Merge rules.  A shipped profile marked ``"floor": true`` can neither be
 removed nor narrowed: its names and prefixes are always in force, whatever
 the overlay says.  The overlay may add names and prefixes (to a new profile or
-to a floor profile) and may add served-model ids that name no model; it may
-not set ``floor`` and may not give a floor profile tools.  In phase 1a a
-profile's ``tools`` are validated but not yet enforced: every model the merged
-profiles match stays chat-by-name only, which is the safe reading.
+to a floor profile), may add ``tools`` and ``lanes`` to any profile (a floor
+included; an overlay profile whose ``id`` names a shipped profile extends it
+and may leave ``match`` empty), may add secret path globs and may add
+served-model ids that name no model.  It may not set ``floor`` and may not set
+``restricted_tool_ceiling`` (only the shipped file does).  Merging only ever
+adds: an overlay cannot remove a shipped entry of any kind.
+
+Every model a profile matches stays on the tool-lane deny list.  A profile's
+``tools`` are a grant only in the lanes it lists, and only for tools that are
+in the shipped ceiling and pass the safety predicate; that filtering and the
+grant itself are ``adapters.model_tool_grants`` and
+``domain.model_tool_grants``.  This module records where every entry came from
+(:class:`Entry`) so the status can show it.
 
 Failure rules (fail closed).  A shipped file that is missing, unreadable or
 invalid yields an unavailable floor (``ToolLaneFloor.available`` False): every
@@ -50,16 +60,24 @@ SHIPPED_PATH = Path(__file__).resolve().parent / "data" / "model_tool_policy.jso
 # A policy file is a short list of names; anything larger is not one.
 MAX_FILE_BYTES = 1024 * 1024
 
-_DOCUMENT_KEYS = frozenset({"version", "model_profiles", "undetermined_served_models"})
+CEILING_KEY = "restricted_tool_ceiling"
+SECRET_GLOBS_KEY = "restricted_secret_path_globs"
+_DOCUMENT_KEYS = frozenset({
+    "version", "model_profiles", "undetermined_served_models", CEILING_KEY, SECRET_GLOBS_KEY,
+})
 _PROFILE_KEYS = frozenset({"id", "floor", "match", "tools", "lanes"})
 _MATCH_KEYS = frozenset({"names", "prefixes"})
 _PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+# A secret path glob: a short relative pattern, no drive, no parent step.
+_GLOB_RE = re.compile(r"^[A-Za-z0-9._*?/\[\]!-]{1,128}$")
 
 
 class ConfigSource(str, Enum):
     SHIPPED = "shipped"
     OVERLAY = "overlay"
+    # The deprecated ``tool_lane_denied_models`` section of runtime_policy.json.
+    LEGACY = "legacy"
 
 
 @dataclass(frozen=True)
@@ -87,6 +105,32 @@ class Profile:
 
 
 @dataclass(frozen=True)
+class Entry:
+    """One merged value and the file it came from."""
+
+    value: str
+    source: ConfigSource
+
+
+@dataclass(frozen=True)
+class MergedProfile:
+    """One profile after the merge: shipped entries first, overlay additions after."""
+
+    id: str
+    floor: bool
+    names: tuple[Entry, ...]
+    prefixes: tuple[Entry, ...]
+    tools: tuple[Entry, ...]
+    lanes: tuple[Entry, ...]
+
+    def values(self, field: str) -> tuple[str, ...]:
+        return tuple(entry.value for entry in getattr(self, field))
+
+    def source_of(self, field: str, value: str) -> ConfigSource | None:
+        return next((entry.source for entry in getattr(self, field) if entry.value == value), None)
+
+
+@dataclass(frozen=True)
 class ModelToolConfig:
     """The merged result of the shipped file and the overlay."""
 
@@ -99,6 +143,16 @@ class ModelToolConfig:
     shipped_path: str
     overlay_path: str
     issues: tuple[ConfigIssue, ...] = ()
+    profiles: tuple[MergedProfile, ...] = ()
+    tool_ceiling: tuple[str, ...] = ()
+    secret_path_globs: tuple[Entry, ...] = ()
+
+    def profile(self, profile_id: str) -> MergedProfile | None:
+        return next((item for item in self.profiles if item.id == profile_id), None)
+
+    @property
+    def secret_globs(self) -> tuple[str, ...]:
+        return tuple(entry.value for entry in self.secret_path_globs)
 
     @property
     def errors(self) -> tuple[str, ...]:
@@ -128,7 +182,9 @@ def _entries(value: Any, where: str, *, pattern: re.Pattern[str] | None, problem
     return result
 
 
-def _parse_profile(raw: Any, index: int, problems: list[str]) -> Profile | None:
+def _parse_profile(
+    raw: Any, index: int, problems: list[str], extends: frozenset[str] = frozenset(),
+) -> Profile | None:
     where = "model_profiles[%d]" % index
     if not isinstance(raw, dict):
         problems.append("%s must be an object" % where)
@@ -156,7 +212,7 @@ def _parse_profile(raw: Any, index: int, problems: list[str]) -> Profile | None:
     prefixes = _entries(match.get("prefixes"), where + ".match.prefixes", pattern=_MODEL_RE, problems=problems)
     tools = _entries(raw.get("tools"), where + ".tools", pattern=_TOKEN_RE, problems=problems)
     lanes = _entries(raw.get("lanes"), where + ".lanes", pattern=_TOKEN_RE, problems=problems)
-    if not names and not prefixes:
+    if not names and not prefixes and profile_id not in extends:
         problems.append("%s matches no model" % where)
     return Profile(
         id=profile_id,
@@ -168,11 +224,21 @@ def _parse_profile(raw: Any, index: int, problems: list[str]) -> Profile | None:
     )
 
 
-def _parse_document(raw: Any) -> tuple[list[Profile], frozenset[str], list[str]]:
-    """``(profiles, undetermined served ids, problems)`` of one decoded document."""
+@dataclass(frozen=True)
+class _Document:
+    profiles: tuple[Profile, ...]
+    undetermined: frozenset[str]
+    ceiling: tuple[str, ...]
+    ceiling_present: bool
+    globs: tuple[str, ...]
+    problems: tuple[str, ...]
+
+
+def _parse_document(raw: Any, *, extends: frozenset[str] = frozenset()) -> _Document:
+    """One decoded document, validated; ``extends`` are ids whose profile may leave ``match`` empty."""
     problems: list[str] = []
     if not isinstance(raw, dict):
-        return [], frozenset(), ["the file must hold one JSON object"]
+        return _Document((), frozenset(), (), False, (), ("the file must hold one JSON object",))
     unknown = set(raw) - _DOCUMENT_KEYS
     if unknown:
         problems.append("unknown key(s): %s" % ", ".join(sorted(map(str, unknown))))
@@ -185,7 +251,7 @@ def _parse_document(raw: Any) -> tuple[list[Profile], frozenset[str], list[str]]
         problems.append("model_profiles must be a list")
         raw_profiles = []
     for index, entry in enumerate(raw_profiles):
-        profile = _parse_profile(entry, index, problems)
+        profile = _parse_profile(entry, index, problems, extends)
         if profile is None:
             continue
         if any(existing.id == profile.id for existing in profiles):
@@ -198,7 +264,16 @@ def _parse_document(raw: Any) -> tuple[list[Profile], frozenset[str], list[str]]
         problems.append("undetermined_served_models must be a list of strings")
     else:
         undetermined = {normalize_name(item) for item in served}
-    return profiles, frozenset(undetermined), problems
+    ceiling = _entries(raw.get(CEILING_KEY), CEILING_KEY, pattern=_TOKEN_RE, problems=problems)
+    globs = _entries(raw.get(SECRET_GLOBS_KEY), SECRET_GLOBS_KEY, pattern=_GLOB_RE, problems=problems)
+    for glob in globs:
+        if glob.startswith("/") or ".." in glob.split("/"):
+            problems.append("invalid entry %r in %s: must be relative, without '..'" % (glob, SECRET_GLOBS_KEY))
+    return _Document(
+        profiles=tuple(profiles), undetermined=frozenset(undetermined),
+        ceiling=tuple(dict.fromkeys(ceiling)), ceiling_present=CEILING_KEY in raw,
+        globs=tuple(dict.fromkeys(globs)), problems=tuple(problems),
+    )
 
 
 # ---- file access -------------------------------------------------------------
@@ -226,6 +301,11 @@ def _read_json(path: Path) -> tuple[Any, str]:
         return None, "%s: %s" % (type(exc).__name__, exc)
 
 
+def read_document(path: Path) -> tuple[Any, str]:
+    """``(decoded document, "")`` or ``(None, reason)`` for one policy file; never raises."""
+    return _read_json(Path(path))
+
+
 def overlay_path() -> Path:
     """The operator overlay's location (``SONDER_MODEL_TOOL_POLICY`` wins over the state home)."""
     override = os.environ.get(OVERLAY_ENV, "").strip()
@@ -241,55 +321,101 @@ def _safe_overlay_path() -> tuple[Path | None, str]:
         return None, "%s: %s" % (type(exc).__name__, exc)
 
 
-def _load_shipped(path: Path) -> tuple[ToolLaneFloor, list[Profile], list[ConfigIssue]]:
+def _load_shipped(path: Path) -> tuple[ToolLaneFloor, _Document | None, list[ConfigIssue]]:
     raw, reason = _read_json(path)
     problems: list[str] = [reason] if reason else []
-    profiles: list[Profile] = []
-    undetermined: frozenset[str] = frozenset()
+    document: _Document | None = None
     if not reason:
-        profiles, undetermined, problems = _parse_document(raw)
-        if not any(profile.floor for profile in profiles):
+        document = _parse_document(raw)
+        problems = list(document.problems)
+        if not any(profile.floor for profile in document.profiles):
             problems.append("no profile is marked \"floor\": true")
-    if problems:
+    if problems or document is None:
         issues = [ConfigIssue(ConfigSource.SHIPPED, str(path), problem) for problem in problems]
-        return ToolLaneFloor.unavailable("%s: %s" % (path, "; ".join(problems))), [], issues
-    names = frozenset(name for profile in profiles for name in profile.names)
-    prefixes = tuple(dict.fromkeys(item for profile in profiles for item in profile.prefixes))
-    return ToolLaneFloor(names=names, prefixes=prefixes, undetermined_served=undetermined), profiles, []
+        return ToolLaneFloor.unavailable("%s: %s" % (path, "; ".join(problems))), None, issues
+    names = frozenset(name for profile in document.profiles for name in profile.names)
+    prefixes = tuple(dict.fromkeys(item for profile in document.profiles for item in profile.prefixes))
+    floor = ToolLaneFloor(names=names, prefixes=prefixes, undetermined_served=document.undetermined)
+    return floor, document, []
 
 
-def _load_overlay(
-    path: Path | None, reason: str, shipped: list[Profile],
-) -> tuple[tuple[str, ...], tuple[str, ...], frozenset[str], bool, bool, list[ConfigIssue]]:
-    """``(names, prefixes, extra undetermined ids, readable, present, issues)`` of the overlay."""
+def overlay_problems(raw: Any, shipped: _Document | None) -> tuple[_Document, list[str]]:
+    """Validate one decoded overlay document against the shipped one.
+
+    Shared by the loader and the console editor, so a document the editor
+    writes is exactly one the loader accepts.
+    """
+    extends = frozenset(profile.id for profile in shipped.profiles) if shipped is not None else frozenset()
+    document = _parse_document(raw, extends=extends)
+    problems = list(document.problems)
+    for profile in document.profiles:
+        if profile.floor:
+            problems.append("profile %r: only the shipped file may mark a profile as a floor" % profile.id)
+    if document.ceiling_present:
+        problems.append("%s: only the shipped file sets the restricted tool ceiling" % CEILING_KEY)
+    return document, problems
+
+
+@dataclass(frozen=True)
+class _Overlay:
+    document: _Document | None
+    readable: bool
+    present: bool
+    issues: tuple[ConfigIssue, ...]
+
+
+def _load_overlay(path: Path | None, reason: str, shipped: _Document | None) -> _Overlay:
     if path is None:
-        return (), (), frozenset(), False, False, [ConfigIssue(ConfigSource.OVERLAY, "(unknown)", reason)]
+        return _Overlay(None, False, False, (ConfigIssue(ConfigSource.OVERLAY, "(unknown)", reason),))
     identity = _identity(path)
     if identity is None:
-        return (), (), frozenset(), False, True, [
+        return _Overlay(None, False, True, (
             ConfigIssue(ConfigSource.OVERLAY, str(path), "the file cannot be inspected"),
-        ]
+        ))
     if identity[1:] == (None,):
-        return (), (), frozenset(), True, False, []
+        return _Overlay(None, True, False, ())
     raw, reason = _read_json(path)
     problems: list[str] = [reason] if reason else []
-    profiles: list[Profile] = []
-    undetermined: frozenset[str] = frozenset()
+    document: _Document | None = None
     if not reason:
-        profiles, undetermined, problems = _parse_document(raw)
-        floors = {profile.id for profile in shipped if profile.floor}
-        for profile in profiles:
-            if profile.floor:
-                problems.append("profile %r: only the shipped file may mark a profile as a floor" % profile.id)
-            if profile.id in floors and profile.tools:
-                problems.append("profile %r: a floor profile cannot be given tools" % profile.id)
+        document, problems = overlay_problems(raw, shipped)
     if problems:
-        return (), (), frozenset(), False, True, [
+        return _Overlay(None, False, True, tuple(
             ConfigIssue(ConfigSource.OVERLAY, str(path), problem) for problem in problems
-        ]
-    names = tuple(dict.fromkeys(name for profile in profiles for name in profile.names))
-    prefixes = tuple(dict.fromkeys(item for profile in profiles for item in profile.prefixes))
-    return names, prefixes, undetermined, True, True, []
+        ))
+    return _Overlay(document, True, True, ())
+
+
+def _sourced(values: tuple[str, ...], source: ConfigSource) -> tuple[Entry, ...]:
+    return tuple(Entry(value, source) for value in values)
+
+
+def _add(existing: tuple[Entry, ...], values: tuple[str, ...], source: ConfigSource) -> tuple[Entry, ...]:
+    seen = {entry.value for entry in existing}
+    return existing + tuple(Entry(value, source) for value in values if value not in seen)
+
+
+def _merge_profiles(shipped: _Document | None, overlay: _Document | None) -> tuple[MergedProfile, ...]:
+    """Shipped profiles first, then the overlay's additions; nothing is ever removed."""
+    merged: dict[str, MergedProfile] = {}
+    for profile in shipped.profiles if shipped is not None else ():
+        merged[profile.id] = MergedProfile(
+            id=profile.id, floor=profile.floor,
+            names=_sourced(profile.names, ConfigSource.SHIPPED),
+            prefixes=_sourced(profile.prefixes, ConfigSource.SHIPPED),
+            tools=_sourced(profile.tools, ConfigSource.SHIPPED),
+            lanes=_sourced(profile.lanes, ConfigSource.SHIPPED),
+        )
+    for profile in overlay.profiles if overlay is not None else ():
+        base = merged.get(profile.id) or MergedProfile(profile.id, False, (), (), (), ())
+        merged[profile.id] = MergedProfile(
+            id=base.id, floor=base.floor,
+            names=_add(base.names, profile.names, ConfigSource.OVERLAY),
+            prefixes=_add(base.prefixes, profile.prefixes, ConfigSource.OVERLAY),
+            tools=_add(base.tools, profile.tools, ConfigSource.OVERLAY),
+            lanes=_add(base.lanes, profile.lanes, ConfigSource.OVERLAY),
+        )
+    return tuple(merged.values())
 
 
 # ---- merge and cache ---------------------------------------------------------
@@ -307,27 +433,45 @@ def identity_key() -> tuple | None:
     return (shipped_id, overlay_id)
 
 
+def load_shipped_document() -> tuple[_Document | None, list[ConfigIssue]]:
+    """The validated shipped document (None when unusable), for the console editor."""
+    _floor, document, issues = _load_shipped(SHIPPED_PATH)
+    return document, issues
+
+
 def _build() -> ModelToolConfig:
-    floor, shipped_profiles, issues = _load_shipped(SHIPPED_PATH)
-    overlay, reason = _safe_overlay_path()
-    names, prefixes, undetermined, readable, present, overlay_issues = _load_overlay(
-        overlay, reason, shipped_profiles,
-    )
-    if undetermined and floor.available:
-        floor = ToolLaneFloor(
-            names=floor.names, prefixes=floor.prefixes,
-            undetermined_served=floor.undetermined_served | undetermined,
-        )
+    floor, shipped, issues = _load_shipped(SHIPPED_PATH)
+    path, reason = _safe_overlay_path()
+    overlay = _load_overlay(path, reason, shipped)
+    document = overlay.document
+    names: tuple[str, ...] = ()
+    prefixes: tuple[str, ...] = ()
+    if document is not None:
+        names = tuple(dict.fromkeys(name for profile in document.profiles for name in profile.names))
+        prefixes = tuple(dict.fromkeys(item for profile in document.profiles for item in profile.prefixes))
+        if document.undetermined and floor.available:
+            floor = ToolLaneFloor(
+                names=floor.names, prefixes=floor.prefixes,
+                undetermined_served=floor.undetermined_served | document.undetermined,
+            )
+    globs: tuple[Entry, ...] = ()
+    if shipped is not None:
+        globs = _sourced(shipped.globs, ConfigSource.SHIPPED)
+        if document is not None:
+            globs = _add(globs, document.globs, ConfigSource.OVERLAY)
     return ModelToolConfig(
         floor=floor,
         overlay_names=names,
         overlay_prefixes=prefixes,
         readable_shipped=floor.available,
-        readable_overlay=readable,
-        overlay_present=present,
+        readable_overlay=overlay.readable,
+        overlay_present=overlay.present,
         shipped_path=str(SHIPPED_PATH),
-        overlay_path=str(overlay) if overlay is not None else "",
-        issues=tuple(issues) + tuple(overlay_issues),
+        overlay_path=str(path) if path is not None else "",
+        issues=tuple(issues) + overlay.issues,
+        profiles=_merge_profiles(shipped, document) if shipped is not None else (),
+        tool_ceiling=shipped.ceiling if shipped is not None else (),
+        secret_path_globs=globs,
     )
 
 

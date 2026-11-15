@@ -246,14 +246,21 @@ def test_overlay_that_empties_everything_leaves_the_floor(overlay_file):
     assert rule.decide_served("default", deny()).status is ModelLaneStatus.SERVED_UNKNOWN
 
 
-def test_overlay_cannot_claim_a_floor_or_give_one_tools(overlay_file):
+def test_overlay_cannot_claim_a_floor_but_may_add_tools_to_one(overlay_file):
     write_overlay(overlay_file, [profile("mine", names=["helper-model"], floor=True)])
     config = mtp.load()
     assert not config.readable_overlay and "only the shipped file" in config.errors[0]
-    write_overlay(overlay_file, [profile("security-advisers", prefixes=["x-"], tools=["text_search"])])
+    # Phase 1b: the overlay may add tools and lanes to a floor profile; the
+    # floor's match is untouched and every model it matches stays on the deny list.
+    write_overlay(overlay_file, [profile("security-advisers", prefixes=["x-"], tools=["text_search"], lanes=["agent"])])
     config = mtp.load()
-    assert not config.readable_overlay and "cannot be given tools" in " ".join(config.errors)
+    assert config.readable_overlay and not config.issues
+    advisers = config.profile("security-advisers")
+    assert advisers.floor and advisers.values("tools") == ("text_search",)
+    assert advisers.values("prefixes")[: len(EXPECTED_FLOOR_PREFIXES)] == tuple(EXPECTED_FLOOR_PREFIXES)
+    assert advisers.source_of("tools", "text_search") is mtp.ConfigSource.OVERLAY
     assert decide(DENIED).status is ModelLaneStatus.DENIED
+    assert decide("x-model").status is ModelLaneStatus.DENIED
 
 
 def test_overlay_adding_a_name_and_a_prefix_denies_them(overlay_file):
