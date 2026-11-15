@@ -25,5 +25,19 @@
       "name": "tool_capability_manifest",
       "why": "Tool schemas and fingerprint. On the served path it is replaced by the role-filtered manifest. Visibility only."
     }
+  ],
+  "untooled_commands": [
+    {
+      "name": "/help",
+      "why": "Static help text. Reads no host file, process, window or secret."
+    },
+    {
+      "name": "/trace",
+      "why": "Toggles the caller's own per-session trace flag. For an account-bound request prompt augmentation is off, so the trace shows only the caller's own prompt."
+    },
+    {
+      "name": "/strict",
+      "why": "Toggles the caller's own per-session strict flag. Acts on nothing outside the session."
+    }
   ]
 }

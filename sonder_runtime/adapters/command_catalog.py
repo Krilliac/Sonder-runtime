@@ -836,7 +836,7 @@ def _wrapper_tools(module: str, name: str, tool_names: frozenset, seen: set) -> 
     return found
 
 
-def _branch_tool_calls(path: str, function: str, tool_names: frozenset) -> dict:
+def _branch_tool_calls(path: str, function: str, tool_names: frozenset, keep_empty: bool = False) -> dict:
     """``{"/write": ("file_write",)}`` for one hand-written dispatch chain.
 
     Read out of the source rather than hand-listed, for the same reason the
@@ -920,7 +920,7 @@ def _branch_tool_calls(path: str, function: str, tool_names: frozenset) -> dict:
             continue
         body = ast.Module(body=node.body, type_ignores=[])
         tools = sorted(_called_tools(body, 0, set()) & tool_names)
-        if not tools:
+        if not tools and not keep_empty:
             continue
         for name in names:
             found[name] = tuple(sorted(set(found.get(name, ())) | set(tools)))
@@ -1394,6 +1394,29 @@ def http_slash_tools() -> dict:
 
 
 @functools.lru_cache(maxsize=1)
+def http_slash_untooled() -> frozenset:
+    """``_handle_slash`` chain commands whose branch resolves to no tool.
+
+    Same AST walk and delegation resolution as ``http_slash_tools`` (which
+    omits them), so the two cannot drift: every literal chain command is in
+    exactly one of the two. The role gate refuses these for a ``user`` unless
+    the shipped untooled allowlist names them.
+    """
+    server = importlib.import_module("server")  # lazy compatibility edge
+    names = _registered_tool_names(server)
+    delegated = _branch_tool_calls("server.py", "control_command", names)
+    own = _branch_tool_calls(
+        "sonder_serve.py", "_handle_slash", names | {_DELEGATION}, keep_empty=True,
+    )
+    mapped = http_slash_tools()
+    return frozenset(
+        slash for slash, tools in own.items()
+        if slash not in mapped
+        and not (set(tools) - {_DELEGATION}) | set(delegated.get(slash, ()))
+    )
+
+
+@functools.lru_cache(maxsize=1)
 def _help_summaries() -> dict:
     """One-liners harvested from the REPL's hand-written ``HELP`` block.
 
@@ -1834,6 +1857,7 @@ def reset_cache() -> None:
     console_tools.cache_clear()
     console_disarmed_tools.cache_clear()
     http_slash_tools.cache_clear()
+    http_slash_untooled.cache_clear()
     _module_level_functions.cache_clear()
     # Was cleared by nothing anywhere. `_help_summaries` parses the HELP block
     # out of `sonder_repl.py`, so a live reload that edited a one-liner kept
