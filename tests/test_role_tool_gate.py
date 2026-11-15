@@ -434,3 +434,15 @@ def test_computer_use_chat_route_itself_is_unchanged_for_the_operator(monkeypatc
     result = computer_use_chat.route("stop controlling", object())
     assert dispatched == ["computer_use_stop"]
     assert result == "{}"
+
+
+def test_every_dispatch_chain_is_enumerable_by_the_catalog():
+    """A non-literal ``cmd`` comparison in any chain makes the catalog unavailable.
+
+    The catalog then refuses every slash command (fail closed), so catch it here
+    instead of at runtime: the console chain, control_command and _handle_slash.
+    """
+    command_catalog.reset_cache()
+    assert command_catalog.console_tools()
+    assert command_catalog.http_slash_tools()
+    assert command_catalog.http_slash_untooled()
