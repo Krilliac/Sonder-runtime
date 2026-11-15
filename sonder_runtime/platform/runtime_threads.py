@@ -132,7 +132,7 @@ class _ManagedPool(_NativePool):
                         raise ThreadOwnershipRefused("worker initialization cleanup unresolved")
         options.arguments["initializer"] = initialize
         options.arguments["initargs"] = ()
-        super().__init__(**options.arguments)
+        super().__init__(*options.args, **options.kwargs)
 
     def submit(self, fn, /, *args, **kwargs):
         owner = self._owner
@@ -265,7 +265,7 @@ class OwnedRuntimeThreads:
             if len(self._pools) >= self._max_pools or len(self._threads) + self._reserved_workers + reserve > self._max_threads:
                 raise ThreadOwnershipRefused("runtime pool capacity exhausted")
             options.arguments["max_workers"] = reserve
-            pool = _ManagedPool(self, **options.arguments)
+            pool = _ManagedPool(self, *options.args, **options.kwargs)
             pool._reserved_count = reserve
             self._pools.append(pool)
             self._reserved_workers += reserve
