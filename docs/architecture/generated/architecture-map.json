@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 439,
+      "file_count": 444,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -435,6 +435,11 @@
         "sonder_runtime/adapters/security/powershell_gate.py",
         "sonder_runtime/adapters/security/recovery_evidence.py",
         "sonder_runtime/adapters/security/unsafe_lab.py",
+        "sonder_runtime/adapters/security_eval/__init__.py",
+        "sonder_runtime/adapters/security_eval/dataset.py",
+        "sonder_runtime/adapters/security_eval/model_client.py",
+        "sonder_runtime/adapters/security_eval/output_store.py",
+        "sonder_runtime/adapters/security_eval/repo_reader.py",
         "sonder_runtime/adapters/semantic_tier.py",
         "sonder_runtime/adapters/session_atif_export.py",
         "sonder_runtime/adapters/session_turn_claims.py",
@@ -483,7 +488,7 @@
       ]
     },
     {
-      "file_count": 417,
+      "file_count": 420,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -812,6 +817,9 @@
         "sonder_runtime/application/security/recovery_boundary.py",
         "sonder_runtime/application/security/recovery_evidence.py",
         "sonder_runtime/application/security/secrets_and_fuzz.py",
+        "sonder_runtime/application/security_eval/__init__.py",
+        "sonder_runtime/application/security_eval/ports.py",
+        "sonder_runtime/application/security_eval/runner.py",
         "sonder_runtime/application/selfmod/__init__.py",
         "sonder_runtime/application/selfmod/candidate_isolation.py",
         "sonder_runtime/application/selfmod/governance.py",
@@ -906,7 +914,7 @@
       ]
     },
     {
-      "file_count": 78,
+      "file_count": 79,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -979,6 +987,7 @@
         "sonder_runtime/bootstrap/repl_host_selection.py",
         "sonder_runtime/bootstrap/repl_managed.py",
         "sonder_runtime/bootstrap/runtime_owner.py",
+        "sonder_runtime/bootstrap/security_eval_agent_tools.py",
         "sonder_runtime/bootstrap/standalone_continuation.py",
         "sonder_runtime/bootstrap/strategy.py",
         "sonder_runtime/bootstrap/strategy_observers.py",
@@ -990,7 +999,7 @@
       ]
     },
     {
-      "file_count": 305,
+      "file_count": 313,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1258,6 +1267,14 @@
         "sonder_runtime/domain/security/credential_egress.py",
         "sonder_runtime/domain/security/credential_formats.py",
         "sonder_runtime/domain/security/redaction.py",
+        "sonder_runtime/domain/security_eval/__init__.py",
+        "sonder_runtime/domain/security_eval/context_select.py",
+        "sonder_runtime/domain/security_eval/errors.py",
+        "sonder_runtime/domain/security_eval/prompts.py",
+        "sonder_runtime/domain/security_eval/records.py",
+        "sonder_runtime/domain/security_eval/scoring.py",
+        "sonder_runtime/domain/security_eval/summary.py",
+        "sonder_runtime/domain/security_eval/verdict.py",
         "sonder_runtime/domain/selfmod/__init__.py",
         "sonder_runtime/domain/selfmod/models.py",
         "sonder_runtime/domain/serve_selection.py",
@@ -1384,7 +1401,7 @@
       ]
     },
     {
-      "file_count": 53,
+      "file_count": 54,
       "name": "platform",
       "python_files": [
         "sonder_runtime/platform/__init__.py",
@@ -1429,6 +1446,7 @@
         "sonder_runtime/platform/runtime_summary.py",
         "sonder_runtime/platform/runtime_threads.py",
         "sonder_runtime/platform/secret_presence.py",
+        "sonder_runtime/platform/security_eval_config.py",
         "sonder_runtime/platform/service_state.py",
         "sonder_runtime/platform/shutdown.py",
         "sonder_runtime/platform/spanda_config.py",
