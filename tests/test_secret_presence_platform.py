@@ -29,6 +29,7 @@ def test_config_secret_redaction_uses_platform_policy():
         "membership_client_cert_file": "[unset]",
         "membership_client_key_file": "[unset]",
         "control_state_rehearsal_key": "[unset]",
+        "health_alert_ntfy_url": "[unset]",
     }
 
 
