@@ -142,7 +142,8 @@ def with_siblings(
     this puts the page it names next to it.  Each identifier is handled once.
 
     ``fetch_title_rows(ident)`` is a title query: the best row of each source
-    whose title holds ident, best first.  The result is the new order followed
+    whose title opens with exactly ident (a sub-technique such as "T1003.001"
+    does not count for "T1003"), best first.  The result is the new order followed
     by all of ``rows``; pass it to ``select_passages``, whose caps apply as
     before (a moved row is not kept twice: its body is already seen).
     """
