@@ -447,4 +447,44 @@ def served_model_counts(states: Iterable[StepState]) -> dict[str, int]:
 
 
 def breaker_trips(consecutive: int, limit: int) -> bool:
+    """Whether ``consecutive`` backend failures in a row reach the pause threshold."""
     return consecutive >= limit
+
+
+def spec_to_dict(spec: JobSpec) -> dict:
+    """Persistable form of an already validated spec."""
+    return {
+        "name": spec.name, "fields": list(spec.fields),
+        "stages": [
+            {
+                "name": stage.name, "model": stage.model, "prompt": stage.prompt_template,
+                "system": stage.system, "num_predict": stage.num_predict, "num_ctx": stage.num_ctx,
+                "think": stage.think, "temperature": stage.temperature, "timeout_s": stage.timeout_s,
+                "depends_on": list(stage.depends_on),
+            }
+            for stage in spec.stages
+        ],
+    }
+
+
+def spec_from_dict(raw: Mapping) -> JobSpec:
+    """Rebuild a spec this module persisted; the data is trusted, not re-validated."""
+    return JobSpec(
+        name=str(raw.get("name", "")),
+        fields=tuple(raw.get("fields", ())),
+        stages=tuple(
+            StageSpec(
+                name=stage["name"], model=stage["model"], prompt_template=stage["prompt"],
+                system=stage.get("system", ""), num_predict=stage["num_predict"],
+                num_ctx=stage["num_ctx"], think=stage.get("think"),
+                temperature=stage["temperature"], timeout_s=stage["timeout_s"],
+                depends_on=tuple(stage.get("depends_on", ())),
+            )
+            for stage in raw["stages"]
+        ),
+    )
+
+
+def referenced_stages(stage: StageSpec) -> tuple[str, ...]:
+    """Upstream stages whose answers the stage's templates read."""
+    return template_references(stage.prompt_template + "\n" + stage.system)[1]
