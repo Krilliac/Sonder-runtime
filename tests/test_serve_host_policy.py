@@ -287,6 +287,17 @@ def test_allowed_hosts_config_is_validated():
     assert "allowed_hosts" in str(refused.value)
 
 
+def test_web_app_config_keys_and_validation(tmp_path):
+    default = load_config(None, env={})
+    assert default.server.web_app_enabled is False and default.server.web_app_dir == ""
+    config = load_config(None, env={"SONDER_WEB_APP": "1", "SONDER_WEB_APP_DIR": str(tmp_path)})
+    assert config.server.web_app_enabled is True
+    assert config.server.web_app_dir == str(tmp_path)
+    with pytest.raises(ConfigError) as refused:
+        load_config(None, env={"SONDER_WEB_APP_DIR": "relative/dir"})
+    assert "web_app_dir" in str(refused.value)
+
+
 # -- X-Forwarded-For --------------------------------------------------------
 
 def test_forwarded_for_ignored_without_declared_proxy():

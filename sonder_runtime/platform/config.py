@@ -161,6 +161,11 @@ class ServerConfig:
     # the Host header besides loopback names.  Everything else is refused
     # with 421 before routing (DNS-rebinding defence).
     allowed_hosts: tuple[str, ...] = ()
+    # Serve the Flutter web build at /app/ from the HTTP server.  Off by
+    # default; ``web_app_dir`` must be absolute and empty selects
+    # <state home>/web_app (written by scripts/build_web_app.py).
+    web_app_enabled: bool = False
+    web_app_dir: str = ""
     # Routed HTTP work (workbench/fleet/autopilot chat turns): how long the
     # request waits before answering with a work-run id, the wall-clock budget
     # after which the run may no longer change anything, and how many such
@@ -1499,6 +1504,10 @@ def _apply_environment(
                 if part.strip()
             ),
         )
+    if "SONDER_WEB_APP" in env:
+        server = replace(server, web_app_enabled=_env_bool(env["SONDER_WEB_APP"]))
+    if "SONDER_WEB_APP_DIR" in env:
+        server = replace(server, web_app_dir=env["SONDER_WEB_APP_DIR"].strip())
     if "SONDER_REQUIRE_ACCOUNT" in env:
         server = replace(server, require_account=_env_bool(env["SONDER_REQUIRE_ACCOUNT"]))
     if "SONDER_ALLOW_REGISTRATION" in env:
@@ -1872,6 +1881,11 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
     for entry in server.allowed_hosts:
         if not _valid_allowed_host(entry):
             errors.append(f"[server].allowed_hosts entry invalid: {entry!r}")
+    if type(server.web_app_enabled) is not bool:
+        errors.append("[server].web_app_enabled must be a boolean")
+    if type(server.web_app_dir) is not str or (
+            server.web_app_dir and not Path(server.web_app_dir).is_absolute()):
+        errors.append("[server].web_app_dir must be an absolute path")
 
     api_key = getattr(config.secrets, "api_key", None)
     loopback = _is_loopback_host(server_host) if host_is_exact_string else False
