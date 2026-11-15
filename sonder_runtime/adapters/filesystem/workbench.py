@@ -17,6 +17,7 @@ import os
 import re
 import signal
 import shutil
+import stat
 import struct
 import subprocess
 import sys
@@ -124,17 +125,24 @@ def _note_skip(state, path, reason, *, expose_path=True):
 
 
 def _is_link(entry: os.DirEntry) -> bool:
-    """A symlink or an NTFS junction: neither is followed by a tree walk.
+    """A symlink, an NTFS junction or any other reparse point: none is followed by a tree walk.
 
     ``DirEntry.is_symlink()`` is False for a junction, so a walk that checked
     only that descended through a project junction into a folder outside it.
-    ``DirEntry.is_junction`` exists from Python 3.12; on an older interpreter
-    only the symlink check applies.
+    ``DirEntry.is_junction`` exists only from Python 3.12, so the reparse
+    attribute is read instead (``file_ops._is_reparse_point`` does the same):
+    on Windows ``DirEntry.stat(follow_symlinks=False)`` carries
+    ``st_file_attributes`` from the directory listing, with no extra system
+    call.  Elsewhere the attribute is absent and only the symlink check
+    applies.  An entry whose metadata cannot be read counts as a link.
     """
     if entry.is_symlink():
         return True
-    is_junction = getattr(entry, "is_junction", None)
-    return bool(is_junction is not None and is_junction())
+    try:
+        attributes = getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0)
+    except OSError:
+        return True
+    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
 
 
 def _bounded_walk(

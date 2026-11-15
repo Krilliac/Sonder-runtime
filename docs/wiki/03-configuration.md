@@ -469,7 +469,8 @@ The model lists live in two JSON files, not in Python:
   `SONDER_MODEL_TOOL_POLICY` instead, when set), same schema, optional. It is a
   separate file from `runtime_policy.json` so that `runtime_policy_update` can
   never reach it. Edit it by hand, or at the console with `/runtime tools`
-  (below); nothing else in Sonder writes it. It can add names and prefixes (in
+  (below); that editor is its only writer in Sonder (see "Protected from the
+  file tools" below). It can add names and prefixes (in
   a new profile, or in a floor profile's `match`), add `tools` and `lanes` to
   any profile (a floor included), add served-model ids that name no model and
   add `restricted_secret_path_globs`. It cannot set `"floor"`, cannot set
@@ -478,6 +479,24 @@ The model lists live in two JSON files, not in Python:
   force whatever the overlay says (the overlay's entries are unioned in). A
   profile that matches no model, an unknown key, a duplicate `id`, a bad name
   or glob or a file over 1 MiB makes the overlay invalid.
+
+Protected from the file tools. Both files are control-plane state for every
+tool that changes files, from an agent turn or MCP, without a developer token:
+`file_write`, `file_edit`, `file_copy`/`file_move`, `file_delete`, batch writes
+and the patch tools refuse them (the overlay with its `.lock` and `.tmp-`
+siblings, and the whole package data directory holding the shipped file);
+`fetch_artifact` refuses a destination, staging file or provenance sidecar
+there; `apply_patch` lists every path a patch would write (`git apply
+--numstat`, both names of a rename) and refuses the patch when any is
+protected; and in the live runtime checkout (a repository holding the
+workspace root, the package data directory, the overlay or the Sonder home)
+`git_checkout`, `git_branch` with a base, `git_stash` push/pop, `git_merge` and
+`git_cherry_pick` refuse when the paths they would change include a protected
+one (a list git cannot produce refuses too). Other names for the same file
+count: a Windows `\\?\` spelling is compared in its ordinary form (a namespace
+with no ordinary form, such as `\\.\` or `GLOBALROOT`, counts as protected), a
+UNC spelling of a local folder and a hard link are compared by file identity,
+and no file tool writes in place to a file that has more than one hard link.
 
 The shipped file also holds `restricted_tool_ceiling` (the only tools any
 profile may ever grant: `text_search`, `repository_symbol_index`,
@@ -528,10 +547,17 @@ label is refused: "a restricted model needs a project root"). Every path
 argument is resolved against that root and refused when it leaves it or
 matches a secret glob (case-insensitive; a glob without `/` matches any path
 component, one with `/` any tail of the path); so is a search `glob` that
-selects secret files and `include_hidden` / `include_ignored`. `text_search`
-and `repository_symbol_index` results are filtered before the model, the
-activity record or the caller sees them: a row naming a secret path, or one
-that does not parse, is withheld and counted.
+selects secret files and `include_hidden` / `include_ignored`. `text_search`,
+`repository_symbol_index` and `directory_tree` results are filtered before the
+model, the activity record or the caller sees them: a row or tree entry naming
+a secret path (as spelled or after following links), an entry inside a
+directory that matches a glob, or a line that does not parse, is withheld and
+counted. Tree walks never follow a symlink, junction or other reparse point.
+
+The grant is decided again during the turn: at every model call the files must
+still grant every tool the turn was opened with (revoking any one stops the
+next call), and at every dispatch the tool must still be granted. A tool
+granted after the turn opened does not join it.
 
 At the console:
 
@@ -650,18 +676,22 @@ applies the same served-model rule to every non-Ollama request it dispatches.
 Ordinary models are judged against a deny list cached per version of the
 policy file, so they pay no extra disk read per call.
 
-Five configurations fail closed:
+Six configurations fail closed:
 
 - With the shipped `model_tool_policy.json` missing, unreadable or invalid (no
   floor profile counts as invalid), every tool-using lane refuses every model,
   tier-bound ones and the default route included, and the refusal and
   `/runtime status` name the file. Text-only chat is unaffected, and tier
   bindings are not rewritten. Fix: restore the file from the install.
-- With the overlay unreadable or invalid, it is ignored as a whole: the floor
-  still applies, a model named by the caller (not one a tier is bound to) is
-  refused in tool lanes exactly as for an unreadable policy file, and
-  `/runtime status` shows the error. The file is never rewritten; fix it by
-  hand (or delete it). A missing overlay is normal.
+- With the overlay present but unreadable or invalid (or impossible to
+  inspect), every tool-using lane refuses every model, tier-bound ones, the
+  default route and bridged providers included, because the overlay may be
+  what restricted a model and a broken file cannot say which. The refusal and
+  `/runtime status` name the file, text-only chat is unaffected, tier bindings
+  are not rewritten, and a runtime-policy update that binds a tier is refused
+  until it is fixed. A failed read is reused for at most a second and refuses
+  while it is. The file is never rewritten; fix it by hand (or delete it). A
+  missing overlay is normal.
 - With the policy file unreadable, a model named by the caller (not one a tier
   is bound to) is refused in tool lanes, and the chat code gate does not run
   its reply. Fix: repair the file (`/runtime status` shows the error) or reset

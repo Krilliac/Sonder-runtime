@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 437,
+      "file_count": 439,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -170,6 +170,7 @@
         "sonder_runtime/adapters/filesystem/file_ops.py",
         "sonder_runtime/adapters/filesystem/intent_executor.py",
         "sonder_runtime/adapters/filesystem/json_patch.py",
+        "sonder_runtime/adapters/filesystem/path_aliases.py",
         "sonder_runtime/adapters/filesystem/sealed_python_main.py",
         "sonder_runtime/adapters/filesystem/text_patch.py",
         "sonder_runtime/adapters/filesystem/typed.py",
@@ -183,6 +184,7 @@
         "sonder_runtime/adapters/gateway_generation.py",
         "sonder_runtime/adapters/generation_permit.py",
         "sonder_runtime/adapters/git/__init__.py",
+        "sonder_runtime/adapters/git_change_targets.py",
         "sonder_runtime/adapters/git_discovery.py",
         "sonder_runtime/adapters/git_mutation_guard.py",
         "sonder_runtime/adapters/git_program_guard.py",

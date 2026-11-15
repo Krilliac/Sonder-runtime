@@ -19,7 +19,8 @@ Three rules live here, as code rather than lists:
 * :func:`decide_tools` - which status a model has: ``ALLOWED`` (not listed),
   ``RESTRICTED`` (listed only by restricted profiles; the granted tools and
   lanes are the intersection over every matching profile), ``DENIED``,
-  ``POLICY_UNREADABLE``, ``SERVED_UNKNOWN`` or ``CONFIG_UNAVAILABLE``.  A
+  ``POLICY_UNREADABLE``, ``SERVED_UNKNOWN``, ``CONFIG_UNAVAILABLE`` or
+  ``OVERLAY_UNUSABLE``.  A
   profile with no tools left after the predicate is a plain deny entry, so a
   model whose profiles grant nothing is ``DENIED`` exactly as before.
 * :func:`secret_glob_match` - whether a path (relative to the project root)
@@ -67,6 +68,7 @@ class ModelToolStatus(str, Enum):
     POLICY_UNREADABLE = "policy_unreadable"
     SERVED_UNKNOWN = "served_unknown"
     CONFIG_UNAVAILABLE = "config_unavailable"
+    OVERLAY_UNUSABLE = "overlay_unusable"
 
 
 @dataclass(frozen=True)
@@ -188,7 +190,8 @@ def decide_tools(
     tools is not empty; it is ``DENIED`` otherwise.  An unreadable policy file
     turns what would be ``RESTRICTED`` into ``POLICY_UNREADABLE`` (the legacy
     section cannot be checked).  The statuses the deny list itself returns
-    (``CONFIG_UNAVAILABLE``, ``POLICY_UNREADABLE``) pass through unchanged.
+    (``CONFIG_UNAVAILABLE``, ``OVERLAY_UNUSABLE``, ``POLICY_UNREADABLE``) pass
+    through unchanged.
     """
     verdict = decide(model, deny, free_form=free_form)
     if verdict.status is ModelLaneStatus.ALLOWED:

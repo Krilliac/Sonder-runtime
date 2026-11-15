@@ -51,12 +51,13 @@ def tool_lane_deny_list(policy):
 
     The ``tool_lane_denied_models`` section of ``runtime_policy.json`` is
     deprecated in favour of the operator overlay (``model_tool_policy.json``)
-    but still read and unioned (add-only).
+    but still read and unioned (add-only).  An overlay that exists but cannot
+    be used refuses every model in tool lanes (``overlay_problem``).
     """
     config = _model_tool_policy.load()
     return _rules.tool_lane_deny_list(
         policy, floor=config.floor, extra=config.overlay_section(),
-        extra_readable=config.readable_overlay,
+        extra_readable=config.readable_overlay, overlay_problem=config.overlay_problem,
     )
 
 
@@ -357,6 +358,12 @@ def update(
                     "runtime policy local_models cannot be changed while the shipped "
                     "model tool policy is unavailable: %s" % deny.floor.detail
                 )
+            if deny.overlay_problem:
+                # Nor without a usable overlay: it may restrict the model asked for.
+                raise ValueError(
+                    "runtime policy local_models cannot be changed while the operator "
+                    "model tool policy overlay cannot be used: %s" % deny.overlay_problem
+                )
             blocked = _rules.denied_local_bindings(local_models, deny)
             if blocked:
                 tier, model = blocked[0]
@@ -468,6 +475,8 @@ def format_tool_lane_denied_models(policy=None) -> str:
     )
     if not deny.floor.available:
         line += " [shipped model tool policy unavailable: every tool-using lane refuses every model]"
+    elif deny.overlay_problem:
+        line += " [operator overlay unusable: every tool-using lane refuses every model]"
     elif not deny.readable:
         line += " [policy file unreadable: caller-named models refused in tool lanes]"
     return line

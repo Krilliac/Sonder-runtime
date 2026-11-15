@@ -26,6 +26,7 @@ from bisect import bisect_left
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import sonder_runtime.adapters.git_discovery as git_discovery
+import sonder_runtime.adapters.filesystem.path_aliases as _path_aliases
 from sonder_runtime.platform import paths as runtime_paths
 from sonder_runtime.adapters.security.control_plane_paths import live_control_plane_inventory
 from sonder_runtime.adapters.filesystem.intent_executor import (
@@ -443,8 +444,20 @@ def _is_secret_path(path: Path) -> bool:
     )
 
 
+def _protection_spelling(path: Path) -> Path:
+    """The resolved, ordinary spelling the protection checks compare (``path_aliases.normal_spelling``).
+
+    Raises ``ValueError`` or ``OSError`` for a spelling with no ordinary form;
+    the callers below then treat the path as protected.
+    """
+    return _path_aliases.normal_spelling(_resolve_best_effort(path))
+
+
 def _is_sensitive_control_path(path: Path) -> bool:
-    path = _resolve_best_effort(path)
+    try:
+        path = _protection_spelling(path)
+    except (OSError, ValueError):
+        return True  # a namespace with no ordinary spelling cannot be judged by name
     name = path.name.lower()
     return (
         path in _control_plane_paths()
@@ -460,8 +473,46 @@ def _is_sensitive_control_path(path: Path) -> bool:
     )
 
 
+def _alias_anchor_directories() -> set[Path]:
+    """Directories an alias is mapped back through (``path_aliases.local_equivalent``)."""
+    anchors = {path.parent for path in _control_plane_paths()}
+    anchors.update({_resolve_best_effort(RUNTIME_PACKAGE_DATA_DIR), _resolve_best_effort(workspace_root())})
+    return anchors
+
+
+def _identity_protected_files() -> set[Path]:
+    """The exact protected files a hard link or a UNC alias is compared with by identity."""
+    files = set(_control_plane_paths())
+    try:
+        files.update(entry for entry in _resolve_best_effort(RUNTIME_PACKAGE_DATA_DIR).iterdir() if entry.is_file())
+    except OSError:
+        pass
+    return files
+
+
 def _is_protected_mutation_path(path: Path) -> bool:
-    path = _resolve_best_effort(path)
+    """Whether ``path`` is protected control-plane state, under any of its names.
+
+    Decided by name first.  A path a name check can miss (a UNC spelling, or a
+    file with several hard links; ``path_aliases.may_alias``) is mapped back
+    to its ordinary name through a known directory and compared by file
+    identity with the exact protected files.
+    """
+    try:
+        path = _protection_spelling(path)
+    except (OSError, ValueError):
+        return True  # a namespace with no ordinary spelling cannot be judged by name
+    if _is_protected_by_name(path):
+        return True
+    if not _path_aliases.may_alias(path):
+        return False
+    local = _path_aliases.local_equivalent(path, _alias_anchor_directories())
+    if local is not None and local != path and _is_protected_by_name(local):
+        return True
+    return _path_aliases.same_file_as_any(path, _identity_protected_files())
+
+
+def _is_protected_by_name(path: Path) -> bool:
     if _is_sensitive_control_path(path):
         return True
     if _is_inside(path, _resolve_best_effort(RUNTIME_PACKAGE_DATA_DIR)):
@@ -513,6 +564,16 @@ def _require_mutation_access(path: Path, developer_authorized: bool) -> None:
         raise PermissionError(
             "refusing to mutate protected Sonder control-plane path %s "
             "without an authenticated developer token" % path
+        )
+    links = _path_aliases.hard_link_count(_resolve_best_effort(path))
+    if links > 1:
+        # An in-place write through one name changes the file under every
+        # name, and the others can be anywhere on the volume (a protected
+        # file included), so a hard-linked target is never written here.
+        raise PermissionError(
+            "refusing to mutate %s: it is a hard link (%d names for one file), so "
+            "the change would reach every other name; remove the extra names or "
+            "use an authenticated developer token" % (path, links)
         )
 
 
@@ -1936,6 +1997,10 @@ def _batch_preflight(
                     raise ValueError("duplicate batch target by file identity")
                 if metadata.st_ino:
                     seen_existing_identities.add(identity)
+                if metadata.st_nlink > 1:
+                    raise PermissionError(
+                        "batch target is a hard link (%d names for one file)" % metadata.st_nlink
+                    )
             if mode == "create" and exists:
                 raise FileExistsError("file exists; use mode=overwrite")
             if mode == "overwrite" and not exists:

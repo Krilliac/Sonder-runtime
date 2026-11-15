@@ -126,6 +126,16 @@ def _normalize_windows_extended_final_path(resolved: Path) -> Path:
     return normal
 
 
+def normalized_final_path(resolved: Path) -> Path:
+    """The ordinary spelling of a Windows ``\\\\?\\`` path, the same way the inventory sees it.
+
+    For callers that compare paths with this inventory by name (the file
+    tools' protected-path checks).  Raises ``ValueError`` for a namespace with
+    no ordinary spelling; off Windows the path is returned unchanged.
+    """
+    return _normalize_windows_extended_final_path(Path(resolved))
+
+
 @dataclass(frozen=True)
 class ControlPlanePaths:
     """Explicit trusted constructor paths; no guessed store defaults."""

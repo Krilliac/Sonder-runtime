@@ -19,6 +19,7 @@ from pathlib import Path
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
 from sonder_runtime.application.testing.legacy_runs import retired_extra_args
+from sonder_runtime.adapters import git_change_targets
 from sonder_runtime.adapters import git_program_guard
 from sonder_runtime.adapters.git_mutation_guard import (
     ConcurrentGitMutation,
@@ -311,6 +312,46 @@ def _git_probe_at(root, relative, arguments, *, timeout, env):
         "stdout": proc.stdout.decode("utf-8", errors="surrogateescape"),
         "stderr": proc.stderr.decode("utf-8", errors="replace"),
     }
+
+
+def _git_change_runner(root, *, timeout, hardened):
+    """A runner for ``git_change_targets``: git in ``root``, output untrimmed.
+
+    ``hardened`` adds the same driver/hook overrides as ``_run_git`` (raising
+    ``ValueError`` when they cannot be read); ``apply_patch`` runs a bare
+    ``git apply`` and lists its paths the same way.
+    """
+    env = _git_env()
+    overrides = _neutralized_git_arguments(root, timeout=timeout, env=env) if hardened else []
+
+    def run(arguments, stdin_bytes=b""):
+        proc = subprocess.run(
+            [_git(), *overrides, *arguments], cwd=str(root), timeout=timeout,
+            capture_output=True, input=stdin_bytes, env=env,
+        )
+        return proc.returncode, proc.stdout
+
+    return run
+
+
+def _protected_change_refusal(operation, root, targets, *, timeout, live_only=True):
+    """``{"ok": False, "error": ...}`` when ``operation`` would change protected control-plane files, else None.
+
+    ``git_change_targets`` lists what the operation writes and applies the
+    file tools' guard to each path (in the live runtime checkout only, unless
+    ``live_only`` is False).
+    """
+    timeout = _bounded_int(timeout, 10, 1, MAX_TIMEOUT)
+    # ``rev-parse --show-toplevel`` runs no hook or driver, so it needs no overrides.
+    top = git_change_targets.toplevel(_git_change_runner(root, timeout=timeout, hardened=False))
+    if live_only and not git_change_targets.is_live_checkout(top):
+        return None
+    try:
+        run = _git_change_runner(root, timeout=timeout, hardened=live_only)
+    except ValueError as exc:
+        return {"ok": False, "error": "refusing %s: %s" % (operation, exc)}
+    reason = git_change_targets.refusal(operation, root, run, targets, top=top)
+    return {"ok": False, "error": reason} if reason else None
 
 
 def _run_git(root, args, *, timeout=10):
@@ -877,6 +918,11 @@ def git_branch(root=".", name="", checkout=True, base="", timeout=10, extra_root
     if checkout:
         cmd = ["checkout", "-b", name]
         if base:
+            refused = _protected_change_refusal(
+                "git_branch", root, lambda run: git_change_targets.checkout_targets(run, base), timeout=timeout,
+            )
+            if refused:
+                return refused
             cmd.append(base)
     else:
         cmd = ["branch", name]
@@ -890,6 +936,11 @@ def git_checkout(root=".", ref="", timeout=10, extra_roots=""):
     root = _resolve_root(root, extra_roots)
     if not ref:
         return {"ok": False, "error": "ref is required (branch name, tag, or commit)"}
+    refused = _protected_change_refusal(
+        "git_checkout", root, lambda run: git_change_targets.checkout_targets(run, ref), timeout=timeout,
+    )
+    if refused:
+        return refused
     return _run_git(root, ["checkout", ref], timeout=timeout)
 
 
@@ -910,6 +961,13 @@ def git_stash(root=".", action="push", message="", include_untracked=True, timeo
         cmd = ["stash", "drop"]
     else:
         return {"ok": False, "error": "unknown stash action: %s (use push/pop/list/drop)" % action}
+    refused = _protected_change_refusal(
+        "git_stash " + action, root,
+        lambda run: git_change_targets.stash_targets(run, action, include_untracked=bool(include_untracked)),
+        timeout=timeout,
+    )
+    if refused:
+        return refused
     return _run_git(root, cmd, timeout=timeout)
 
 
@@ -938,6 +996,11 @@ def git_merge(root=".", branch="", no_ff=True, message="", timeout=30, extra_roo
     if message:
         cmd.extend(["-m", message])
     cmd.append(branch)
+    refused = _protected_change_refusal(
+        "git_merge", root, lambda run: git_change_targets.merge_targets(run, branch), timeout=timeout,
+    )
+    if refused:
+        return refused
     return _run_git(root, cmd, timeout=timeout)
 
 
@@ -950,6 +1013,11 @@ def git_cherry_pick(root=".", commits_json="[]", timeout=30, extra_roots=""):
             return {"ok": False, "error": "commits_json must be a non-empty JSON array of commit SHAs"}
     except json.JSONDecodeError:
         return {"ok": False, "error": "invalid JSON"}
+    refused = _protected_change_refusal(
+        "git_cherry_pick", root, lambda run: git_change_targets.cherry_pick_targets(run, commits), timeout=timeout,
+    )
+    if refused:
+        return refused
     return _run_git(root, ["cherry-pick"] + commits, timeout=timeout)
 
 
@@ -1190,6 +1258,14 @@ def apply_patch(root=".", patch_text="", check_only=False, timeout=10, extra_roo
     root = _resolve_root(root, extra_roots)
     if not patch_text:
         return {"ok": False, "error": "patch_text is required"}
+    if not check_only:
+        # Every path the patch writes, in any repository, gets the file tools' guard.
+        refused = _protected_change_refusal(
+            "apply_patch", root, lambda run: git_change_targets.patch_targets(run, patch_text),
+            timeout=timeout, live_only=False,
+        )
+        if refused:
+            return refused
     cmd = [_git(), "apply"]
     if check_only:
         cmd.append("--check")

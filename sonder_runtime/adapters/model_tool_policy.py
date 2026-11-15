@@ -31,13 +31,17 @@ grant itself are ``adapters.model_tool_grants`` and
 Failure rules (fail closed).  A shipped file that is missing, unreadable or
 invalid yields an unavailable floor (``ToolLaneFloor.available`` False): every
 tool-using lane refuses every model, and the status text names the file.  An
-overlay that is unreadable or invalid is ignored as a whole: the floor still
-applies, caller-named (free-form) models fail closed through the deny list's
-``readable`` flag, and the error is reported.  A missing overlay is normal.
+overlay that exists but is unreadable or invalid (or cannot be inspected, or
+whose location cannot be worked out) refuses every model in every tool-using
+lane the same way (``ModelToolConfig.overlay_problem``): it may be the only
+thing that restricted a model, and an unusable file cannot say which.  The
+error is reported and the file is never rewritten.  A missing overlay is
+normal.
 
 The pure rule is ``sonder_runtime.domain.tool_lane_models``; this module only
 supplies its inputs.  Results are cached against each file's identity (path,
-modification time, size, inode); a failed read is never cached.
+modification time, size, inode); a failed read is reused for the same
+identity for at most ``FAILED_READ_TTL_SECONDS`` and refuses while it is.
 """
 from __future__ import annotations
 
@@ -163,6 +167,20 @@ class ModelToolConfig:
     @property
     def errors(self) -> tuple[str, ...]:
         return tuple(issue.text() for issue in self.issues)
+
+    @property
+    def overlay_problem(self) -> str:
+        """Why the overlay cannot be used, naming it; ``""`` when it is usable or absent.
+
+        Non-empty refuses every model in every tool-using lane
+        (``ToolLaneDenyList.overlay_problem``).
+        """
+        if self.readable_overlay:
+            return ""
+        reasons = [issue.message for issue in self.issues if issue.source is ConfigSource.OVERLAY]
+        return "%s: %s" % (
+            self.overlay_path or "(unknown)", "; ".join(reasons) or "the file cannot be used",
+        )
 
     def overlay_section(self) -> dict[str, list[str]]:
         """The overlay's additions in ``tool_lane_denied_models`` section shape."""
@@ -531,7 +549,7 @@ def describe(config: ModelToolConfig | None = None) -> list[str]:
             ", ".join(config.overlay_names) or "-", ", ".join(config.overlay_prefixes) or "-",
         )
     else:
-        overlay_state = "ERROR: ignored; caller-named models are refused in tool lanes until it is fixed"
+        overlay_state = "ERROR: every tool-using lane refuses every model until it is fixed or removed"
     lines.append("model tool policy (overlay): %s %s" % (config.overlay_path or "(unknown)", overlay_state))
     lines.extend("  ERROR: %s" % error for error in config.errors)
     return lines

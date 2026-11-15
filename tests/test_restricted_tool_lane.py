@@ -186,6 +186,48 @@ def test_secret_or_outside_paths_are_refused(catalog, overlay, project, monkeypa
     assert "TOPSECRET" not in script.prompts[1] and "TOPSECRET" not in output
 
 
+def test_directory_tree_withholds_secret_names_and_does_not_descend_into_them(
+    catalog, overlay, project, monkeypatch, dispatched,
+):
+    overlay()
+    (project / "secrets").mkdir()
+    (project / "secrets" / "plain_inside.txt").write_text("x\n", encoding="utf-8")
+    (project / "src" / "deploy_token_notes.md").write_text("x\n", encoding="utf-8")
+    script = Script({"tool": "directory_tree", "args": {"path": ".", "depth": 4}}, {"final": "done"})
+    run(monkeypatch, script, project=str(project))
+    assert [name for name, _args in dispatched] == ["directory_tree"]
+    observation = script.prompts[1]
+    assert "app.py" in observation
+    for withheld in ("credentials.json", "server.pem", "secrets", "plain_inside.txt", "deploy_token_notes.md"):
+        assert withheld not in observation, (withheld, observation)
+    assert "withheld" in observation
+
+
+def test_the_tree_filter_checks_every_entry_line_and_withholds_what_it_cannot_parse(project):
+    run = _run()
+    run.project_root = str(project)
+    run.secret_globs = (".env", "*.pem", "**/secrets/**", "*secret*")
+    observation = "\n".join([
+        "directory tree: %s" % project,
+        "  [D] config",
+        "    [F] config/settings.toml (12 bytes)",
+        "  [D] vault_secret_dir",
+        "    [F] vault_secret_dir/readme.txt (3 bytes)",
+        "  [F] server.pem (9 bytes)",
+        "  [F] notes (1 bytes).txt (4 bytes)",
+        "garbage line that is not an entry",
+        "  ... truncated at 5 entries",
+    ])
+    filtered = run.filter_observation("directory_tree", {"path": str(project)}, observation).split("\n")
+    assert filtered[0] == "directory tree: %s" % project
+    assert "  [D] config" in filtered and "    [F] config/settings.toml (12 bytes)" in filtered
+    assert "  [F] notes (1 bytes).txt (4 bytes)" in filtered
+    assert "  ... truncated at 5 entries" in filtered
+    text = "\n".join(filtered)
+    for withheld in ("vault_secret_dir", "readme.txt", "server.pem", "garbage"):
+        assert withheld not in text, withheld
+
+
 def test_no_project_is_refused(catalog, overlay, monkeypatch):
     overlay()
     script = Script({"final": "done"})
@@ -554,6 +596,42 @@ def test_the_permit_is_decided_again_on_each_call(catalog, overlay):
         generate(DENIED)
 
 
+def test_revoking_one_of_the_runs_tools_stops_its_next_model_call(catalog, overlay):
+    overlay()
+    generate = _run().generator(_guarded)
+    assert generate(DENIED) == "sent"
+    overlay(tools=[tool for tool in GRANTED if tool != "text_search"])  # one tool revoked mid-turn
+    with pytest.raises(server.ModelCallError):
+        generate(DENIED)
+
+
+def test_revoking_one_of_the_runs_tools_refuses_it_at_dispatch(catalog, overlay, project):
+    overlay()
+    run = _run()
+    run.project_root = str(project)
+    check = run.tool_policy(None, lambda tool_name, args, root: args)
+    assert check("text_search", {"query": "needle"}) == ""
+    overlay(tools=[tool for tool in GRANTED if tool != "text_search"])
+    refused = check("text_search", {"query": "needle"})
+    assert "HOST POLICY" in refused and "text_search" in refused
+    assert check("file_read_range", {"path": "src/app.py"}) == ""  # still granted
+    overlay(tools=[])  # everything revoked
+    assert "HOST POLICY" in check("file_read_range", {"path": "src/app.py"})
+
+
+def test_a_tool_granted_later_does_not_join_a_running_turn(catalog, overlay, project):
+    overlay(tools=["file_read_range"])
+    run = lane.RestrictedRun(
+        lane="agent", model=DENIED, tools=frozenset({"file_read_range"}), profiles=("security-advisers",),
+        secret_globs=(".env",), caller_project="", target=("x", False, None, "model:" + DENIED),
+    )
+    run.project_root = str(project)
+    overlay()  # the operator grants more tools mid-turn
+    check = run.tool_policy(None, lambda tool_name, args, root: args)
+    assert "HOST POLICY" in check("text_search", {"query": "needle"})
+    assert check("file_read_range", {"path": "src/app.py"}) == ""
+
+
 def test_the_permit_needs_the_runs_lane_in_the_grant(catalog, overlay):
     overlay(lanes=["agent"])
     with pytest.raises(server.ModelCallError):
@@ -612,6 +690,64 @@ def test_a_project_junction_does_not_leak_outside_content(catalog, overlay, junc
     assert seen
     for leaked in ("OUTSIDE_CONTENT", "notes.txt", "outside_symbol_name", "outside_mod"):
         assert leaked not in seen, (leaked, seen)
+
+
+class _EntryWithoutJunctionCheck:
+    """A ``DirEntry`` as Python 3.11 has it: no ``is_junction``."""
+
+    def __init__(self, entry):
+        self._entry = entry
+        self.name, self.path = entry.name, entry.path
+
+    def is_symlink(self):
+        return self._entry.is_symlink()
+
+    def is_dir(self, *, follow_symlinks=True):
+        return self._entry.is_dir(follow_symlinks=follow_symlinks)
+
+    def stat(self, *, follow_symlinks=True):
+        return self._entry.stat(follow_symlinks=follow_symlinks)
+
+
+@windows_only
+def test_a_junction_is_a_link_without_direntry_is_junction(junctioned):
+    """``DirEntry.is_junction`` is Python 3.12+; the walk must not need it (README: 3.11+)."""
+    import os
+
+    from sonder_runtime.adapters.filesystem import workbench
+
+    entries = {entry.name: entry for entry in os.scandir(junctioned)}
+    assert workbench._is_link(_EntryWithoutJunctionCheck(entries["docs"])) is True
+    assert workbench._is_link(_EntryWithoutJunctionCheck(entries["src"])) is False
+
+
+@windows_only
+def test_directory_tree_skips_a_junction_without_direntry_is_junction(junctioned, monkeypatch):
+    import os
+
+    from sonder_runtime.adapters.filesystem import workbench
+
+    real_scandir = os.scandir
+
+    class _Listing:
+        def __init__(self, path):
+            self._inner = real_scandir(path)
+
+        def __iter__(self):
+            return (_EntryWithoutJunctionCheck(entry) for entry in self._inner)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._inner.close()
+
+    monkeypatch.setattr(workbench.os, "scandir", _Listing)
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(junctioned))
+    tree = workbench.directory_tree(str(junctioned), depth=3, include_ignored=True)
+    names = {entry["name"] for entry in tree["entries"]}
+    assert "app.py" in names
+    assert "notes.txt" not in names and "outside_mod.py" not in names and "docs" not in names
 
 
 @windows_only

@@ -230,7 +230,9 @@ def test_an_unreadable_policy_file_withholds_the_grant(overlay_file, tmp_path):
 
 def test_an_invalid_overlay_grants_nothing(overlay_file):
     overlay_file.write_text("{broken", encoding="utf-8")
-    assert tool_decision(DENIED).status is ModelToolStatus.DENIED
+    decision = tool_decision(DENIED)
+    assert decision.status is ModelToolStatus.OVERLAY_UNUSABLE
+    assert not decision.tools
 
 
 def test_a_missing_shipped_file_grants_nothing(monkeypatch, tmp_path, overlay_file):

@@ -333,9 +333,9 @@ def test_overlay_path_follows_the_environment_then_the_state_home(monkeypatch, t
     assert mtp.overlay_path().name == "model_tool_policy.json"
 
 
-# ---- invalid overlay: floors apply, free-form fails closed, never rewritten --------
+# ---- invalid overlay: every model refused in tool lanes, never rewritten ----------
 
-@pytest.mark.parametrize("content", [
+INVALID_OVERLAYS = [
     "{not json",
     "[]",
     json.dumps({"version": 9, "model_profiles": []}),
@@ -344,26 +344,79 @@ def test_overlay_path_follows_the_environment_then_the_state_home(monkeypatch, t
     json.dumps({"version": 1, "model_profiles": "nope"}),
     json.dumps({"version": 1, "model_profiles": [], "surprise": True}),
     json.dumps({"version": 1, "model_profiles": [profile("a", names=["x"]), profile("a", names=["y"])]}),
-])
-def test_invalid_overlay_keeps_floors_and_fails_free_form_closed(overlay_file, content):
+]
+
+
+@pytest.mark.parametrize("content", INVALID_OVERLAYS)
+def test_invalid_overlay_refuses_every_model_and_is_never_rewritten(overlay_file, content):
     overlay_file.write_text(content, encoding="utf-8")
     before = (overlay_file.read_bytes(), overlay_file.stat().st_mtime_ns)
     config = mtp.load()
     assert config.readable_shipped and not config.readable_overlay and config.issues
-    # floors still apply, tier-bound or caller-named
-    assert decide(DENIED).status is ModelLaneStatus.DENIED
-    assert decide(HF_QWEN, free_form=True).status is ModelLaneStatus.DENIED
-    # an ordinary tier-bound model still runs; a caller-named one fails closed
-    assert decide(ALLOWED, free_form=False).status is ModelLaneStatus.ALLOWED
-    assert decide(ALLOWED, free_form=True).status is ModelLaneStatus.POLICY_UNREADABLE
-    assert guard.refusal(ALLOWED) == rule.refusal_message(ALLOWED, ModelLaneStatus.POLICY_UNREADABLE)
+    # every model is refused, tier-bound or caller-named, listed or not
+    for name in (DENIED, HF_QWEN, ALLOWED):
+        for free_form in (False, True):
+            assert decide(name, free_form=free_form).status is ModelLaneStatus.OVERLAY_UNUSABLE, name
+    verdict = decide(ALLOWED)
+    assert str(overlay_file) in verdict.matched
+    assert guard.refusal(ALLOWED) == rule.refusal_message(ALLOWED, verdict.status, verdict.matched)
+    assert str(overlay_file) in guard.refusal(ALLOWED)
     # the error is visible in the status text
     status = runtime_policy.format_policy(runtime_policy.load(create=False))
     assert str(overlay_file) in status and "ERROR" in status and "overlay" in status
+    assert "every tool-using lane refuses every model" in status
     # nothing rewrote the file
     runtime_policy.load(create=True)
     mtp.load()
     assert (overlay_file.read_bytes(), overlay_file.stat().st_mtime_ns) == before
+
+
+@pytest.mark.parametrize("content", INVALID_OVERLAYS[:2])
+def test_an_unusable_overlay_refuses_a_model_it_restricted_however_it_is_reached(overlay_file, content):
+    """A model the overlay alone denies does not come back through a tier, the default route or a provider."""
+    write_overlay(overlay_file, [profile("mine", names=["helper-model"])])
+    bindings = {"general": "helper-model", "code": ALLOWED}
+    assert decide("helper-model").status is ModelLaneStatus.DENIED
+    overlay_file.write_text(content, encoding="utf-8")
+    # tier-bound
+    with pytest.raises(Exception, match="overlay") as caught:
+        guard.require_generation("helper-model")
+    assert getattr(caught.value, "tool_lane_refused", False)
+    assert guard.resolved_refusal("general", "helper-model", "general")
+    assert guard.denied("helper-model", "general") is True
+    # the default route and a by-tier selector
+    assert rule.decide_selector("sonder", bindings, deny()).status is ModelLaneStatus.OVERLAY_UNUSABLE
+    assert rule.decide_selector("general", bindings, deny()).status is ModelLaneStatus.OVERLAY_UNUSABLE
+    assert guard.selector_refusal("sonder", bindings)
+    assert guard.default_route_refusal(bindings)
+    # a model a bridged provider serves
+    assert rule.decide_served("helper-model", deny()).status is ModelLaneStatus.OVERLAY_UNUSABLE
+    # an ordinary model too: the overlay cannot say which models it restricted
+    with pytest.raises(Exception, match="overlay"):
+        guard.require_generation(ALLOWED)
+    # text-only chat still works
+    guard.require_generation("helper-model", text_only=True)
+    # and the binding cannot be written while the overlay cannot judge it
+    with pytest.raises(ValueError, match="overlay"):
+        runtime_policy.update(local_models={"general": ALLOWED})
+
+
+def test_an_overlay_that_cannot_be_inspected_refuses_every_model(overlay_file, monkeypatch):
+    real = mtp._identity
+    monkeypatch.setattr(mtp, "_identity", lambda path: None if Path(path) == overlay_file else real(path))
+    config = mtp.load()
+    assert not config.readable_overlay
+    assert decide(ALLOWED).status is ModelLaneStatus.OVERLAY_UNUSABLE
+
+
+def test_a_failed_overlay_read_reused_from_the_cache_still_refuses(overlay_file, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(mtp.time, "monotonic", lambda: clock[0])
+    overlay_file.write_text("{broken", encoding="utf-8")
+    assert decide(ALLOWED).status is ModelLaneStatus.OVERLAY_UNUSABLE
+    assert decide(ALLOWED).status is ModelLaneStatus.OVERLAY_UNUSABLE  # served from the cache
+    with pytest.raises(Exception, match="overlay"):
+        guard.require_generation(ALLOWED)
 
 
 def test_invalid_overlay_is_not_cached_and_recovers(overlay_file):

@@ -12,7 +12,10 @@ so configuration can extend the list but never shrink it.  No model name is
 written in this module: the floor is passed in.  When the policy file is
 unreadable the list is marked unreadable and caller-named (free-form) models
 fail closed; when the shipped config itself is unavailable the floor says so
-(``available=False``) and every tool-using lane refuses every model.
+(``available=False``) and every tool-using lane refuses every model.  An
+operator overlay that exists but cannot be used (``overlay_problem``) refuses
+every model the same way: it may be what restricted a model, and it cannot
+say which, so no model can be judged until it is fixed or removed.
 
 A tier bound to a provider other than Ollama is judged by the model that
 provider actually serves (:func:`decide_served`).  A blocked model never
@@ -44,6 +47,8 @@ class ModelLaneStatus(str, Enum):
     SERVED_UNKNOWN = "served_unknown"
     # The shipped model/tool config is missing or invalid: no model can be judged.
     CONFIG_UNAVAILABLE = "config_unavailable"
+    # The operator overlay exists but cannot be used: no model can be judged.
+    OVERLAY_UNUSABLE = "overlay_unusable"
 
 
 @dataclass(frozen=True)
@@ -95,14 +100,23 @@ def _clean_entries(values: Any) -> list[str]:
 
 @dataclass(frozen=True)
 class ToolLaneDenyList:
+    """The deny list in force.
+
+    ``overlay_problem`` is empty unless the operator overlay exists (or could
+    not be inspected) but cannot be used; it then names the file and why, and
+    every tool-using lane refuses every model (``OVERLAY_UNUSABLE``).
+    """
+
     names: frozenset[str]
     prefixes: tuple[str, ...]
     readable: bool = True
     floor: ToolLaneFloor = ToolLaneFloor()
+    overlay_problem: str = ""
 
     @classmethod
     def from_policy(
         cls, section: Mapping[str, Any] | None, *, floor: ToolLaneFloor, readable: bool = True,
+        overlay_problem: str = "",
     ) -> "ToolLaneDenyList":
         """The floor unioned with the policy section's ``names``/``prefixes``."""
         raw = section if isinstance(section, Mapping) else {}
@@ -111,7 +125,10 @@ class ToolLaneDenyList:
         for prefix in _clean_entries(raw.get("prefixes")):
             if prefix not in prefixes:
                 prefixes.append(prefix)
-        return cls(names=names, prefixes=tuple(prefixes), readable=bool(readable), floor=floor)
+        return cls(
+            names=names, prefixes=tuple(prefixes), readable=bool(readable), floor=floor,
+            overlay_problem=str(overlay_problem or ""),
+        )
 
     @property
     def extended(self) -> bool:
@@ -125,8 +142,15 @@ def refusal_message(
     """The user-facing refusal for a model blocked from tool-using lanes.
 
     ``detail`` is the decision's ``matched`` text; for ``CONFIG_UNAVAILABLE``
-    it names the shipped config file and why it cannot be used.
+    it names the shipped config file and why it cannot be used, for
+    ``OVERLAY_UNUSABLE`` the operator overlay and why.
     """
+    if status is ModelLaneStatus.OVERLAY_UNUSABLE:
+        return (
+            "model '%s' cannot be used in tool-using lanes while the operator model "
+            "tool policy overlay cannot be used (%s); fix or remove that file "
+            "(`/runtime tools` shows the error)." % (model, detail or "model_tool_policy.json")
+        )
     if status is ModelLaneStatus.CONFIG_UNAVAILABLE:
         return (
             "model '%s' cannot be used in tool-using lanes while the shipped model "
@@ -162,6 +186,13 @@ def served_refusal_message(
             "shipped model tool policy is unavailable "
             f"({verdict.matched or 'model_tool_policy.json'}), so it cannot be used in "
             "tool-using lanes; restore that file from the install (chat still works)."
+        )
+    if verdict.status is ModelLaneStatus.OVERLAY_UNUSABLE:
+        return (
+            f"tier '{tier}' is served by {provider or 'a non-Ollama provider'} and the "
+            "operator model tool policy overlay cannot be used "
+            f"({verdict.matched or 'model_tool_policy.json'}), so it cannot be used in "
+            "tool-using lanes; fix or remove that file (chat still works)."
         )
     if verdict.status is ModelLaneStatus.SERVED_UNKNOWN:
         return (
@@ -199,6 +230,15 @@ def default_route_refusal_message(tier: Any, reason: str) -> str:
     )
 
 
+def _unjudgeable(model: str, deny: ToolLaneDenyList) -> ModelLaneDecision | None:
+    """The refusal when no model can be judged (shipped config or overlay unusable), else None."""
+    if not deny.floor.available:
+        return ModelLaneDecision(ModelLaneStatus.CONFIG_UNAVAILABLE, model, deny.floor.detail)
+    if deny.overlay_problem:
+        return ModelLaneDecision(ModelLaneStatus.OVERLAY_UNUSABLE, model, deny.overlay_problem)
+    return None
+
+
 def decide_served(model: Any, deny: ToolLaneDenyList) -> ModelLaneDecision:
     """Decide for the model a non-Ollama provider serves for a tier.
 
@@ -208,8 +248,9 @@ def decide_served(model: Any, deny: ToolLaneDenyList) -> ModelLaneDecision:
     tier-bound model.
     """
     raw = str(model if model is not None else "").strip()
-    if not deny.floor.available:
-        return ModelLaneDecision(ModelLaneStatus.CONFIG_UNAVAILABLE, raw, deny.floor.detail)
+    refused = _unjudgeable(raw, deny)
+    if refused is not None:
+        return refused
     if normalize_name(raw) in deny.floor.undetermined_served:
         return ModelLaneDecision(ModelLaneStatus.SERVED_UNKNOWN, raw)
     return decide(raw, deny, free_form=False)
@@ -243,8 +284,9 @@ def decide_selector(
     """
     text = str(selector if selector is not None else "").strip()
     key = text.lower()
-    if not deny.floor.available:
-        return ModelLaneDecision(ModelLaneStatus.CONFIG_UNAVAILABLE, text, deny.floor.detail)
+    refused = _unjudgeable(text, deny)
+    if refused is not None:
+        return refused
     if key in ("", "sonder", "local"):
         return ModelLaneDecision(ModelLaneStatus.ALLOWED, text)
     if key in bindings:
@@ -290,11 +332,12 @@ def decide(model: Any, deny: ToolLaneDenyList, *, free_form: bool) -> ModelLaneD
     caller-named (``free_form``) model fails closed; a tier-bound model is
     still checked against the lists.  When the shipped config is unavailable
     (``deny.floor.available`` False) every model is refused
-    (``CONFIG_UNAVAILABLE``).
+    (``CONFIG_UNAVAILABLE``), and so it is when the operator overlay exists
+    but cannot be used (``OVERLAY_UNUSABLE``).
     """
-    if not deny.floor.available:
-        raw = str(model if model is not None else "").strip()
-        return ModelLaneDecision(ModelLaneStatus.CONFIG_UNAVAILABLE, raw, deny.floor.detail)
+    refused = _unjudgeable(str(model if model is not None else "").strip(), deny)
+    if refused is not None:
+        return refused
     return decide_listed(model, deny, free_form=free_form)
 
 
@@ -302,9 +345,9 @@ def decide_listed(model: Any, deny: ToolLaneDenyList, *, free_form: bool) -> Mod
     """Whether ``model`` is on the lists, whether or not the shipped config loaded.
 
     For places that replace a blocked binding with a default (seeding a tier,
-    loading a policy, binding the live tier map): a broken shipped config
-    must refuse tool lanes (``decide``) without also rewriting the operator's
-    tier bindings.  Lane decisions use ``decide``, never this.
+    loading a policy, binding the live tier map): a broken shipped config or
+    overlay must refuse tool lanes (``decide``) without also rewriting the
+    operator's tier bindings.  Lane decisions use ``decide``, never this.
     """
     raw = str(model if model is not None else "").strip()
     normalized = normalize_name(raw)

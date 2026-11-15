@@ -27,9 +27,11 @@ A restricted turn (:class:`RestrictedRun`) is then fenced:
   confined to it and checked against the secret globs after the host's own
   project scoping (``tool_policy``);
 * ``include_hidden``/``include_ignored`` are refused, and the lines of a
-  content search (``text_search``, ``repository_symbol_index``) that name a
-  path matching a secret glob are withheld from the observation
-  (``filter_observation``); a line that does not parse is withheld too.
+  content search (``text_search``, ``repository_symbol_index``) and the
+  entries of a ``directory_tree`` that name a path matching a secret glob
+  (spelled or real; a tree entry under a matching directory too) are withheld
+  from the observation (``filter_observation``); a line that does not parse is
+  withheld too.
 
 Its own model calls.  The restricted model stays on the deny list, so the
 generation guard (``tool_lane_guard.require_generation``) would refuse its
@@ -69,6 +71,7 @@ _ENTRY: ContextVar[str | None] = ContextVar("sonder_restricted_tool_lane_entry",
 _SUPPRESSED = ""
 _POLICY = "ERROR: HOST POLICY: "
 _SEARCH_TOOLS = frozenset({"text_search", "repository_symbol_index"})
+_TREE_TOOL = "directory_tree"
 _PATH_KEYS = frozenset({
     "path", "root", "file", "filename", "file_path", "left", "right", "source",
     "destination", "input_path", "output_path", "project_dir", "cwd", "directory", "dir",
@@ -80,6 +83,11 @@ _HIDDEN_KEYS = ("include_hidden", "include_ignored")
 # A content-search row: ``<path>:<line>:<column>`` then ``: `` (text_search) or
 # `` `` (repository_symbol_index).
 _ROW = re.compile(r":\d+:\d+(?=: | )")
+# A ``directory_tree`` entry as ``server.directory_tree`` formats it:
+# ``<indent>[D] <relative>`` or ``<indent>[F] <relative> (<n> bytes)``.
+_TREE_ENTRY = re.compile(r"^ {2,}\[(D|F)\] (.+)$")
+_TREE_FILE_SIZE = re.compile(r"^(.+) \(\d+ bytes\)$")
+_TREE_TRUNCATED = re.compile(r"^  \.\.\. truncated at \d+ entries$")
 
 
 def _refusal(text: str) -> str:
@@ -214,6 +222,7 @@ def _rules_refusal(model: Any, decision: _rules.ModelToolDecision) -> str:
     status = {
         _rules.ModelToolStatus.POLICY_UNREADABLE: ModelLaneStatus.POLICY_UNREADABLE,
         _rules.ModelToolStatus.CONFIG_UNAVAILABLE: ModelLaneStatus.CONFIG_UNAVAILABLE,
+        _rules.ModelToolStatus.OVERLAY_UNUSABLE: ModelLaneStatus.OVERLAY_UNUSABLE,
     }.get(decision.status, ModelLaneStatus.DENIED)
     return refusal_message(model, status, decision.matched)
 
@@ -253,17 +262,25 @@ class RestrictedRun:
         """
         return _generation_permit.wrap(generate, model=self.model, still_granted=self.still_granted)
 
-    def still_granted(self, policy: Mapping[str, Any] | None = None) -> bool:
-        """Whether this run's model still has a grant opening its lane with one of its tools.
+    def current_tools(self, policy: Mapping[str, Any] | None = None) -> frozenset[str]:
+        """This run's tools that the files still grant in its lane, decided again now.
 
-        Decided again from the files on each call, so a grant revoked mid-turn
-        stops the next model call.  Any fault answers False.
+        Never more than ``tools``: a tool granted after the turn opened does
+        not join it.  Any fault answers the empty set.
         """
         try:
             decision = decide(self.model, policy if policy else _policy.load(create=False))
         except Exception:  # noqa: BLE001 - an unreadable policy grants nothing
-            return False
-        return decision.permits(self.lane) and bool(decision.tools & self.tools)
+            return frozenset()
+        return self.tools & decision.tools if decision.permits(self.lane) else frozenset()
+
+    def still_granted(self, policy: Mapping[str, Any] | None = None) -> bool:
+        """Whether the files still grant every tool this run was opened with, in its lane.
+
+        Decided again on each model call, so revoking any one of the run's
+        tools mid-turn stops its next model call.  Any fault answers False.
+        """
+        return self.current_tools(policy) == self.tools
 
     def allowlist(self, requested: Any) -> frozenset[str]:
         """The caller's allowlist (when it gave one) narrowed to the granted tools."""
@@ -361,7 +378,9 @@ class RestrictedRun:
     ) -> Callable[[str, Any], str]:
         """An argument-aware policy for this turn, composed after ``inner`` would allow.
 
-        ``scope_args`` is the host's own project scoping
+        A tool is dispatched only while the files still grant it
+        (:meth:`current_tools`, decided again at every dispatch), so revoking
+        it mid-turn refuses its next call.  ``scope_args`` is the host's own project scoping
         (``server._project_scope_args``), so the paths checked are the paths
         dispatched.
         """
@@ -370,6 +389,10 @@ class RestrictedRun:
                 return _refusal(
                     "restricted model '%s' may use only: %s; '%s' is not granted."
                     % (self.model, ", ".join(sorted(self.tools)), tool_name)
+                )
+            if tool_name not in self.current_tools():
+                return _refusal(
+                    "tool '%s' is no longer granted to restricted model '%s'." % (tool_name, self.model)
                 )
             if not isinstance(args, dict):
                 return _refusal("tool '%s': arguments must be a JSON object." % tool_name)
@@ -443,13 +466,54 @@ class RestrictedRun:
 
         return apply
 
+    def _tree_entry_withheld(self, base: str, line: str) -> bool:
+        """Whether a ``directory_tree`` line is withheld: it does not parse, or it or a parent names a secret."""
+        entry = _TREE_ENTRY.match(line)
+        if entry is None:
+            return True
+        relative = entry.group(2)
+        if entry.group(1) == "F":
+            sized = _TREE_FILE_SIZE.match(relative)
+            if sized is None:
+                return True
+            relative = sized.group(1)
+        parts = [part for part in re.split(r"[\\/]", relative) if part]
+        if not parts:
+            return True
+        # The entry itself and every directory above it: nothing is listed
+        # from inside a directory that matches a glob.
+        return any(
+            self._secret_or_outside(base, os.path.join(*parts[:end])) for end in range(1, len(parts) + 1)
+        )
+
+    def _filter_tree(self, scoped_args: Mapping[str, Any], text: str) -> str:
+        raw = (scoped_args.get("path") or scoped_args.get("root")) if isinstance(scoped_args, Mapping) else ""
+        if not self.project_root:
+            return _refusal("tool '%s': the tree root is unknown, so its result is withheld." % _TREE_TOOL)
+        base = os.path.realpath(os.path.join(self.project_root, str(raw or ".")))
+        lines = text.split("\n")
+        kept = lines[:1] if lines and lines[0].startswith("directory tree: ") else []
+        withheld = 0
+        for line in lines[len(kept):]:
+            if _TREE_TRUNCATED.match(line) or not self._tree_entry_withheld(base, line):
+                kept.append(line)
+            else:
+                withheld += 1
+        if withheld:
+            kept.append(
+                "  [withheld %d entr(y/ies) that name a path matching the restricted secret path globs]" % withheld
+            )
+        return "\n".join(kept)
+
     def filter_observation(self, tool_name: str, scoped_args: Mapping[str, Any], observation: Any) -> Any:
-        """Withhold content-search lines that name a secret path (or do not parse)."""
-        if tool_name not in _SEARCH_TOOLS:
+        """Withhold content-search lines and tree entries that name a secret path (or do not parse)."""
+        if tool_name not in _SEARCH_TOOLS and tool_name != _TREE_TOOL:
             return observation
         text = str(observation)
         if text.lstrip().startswith("ERROR"):
             return observation
+        if tool_name == _TREE_TOOL:
+            return self._filter_tree(scoped_args, text)
         key = "root" if tool_name == "text_search" else "path"
         base = str(scoped_args.get(key) or self.project_root) if isinstance(scoped_args, Mapping) else ""
         if not base:

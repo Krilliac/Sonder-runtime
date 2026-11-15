@@ -192,6 +192,7 @@ def _judge_reply(verdict: _models.ModelLaneDecision, text_only: bool) -> bool:
     """Whether a reply's verdict refuses it: a blocked model always, an unnamed one unless text-only."""
     if verdict.status in (
         _models.ModelLaneStatus.SERVED_UNKNOWN, _models.ModelLaneStatus.CONFIG_UNAVAILABLE,
+        _models.ModelLaneStatus.OVERLAY_UNUSABLE,
     ):
         return not text_only
     return verdict.denied

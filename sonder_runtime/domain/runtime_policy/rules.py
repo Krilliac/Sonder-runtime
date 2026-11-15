@@ -474,6 +474,7 @@ def _merged_section(base, extra) -> dict:
 
 def tool_lane_deny_list(
     policy, *, floor: ToolLaneFloor, extra=None, extra_readable: bool = True,
+    overlay_problem: str = "",
 ) -> ToolLaneDenyList:
     """The deny list in force for a loaded policy (the floor always included).
 
@@ -481,14 +482,18 @@ def tool_lane_deny_list(
     the list is marked unreadable and caller-named models fail closed.
     ``extra`` is a ``names``/``prefixes`` section from the operator overlay
     file, unioned in; ``extra_readable=False`` (the overlay could not be read)
-    marks the list unreadable the same way.
+    marks the list unreadable the same way.  ``overlay_problem`` names an
+    overlay that exists but cannot be used; every model is then refused in
+    tool lanes (``tool_lane_models.decide``).
     """
     if not isinstance(policy, dict):
-        return ToolLaneDenyList.from_policy(extra, floor=floor, readable=False)
+        return ToolLaneDenyList.from_policy(
+            extra, floor=floor, readable=False, overlay_problem=overlay_problem,
+        )
     readable = not str(policy.get("error") or "").strip() and bool(extra_readable)
     return ToolLaneDenyList.from_policy(
         _merged_section(policy.get("tool_lane_denied_models"), extra),
-        floor=floor, readable=readable,
+        floor=floor, readable=readable, overlay_problem=overlay_problem,
     )
 
 
