@@ -801,7 +801,7 @@ lookup line. A working version 2 index looks like this (names and counts are
 the ones in your index):
 
 ```
-index=/home/you/.local/share/sonder/references/references.sqlite readable=yes schema=2 passages=8908 sources=attack:640, events:3400, sigma:4868 built=2026-11-13T09:00:00+00:00; automatic lookup names=...
+index=/home/<you>/.local/share/sonder/references/references.sqlite readable=yes schema=2 passages=8908 sources=attack:640, events:3400, sigma:4868 built=2026-11-13T09:00:00+00:00; automatic lookup names=...
 ```
 
 `readable=yes` means the index passed validation; `schema=` is its version (1
