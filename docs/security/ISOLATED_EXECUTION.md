@@ -118,7 +118,38 @@ Do not mount the Docker socket into the project or place sensitive device nodes,
 sockets, or credentials in a writable workspace. The tool cannot distinguish a
 special file already present inside the one approved project bind.
 
-The Docker- and Podman-specific argv contracts are covered by unit tests. No
-ready container engine was present on the implementation host, so a live engine
-smoke test remains unverified; availability probes and the launch itself fail
-closed rather than weakening flags when an engine rejects an option.
+The Docker- and Podman-specific argv contracts are covered by unit tests.
+
+### Live verification status
+
+The first live run was 2026-11-15 on Podman 6.2.0 (Windows WSL machine,
+rootless). It found two bugs the unit tests could not: Podman's `image inspect`
+template field is `.ID` (Docker uses `.Id`), and `env` stopped option parsing at
+the first `NAME=VALUE`, so a trailing `--` was executed as the command. Both are
+fixed. After the fix all 10 live checks passed on `alpine:3.22`: uid 65534; the
+only network interface is `lo` and an outbound `wget` is blocked; read-only
+root; read-only workspace by default; `CapEff` 0 and `NoNewPrivs` 1; `noexec`
+`/tmp` (the copy into it succeeds, the execution is denied); memory, pids and
+cpu cgroup limits applied; a timeout kills the container with cleanup verified
+absent; the writable-workspace opt-in works; and an image declaring a `VOLUME`
+is refused. `debian:bookworm-slim` was used only to confirm that GNU `env`
+handles `-i -- NAME=VALUE command` the same way as busybox.
+
+Docker is still untested live. On Windows the Podman machine must be started
+outside an SSH session, because ending that session kills the machine.
+Availability probes and the launch itself fail closed rather than weakening
+flags when an engine rejects an option.
+
+To rerun the live checks, install the image (`podman pull
+docker.io/library/alpine:3.22`) and run:
+
+```
+SONDER_ISOLATED_LIVE=1 SONDER_ISOLATED_RUNTIME=podman \
+  SONDER_ISOLATED_ROOTS=/path/to/scratch \
+  pytest tests/live/test_isolated_live.py
+```
+
+The test skips with a reason naming whichever variable is missing.
+`SONDER_ISOLATED_IMAGE` overrides the image; the volume-refusal check also needs
+`SONDER_ISOLATED_VOLUME_IMAGE` naming an installed image that declares a
+`VOLUME`, and skips without it.

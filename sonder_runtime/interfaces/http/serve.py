@@ -80,6 +80,7 @@ import sonder_runtime.adapters.observability.activity_tracker as activity_tracke
 import sonder_runtime.adapters.observability.chat_formatting as chat_formatting
 import sonder_runtime.adapters.secrets as sonder_secrets
 import sonder_runtime.adapters.web.lifecycle as sonder_lifecycle
+from sonder_runtime.adapters.web import login_throttle_http
 import sonder_runtime.platform.config as runtime_config
 import sonder_runtime.platform.paths as runtime_paths
 from sonder_runtime.adapters.command_catalog import command_catalog
@@ -2133,7 +2134,7 @@ SYSTEM_OPERATION_TOOLS = {
     "autopilot_start": "automation_lifecycle",
     "autopilot_resume": "automation_lifecycle",
     "autopilot_pause": "automation_lifecycle",
-    "autopilot_cancel": "automation_lifecycle",
+    "autopilot_cancel": "automation_lifecycle", "mission_start": "automation_lifecycle",
     # The workflow store is process-wide.  Listing it reveals every saved
     # action payload and description, which can include repository paths,
     # command arguments, and operator-authored context.  It is therefore not
@@ -4978,8 +4979,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def _auth_rate_limited(self):
         """Token-bucket authentication-failure limiter (admission step 3)."""
+        return self._auth_throttle_gate(reserve=False)
+
+    def _auth_reserve_refused(self):
+        """Credential-checking routes (``login_throttle_http``): spend a token
+        in the same locked step as the check; the route refunds it on success.
+        """
+        return self._auth_throttle_gate(reserve=True)
+
+    def _auth_throttle_gate(self, *, reserve):
         client = self._client_ip()
-        if sonder_lifecycle.get().auth_attempt_allowed(client):
+        lifecycle = sonder_lifecycle.get()
+        if (lifecycle.reserve_auth_attempt(client) if reserve
+                else lifecycle.auth_attempt_allowed(client)):
             return False
         _serve_logger.error(f"auth rate limit exceeded for client={client!r}")
         _serve_logger.debug(f"_auth_rate_limited: rate-limited client={client!r}")
@@ -4991,16 +5003,7 @@ class Handler(BaseHTTPRequestHandler):
                 sonder_lifecycle.get(), "auth_rate_limited",
                 getattr(self, "_request_started", time.monotonic()),
             )
-        self._send_json_payload(
-            sonder_lifecycle.error_envelope(
-                "AUTH_RATE_LIMITED",
-                "too many failed authentication attempts; retry later",
-                self._correlation(),
-                retryable=True,
-            ),
-            status=429,
-            headers={"Retry-After": "2"},
-        )
+        login_throttle_http.send_throttled(self)
         return True
 
     def _peer_is_loopback(self):
@@ -7054,58 +7057,14 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_permission_mode_post(req, context=context)
             return
         if path == "/v1/sonder/register":
-            conn = server._open_db()
-            try:
-                account = admin_auth.register(
-                    conn,
-                    req.get("username", ""),
-                    req.get("password", ""),
-                    trusted_local=False,
-                    bootstrap_secret=self.headers.get(
-                        "X-Sonder-Bootstrap-Secret", ""
-                    ),
-                    allow_additional=ALLOW_REGISTRATION,
-                    actor=context["account"] if context["authorized"] else None,
-                )
-                # ``message`` lets a client that only reads ``ok``/``message``
-                # (older apps) report the success instead of a bare 201.
-                self._send_json_payload({
-                    "ok": True, "account": account,
-                    "message": _account_created_message(account),
-                }, status=201)
-            except PermissionError as error:
-                self._send_json_payload({"ok": False, "message": str(error)}, status=403)
-            except sqlite3.IntegrityError:
-                self._send_json_payload({"ok": False, "message": "account already exists"}, status=409)
-            except ValueError as error:
-                self._send_json_payload({"ok": False, "message": str(error)}, status=400)
-            except Exception as error:
-                _serve_logger.error(f"account registration failed, correlation={self._correlation()!r}", exc_info=True)
-                self.log_error("registration failed: %s", type(error).__name__)
-                self._send_json_payload({"ok": False, "message": "registration failed"}, status=500)
-            finally:
-                conn.close()
+            login_throttle_http.handle_register(
+                self, req, context, runtime=server, admin_auth=admin_auth,
+                allow_registration=ALLOW_REGISTRATION,
+                created_message=_account_created_message)
             return
         if path == "/v1/sonder/login":
-            if context["mode"] in ("api-key", "both") and not context["api_key"]:
-                self._send_auth_error()
-                return
-            conn = server._open_db()
-            try:
-                token, account = admin_auth.login(
-                    conn, req.get("username", ""), req.get("password", "")
-                )
-                self._send_json_payload({"ok": True, "token": token, "account": account})
-            except (ValueError, PermissionError):
-                self._send_json_payload(
-                    {"ok": False, "message": "invalid username or password"}, status=401
-                )
-            except Exception as error:
-                _serve_logger.error(f"login failed, correlation={self._correlation()!r}", exc_info=True)
-                self.log_error("login failed: %s", type(error).__name__)
-                self._send_json_payload({"ok": False, "message": "login failed"}, status=500)
-            finally:
-                conn.close()
+            login_throttle_http.handle_login(
+                self, req, context, runtime=server, admin_auth=admin_auth)
             return
         if path == "/v1/sonder/admin/account":
             if not context["authorized"]:

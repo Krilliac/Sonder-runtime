@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 438,
+      "file_count": 440,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -427,6 +427,7 @@
         "sonder_runtime/adapters/security/continuation_approval.py",
         "sonder_runtime/adapters/security/control_plane_paths.py",
         "sonder_runtime/adapters/security/credential_provider.py",
+        "sonder_runtime/adapters/security/login_throttle.py",
         "sonder_runtime/adapters/security/permission_evaluator.py",
         "sonder_runtime/adapters/security/permission_policy.py",
         "sonder_runtime/adapters/security/permission_receipts.py",
@@ -471,6 +472,7 @@
         "sonder_runtime/adapters/web/lifecycle.py",
         "sonder_runtime/adapters/web/listener_probe.py",
         "sonder_runtime/adapters/web/live_reload.py",
+        "sonder_runtime/adapters/web/login_throttle_http.py",
         "sonder_runtime/adapters/web/managed_http.py",
         "sonder_runtime/adapters/web_fetch.py",
         "sonder_runtime/adapters/web_intents.py",
@@ -989,7 +991,7 @@
       ]
     },
     {
-      "file_count": 305,
+      "file_count": 306,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1148,6 +1150,7 @@
         "sonder_runtime/domain/launcher_health.py",
         "sonder_runtime/domain/learning_tier.py",
         "sonder_runtime/domain/login_output.py",
+        "sonder_runtime/domain/login_throttle.py",
         "sonder_runtime/domain/loop_actions.py",
         "sonder_runtime/domain/loop_result_formatting.py",
         "sonder_runtime/domain/loop_retry_policy.py",
