@@ -84,3 +84,49 @@ def test_parse_hypotheses_garbage_is_an_error_and_bad_items_are_dropped():
         parse_hypotheses("nothing structured here")
     found = parse_hypotheses('[{"hypothesis": "ok"}, {"hypothesis": ""}, 5, {"lines": "1"}]')
     assert [h.hypothesis for h in found] == ["ok"]
+
+
+# -- prompts ---------------------------------------------------------------------------------
+
+def _record(tmp_path):
+    from sonder_runtime.domain.security_eval.records import parse_record
+    from tests.support.security_eval_fixtures import record
+    return parse_record(record("h1", tmp_path, label="CONFIRMED", reason="private note", severity="high"), 1)
+
+
+def test_item_prompt_is_one_json_document_without_the_answer(tmp_path):
+    import json
+    from sonder_runtime.domain.security_eval.prompts import DEFAULT_SYSTEM_PROMPT, item_prompt
+    prompt = item_prompt(_record(tmp_path), "var x = 1;\nreturn x;", 12, "[definition] a.cs:1", None)
+    document = json.loads(prompt)
+    assert set(document) == {"task", "answer_schema", "data"}
+    data = document["data"]
+    assert data["hypothesis"] and data["category"] == "bounds" and data["file"] == "src/PacketReader.cs"
+    assert data["source"] == "12: var x = 1;\n13: return x;" and data["context"] == "[definition] a.cs:1"
+    assert set(data) == {"hypothesis", "category", "file", "lines", "source", "context"}
+    for leaked in ("private note", '"h1"', '"stage"', '"severity"', '"label"'):
+        assert leaked not in prompt
+    assert "untrusted" in DEFAULT_SYSTEM_PROMPT and DEFAULT_SYSTEM_PROMPT.strip()
+    assert prompt == item_prompt(_record(tmp_path), "var x = 1;\nreturn x;", 12, "[definition] a.cs:1", None)
+
+
+def test_template_fields_and_errors(tmp_path):
+    import json
+    from sonder_runtime.domain.security_eval.errors import TemplateError
+    from sonder_runtime.domain.security_eval.prompts import MAX_TEMPLATE_BYTES, item_prompt, number_lines, render_task
+    record = _record(tmp_path)
+    custom = item_prompt(record, "x", 1, "", "Judge the $category claim in $file at $lines.")
+    assert json.loads(custom)["task"] == "Judge the bounds claim in src/PacketReader.cs at 13-14."
+    for bad in ("uses $bogus", "dangling $", "x" * (MAX_TEMPLATE_BYTES + 1)):
+        with pytest.raises(TemplateError):
+            item_prompt(record, "x", 1, "", bad)
+    assert render_task("cost $$5 for $category", {"category": "c"}) == "cost $5 for c"
+    assert number_lines("a\nb", 5) == "5: a\n6: b"
+
+
+def test_chunk_prompt_carries_the_chunk_and_no_labels():
+    import json
+    from sonder_runtime.domain.security_eval.prompts import chunk_prompt
+    document = json.loads(chunk_prompt("src/a.cs", 40, "int a;", "", None))
+    assert document["data"]["file"] == "src/a.cs" and document["data"]["source"] == "40: int a;"
+    assert "hypotheses" in json.dumps(document["answer_schema"])

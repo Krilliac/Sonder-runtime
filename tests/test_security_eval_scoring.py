@@ -140,3 +140,35 @@ def test_chunk_scores_label_precision_as_a_floor_and_count_failed_chunks():
 def test_chunk_precision_is_none_with_nothing_generated():
     result = score_chunks([ChunkOutcome("a", 0, (), 0, "SCORED")])["a"]
     assert result.precision_floor is None and result.precision_labelled is None and result.recall is None
+
+
+# -- summary ---------------------------------------------------------------------------------
+
+def _report(complete=True):
+    rows = rows_for("none", NONE_ARM) + rows_for("retrieved", RETRIEVED_ARM)
+    return {
+        "schema": 1, "mode": "item", "requested_model": "demo-model:9b", "helper_version": "1",
+        "served_models": {"demo-model:9b-q8": 20}, "served_model_source": "gateway_resolved",
+        "config_digest": "abc123", "arms": ["none", "retrieved"], "complete": complete,
+        "stopped_reason": "done" if complete else "time_budget", "remaining": 0 if complete else 6,
+        "rows": 20, "outcomes": {"SCORED": 18, "UNPARSED": 1, "MODEL_ERROR": 1},
+        "tokens": {"tokens_in": 1000, "tokens_out": 200, "rows": 20, "rows_measured": 15, "rows_unverified": 5},
+        "scores": score(rows).as_dict(), "paired": paired_comparison(rows).as_dict(),
+    }
+
+
+def test_summary_is_short_and_states_the_model_tokens_and_both_arms():
+    from sonder_runtime.domain.security_eval.summary import render_summary
+    text = render_summary(_report())
+    assert len(text.splitlines()) <= 60
+    for needle in ("demo-model:9b", "demo-model:9b-q8", "gateway_resolved", "15 of 20", "none", "retrieved",
+                   "bounds", "McNemar", "0.125"):
+        assert needle in text
+    assert "INCOMPLETE" not in text
+    assert "n/a" in text  # a precision of None is printed as n/a, not 0 or 1
+
+
+def test_summary_of_an_incomplete_run_carries_a_banner():
+    from sonder_runtime.domain.security_eval.summary import render_summary
+    text = render_summary(_report(complete=False))
+    assert text.splitlines()[0].startswith("# ") and "INCOMPLETE" in text and "time_budget" in text and "6" in text
