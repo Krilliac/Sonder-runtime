@@ -12,7 +12,7 @@ from sonder_runtime.adapters.provider_bindings import ProviderBindings
 from sonder_runtime.bootstrap import agent_help_tools
 from sonder_runtime.bootstrap import security_eval_agent_tools as tool_module
 from sonder_runtime.platform.security_eval_config import SecurityEvalConfig
-from tests.support.security_eval_fixtures import build_repo, fixture_records, record, write_dataset
+from tests.support.security_eval_fixtures import build_repo, fixture_records, write_dataset
 from tests.test_security_eval_runner import FakeGateway, truth
 
 pytestmark = pytest.mark.unit

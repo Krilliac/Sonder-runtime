@@ -183,7 +183,7 @@ def test_read_chunks_split_on_line_boundaries(repo_root, tmp_path):
     chunks = repo.read_chunks("src/PacketReader.cs", 400)
     assert len(chunks) >= 2
     assert chunks[0].start == 1 and chunks[-1].end == chunks[-1].total_lines
-    for earlier, later in zip(chunks, chunks[1:]):
+    for earlier, later in zip(chunks, chunks[1:], strict=False):
         assert later.start == earlier.end + 1
     assert all(len(chunk.text) <= 400 for chunk in chunks)
     assert "".join(chunk.text for chunk in chunks).count("ReadBlock") == 1
