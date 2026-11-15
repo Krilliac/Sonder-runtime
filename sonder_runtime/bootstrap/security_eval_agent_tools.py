@@ -2,7 +2,7 @@
 
 Judges (item mode) or finds (chunk mode) hypotheses against an external labelled JSONL set, with and
 without retrieved repo context, through the normal Sonder model path. Nothing here reaches the network,
-runs a subprocess or executes model output: replies are parsed and scored as text. Writes go only to
+starts a child process or executes model output: replies are parsed and scored as text. Writes go only to
 the ``out_dir`` the caller names. The dataset is never committed; its path is an argument or
 ``SONDER_SECURITY_EVAL_DATASET``. See ``docs/architecture`` and the SONDER_SECURITY_EVAL_* keys in
 ``sonder_runtime/platform/security_eval_config.py``.
