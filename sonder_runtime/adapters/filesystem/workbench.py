@@ -17,6 +17,7 @@ import os
 import re
 import signal
 import shutil
+import stat
 import struct
 import subprocess
 import sys
@@ -98,13 +99,42 @@ def _skip_dir(name: str, include_ignored=False) -> bool:
     return not include_ignored and name.casefold() in SKIP_DIRS_CASEFOLD
 
 
+def _reparse_entry(entry) -> bool:
+    """Whether a scandir entry is a symlink, junction or other reparse point.
+
+    On Windows ``DirEntry.is_symlink()`` is False for a junction, and
+    ``is_dir(follow_symlinks=False)`` is True for one, so a walk that only
+    checks ``is_symlink`` enters junctions and can leave every allowed root.
+    ``is_junction`` (3.12+) and the reparse-point attribute both catch it.
+    """
+    if entry.is_symlink():
+        return True
+    is_junction = getattr(entry, "is_junction", None)
+    if is_junction is not None and is_junction():
+        return True
+    attributes = getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0)
+    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
+
+def _noncanonical_name(name: str) -> bool:
+    """A Windows name Win32 does not open as spelled (trailing dot or space).
+
+    Such names exist only when created through ``\\\\?\\`` paths. Opening
+    ``id_rsa.`` or listing ``.aws.`` through a normal path reaches ``id_rsa``
+    or ``.aws`` instead, so the walk's name is not the file that is read.
+    """
+    return os.name == "nt" and name.endswith((".", " "))
+
+
 def _sensitive_directory(path: Path) -> str:
     """Skip reason for a directory a content search must not enter ("" if none).
 
     ``file_ops.SENSITIVE_READ_DIRECTORIES`` (``.git``, ``.ssh``, ``.aws`` ...)
     are secret or control state. A credential-store directory an operator
     root names is the one exception, decided by the same
-    ``credential_read_component`` that ``file_read`` uses.
+    ``credential_read_component`` that ``file_read`` uses. ``.git`` is pruned
+    even with ``include_ignored``, on purpose: repository metadata (config,
+    packed refs, logs, hooks) is control state, not workspace text.
     """
     name = path.name.casefold()
     if name not in file_ops.SENSITIVE_READ_DIRECTORIES:
@@ -167,8 +197,9 @@ def _bounded_walk(
     """Return a deterministic guarded-tree iterator and mutable scan state.
 
     The caller already resolved ``root`` through ``file_ops``. Entries are
-    yielded depth-first in case-insensitive path order. Symlinks are never
-    followed. Both inspected directory entries and wall time are bounded, so a
+    yielded depth-first in case-insensitive path order. Symlinks, junctions
+    and other reparse points are never followed, and on Windows a name with a
+    trailing dot or space (which opens as a different file) is skipped. Both inspected directory entries and wall time are bounded, so a
     small output limit cannot hide an unbounded filesystem walk. ``prune_dir``
     maps a directory path to a skip reason ("" to enter it); a pruned
     directory is neither yielded nor entered.
@@ -243,6 +274,12 @@ def _bounded_walk(
                     try:
                         if child.is_symlink():
                             _note_skip(state, path, "symlink")
+                            continue
+                        if _reparse_entry(child):
+                            _note_skip(state, path, "reparse_point")
+                            continue
+                        if _noncanonical_name(child.name):
+                            _note_skip(state, path, "noncanonical_name")
                             continue
                         if not include_hidden and _hidden(child.name):
                             _note_skip(state, path, "hidden")
@@ -410,7 +447,11 @@ def directory_tree(
             if visible is not None and os.path.normcase(relative) not in visible:
                 skipped += 1
                 continue
-            if child.is_symlink():
+            try:
+                unsafe = _reparse_entry(child) or _noncanonical_name(child.name)
+            except OSError:
+                unsafe = True
+            if unsafe:
                 skipped += 1
                 continue
             if not include_hidden and _hidden(child.name):
@@ -527,22 +568,31 @@ def text_search(
         relative = item["relative"]
         if not (fnmatch.fnmatch(name, glob) or fnmatch.fnmatch(relative, glob)):
             continue
-        if _secret_file(path):
+        # Judge and open the file the OS actually resolves to, as file_read
+        # does, not the walk's spelling of it: a junction, a trailing-dot name
+        # or any other alias the walk did not catch must not turn a refused
+        # file into a searchable one. The walk stays under root_path, so a
+        # resolved path outside it is an alias and is never opened.
+        resolved = file_ops._resolve_best_effort(path)
+        if not file_ops._is_inside(resolved, root_path):
+            _note_skip(state, path, "resolves_outside_root")
+            continue
+        if _secret_file(resolved):
             secret_files_skipped += 1
             _note_skip(state, path, "secret_file")
             continue
         if item["bytes"] > size_limit:
             files_skipped += 1
             continue
-        if not explicit_glob and path.suffix.lower() not in TEXT_SUFFIXES:
+        if not explicit_glob and resolved.suffix.lower() not in TEXT_SUFFIXES:
             files_skipped += 1
             continue
         try:
-            with path.open("rb") as raw:
+            with resolved.open("rb") as raw:
                 if b"\0" in raw.read(4096):
                     files_skipped += 1
                     continue
-            handle = path.open("r", encoding="utf-8", errors="replace")
+            handle = resolved.open("r", encoding="utf-8", errors="replace")
         except (OSError, PermissionError):
             files_skipped += 1
             continue

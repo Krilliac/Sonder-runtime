@@ -62,6 +62,18 @@ Mitigations that are already in place and worth knowing about:
   `.pgpass`, OpenSSH key files, `.env*`) are refused by the direct read tools
   even inside an allowed root and even with a developer token or bypass,
   unless an operator-configured file root names the store itself.
+- `text_search` withholds the contents of every file `file_read` refuses as
+  a secret or credential store (the same `file_ops` predicates), whatever
+  `include_hidden`, the glob or a bypass say, and reports how many it
+  skipped. It never enters `.git`, `.ssh`, `.aws` and the other sensitive
+  directories, even with `include_ignored`. It judges and opens the resolved
+  file, and the directory walks used by search, tree and inventory do not
+  follow symlinks, junctions or other reparse points. They also skip Windows
+  names that end in a dot or space, because those open a different file.
+  Control-plane files that `file_read` refuses without a developer token
+  (`permissions.json`, `workflows.json`, `system_profile.md`, root-level
+  modules) are Sonder's own code and configuration, not credentials. They
+  stay searchable.
 - Structured `data_query` reads are bounded and side-effect-free: SQLite uses
   a read-only URI and deny-by-default authorizer, while JSON/JSONL/CSV/TSV use
   exact structured filters and projections without expression evaluation.

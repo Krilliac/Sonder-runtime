@@ -13,6 +13,7 @@ access ``file_read`` gives it.
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -143,10 +144,17 @@ def test_bypass_does_not_unlock_secret_files_in_a_search(workspace):
 
 
 def test_search_mirrors_file_read_for_every_planted_file(workspace):
-    """Content is searchable exactly when an unauthorized file_read allows it.
+    """For secret and credential stores, search follows file_read's verdict.
 
-    Pinned to ``file_read``'s own verdict, so credential names added to
-    ``file_ops`` later are withheld from the search with no change here.
+    A planted secret or credential file is searchable exactly when an
+    unauthorized file_read allows it. Pinned to ``file_read``'s own verdict,
+    so credential names added to ``file_ops`` later are withheld from the
+    search with no change here. Only secret and credential stores are
+    covered: control-plane files that file_read also refuses without a
+    developer token (``permissions.json``, ``system_profile.md``,
+    ``workflows.json``, a root-level ``server.py``) stay searchable on
+    purpose, because they are Sonder's own code and configuration, not
+    credentials.
     """
     result = workbench.text_search(".", root=".", regex=True, include_hidden=True)
     matched = _matched(result)
@@ -198,3 +206,138 @@ def test_git_metadata_directory_is_pruned_with_include_ignored(workspace):
 
     assert not any(row["relative"].startswith(".git") for row in result["matches"])
     assert result["skipped_by_reason"]["sensitive_directory"] == 3
+
+
+# --- Windows aliases: the walk's spelling must not differ from the file read.
+
+windows_only = pytest.mark.skipif(
+    os.name != "nt", reason="junctions and verbatim-path names are Windows-only",
+)
+VERBATIM_PREFIX = "\\\\?\\"  # the four characters \\?\
+
+
+def _junction(link: Path, target: Path) -> None:
+    completed = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+        capture_output=True, text=True, check=False,
+    )
+    if completed.returncode != 0 or not link.exists():
+        pytest.skip("could not create a junction: %s" % completed.stderr.strip())
+
+
+def _verbatim(path: Path) -> str:
+    """Verbatim-path spelling, the only way to create a trailing-dot name."""
+    return VERBATIM_PREFIX + str(path)
+
+
+@windows_only
+def test_junctions_into_credential_stores_are_not_followed(workspace, tmp_path):
+    outside = tmp_path / "outside"
+    (outside / ".docker").mkdir(parents=True)
+    (outside / ".docker" / "config.json").write_text('{"auths": "%s-docker"}\n' % MARK)
+    (outside / "sonder-personal-lora").mkdir()
+    (outside / "sonder-personal-lora" / "adapter_config.json").write_text("%s-lora\n" % MARK)
+    _junction(workspace / "jsub", workspace / ".aws")
+    _junction(workspace / "dk", outside / ".docker")
+    _junction(workspace / "lora", outside / "sonder-personal-lora")
+
+    result = workbench.text_search(MARK, root=".", include_hidden=True)
+
+    assert _matched(result) == {"src/ok.txt", "src/.hidden-notes"}
+    assert result["skipped_by_reason"]["reparse_point"] == 3
+    _assert_no_secret_content(repr(result))
+    assert "-lora" not in repr(result)
+
+
+@windows_only
+def test_junction_out_of_every_root_is_not_followed(workspace, tmp_path):
+    outside = tmp_path / "outside" / "plain"
+    outside.mkdir(parents=True)
+    (outside / "readme.txt").write_text("%s outside-roots\n" % MARK)
+    (outside / "notes-outside.txt").write_text("x\n")
+    _junction(workspace / "po", outside)
+
+    search = workbench.text_search(MARK, root=".", include_hidden=True)
+    mcp_search = server.text_search(MARK, include_hidden=True)
+    found = file_ops.find_files("*", root=".", max_results=200)
+    mcp_found = server.file_find("*")
+    tree = workbench.directory_tree(".", depth=4, max_entries=200)
+    inventory = workbench.workspace_inventory(".", top_n=50)
+
+    assert _matched(search) == {"src/ok.txt", "src/.hidden-notes"}
+    assert "outside-roots" not in mcp_search
+    for listing in (search, mcp_search, found, mcp_found, tree, inventory):
+        text = repr(listing)
+        assert "readme.txt" not in text
+        assert "notes-outside.txt" not in text
+
+
+@windows_only
+def test_trailing_dot_directory_beside_a_store_is_not_an_alias(workspace):
+    alias = workspace / ".aws."
+    os.mkdir(_verbatim(alias))
+    try:
+        result = workbench.text_search(MARK, root=".", include_hidden=True)
+        listed = workbench.directory_tree(".", depth=4, include_hidden=True)
+    finally:
+        os.rmdir(_verbatim(alias))
+
+    assert _matched(result) == {"src/ok.txt", "src/.hidden-notes"}
+    assert result["skipped_by_reason"]["noncanonical_name"] == 1
+    _assert_no_secret_content(repr(result))
+    assert not any(row["name"] == ".aws." for row in listed["entries"])
+
+
+@windows_only
+@pytest.mark.parametrize("directory,name", [("keys", "id_rsa"), ("k", "server.pem")])
+def test_trailing_dot_decoy_file_does_not_open_the_secret(workspace, directory, name):
+    real = workspace / directory / name
+    real.parent.mkdir()
+    real.write_text("%s real-%s\n" % (MARK, name))
+    decoy = _verbatim(real.parent / (name + "."))
+    with open(decoy, "w", encoding="utf-8") as handle:
+        handle.write("decoy\n")
+    try:
+        result = workbench.text_search(MARK, root=directory, include_hidden=True)
+        output = server.text_search(MARK, root=directory)
+    finally:
+        os.remove(decoy)
+
+    assert result["matches"] == []
+    assert "real-" not in repr(result)
+    assert "real-" not in output
+
+
+@windows_only
+def test_resolved_path_check_holds_when_the_walk_misses_an_alias(
+    workspace, tmp_path, monkeypatch,
+):
+    """Second line of defence: judge and open the resolved file.
+
+    The walk's alias checks are disabled here to stand in for an alias kind
+    they do not know yet; the per-file check on the resolved path must still
+    withhold the store behind a junction, the real key behind a trailing-dot
+    decoy, and anything that resolves outside the search root.
+    """
+    monkeypatch.setattr(workbench, "_reparse_entry", lambda entry: entry.is_symlink())
+    monkeypatch.setattr(workbench, "_noncanonical_name", lambda name: False)
+    outside = tmp_path / "outside" / "plain"
+    outside.mkdir(parents=True)
+    (outside / "readme.txt").write_text("%s outside-roots\n" % MARK)
+    _junction(workspace / "jsub", workspace / ".aws")
+    _junction(workspace / "po", outside)
+    (workspace / "keys").mkdir()
+    (workspace / "keys" / "id_rsa").write_text("%s real-id_rsa\n" % MARK)
+    decoy = _verbatim(workspace / "keys" / "id_rsa.")
+    with open(decoy, "w", encoding="utf-8") as handle:
+        handle.write("decoy\n")
+    try:
+        result = workbench.text_search(MARK, root=".", include_hidden=True)
+    finally:
+        os.remove(decoy)
+
+    assert _matched(result) == {"src/ok.txt", "src/.hidden-notes"}
+    assert result["skipped_by_reason"]["resolves_outside_root"] == 1
+    _assert_no_secret_content(repr(result))
+    assert "outside-roots" not in repr(result)
+    assert "real-id_rsa" not in repr(result)
