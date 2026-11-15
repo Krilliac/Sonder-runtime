@@ -79,6 +79,13 @@ jobs:
       # legacy module sizes are shrink-only against scripts/lint_baseline.json.
       - name: Enforce lint gate and shrink-only ratchets
         run: python scripts/check_lint_ratchet.py
+      # Strict mypy for the allowlist in scripts/typing_strict_modules.txt, checked for
+      # linux and win32; a new sonder_runtime module must be strict-clean. On a pull
+      # request --against keeps both lists one-way relative to the base branch.
+      - name: Enforce typing ratchet
+        env:
+          TYPING_RATCHET_BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || '' }}
+        run: python scripts/check_typing_ratchet.py ${TYPING_RATCHET_BASE:+--against "$TYPING_RATCHET_BASE"}
       - name: Prevent new Git-history privacy debt
         run: python scripts/check_history_privacy.py --json
       - name: Check operator/developer doc links

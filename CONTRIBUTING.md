@@ -53,6 +53,7 @@ python scripts/check_architecture.py
 python scripts/check_requirement_evidence.py
 python scripts/check_error_signals.py
 python scripts/check_lint_ratchet.py
+python scripts/check_typing_ratchet.py
 python scripts/check_history_privacy.py --json
 python -m pytest -q -n auto --dist load --durations=25
 ```
@@ -119,6 +120,7 @@ venv/Scripts/python scripts/check_architecture.py         # layer/import boundar
 venv/Scripts/python scripts/check_requirement_evidence.py # master-spec requirement IDs vs the evidence ledger
 venv/Scripts/python scripts/check_error_signals.py         # shrink-only ratchet on legacy "ERROR:"-prefixed returns
 venv/Scripts/python scripts/check_lint_ratchet.py          # ruff blocking rules + shrink-only lint and module-size ratchets
+venv/Scripts/python scripts/check_typing_ratchet.py        # mypy --strict on the allowlist; new sonder_runtime modules must be strict-clean
 venv/Scripts/python scripts/check_history_privacy.py --json # no new sensitive Git-history debt
 venv/Scripts/python scripts/check_doc_links.py              # relative links in README/wiki/runbooks resolve
 ```
@@ -143,6 +145,8 @@ one most contributors hit first — it
 rejects, for example, a new `sqlite3.connect` or `subprocess` call outside
 `sonder_runtime/adapters/`, or a domain module importing anything outside
 `sonder_runtime/domain/` plus the standard library.
+
+`check_typing_ratchet.py` runs the `mypy` pinned in `requirements-dev.txt` with `--strict` for both `linux` and `win32` (settings in `mypy.ini`). Every `.py` file under `sonder_runtime/` is listed in exactly one of `scripts/typing_strict_modules.txt` (must stay strict-clean) or `scripts/typing_baseline.txt` (legacy; shrink-only). A new module in neither list fails: write it so it passes `--strict`, then `python scripts/check_typing_ratchet.py --update` adds it to the strict list, promotes any baseline module you fixed, and drops deleted ones. It never adds to the baseline, and CI's `--against <base>` rejects a baseline that grew or a strict module that was dropped.
 
 ## What tends to get merged
 
