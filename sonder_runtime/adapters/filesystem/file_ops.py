@@ -106,6 +106,10 @@ RUNTIME_PACKAGE_DIRS = ("sonder_runtime",)
 # privileges at the next run -- the same hole the root-level clause closes.
 FIRST_PARTY_CODE_DIRS = ("scripts", "migrations")
 FIRST_PARTY_CODE_FILES = (("tests", "conftest.py"),)
+# Package data the runtime loads as policy (model_tool_policy.json holds the
+# tool-lane floor). It replaced Python constants that the ``.py`` clause below
+# protected, so it keeps that protection whatever its suffix.
+RUNTIME_PACKAGE_DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 # Launchers and scripts a host shell runs directly.
 EXECUTABLE_SCRIPT_SUFFIXES = frozenset({".py", ".cmd", ".bat", ".ps1", ".psm1", ".sh"})
 # Repository metadata a later git command executes from (hooks, config with
@@ -459,6 +463,8 @@ def _is_sensitive_control_path(path: Path) -> bool:
 def _is_protected_mutation_path(path: Path) -> bool:
     path = _resolve_best_effort(path)
     if _is_sensitive_control_path(path):
+        return True
+    if _is_inside(path, _resolve_best_effort(RUNTIME_PACKAGE_DATA_DIR)):
         return True
     suffix = path.suffix.lower()
     if suffix not in EXECUTABLE_SCRIPT_SUFFIXES:

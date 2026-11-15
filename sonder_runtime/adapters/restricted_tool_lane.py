@@ -31,6 +31,15 @@ A restricted turn (:class:`RestrictedRun`) is then fenced:
   path matching a secret glob are withheld from the observation
   (``filter_observation``); a line that does not parse is withheld too.
 
+Its own model calls.  The restricted model stays on the deny list, so the
+generation guard (``tool_lane_guard.require_generation``) would refuse its
+first call.  ``_agent_turn`` wraps only this turn's generator in
+:func:`permitted` (``generation_permit``), which holds a permit for the length
+of each call on the calling thread; the guard then lets exactly this run's
+model through, after :meth:`RestrictedRun.still_granted` decides its grant
+again.  Tool dispatch, nested agents and every other model call run outside
+that window, and the permit names one model, so it opens nothing else.
+
 A :class:`RestrictedRun` belongs to one agent turn on one thread; it is not
 shared and holds no lock.
 """
@@ -47,8 +56,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import sonder_runtime.adapters.generation_permit as _generation_permit
 import sonder_runtime.adapters.model_tool_grants as _grants
 import sonder_runtime.adapters.model_tool_policy as _mtp
+import sonder_runtime.adapters.runtime_policy as _policy
 import sonder_runtime.adapters.tool_lane_guard as _guard
 from sonder_runtime.domain import model_tool_grants as _rules
 from sonder_runtime.domain.tool_lane_models import ModelLaneStatus, refusal_message
@@ -194,6 +205,11 @@ def admit(
     ), ""
 
 
+def permitted(run: "RestrictedRun | None", generate: Callable[..., Any]) -> Callable[..., Any]:
+    """``generate`` unchanged without a restricted run, else :meth:`RestrictedRun.generator`."""
+    return generate if run is None else run.generator(generate)
+
+
 def _rules_refusal(model: Any, decision: _rules.ModelToolDecision) -> str:
     status = {
         _rules.ModelToolStatus.POLICY_UNREADABLE: ModelLaneStatus.POLICY_UNREADABLE,
@@ -227,6 +243,27 @@ class RestrictedRun:
         self.caller_project = caller_project
         self.target = target
         self.project_root = ""
+
+    def generator(self, generate: Callable[..., Any]) -> Callable[..., Any]:
+        """``generate``, with this run's own model let through the generation guard.
+
+        The permit holds for the length of each call, on the thread making it
+        (``generation_permit.wrap``); a call made on another thread, or after
+        the call returns, does not carry it and is refused as before.
+        """
+        return _generation_permit.wrap(generate, model=self.model, still_granted=self.still_granted)
+
+    def still_granted(self, policy: Mapping[str, Any] | None = None) -> bool:
+        """Whether this run's model still has a grant opening its lane with one of its tools.
+
+        Decided again from the files on each call, so a grant revoked mid-turn
+        stops the next model call.  Any fault answers False.
+        """
+        try:
+            decision = decide(self.model, policy if policy else _policy.load(create=False))
+        except Exception:  # noqa: BLE001 - an unreadable policy grants nothing
+            return False
+        return decision.permits(self.lane) and bool(decision.tools & self.tools)
 
     def allowlist(self, requested: Any) -> frozenset[str]:
         """The caller's allowlist (when it gave one) narrowed to the granted tools."""
@@ -359,16 +396,26 @@ class RestrictedRun:
     # -- observation filter -------------------------------------------------
 
     def _secret_or_outside(self, base: str, path_text: str) -> bool:
+        """Whether a result row's path is outside the project or names a secret.
+
+        Both the spelled path and its ``realpath`` are checked: a junction or
+        symlink inside the project can spell an inside path for a file that is
+        outside it, and the glob applies to either name.
+        """
         if not path_text.strip() or not self.project_root:
             return True
-        candidate = os.path.normpath(os.path.join(base, path_text.strip()))
-        try:
-            relative = os.path.relpath(candidate, self.project_root).replace("\\", "/")
-        except ValueError:  # another drive on Windows
-            return True
-        if relative == ".." or relative.startswith("../"):
-            return True
-        return bool(_rules.secret_glob_match(relative, self.secret_globs))
+        lexical = os.path.normpath(os.path.join(base, path_text.strip()))
+        root = os.path.realpath(self.project_root)
+        for candidate in (lexical, os.path.realpath(lexical)):
+            try:
+                relative = os.path.relpath(candidate, root).replace("\\", "/")
+            except ValueError:  # another drive on Windows
+                return True
+            if relative == ".." or relative.startswith("../"):
+                return True
+            if _rules.secret_glob_match(relative, self.secret_globs):
+                return True
+        return False
 
     def _row_names_secret(self, base: str, rest: str) -> bool:
         """Whether a ``path:line:col`` result row names a secret path (or does not parse).
@@ -454,5 +501,6 @@ class RestrictedRun:
 
 
 __all__ = [
-    "LaneEntry", "RestrictedRun", "admit", "decide", "entering", "entry", "suppressed", "suppressing",
+    "LaneEntry", "RestrictedRun", "admit", "decide", "entering", "entry", "permitted",
+    "suppressed", "suppressing",
 ]

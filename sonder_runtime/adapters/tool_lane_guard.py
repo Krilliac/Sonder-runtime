@@ -44,6 +44,7 @@ import sys
 from collections.abc import Callable, Mapping, MutableMapping
 from typing import Any
 
+import sonder_runtime.adapters.generation_permit as _generation_permit
 import sonder_runtime.adapters.model_tool_policy as _model_tool_policy
 import sonder_runtime.adapters.runtime_policy as _policy
 from sonder_runtime.domain import tool_lane_models as _models
@@ -220,7 +221,9 @@ def require_generation(
     names and the payload's own ``model`` (as tier-bound names, so an
     unreadable policy still refuses the built-in list without refusing an
     ordinary model).  A caller whose reply is only returned or shown passes
-    ``text_only=True`` and those names are not judged.
+    ``text_only=True`` and those names are not judged.  The one exception
+    to the refusal is a restricted agent turn's own generator calling its
+    granted model with no bridged rung (``generation_permit``).
 
     A bridged ``rung`` is a tier call, and a blocked model never serves a
     tier: the model its provider is configured to serve is judged whatever
@@ -239,7 +242,7 @@ def require_generation(
             names.append(payload.get("model"))
         for name in names:
             verdict = _models.decide(name, deny, free_form=False)
-            if verdict.denied:
+            if verdict.denied and not (rung is None and _generation_permit.permits(name, policy)):
                 raise _generation_refused(_models.refusal_message(verdict.model, verdict.status, verdict.matched))
     if rung is None:
         return

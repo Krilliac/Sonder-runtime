@@ -183,6 +183,32 @@ def test_missing_shipped_file_does_not_rewrite_tier_bindings(missing_shipped):
     assert bound["code"] == policy["local_models"]["code"]
 
 
+@pytest.mark.parametrize("model", [DENIED, ALLOWED])
+def test_missing_shipped_file_refuses_writing_a_tier_binding(missing_shipped, tmp_path, model):
+    """Without the floor no binding can be judged, so none is written (not even an ordinary one)."""
+    policy_file = tmp_path / "runtime_policy.json"
+    runtime_policy.load(create=True)
+    before = policy_file.read_bytes()
+    with pytest.raises(ValueError, match="shipped model tool policy is unavailable"):
+        runtime_policy.update(local_models={"general": model})
+    assert policy_file.read_bytes() == before
+
+
+def test_the_same_binding_write_succeeds_with_the_shipped_file():
+    runtime_policy.update(local_models={"general": ALLOWED})
+    assert runtime_policy.load(create=False)["local_models"]["general"] == ALLOWED
+
+
+def test_missing_shipped_file_seeds_no_tier_from_the_environment(missing_shipped):
+    from sonder_runtime.domain.runtime_policy import rules as policy_rules
+
+    floor = mtp.shipped_floor()
+    assert not floor.available
+    for model in (DENIED, ALLOWED):
+        seeded = policy_rules.seed_model({"SONDER_CODE": model}, "code", floor=floor)
+        assert seeded == policy_rules.DEFAULT_MODELS["code"], model
+
+
 @pytest.mark.parametrize("content", [
     "{not json",
     "[]",
@@ -348,6 +374,25 @@ def test_invalid_overlay_is_not_cached_and_recovers(overlay_file):
     assert mtp.load().readable_overlay
     assert decide("fixed-model").status is ModelLaneStatus.DENIED
     assert decide(ALLOWED, free_form=True).status is ModelLaneStatus.ALLOWED
+
+
+def test_a_failed_read_is_reused_briefly_for_the_same_files(overlay_file, monkeypatch):
+    """Every model call asks; a bad overlay is not parsed again on each one."""
+    overlay_file.write_text("{broken", encoding="utf-8")
+    builds = []
+    real = mtp._build
+    monkeypatch.setattr(mtp, "_build", lambda: builds.append(1) or real())
+    clock = [1000.0]
+    monkeypatch.setattr(mtp.time, "monotonic", lambda: clock[0])
+    for _ in range(5):
+        assert not mtp.load().readable_overlay
+    assert len(builds) == 1
+    clock[0] += mtp.FAILED_READ_TTL_SECONDS + 0.01  # the bound passes: read again
+    assert not mtp.load().readable_overlay
+    assert len(builds) == 2
+    write_overlay(overlay_file, [profile("mine", names=["fixed-model"])])  # the file changes: read again
+    assert mtp.load().readable_overlay
+    assert len(builds) == 3
 
 
 def test_oversized_overlay_is_refused(overlay_file):

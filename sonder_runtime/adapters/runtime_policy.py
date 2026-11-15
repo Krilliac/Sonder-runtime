@@ -350,7 +350,14 @@ def update(
                 )
             # An explicit request to bind a blocked model is refused outright;
             # only a file that already names one loads with that tier dropped.
-            blocked = _rules.denied_local_bindings(local_models, tool_lane_deny_list(candidate))
+            deny = tool_lane_deny_list(candidate)
+            if not deny.floor.available:
+                # Without the shipped floor no binding can be judged, so none is written.
+                raise ValueError(
+                    "runtime policy local_models cannot be changed while the shipped "
+                    "model tool policy is unavailable: %s" % deny.floor.detail
+                )
+            blocked = _rules.denied_local_bindings(local_models, deny)
             if blocked:
                 tier, model = blocked[0]
                 raise ValueError(

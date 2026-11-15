@@ -20633,12 +20633,12 @@ def _agent_turn(
         {"spent": 0, "total": _CLOUD_AGENT_OUTPUT_BUDGET}
         if cloud else None
     )
-    gen = _make_tier_generate(
+    gen = _restricted_tool_lane.permitted(restricted, _make_tier_generate(  # its own model calls only
         tier_label, model, system, agent_temperature, agent_num_predict, agent_num_ctx, cloud=cloud,
         cancel_check=cancel_check,
         accept_native_tool_calls=True,
         compact_cloud_reasoning=True, generation_kind="decision",
-    )
+    ))
     if capture_session is not None:
         gen = wrap_model_generator(
             gen,

@@ -181,6 +181,7 @@
         "sonder_runtime/adapters/fleet_synthesis.py",
         "sonder_runtime/adapters/fleet_workers.py",
         "sonder_runtime/adapters/gateway_generation.py",
+        "sonder_runtime/adapters/generation_permit.py",
         "sonder_runtime/adapters/git/__init__.py",
         "sonder_runtime/adapters/git_discovery.py",
         "sonder_runtime/adapters/git_mutation_guard.py",

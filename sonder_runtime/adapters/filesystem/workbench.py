@@ -123,6 +123,20 @@ def _note_skip(state, path, reason, *, expose_path=True):
         state["skipped_examples"].append({"path": str(path), "reason": reason})
 
 
+def _is_link(entry: os.DirEntry) -> bool:
+    """A symlink or an NTFS junction: neither is followed by a tree walk.
+
+    ``DirEntry.is_symlink()`` is False for a junction, so a walk that checked
+    only that descended through a project junction into a folder outside it.
+    ``DirEntry.is_junction`` exists from Python 3.12; on an older interpreter
+    only the symlink check applies.
+    """
+    if entry.is_symlink():
+        return True
+    is_junction = getattr(entry, "is_junction", None)
+    return bool(is_junction is not None and is_junction())
+
+
 def _bounded_walk(
     root: Path, *, include_hidden=False, include_ignored=False,
     max_entries=DEFAULT_WALK_ENTRIES, timeout_seconds=DEFAULT_WALK_SECONDS,
@@ -202,7 +216,7 @@ def _bounded_walk(
                         )
                         continue
                     try:
-                        if child.is_symlink():
+                        if _is_link(child):
                             _note_skip(state, path, "symlink")
                             continue
                         if not include_hidden and _hidden(child.name):
@@ -367,7 +381,7 @@ def directory_tree(
             if visible is not None and os.path.normcase(relative) not in visible:
                 skipped += 1
                 continue
-            if child.is_symlink():
+            if _is_link(child):
                 skipped += 1
                 continue
             if not include_hidden and _hidden(child.name):

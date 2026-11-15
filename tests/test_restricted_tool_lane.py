@@ -11,6 +11,8 @@ from __future__ import annotations
 import ast
 import json
 import re
+import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -439,3 +441,188 @@ def test_the_auto_tier_path_is_suppressed(catalog, overlay, project, monkeypatch
         "inspect", "general", max_steps=2, allow_web=False, project=str(project), allow_location=False,
     )
     assert seen == [None]
+
+
+# ---- the restricted model's own calls reach the real generation guard -------------
+# Above, the generator is scripted; here only the HTTP transport is, so every
+# call goes through _make_generate, _chat_request and require_generation.
+
+@pytest.fixture
+def transport(monkeypatch):
+    """Fake Ollama transport: each send answers with the next scripted decision."""
+    sent, replies = [], []
+
+    def fake_post(path, payload, **kwargs):
+        sent.append(payload["model"])
+        content = replies.pop(0) if replies else json.dumps({"final": "done"})
+        return {
+            "model": payload["model"],
+            "message": {"role": "assistant", "content": content},
+            "done_reason": "stop", "prompt_eval_count": 3, "eval_count": 2,
+        }, 1
+
+    monkeypatch.setattr(server, "_post_model", fake_post)
+    monkeypatch.setattr(server, "_known_thinking_model", lambda model: False)
+    monkeypatch.setattr(server, "_think_option_supported", lambda model: False)
+    monkeypatch.setattr(server, "_auto_model_context", lambda model: 4096)
+    return sent, replies
+
+
+def test_a_restricted_turn_reaches_its_model_through_the_real_guard(
+    catalog, overlay, project, transport, dispatched,
+):
+    overlay()
+    sent, replies = transport
+    replies.extend([
+        json.dumps({"tool": "text_search", "args": {"query": "needle"}}),
+        json.dumps({"final": "found it"}),
+    ])
+    output = server.agent("inspect the project", tier=DENIED, checklist=False, project=str(project))
+    assert "blocked from tool-using" not in output, output
+    assert sent and set(sent) == {DENIED}, sent
+    assert [name for name, _args in dispatched] == ["text_search"]
+    assert "found it" in output and "TOPSECRET" not in output
+
+
+def test_the_same_model_is_refused_outside_the_restricted_turn(catalog, overlay, project, transport):
+    overlay()
+    sent, _replies = transport
+    server.agent("inspect the project", tier=DENIED, checklist=False, project=str(project))
+    before = len(sent)
+    gen = server._make_generate(DENIED, "", 0.2, 64, 4096)
+    with pytest.raises(server.ModelCallError) as caught:
+        gen("hi")
+    assert caught.value.tool_lane_refused is True
+    assert len(sent) == before  # nothing sent
+    with pytest.raises(server.ModelCallError):
+        guard.require_generation(DENIED)
+
+
+def _run(lane_name="agent", model=DENIED):
+    return lane.RestrictedRun(
+        lane=lane_name, model=model, tools=frozenset(GRANTED), profiles=("security-advisers",),
+        secret_globs=(".env",), caller_project="", target=("x", False, None, "model:" + model),
+    )
+
+
+def _guarded(model, **kwargs):
+    guard.require_generation(model, **kwargs)
+    return "sent"
+
+
+def test_the_permit_covers_only_the_runs_own_model_during_its_own_call(catalog, overlay):
+    overlay()
+    run = _run()
+    assert run.generator(_guarded)(DENIED) == "sent"
+    # Another model under the same profile is not this run's model.
+    with pytest.raises(server.ModelCallError):
+        run.generator(_guarded)(DENIED_SMALL)
+    # After the call returns, nothing is permitted.
+    with pytest.raises(server.ModelCallError):
+        _guarded(DENIED)
+    # Not through a bridged rung either.
+    rung = type("Rung", (), {"provider": "openrouter", "tier": "code"})()
+    with pytest.raises(server.ModelCallError):
+        run.generator(lambda: _guarded(DENIED, rung=rung))()
+
+
+def test_the_permit_does_not_follow_a_call_onto_another_thread(catalog, overlay):
+    overlay()
+    outcome = []
+
+    def on_another_thread():
+        def target():
+            try:
+                outcome.append(_guarded(DENIED))
+            except server.ModelCallError:
+                outcome.append("refused")
+        worker = threading.Thread(target=target)
+        worker.start()
+        worker.join()
+
+    _run().generator(on_another_thread)()
+    assert outcome == ["refused"]
+
+
+def test_the_permit_is_decided_again_on_each_call(catalog, overlay):
+    overlay()
+    run = _run()
+    generate = run.generator(_guarded)
+    assert generate(DENIED) == "sent"
+    overlay(tools=[])  # the operator revokes the grant mid-turn
+    with pytest.raises(server.ModelCallError):
+        generate(DENIED)
+
+
+def test_the_permit_needs_the_runs_lane_in_the_grant(catalog, overlay):
+    overlay(lanes=["agent"])
+    with pytest.raises(server.ModelCallError):
+        _run("workbench_agent").generator(_guarded)(DENIED)
+
+
+def test_a_nested_agent_inside_a_tool_dispatch_gets_no_permit(catalog, overlay, project, transport, monkeypatch):
+    """A tool dispatched by the restricted turn runs outside the generator's call."""
+    overlay()
+    sent, replies = transport
+    seen = []
+    real = server._agent_dispatch_observed
+
+    def dispatch(tool_name, args, *a, **k):
+        try:
+            seen.append(_guarded(DENIED))
+        except server.ModelCallError:
+            seen.append("refused")
+        return real(tool_name, args, *a, **k)
+
+    monkeypatch.setattr(server, "_agent_dispatch_observed", dispatch)
+    replies.extend([json.dumps({"tool": "directory_tree", "args": {}}), json.dumps({"final": "ok"})])
+    server.agent("inspect the project", tier=DENIED, checklist=False, project=str(project))
+    assert seen == ["refused"]
+
+
+# ---- a junction inside the project does not reach outside it -----------------------
+
+windows_only = pytest.mark.skipif(sys.platform != "win32", reason="NTFS junctions are Windows only")
+
+
+@pytest.fixture
+def junctioned(project, tmp_path):
+    """``<project>/docs`` is a junction to a folder outside the project."""
+    import _winapi
+
+    outside = tmp_path / "outside_project"
+    outside.mkdir()
+    (outside / "notes.txt").write_text("needle OUTSIDE_CONTENT\n", encoding="utf-8")
+    (outside / "outside_mod.py").write_text("def outside_symbol_name():\n    return 1\n", encoding="utf-8")
+    _winapi.CreateJunction(str(outside), str(project / "docs"))
+    return project
+
+
+@windows_only
+@pytest.mark.parametrize("call", [
+    {"tool": "text_search", "args": {"query": "needle", "root": "."}},
+    {"tool": "repository_symbol_index", "args": {"path": "."}},
+    {"tool": "directory_tree", "args": {"path": "."}},
+])
+def test_a_project_junction_does_not_leak_outside_content(catalog, overlay, junctioned, monkeypatch, call):
+    overlay()
+    script = Script(call, {"final": "done"})
+    run(monkeypatch, script, project=str(junctioned))
+    seen = "\n".join(script.prompts[1:])
+    assert seen
+    for leaked in ("OUTSIDE_CONTENT", "notes.txt", "outside_symbol_name", "outside_mod"):
+        assert leaked not in seen, (leaked, seen)
+
+
+@windows_only
+def test_the_search_filter_withholds_a_row_reached_through_a_junction(junctioned):
+    run = _run()
+    run.project_root = str(junctioned)
+    observation = "\n".join([
+        "matches for 'needle':",
+        r"  docs\notes.txt:1:1: needle OUTSIDE_CONTENT",  # spelled inside, reached through the junction
+        r"  src\app.py:1:5: def needle():",
+    ])
+    filtered = run.filter_observation("text_search", {"root": str(junctioned)}, observation)
+    assert "OUTSIDE_CONTENT" not in filtered
+    assert r"  src\app.py:1:5: def needle():" in filtered.split("\n")

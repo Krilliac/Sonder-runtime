@@ -44,6 +44,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -59,6 +60,11 @@ OVERLAY_FILE_NAME = "model_tool_policy.json"
 SHIPPED_PATH = Path(__file__).resolve().parent / "data" / "model_tool_policy.json"
 # A policy file is a short list of names; anything larger is not one.
 MAX_FILE_BYTES = 1024 * 1024
+# How long a failed read is reused for the same file identity.  Every model
+# call asks, so a bad file would otherwise be parsed again on each one; the
+# bound keeps a transient read failure (a file held open by another program)
+# from outliving the moment.
+FAILED_READ_TTL_SECONDS = 1.0
 
 CEILING_KEY = "restricted_tool_ceiling"
 SECRET_GLOBS_KEY = "restricted_secret_path_globs"
@@ -420,7 +426,9 @@ def _merge_profiles(shipped: _Document | None, overlay: _Document | None) -> tup
 
 # ---- merge and cache ---------------------------------------------------------
 
-_CACHE: tuple[tuple, ModelToolConfig] | None = None
+# ``(key, config, expiry)``: expiry is None for a clean read, else the
+# ``time.monotonic()`` after which a failed read is read again.
+_CACHE: tuple[tuple, ModelToolConfig, float | None] | None = None
 
 
 def identity_key() -> tuple | None:
@@ -479,18 +487,22 @@ def load() -> ModelToolConfig:
     """The merged config, read again only when either file changed.
 
     Never raises.  The key is taken before the read and checked after it, so a
-    write racing the read is never cached under a newer key; a result with any
-    issue is not cached.  Thread-safe: the cache is one tuple replaced
+    write racing the read is never cached under a newer key.  A result with
+    any issue is reused for the same key for at most
+    ``FAILED_READ_TTL_SECONDS``.  Thread-safe: the cache is one tuple replaced
     atomically, and a racing reader at worst reads the files itself.
     """
     global _CACHE
     key = identity_key()
     cached = _CACHE
-    if key is not None and cached is not None and cached[0] == key:
+    if key is not None and cached is not None and cached[0] == key and (
+        cached[2] is None or time.monotonic() < cached[2]
+    ):
         return cached[1]
     config = _build()
-    if key is not None and not config.issues and identity_key() == key:
-        _CACHE = (key, config)
+    if key is not None and identity_key() == key:
+        expiry = None if not config.issues else time.monotonic() + FAILED_READ_TTL_SECONDS
+        _CACHE = (key, config, expiry)
     return config
 
 

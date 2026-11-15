@@ -150,8 +150,11 @@ def seed_model(env, tier: str, *, floor: ToolLaneFloor) -> str:
         configured = ""
     if configured and not is_cloud_name(configured):
         model = validate_model(configured, DEFAULT_MODELS[tier])
-        # A model blocked from tool lanes is never seeded into a tier.
-        if decide_listed(model, ToolLaneDenyList.from_policy(None, floor=floor), free_form=False).denied:
+        # A model blocked from tool lanes is never seeded into a tier, and
+        # without the shipped floor no model can be judged, so none is.
+        if not floor.available or decide_listed(
+            model, ToolLaneDenyList.from_policy(None, floor=floor), free_form=False,
+        ).denied:
             return DEFAULT_MODELS[tier]
         return model
     return DEFAULT_MODELS[tier]
