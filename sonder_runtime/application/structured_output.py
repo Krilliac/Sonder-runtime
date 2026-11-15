@@ -8,8 +8,13 @@ constrain decoding (Ollama, as its ``format`` field) does so; one that cannot
 the reply is checked here either way.  Constraining the decoder is a claim about
 the backend; the check on the returned text is the evidence.
 
-On a failed check the call is retried (default once) with the rejected reply and
-the validation errors appended as two history turns.  Exhausted retries return a
+A schema using a keyword the check cannot evaluate raises ``InvalidInput``
+before any model call: validation never reports success on unchecked rules.
+
+On a failed check the call is retried (default once): the original prompt and
+the rejected reply move into history (user, assistant) and the correction
+becomes the new prompt, so gateways that place history before the prompt send
+strictly alternating turns.  Exhausted retries return a
 typed failure.  Gateway errors (timeouts, consent, outages) are not validation
 failures and propagate unchanged.
 
@@ -23,7 +28,7 @@ from .context import OperationContext
 from .ports.model_gateway import ModelGateway, ModelRequest
 from .security.prompt_provenance import ProvenanceError
 from ..domain.common.errors import InvalidInput
-from ..domain.json_reply import check_reply
+from ..domain.json_reply import check_reply, unsupported_keywords
 
 MAX_RETRIES = 3
 _ERROR_LIMIT = 8
@@ -59,7 +64,8 @@ class StructuredResult:
     tier: str
     tokens_in: int | None
     tokens_out: int | None
-    # Schema keywords the check could not evaluate (see domain.json_reply).
+    # Always empty on a returned result (unsupported schemas raise before any
+    # call); kept so callers can assert nothing went unchecked.
     unchecked: tuple[str, ...]
 
     @property
@@ -90,6 +96,12 @@ def generate_structured(
 ) -> StructuredResult:
     if not isinstance(schema, dict):
         raise InvalidInput("structured output schema must be a JSON object")
+    gaps = unsupported_keywords(schema)
+    if gaps:
+        raise InvalidInput(
+            "structured output schema uses keywords that cannot be validated: %s"
+            % ", ".join(gaps)
+        )
     if isinstance(retries, bool) or not isinstance(retries, int) or not 0 <= retries <= MAX_RETRIES:
         raise InvalidInput("structured output retries must be an integer from 0 to %d" % MAX_RETRIES)
     options = dict(request.options or {})
@@ -116,11 +128,19 @@ def generate_structured(
         if attempt == retries:
             break
         try:
-            current = replace(current, history=(
-                *current.history,
-                {"role": "assistant", "content": response.text},
-                {"role": "user", "content": _correction(checked.errors)},
-            ))
+            current = replace(
+                current,
+                history=(
+                    *current.history,
+                    {"role": "user", "content": current.prompt},
+                    {"role": "assistant", "content": response.text},
+                ),
+                prompt=_correction(checked.errors),
+                # These describe the original request, not the retry.
+                prefix_manifest=None,
+                replay_manifest=None,
+                prefix_cache_observation=None,
+            )
         except ProvenanceError:
             failure = StructuredFailure("retry_unavailable", checked.errors)
             break

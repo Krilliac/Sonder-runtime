@@ -58,11 +58,40 @@ def test_schema_violations_are_named_by_path(reply, fragment):
     assert any(fragment in error for error in result.errors)
 
 
-def test_keywords_it_cannot_check_are_reported_not_passed():
+def test_keywords_it_cannot_check_fail_closed_not_pass():
     result = check_reply('{"a": 1}', {"type": "object", "if": {}, "then": {}})
-    assert result.ok
+    assert not result.ok
+    assert result.kind == "unsupported_schema"
     assert "if" in result.unchecked
     assert "then" in result.unchecked
+    assert result.value is None
+
+
+def test_unsupported_keyword_in_a_nested_subschema_fails_closed():
+    schema = {"type": "object", "properties": {"a": {"type": "string", "format": "date"}}}
+    result = check_reply('{}', schema)
+    assert result.kind == "unsupported_schema"
+    assert result.unchecked == ("format",)
+
+
+def test_deeply_nested_reply_is_a_typed_invalid_json_not_an_exception():
+    result = check_reply("[" * 100000, {"type": "array"})
+    assert result.kind == "invalid_json"
+
+
+@pytest.mark.parametrize("text", ["NaN", "Infinity", "-Infinity"])
+def test_non_json_number_constants_are_rejected(text):
+    assert check_reply(text, {"type": "number"}).kind == "invalid_json"
+
+
+def test_non_string_required_entries_fail_closed():
+    result = check_reply("{}", {"type": "object", "required": [1]})
+    assert result.kind == "unsupported_schema"
+
+
+def test_a_property_named_like_a_keyword_is_not_a_gap():
+    schema = {"type": "object", "properties": {"format": {"type": "string"}}}
+    assert check_reply('{"format": "x"}', schema).ok
 
 
 def test_annotation_keywords_are_not_gaps():

@@ -69,11 +69,10 @@ def test_invalid_then_valid_retries_once_with_the_error_appended():
     assert result.ok and result.value == {"answer": 42}
     assert len(gateway.requests) == 2
     retry = gateway.requests[1]
-    assert retry.prompt == gateway.requests[0].prompt
-    roles = [row["role"] for row in retry.history]
-    assert roles[-2:] == ["assistant", "user"]
-    assert '{"answer": "forty-two"}' in retry.history[-2]["content"]
-    assert "$.answer" in retry.history[-1]["content"]
+    assert [row["role"] for row in retry.history] == ["user", "assistant"]
+    assert retry.history[0]["content"] == gateway.requests[0].prompt
+    assert '{"answer": "forty-two"}' in retry.history[1]["content"]
+    assert "$.answer" in retry.prompt
     assert retry.options["schema"] == SCHEMA
     assert (result.tokens_in, result.tokens_out) == (20, 10)
     assert len(result.attempts) == 2
@@ -108,13 +107,35 @@ def test_retries_are_configurable_and_zero_means_one_call():
     assert len(gateway.requests) == 1
 
 
-def test_unchecked_schema_keywords_are_disclosed_on_the_result():
-    schema = dict(SCHEMA, **{"if": {}})
-    result = generate_structured(
-        FakeGateway(['{"answer": 1}']), _request(), _context(), schema,
+def test_retry_after_existing_history_ending_in_assistant_alternates_roles():
+    gateway = FakeGateway(["nope", '{"answer": 42}'])
+    request = ModelRequest(
+        "what is 6*7?", "code",
+        history=(
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ),
     )
+    result = generate_structured(gateway, request, _context(), SCHEMA)
     assert result.ok
-    assert "if" in result.unchecked
+    retry = gateway.requests[1]
+    sequence = [row["role"] for row in retry.history] + ["user"]
+    assert sequence == ["user", "assistant", "user", "assistant", "user"]
+    assert all(a != b for a, b in zip(sequence, sequence[1:], strict=False))
+
+
+@pytest.mark.parametrize("schema", [
+    dict(SCHEMA, **{"if": {}}),
+    {"type": "object", "properties": {"a": {"$ref": "#/x"}}},
+    {"type": "array", "items": {"format": "date"}},
+    {"anyOf": [{"type": "string"}, {"allOf": []}]},
+    {"type": "string", "pattern": "("},
+])
+def test_unsupported_schema_keywords_fail_before_any_model_call(schema):
+    gateway = FakeGateway(['{"answer": 1}'])
+    with pytest.raises(InvalidInput):
+        generate_structured(gateway, _request(), _context(), schema)
+    assert gateway.requests == []
 
 
 def test_a_non_object_schema_is_rejected_before_any_call():
@@ -197,7 +218,7 @@ def test_retry_through_the_real_generator_sends_only_role_content_messages(monke
     assert len(payloads) == 2
     assert payloads[1]["format"] == SCHEMA
     messages = payloads[1]["messages"]
-    assert [m["role"] for m in messages] == ["system", "assistant", "user", "user"]
+    assert [m["role"] for m in messages] == ["system", "user", "assistant", "user"]
     assert all(isinstance(m, dict) and set(m) == {"role", "content"} for m in messages)
 
 

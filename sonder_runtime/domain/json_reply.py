@@ -1,10 +1,11 @@
 """Check that a model reply is JSON matching a JSON Schema.
 
-Pure and stdlib-only.  It enforces the common keyword subset below and reports
-every other schema keyword as ``unchecked`` instead of treating it as
-satisfied: a decoder-side constraint is a claim about the backend, not
-evidence, so what this check could not look at must stay visible to the
-caller.  Nothing is repaired, coerced or defaulted.
+Pure and stdlib-only.  It enforces the common keyword subset below and fails
+closed on everything else: a schema that uses a keyword (or a malformed value
+for one) this check cannot evaluate is rejected as ``unsupported_schema``
+before the reply is looked at, never passed as satisfied.  A decoder-side
+constraint is a claim about the backend, not evidence.  Nothing is repaired,
+coerced or defaulted.
 
 Enforced: type, enum, const, required, properties, additionalProperties
 (bool or schema), items (single schema), minItems, maxItems, minLength,
@@ -29,6 +30,11 @@ _ENFORCED = frozenset({
 _TYPE_NAMES = frozenset({
     "object", "array", "string", "integer", "number", "boolean", "null",
 })
+UNSUPPORTED_SCHEMA = "unsupported_schema"
+_BOUND_KEYWORDS = (
+    "minItems", "maxItems", "minLength", "maxLength", "minimum", "maximum",
+    "exclusiveMinimum", "exclusiveMaximum",
+)
 
 
 @dataclass(frozen=True)
@@ -43,6 +49,10 @@ class ReplyCheck:
     @property
     def ok(self) -> bool:
         return not self.kind
+
+
+def _reject_constant(name: str) -> object:
+    raise ValueError("%s is not a JSON value" % name)
 
 
 def _strip_fence(text: str) -> str:
@@ -229,14 +239,94 @@ def _walk_number(value: int | float, schema: dict, path: str, errors: list[str],
             errors.append("%s: %s %s %s" % (path, value, message, bound))
 
 
+def _scan(schema: object, path: str, found: set[str]) -> None:
+    if schema is True or schema is False:
+        return
+    if not isinstance(schema, dict):
+        found.add("<non-object subschema at %s>" % path)
+        return
+    for keyword in schema:
+        if keyword not in _ENFORCED and keyword not in _ANNOTATIONS:
+            found.add(keyword)
+    declared = schema.get("type")
+    if declared is not None:
+        names = [declared] if isinstance(declared, str) else declared
+        if not isinstance(names, list) or not names or not all(
+            isinstance(n, str) and n in _TYPE_NAMES for n in names
+        ):
+            found.add("type")
+    if "enum" in schema and not isinstance(schema["enum"], list):
+        found.add("enum")
+    if "required" in schema and not (
+        isinstance(schema["required"], list)
+        and all(isinstance(name, str) for name in schema["required"])
+    ):
+        found.add("required")
+    for keyword in _BOUND_KEYWORDS:
+        if keyword in schema:
+            bound = schema[keyword]
+            if isinstance(bound, bool) or not isinstance(bound, (int, float)):
+                found.add(keyword)
+    if "pattern" in schema:
+        pattern = schema["pattern"]
+        try:
+            if not isinstance(pattern, str):
+                raise re.error("not a string")
+            re.compile(pattern)
+        except re.error:
+            found.add("pattern")
+    if "properties" in schema:
+        properties = schema["properties"]
+        if isinstance(properties, dict):
+            for name, sub in properties.items():
+                _scan(sub, "%s.%s" % (path, name), found)
+        else:
+            found.add("properties")
+    if "additionalProperties" in schema:
+        extra = schema["additionalProperties"]
+        if isinstance(extra, (bool, dict)):
+            _scan(extra, path + ".*", found)
+        else:
+            found.add("additionalProperties")
+    if "items" in schema:
+        sub = schema["items"]
+        if isinstance(sub, (dict, bool)):
+            _scan(sub, path + "[]", found)
+        else:
+            found.add("items")
+    if "anyOf" in schema:
+        branches = schema["anyOf"]
+        if isinstance(branches, list) and branches:
+            for index, branch in enumerate(branches):
+                _scan(branch, "%s|%d" % (path, index), found)
+        else:
+            found.add("anyOf")
+
+
+def unsupported_keywords(schema: object) -> tuple[str, ...]:
+    """Every keyword (or malformed value) in ``schema`` this check cannot
+    evaluate, sorted; empty when the whole schema is checkable."""
+    found: set[str] = set()
+    _scan(schema, "$", found)
+    return tuple(sorted(found))
+
+
 def check_reply(text: str, schema: dict) -> ReplyCheck:
     """Parse ``text`` as JSON and check it against ``schema``.
 
     A single surrounding Markdown code fence is tolerated; anything else around
-    the JSON is an ``invalid_json`` failure.
+    the JSON is an ``invalid_json`` failure.  A schema using anything outside
+    the enforced subset is an ``unsupported_schema`` failure.
     """
+    gaps = unsupported_keywords(schema)
+    if gaps:
+        return ReplyCheck(None, UNSUPPORTED_SCHEMA, (
+            "schema uses keywords this check cannot evaluate: %s" % ", ".join(gaps),
+        ), gaps)
     try:
-        value = json.loads(_strip_fence(text))
+        value = json.loads(_strip_fence(text), parse_constant=_reject_constant)
+    except RecursionError:
+        return ReplyCheck(None, "invalid_json", ("reply is nested too deeply to be valid JSON",), ())
     except (TypeError, ValueError) as exc:
         return ReplyCheck(None, "invalid_json", ("reply is not valid JSON: %s" % exc,), ())
     errors: list[str] = []
