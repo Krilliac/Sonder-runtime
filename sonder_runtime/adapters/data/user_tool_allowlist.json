@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "tools": [
+    {
+      "name": "status",
+      "why": "Cached inference-pool capacity summary. Reads no host file, process, window or secret and probes nothing."
+    },
+    {
+      "name": "admin_whoami",
+      "why": "Reports the account attached to the caller's own session token. Acts on nothing."
+    },
+    {
+      "name": "tool_help",
+      "why": "Static argument help for advertised tools. Read-only."
+    },
+    {
+      "name": "command_registry_list",
+      "why": "Static listing of slash commands by name, category and risk. Read-only."
+    },
+    {
+      "name": "tool_manifest",
+      "why": "Tool name list. On the served path it is replaced by the role-filtered manifest, so a user sees only what the role may run."
+    },
+    {
+      "name": "tool_capability_manifest",
+      "why": "Tool schemas and fingerprint. On the served path it is replaced by the role-filtered manifest. Visibility only."
+    }
+  ]
+}

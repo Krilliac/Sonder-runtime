@@ -80,6 +80,13 @@
       "name": "build_model"
     },
     {
+      "effects": [
+        "read_files"
+      ],
+      "execution_class": "pure",
+      "name": "claim_check"
+    },
+    {
       "effects": [],
       "execution_class": "pure",
       "name": "compute_artifact_fetch"
