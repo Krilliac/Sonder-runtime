@@ -80,7 +80,7 @@ import sonder_runtime.adapters.observability.activity_tracker as activity_tracke
 import sonder_runtime.adapters.observability.chat_formatting as chat_formatting
 import sonder_runtime.adapters.secrets as sonder_secrets
 import sonder_runtime.adapters.web.lifecycle as sonder_lifecycle
-from sonder_runtime.adapters.security.login_throttle import LoginThrottled
+from sonder_runtime.adapters.web import login_throttle_http
 import sonder_runtime.platform.config as runtime_config
 import sonder_runtime.platform.paths as runtime_paths
 from sonder_runtime.adapters.command_catalog import command_catalog
@@ -4948,8 +4948,8 @@ class Handler(BaseHTTPRequestHandler):
         return self._auth_throttle_gate(reserve=False)
 
     def _auth_reserve_refused(self):
-        """Credential-checking routes: spend a token in the same locked step
-        as the check; the route refunds it on success (``_refund_auth_attempt``).
+        """Credential-checking routes (``login_throttle_http``): spend a token
+        in the same locked step as the check; the route refunds it on success.
         """
         return self._auth_throttle_gate(reserve=True)
 
@@ -4969,29 +4969,8 @@ class Handler(BaseHTTPRequestHandler):
                 sonder_lifecycle.get(), "auth_rate_limited",
                 getattr(self, "_request_started", time.monotonic()),
             )
-        self._send_auth_throttled()
+        login_throttle_http.send_throttled(self)
         return True
-
-    def _send_auth_throttled(self, retry_after=2):
-        self._send_json_payload(
-            sonder_lifecycle.error_envelope(
-                "AUTH_RATE_LIMITED",
-                "too many failed authentication attempts; retry later",
-                self._correlation(),
-                retryable=True,
-            ),
-            status=429,
-            headers={"Retry-After": str(retry_after)},
-        )
-
-    def _record_login_failure(self, reason):
-        # The reservation taken at admission already paid for this failure.
-        sonder_lifecycle.get().record_auth_failure(
-            self._client_ip(), reason, charge=False
-        )
-
-    def _refund_auth_attempt(self):
-        sonder_lifecycle.get().refund_auth_attempt(self._client_ip())
 
     def _peer_is_loopback(self):
         # A loopback peer earns its conveniences only through a trusted Host
@@ -7044,77 +7023,14 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_permission_mode_post(req, context=context)
             return
         if path == "/v1/sonder/register":
-            if self._auth_reserve_refused():
-                return
-            conn = server._open_db()
-            try:
-                account = admin_auth.register(
-                    conn,
-                    req.get("username", ""),
-                    req.get("password", ""),
-                    trusted_local=False,
-                    bootstrap_secret=self.headers.get(
-                        "X-Sonder-Bootstrap-Secret", ""
-                    ),
-                    allow_additional=ALLOW_REGISTRATION,
-                    actor=context["account"] if context["authorized"] else None,
-                )
-                self._refund_auth_attempt()
-                # ``message`` lets a client that only reads ``ok``/``message``
-                # (older apps) report the success instead of a bare 201.
-                self._send_json_payload({
-                    "ok": True, "account": account,
-                    "message": _account_created_message(account),
-                }, status=201)
-            except PermissionError as error:
-                self._record_login_failure("registration-denied")
-                self._send_json_payload({"ok": False, "message": str(error)}, status=403)
-            except sqlite3.IntegrityError:
-                self._refund_auth_attempt()
-                self._send_json_payload({"ok": False, "message": "account already exists"}, status=409)
-            except ValueError as error:
-                self._refund_auth_attempt()
-                self._send_json_payload({"ok": False, "message": str(error)}, status=400)
-            except Exception as error:
-                self._refund_auth_attempt()
-                _serve_logger.error(f"account registration failed,correlation={self._correlation()!r}", exc_info=True)
-                self.log_error("registration failed: %s", type(error).__name__)
-                self._send_json_payload({"ok": False, "message": "registration failed"}, status=500)
-            finally:
-                conn.close()
+            login_throttle_http.handle_register(
+                self, req, context, runtime=server, admin_auth=admin_auth,
+                allow_registration=ALLOW_REGISTRATION,
+                created_message=_account_created_message)
             return
         if path == "/v1/sonder/login":
-            if context["mode"] in ("api-key", "both") and not context["api_key"]:
-                self._send_auth_error()
-                return
-            if self._auth_reserve_refused():
-                return
-            conn = server._open_db()
-            try:
-                token, account = admin_auth.login(
-                    conn, req.get("username", ""), req.get("password", ""),
-                    client_ip=self._client_ip(),
-                )
-                self._refund_auth_attempt()
-                self._send_json_payload({"ok": True, "token": token, "account": account})
-            except LoginThrottled as error:
-                # Refused before any password work: not a guess, so it does
-                # not spend the caller's budget.
-                self._refund_auth_attempt()
-                self._record_login_failure("login-throttled")
-                self._send_auth_throttled(error.retry_after_seconds)
-            except (ValueError, PermissionError):
-                self._record_login_failure("invalid-credentials")
-                self._send_json_payload(
-                    {"ok": False, "message": "invalid username or password"}, status=401
-                )
-            except Exception as error:
-                self._refund_auth_attempt()
-                _serve_logger.error(f"login failed,correlation={self._correlation()!r}", exc_info=True)
-                self.log_error("login failed: %s", type(error).__name__)
-                self._send_json_payload({"ok": False, "message": "login failed"}, status=500)
-            finally:
-                conn.close()
+            login_throttle_http.handle_login(
+                self, req, context, runtime=server, admin_auth=admin_auth)
             return
         if path == "/v1/sonder/admin/account":
             if not context["authorized"]:
