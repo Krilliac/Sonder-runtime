@@ -123,7 +123,7 @@ def test_a_gitfile_naming_the_live_git_directory_is_live(checkout, tmp_path, whe
     head, shipped = _head(checkout.repo), checkout.shipped.read_bytes()
     folder = checkout.project / "linked" if where == "inside" else tmp_path / "outside"
     target = "../checkout/.git" if where == "outside_relative" else (checkout.repo / ".git").as_posix()
-    _developer_write(folder / ".git", "gitdir: %s\n" % target)
+    _developer_write(folder / ".git", f"gitdir: {target}\n")
     # git agrees: run in that folder it uses the live git directory.
     used = git(folder, "rev-parse", "--absolute-git-dir").stdout.strip()
     assert used.casefold() == (checkout.repo / ".git").as_posix().casefold()
@@ -138,7 +138,7 @@ def _planted_git_dir(files, tmp_path, head_text, name="planted"):
     _developer_write(planted / "HEAD", head_text)
     _developer_write(planted / "commondir", (files.repo / ".git").as_posix() + "\n")
     folder = tmp_path / (name + "_tree")
-    _developer_write(folder / ".git", "gitdir: %s\n" % planted.as_posix())
+    _developer_write(folder / ".git", f"gitdir: {planted.as_posix()}\n")
     return folder
 
 
@@ -173,7 +173,7 @@ def test_a_core_worktree_into_the_live_tree_is_live(checkout, tmp_path):
     git(planted, "config", "core.bare", "false")
     git(planted, "config", "core.worktree", checkout.repo.as_posix())
     folder = tmp_path / "configured_tree"
-    _developer_write(folder / ".git", "gitdir: %s\n" % planted.as_posix())
+    _developer_write(folder / ".git", f"gitdir: {planted.as_posix()}\n")
     assert git(folder, "rev-parse", "--show-toplevel").stdout.strip().casefold() == checkout.repo.as_posix().casefold()
     assert live_checkout.is_live(folder)
     # Run inside the git directory itself, git takes it as the repository and the same working tree.

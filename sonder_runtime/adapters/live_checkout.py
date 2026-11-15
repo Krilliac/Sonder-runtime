@@ -152,7 +152,7 @@ def _gitfile_dirs(gitfile: Path) -> list[Path]:
     if not line.startswith(_GITFILE_PREFIX):
         return []
     value = line[len(_GITFILE_PREFIX):]
-    return _named_paths(value[1:] if value.startswith(" ") else value, gitfile.parent)
+    return _named_paths(value.removeprefix(" "), gitfile.parent)
 
 
 def _git_dirs_at(directory: Path) -> list[Path]:
