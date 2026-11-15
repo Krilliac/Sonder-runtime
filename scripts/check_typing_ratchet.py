@@ -18,6 +18,9 @@ Checks, in order:
 1. Every listed path exists, and no path is in both lists.
 2. Every file under ``sonder_runtime/`` is listed (the "new untyped module" check).
 3. ``mypy --strict`` reports no error in any strict module.
+   A strict module may not opt itself out: any ``# mypy:`` configuration comment
+   or a ``# type: ignore`` comment above its first statement (which mypy treats
+   as ignoring the whole file) fails the gate.
 4. With ``--against REF``: the baseline holds nothing that REF's baseline did
    not, and no module that is strict at REF dropped out of the strict list
    while its file still exists.  This is what makes the lists one-way in review.
@@ -34,9 +37,12 @@ produced output this script cannot read).
 from __future__ import annotations
 
 import argparse
+import ast
+import io
 import re
 import subprocess
 import sys
+import tokenize
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -102,6 +108,42 @@ def parse_mypy_output(text: str) -> dict[str, list[str]]:
     return dict(errors)
 
 
+_MYPY_DIRECTIVE = re.compile(r"^#\s*mypy\s*:", re.IGNORECASE)
+_TYPE_IGNORE = re.compile(r"^#\s*type\s*:\s*ignore(?![\w-])", re.IGNORECASE)
+
+
+def find_opt_outs(source: str) -> list[str]:
+    """Describe every way *source* switches off or relaxes its own type check.
+
+    Flags any ``# mypy:`` configuration comment (file-level ``ignore-errors`` or
+    inline flags that relax ``--strict``) and any ``# type: ignore`` comment that
+    sits above the first real statement, which mypy applies to the whole file.
+    """
+    try:
+        tree = ast.parse(source)
+        comments = [
+            (token.start[0], token.string)
+            for token in tokenize.generate_tokens(io.StringIO(source).readline)
+            if token.type == tokenize.COMMENT
+        ]
+    except (SyntaxError, tokenize.TokenError, ValueError) as exc:
+        return ["cannot be scanned for opt-out comments (%s)" % exc]
+    body = list(tree.body)
+    if (
+        body and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str)
+    ):
+        body = body[1:]
+    first_line = body[0].lineno if body else 10**9
+    found = []
+    for line, text in comments:
+        if _MYPY_DIRECTIVE.match(text):
+            found.append("line %d has a `# mypy:` configuration comment (%s)" % (line, text))
+        elif line < first_line and _TYPE_IGNORE.match(text):
+            found.append("line %d has `# type: ignore` before the first statement, which ignores the whole file" % line)
+    return found
+
+
 def _run_mypy_once(root: Path, platform: str) -> dict[str, list[str]]:
     command = [
         sys.executable, "-m", "mypy", "--strict",
@@ -121,6 +163,15 @@ def _run_mypy_once(root: Path, platform: str) -> dict[str, list[str]]:
     if completed.returncode not in (0, 1):
         raise RatchetError("mypy failed (exit %d): %s" % (completed.returncode, output.strip()[-2000:]))
     errors = parse_mypy_output(completed.stdout)
+    printed = sum(1 for raw in completed.stdout.splitlines() if ": error:" in raw)
+    parsed = sum(len(lines) for lines in errors.values())
+    if printed > parsed:
+        # An error line this script could not attribute to a file (for example a
+        # Windows drive-colon path) must never read as a clean module.
+        raise RatchetError(
+            "mypy printed %d error lines but only %d were readable: %s"
+            % (printed, parsed, output.strip()[-2000:])
+        )
     if completed.returncode == 1 and not errors:
         # Exit 1 means mypy found errors. If none parsed, the output format
         # changed and a silent pass would be a fabricated one.
@@ -150,11 +201,14 @@ def evaluate(
     strict: Sequence[str],
     baseline: Sequence[str],
     errors: Mapping[str, Sequence[str]],
+    root: Path | None = None,
 ) -> tuple[list[str], list[str]]:
     """Return ``(violations, promotable)`` for the current tree.
 
     ``promotable`` is every module that is not strict yet and has no mypy error:
     a baseline module that was fixed, or a new file written strict-clean.
+    When *root* is given, each strict module's source is also scanned for
+    comments that opt it out of checking.
     """
     present = set(modules)
     strict_set = set(strict)
@@ -175,6 +229,15 @@ def evaluate(
     for path in sorted(strict_set & present):
         for line in errors.get(path, ()):
             violations.append("strict module regressed: %s" % line)
+    if root is not None:
+        for path in sorted(strict_set & present):
+            try:
+                source = (root / path).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                violations.append("strict module %s cannot be read for the opt-out scan: %s" % (path, exc))
+                continue
+            for problem in find_opt_outs(source):
+                violations.append("strict module opts out of checking: %s: %s" % (path, problem))
     promotable = [
         path for path in modules
         if path not in strict_set and path in present and not errors.get(path)
@@ -268,14 +331,14 @@ def main(argv: list[str] | None = None) -> int:
         baseline = read_list(BASELINE_PATH)
         if not strict:
             raise RatchetError("%s is empty or missing; run --init once" % STRICT_PATH.name)
-        violations, promotable = evaluate(modules, strict, baseline, errors)
+        violations, promotable = evaluate(modules, strict, baseline, errors, REPO_ROOT)
         if args.against:
             violations += compare_against(REPO_ROOT, args.against, modules, strict, baseline)
     except (RatchetError, OSError) as exc:
         print("typing ratchet: %s" % exc, file=sys.stderr)
         return 2
     if args.update:
-        regressions = [v for v in violations if v.startswith("strict module regressed")]
+        regressions = [v for v in violations if v.startswith("strict module")]
         if regressions:
             print("refusing --update while a strict module has errors:", file=sys.stderr)
             for line in regressions:
