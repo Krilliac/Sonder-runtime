@@ -1093,6 +1093,9 @@ _ENTRIES = [
      "SonderInferenceProtocolProbe._request", "/v1/chat/completions", 1, TEXT, _PROBE),
     ("sonder_runtime/adapters/model_bootstrap.py", "LegacyModelBootstrapAdapter.make_generate",
      "_make_generate", 1, CHOKE, "OllamaGateway's generate factory; forwards every keyword"),
+    ("sonder_runtime/adapters/security_eval/model_client.py", "GatewayVerdictModel.ask", GATEWAY_GENERATE, 1, TEXT,
+     "security_eval verdicts are parsed and scored as text, never run; the registrar hands this the "
+     "ServedTierGateway text wrapper, and residency is refused before any request"),
     ("sonder_runtime/adapters/provider_dispatch/fallback.py", "PreSendFallbackGateway.generate",
      GATEWAY_GENERATE, 2, CHOKE, "packaged gateway plumbing"),
     ("sonder_runtime/adapters/provider_dispatch/gateway.py", "ProviderDispatchGateway.generate",
@@ -1142,6 +1145,10 @@ _ENTRIES = [
      "the vision critique steers the next round's script; a refused vision tier turns the critique off",
      (), "the call passes no selector: _vision_analyze_impl always answers on the vision tier, "
      "which the critique judges by name ('vision')"),
+    ("sonder_runtime/bootstrap/security_eval_agent_tools.py", "evaluate", "raw-gateway:" + RAW_GATEWAY_ATTRIBUTE, 1,
+     TEXT, "reads Application.model_gateway only to wrap it in ServedTierGateway (the text consumers' handle, as "
+     "ChatService gets it): the tool is text-only, and the checked ToolLaneGateway would refuse the "
+     "security adviser models this eval exists to measure; reviewer sign-off requested"),
     ("sonder_runtime/interfaces/http/facades/model_request.py", "<module>", "/v1/chat/completions", 1, TEXT,
      _OWN_CHAT),
     ("sonder_runtime/interfaces/http/facades/model_request.py", "ModelRequestFacade.invoke.complete",

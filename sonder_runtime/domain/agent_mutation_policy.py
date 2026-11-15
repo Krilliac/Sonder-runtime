@@ -11,7 +11,7 @@ WORK_MUTATION_TOOLS = frozenset({
     "memory_embedding_backfill", "memory_interaction_embedding_backfill",
     "git_commit", "git_branch", "git_checkout", "git_stash", "git_tag", "git_merge", "git_cherry_pick",
     "dependency_add", "dependency_remove", "dependency_update", "build_clean", "rename_symbol", "apply_patch",
-    "lint_run", "format_code", "task_delete",
+    "lint_run", "format_code", "task_delete", "security_eval",
 })
 
 

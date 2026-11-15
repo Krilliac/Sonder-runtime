@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from sonder_runtime.platform.config_environment import env_bool
 
 CONTEXT_MODES = ("none", "retrieved", "both")
-_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$")
+MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$")
 PREFIX = "SONDER_SECURITY_EVAL_"
 TEMPLATE_MAX_BYTES = 32768
 
@@ -111,7 +111,7 @@ def security_eval_config_from_env(env, errors: list[str] | None = None) -> Secur
         config = replace(config, repo_roots=tuple(roots))
     model = text.get(PREFIX + "MODEL", "")
     if model:
-        if _MODEL_RE.fullmatch(model):
+        if MODEL_RE.fullmatch(model):
             config = replace(config, model=model)
         else:
             bad("MODEL", "is not a valid model name")
