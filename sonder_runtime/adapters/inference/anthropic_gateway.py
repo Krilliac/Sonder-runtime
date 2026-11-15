@@ -561,6 +561,13 @@ class AnthropicGateway:
         )
         token, spent, inflight = self._ledger.try_reserve(worst, settings.daily_usd)
         if token is None:
+            if settings.daily_usd <= 0:
+                raise AnthropicDailyCapReached(
+                    "Anthropic calls are disabled: the daily cap %s is 0, which refuses "
+                    "every call; raise it to use Anthropic"
+                    % ENV_DAILY_USD,
+                    cap_usd=settings.daily_usd, spent_usd=spent,
+                )
             if worst > settings.daily_usd:
                 raise AnthropicDailyCapReached(
                     "Anthropic call refused: its worst-case cost %s (max_tokens of output "
@@ -827,8 +834,10 @@ class AnthropicGateway:
         worst-case cost) is known, that worst case is recorded instead of zero.
         """
         usage = data.get("usage")
-        if not isinstance(usage, Mapping):
-            usage = None
+        if not isinstance(usage, Mapping) or (
+            usage.get("input_tokens") is None and usage.get("output_tokens") is None
+        ):
+            usage = None  # absent, or carrying neither token count: unreported, not free
         counts = {name: int((usage or {}).get(name) or 0) for name in (
             "input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens",
         )}
