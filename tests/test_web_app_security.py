@@ -448,10 +448,6 @@ def test_concurrent_requests_during_swap_never_see_a_half_loaded_bundle(tmp_path
     assert set(seen) <= {"r1", "r2"} and "r2" in seen
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "FINDING: cached_bundle caches a transient current.json read failure (Windows "
-    "PermissionError during os.replace) under the new stat key, so /app/ stays 404 "
-    "until the next swap or a restart.  Flip when the loader stops caching OSError loads."))
 def test_transient_read_failure_is_not_cached(tmp_path, monkeypatch):
     web_app.clear_cache()
     write_release(tmp_path)

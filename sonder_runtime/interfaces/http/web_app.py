@@ -140,6 +140,7 @@ class BundleLoad:
     code: str = ""
     remedy: str = ""
     message: str = ""
+    transient: bool = False  # an OSError read failure; do not cache, retry next request
 
     @property
     def ok(self) -> bool:
@@ -150,8 +151,9 @@ class BundleLoad:
         return cls(bundle=bundle)
 
     @classmethod
-    def error(cls, code: str, message: str, remedy: str = BUILD_REMEDY) -> "BundleLoad":
-        return cls(None, code, remedy, message)
+    def error(cls, code: str, message: str, remedy: str = BUILD_REMEDY,
+              transient: bool = False) -> "BundleLoad":
+        return cls(None, code, remedy, message, transient)
 
 
 def content_type_for(relpath: str) -> str:
@@ -189,7 +191,8 @@ def _unquote_strict(text: str) -> str:
 
 
 def _no_link(path: Path) -> bool:
-    return not (path.is_symlink() or path.is_junction())
+    is_junction = getattr(os.path, "isjunction", lambda _path: False)
+    return not (path.is_symlink() or is_junction(path))
 
 
 def _read_json(path: Path) -> object:
@@ -222,7 +225,9 @@ def load_bundle(root: Path) -> BundleLoad:
         return BundleLoad.error(not_built, f"no web app build found under {root}")
     try:
         pointer = _read_json(current)
-    except (OSError, ValueError):
+    except OSError:
+        return BundleLoad.error(not_built, "current.json is unreadable", transient=True)
+    except ValueError:
         return BundleLoad.error(not_built, "current.json is unreadable")
     name = pointer.get("release") if isinstance(pointer, dict) else None
     if (not isinstance(name, str) or _RELEASE_NAME.fullmatch(name) is None
@@ -240,7 +245,10 @@ def load_bundle(root: Path) -> BundleLoad:
         return BundleLoad.error(not_built, "release is outside the web app root")
     try:
         manifest = _read_json(release_dir / MANIFEST_NAME)
-    except (OSError, ValueError):
+    except OSError:
+        return BundleLoad.error(
+            not_built, "release manifest is missing or unreadable", transient=True)
+    except ValueError:
         return BundleLoad.error(not_built, "release manifest is missing or unreadable")
     if not isinstance(manifest, dict) or manifest.get("schema") != MANIFEST_SCHEMA:
         return BundleLoad.error(not_built, "release manifest has an unsupported schema")
@@ -312,7 +320,10 @@ def cached_bundle(root: Path) -> BundleLoad:
         if entry is not None and entry[0] == key:
             return entry[1]
         loaded = load_bundle(Path(root))
-        _CACHE[cache_key] = (key, loaded)
+        if loaded.transient:
+            _CACHE.pop(cache_key, None)
+        else:
+            _CACHE[cache_key] = (key, loaded)
         return loaded
 
 
