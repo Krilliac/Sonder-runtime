@@ -18,7 +18,6 @@ assets/local-system.zip
 /linux/
 /macos/
 /windows/
-/web/
 
 # IDE / OS
 .idea/
