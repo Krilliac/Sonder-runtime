@@ -131,6 +131,50 @@ def test_fixed_argv_has_guards_total_memory_and_recursive_readonly(tmp_path):
     assert name == "sonder-isolated-" + "a" * 32
 
 
+@pytest.mark.parametrize("scratch", [None, 256])
+def test_env_segment_puts_double_dash_after_dash_i_and_not_before_command(
+    tmp_path, scratch
+):
+    # env stops option parsing at the first NAME=VALUE, so a later "--" would be
+    # executed as the program (busybox and GNU env both fail on it).
+    project = tmp_path / "project"
+    project.mkdir()
+    argv, _name = _build(
+        _runtime_path(tmp_path), "python:3.12-alpine", ["python", "-c", "pass"],
+        str(project.resolve()), build_scratch_mb=scratch,
+    )
+    home, tmpdir = (
+        ("HOME=/build/home", "TMPDIR=/build/tmp") if scratch else
+        ("HOME=/tmp", "TMPDIR=/tmp")
+    )
+    start = argv.index("python:3.12-alpine") + 1
+    assert argv[start:] == [
+        "-i", "--",
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        home, tmpdir, "LANG=C.UTF-8",
+        "python", "-c", "pass",
+    ]
+    assert argv[argv.index("python") - 1] != "--"
+    assert argv.count("--") == 1
+
+
+def test_command_whose_program_contains_equals_is_refused(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    for command in (["FOO=bar", "run"], ["/bin/a=b"]):
+        with pytest.raises(ValueError, match="cannot contain '='"):
+            _build(
+                _runtime_path(tmp_path), "python:3.12-alpine", command,
+                str(project.resolve()),
+            )
+    # Later arguments may contain '=' freely.
+    argv, _name = _build(
+        _runtime_path(tmp_path), "python:3.12-alpine", ["env-tool", "A=b"],
+        str(project.resolve()),
+    )
+    assert argv[-2:] == ["env-tool", "A=b"]
+
+
 def test_writable_workspace_changes_only_mount_mode(tmp_path):
     project = tmp_path / "project"
     project.mkdir()
@@ -379,7 +423,7 @@ def test_bounded_pinned_image_inspection_returns_immutable_id(monkeypatch):
         ),
     )
     assert isolated_runner._inspect_image_policy(
-        r"C:\docker.exe", DOCKER_PREFIX, "busybox:1.36"
+        "docker", r"C:\docker.exe", DOCKER_PREFIX, "busybox:1.36"
     ) == IMAGE_ID
     assert calls[0][:4] == [r"C:\docker.exe", *DOCKER_PREFIX, "image"]
     assert calls[0][-1] == "busybox:1.36"
@@ -394,12 +438,12 @@ def test_docker_and_podman_image_volumes_are_rejected(monkeypatch, volumes):
         ),
     )
     prefixes = [
-        DOCKER_PREFIX,
-        ("--url", "ssh://core@127.0.0.1:2222/run/podman.sock"),
+        ("docker", DOCKER_PREFIX),
+        ("podman", ("--url", "ssh://core@127.0.0.1:2222/run/podman.sock")),
     ]
-    for prefix in prefixes:
+    for name, prefix in prefixes:
         with pytest.raises(ValueError, match="declaring OCI volumes"):
-            isolated_runner._inspect_image_policy("runtime.exe", prefix, "image:tag")
+            isolated_runner._inspect_image_policy(name, "runtime.exe", prefix, "image:tag")
 
 
 def test_image_inspection_error_and_oversize_fail_closed(monkeypatch):
@@ -410,10 +454,61 @@ def test_image_inspection_error_and_oversize_fail_closed(monkeypatch):
         ),
     )
     with pytest.raises(ValueError, match="inspection failed"):
-        isolated_runner._inspect_image_policy("runtime", (), "image")
+        isolated_runner._inspect_image_policy("docker", "runtime", (), "image")
     monkeypatch.setattr(isolated_runner, "_bounded_probe", lambda *_a, **_k: None)
     with pytest.raises(ValueError, match="safety bound"):
-        isolated_runner._inspect_image_policy("runtime", (), "image")
+        isolated_runner._inspect_image_policy("docker", "runtime", (), "image")
+
+
+@pytest.mark.parametrize("runtime_name, field", [("docker", ".Id"), ("podman", ".ID")])
+def test_inspect_template_uses_engine_specific_id_field(monkeypatch, runtime_name, field):
+    calls = []
+    monkeypatch.setattr(
+        isolated_runner, "_bounded_probe",
+        lambda argv, **_kwargs: calls.append(argv) or subprocess.CompletedProcess(
+            argv, 0, stdout=json.dumps({"id": IMAGE_ID, "volumes": None}), stderr=""
+        ),
+    )
+    isolated_runner._inspect_image_policy(runtime_name, "runtime", (), "image:tag")
+    template = calls[0][calls[0].index("--format") + 1]
+    assert template == '{"id":{{json %s}},"volumes":{{json .Config.Volumes}}}' % field
+
+
+def test_inspect_rejects_unknown_runtime_name(monkeypatch):
+    monkeypatch.setattr(
+        isolated_runner, "_bounded_probe",
+        lambda *_a, **_k: pytest.fail("must not probe an unknown runtime"),
+    )
+    with pytest.raises(ValueError, match="Docker or Podman"):
+        isolated_runner._inspect_image_policy("nerdctl", "runtime", (), "image")
+
+
+def test_inspect_failure_includes_bounded_sanitised_stderr(monkeypatch):
+    noisy = "Error: template: can't evaluate field Id\x1b[31m\r\n" + "x" * 5000
+    monkeypatch.setattr(
+        isolated_runner, "_bounded_probe",
+        lambda *_a, **_k: subprocess.CompletedProcess([], 125, stdout="", stderr=noisy),
+    )
+    with pytest.raises(ValueError, match="inspection failed") as caught:
+        isolated_runner._inspect_image_policy("podman", "runtime", (), "image")
+    message = str(caught.value)
+    assert "can't evaluate field Id" in message
+    assert "exit 125" in message
+    assert "the image must already be installed" in message
+    assert not isolated_runner._CONTROL_RE.search(message)
+    assert len(message) < 400
+
+
+def test_stderr_excerpt_strips_c1_and_format_characters_and_stays_bounded():
+    # C1 controls, bidi override/isolate, zero-width space and joiner, BOM.
+    bidi_and_zero_width = "".join(chr(code) for code in (0x202E, 0x2066, 0x200B, 0x200D, 0xFEFF))
+    hostile = "bad\x85line\x9bCSI" + bidi_and_zero_width[0] + "evil" + bidi_and_zero_width[1:2] + "x" + bidi_and_zero_width[2:3] + "z" + bidi_and_zero_width[3:4] + "w" + bidi_and_zero_width[4:] + "end"
+    excerpt = isolated_runner._stderr_excerpt(hostile)
+    for char in "\x85\x9b" + bidi_and_zero_width:
+        assert char not in excerpt
+    assert excerpt.split() == ["bad", "line", "CSI", "evil", "x", "z", "w", "end"]
+    long = isolated_runner._stderr_excerpt(chr(0x200B) * 50 + "y" * 5000)
+    assert long == "y" * 200
 
 
 def test_metadata_probe_hard_caps_output_without_thread_leak(monkeypatch):

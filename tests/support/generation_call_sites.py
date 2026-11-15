@@ -1153,7 +1153,7 @@ _ENTRIES = [
     ("sonder_runtime/interfaces/http/facades/observatory_routes.py", "ecosystem_document",
      "raw-gateway:" + RAW_GATEWAY_ATTRIBUTE, 1, CHOKE,
      "reads the gateway's provider status for the ecosystem document; generates nothing"),
-    ("sonder_runtime/interfaces/http/serve.py", "Handler._auth_rate_limited", "/v1/chat/completions", 1,
+    ("sonder_runtime/interfaces/http/serve.py", "Handler._auth_throttle_gate", "/v1/chat/completions", 1,
      TEXT, _OWN_CHAT),
     ("sonder_runtime/interfaces/http/serve.py", "Handler._handle_post_request", "/v1/chat/completions", 3,
      TEXT, _OWN_CHAT),
