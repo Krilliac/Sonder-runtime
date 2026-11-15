@@ -47,6 +47,7 @@ from sonder_runtime.platform.artifact_mobility_source_config import (
 )
 from sonder_runtime.platform.app_control_config import AppControlConfig, app_control_errors
 from sonder_runtime.platform.computer_use_config import ComputerUseConfig, computer_use_errors
+from sonder_runtime.platform.health_alerts_config import HealthAlertsConfig, health_alerts_errors
 from sonder_runtime.platform.control_state_rehearsal_config import (
     ControlStateRehearsalConfig,
     control_state_rehearsal_errors,
@@ -94,6 +95,7 @@ SECRET_ENV_KEYS = (
     "SONDER_BACKUP_KEY_FILE",
     "SONDER_LAUNCHER_HEALTH_TOKEN",
     "SONDER_CONTROL_STATE_REHEARSAL_API_KEY",
+    "SONDER_HEALTH_ALERT_NTFY_URL",
 )
 _SECRET_TOML_KEYS = frozenset(
     {
@@ -105,6 +107,7 @@ _SECRET_TOML_KEYS = frozenset(
         "membership_client_cert_file",
         "membership_client_key_file",
         "control_state_rehearsal_key",
+        "health_alert_ntfy_url",
         "auth_secret",
         "backup_key",
         "backup_key_file",
@@ -467,6 +470,7 @@ class Secrets:
     membership_client_cert_file: str = field(default="", repr=False)
     membership_client_key_file: str = field(default="", repr=False)
     control_state_rehearsal_key: str = field(default="", repr=False)
+    health_alert_ntfy_url: str = field(default="", repr=False)
 
     def as_redacted_dict(self) -> dict:
         return {
@@ -484,6 +488,7 @@ class Secrets:
             "control_state_rehearsal_key": redact_presence(
                 self.control_state_rehearsal_key
             ),
+            "health_alert_ntfy_url": redact_presence(self.health_alert_ntfy_url),
             "auth_secret": redact_presence(self.auth_secret),
             "backup_key_file": redact_presence(self.backup_key_file),
         }
@@ -646,6 +651,7 @@ class SonderConfig:
     child_storage: ChildStorageConfig = field(default_factory=ChildStorageConfig)
     app_control: AppControlConfig = field(default_factory=AppControlConfig)
     computer_use: ComputerUseConfig = field(default_factory=ComputerUseConfig)
+    health_alerts: HealthAlertsConfig = field(default_factory=HealthAlertsConfig)
     membership: MembershipConfig = field(default_factory=MembershipConfig)
     control_state_rehearsal: ControlStateRehearsalConfig = field(
         default_factory=ControlStateRehearsalConfig
@@ -782,6 +788,10 @@ class SonderConfig:
         out['computer_use'] = {
             item.name: getattr(self.computer_use, item.name)
             for item in fields(self.computer_use)
+        }
+        out['health_alerts'] = {
+            item.name: getattr(self.health_alerts, item.name)
+            for item in fields(self.health_alerts)
         }
         out['child_storage'] = {
             item.name: ('<configured>' if self.child_storage.binding_file else '<unset>')
@@ -971,6 +981,7 @@ _SECTION_TYPES = {
     "child_storage": ChildStorageConfig,
     "app_control": AppControlConfig,
     "computer_use": ComputerUseConfig,
+    "health_alerts": HealthAlertsConfig,
     "control_state_rehearsal": ControlStateRehearsalConfig,
     "state": StateConfig,
     "context": ContextConfig,
@@ -1701,6 +1712,10 @@ def _apply_environment(
                 "SONDER_CONTROL_STATE_REHEARSAL_API_KEY"
             ].strip(),
         )
+    if env.get("SONDER_HEALTH_ALERT_NTFY_URL", "").strip():
+        secrets = replace(
+            secrets, health_alert_ntfy_url=env["SONDER_HEALTH_ALERT_NTFY_URL"].strip(),
+        )
     if env.get("SONDER_AUTH_SECRET", "").strip():
         secrets = replace(secrets, auth_secret=env["SONDER_AUTH_SECRET"].strip())
     backup_key_file = env.get("SONDER_BACKUP_KEY_FILE", "")
@@ -1803,6 +1818,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
     errors.extend(child_storage_errors(config))
     errors.extend(app_control_errors(config))
     errors.extend(computer_use_errors(config))
+    errors.extend(health_alerts_errors(config))
     errors.extend(artifact_transfer_errors(config))
     errors.extend(memory_replication_errors(config))
     errors.extend(artifact_mobility_source_errors(config))
