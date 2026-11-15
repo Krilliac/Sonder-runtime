@@ -85,18 +85,6 @@ def get_job(job_id: str) -> JobRecord | None:
         conn.close()
 
 
-def count_active() -> int:
-    conn = fanout_store._connect()
-    try:
-        marks = ",".join("?" for _ in ACTIVE_JOB_STATUSES)
-        return conn.execute(
-            "SELECT COUNT(*) FROM batch_jobs WHERE status IN (%s)" % marks,
-            [status.value for status in ACTIVE_JOB_STATUSES],
-        ).fetchone()[0]
-    finally:
-        conn.close()
-
-
 def add_items(job_id: str, entries: Sequence[tuple[str, str]], *, max_items: int) -> int:
     """Append sealed items ``(key, ciphertext)``; returns the job's item count."""
     now = time.time()

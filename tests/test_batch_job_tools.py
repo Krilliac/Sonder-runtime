@@ -88,6 +88,39 @@ def test_a_cloud_model_in_any_stage_is_refused_at_create_time(harness):
     assert harness.calls == []
 
 
+def test_a_whitespace_padded_cloud_model_is_refused_at_create_time(harness, monkeypatch):
+    models = [{"name": name, "capabilities": ["chat"]} for name in ("m:1", "m:2", "glm-4.6:cloud")]
+    monkeypatch.setattr(server, "_get", lambda path: {"models": models if path == "/api/tags" else []})
+    error = _error(harness.create(two_stages("m:1", "glm-4.6:cloud "), items=1, start=True))
+    assert error["code"] == "INVALID_INPUT" and "refused cloud model" in error["message"]
+    assert harness.tool("batch_job_recent")["jobs"] == []
+    assert harness.calls == []
+
+
+def test_a_model_that_resolves_to_a_cloud_name_is_refused_after_resolution(harness, monkeypatch):
+    monkeypatch.setattr(server, "resolve_discovered_model_record", lambda selector: ("hosted:cloud", {}))
+    error = _error(harness.create(two_stages(), items=1, start=True))
+    assert error["code"] == "INVALID_INPUT" and "cloud" in error["message"]
+    assert harness.tool("batch_job_recent")["jobs"] == []
+    assert harness.calls == []
+
+
+def test_a_create_that_fails_after_the_draft_exists_cancels_it_and_names_its_id(harness, monkeypatch):
+    from sonder_runtime.adapters.persistence import batch_store
+    from sonder_runtime.domain.common.errors import CapacityExceeded
+
+    def full(*_a, **_k):
+        raise CapacityExceeded("too many active batch jobs (limit 1)")
+
+    monkeypatch.setattr(batch_store, "start_job", full)
+    error = _error(harness.create(two_stages(), items=2, start=True))
+    assert error["code"] == "CAPACITY_EXCEEDED"
+    jobs = batch_store.recent_jobs(request_owner=None, include_finished=True, limit=10)
+    assert len(jobs) == 1 and jobs[0]["status"] == "cancelled"
+    assert jobs[0]["job_id"] in error["message"] and "was cancelled" in error["message"]
+    assert harness.calls == []
+
+
 def test_unknown_and_non_chat_models_are_refused(harness, monkeypatch):
     assert _error(harness.create(two_stages("not-installed:1"), items=1))["code"] == "INVALID_INPUT"
     monkeypatch.setattr(server, "_fanout_nonchat_reason", lambda record: "embedding model")

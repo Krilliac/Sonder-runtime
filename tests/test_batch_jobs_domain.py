@@ -54,6 +54,14 @@ def test_invalid_specs_are_refused_with_invalid_input(stages):
     assert caught.value.code == "INVALID_INPUT"
 
 
+def test_a_whitespace_padded_cloud_model_is_refused_and_stored_names_are_stripped():
+    with pytest.raises(InvalidInput, match="cloud model"):
+        _validate([_stage("r1", model="kimi:cloud ")])
+    with pytest.raises(InvalidInput, match="cloud model"):
+        _validate([_stage("r1", model="  kimi:cloud ")])
+    assert _validate([_stage("r1", model=" m:1 ")]).stages[0].model == "m:1"
+
+
 def test_cloud_model_refusal_names_the_stage_and_never_reaches_the_runner():
     with pytest.raises(InvalidInput, match="cloud model"):
         _validate([_stage("r1"), _stage("r2", model="kimi:cloud")])

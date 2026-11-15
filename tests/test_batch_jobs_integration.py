@@ -190,12 +190,18 @@ def test_batch_child_runs_stay_out_of_model_fanout_recent_and_the_child_survives
     assert batch_store.get_job(job_id) is None and batch_store.step_states(job_id) == {}
 
 
-def test_the_job_worker_runs_without_a_narration_context_and_progress_has_no_invented_eta(harness):
-    created = harness.create(two_stages(), items=1, start=False)
+def test_the_job_worker_thread_runs_the_job_without_a_narration_context_and_a_draft_has_no_invented_eta(harness):
+    draft = harness.create(two_stages(), items=1, start=False)
+    shown = harness.tool("batch_job_status", job_id=draft["job"]["job_id"])["job"]
+    assert shown["status"] == "draft"
+    assert shown["progress"]["rate_per_min"] is None and shown["progress"]["eta_s"] is None
+    assert shown["progress"]["eta_basis"] == "insufficient_samples"
+
+    created = harness.create(two_stages(), items=1, start=True)
+    harness.wait()  # the daemon worker thread, which has no activity context, ran both steps
     job = harness.tool("batch_job_status", job_id=created["job"]["job_id"])["job"]
-    assert job["status"] == "draft"
-    assert job["progress"]["rate_per_min"] is None and job["progress"]["eta_s"] is None
-    assert job["progress"]["eta_basis"] == "insufficient_samples"
+    assert job["status"] == "completed" and job["progress"]["answered"] == 2
+    assert len(harness.calls) == 2
 
 
 def test_cancel_forwards_to_the_job_and_a_cancelled_job_dispatches_nothing_more(harness):

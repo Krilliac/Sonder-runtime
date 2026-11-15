@@ -18,7 +18,6 @@ from typing import Callable, Iterable, Mapping, Sequence
 from sonder_runtime.domain.common.errors import InvalidInput
 from sonder_runtime.domain.model_usage import PROVIDER_TOKEN_SOURCES
 
-ORDERS = ("stage_major", "item_major")
 # Failure classes that point at the backend rather than at one item.
 BREAKER_FAILURE_CLASSES = frozenset(("unavailable", "transport", "timeout"))
 
@@ -39,9 +38,6 @@ class JobStatus(str, Enum):
     INTERRUPTED = "interrupted"
 
 
-TERMINAL_JOB_STATUSES = frozenset(
-    (JobStatus.COMPLETED, JobStatus.CANCELLED, JobStatus.INTERRUPTED)
-)
 ACTIVE_JOB_STATUSES = frozenset((JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.PAUSED))
 
 
@@ -226,7 +222,7 @@ def validate_spec(raw, limits: Limits, *, is_cloud_model: Callable[[str], bool])
             raise InvalidInput("stage name must match [A-Za-z][A-Za-z0-9_-]{0,31}")
         if names.count(stage_name) > 1:
             raise InvalidInput("duplicate stage name")
-        model = _plain_text(stage.get("model", ""), "model", limit=200)
+        model = _plain_text(stage.get("model", ""), "model", limit=200).strip()
         if is_cloud_model(model):
             raise InvalidInput("batch jobs run local models only; refused cloud model for stage " + stage_name)
         template = _plain_text(stage.get("prompt", ""), "prompt", limit=limits.max_rendered_prompt_chars)
@@ -266,7 +262,7 @@ def validate_spec(raw, limits: Limits, *, is_cloud_model: Callable[[str], bool])
                 or not math.isfinite(temperature) or not 0 <= temperature <= 2:
             raise InvalidInput("temperature must be a number in 0..2")
         stages.append(StageSpec(
-            name=stage_name, model=model.strip(), prompt_template=template, system=system,
+            name=stage_name, model=model, prompt_template=template, system=system,
             num_predict=_plain_int(stage.get("num_predict", 512), "num_predict", 32, 4096),
             num_ctx=_plain_int(stage.get("num_ctx", 4096), "num_ctx", 512, 1_048_576),
             think=think, temperature=float(temperature),

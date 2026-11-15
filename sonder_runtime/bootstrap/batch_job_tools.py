@@ -203,8 +203,22 @@ class BatchJobService:
                 raise InvalidInput("stage %s model is not installed: %s" % (stage.name, stage.model))
             if rt._fanout_nonchat_reason(found[1]):
                 raise InvalidInput("stage %s model cannot chat: %s" % (stage.name, stage.model))
+            if rt._is_cloud_model_name(found[0]):
+                raise InvalidInput("batch jobs run local models only; refused cloud model for stage " + stage.name)
             stages.append(dataclasses.replace(stage, model=found[0]))
         return dataclasses.replace(spec, stages=tuple(stages))
+
+    @staticmethod
+    def _abandon_draft(job_id: str, exc: Exception) -> SonderError:
+        """Cancel the draft a failed create left behind; the error to raise names its id."""
+        try:
+            batch_store.request_cancel(job_id)
+        except Exception:  # noqa: BLE001 - the original failure is the one to report
+            logger.exception("could not cancel the draft batch job %s", job_id)
+        if isinstance(exc, SonderError):
+            return type(exc)("%s (job %s was cancelled)" % (exc, job_id))
+        logger.error("batch job %s could not be filled or started", job_id, exc_info=exc)
+        return InternalFailure("batch job tool failed; job %s was cancelled" % job_id)
 
     def _seal_items(self, items):
         executor = self.executor()
@@ -246,10 +260,14 @@ class BatchJobService:
             name=spec.name, request_owner=owner, request_role=role, spec=spec,
             settings=_settings(config), ttl_seconds=config.retention_ttl_seconds,
         )
-        if validated:
-            batch_store.add_items(job.id, self._seal_items(validated), max_items=config.max_items_per_job)
+        try:
+            if validated:
+                batch_store.add_items(job.id, self._seal_items(validated), max_items=config.max_items_per_job)
+            if start:
+                job = batch_store.start_job(job.id, max_active=config.max_active_jobs)
+        except Exception as exc:
+            raise self._abandon_draft(job.id, exc) from exc
         if start:
-            job = batch_store.start_job(job.id, max_active=config.max_active_jobs)
             self.worker.submit(job.id)
         return {"ok": True, "job": self._receipt(batch_store.get_job(job.id))}
 
