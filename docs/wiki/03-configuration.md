@@ -46,6 +46,8 @@ request_timeout_seconds = 300
 tls_terminated_by_proxy = true      # reference TLS-proxy deployment; also hides the local log dashboard
 trusted_proxy_cidrs = ["127.0.0.1/32", "::1/128"]  # X-Forwarded-For is read only with tls_terminated_by_proxy = true
 allowed_hosts = []                  # extra Host names ("name" or "name:port"); only local-open refuses other names (421)
+web_app_enabled = false             # serve the Flutter web app at /app/ (SONDER_WEB_APP); see "Serving the web app"
+web_app_dir = ""                    # absolute bundle root; "" = <state home>/web_app (SONDER_WEB_APP_DIR)
 work_wait_seconds = 240             # routed chat work: wait before answering with a work-run id
 work_budget_seconds = 1800          # routed chat work: wall-clock budget, then effects are refused
 work_max_running = 2                # concurrent routed work runs
@@ -168,6 +170,56 @@ overlap or automatic key rotation exists. The complete operator procedure,
 two-host acceptance template, rollback boundary, and honest single/two-PC
 limits are in [Bounded, explicit fact replication](../runbooks/memory-replication.md).
 
+### Serving the web app
+
+With `[server].web_app_enabled = true` (or `SONDER_WEB_APP=1`) the HTTP server
+serves the Flutter app's web build at `/app/`, so a browser on the same
+network reaches the app without a native install. The setting is off by
+default; when off, `/app/` is an ordinary unknown route.
+
+Build and publish the bundle with `python scripts/build_web_app.py` (run it
+from a linked worktree; pass `--allow-main-checkout` to build in the main
+checkout). It runs `flutter build web` with `--no-web-resources-cdn --csp
+--base-href /app/`, writes `sonder-web-manifest.json` (sha256 and size of
+every file) and swaps `<web_app_dir>/current.json` atomically, keeping the
+newest three releases. The default `web_app_dir` is `<state home>/web_app`;
+the script refuses a directory inside the repository. A running server picks
+up a new release on the next request. Enabled with no bundle, `/app/` answers
+404 `WEB_APP_NOT_BUILT` with this remedy.
+
+Security model:
+
+- **Allowlist.** Only files listed in the verified manifest are served. Every
+  file's size and sha256 is checked when a release is first loaded; an
+  unlisted `index.html`, a symlink or junction, a dotfile, or any traversal
+  form (`..`, encoded separators, drive letters, NTFS streams) is refused.
+- **Static shell, no secrets.** The shell is served without credentials
+  because a browser navigation cannot send the `Authorization` or
+  `X-Sonder-Account-Token` header. Every `/v1` call the app then makes is
+  gated exactly as for any other client, and the app signs in through the
+  normal account routes. Host policy applies first, so a rebinding name gets
+  421 on `/app/` too.
+- **Same origin only.** The app talks to the origin that served it and its
+  server URL is not editable there. A same-origin request from a trusted Host
+  passes the origin check; `cors_origins` is unchanged and no
+  `Access-Control-Allow-Origin` header is added. A name that is only accepted
+  because credentials are required never gets this exemption.
+- **Browser hardening.** Responses carry a strict Content-Security-Policy
+  (own origin only; `wasm-unsafe-eval` for CanvasKit, no `unsafe-eval`),
+  `nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin` (not
+  `no-referrer`, which would make browsers send `Origin: null` on POSTs),
+  cross-origin opener/resource isolation and a denying Permissions-Policy.
+  Files get `Cache-Control: no-cache` plus an `ETag`, because Flutter's output
+  names are not content-hashed.
+- **Credentials stay in memory.** In a browser the app keeps API keys and
+  account sessions in memory only, so a reload means signing in again.
+  Account sign-in needs HTTPS or a numeric loopback address (existing rule),
+  so reach the app over HTTPS through your TLS proxy or on `127.0.0.1`.
+- **Private fonts.** The engine's fallback-font download from `gstatic.com`
+  is blocked by the policy; glyphs outside the bundled fonts (emoji, CJK) show
+  as empty boxes.
+- `HEAD` requests are not supported (the server answers 501), as elsewhere.
+
 ## Secrets file (`packaging/sonder.env.example`, mode 0600)
 
 ```
@@ -198,6 +250,8 @@ Serving/auth: `SONDER_API_KEY`, `SONDER_HOST`, `SONDER_PORT`,
 `SONDER_AUTH_MODE`, `SONDER_AUTH_SECRET`, `SONDER_MAX_REQUEST_BYTES`,
 `SONDER_MAX_CONCURRENT_REQUESTS`, `SONDER_QUEUE_DEPTH`, `SONDER_CORS_ORIGINS`,
 `SONDER_ALLOWED_HOSTS` (comma-separated `[server].allowed_hosts`),
+`SONDER_WEB_APP` (`[server].web_app_enabled`), `SONDER_WEB_APP_DIR`
+(`[server].web_app_dir`, absolute),
 `SONDER_HTTP_WORK_WAIT_SECONDS`, `SONDER_HTTP_WORK_BUDGET_SECONDS`,
 `SONDER_HTTP_WORK_MAX_RUNNING`, `SONDER_STREAM_HEARTBEAT_SECONDS`.
 

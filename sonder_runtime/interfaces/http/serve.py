@@ -1224,7 +1224,7 @@ def configure_typed_config(config) -> None:
     global ALLOWED_HOSTS
     ALLOWED_HOSTS = _parse_allowed_hosts(server_config.allowed_hosts)
     global _WEB_APP
-    _WEB_APP = web_app.settings_from_config(config)
+    _WEB_APP = web_app.WebAppSettings(server_config.web_app_enabled, runtime_config.web_app_root(config))
     OBSERVATORY_ORIGINS = frozenset(
         origin for origin in config.observability.live_export_origins
         if origin and origin != "*"

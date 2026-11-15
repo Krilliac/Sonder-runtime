@@ -2334,6 +2334,16 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             errors.append(f"[backup].{name} must be >= 1")
 
 
+def web_app_root(config: "SonderConfig") -> Path:
+    """Where the Flutter web bundle lives: ``[server].web_app_dir`` or
+    ``<state home>/web_app`` (published by ``scripts/build_web_app.py``)."""
+    configured = (config.server.web_app_dir or "").strip()
+    if configured:
+        return Path(configured)
+    home = (config.state.home or "").strip()
+    return (Path(home) if home else sonder_paths.default_home()) / "web_app"
+
+
 def load_config(
     toml_path: str | os.PathLike | None = None,
     *,

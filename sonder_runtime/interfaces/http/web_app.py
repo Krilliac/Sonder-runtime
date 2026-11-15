@@ -26,7 +26,6 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
-from urllib.parse import unquote
 
 __all__ = [
     "SECURITY_HEADERS",
@@ -41,8 +40,6 @@ __all__ = [
     "resolve_request",
     "same_origin",
     "same_origin_request",
-    "root_from_config",
-    "settings_from_config",
 ]
 
 APP_PREFIX = "/app"
@@ -114,30 +111,14 @@ _CONTENT_TYPES: Mapping[str, str] = {
 
 @dataclass(frozen=True)
 class WebAppSettings:
+    """Whether to serve, and the bundle root (``[server].web_app_*``)."""
+
     enabled: bool
     root: Path
 
     @classmethod
     def disabled(cls) -> "WebAppSettings":
         return cls(False, Path())
-
-
-def root_from_config(config: Any) -> Path:
-    """The bundle root: ``[server].web_app_dir`` or ``<state home>/web_app``."""
-    configured = str(config.server.web_app_dir or "").strip()
-    if configured:
-        return Path(configured)
-    from sonder_runtime.platform.paths import default_home
-
-    home = str(getattr(config.state, "home", "") or "").strip()
-    return (Path(home) if home else default_home()) / "web_app"
-
-
-def settings_from_config(config: Any) -> WebAppSettings:
-    """Build settings from a typed ``SonderConfig`` (server and state sections)."""
-    if not config.server.web_app_enabled:
-        return WebAppSettings.disabled()
-    return WebAppSettings(True, root_from_config(config))
 
 
 @dataclass(frozen=True)
@@ -196,6 +177,15 @@ def valid_relpath(relpath: object) -> bool:
         and bool(relpath)
         and all(valid_segment(part) for part in relpath.split("/"))
     )
+
+
+_PERCENT = re.compile(rb"%([0-9A-Fa-f]{2})")
+
+
+def _unquote_strict(text: str) -> str:
+    """Percent-decode once, as UTF-8; raises UnicodeDecodeError on bad bytes."""
+    raw = text.encode("utf-8")
+    return _PERCENT.sub(lambda m: bytes((int(m.group(1), 16),)), raw).decode("utf-8")
 
 
 def _no_link(path: Path) -> bool:
@@ -393,8 +383,8 @@ def resolve_request(raw_target: str, load: BundleLoad,
             char in rest for char in _FORBIDDEN_CHARS):
         return _not_found()
     try:
-        decoded = unquote(rest, errors="strict")
-    except UnicodeDecodeError:
+        decoded = _unquote_strict(rest)
+    except UnicodeError:
         return _not_found()
     if any(char in decoded for char in _FORBIDDEN_CHARS):
         return _not_found()

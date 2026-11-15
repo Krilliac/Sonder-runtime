@@ -220,11 +220,10 @@ def prune(web_app_dir: Path, keep: int) -> list[str]:
 
 def _default_web_app_dir() -> tuple[Path, int]:
     sys.path.insert(0, str(REPO_ROOT))
-    from sonder_runtime.interfaces.http.web_app import root_from_config
-    from sonder_runtime.platform.config import load_config
+    from sonder_runtime.platform.config import load_config, web_app_root
 
     config = load_config(None)
-    return root_from_config(config), config.server.port
+    return web_app_root(config), config.server.port
 
 
 def build(args: argparse.Namespace, env: dict[str, str]) -> Path:

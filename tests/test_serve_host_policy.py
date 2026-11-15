@@ -13,7 +13,7 @@ from sonder_runtime.interfaces.http.host_policy import (
     HOST_CREDENTIALED, HOST_TRUSTED, forwarded_client_ip, host_allowed, host_decision,
     machine_host_names, parse_host_header,
 )
-from sonder_runtime.platform.config import ConfigError, load_config
+from sonder_runtime.platform.config import ConfigError, load_config, web_app_root
 
 
 LOOPBACK_NETS = (ipaddress.ip_network("127.0.0.1/32"), ipaddress.ip_network("::1/128"))
@@ -293,6 +293,9 @@ def test_web_app_config_keys_and_validation(tmp_path):
     config = load_config(None, env={"SONDER_WEB_APP": "1", "SONDER_WEB_APP_DIR": str(tmp_path)})
     assert config.server.web_app_enabled is True
     assert config.server.web_app_dir == str(tmp_path)
+    assert web_app_root(config) == tmp_path
+    home = load_config(None, env={"SONDER_STATE_HOME": str(tmp_path / "h")})
+    assert web_app_root(home).name == "web_app"
     with pytest.raises(ConfigError) as refused:
         load_config(None, env={"SONDER_WEB_APP_DIR": "relative/dir"})
     assert "web_app_dir" in str(refused.value)

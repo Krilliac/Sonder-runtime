@@ -19145,6 +19145,18 @@
       "type": "tuple[str, ...]"
     },
     {
+      "default": false,
+      "field": "web_app_enabled",
+      "section": "server",
+      "type": "bool"
+    },
+    {
+      "default": "",
+      "field": "web_app_dir",
+      "section": "server",
+      "type": "str"
+    },
+    {
       "default": 240,
       "field": "work_wait_seconds",
       "section": "server",
@@ -19245,13 +19257,13 @@
   "counts": {
     "capabilities": 231,
     "commands": 349,
-    "configuration": 249,
+    "configuration": 251,
     "events": 43,
     "native_tools": 68,
     "schemas": 4,
     "tools": 231
   },
-  "digest": "15ee0f81702edbfcccef1ff65791cb0933b9c231ebd9b2474c4dccfbff1b1342",
+  "digest": "eb80ce52fe97dba417bde1eaf003072ece56804d9a89fe3ae0d6a89f4bb6ad62",
   "events": [
     {
       "name": "session.started",
@@ -49081,7 +49093,7 @@
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/domain/operational_capabilities.py": "6f8f2083343ac1b0de076cd4d545b5f99602a9916c185bd15d965ffa0c405fe6",
     "sonder_runtime/interfaces/sdk/discovery.py": "db8aeca8dd84d06cbbf834495db30b211956393375676f23899a28685aea015b",
-    "sonder_runtime/platform/config.py": "eab251d2de938a06d46d3ab71f772ef48576d452bf2195944836ba8fa521a5e1",
+    "sonder_runtime/platform/config.py": "65a2633389a8a1b8ca437fc6bde03e3aa575d732c48cbf72873b733ae80394e0",
     "sonder_runtime/platform/memory_replication_config.py": "f9fc0a642812bdc456ac082f0f8c52f051822f0160e16882b634895feb0cea61"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
