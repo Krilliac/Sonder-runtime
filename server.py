@@ -143,7 +143,7 @@ import sqlite_mutate as sqlite_mutate_module
 import symbol_index
 import git_history
 import sonder_runtime.adapters.archive_create as archive_create_tool
-from sonder_runtime.platform import context_policy
+from sonder_runtime.platform import context_policy, declared_context, model_context_memory
 import command_registry
 import adaptive_training
 import selfmod
@@ -1584,13 +1584,12 @@ def resolve_sonder_model(strict=False):
 _MODEL_CONTEXT_CACHE = {}
 _MODEL_CONTEXT_CACHE_LOCK = threading.Lock()
 _MODEL_CONTEXT_CACHE_TTL = 300.0
-# A failed /api/show yields no metadata and pins the conservative context
-# fallback; keep that verdict short-lived so a transient provider hiccup does
-# not undersize a large model's window for the full positive TTL.
+# A failed /api/show is re-probed soon; the window then comes from _MODEL_CONTEXT_MEMORY.
 _MODEL_CONTEXT_CACHE_NEGATIVE_TTL = 30.0
 # Attention geometry parsed from the same /api/show response, guarded by
 # _MODEL_CONTEXT_CACHE_LOCK; None records "not modelled", not a failure.
 _MODEL_GEOMETRY_CACHE = {}
+_MODEL_CONTEXT_MEMORY = model_context_memory.ModelContextMemory()
 _RESIDENCY_FEEDBACK = None
 _RESIDENCY_FEEDBACK_LOCK = threading.Lock()
 
@@ -1702,11 +1701,11 @@ def _model_context_metadata(model):
                 else _MODEL_CONTEXT_CACHE_NEGATIVE_TTL
             )
             if now - cached[0] < ttl:
-                return cached[1], cached[2]
-    context_length = None
-    parameter_size = None
+                return _MODEL_CONTEXT_MEMORY.replay(model, cached[1], cached[2])
+    context_length = parameter_size = None
+    declared = False  # stays False unless the whole probe parses
     try:
-        details = _post("/api/show", {"name": model}, timeout=30)
+        details = _post("/api/show", {"model": model, "name": model}, timeout=30)
         info = details.get("model_info") if isinstance(details, dict) else {}
         info = info if isinstance(info, dict) else {}
         for name, value in info.items():
@@ -1723,13 +1722,14 @@ def _model_context_metadata(model):
                 parameter_size = float(count) / 1_000_000_000.0
         with _MODEL_CONTEXT_CACHE_LOCK:
             _MODEL_GEOMETRY_CACHE[key] = _kv_budget.geometry_from_model_info(info)
+        declared = declared_context.declared_from_show(details)
     except Exception:
         # Metadata is an optimization and cannot make an otherwise valid model
         # unavailable. The deterministic context-policy fallback remains safe.
         pass
     with _MODEL_CONTEXT_CACHE_LOCK:
-        _MODEL_CONTEXT_CACHE[key] = (now, context_length, parameter_size)
-    return context_length, parameter_size
+        _MODEL_CONTEXT_CACHE[key] = (now, None, None) if declared is False else (now, context_length, parameter_size)
+    return _MODEL_CONTEXT_MEMORY.settle(model, declared, context_length, parameter_size)
 
 
 def _residency_feedback():
@@ -1768,15 +1768,15 @@ def _auto_model_context(model):
     GPU-resident again.  See ``adapters.inference.residency_feedback``.
     """
     context_length, parameter_size = _model_context_metadata(model)
-    feedback = None if _is_cloud_model_name(model) else _residency_feedback()
-    if feedback is None:
-        return context_policy.auto_context(context_length, parameter_size)
-    with _MODEL_CONTEXT_CACHE_LOCK:
-        geometry = _MODEL_GEOMETRY_CACHE.get(str(model or "").strip().casefold())
-    feedback.refresh(model, geometry=geometry, kv_type=context_policy.kv_cache_type()[0])
-    return context_policy.auto_context(
-        context_length, parameter_size, feedback.ceiling(model),
-    )
+    cloud_name = _is_cloud_model_name(model)
+    feedback = None if cloud_name else _residency_feedback()
+    ceiling = None
+    if feedback is not None:
+        with _MODEL_CONTEXT_CACHE_LOCK:
+            geometry = _MODEL_GEOMETRY_CACHE.get(str(model or "").strip().casefold())
+        feedback.refresh(model, geometry=geometry, kv_type=context_policy.kv_cache_type()[0])
+        ceiling = feedback.ceiling(model)
+    return _MODEL_CONTEXT_MEMORY.auto_window(model, context_length, parameter_size, ceiling, cloud=cloud_name)
 
 
 def _make_generate(

@@ -217,6 +217,12 @@ def _isolate_model_call_memory():
             server._THINKING_CAPABILITY_CACHE.clear()
             server._THINK_OPTION_UNSUPPORTED_CACHE.clear()
         model_pace.reset()
+        # Model-context caches: probe verdicts, geometry, and the memory that
+        # replays a model's last successful metadata and declared num_ctx.
+        with server._MODEL_CONTEXT_CACHE_LOCK:
+            server._MODEL_CONTEXT_CACHE.clear()
+            server._MODEL_GEOMETRY_CACHE.clear()
+        server._MODEL_CONTEXT_MEMORY.clear()
 
     forget()
     yield

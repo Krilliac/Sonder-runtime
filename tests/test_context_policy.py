@@ -115,6 +115,21 @@ def test_auto_context_ignores_unknown_or_malformed_metadata(monkeypatch):
     assert context_policy.auto_context(None, "780M") == 32768
 
 
+def test_never_probed_model_gets_the_conservative_window_only_when_flagged(monkeypatch):
+    monkeypatch.delenv("SONDER_CONTEXT_SIZE", raising=False)
+    monkeypatch.delenv("SONDER_SESSION_NUM_CTX", raising=False)
+    monkeypatch.setenv("OLLAMA_KV_CACHE_TYPE", "q8_0")
+
+    assert context_policy.auto_context(None, None, None, True) == 8192
+    plan = context_policy.auto_context_plan(metadata_unavailable=True)
+    assert "metadata-unavailable" in plan["clamps"]
+    # The default is the unflagged base value, and an operator pin is an
+    # informed override of the floor.
+    assert context_policy.auto_context(None, None) == 32768
+    monkeypatch.setenv("SONDER_CONTEXT_SIZE", "32k")
+    assert context_policy.auto_context(None, None, None, True) == 32000
+
+
 def test_explicit_operator_context_overrides_the_parameter_band(monkeypatch):
     """SONDER_CONTEXT_SIZE is an informed override of the KV budget ladder,
     matching the documented contract; the model's advertised maximum and the
