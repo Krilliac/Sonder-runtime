@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 import time
+import urllib.parse
 import urllib.request
 
 from ...application.context import OperationContext
@@ -120,8 +121,9 @@ class OllamaVisionGateway:
         limit = RESPONSE_BODY_LIMIT
         budget = timeout or _configured_request_timeout
         try:
+            target = urllib.parse.urlsplit(url)
             with gpu_admission.process_service().admit(
-                "/api/chat", payload, origin=url.removesuffix("/api/chat"),
+                target.path, payload, origin="%s://%s" % (target.scheme, target.netloc),
                 deadline=time.monotonic() + budget,
             ) as ticket:
                 request = urllib.request.Request(

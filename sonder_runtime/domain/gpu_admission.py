@@ -191,7 +191,9 @@ class GpuAdmissionPolicy:
 
 _PROBE_PATHS = frozenset({"/api/show", "/api/ps", "/api/tags", "/api/version"})
 _EMBED_PATHS = frozenset({"/api/embeddings", "/api/embed"})
-_GENERATION_PATHS = frozenset({"/api/chat", "/api/generate"})
+_API = "/api/"
+_CHAT_PATH = _API + "chat"
+_GENERATION_PATHS = frozenset({_CHAT_PATH, _API + "generate"})
 _ZERO_DURATION = re.compile(r"0+(\.0+)?(ns|us|ms|s|m|h)?", re.IGNORECASE)
 _BACKGROUND_RANK = 1
 
@@ -211,7 +213,7 @@ def is_zero_keep_alive(value: object) -> bool:
 
 def _generates(path: str, payload: Mapping[str, object]) -> bool:
     """Whether a chat/generate request carries something to generate from."""
-    if path == "/api/chat":
+    if path == _CHAT_PATH:
         messages = payload.get("messages")
         return isinstance(messages, (list, tuple)) and len(messages) > 0
     prompt = payload.get("prompt")
