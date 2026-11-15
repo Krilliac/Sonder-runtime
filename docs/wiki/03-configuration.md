@@ -441,10 +441,10 @@ self-modification job run by `scripts/nightly_self_improve.py` and
 refuses them, the chat code gate never runs their replies, and they are never
 bound to a tier. The self-modification job checks its model (`--model`, else
 the `code` tier) before it starts a run and stops with `model refused, no run
-started: ...`. The built-in list is the `astra-cyber-` prefix and two source
-repositories. For each source, the hosted `hf.co/owner/repo` and
+started: ...`. The shipped list (the "floor", see below) is the `astra-cyber-`
+prefix and two source repositories. For each source, the hosted `hf.co/owner/repo` and
 `huggingface.co/owner/repo` ids, the hostless `owner/repo` id, and the repository
-name without `-GGUF` (the model stem) are denied as prefixes. A built-in stem
+name without `-GGUF` (the model stem) are denied as prefixes. A floor stem
 matches at the start of any path segment, followed by any characters, including
 another format or quantisation suffix. The `astra-cyber-` prefix likewise
 matches at the start of any segment. Both `/` and `\` separate segments;
@@ -455,9 +455,37 @@ Policy-added names and prefixes are matched against the full name, its last
 `/` segment (backslashes included, as before), and its last segment after
 either separator.
 
-The runtime policy can add entries (`tool_lane_denied_models` in
-`runtime_policy.json`: `{"names": [...], "prefixes": [...]}`) but never remove
-the built-in ones, and no tool or MCP parameter edits it. A malformed section
+The model lists live in two JSON files, not in Python:
+
+- **Shipped defaults**, `sonder_runtime/adapters/data/model_tool_policy.json`
+  (schema `version` 1, shipped beside `semantic_tier_head.json` and versioned with
+  the code). It holds `model_profiles`, each `{"id", "floor", "match": {"names",
+  "prefixes"}, "tools", "lanes"}`, and `undetermined_served_models` (served-model
+  ids that name no model: `""` and `default`). The `security-advisers` profile is
+  a floor (`"floor": true`) with `tools: []`, meaning chat by name only, and
+  every prefix spelled out. Entries are lowercase; the loader casefolds them
+  anyway.
+- **Operator overlay**, `<state home>/model_tool_policy.json` (the path in
+  `SONDER_MODEL_TOOL_POLICY` instead, when set), same schema, optional. It is a
+  separate file from `runtime_policy.json` so that `runtime_policy_update` can
+  never reach it. Phase 1a reads it only: edit it by hand; nothing in Sonder
+  writes or rewrites it. It can add names and prefixes (in a new profile, or in
+  a floor profile's `match`) and add served-model ids that name no model. It
+  cannot set `"floor"`, cannot give a floor profile `tools`, and cannot remove
+  or narrow a floor: the floor's names and prefixes are always in force
+  whatever the overlay says. A profile's `tools` are validated but not yet
+  enforced in this phase, so every model an overlay profile matches is chat by
+  name only. A profile that matches no model, an unknown key, a duplicate
+  `id`, a bad name or a file over 1 MiB makes the overlay invalid.
+
+Both are read again when their size or modification time changes. `/runtime
+status` shows both paths and every load error.
+
+The `tool_lane_denied_models` section of `runtime_policy.json` (`{"names":
+[...], "prefixes": [...]}`) is deprecated in favour of the overlay but still read
+and unioned (add-only), so existing files keep working. Neither it nor the
+overlay can remove a floor entry, and no tool or MCP parameter edits either
+list. A malformed section
 makes the whole policy file invalid: it then loads as built-in defaults, which
 also reverts every tier binding, and caller-named models are refused in tool
 lanes until the file is repaired or reset (`/runtime reset`). A `local_models`
@@ -547,8 +575,18 @@ applies the same served-model rule to every non-Ollama request it dispatches.
 Ordinary models are judged against a deny list cached per version of the
 policy file, so they pay no extra disk read per call.
 
-Three configurations fail closed where they did not before:
+Five configurations fail closed:
 
+- With the shipped `model_tool_policy.json` missing, unreadable or invalid (no
+  floor profile counts as invalid), every tool-using lane refuses every model,
+  tier-bound ones and the default route included, and the refusal and
+  `/runtime status` name the file. Text-only chat is unaffected, and tier
+  bindings are not rewritten. Fix: restore the file from the install.
+- With the overlay unreadable or invalid, it is ignored as a whole: the floor
+  still applies, a model named by the caller (not one a tier is bound to) is
+  refused in tool lanes exactly as for an unreadable policy file, and
+  `/runtime status` shows the error. The file is never rewritten; fix it by
+  hand (or delete it). A missing overlay is normal.
 - With the policy file unreadable, a model named by the caller (not one a tier
   is bound to) is refused in tool lanes, and the chat code gate does not run
   its reply. Fix: repair the file (`/runtime status` shows the error) or reset
