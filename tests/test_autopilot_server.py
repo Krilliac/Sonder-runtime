@@ -564,7 +564,7 @@ def test_http_autopilot_status_is_safe_but_lifecycle_changes_require_developer()
 
 def test_served_autopilot_binds_an_opaque_account_scope(monkeypatch):
     captured = {}
-    context = {"account": {"username": "alice"}, "api_key": "", "mode": "account"}
+    context = {"account": {"username": "alice", "role": "developer"}, "api_key": "", "mode": "account", "authorized": True}
     monkeypatch.setattr(
         server, "control_command",
         lambda prompt, **kwargs: captured.update(kwargs) or "ok",
