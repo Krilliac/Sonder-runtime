@@ -70,10 +70,10 @@ def test_invalid_then_valid_retries_once_with_the_error_appended():
     assert len(gateway.requests) == 2
     retry = gateway.requests[1]
     assert retry.prompt == gateway.requests[0].prompt
-    roles = [row[0] for row in retry.history]
+    roles = [row["role"] for row in retry.history]
     assert roles[-2:] == ["assistant", "user"]
-    assert '{"answer": "forty-two"}' in retry.history[-2][1]
-    assert "$.answer" in retry.history[-1][1]
+    assert '{"answer": "forty-two"}' in retry.history[-2]["content"]
+    assert "$.answer" in retry.history[-1]["content"]
     assert retry.options["schema"] == SCHEMA
     assert (result.tokens_in, result.tokens_out) == (20, 10)
     assert len(result.attempts) == 2
@@ -171,3 +171,61 @@ def test_ollama_gateway_rejects_a_non_mapping_schema_option():
             ModelRequest("q", "code", system="s", options={"schema": "x"}),
             _context(),
         )
+
+
+def test_retry_through_the_real_generator_sends_only_role_content_messages(monkeypatch):
+    import server
+
+    payloads = []
+    replies = iter(['{"answer": "x"}', '{"answer": 42}'])
+
+    def fake_chat(payload, **kwargs):
+        payloads.append(payload)
+        text = next(replies)
+        return {"message": {"content": text}, "prompt_eval_count": 3, "eval_count": 2}, text
+
+    monkeypatch.setattr(server, "_chat_request", fake_chat)
+    gateway = OllamaGateway(
+        target_resolver=lambda tier, strict=None: ModelTarget("m:1b", False, "code"),
+        generate_factory=server._make_generate,
+        session_num_ctx=2048,
+    )
+    result = generate_structured(
+        gateway, ModelRequest("what is 6*7?", "code", system="s"), _context(), SCHEMA,
+    )
+    assert result.ok and result.value == {"answer": 42}
+    assert len(payloads) == 2
+    assert payloads[1]["format"] == SCHEMA
+    messages = payloads[1]["messages"]
+    assert [m["role"] for m in messages] == ["system", "assistant", "user", "user"]
+    assert all(isinstance(m, dict) and set(m) == {"role", "content"} for m in messages)
+
+
+def test_structured_request_reaches_the_evidence_gateway_requiring_structured():
+    from types import SimpleNamespace
+
+    from sonder_runtime.application.routing.evidence_gateway import (
+        CapabilityEvidenceGateway,
+    )
+    from sonder_runtime.domain.common.errors import DependencyUnavailable
+    from sonder_runtime.domain.routing.backend_conformance import BackendCapability
+
+    route = SimpleNamespace(provider_id="ollama", model="fake:1b", cloud=False)
+    class Inner(FakeGateway):
+        def resolve_route(self, request, context):
+            return route
+
+    inner = Inner(['{"answer": 1}'])
+    gateway = CapabilityEvidenceGateway(
+        inner, None, lambda *_: None, mode="strict",
+    )
+    with pytest.raises(DependencyUnavailable):
+        generate_structured(gateway, _request(), _context(), SCHEMA)
+    assert inner.requests == []
+
+    from sonder_runtime.application.routing.request_capabilities import (
+        request_requirements,
+    )
+    assert BackendCapability.STRUCTURED in request_requirements({"schema": SCHEMA})
+    assert BackendCapability.STRUCTURED in request_requirements({"options": {"schema": SCHEMA}})
+    assert not request_requirements({"options": {"temperature": 0.0}})

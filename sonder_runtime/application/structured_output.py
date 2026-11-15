@@ -118,8 +118,8 @@ def generate_structured(
         try:
             current = replace(current, history=(
                 *current.history,
-                ("assistant", response.text),
-                ("user", _correction(checked.errors)),
+                {"role": "assistant", "content": response.text},
+                {"role": "user", "content": _correction(checked.errors)},
             ))
         except ProvenanceError:
             failure = StructuredFailure("retry_unavailable", checked.errors)
