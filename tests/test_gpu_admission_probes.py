@@ -65,3 +65,29 @@ def test_concurrent_probes_never_overlap_and_the_overflow_gets_probe_busy(
     fake.show_gate.set()
     holder.join(5)
 
+
+
+def test_a_probe_busy_deferral_is_not_a_worker_failure():
+    calls = []
+    pool = ollama_pool.OllamaWorkerPool(
+        "http://127.0.0.1:11434", failure_threshold=1,
+        capability_prober=lambda origin: calls.append(origin) or {"models": ["m"]},
+        capability_probe_timeout_seconds=1.0,
+    )
+    state = pool._states[0]
+    from sonder_runtime.adapters.inference import gpu_admission as adapter
+    from sonder_runtime.domain import gpu_admission as domain
+    refusal = domain.Refused(domain.RefusalReason.PROBE_BUSY, "probe gate busy")
+
+    class Busy:
+        def admit(self, *args, **kwargs):
+            raise adapter.GpuAdmissionRefused(refusal)
+
+    pool.gpu_admission = Busy()
+    pool.refresh_capabilities(force=True)
+    assert calls == []
+    assert state.consecutive_failures == 0
+    assert state.cooldown_until <= pool._clock()
+    assert state.capabilities is None
+    assert not state.capability_probe_failed
+    assert not state.capability_probe_inflight

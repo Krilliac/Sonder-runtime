@@ -122,6 +122,10 @@ class WorkerPoolError(urllib.error.URLError):
     """Base for privacy-safe pool admission and availability failures."""
 
 
+class CapabilityProbeDeferred(Exception):
+    """GPU admission deferred a capability probe; the worker itself is not at fault."""
+
+
 class WorkerPoolBackpressure(WorkerPoolError):
     """No worker capacity or bounded queue slot was available."""
 
@@ -1074,15 +1078,17 @@ class OllamaWorkerPool:
         """Run the capability prober inside one PROBE admission.
 
         A refused probe is a deferred check, not a worker fault: it surfaces as
-        a timeout (retryable, the next refresh asks again) instead of marking
-        the worker incompatible.
+        ``CapabilityProbeDeferred``, which the refresh skips without touching
+        the worker's failure count, circuit or capabilities (the next refresh
+        asks again because the cached capabilities stay stale).
         """
         try:
             with admitted(self, "/api/tags", None, origin,
                           deadline=time.monotonic() + self._probe_timeout):
                 return self._capability_prober(origin)
         except gpu_admission_module.GpuAdmissionRefused as refused:
-            raise TimeoutError("capability probe deferred: %s" % refused.refusal.reason.value) from None
+            raise CapabilityProbeDeferred(
+                "capability probe deferred: %s" % refused.refusal.reason.value) from None
 
     @staticmethod
     def _retryable(error: BaseException) -> bool:
@@ -1404,6 +1410,11 @@ class OllamaWorkerPool:
                         )
                         continue
                     self._metrics["capability_probes"] += 1
+                    if isinstance(error, CapabilityProbeDeferred):
+                        logger.info(
+                            "capability probe for worker %s deferred by gpu admission; will retry",
+                            state.endpoint.worker_id)
+                        continue
                     if error is not None:
                         logger.debug(f"capability probe failed for {state.endpoint.worker_id}: {_safe_error(error)}")
                         logger.warning(

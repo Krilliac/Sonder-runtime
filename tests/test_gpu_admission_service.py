@@ -126,6 +126,37 @@ def test_observe_on_a_corrupt_store_admits_and_logs(tmp_path, caplog):
     assert any("admitting without coordination" in r.getMessage() for r in caplog.records)
 
 
+def _install_foreign_owner(monkeypatch, tmp_path):
+    from sonder_runtime.adapters.persistence import owned_sqlite
+    private = tmp_path / "private-root"
+    private.mkdir()
+    monkeypatch.setattr(owned_sqlite, "_PROCESS_OWNER",
+                        owned_sqlite.OwnedSQLiteConnections((private,)))
+
+
+def test_enforce_with_a_process_owner_refusing_the_store_path_is_store_unavailable(
+        tmp_path, monkeypatch):
+    fake = FakeOllama()
+    (tmp_path / "outside").mkdir()
+    service = make_service(tmp_path / "outside", fake)
+    _install_foreign_owner(monkeypatch, tmp_path)
+    with pytest.raises(adapter.GpuAdmissionRefused) as caught:
+        _chat(service)
+    assert caught.value.refusal.reason is domain.RefusalReason.STORE_UNAVAILABLE
+
+
+def test_observe_with_a_process_owner_refusing_the_store_path_admits_and_logs(
+        tmp_path, monkeypatch, caplog):
+    fake = FakeOllama()
+    (tmp_path / "outside").mkdir()
+    service = make_service(tmp_path / "outside", fake, mode="observe")
+    _install_foreign_owner(monkeypatch, tmp_path)
+    with caplog.at_level(logging.WARNING):
+        ticket = _chat(service, 4096)
+    assert ticket.rewritten is False
+    assert any("admitting without coordination" in r.getMessage() for r in caplog.records)
+
+
 def test_a_wrong_schema_store_is_unavailable_in_enforce(tmp_path):
     fake = FakeOllama()
     service = make_service(tmp_path, fake)

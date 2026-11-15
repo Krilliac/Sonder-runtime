@@ -4,8 +4,10 @@ Every Sonder process on a box shares one GPU, so they share one queue: this file
 holds the lease table (waiting and held tickets), the one-window-per-model pins
 and the measured host footprints. It lives beside the user's local app data, not
 in a per-instance state home, so a worktree instance with its own home still
-queues behind production. For the same reason it opens its own connections
-instead of the per-home owned-SQLite namespace.
+queues behind production. Connections still come from the owned-SQLite factory
+(the one place a connection is opened); when a process owner is installed and
+this path lies outside its private roots the owner refuses the open, and that
+refusal is reported as ``StoreUnavailable`` like any other unusable state.
 
 Ownership and thread affinity: a ``GpuAdmissionStore`` holds no connection; each
 operation opens one, runs a single ``BEGIN IMMEDIATE`` transaction and closes it,
@@ -134,7 +136,12 @@ class GpuAdmissionStore:
         if self.path.is_symlink():
             raise StoreUnavailable("admission store must not be a symlink")
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        return owned_sqlite_connect(str(self.path), timeout=self._busy)
+        try:
+            return owned_sqlite_connect(str(self.path), timeout=self._busy)
+        except RuntimeError as error:
+            # The process owner refuses paths outside its namespace and
+            # connections beyond its capacity; both leave the store unusable.
+            raise StoreUnavailable("admission store unavailable: %s" % error) from error
 
     def _begin(self, connection: sqlite3.Connection) -> None:
         connection.execute("BEGIN IMMEDIATE")
