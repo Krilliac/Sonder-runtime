@@ -33,6 +33,12 @@ def runtime_identity_fields(
             "where": "served by a hosted provider through OpenRouter, not on this machine",
             "diagnostics": "`python -m sonder_runtime openrouter account` or Sonder's diagnostics",
         }
+    if not cloud and provider == "anthropic":
+        return {
+            "model": current,
+            "where": "served by Anthropic's hosted Claude API, not on this machine",
+            "diagnostics": "`python -m sonder_runtime anthropic status` or Sonder's diagnostics",
+        }
     where = (
         "served by Ollama's hosted service, not on this machine"
         if cloud else
