@@ -81,10 +81,11 @@ jobs:
         run: python scripts/check_lint_ratchet.py
       # Strict mypy for the allowlist in scripts/typing_strict_modules.txt, checked for
       # linux and win32; a new sonder_runtime module must be strict-clean. On a pull
-      # request --against keeps both lists one-way relative to the base branch.
+      # request --against keeps both lists one-way relative to the base branch; on a
+      # push it compares against the commit the push replaced (absent on a new branch).
       - name: Enforce typing ratchet
         env:
-          TYPING_RATCHET_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
+          TYPING_RATCHET_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || (github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || '' }}
         run: python scripts/check_typing_ratchet.py ${TYPING_RATCHET_BASE:+--against "$TYPING_RATCHET_BASE"}
       - name: Prevent new Git-history privacy debt
         run: python scripts/check_history_privacy.py --json

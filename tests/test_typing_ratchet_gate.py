@@ -84,7 +84,9 @@ def test_stale_and_duplicate_entries_fail():
     ("returncode", "stdout"),
     [
         (1, "something unexpected\n"),
-        (0, "sonder_runtime/a.py:1: error: x  [misc]\n"),
+        (1, "something unexpected\nFound 1 error in 1 file (checked 1 source file)\n"),
+        (0, "sonder_runtime/a.py:1: error: x  [misc]\nSuccess: no issues found in 1 source file\n"),
+        (0, ""),
         (2, ""),
     ],
 )
@@ -155,3 +157,12 @@ def test_checked_in_lists_match_the_tree():
     violations, _ = module.evaluate(module.discover_modules(REPO_ROOT), strict, baseline, {})
     assert violations == []
     assert len(strict) == len(set(strict)) and len(baseline) == len(set(baseline))
+
+
+def test_against_flags_a_strict_module_moved_to_the_baseline(tmp_path):
+    module = _load_gate()
+    _repo_with_lists(tmp_path, module, "m/legacy.py\n")
+    violations = module.compare_against(
+        tmp_path, "HEAD", MODULES, [], ["m/legacy.py", "m/strict.py"],
+    )
+    assert "m/strict.py was strict at HEAD and is no longer in the strict list" in violations

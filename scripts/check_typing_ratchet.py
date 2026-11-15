@@ -20,7 +20,12 @@ Checks, in order:
 3. ``mypy --strict`` reports no error in any strict module.
    A strict module may not opt itself out: any ``# mypy:`` configuration comment
    or a ``# type: ignore`` comment above its first statement (which mypy treats
-   as ignoring the whole file) fails the gate.
+   as ignoring the whole file) fails the gate, as does ``no_type_check``.
+   ``mypy.ini`` may not weaken the check either: only an allowlist of keys is
+   accepted, and a ``[mypy-*]`` section may do nothing but ignore a missing
+   third-party import.  mypy's own summary must also show that it checked at
+   least every discovered module, and any error path that is not a discovered
+   module is a tool failure, so a module cannot escape by being skipped.
 4. With ``--against REF``: the baseline holds nothing that REF's baseline did
    not, and no module that is strict at REF dropped out of the strict list
    while its file still exists.  This is what makes the lists one-way in review.
@@ -38,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import configparser
 import io
 import re
 import subprocess
@@ -54,6 +60,10 @@ BASELINE_PATH = Path(__file__).with_name("typing_baseline.txt")
 CONFIG_NAME = "mypy.ini"
 PLATFORMS = ("linux", "win32")
 
+_SUMMARY_LINE = re.compile(
+    r"^(?:Success: no issues found in (?P<ok>\d+) source files?"
+    r"|Found \d+ errors? in \d+ files? \(checked (?P<bad>\d+) source files?\))$"
+)
 _ERROR_LINE = re.compile(r"^(?P<path>[^\s:][^:]*\.py):(?P<line>\d+)(?::\d+)?: error: (?P<message>.*)$")
 _STRICT_HEADER = (
     "# Modules that pass `mypy --strict` and must keep passing (see scripts/check_typing_ratchet.py).",
@@ -108,6 +118,94 @@ def parse_mypy_output(text: str) -> dict[str, list[str]]:
     return dict(errors)
 
 
+def parse_checked_count(text: str) -> int:
+    """Return the number of source files mypy says it checked, from its summary line."""
+    counts = []
+    for raw in text.splitlines():
+        match = _SUMMARY_LINE.match(raw.strip())
+        if match:
+            counts.append(int(match.group("ok") or match.group("bad")))
+    if len(counts) != 1:
+        raise RatchetError(
+            "mypy printed %d summary lines (expected exactly 1), so the number of checked files is unknown: %s"
+            % (len(counts), text.strip()[-500:])
+        )
+    return counts[0]
+
+
+# [mypy] keys the repo needs, each with the only value accepted for it.  Anything
+# else (exclude, ignore_errors, disable_error_code, show_absolute_path,
+# no_error_summary, ...) can hide a strict module from the gate or break its
+# parsing, so it fails the gate until it is added here with a reason.
+_ALLOWED_GLOBAL_KEYS: dict[str, re.Pattern[str]] = {
+    "python_version": re.compile(r"3\.\d+"),
+    "files": re.compile(re.escape(PACKAGE)),
+    "mypy_path": re.compile(r"\."),
+    "namespace_packages": re.compile(r"true"),
+    "explicit_package_bases": re.compile(r"true"),
+    # Types flow from every imported module but only the modules named on the
+    # command line report errors; this key is required for that, and "silent"
+    # is the only value that keeps the strict modules themselves reporting.
+    "follow_imports": re.compile(r"silent"),
+    "ignore_missing_imports": re.compile(r"true"),
+    "show_error_codes": re.compile(r"true"),
+    "pretty": re.compile(r"false"),
+    "enable_error_code": re.compile(r"ignore-without-code"),
+}
+# A per-module section is only for third-party packages that may be missing.
+_THIRD_PARTY_SECTION = re.compile(r"^mypy-([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\.\*)?)$")
+
+
+def validate_mypy_config(config_path: Path, package: str = PACKAGE) -> list[str]:
+    """Return violations for a ``mypy.ini`` that could relax checking of a strict module."""
+    parser = configparser.RawConfigParser(strict=True)
+    try:
+        with config_path.open(encoding="utf-8") as handle:
+            parser.read_file(handle)
+    except (OSError, UnicodeDecodeError, configparser.Error) as exc:
+        raise RatchetError("cannot read %s: %s" % (config_path.name, exc)) from exc
+    name = config_path.name
+    violations = []
+    if not parser.has_section("mypy"):
+        violations.append("mypy config: %s has no [mypy] section" % name)
+    for section in parser.sections():
+        if section == "mypy":
+            for key in parser.options(section):
+                value = parser.get(section, key).strip().lower()
+                allowed = _ALLOWED_GLOBAL_KEYS.get(key)
+                if allowed is None:
+                    violations.append("mypy config: [mypy] key %r is not allowed in %s" % (key, name))
+                elif not allowed.fullmatch(value):
+                    violations.append(
+                        "mypy config: [mypy] %s = %s is not an accepted value in %s" % (key, value, name)
+                    )
+            continue
+        match = _THIRD_PARTY_SECTION.match(section)
+        if match is None or match.group(1).split(".")[0] == package:
+            violations.append(
+                "mypy config: section [%s] in %s is not allowed (only [mypy-<third-party package>] "
+                "sections that set ignore_missing_imports)" % (section, name)
+            )
+            continue
+        for key in parser.options(section):
+            value = parser.get(section, key).strip().lower()
+            if key != "ignore_missing_imports" or value != "true":
+                violations.append(
+                    "mypy config: [%s] may only set ignore_missing_imports = True, not %s" % (section, key)
+                )
+    return violations
+
+
+def require_known_paths(errors: Mapping[str, Sequence[str]], modules: Sequence[str]) -> None:
+    """Raise when mypy reported an error for a path that is not a discovered module."""
+    unknown = sorted(set(errors) - set(modules))
+    if unknown:
+        raise RatchetError(
+            "mypy reported errors for paths that are not discovered modules (absolute or "
+            "unexpected paths would hide errors): %s" % ", ".join(unknown[:5])
+        )
+
+
 _MYPY_DIRECTIVE = re.compile(r"^#\s*mypy\s*:", re.IGNORECASE)
 _TYPE_IGNORE = re.compile(r"^#\s*type\s*:\s*ignore(?![\w-])", re.IGNORECASE)
 
@@ -136,6 +234,16 @@ def find_opt_outs(source: str) -> list[str]:
         body = body[1:]
     first_line = body[0].lineno if body else 10**9
     found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id.startswith("no_type_check"):
+            found.append("line %d uses `%s`, which switches off checking" % (node.lineno, node.id))
+        elif isinstance(node, ast.Attribute) and node.attr.startswith("no_type_check"):
+            found.append("line %d uses `%s`, which switches off checking" % (node.lineno, node.attr))
+        elif isinstance(node, ast.ImportFrom):
+            found.extend(
+                "line %d imports `%s`, which switches off checking" % (node.lineno, alias.name)
+                for alias in node.names if alias.name.startswith("no_type_check")
+            )
     for line, text in comments:
         if _MYPY_DIRECTIVE.match(text):
             found.append("line %d has a `# mypy:` configuration comment (%s)" % (line, text))
@@ -144,7 +252,7 @@ def find_opt_outs(source: str) -> list[str]:
     return found
 
 
-def _run_mypy_once(root: Path, platform: str) -> dict[str, list[str]]:
+def _run_mypy_once(root: Path, platform: str, expected_sources: int) -> dict[str, list[str]]:
     command = [
         sys.executable, "-m", "mypy", "--strict",
         "--config-file", str(root / CONFIG_NAME),
@@ -162,6 +270,12 @@ def _run_mypy_once(root: Path, platform: str) -> dict[str, list[str]]:
         raise RatchetError("mypy is not installed (pip install -r requirements-dev.txt)")
     if completed.returncode not in (0, 1):
         raise RatchetError("mypy failed (exit %d): %s" % (completed.returncode, output.strip()[-2000:]))
+    checked = parse_checked_count(completed.stdout)
+    if checked < expected_sources:
+        raise RatchetError(
+            "mypy checked %d source files on %s but %d modules were discovered; "
+            "a module is being skipped (exclude or files in mypy.ini?)" % (checked, platform, expected_sources)
+        )
     errors = parse_mypy_output(completed.stdout)
     printed = sum(1 for raw in completed.stdout.splitlines() if ": error:" in raw)
     parsed = sum(len(lines) for lines in errors.values())
@@ -181,16 +295,17 @@ def _run_mypy_once(root: Path, platform: str) -> dict[str, list[str]]:
     return errors
 
 
-def run_mypy(root: Path = REPO_ROOT) -> dict[str, list[str]]:
+def run_mypy(root: Path = REPO_ROOT, expected_sources: int = 1) -> dict[str, list[str]]:
     """Run ``mypy --strict`` for each platform and return the merged errors per file.
 
     A module must be clean on every platform in ``PLATFORMS``, so the verdict
     does not depend on which OS runs the gate (CI is Linux, development is
-    Windows, and ``sys.platform`` branches change what mypy sees).
+    Windows, and ``sys.platform`` branches change what mypy sees).  mypy must
+    report having checked at least *expected_sources* files on each platform.
     """
     merged: dict[str, list[str]] = {}
     for platform in PLATFORMS:
-        for path, lines in _run_mypy_once(root, platform).items():
+        for path, lines in _run_mypy_once(root, platform, expected_sources).items():
             known = merged.setdefault(path, [])
             known.extend(line for line in lines if line not in known)
     return merged
@@ -210,6 +325,7 @@ def evaluate(
     When *root* is given, each strict module's source is also scanned for
     comments that opt it out of checking.
     """
+    require_known_paths(errors, modules)
     present = set(modules)
     strict_set = set(strict)
     baseline_set = set(baseline)
@@ -317,8 +433,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         modules = discover_modules()
-        errors = run_mypy()
+        config_violations = validate_mypy_config(REPO_ROOT / CONFIG_NAME)
+        errors = run_mypy(REPO_ROOT, len(modules))
+        require_known_paths(errors, modules)
         if args.init:
+            if config_violations:
+                raise RatchetError("; ".join(config_violations))
             if STRICT_PATH.exists() or BASELINE_PATH.exists():
                 print("typing ratchet: lists already exist; use --update", file=sys.stderr)
                 return 1
@@ -332,13 +452,14 @@ def main(argv: list[str] | None = None) -> int:
         if not strict:
             raise RatchetError("%s is empty or missing; run --init once" % STRICT_PATH.name)
         violations, promotable = evaluate(modules, strict, baseline, errors, REPO_ROOT)
+        violations = config_violations + violations
         if args.against:
             violations += compare_against(REPO_ROOT, args.against, modules, strict, baseline)
     except (RatchetError, OSError) as exc:
         print("typing ratchet: %s" % exc, file=sys.stderr)
         return 2
     if args.update:
-        regressions = [v for v in violations if v.startswith("strict module")]
+        regressions = [v for v in violations if v.startswith(("strict module", "mypy config"))]
         if regressions:
             print("refusing --update while a strict module has errors:", file=sys.stderr)
             for line in regressions:
