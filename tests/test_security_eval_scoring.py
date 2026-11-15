@@ -172,3 +172,36 @@ def test_summary_of_an_incomplete_run_carries_a_banner():
     from sonder_runtime.domain.security_eval.summary import render_summary
     text = render_summary(_report(complete=False))
     assert text.splitlines()[0].startswith("# ") and "INCOMPLETE" in text and "time_budget" in text and "6" in text
+
+
+# -- chunk matching is per file --------------------------------------------------------------
+
+def _record(hid, file, start, end, label="CONFIRMED"):
+    from sonder_runtime.domain.security_eval.records import HypothesisRecord, LineRange
+    return HypothesisRecord(hid, "repo", file, LineRange(start, end), "bounds", "text", label, "high", "r1", "why")
+
+
+def _finding(file, start, end):
+    from sonder_runtime.domain.security_eval.records import LineRange
+    from sonder_runtime.domain.security_eval.verdict import ParsedHypothesis
+    return ParsedHypothesis(file, LineRange(start, end), "bounds", "text", "high")
+
+
+def test_a_finding_in_another_file_with_overlapping_lines_does_not_match():
+    from sonder_runtime.domain.security_eval.scoring import match_findings
+    records = [_record("h01", "src/Reader.cs", 10, 12)]
+    assert match_findings([_finding("tools/caller.py", 10, 12)], records, 2, "src/Reader.cs") == ()
+
+
+def test_a_finding_in_the_records_file_matches_even_with_other_spelling():
+    from sonder_runtime.domain.security_eval.scoring import match_findings
+    records = [_record("h01", "src/Reader.cs", 10, 12)]
+    got = match_findings([_finding("./src\\Reader.cs", 11, 11)], records, 0, "src/Reader.cs")
+    assert [r.hid for r in got] == ["h01"]
+
+
+def test_a_finding_without_a_file_defaults_to_the_chunk_file():
+    from sonder_runtime.domain.security_eval.scoring import match_findings
+    records = [_record("h01", "src/Reader.cs", 10, 12)]
+    assert [r.hid for r in match_findings([_finding("", 10, 12)], records, 0, "src/Reader.cs")] == ["h01"]
+    assert match_findings([_finding("", 10, 12)], records, 0, "other.cs") == ()

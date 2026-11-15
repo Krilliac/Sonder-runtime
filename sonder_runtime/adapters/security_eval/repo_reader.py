@@ -6,7 +6,8 @@ Confinement rules (every one is enforced here, none is delegated to the caller):
 - a record's ``file`` field may not hold ``..``, an absolute path, a drive letter or an alternate
   data stream;
 - the walk never follows a symlink or junction and never lists one; ``.git`` and credential
-  directories, secret files, ``.env*``, binary files and files over the byte cap are skipped;
+  directories, secret files (the ``file_ops`` definition: ``.env*``, ``*.env``, credential/secret
+  named configs, ``.docker/config.json``), binary files and files over the byte cap are skipped;
 - every open is a no-follow open (``FILE_FLAG_OPEN_REPARSE_POINT`` on Windows, ``O_NOFOLLOW`` on
   POSIX) whose handle path is checked to lie inside the root, so a directory swapped for a link after
   indexing is refused at open time instead of read.
@@ -20,6 +21,7 @@ import re
 import stat
 import time
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Callable
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
@@ -37,9 +39,6 @@ _SKIP_DIRS = frozenset(
     name.casefold() for name in (
         set(file_ops.SENSITIVE_READ_DIRECTORIES) | set(file_ops.CREDENTIAL_READ_DIRECTORIES)
         | {"node_modules", "__pycache__"}))
-_SECRET_NAMES = frozenset(name.casefold() for name in (
-    set(file_ops.SECRET_FILES) | set(file_ops.CREDENTIAL_READ_FILES)))
-_SECRET_SUFFIXES = frozenset(suffix.casefold() for suffix in file_ops.SECRET_SUFFIXES)
 _BINARY_PROBE = 4096
 _MAX_DEPTH = 40
 _GUARD_WINDOW_BEFORE_CALLER = 5
@@ -83,10 +82,15 @@ def _is_reparse(path: str) -> bool:
     return stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_file_attributes", 0) & _REPARSE)
 
 
-def _sensitive_name(name: str) -> bool:
-    folded = name.casefold()
-    return (folded in _SECRET_NAMES or folded.startswith(".env")
-            or os.path.splitext(folded)[1] in _SECRET_SUFFIXES)
+def _sensitive_rel(rel: str) -> bool:
+    """True when the repo-relative path is a secret file by the ``file_ops`` definition.
+
+    Uses ``file_ops._is_secret_path`` (secret names and suffixes, ``.env*``, ``*.env``, and
+    credential/secret named config files) plus ``file_ops._credential_part`` (credential stores
+    such as ``.docker/config.json``) so the two lists cannot drift apart.
+    """
+    parts = rel.split("/")
+    return file_ops._is_secret_path(PurePosixPath(parts[-1])) or bool(file_ops._credential_part(parts))
 
 
 def _opened_handle_path(fd: int) -> str | None:
@@ -210,7 +214,7 @@ class ConfinedRepo:
     @staticmethod
     def _refuse_sensitive(rel: str) -> None:
         parts = rel.split("/")
-        if any(part.casefold() in _SKIP_DIRS for part in parts[:-1]) or _sensitive_name(parts[-1]):
+        if any(part.casefold() in _SKIP_DIRS for part in parts[:-1]) or _sensitive_rel(rel):
             raise SourceRefused("file %r is a sensitive or secret path and is never read" % rel)
 
     def _read_bytes(self, rel: str) -> bytes:
@@ -319,7 +323,7 @@ class ConfinedRepo:
                 continue
             if not stat.S_ISREG(info.st_mode):
                 continue
-            if _sensitive_name(entry.name):
+            if _sensitive_rel(rel):
                 self._skipped["sensitive"] += 1
                 continue
             if info.st_size > self._limits.max_file_bytes:

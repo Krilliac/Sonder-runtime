@@ -237,12 +237,20 @@ def _overlap(first_start: int, first_end: int, second_start: int, second_end: in
     return min(first_end, second_end) - max(first_start, second_start) + 1
 
 
-def match_findings(findings, records, tolerance: int) -> tuple[HypothesisRecord, ...]:
+def _norm_file(path: str) -> str:
+    parts = [part for part in str(path).strip().replace("\\", "/").split("/") if part not in ("", ".")]
+    return "/".join(parts)
+
+
+def match_findings(findings, records, tolerance: int, default_file: str = "") -> tuple[HypothesisRecord, ...]:
     """Match each located finding to at most one labelled record, each record at most once.
 
     A finding matches a record whose line range, widened by ``tolerance`` lines, overlaps the
     finding's range. Among candidates the largest overlap wins, then the nearest start, then the
     lower ``hid``. A finding with no line range matches nothing (it still counts as generated).
+    The finding's file (separators and ``./`` normalised) must equal the record's file; a finding
+    that names no file is taken to be in ``default_file`` (the chunk's file), so a model that omits
+    the field still scores in the chunk it was shown, while a finding in another file never does.
     """
     taken: set[str] = set()
     matched: list[HypothesisRecord] = []
@@ -250,8 +258,9 @@ def match_findings(findings, records, tolerance: int) -> tuple[HypothesisRecord,
         if not isinstance(finding, ParsedHypothesis) or finding.lines is None:
             continue
         best = None
+        finding_file = _norm_file(finding.file or default_file)
         for record in records:
-            if record.hid in taken:
+            if record.hid in taken or _norm_file(record.file) != finding_file:
                 continue
             size = _overlap(finding.lines.start, finding.lines.end,
                             record.lines.start - tolerance, record.lines.end + tolerance)

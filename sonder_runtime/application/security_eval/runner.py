@@ -299,7 +299,7 @@ class SecurityEvalRunner:
             findings = parse_hypotheses(call.text, _MAX_FINDINGS)
         except VerdictParseError as exc:
             return self._failed(row, "UNPARSED", exc)
-        matched = match_findings(findings, unit.scope, plan.match_line_tolerance)
+        matched = match_findings(findings, unit.scope, plan.match_line_tolerance, unit.file)
         row.update({"generated": len(findings), "matched_hids": [r.hid for r in matched],
                     "matched_labels": [r.label for r in matched]})
         return row

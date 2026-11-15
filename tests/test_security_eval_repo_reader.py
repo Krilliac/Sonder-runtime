@@ -187,3 +187,15 @@ def test_read_chunks_split_on_line_boundaries(repo_root, tmp_path):
         assert later.start == earlier.end + 1
     assert all(len(chunk.text) <= 400 for chunk in chunks)
     assert "".join(chunk.text for chunk in chunks).count("ReadBlock") == 1
+
+
+@pytest.mark.parametrize("rel", ["deploy/prod.env", "config/secrets.yaml", ".docker/config.json"])
+def test_env_suffix_credential_named_and_docker_config_files_are_skipped_and_refused(repo_root, tmp_path, rel):
+    target = repo_root / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("KEY=hunter2", encoding="utf-8")
+    repo = open_repo(repo_root, tmp_path)
+    repo.retrieve("src/PacketReader.cs", LineRange(13, 14))
+    assert rel not in set(repo.indexed_paths())
+    with pytest.raises(SourceRefused):
+        repo.read_window(rel, LineRange(1, 1), 0)
