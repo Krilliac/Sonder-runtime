@@ -8,24 +8,34 @@ import re
 MAX_ARGUMENT_CHARS = 65536
 MAX_ARGUMENT_DEPTH = 64
 TOOL_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.:-]{0,127}\Z")
-# A JSON string literal (escapes honoured) or one structural bracket.
-_JSON_TOKEN_RE = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"|[\[\]{}]', re.DOTALL)
 
 
 def _json_text_depth_within(text: str, limit: int) -> bool:
     """Return False once bracket nesting outside string literals exceeds limit.
 
-    Iterative and independent of the interpreter recursion limit, so the
-    verdict is the same on every Python version.
+    A single linear pass (string/escape state machine, no regex, no
+    backtracking), independent of the interpreter recursion limit, so the
+    verdict and the cost are the same on every Python version. An unterminated
+    string swallows the rest of the text; json.loads rejects such input anyway.
     """
     depth = 0
-    for match in _JSON_TOKEN_RE.finditer(text):
-        token = match.group()
-        if token == "{" or token == "[":
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char == "{" or char == "[":
             depth += 1
             if depth > limit:
                 return False
-        elif token == "}" or token == "]":
+        elif char == "}" or char == "]":
             depth -= 1
     return True
 
