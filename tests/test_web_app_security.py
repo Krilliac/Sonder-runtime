@@ -15,7 +15,6 @@ import threading
 
 import pytest
 
-import sonder_runtime.interfaces.http.serve as ts
 from sonder_runtime.interfaces.http import web_app
 from tests.test_serve_host_policy import API_KEY, _server
 from tests.test_web_app_http import _enable, _request
