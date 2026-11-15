@@ -211,7 +211,11 @@ def compile_bytecode(entries, *, limit=None):
                     return None, {}
                 table[str(path)] = pyc
                 digests[str(path)] = sha256(source).hexdigest()
-    return marshal.dumps(table), digests
+    # Version 2 writes no reference flags and does not distinguish interned
+    # from other strings; both depend on object identity and refcounts and
+    # differ between identical calls on 3.14. The bytes therefore depend only
+    # on the table's contents, on every supported interpreter.
+    return marshal.dumps(table, 2), digests
 
 
 def _require_compiled_from(digests, rows, site_root, dependencies):
