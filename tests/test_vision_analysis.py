@@ -171,7 +171,7 @@ def test_vision_analysis_uses_show_for_sparse_catalog_capability(monkeypatch):
 
     assert server._vision_local_target() == "qwen2.5vl:3b"
     assert seen == {
-        "path": "/api/show", "payload": {"name": "qwen2.5vl:3b"},
+        "path": "/api/show", "payload": {"model": "qwen2.5vl:3b", "name": "qwen2.5vl:3b"},
         "kwargs": {"timeout": 30},
     }
 
