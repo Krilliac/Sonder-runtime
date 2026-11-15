@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "0e79eac90b9d3fc1a088d551cfc20636835dd5a54f99eae3f7206b9d62abf2b6",
+    "catalog_digest": "f03893ef9d4d664d04e0edc601a483a48281c7b04300fe1ecd7bacfbb5873c62",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "0e79eac90b9d3fc1a088d551cfc20636835dd5a54f99eae3f7206b9d62abf2b6",
+      "catalog_digest": "f03893ef9d4d664d04e0edc601a483a48281c7b04300fe1ecd7bacfbb5873c62",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -6203,6 +6203,68 @@
             "type": "object"
           },
           "name": "secret_scan"
+        },
+        {
+          "description": "Measure a local model's precision and recall on labelled security hypotheses, with and without retrieved repo context. Reads an external JSONL dataset (argument or SONDER_SECURITY_EVAL_DATASET), calls the named local model only (cloud and unconsented remote routes are refused), and writes items.jsonl, report.json and summary.md under out_dir. A call is a bounded slice; call again with the same out_dir to resume. score_only rescoring makes no model call.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "categories": {
+                "default": "",
+                "title": "Categories",
+                "type": "string"
+              },
+              "context": {
+                "default": "",
+                "title": "Context",
+                "type": "string"
+              },
+              "dataset": {
+                "default": "",
+                "title": "Dataset",
+                "type": "string"
+              },
+              "hids": {
+                "default": "",
+                "title": "Hids",
+                "type": "string"
+              },
+              "limit": {
+                "default": 0,
+                "title": "Limit",
+                "type": "integer"
+              },
+              "mode": {
+                "default": "item",
+                "title": "Mode",
+                "type": "string"
+              },
+              "model": {
+                "default": "",
+                "title": "Model",
+                "type": "string"
+              },
+              "out_dir": {
+                "default": "",
+                "title": "Out Dir",
+                "type": "string"
+              },
+              "score_only": {
+                "default": false,
+                "title": "Score Only",
+                "type": "boolean"
+              },
+              "stages": {
+                "default": "",
+                "title": "Stages",
+                "type": "string"
+              }
+            },
+            "title": "security_evalArguments",
+            "type": "object"
+          },
+          "name": "security_eval"
         },
         {
           "description": "Check for common local breakage without changing anything.",
@@ -15572,6 +15634,77 @@
     },
     {
       "aliases": [],
+      "category": "data",
+      "name": "/security_eval",
+      "native": false,
+      "params": [
+        {
+          "default": "",
+          "name": "model",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "out_dir",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "dataset",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "item",
+          "name": "mode",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "context",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": 0,
+          "name": "limit",
+          "required": false,
+          "type": "int"
+        },
+        {
+          "default": "",
+          "name": "categories",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "stages",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "hids",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": false,
+          "name": "score_only",
+          "required": false,
+          "type": "bool"
+        }
+      ],
+      "risk": "mutation",
+      "summary": "Measure a local model's precision and recall on labelled security hypotheses, with and without retrieved repo context.",
+      "tool": "security_eval"
+    },
+    {
+      "aliases": [],
       "category": "updates",
       "name": "/self_heal_check",
       "native": false,
@@ -17893,6 +18026,12 @@
       "type": "BuildToolsConfig"
     },
     {
+      "default": null,
+      "field": "security_eval",
+      "section": "root",
+      "type": "SecurityEvalConfig"
+    },
+    {
       "default": "[redacted]",
       "field": "api_key",
       "section": "secrets",
@@ -19321,15 +19460,15 @@
   ],
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES plus sonder_runtime.platform.memory_replication_config",
   "counts": {
-    "capabilities": 231,
-    "commands": 349,
-    "configuration": 262,
+    "capabilities": 232,
+    "commands": 350,
+    "configuration": 263,
     "events": 43,
     "native_tools": 68,
     "schemas": 4,
-    "tools": 231
+    "tools": 232
   },
-  "digest": "b9af86f6c038530a067d9f7c8a9f43dbc23c519813cf3f0ee8b610c930ad98cc",
+  "digest": "0c578795b5da36e9c3d632cb2868b1c61b09ae71a960218f1f9ed30715cfaae6",
   "events": [
     {
       "name": "session.started",
@@ -21991,9 +22130,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "0e79eac90b9d3fc1a088d551cfc20636835dd5a54f99eae3f7206b9d62abf2b6",
+    "catalog_digest": "f03893ef9d4d664d04e0edc601a483a48281c7b04300fe1ecd7bacfbb5873c62",
     "client": {
-      "digest": "0e79eac90b9d3fc1a088d551cfc20636835dd5a54f99eae3f7206b9d62abf2b6",
+      "digest": "f03893ef9d4d664d04e0edc601a483a48281c7b04300fe1ecd7bacfbb5873c62",
       "events": [
         {
           "name": "approval.denied",
@@ -23338,6 +23477,7 @@
           "script_run",
           "script_search",
           "secret_scan",
+          "security_eval",
           "self_heal_check",
           "self_heal_repair",
           "session_export",
@@ -24288,6 +24428,11 @@
             "name": "secret_scan",
             "schema_available": true,
             "summary": "Scan workspace files for leaked secrets (API keys, passwords, private keys, tokens). Returns findings with file, line, and type."
+          },
+          {
+            "name": "security_eval",
+            "schema_available": true,
+            "summary": "Measure a local model's precision and recall on labelled security hypotheses, with and without retrieved repo context. Reads an external JSONL dataset (argument or SONDER_SECURITY_EVAL_DATASET), calls the named local model only (cloud and unconsented remote routes are refused), and writes items.jsonl, report.json and summary.md under out_dir. A call is a bounded slice; call again with the same out_dir to resume. score_only rescoring makes no model call."
           },
           {
             "name": "self_heal_check",
@@ -30676,6 +30821,68 @@
             "type": "object"
           },
           "name": "secret_scan"
+        },
+        {
+          "description": "Measure a local model's precision and recall on labelled security hypotheses, with and without retrieved repo context. Reads an external JSONL dataset (argument or SONDER_SECURITY_EVAL_DATASET), calls the named local model only (cloud and unconsented remote routes are refused), and writes items.jsonl, report.json and summary.md under out_dir. A call is a bounded slice; call again with the same out_dir to resume. score_only rescoring makes no model call.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "categories": {
+                "default": "",
+                "title": "Categories",
+                "type": "string"
+              },
+              "context": {
+                "default": "",
+                "title": "Context",
+                "type": "string"
+              },
+              "dataset": {
+                "default": "",
+                "title": "Dataset",
+                "type": "string"
+              },
+              "hids": {
+                "default": "",
+                "title": "Hids",
+                "type": "string"
+              },
+              "limit": {
+                "default": 0,
+                "title": "Limit",
+                "type": "integer"
+              },
+              "mode": {
+                "default": "item",
+                "title": "Mode",
+                "type": "string"
+              },
+              "model": {
+                "default": "",
+                "title": "Model",
+                "type": "string"
+              },
+              "out_dir": {
+                "default": "",
+                "title": "Out Dir",
+                "type": "string"
+              },
+              "score_only": {
+                "default": false,
+                "title": "Score Only",
+                "type": "boolean"
+              },
+              "stages": {
+                "default": "",
+                "title": "Stages",
+                "type": "string"
+              }
+            },
+            "title": "security_evalArguments",
+            "type": "object"
+          },
+          "name": "security_eval"
         },
         {
           "description": "Check for common local breakage without changing anything.",
@@ -39371,6 +39578,66 @@
           "name": "secret_scan"
         },
         {
+          "description": "Measure a local model's precision and recall on labelled security hypotheses, with and without retrieved repo context. Reads an external JSONL dataset (argument or SONDER_SECURITY_EVAL_DATASET), calls the named local model only (cloud and unconsented remote routes are refused), and writes items.jsonl, report.json and summary.md under out_dir. A call is a bounded slice; call again with the same out_dir to resume. score_only rescoring makes no model call.",
+          "inputSchema": {
+            "properties": {
+              "categories": {
+                "default": "",
+                "title": "Categories",
+                "type": "string"
+              },
+              "context": {
+                "default": "",
+                "title": "Context",
+                "type": "string"
+              },
+              "dataset": {
+                "default": "",
+                "title": "Dataset",
+                "type": "string"
+              },
+              "hids": {
+                "default": "",
+                "title": "Hids",
+                "type": "string"
+              },
+              "limit": {
+                "default": 0,
+                "title": "Limit",
+                "type": "integer"
+              },
+              "mode": {
+                "default": "item",
+                "title": "Mode",
+                "type": "string"
+              },
+              "model": {
+                "default": "",
+                "title": "Model",
+                "type": "string"
+              },
+              "out_dir": {
+                "default": "",
+                "title": "Out Dir",
+                "type": "string"
+              },
+              "score_only": {
+                "default": false,
+                "title": "Score Only",
+                "type": "boolean"
+              },
+              "stages": {
+                "default": "",
+                "title": "Stages",
+                "type": "string"
+              }
+            },
+            "title": "security_evalArguments",
+            "type": "object"
+          },
+          "name": "security_eval"
+        },
+        {
           "description": "Check for common local breakage without changing anything.",
           "inputSchema": {
             "properties": {},
@@ -47332,6 +47599,69 @@
         },
         {
           "function": {
+            "description": "Measure a local model's precision and recall on labelled security hypotheses, with and without retrieved repo context. Reads an external JSONL dataset (argument or SONDER_SECURITY_EVAL_DATASET), calls the named local model only (cloud and unconsented remote routes are refused), and writes items.jsonl, report.json and summary.md under out_dir. A call is a bounded slice; call again with the same out_dir to resume. score_only rescoring makes no model call.",
+            "name": "security_eval",
+            "parameters": {
+              "properties": {
+                "categories": {
+                  "default": "",
+                  "title": "Categories",
+                  "type": "string"
+                },
+                "context": {
+                  "default": "",
+                  "title": "Context",
+                  "type": "string"
+                },
+                "dataset": {
+                  "default": "",
+                  "title": "Dataset",
+                  "type": "string"
+                },
+                "hids": {
+                  "default": "",
+                  "title": "Hids",
+                  "type": "string"
+                },
+                "limit": {
+                  "default": 0,
+                  "title": "Limit",
+                  "type": "integer"
+                },
+                "mode": {
+                  "default": "item",
+                  "title": "Mode",
+                  "type": "string"
+                },
+                "model": {
+                  "default": "",
+                  "title": "Model",
+                  "type": "string"
+                },
+                "out_dir": {
+                  "default": "",
+                  "title": "Out Dir",
+                  "type": "string"
+                },
+                "score_only": {
+                  "default": false,
+                  "title": "Score Only",
+                  "type": "boolean"
+                },
+                "stages": {
+                  "default": "",
+                  "title": "Stages",
+                  "type": "string"
+                }
+              },
+              "title": "security_evalArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
             "description": "Check for common local breakage without changing anything.",
             "name": "self_heal_check",
             "parameters": {
@@ -49159,7 +49489,7 @@
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/domain/operational_capabilities.py": "6f8f2083343ac1b0de076cd4d545b5f99602a9916c185bd15d965ffa0c405fe6",
     "sonder_runtime/interfaces/sdk/discovery.py": "db8aeca8dd84d06cbbf834495db30b211956393375676f23899a28685aea015b",
-    "sonder_runtime/platform/config.py": "8455895a9060a70e639466a2e8013474f920bfd5b1bc8fb3f68bea02bfb823f9",
+    "sonder_runtime/platform/config.py": "98812318f8a4fde792efdec76d134b0774ac4a68af558caadae90edba59a4213",
     "sonder_runtime/platform/memory_replication_config.py": "f9fc0a642812bdc456ac082f0f8c52f051822f0160e16882b634895feb0cea61"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
@@ -54925,6 +55255,66 @@
           }
         },
         "title": "secret_scanArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Measure a local model's precision and recall on labelled security hypotheses, with and without retrieved repo context. Reads an external JSONL dataset (argument or SONDER_SECURITY_EVAL_DATASET), calls the named local model only (cloud and unconsented remote routes are refused), and writes items.jsonl, report.json and summary.md under out_dir. A call is a bounded slice; call again with the same out_dir to resume. score_only rescoring makes no model call.",
+      "name": "security_eval",
+      "parameters": {
+        "properties": {
+          "categories": {
+            "default": "",
+            "title": "Categories",
+            "type": "string"
+          },
+          "context": {
+            "default": "",
+            "title": "Context",
+            "type": "string"
+          },
+          "dataset": {
+            "default": "",
+            "title": "Dataset",
+            "type": "string"
+          },
+          "hids": {
+            "default": "",
+            "title": "Hids",
+            "type": "string"
+          },
+          "limit": {
+            "default": 0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "mode": {
+            "default": "item",
+            "title": "Mode",
+            "type": "string"
+          },
+          "model": {
+            "default": "",
+            "title": "Model",
+            "type": "string"
+          },
+          "out_dir": {
+            "default": "",
+            "title": "Out Dir",
+            "type": "string"
+          },
+          "score_only": {
+            "default": false,
+            "title": "Score Only",
+            "type": "boolean"
+          },
+          "stages": {
+            "default": "",
+            "title": "Stages",
+            "type": "string"
+          }
+        },
+        "title": "security_evalArguments",
         "type": "object"
       }
     },
