@@ -57,6 +57,12 @@ def test_out_of_range_values_are_config_errors(tmp_path, line):
         load(tmp_path, "[health_alerts]\n%s\n" % line)
 
 
+@pytest.mark.parametrize("entry", ["Job=abc", "Job=0", "=5", "Job=-1", "Job=9000", "Job=nan"])
+def test_bad_watched_job_entries_are_config_errors(tmp_path, entry):
+    with pytest.raises(ConfigError, match="watched_jobs"):
+        load(tmp_path, '[health_alerts]\nwatched_jobs = ["%s"]\n' % entry)
+
+
 def test_ntfy_channel_is_built_only_when_enabled_and_url_set(tmp_path):
     off = build_notifier(load(tmp_path, "", env={"SONDER_HEALTH_ALERT_NTFY_URL": URL}))
     on = build_notifier(load(tmp_path, "[health_alerts]\nntfy = true\n",
@@ -73,3 +79,17 @@ def test_run_health_alerts_uses_injected_service():
     service = Service()
     assert run_health_alerts(SonderConfig(), {"checks": []}, service=service) == "run"
     assert service.args[0] == {"checks": []} and hasattr(service.args[1], "read")
+
+
+@pytest.mark.parametrize("entry", ["Job", "Job=5", "Job=abc", "Job=0", "=5", "Job=-1", "Job=nan",
+                                   "Job=9000", "A=1=2", " Job = 3 ", "Job=", "  =  "])
+def test_platform_entry_check_matches_the_domain_parser(entry):
+    from sonder_runtime.domain.health_alerts import parse_watched_task
+    from sonder_runtime.platform.health_alerts_config import watched_job_entry_valid
+
+    try:
+        parse_watched_task(entry, default_window_hours=26.0)
+        expected = True
+    except ValueError:
+        expected = False
+    assert watched_job_entry_valid(entry, 26.0) is expected

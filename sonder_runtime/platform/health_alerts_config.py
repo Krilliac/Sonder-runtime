@@ -9,6 +9,19 @@ from dataclasses import dataclass
 _HTTP_URL = re.compile(r"https?://[^\s/?#@]+(?:[/?#]\S*)?", re.IGNORECASE)
 
 
+def watched_job_entry_valid(entry, default_window_hours):
+    """Platform-side mirror of ``domain.health_alerts.parse_watched_task`` (a drift test pins them)."""
+    text = entry.strip()
+    name, sep, hours = text.rpartition("=") if "=" in text else (text, "", "")
+    window = default_window_hours
+    if sep:
+        try:
+            window = float(hours)
+        except ValueError:
+            return False
+    return bool(name.strip() if sep else text) and 0 < window <= 24 * 366
+
+
 @dataclass(frozen=True)
 class HealthAlertsConfig:
     # Windows toast through Windows PowerShell; ignored on other platforms.
@@ -45,6 +58,16 @@ def health_alerts_errors(config):
             or any(type(v) is not str or not v.strip() or len(v) > 200 for v in values)
         ):
             errors.append(f"[health_alerts].{key} must be up to 64 non-empty strings")
+        elif key == "watched_jobs":
+            window = c.default_window_hours
+            default = window if type(window) is float and 0.0 < window <= 24.0 * 366 else 26.0
+            for entry in values:
+                if not watched_job_entry_valid(entry, default):
+                    errors.append(
+                        '[health_alerts].watched_jobs entries must be "Name" or "Name=hours" '
+                        "with hours in (0, 8784]"
+                    )
+                    break
     if type(c.rate_limit_seconds) is not int or not 60 <= c.rate_limit_seconds <= 30 * 86400:
         errors.append("[health_alerts].rate_limit_seconds must be an integer in [60, 2592000]")
     for key, low, high in (("default_window_hours", 0.0, 24.0 * 366), ("timeout_seconds", 0.0, 120.0)):

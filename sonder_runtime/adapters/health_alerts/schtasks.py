@@ -6,6 +6,7 @@ import re
 import subprocess
 from collections.abc import Callable
 
+from sonder_runtime.adapters.health_alerts._child import minimal_environment, system32_path
 from sonder_runtime.application.ports.health_alerts import TaskUnavailable
 from sonder_runtime.domain.health_alerts import (
     ScheduledTaskState,
@@ -25,10 +26,13 @@ class SchtasksReader:
     def read(self, name: str) -> ScheduledTaskState:
         if not _TASK_NAME.fullmatch(name) or name.startswith("-"):
             raise TaskUnavailable("task name is not a plain task path")
-        argv = ["schtasks", "/query", "/tn", name, "/fo", "csv", "/v"]
+        exe = system32_path("schtasks.exe")
+        if not exe:
+            raise TaskUnavailable("schtasks could not run: SystemRoot unknown")
+        argv = [exe, "/query", "/tn", name, "/fo", "csv", "/v"]
         try:
             done = self._run(
-                argv, capture_output=True, text=True, check=False,
+                argv, env=minimal_environment(), capture_output=True, text=True, check=False,
                 encoding=locale.getpreferredencoding(False), errors="replace",
                 timeout=self._timeout,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),

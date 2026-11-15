@@ -26,7 +26,28 @@ class Done:
         self.returncode, self.stdout = returncode, stdout
 
 
-def test_toast_passes_text_through_environment_not_script():
+SECRET_ENV = {
+    "SONDER_HEALTH_ALERT_NTFY_URL": SECRET_URL,
+    "SONDER_AUTH_SECRET": "auth-s3cr3t",
+    "SONDER_BACKUP_KEY_FILE": "backup-key",
+    "OPENROUTER_API_KEY": "or-key",
+    "SONDER_OPENAI_API_KEY": "oa-key",
+}
+
+
+@pytest.fixture
+def system_env(monkeypatch):
+    monkeypatch.setenv("SystemRoot", "C:\\Windows")
+    for key, value in SECRET_ENV.items():
+        monkeypatch.setenv(key, value)
+
+
+def _assert_no_secrets(env):
+    assert not set(SECRET_ENV) & set(env)
+    assert not set(SECRET_ENV.values()) & set(env.values())
+
+
+def test_toast_passes_text_through_environment_not_script(system_env):
     calls = []
 
     def run(argv, **kw):
@@ -36,7 +57,9 @@ def test_toast_passes_text_through_environment_not_script():
     result = ToastNotifier(timeout_seconds=5, run=run, platform="win32").send(ALERT)
     assert result == (DeliveryResult("toast", True),)
     argv, kw = calls[0]
-    assert argv[0] == "powershell.exe" and "-ExecutionPolicy" not in argv
+    assert argv[0].replace("\\", "/") == "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+    assert "-ExecutionPolicy" not in argv
+    _assert_no_secrets(kw["env"])
     assert "Detail line" not in " ".join(argv)
     assert kw["env"]["SONDER_ALERT_DETAIL"] == "Detail line"
     assert "\x07" not in kw["env"]["SONDER_ALERT_TITLE"]
@@ -44,7 +67,7 @@ def test_toast_passes_text_through_environment_not_script():
 
 
 @pytest.mark.parametrize("fault", [OSError("x"), subprocess.TimeoutExpired("p", 1)])
-def test_toast_failure_is_a_result_not_an_exception(fault):
+def test_toast_failure_is_a_result_not_an_exception(fault, system_env):
     def run(argv, **kw):
         raise fault
 
@@ -52,7 +75,7 @@ def test_toast_failure_is_a_result_not_an_exception(fault):
     assert not result.delivered and result.error
 
 
-def test_toast_nonzero_exit_is_undelivered():
+def test_toast_nonzero_exit_is_undelivered(system_env):
     (result,) = ToastNotifier(timeout_seconds=1, run=lambda *a, **k: Done(1), platform="win32").send(ALERT)
     assert not result.delivered and "1" in result.error
 
@@ -134,7 +157,29 @@ CSV = (
 )
 
 
-def test_schtasks_reader_builds_argv_without_shell_and_parses():
+def test_toast_without_systemroot_never_runs_a_bare_powershell(monkeypatch):
+    monkeypatch.delenv("SystemRoot", raising=False)
+    monkeypatch.delenv("WINDIR", raising=False)
+
+    def run(*a, **k):
+        raise AssertionError("must not run")
+
+    (result,) = ToastNotifier(timeout_seconds=1, run=run, platform="win32").send(ALERT)
+    assert not result.delivered and result.error
+
+
+def test_schtasks_without_systemroot_never_runs_a_bare_schtasks(monkeypatch):
+    monkeypatch.delenv("SystemRoot", raising=False)
+    monkeypatch.delenv("WINDIR", raising=False)
+
+    def run(*a, **k):
+        raise AssertionError("must not run")
+
+    with pytest.raises(TaskUnavailable):
+        SchtasksReader(timeout_seconds=1, run=run).read("JobA")
+
+
+def test_schtasks_reader_builds_argv_without_shell_and_parses(system_env):
     seen = {}
 
     def run(argv, **kw):
@@ -142,13 +187,15 @@ def test_schtasks_reader_builds_argv_without_shell_and_parses():
         return Done(0, CSV)
 
     state = SchtasksReader(timeout_seconds=4, run=run).read("JobA")
-    assert seen["argv"] == ["schtasks", "/query", "/tn", "JobA", "/fo", "csv", "/v"]
+    assert seen["argv"][0].replace("\\", "/") == "C:/Windows/System32/schtasks.exe"
+    assert seen["argv"][1:] == ["/query", "/tn", "JobA", "/fo", "csv", "/v"]
+    _assert_no_secrets(seen["kw"]["env"])
     assert "shell" not in seen["kw"] and seen["kw"]["timeout"] == 4
     assert state.last_run == datetime(2026, 11, 14, 21, 15, 1) and state.last_result == 0
 
 
 @pytest.mark.parametrize("name", ["", "-x", "a;b", "a|b", "a\nb"])
-def test_schtasks_reader_refuses_odd_names(name):
+def test_schtasks_reader_refuses_odd_names(name, system_env):
     def run(*a, **k):
         raise AssertionError("must not run")
 
@@ -158,7 +205,7 @@ def test_schtasks_reader_refuses_odd_names(name):
 
 @pytest.mark.parametrize("outcome", [Done(1, ""), Done(0, "garbage"), OSError("x"),
                                      subprocess.TimeoutExpired("s", 1)])
-def test_schtasks_reader_failures_are_typed(outcome):
+def test_schtasks_reader_failures_are_typed(outcome, system_env):
     def run(*a, **k):
         if isinstance(outcome, Exception):
             raise outcome

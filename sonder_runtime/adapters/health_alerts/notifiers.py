@@ -7,7 +7,6 @@ line, an exception message or a result.
 from __future__ import annotations
 
 import logging
-import os
 import re
 import subprocess
 import sys
@@ -15,6 +14,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 
+from sonder_runtime.adapters.health_alerts._child import minimal_environment, system32_path
 from sonder_runtime.application.ports.health_alerts import DeliveryResult, Notifier
 from sonder_runtime.domain.health_alerts import Alert
 
@@ -61,10 +61,14 @@ class ToastNotifier:
     def send(self, alert: Alert) -> tuple[DeliveryResult, ...]:
         if not self._platform.startswith("win"):
             return (DeliveryResult(self.channel, False, "unsupported platform"),)
-        env = dict(os.environ)
-        env["SONDER_ALERT_TITLE"] = _plain(alert.title, 120)
-        env["SONDER_ALERT_DETAIL"] = _plain(alert.detail, 240)
-        argv = ["powershell.exe", "-NoProfile", "-NonInteractive",
+        powershell = system32_path("WindowsPowerShell", "v1.0", "powershell.exe")
+        if not powershell:
+            return (DeliveryResult(self.channel, False, "SystemRoot unknown"),)
+        env = minimal_environment({
+            "SONDER_ALERT_TITLE": _plain(alert.title, 120),
+            "SONDER_ALERT_DETAIL": _plain(alert.detail, 240),
+        })
+        argv = [powershell, "-NoProfile", "-NonInteractive",
                 "-WindowStyle", "Hidden", "-Command", _TOAST_SCRIPT]
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         try:
