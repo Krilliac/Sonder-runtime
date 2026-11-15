@@ -17,6 +17,7 @@ import os
 import re
 import signal
 import shutil
+import stat
 import struct
 import subprocess
 import sys
@@ -98,6 +99,89 @@ def _skip_dir(name: str, include_ignored=False) -> bool:
     return not include_ignored and name.casefold() in SKIP_DIRS_CASEFOLD
 
 
+# Windows reparse tags with this bit set are name surrogates: the entry
+# stands for another name (IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK
+# and similar). IsReparseTagNameSurrogate in the Windows SDK tests it. The
+# stdlib ``stat`` module exposes no constant for it.
+_REPARSE_TAG_NAME_SURROGATE = 0x20000000
+
+
+def _reparse_entry(entry) -> bool:
+    """Whether a scandir entry is a link the walk must not follow.
+
+    On Windows ``DirEntry.is_symlink()`` is False for a junction, and
+    ``is_dir(follow_symlinks=False)`` is True for one, so a walk that only
+    checks ``is_symlink`` enters junctions and can leave every allowed root.
+    ``is_junction`` (3.12+) catches it, and the reparse tag catches any other
+    name surrogate. Non-surrogate reparse points (OneDrive / cloud-files
+    placeholders, dedup files, AppExecLinks) are ordinary local content and
+    are walked. A reparse point whose tag cannot be read is treated as a
+    link (fail closed). On POSIX no extra stat is done: ``is_symlink`` is
+    the whole answer there.
+    """
+    if entry.is_symlink():
+        return True
+    is_junction = getattr(entry, "is_junction", None)
+    if is_junction is not None and is_junction():
+        return True
+    if os.name != "nt":
+        return False
+    metadata = entry.stat(follow_symlinks=False)
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    if not attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400):
+        return False
+    tag = getattr(metadata, "st_reparse_tag", 0)
+    return not tag or bool(tag & _REPARSE_TAG_NAME_SURROGATE)
+
+
+def _noncanonical_name(name: str) -> bool:
+    """A Windows name Win32 does not open as spelled (trailing dot or space).
+
+    Such names exist only when created through ``\\\\?\\`` paths. Opening
+    ``id_rsa.`` or listing ``.aws.`` through a normal path reaches ``id_rsa``
+    or ``.aws`` instead, so the walk's name is not the file that is read.
+    """
+    return os.name == "nt" and name.endswith((".", " "))
+
+
+def _sensitive_directory(path: Path) -> str:
+    """Skip reason for a directory a content search must not enter ("" if none).
+
+    ``file_ops.SENSITIVE_READ_DIRECTORIES`` (``.git``, ``.ssh``, ``.aws`` ...)
+    are secret or control state. A credential-store directory an operator
+    root names is the one exception, decided by the same
+    ``credential_read_component`` that ``file_read`` uses. ``.git`` is pruned
+    even with ``include_ignored``, on purpose: repository metadata (config,
+    packed refs, logs, hooks) is control state, not workspace text.
+    """
+    name = path.name.casefold()
+    if name not in file_ops.SENSITIVE_READ_DIRECTORIES:
+        return ""
+    if name in file_ops.CREDENTIAL_READ_DIRECTORIES and not file_ops.credential_read_component(path):
+        return ""
+    return "sensitive_directory"
+
+
+def _secret_file(path: Path) -> bool:
+    """Whether a content search must withhold *path*.
+
+    True for every file an unauthorized ``file_read`` refuses for being a
+    secret or credential store: ``credential_read_component`` (root-aware, so
+    a store an operator root names stays readable) plus ``_is_secret_path``
+    and the personal corpus. The lists live in ``file_ops`` only.
+    ``credential_read_component`` resolves every allowed root per call, so it
+    runs only when the name-only ``_credential_part`` finds a store component
+    anywhere in the absolute path: it judges a suffix of those same parts and
+    cannot find one the whole path lacks.
+    """
+    if file_ops._is_secret_path(path) or file_ops._is_personal_corpus(path):
+        return True
+    return bool(
+        file_ops._credential_part(path.parts)
+        and file_ops.credential_read_component(path)
+    )
+
+
 def _new_walk_state(root: Path, max_entries: int, timeout_seconds: float):
     return {
         "root": str(root),
@@ -126,13 +210,18 @@ def _note_skip(state, path, reason, *, expose_path=True):
 def _bounded_walk(
     root: Path, *, include_hidden=False, include_ignored=False,
     max_entries=DEFAULT_WALK_ENTRIES, timeout_seconds=DEFAULT_WALK_SECONDS,
+    prune_dir=None,
 ):
     """Return a deterministic guarded-tree iterator and mutable scan state.
 
     The caller already resolved ``root`` through ``file_ops``. Entries are
-    yielded depth-first in case-insensitive path order. Symlinks are never
-    followed. Both inspected directory entries and wall time are bounded, so a
-    small output limit cannot hide an unbounded filesystem walk.
+    yielded depth-first in case-insensitive path order. Symlinks, junctions
+    and other name-surrogate reparse points are never followed (see
+    ``_reparse_entry``), and on Windows a name with a trailing dot or space
+    (which opens as a different file) is skipped. Both inspected directory
+    entries and wall time are bounded, so a small output limit cannot hide an unbounded filesystem walk. ``prune_dir``
+    maps a directory path to a skip reason ("" to enter it); a pruned
+    directory is neither yielded nor entered.
     """
     max_entries = _bounded_int(
         max_entries, DEFAULT_WALK_ENTRIES, 1, MAX_WALK_ENTRIES,
@@ -205,12 +294,22 @@ def _bounded_walk(
                         if child.is_symlink():
                             _note_skip(state, path, "symlink")
                             continue
+                        if _reparse_entry(child):
+                            _note_skip(state, path, "reparse_point")
+                            continue
+                        if _noncanonical_name(child.name):
+                            _note_skip(state, path, "noncanonical_name")
+                            continue
                         if not include_hidden and _hidden(child.name):
                             _note_skip(state, path, "hidden")
                             continue
                         is_dir = child.is_dir(follow_symlinks=False)
                         if is_dir and _skip_dir(child.name, include_ignored):
                             _note_skip(state, path, "ignored_directory")
+                            continue
+                        pruned = is_dir and prune_dir is not None and prune_dir(path)
+                        if pruned:
+                            _note_skip(state, path, pruned)
                             continue
                         size = 0 if is_dir else child.stat(follow_symlinks=False).st_size
                     except (OSError, PermissionError):
@@ -367,7 +466,11 @@ def directory_tree(
             if visible is not None and os.path.normcase(relative) not in visible:
                 skipped += 1
                 continue
-            if child.is_symlink():
+            try:
+                unsafe = _reparse_entry(child) or _noncanonical_name(child.name)
+            except OSError:
+                unsafe = True
+            if unsafe:
                 skipped += 1
                 continue
             if not include_hidden and _hidden(child.name):
@@ -463,12 +566,17 @@ def text_search(
     matches = []
     files_scanned = 0
     files_skipped = 0
+    secret_files_skipped = 0
+    # Secret and credential files are withheld whatever include_hidden, the
+    # glob or bypass say: a search is an unaddressed sweep, so it never
+    # returns a line file_read would refuse to an unauthorized caller.
     iterator, state = _bounded_walk(
         root_path,
         include_hidden=include_hidden,
         include_ignored=include_ignored,
         max_entries=max_entries,
         timeout_seconds=timeout_seconds,
+        prune_dir=_sensitive_directory,
     )
     result_limited = False
     for item in iterator:
@@ -479,18 +587,31 @@ def text_search(
         relative = item["relative"]
         if not (fnmatch.fnmatch(name, glob) or fnmatch.fnmatch(relative, glob)):
             continue
+        # Judge and open the file the OS actually resolves to, as file_read
+        # does, not the walk's spelling of it: a junction, a trailing-dot name
+        # or any other alias the walk did not catch must not turn a refused
+        # file into a searchable one. The walk stays under root_path, so a
+        # resolved path outside it is an alias and is never opened.
+        resolved = file_ops._resolve_best_effort(path)
+        if not file_ops._is_inside(resolved, root_path):
+            _note_skip(state, path, "resolves_outside_root")
+            continue
+        if _secret_file(resolved):
+            secret_files_skipped += 1
+            _note_skip(state, path, "secret_file")
+            continue
         if item["bytes"] > size_limit:
             files_skipped += 1
             continue
-        if not explicit_glob and path.suffix.lower() not in TEXT_SUFFIXES:
+        if not explicit_glob and resolved.suffix.lower() not in TEXT_SUFFIXES:
             files_skipped += 1
             continue
         try:
-            with path.open("rb") as raw:
+            with resolved.open("rb") as raw:
                 if b"\0" in raw.read(4096):
                     files_skipped += 1
                     continue
-            handle = path.open("r", encoding="utf-8", errors="replace")
+            handle = resolved.open("r", encoding="utf-8", errors="replace")
         except (OSError, PermissionError):
             files_skipped += 1
             continue
@@ -516,11 +637,21 @@ def text_search(
     if result_limited:
         scan["truncated"] = True
         scan["truncation_reason"] = "max_results"
+    directories_withheld = scan["skipped_by_reason"].get("sensitive_directory", 0)
+    withheld = ""
+    if secret_files_skipped or directories_withheld:
+        withheld = (
+            "; skipped %d secret/credential files and %d sensitive directories"
+            " (contents not searched)" % (secret_files_skipped, directories_withheld)
+        )
     return {
         "root": str(root_path), "query": str(query), "glob": glob,
         "regex": bool(regex), "case_sensitive": bool(case_sensitive),
         "matches": matches, "files_scanned": files_scanned,
-        "files_skipped": files_skipped, **scan,
+        "files_skipped": files_skipped,
+        "secret_files_skipped": secret_files_skipped,
+        "sensitive_directories_skipped": directories_withheld,
+        "withheld_note": withheld, **scan,
     }
 
 
