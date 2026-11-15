@@ -238,7 +238,15 @@ def _overlap(first_start: int, first_end: int, second_start: int, second_end: in
 
 
 def _norm_file(path: str) -> str:
-    parts = [part for part in str(path).strip().replace("\\", "/").split("/") if part not in ("", ".")]
+    """A finding or record file in comparable form: ``/`` separators, outer whitespace stripped,
+    empty and ``.`` components dropped.
+
+    Nothing else is folded. Matching is case-sensitive (``Src/Reader.cs`` never matches
+    ``src/Reader.cs``, even on a case-insensitive file system) and ``..`` is not resolved, so a
+    finding that names its file in another spelling counts as unmatched: the scores undercount,
+    they never overcount.
+    """
+    parts =[part for part in str(path).strip().replace("\\", "/").split("/") if part not in ("", ".")]
     return "/".join(parts)
 
 

@@ -11,7 +11,17 @@ Confinement rules (every one is enforced here, none is delegated to the caller):
   cap are skipped, and ``read_window`` refuses the same paths;
 - every open is a no-follow open (``FILE_FLAG_OPEN_REPARSE_POINT`` on Windows, ``O_NOFOLLOW`` on
   POSIX) whose handle path is checked to lie inside the root, so a directory swapped for a link after
-  indexing is refused at open time instead of read.
+  indexing is refused at open time instead of read;
+- the sensitive, secret and skipped-directory checks run twice: on the name the caller gave, before
+  anything is opened, and again on the root-relative path of the opened handle, on every component.
+  The second check is what stops an alias of a secret: a Windows 8.3 short name (``ENV~1`` for
+  ``.env``, ``SSH~1/data.txt`` for ``.ssh/data.txt``) opens the long-named file under a name that no
+  list matches, but the handle path is always the long name. On Windows a handle path that cannot be
+  obtained or placed below the root is refused. On POSIX, where ``/proc``/``/dev/fd`` cannot name
+  the descriptor (macOS), the caller's name is the on-disk name (POSIX has no short-name aliases) and
+  ``samestat`` confirms the opened file is the one that was checked;
+- a caller-supplied component shaped like an 8.3 short name (``NAME~N.EXT``) is also refused before
+  the open, as a cheap first filter; it is not the defence, the handle check is.
 Truncation (file count, bytes, time) is reported, never silent. Nothing is written or executed.
 Not defended: a hard link inside the root to a file elsewhere reads as an ordinary file.
 """
@@ -86,17 +96,48 @@ def _is_reparse(path: str) -> bool:
 def _sensitive_rel(rel: str) -> bool:
     """True when the repo-relative path is a secret file.
 
-    Uses ``file_ops._is_secret_path`` (secret names and suffixes, ``.env``, ``.envrc``, ``.env.*``,
-    ``*.env``, and credential/secret named config files) plus ``file_ops._credential_part``
+    Uses ``file_ops.is_secret_path`` (secret names and suffixes, ``.env``, ``.envrc``, ``.env.*``,
+    ``*.env``, and credential/secret named config files) plus ``file_ops.credential_part``
     (credential stores such as ``.docker/config.json``) so the two lists cannot drift apart. On top
     of that, any name starting with ``.env`` (``.env-prod``, ``.env_local``, ``.envs``) is secret
-    here: these windows can reach a cloud model, so this reader stays wider than ``file_ops``.
+    here: these windows can reach a model worker off this machine (a consented remote-Ollama
+    worker), so this reader stays wider than ``file_ops``.
     """
     parts = rel.split("/")
     name = parts[-1]
     return (name.casefold().startswith(".env")
-            or file_ops._is_secret_path(PurePosixPath(name))
-            or bool(file_ops._credential_part(parts)))
+            or file_ops.is_secret_path(PurePosixPath(name))
+            or bool(file_ops.credential_part(parts)))
+
+
+def _secret_or_skipped(rel: str) -> bool:
+    """True when a ``/``-joined relative path is a secret file or lies under a skipped directory."""
+    parts = rel.split("/")
+    return any(part.casefold() in _SKIP_DIRS for part in parts[:-1]) or _sensitive_rel(rel)
+
+
+# An 8.3 short name: a base of at most 8 characters ending in ``~`` and digits, then an optional
+# extension of at most 3 characters (``ENV~1``, ``CREDEN~1.JSO``, ``A~BC~12.TXT``). Every generated
+# short name has this shape; a long name that happens to have it (``backup~1.txt``) is refused too,
+# which costs the caller one rename and is accepted. Names like ``report~2024.md`` (base over 8) or
+# ``page~1.html`` (extension over 3) are not short names and pass.
+_SHORT_NAME_SHAPE = re.compile(r"[^.]{0,7}~[0-9]+(?:\.[^.]{0,3})?")
+
+
+def _looks_like_short_name(part: str) -> bool:
+    return bool(_SHORT_NAME_SHAPE.fullmatch(part)) and len(part.partition(".")[0]) <= 8
+
+
+def _handle_relative(actual: str, root: str) -> str | None:
+    """The opened handle path ``actual`` relative to ``root``, ``/``-joined; ``None`` if not below it."""
+    try:
+        relative = os.path.relpath(actual, root)
+    except ValueError:
+        return None
+    parts = relative.split(os.sep)
+    if any(part in ("", ".", "..") for part in parts):
+        return None
+    return "/".join(parts)
 
 
 def _opened_handle_path(fd: int) -> str | None:
@@ -143,6 +184,9 @@ def _open_no_follow(path: str) -> int:
         _fields_ = [("attributes", ctypes.c_uint32), ("reparse_tag", ctypes.c_uint32)]
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    close = kernel32.CloseHandle
+    close.argtypes = [ctypes.c_void_p]
+    close.restype = ctypes.c_int
     create = kernel32.CreateFileW
     create.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
                        ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
@@ -156,15 +200,15 @@ def _open_no_follow(path: str) -> int:
     inspect.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
     inspect.restype = ctypes.c_int
     if not inspect(raw, 9, ctypes.byref(info), ctypes.sizeof(info)):
-        kernel32.CloseHandle(raw)
+        close(raw)
         raise OSError(ctypes.get_last_error(), "could not inspect the source file")
     if info.attributes & 0x400:
-        kernel32.CloseHandle(raw)
+        close(raw)
         raise PathEscapeRefused("the source file is a symlink or junction")
     try:
         return msvcrt.open_osfhandle(raw, flags)
     except Exception:
-        kernel32.CloseHandle(raw)
+        close(raw)
         raise
 
 
@@ -219,9 +263,42 @@ class ConfinedRepo:
 
     @staticmethod
     def _refuse_sensitive(rel: str) -> None:
-        parts = rel.split("/")
-        if any(part.casefold() in _SKIP_DIRS for part in parts[:-1]) or _sensitive_rel(rel):
+        """Refuse a caller-supplied path before anything is opened (the handle check follows)."""
+        if any(_looks_like_short_name(part) for part in rel.split("/")):
+            raise SourceRefused("file %r has a component shaped like a Windows 8.3 short name "
+                                "(NAME~N.EXT) and is never read; give the long name" % rel)
+        if _secret_or_skipped(rel):
             raise SourceRefused("file %r is a sensitive or secret path and is never read" % rel)
+
+    def _refuse_opened_alias(self, descriptor: int, rel: str, opened: os.stat_result,
+                             current: str) -> None:
+        """Re-run the root, secret and skipped-directory checks on the path of the opened handle.
+
+        Windows: the handle path must be obtainable, inside the root and expressible relative to it,
+        or the read is refused (fail closed). POSIX: when the platform cannot name the descriptor,
+        the caller's name is the on-disk name and ``samestat`` ties the handle to it.
+        """
+        try:
+            actual = _opened_handle_path(descriptor)
+        except OSError:
+            raise SourceRefused("the opened path of %r could not be confirmed, so it is not read" % rel) from None
+        if actual is None:
+            if os.name == "nt":
+                raise SourceRefused("the opened path of %r could not be confirmed, so it is not read" % rel)
+            if not os.path.samestat(opened, os.stat(current, follow_symlinks=False)):
+                raise PathEscapeRefused("%r changed while it was validated" % rel)
+            return
+        if not _inside(actual, self._root):
+            raise PathEscapeRefused("%r resolves outside the repo root" % rel)
+        handle_rel = _handle_relative(actual, self._root)
+        if handle_rel is None:
+            raise SourceRefused("the opened path of %r could not be placed below the repo root, "
+                                "so it is not read" % rel)
+        if _secret_or_skipped(handle_rel):
+            raise SourceRefused("file %r opens a sensitive or secret path (an alias such as an 8.3 "
+                                "short name) and is never read" % rel)
+        if os.name != "nt" and not os.path.samestat(opened, os.stat(current, follow_symlinks=False)):
+            raise PathEscapeRefused("%r changed while it was validated" % rel)
 
     def _read_bytes(self, rel: str) -> bytes:
         """Read one file by relative path through the no-follow open and the handle-path check."""
@@ -247,12 +324,7 @@ class ConfinedRepo:
             opened = os.fstat(descriptor)
             if not stat.S_ISREG(opened.st_mode):
                 raise SourceUnavailable("%r is not a regular file" % rel)
-            actual = _opened_handle_path(descriptor)
-            if actual is not None and not _inside(actual, self._root):
-                raise PathEscapeRefused("%r resolves outside the repo root" % rel)
-            if actual is None or os.name != "nt":
-                if not os.path.samestat(opened, os.stat(current, follow_symlinks=False)):
-                    raise PathEscapeRefused("%r changed while it was validated" % rel)
+            self._refuse_opened_alias(descriptor, rel, opened, current)
             if opened.st_size > self._limits.max_file_bytes:
                 raise SourceUnavailable("file %r is over the %d byte cap" % (rel, self._limits.max_file_bytes))
             with os.fdopen(descriptor, "rb", closefd=False) as handle:
@@ -343,6 +415,9 @@ class ConfinedRepo:
                 return False
             try:
                 data = self._read_bytes(rel)
+            except SourceRefused:
+                self._skipped["sensitive"] += 1
+                continue
             except (PathEscapeRefused, SourceUnavailable):
                 self._skipped["unreadable"] += 1
                 continue
