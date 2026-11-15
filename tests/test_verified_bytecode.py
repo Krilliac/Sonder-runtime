@@ -192,16 +192,22 @@ def test_compile_bytecode_aborts_at_the_limit_before_marshalling(tmp_path, monke
     assert compile_bytecode(((str(root), False),), limit=8 * 1024) == (None, {})
 
 
-def test_compile_bytecode_bytes_are_identical_across_fresh_processes(tmp_path):
+def test_compile_bytecode_bytes_are_identical_across_calls_and_processes(tmp_path):
     root = _bulk_root(tmp_path)
     code = ("import sys\n"
             "from sonder_runtime.adapters.execution.runtime_payload import compile_bytecode\n"
-            "data, _ = compile_bytecode(((sys.argv[1], False),))\n"
-            "sys.stdout.buffer.write(data)\n")
+            "first, _ = compile_bytecode(((sys.argv[1], False),))\n"
+            "second, _ = compile_bytecode(((sys.argv[1], False),))\n"
+            "sys.stdout.write(first.hex() + ',' + second.hex())\n")
     env = {**os.environ, "PYTHONPATH": str(REPO), "PYTHONDONTWRITEBYTECODE": "1"}
-    outputs = [subprocess.run([sys.executable, "-c", code, str(root)], env=env, cwd=REPO,
-                              check=True, capture_output=True).stdout for _ in range(2)]
-    assert outputs[0] and outputs[0] == outputs[1]
+    runs = [subprocess.run([sys.executable, "-c", code, str(root)], env=env, cwd=REPO,
+                           check=True, capture_output=True, text=True).stdout.split(",")
+            for _ in range(2)]
+    (cold_a, warm_a), (cold_b, warm_b) = runs
+    assert cold_a
+    # A warm second call in one process and a fresh process's first call must
+    # all produce the same bytes (marshal version 4 differs on a warm call).
+    assert cold_a == warm_a == cold_b == warm_b
 
 
 def test_compile_bytecode_within_limit_is_unchanged(tmp_path):

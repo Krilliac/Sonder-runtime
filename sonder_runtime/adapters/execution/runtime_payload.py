@@ -211,10 +211,11 @@ def compile_bytecode(entries, *, limit=None):
                     return None, {}
                 table[str(path)] = pyc
                 digests[str(path)] = sha256(source).hexdigest()
-    # Version 2 writes no reference flags and does not distinguish interned
-    # from other strings; both depend on object identity and refcounts and
-    # differ between identical calls on 3.14. The bytes therefore depend only
-    # on the table's contents, on every supported interpreter.
+    # Version 2 makes the container encoding deterministic: it writes no
+    # reference flags and no interned flag. Version 4 emits both from object
+    # identity and refcounts, so identical calls in one process can differ
+    # (seen on 3.14; not on 3.12 in tests). The pyc values themselves still differ per
+    # interpreter version; only the same interpreter yields the same bytes.
     return marshal.dumps(table, 2), digests
 
 
