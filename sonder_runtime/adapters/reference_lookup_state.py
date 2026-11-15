@@ -109,7 +109,11 @@ def status_line(rule: AppliesRule) -> str:
         automatic = (f"names={', '.join(s.names) or '-'} prefixes={', '.join(s.prefixes) or '-'} "
                      "(runtime system prompt not sent on lookup turns)")
     if s.readable:
-        listed = [(entry.source, entry.passages) for entry in s.library] or list(s.sources)
+        # The index's own list first; a source only the summary knows (an entry that was
+        # dropped as malformed) is added, so searchable sources never vanish from the line.
+        listed = [(entry.source, entry.passages) for entry in s.library]
+        listed += [(name, count) for name, count in s.sources
+                   if name not in {entry.source for entry in s.library}]
         sources = ", ".join(f"{name}:{count}" for name, count in listed) or "-"
         index_text = (f"readable=yes schema={s.schema_version} passages={s.passages} "
                       f"sources={sources} built={s.built_at or '-'}")

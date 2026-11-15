@@ -62,8 +62,6 @@ from __future__ import annotations
 import math
 from collections.abc import Collection, Iterable, Mapping
 
-# NOTE: both floors were measured on the security-only library (see above) and
-# need re-measuring on the expanded multi-subject library; they are not retuned.
 MIN_COVERAGE = 0.20
 # The floor for a turn whose search-terms reply judged the question outside the
 # library's subjects (``terms.split_scope``).  The verdict alone is not trusted:

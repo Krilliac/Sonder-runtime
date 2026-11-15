@@ -767,7 +767,9 @@ Connect the index to Sonder in one of two ways.
   `$XDG_DATA_HOME/sonder`, or `~/.local/share/sonder` when that is unset; on
   macOS `~/Library/Application Support/sonder` (an existing
   `~/.local/share/sonder` is kept when the macOS folder does not exist yet).
-  `SONDER_HOME` (or the older `SONDER_STATE_HOME`) overrides all three.
+  Three things override all three, strongest first: a home set inside the
+  process (the app's own `configure_home`), then `SONDER_STATE_HOME`, then
+  `SONDER_HOME`.
   Create the `references` folder if it is not there.
 - Or set the path of the file in the environment of every Sonder process, for
   example for PowerShell:
@@ -837,8 +839,8 @@ Troubleshooting:
   all; add it under `reference_lookup` in `runtime_policy.json`.
 - **A UNC path (`\\server\share\references.sqlite`) is refused or unreadable.**
   A managed child process only admits an index inside its own private roots;
-  elsewhere the status says `unreadable` with `index not admitted by the
-  runtime`. SQLite also locks unreliably over network shares. Copy the file to
+  elsewhere the status line reads `readable=no (error: index not admitted by the
+  runtime: ...)`. SQLite also locks unreliably over network shares. Copy the file to
   a local folder and point `SONDER_REFERENCE_INDEX` at the copy.
 - **It works in one process but not another.** Each process reads
   `SONDER_REFERENCE_INDEX` from its own environment, fixed when it started. The

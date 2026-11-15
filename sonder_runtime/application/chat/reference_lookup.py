@@ -47,6 +47,7 @@ from ...domain.reference_lookup.terms import (
     parse_terms,
     query_terms,
     split_scope,
+    strip_subject_echo,
 )
 
 NO_ROOM_WARNING = 'no room for references'
@@ -155,8 +156,10 @@ def _expand(question: str, expand_fn: Callable[[str], str] | None, scope: bool =
     unrelated = False
     try:
         reply = expand_fn(build_expand_prompt(question, scope=scope, subjects=subjects))
+        if subjects and isinstance(reply, str):
+            reply = strip_subject_echo(reply, subjects)
         if scope and isinstance(reply, str):
-            reply, unrelated = split_scope(reply)
+            reply, unrelated = split_scope(reply, subjects)
         terms = parse_terms(reply)
     except Exception as exc:  # reported to the caller as a warning, never hidden
         if is_cancellation(exc):

@@ -1,14 +1,17 @@
 """Reading the library metadata an index carries (``schema_version`` and ``sources``).
 
 I/O-free.  The values come from a file the runtime did not write, so they are
-untrusted: text is cleaned with ``sanitize`` (control, bidi and zero-width
-characters and ANSI sequences removed, whitespace collapsed) and capped, the
-number of entries is capped, and a malformed entry is dropped with a warning
-instead of failing the lookup.
+untrusted: text is cleaned (control, bidi, zero-width, format, private-use and
+unassigned characters removed, ANSI sequences removed, whitespace collapsed,
+verdict words and line labels of the search-terms request removed) and capped,
+the number of entries is capped, and a malformed entry is dropped with a
+warning instead of failing the lookup.
 """
 from __future__ import annotations
 
 import json
+import re
+import unicodedata
 from dataclasses import dataclass
 
 from .models import LibrarySource, SchemaCompat
@@ -21,6 +24,16 @@ MAX_SOURCE_CHARS = 60
 MAX_LICENCE_CHARS = 60
 MAX_RAW_CHARS = 64 * 1024   # a larger ``sources`` value is not parsed at all
 
+# Unicode categories that are never display text: format (tag characters, soft
+# hyphen, invisible operators ...), private use, unassigned and surrogates.
+_HIDDEN_CATEGORIES = frozenset({"Cf", "Co", "Cn", "Cs"})
+# Words and labels that mean something to the search-terms request: a subject
+# must not be able to supply the model's verdict or fake a line of the request.
+_RESERVED_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:not\s+related|unrelated|related)(?![A-Za-z0-9_])"
+    r"|(?:first|second)\s+line\s*:|covering\s*:|question\s*:",
+    re.IGNORECASE)
+
 
 @dataclass(frozen=True)
 class LibraryMeta:
@@ -30,8 +43,16 @@ class LibraryMeta:
     warnings: tuple[str, ...]
 
 
-def _clean(value: object, limit: int) -> str:
-    return sanitize(ansi_free(value), limit)
+def _visible(text: str) -> str:
+    return "".join(ch for ch in text if unicodedata.category(ch) not in _HIDDEN_CATEGORIES)
+
+
+def _clean(value: object, limit: int) -> tuple[str, bool]:
+    """(display-safe capped text, True when reserved words or labels were removed)."""
+    text = sanitize(_visible(ansi_free(value)), 10 * limit)
+    text = "".join(ch for ch in text if ch.isprintable())
+    stripped = " ".join(_RESERVED_RE.sub(" ", text).split())
+    return stripped[:limit].strip(), stripped != text
 
 
 def _count(value: object) -> int | None:
@@ -43,7 +64,7 @@ def _count(value: object) -> int | None:
 def _schema(raw: object) -> tuple[int, SchemaCompat, tuple[str, ...]]:
     if raw is None:
         return 1, SchemaCompat.LEGACY, ()
-    text = _clean(raw, 20)
+    text = _clean(raw, 20)[0]
     if not text.isascii() or not text.isdigit() or int(text) < 1:
         return 1, SchemaCompat.INVALID, (f"meta schema_version is not a version number: {text!r}",)
     version = int(text)
@@ -62,7 +83,7 @@ def _entries(raw: object) -> tuple[list[object], tuple[str, ...]]:
         return [], ("meta sources row is too large and was ignored",)
     try:
         loaded = json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):   # deeply nested input raises RecursionError
         return [], ("meta sources row is not valid JSON and was ignored",)
     if not isinstance(loaded, list):
         return [], ("meta sources row is not a list and was ignored",)
@@ -72,17 +93,21 @@ def _entries(raw: object) -> tuple[list[object], tuple[str, ...]]:
     return loaded, ()
 
 
-def _entry(item: object) -> LibrarySource | None:
+def _entry(item: object) -> tuple[LibrarySource | None, bool]:
+    """(the entry or None when malformed, True when reserved words were removed from its text)."""
     if not isinstance(item, dict):
-        return None
-    source = _clean(item.get("source"), MAX_SOURCE_CHARS) if isinstance(item.get("source"), str) else ""
-    subject = _clean(item.get("subject"), MAX_SUBJECT_CHARS) if isinstance(item.get("subject"), str) else ""
+        return None, False
+    fields = {}
+    altered = False
+    for key, limit in (("source", MAX_SOURCE_CHARS), ("subject", MAX_SUBJECT_CHARS),
+                       ("licence", MAX_LICENCE_CHARS)):
+        value = item.get(key)
+        fields[key], changed = _clean(value, limit) if isinstance(value, str) else ("", False)
+        altered = altered or changed
     passages = _count(item.get("passages"))
-    if not source or not subject or passages is None:
-        return None
-    licence = item.get("licence")
-    return LibrarySource(source, subject, passages,
-                         _clean(licence, MAX_LICENCE_CHARS) if isinstance(licence, str) else "")
+    if not fields["source"] or not fields["subject"] or passages is None:
+        return None, altered
+    return LibrarySource(fields["source"], fields["subject"], passages, fields["licence"]), altered
 
 
 def parse_library_meta(schema_raw: object, sources_raw: object) -> LibraryMeta:
@@ -99,7 +124,9 @@ def parse_library_meta(schema_raw: object, sources_raw: object) -> LibraryMeta:
     items, problems = _entries(sources_raw)
     library = []
     for number, item in enumerate(items):
-        entry = _entry(item)
+        entry, altered = _entry(item)
+        if altered:
+            problems += (f"meta sources entry {number} held reserved words or labels, removed",)
         if entry is None:
             problems += (f"meta sources entry {number} is malformed and was ignored",)
         else:

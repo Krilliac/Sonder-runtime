@@ -205,7 +205,7 @@ class ReferenceIndex:
         try:
             with self.connect() as conn:
                 return self._validate(conn, path_text)
-        except (sqlite3.Error, OSError, ValueError) as exc:
+        except (sqlite3.Error, OSError, ValueError, RecursionError) as exc:
             return IndexStatus(classify_error(exc), path_text, detail=sanitize(exc))
 
     @staticmethod
@@ -228,7 +228,7 @@ class ReferenceIndex:
         meta = dict(conn.execute("SELECT key, value FROM meta").fetchall())
         try:
             summary = json.loads(meta["summary"])
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, RecursionError):
             return wrong("meta has no readable summary row")
         if not isinstance(summary, dict):
             return wrong("meta summary is not an object")
@@ -238,7 +238,13 @@ class ReferenceIndex:
             sources = tuple(sorted((str(k), int(v)) for k, v in by_source.items()))
         except (TypeError, ValueError, AttributeError):
             return wrong("meta summary has unreadable counts")
-        library = parse_library_meta(meta.get("schema_version"), meta.get("sources"))
+        try:
+            library = parse_library_meta(meta.get("schema_version"), meta.get("sources"))
+        except Exception as exc:  # noqa: BLE001  # optional metadata never makes the index unusable
+            return IndexStatus(IndexState.READY, path_text, passages=passages, sources=sources,
+                               built_at=sanitize(_text(meta.get("built_at"))),
+                               warnings=("meta library metadata could not be read: "
+                                         + sanitize(type(exc).__name__),))
         return IndexStatus(IndexState.READY, path_text, passages=passages, sources=sources,
                            built_at=sanitize(_text(meta.get("built_at"))),
                            schema_version=library.schema_version, schema_compat=library.compat,

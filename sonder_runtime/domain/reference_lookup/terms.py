@@ -75,6 +75,74 @@ _ECHO_RE = re.compile(
     re.IGNORECASE)
 
 
+# The most the subject list may take in the search-terms request.
+MAX_SUBJECT_LIST_CHARS = 2048
+_SUBJECT_TRAILING = '.;:,! \t'
+# The library clause of the request copied back ("... a reference library covering: ...").
+_COVERING_RE = re.compile(
+    r'(?:you[ \t]+are[ \t]+choosing[ \t]+search[ \t]+terms[ \t]+for[ \t]+)?(?:an?[ \t]+)?'
+    r'(?:reference[ \t]+library[ \t]+)?covering[ \t]*:[ \t]*', re.IGNORECASE)
+_MORE_RE = re.compile(r'and \d+ more', re.IGNORECASE)
+
+
+def _listed_subjects(subjects: Sequence[str]) -> tuple[list[str], int]:
+    """(the subjects that fit the list, how many were left out): trimmed, distinct, in order."""
+    names: list[str] = []
+    for name in subjects:
+        if isinstance(name, str):
+            name = name.strip().rstrip(_SUBJECT_TRAILING).strip()
+            if name and name not in names:
+                names.append(name)
+    shown: list[str] = []
+    used = 0
+    for name in names:
+        used += len(name) + (2 if shown else 0)
+        if shown and used > MAX_SUBJECT_LIST_CHARS:
+            break
+        shown.append(name)
+    return shown, len(names) - len(shown)
+
+
+def subject_list(subjects: Sequence[str]) -> str:
+    """The subjects as the request lists them ("a; b; and 3 more"), or '' when there are none.
+
+    Each subject loses trailing punctuation, repeats are dropped and the list
+    stops at ``MAX_SUBJECT_LIST_CHARS``.
+    """
+    shown, left_out = _listed_subjects(subjects)
+    if not shown:
+        return ''
+    return '; '.join(shown) + (f'; and {left_out} more' if left_out else '')
+
+
+def strip_subject_echo(content: str, subjects: Sequence[str]) -> str:
+    """The reply without the subject list or library clause of the request copied back.
+
+    The subjects come from a file the runtime did not write; a model that
+    repeats them must not turn them into search terms or a verdict.  The
+    whole list is removed (any case, any spacing), then the "covering:"
+    clause, then any line made only of subjects (two or more joined by ';',
+    or one left after a clause).  One subject alone on a line is kept: it may
+    be the model's own search term.
+    """
+    listing = subject_list(subjects)
+    if not listing or not isinstance(content, str):
+        return content
+    shown = {name.lower() for name in _listed_subjects(subjects)[0]}
+    whole = r'\s+'.join(re.escape(word) for word in listing.split())
+    lines = []
+    for line in re.sub(whole, ' ', content, flags=re.IGNORECASE).split('\n'):
+        clause = _COVERING_RE.search(line) is not None
+        line = _COVERING_RE.sub('', line)
+        segments = [part.strip(' \t' + _SUBJECT_TRAILING) for part in line.split(';')]
+        segments = [part for part in segments if part]
+        if segments and (len(segments) > 1 or clause) and all(
+                part.lower() in shown or _MORE_RE.fullmatch(part) for part in segments):
+            line = ''
+        lines.append(line)
+    return '\n'.join(lines)
+
+
 def build_expand_prompt(question: str, *, scope: bool = False,
                         subjects: Sequence[str] = ()) -> str:
     """The user turn that asks the model for search terms (sent without a system prompt).
@@ -86,16 +154,16 @@ def build_expand_prompt(question: str, *, scope: bool = False,
     are plain text.  With ``scope`` the request also asks for the
     RELATED / UNRELATED line.
     """
-    names = [name for name in subjects if isinstance(name, str) and name]
-    if not names:
+    listing = subject_list(subjects)
+    if not listing:
         prompt = EXPAND_PROMPT.format(question=question)
         return prompt + SCOPE_REQUEST if scope else prompt
-    prompt = (_PROMPT_HEAD + 'a reference library covering: ' + '; '.join(names)
+    prompt = (_PROMPT_HEAD + 'a reference library covering: ' + listing
               + _PROMPT_TAIL.format(question=question))
     return prompt + SCOPE_REQUEST_SUBJECTS if scope else prompt
 
 
-def split_scope(content: str) -> tuple[str, bool]:
+def split_scope(content: str, subjects: Sequence[str] = ()) -> tuple[str, bool]:
     """(the reply without its verdict, True when the verdict is UNRELATED).
 
     Models put the verdict on its own line, as the last item of the terms line
@@ -116,8 +184,10 @@ def split_scope(content: str) -> tuple[str, bool]:
 
     Whatever is read as a verdict is removed, so it never becomes a search
     term: a stray "Unrelated" would be searched for and, being rare in the
-    library, would count against every passage.
+    library, would count against every passage.  With ``subjects`` the list
+    of subjects the request carried is removed first, as is a "covering:" clause.
     """
+    content = strip_subject_echo(content, subjects)
     seen = set()
     lines = []
     for number, line in enumerate(_ECHO_RE.sub(' ', content).split('\n')):
