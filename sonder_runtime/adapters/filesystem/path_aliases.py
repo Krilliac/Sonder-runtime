@@ -39,9 +39,6 @@ from pathlib import Path, PureWindowsPath
 
 from sonder_runtime.adapters.security.control_plane_paths import normalized_final_path
 
-# Ancestors inspected when mapping an alias to a known directory.
-_MAX_ANCESTORS = 64
-
 
 def win32_alias_component(path: Path | str) -> str:
     """The first component of ``path`` that Windows reads as another name, or ``""``.
@@ -120,8 +117,10 @@ def local_equivalent(path: Path, anchors: Iterable[Path]) -> Path | None:
     known = [(anchor, status) for anchor in anchors if (status := _stat(anchor)) is not None]
     if not known:
         return None
+    # Every ancestor up to the drive root, with no count limit: a limit would
+    # answer None (not an alias) for a deep enough path under a protected one.
     current = Path(path)
-    for _ in range(_MAX_ANCESTORS):
+    while True:
         status = _stat(current)
         if status is not None:
             for anchor, anchor_status in known:
@@ -131,7 +130,6 @@ def local_equivalent(path: Path, anchors: Iterable[Path]) -> Path | None:
         if parent == current:
             return None
         current = parent
-    return None
 
 
 def same_file_as_any(path: Path, candidates: Iterable[Path]) -> bool:

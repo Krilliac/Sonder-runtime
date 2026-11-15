@@ -24,6 +24,12 @@ and repositories outside the live tree, keep their behaviour.
 """
 from __future__ import annotations
 
+import os
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
 import pytest
 
 import harness_tools
@@ -92,6 +98,36 @@ def test_a_real_nested_repository_inside_the_live_tree_is_live(checkout):
     assert live_checkout.is_live(nested)
     _refused(harness_tools.git_checkout(str(nested), "other"))
     assert _branch(nested) == "master"
+
+
+class TestDeepDirectory:
+    """The ancestor walk once stopped after 64 directories; git walks to the root and still found the live repository.
+
+    A directory 70 levels under the live checkout was classified not live, and
+    ``git_checkout(root=<deep>, ref="evil")`` switched the live branch.
+    """
+
+    @pytest.fixture
+    def tmp_path(self):
+        """A short base, so the deep directory stays inside the path length git for Windows accepts."""
+        base = Path(tempfile.mkdtemp(prefix="lc"))
+        yield base
+        shutil.rmtree(base, ignore_errors=True)
+
+    def test_a_directory_deeper_than_any_fixed_bound_inside_the_live_tree_is_live(self, checkout):
+        evil_branch(checkout)
+        head, shipped = _head(checkout.repo), checkout.shipped.read_bytes()
+        deep = checkout.repo.joinpath("d", *["a"] * 70)
+        try:
+            deep.mkdir(parents=True)
+        except OSError as exc:
+            pytest.skip("this host cannot create a directory %d characters long: %s" % (len(str(deep)), exc))
+        # git agrees the deep directory belongs to the live checkout.
+        toplevel = git(deep, "rev-parse", "--show-toplevel").stdout.strip()
+        assert toplevel.casefold() == checkout.repo.as_posix().casefold()
+        assert live_checkout.is_live(deep)
+        _refused(harness_tools.git_checkout(str(deep), "evil"))
+        _live_untouched(checkout, head, shipped)
 
 
 @pytest.mark.parametrize("valid", [True, False], ids=["valid_marker", "invalid_marker"])
@@ -164,6 +200,38 @@ def test_a_git_directory_sharing_refs_on_another_branch_is_not_live(checkout, tm
     git(checkout.repo, "branch", "side")
     folder = _planted_git_dir(checkout, tmp_path, "ref: refs/heads/side\n")
     assert not live_checkout.is_live(folder)
+
+
+def _directory_link(link, target):
+    """``link`` as a directory junction (Windows) or symbolic link (elsewhere) to ``target``."""
+    if sys.platform == "win32":
+        import _winapi
+
+        _winapi.CreateJunction(str(target), str(link))
+    else:
+        os.symlink(target, link, target_is_directory=True)
+
+
+def test_a_git_directory_whose_refs_are_the_live_refs_is_live(checkout, tmp_path):
+    """``refs`` linked to the live ``refs``, no ``commondir``: not a worktree, so git's "checked out" check is blind.
+
+    Neither identity nor ``commondir`` matches the live repository here, and
+    its ``HEAD`` names a branch nobody has checked out, so only the shared
+    ``refs`` makes it live.
+    """
+    git(checkout.repo, "branch", "side")
+    planted = tmp_path / "shared_refs"
+    planted.mkdir()
+    (planted / "HEAD").write_text("ref: refs/heads/side\n", encoding="utf-8")
+    try:
+        _directory_link(planted / "refs", checkout.repo / ".git" / "refs")
+    except OSError as exc:
+        pytest.skip("this host cannot create a directory link: %s" % exc)
+    assert os.path.samestat(os.stat(planted / "refs"), os.stat(checkout.repo / ".git" / "refs"))
+    folder = tmp_path / "shared_refs_tree"
+    _developer_write(folder / ".git", f"gitdir: {planted.as_posix()}\n")
+    assert live_checkout.is_live(folder)
+    assert live_checkout.is_live(planted)
 
 
 def test_a_core_worktree_into_the_live_tree_is_live(checkout, tmp_path):

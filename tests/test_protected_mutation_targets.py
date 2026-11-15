@@ -34,6 +34,7 @@ import sonder_runtime.adapters.artifact_fetch as artifact_fetch
 from sonder_runtime.adapters import model_tool_policy as mtp
 from sonder_runtime.adapters.operator_attendance import attended
 from sonder_runtime.adapters.filesystem import file_ops
+from sonder_runtime.adapters.filesystem import path_aliases
 
 from tests.support.policy_checkout import (
     FORGED,
@@ -106,6 +107,17 @@ def test_the_extended_namespace_spelling_of_a_policy_file_is_protected(policy_fi
     plain = "\\\\?\\" + str(policy_files.project / "plain.json")
     file_ops.write_file(plain, "{}\n")
     assert (policy_files.project / "plain.json").read_text(encoding="utf-8") == "{}\n"
+
+
+def test_an_alias_deeper_than_any_fixed_bound_still_maps_to_its_local_name(tmp_path):
+    """``local_equivalent`` walks every ancestor: a 64-directory bound once answered "no alias" for a deep path."""
+    anchor = tmp_path / "anchor"
+    deep = anchor.joinpath(*["a"] * 70)
+    try:
+        deep.mkdir(parents=True)
+    except OSError as exc:
+        pytest.skip("this host cannot create a directory %d characters long: %s" % (len(str(deep)), exc))
+    assert path_aliases.local_equivalent(deep / "x.json", [anchor]) == deep / "x.json"
 
 
 @windows_only
@@ -279,14 +291,16 @@ def test_git_checkout_of_a_policy_file_path_is_refused(checkout):
     _refused(harness_tools.git_checkout(str(checkout.repo), "hello.txt"))
 
 
-@pytest.mark.parametrize("action", ["pop", "push"])
+@pytest.mark.parametrize("action", ["pop", "push", "drop"])
 def test_git_stash_refuses_to_change_a_policy_file_in_the_live_checkout(checkout, action):
     checkout.overlay.write_text(FORGED, encoding="utf-8")
-    if action == "pop":
+    if action in ("pop", "drop"):
         _git(checkout.repo, "stash", "push", "-q")  # stashed outside the tools; the overlay is restored
+    stashes = _git(checkout.repo, "stash", "list", "--format=%H").stdout
     before = (checkout.shipped.read_bytes(), checkout.overlay.read_bytes())
     _refused(harness_tools.git_stash(str(checkout.repo), action=action))
     _unchanged(checkout, before)
+    assert _git(checkout.repo, "stash", "list", "--format=%H").stdout == stashes
     assert harness_tools.git_stash(str(checkout.repo), action="list")["ok"] is True
 
 

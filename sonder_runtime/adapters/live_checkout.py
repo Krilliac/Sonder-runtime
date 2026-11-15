@@ -58,9 +58,11 @@ them when it reads ``core.worktree`` during repository discovery either.
 * :func:`refusal` is the guard the tools call.
 
 Nothing is cached; every call reads the disk as it is.  The functions hold no
-state and may be called from any thread.  The cost is a bounded number of
-``stat`` calls and reads of small files (at most 64 KiB each) per call, and no
-git process.  A check and the git run that follows it are still two steps.
+state and may be called from any thread.  The cost is a few ``stat`` calls and
+reads of small files (at most 64 KiB each) per directory between the path and
+its drive root, with no limit on that depth (git walks to the root, so a limit
+would leave a deep directory unchecked), and no git process.  A check and the
+git run that follows it are still two steps.
 """
 from __future__ import annotations
 
@@ -76,8 +78,6 @@ import sonder_runtime.adapters.model_tool_policy as _model_tool_policy
 import sonder_runtime.adapters.operator_attendance as _attendance
 from sonder_runtime.platform import paths as runtime_paths
 
-# Ancestors inspected above one path.
-MAX_ANCESTORS = 64
 _GIT_ENTRY = ".git"
 _GITFILE_PREFIX = "gitdir:"
 _SYMREF_PREFIX = "ref:"
@@ -108,8 +108,14 @@ def _same(status: os.stat_result | None, others: Iterable[os.stat_result]) -> bo
 
 
 def _ancestors(path: Path) -> Iterator[Path]:
+    """``path`` and every directory above it, up to the drive root, with no count limit.
+
+    Git walks to the root, so a bound here would leave a deep enough directory
+    inside the live tree unchecked.  The walk ends because ``parent`` drops one
+    component each step.
+    """
     current = Path(path)
-    for _ in range(MAX_ANCESTORS):
+    while True:
         yield current
         parent = current.parent
         if parent == current:

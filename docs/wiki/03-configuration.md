@@ -543,7 +543,11 @@ the live tree (its `.git` is a file naming its own `HEAD` and index) keep every
 git tool as plain git. A worktree shares branches, tags and the stash with the
 live repository, which is why `/runtime_source_stash pop` (and `/stash pop`)
 needs the operator at the console and restores only a stash that
-`runtime_source_stash save` recorded in the live checkout.
+`runtime_source_stash save` recorded in the live checkout. It applies that
+stash once: if the drop that follows fails, a second pop reports it instead of
+applying it again. For the same reason `git_stash pop` and `git_stash drop`
+refuse, in any worktree, when the top stash entry is that recorded recovery
+stash.
 
 The shipped file is pinned. The first valid read of the shipped policy (the
 module reads it as the process starts) records its SHA-256. A later read that

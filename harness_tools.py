@@ -27,6 +27,7 @@ from sonder_runtime.adapters.git_mutation_guard import (
     ConcurrentGitMutation,
     guard_git_mutation,
 )
+import git_tools
 import sonder_logging
 import sonder_paths
 import unsafe_lab
@@ -34,6 +35,8 @@ import unsafe_lab
 MAX_OUTPUT = 256_000
 MAX_TIMEOUT = 120
 DEFAULT_TIMEOUT = 30
+# The ``guard`` of a ``git_stash`` refusal that would take the runtime recovery stash.
+RECOVERY_STASH_GUARD = "runtime_recovery_stash"
 
 
 def _bounded_int(value, default, minimum, maximum):
@@ -995,11 +998,45 @@ def git_stash(root=".", action="push", message="", include_untracked=True, timeo
         cmd = ["stash", "drop"]
     else:
         return {"ok": False, "error": "unknown stash action: %s (use push/pop/list/drop)" % action}
-    if action in ("push", "pop"):
+    if action in ("push", "pop", "drop"):
         refused = _live_refusal("git_stash", root)
         if refused:
             return refused
+    if action in ("pop", "drop"):
+        refused = _recovery_stash_refusal(action, root, timeout=timeout)
+        if refused:
+            return refused
     return _run_git(root, cmd, timeout=timeout)
+
+
+def _recovery_stash_refusal(action, root, *, timeout):
+    """``{"ok": False, ...}`` when ``git stash <action>`` would take the runtime recovery stash, else None.
+
+    ``pop`` and ``drop`` act on ``stash@{0}``.  When that is a stash
+    ``runtime_source_stash save`` recorded (in any worktree, since the stash
+    list is shared), only ``runtime_source_stash pop`` may take it: it applies
+    by commit id, needs the operator at the console and keeps its ledger in
+    step.  Refused whoever is at the console, and refused when git cannot
+    answer (a timeout, or configuration it cannot read).  The check and the
+    git run are two steps.
+    """
+    probe_timeout = _bounded_int(timeout, 10, 1, git_tools.MAX_TIMEOUT)
+    try:
+        commit = git_tools.recorded_recovery_stash_at(root, timeout=probe_timeout)
+    except (OSError, ValueError, PermissionError, TimeoutError) as exc:
+        return {
+            "ok": False,
+            "error": "refusing git stash %s: could not check for the runtime recovery stash: %s" % (action, exc),
+            "guard": RECOVERY_STASH_GUARD,
+        }
+    if not commit:
+        return None
+    return {
+        "ok": False,
+        "error": "refusing git stash %s: stash@{0} (%s) is the runtime recovery stash; restore it with "
+                 "runtime_source_stash action=pop at the console" % (action, commit),
+        "guard": RECOVERY_STASH_GUARD,
+    }
 
 
 @_guarded_git_mutation("git_tag")
