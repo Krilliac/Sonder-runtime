@@ -525,19 +525,35 @@ it looks at the paths and at the attendance signal
 around the tool the operator typed, so a model loop started by `/agent` is not
 attended and neither is a piped or scripted console. No token opens it.
 
-A repository that is not the live checkout is unaffected: a user's project, a
-git worktree of the runtime (its `.git` is a file, so it has its own files)
-and a nested repository keep every git tool as plain git, and a junction,
-symlink or different spelling of the live checkout is still the live checkout
+What counts as live is what git would act on, not the nearest `.git`
+(`adapters/live_checkout.py`). Any path inside the live tree is live, whatever
+`.git` markers sit in between: git skips a `.git` folder whose `HEAD` is not a
+ref and keeps walking up, and a repository nested in the live tree is still
+inside it. A path outside the tree is live when a git directory it reaches
+is, or shares state with, the live one: a `.git` file whose `gitdir:` names
+the live git directory, a git directory whose `HEAD` follows the branch the
+live checkout has checked out through a shared `commondir`, or a
+`core.worktree` that points into the live tree. A junction, symlink or
+different spelling of the live checkout is still the live checkout
 (identified by directory identity, not by name).
+
+A repository that is not the live checkout is unaffected: a user's project,
+including repositories nested in it, and a git worktree of the runtime outside
+the live tree (its `.git` is a file naming its own `HEAD` and index) keep every
+git tool as plain git. A worktree shares branches, tags and the stash with the
+live repository, which is why `/runtime_source_stash pop` (and `/stash pop`)
+needs the operator at the console and restores only a stash that
+`runtime_source_stash save` recorded in the live checkout.
 
 The shipped file is pinned. The first valid read of the shipped policy (the
 module reads it as the process starts) records its SHA-256. A later read that
 finds other bytes makes the floor unavailable, so every tool-using lane
 refuses every model, exactly as for a missing file, until Sonder is restarted
 or the operator runs `/runtime tools reload` at the console. `reload` pins
-what is on disk and prints the old and the new hash and every floor name and
-prefix that differs, so compare it with the committed file before trusting it
+what is on disk and prints the old and the new hash and everything that
+differs (floor names and prefixes, the restricted tool ceiling, the secret
+path globs, the undetermined served names and each profile's tools), so
+compare it with the committed file before trusting it
 (`git diff` on `model_tool_policy.json`). Writing the pinned bytes back
 restores the floor without a reload, and a rewrite with identical bytes is not
 a change. `runtime_source_update` and a reviewed self-modification deploy
