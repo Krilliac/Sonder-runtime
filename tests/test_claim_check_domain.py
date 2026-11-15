@@ -3,8 +3,8 @@ import pytest
 
 from sonder_runtime.domain.claim_check import (
     Claim, ClaimError, CheckStatus, Verdict, check_line_in_range, check_symbols_near,
-    collapse_duplicates, decide_verdict, extract_citations, find_guards, find_symbol_uses,
-    guard_families,
+    collapse_duplicates, decide_verdict, extract_citations, extract_missing_guards,
+    find_guards, find_named_guards, find_symbol_uses, guard_families,
 )
 
 SOURCE = """\
@@ -135,3 +135,22 @@ def test_extract_citations_lines_and_backticked_symbols():
     assert lines == (134, 290, 303, 120)
     assert symbols == ("Foo.Bar", "_cache")
     assert extract_citations("no citations here") == ((), ())
+
+
+def test_symbols_named_as_the_missing_guard_are_not_citation_symbols():
+    text = ("Line 92 checks only `TryPlayer` without `CanActOn`, and never calls `Verify()`; "
+            "no `Clamp` is applied to `count`.")
+    lines, symbols = extract_citations(text)
+    assert lines == (92,)
+    assert symbols == ("TryPlayer", "count")
+    assert extract_missing_guards(text) == ("CanActOn", "Verify", "Clamp")
+
+
+def test_named_guard_present_near_the_citation_is_found():
+    hits = find_named_guards(SOURCE, "a.cs", first=10, last=16, names=("Min", "Nowhere"))
+    assert [(h.line, h.kind, h.where) for h in hits] == [(13, "named", "near")]
+    assert find_named_guards(SOURCE, "a.cs", first=1, last=9, names=("Min",)) == []
+
+
+def test_claim_carries_guard_symbols():
+    assert Claim(file="a.cs", guard_symbols=["Min"]).guard_symbols == ("Min",)

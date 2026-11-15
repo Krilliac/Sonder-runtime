@@ -227,6 +227,8 @@ def test_claim_from_mapping_accepts_line_forms_and_prose():
     assert (c.line_start, c.line_end) == (7, 7)
     c = claim_from_mapping({"file": "a.cs", "text": "Line 9 calls `Foo.Bar()` badly"})
     assert (c.line_start, c.symbols) == (9, ("Foo.Bar",))
+    c = claim_from_mapping({"file": "a.cs", "guard_symbols": ["Min"], "text": "never calls `Max`"})
+    assert c.guard_symbols == ("Min",)
     with pytest.raises(ClaimError):
         claim_from_mapping({"line": 3})
     with pytest.raises(ClaimError):
@@ -274,3 +276,31 @@ def test_batch_size_is_bounded(repo, tmp_path):
     with pytest.raises(ClaimError, match="max_batch_claims"):
         check_jsonl(src, tmp_path / "o.jsonl", repo,
                     replace(ClaimCheckConfig(), max_batch_claims=3))
+
+
+def test_prose_names_the_missing_guard_and_finding_it_nearby_flags(repo):
+    claim = claim_from_mapping({
+        "file": "src/Pump.cs", "category": DOS,
+        "text": "Line 13 uses `Safe` but never calls `Min` to bound the count."})
+    assert claim.symbols == ("Safe",) and claim.guard_symbols == ("Min",)
+    report = check_claim(repo, claim, replace(ClaimCheckConfig(), max_callers=0))
+    assert names(report)["symbols_near"] is CheckStatus.PASS
+    assert report.verdict is Verdict.FLAG
+    assert any(g.kind == "named" and g.line == 13 for g in report.guards)
+
+
+def test_missing_guard_symbol_far_from_the_citation_does_not_reject(repo):
+    claim = Claim(file="src/Pump.cs", line_start=7, guard_symbols=("Min",))
+    report = check_claim(repo, claim, replace(ClaimCheckConfig(), guard_window_lines=2,
+                                              max_callers=0))
+    assert all(c.status is not CheckStatus.FAIL for c in report.checks)
+    assert not any(g.kind == "named" for g in report.guards)
+
+
+def test_named_guard_in_a_direct_caller_is_found(repo):
+    claim = Claim(file="src/Pump.cs", line_start=7, symbols=("Fill",), guard_symbols=("MaxItems",),
+                  category="")
+    cfg = replace(ClaimCheckConfig(), guard_window_lines=0)
+    report = check_claim(repo, claim, cfg)
+    assert [(g.path, g.kind, g.where) for g in report.guards if g.where == "caller"] \
+        == [("src/Caller.cs", "named", "caller")]

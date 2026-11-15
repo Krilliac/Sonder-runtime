@@ -21,7 +21,8 @@ from pathlib import Path
 from sonder_runtime.domain.claim_check import (
     CheckResult, CheckStatus, Claim, ClaimError, ClaimReport, GuardHit, Verdict,
     check_line_in_range, check_symbols_near, collapse_duplicates, decide_verdict,
-    extract_citations, find_guards, find_symbol_uses, guard_families,
+    extract_citations, extract_missing_guards, find_guards, find_named_guards,
+    find_symbol_uses, guard_families,
 )
 from sonder_runtime.platform.claim_check_config import ClaimCheckConfig
 
@@ -168,12 +169,21 @@ class ClaimChecker:
         if claim.line_start is None:
             return []
         cfg = self._config
-        families = guard_families(claim.category, claim.guard)
+        families = guard_families(
+            claim.category, " ".join((claim.guard, *claim.guard_symbols)))
         rel = self._relative(real)
         near_first = claim.line_start - cfg.guard_window_lines
         near_last = claim.line_end + cfg.guard_window_lines
-        hits = find_guards(lines, rel, near_first, near_last, families,
-                           cfg.extra_guard_patterns, "near")
+
+        def scan(file_lines, path, first, last, where):
+            # A name the claim says is missing outranks a generic guard shape.
+            named = find_named_guards(file_lines, path, first, last, claim.guard_symbols, where)
+            taken = {h.line for h in named}
+            return named + [h for h in find_guards(
+                file_lines, path, first, last, families, cfg.extra_guard_patterns, where)
+                if h.line not in taken]
+
+        hits = sorted(scan(lines, rel, near_first, near_last, "near"), key=lambda h: h.line)
         seen = {(h.path, h.line) for h in hits}
         needles: list[tuple[str, str]] = []
         for symbol in claim.symbols:
@@ -211,10 +221,8 @@ class ClaimChecker:
                     if path == real and near_first <= use <= near_last:
                         continue
                     uses += 1
-                    for hit in find_guards(
-                            file_lines, rel_path, use - cfg.caller_window_lines,
-                            use + cfg.caller_window_lines, families,
-                            cfg.extra_guard_patterns, where):
+                    for hit in scan(file_lines, rel_path, use - cfg.caller_window_lines,
+                                    use + cfg.caller_window_lines, where):
                         if (hit.path, hit.line) not in seen:
                             seen.add((hit.path, hit.line))
                             hits.append(hit)
@@ -291,12 +299,14 @@ def claim_from_mapping(row: Mapping) -> Claim:
     start, end = _line_pair(row)
     symbols = _symbol_tuple(row.get("symbols"))
     prose = row.get("text")
+    missing = _symbol_tuple(row.get("guard_symbols"))
     if isinstance(prose, str) and prose:
         cited, named = extract_citations(prose)
         if start is None and cited:
             start, end = cited[0], cited[0]
         if not symbols:
             symbols = named
+        missing = missing or extract_missing_guards(prose)
     text_fields = {}
     for key in ("category", "guard", "entry_point"):
         value = row.get(key, "")
@@ -305,6 +315,7 @@ def claim_from_mapping(row: Mapping) -> Claim:
         text_fields[key] = value
     ident = row.get("claim_id", row.get("id", ""))
     return Claim(file=file, line_start=start, line_end=end, symbols=symbols,
+                 guard_symbols=missing,
                  claim_id=str(ident) if ident is not None else "", **text_fields)
 
 

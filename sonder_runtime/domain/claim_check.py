@@ -41,6 +41,9 @@ class Claim:
     guard: str = ""
     entry_point: str = ""
     claim_id: str = ""
+    # Names the claim says are missing ("without `CanActOn`"); finding one near
+    # the cited line contradicts the claim, so they are searched, not required.
+    guard_symbols: tuple[str, ...] = ()
 
     def __post_init__(self):
         if not isinstance(self.file, str) or not self.file.strip():
@@ -55,6 +58,7 @@ class Claim:
             elif type(self.line_end) is not int or self.line_end < self.line_start:
                 raise ClaimError("line_end must be an integer >= line_start")
         object.__setattr__(self, "symbols", tuple(self.symbols))
+        object.__setattr__(self, "guard_symbols", tuple(self.guard_symbols))
 
 
 @dataclass(frozen=True)
@@ -285,6 +289,22 @@ def find_guards(lines: list[str], path: str, first: int, last: int,
     return hits
 
 
+def find_named_guards(lines: list[str], path: str, first: int, last: int,
+                      names: tuple[str, ...], where: str = "near") -> list[GuardHit]:
+    """Lines in ``first..last`` using a name the claim says is missing; comments skipped."""
+    first = max(1, first)
+    last = min(len(lines), last)
+    patterns = [_word(n) for name in names for n in _symbol_needles(name)]
+    hits: list[GuardHit] = []
+    for number in range(first, last + 1):
+        text = lines[number - 1]
+        if _COMMENT.match(text):
+            continue
+        if any(p.search(text) for p in patterns):
+            hits.append(GuardHit(path, number, "named", _clip(text), where))
+    return hits
+
+
 _DECLARATION = re.compile(
     r"\b(?:void|int|bool|string|Task|async|public|private|internal|protected|static|"
     r"def|func|fn|function|class|struct)\b[^()=;]*$")
@@ -347,8 +367,46 @@ _BACKTICK = re.compile(r"`([^`\n]{1,120})`")
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:(?:\.|::|->)[A-Za-z_][A-Za-z0-9_]*)*")
 
 
+_NEGATION = re.compile(
+    r"\b(?:without|missing|lacks?|lacking|no|never|not|nor|neither|absent|omits?|omitted|"
+    r"skips?|skipped|bypass\w*|unchecked|instead of)\s+(?:\w+\s+){0,2}$", re.I)
+_CHAIN = re.compile(r"^\s*(?:,|/)?\s*(?:(?:or|and|nor)\s*)?$", re.I)
+
+
+def _identifier_spans(text: str) -> list[tuple[str, bool]]:
+    """Backticked identifiers in order, each marked True when the prose says it is missing."""
+    spans: list[tuple[str, bool]] = []
+    previous_end = None
+    previous_negated = False
+    for match in _BACKTICK.finditer(text or ""):
+        token = re.sub(r"\(.*\)$", "", match.group(1).strip()).strip()
+        gap = text[previous_end:match.start()] if previous_end is not None else None
+        if gap is not None and previous_negated and _CHAIN.match(gap):
+            negated = True
+        else:
+            clause = text[:match.start()]
+            clause = clause[max(clause.rfind(sep) for sep in ".;:,") + 1:]
+            negated = bool(_NEGATION.search(clause))
+        previous_end, previous_negated = match.end(), negated
+        if _IDENT.fullmatch(token):
+            spans.append((token, negated))
+    return spans
+
+
+def extract_missing_guards(text: str) -> tuple[str, ...]:
+    """Backticked identifiers the prose says are missing or never called."""
+    seen: list[str] = []
+    for token, negated in _identifier_spans(text):
+        if negated and token not in seen:
+            seen.append(token)
+    return tuple(seen)
+
+
 def extract_citations(text: str) -> tuple[tuple[int, ...], tuple[str, ...]]:
-    """Cited line numbers (in order, unique) and backticked identifiers from claim prose."""
+    """Cited line numbers (in order, unique) and backticked identifiers from claim prose.
+
+    Identifiers the prose says are missing are left out: they name the guard, not the code.
+    """
     lines: list[int] = []
     for match in _LINE_REF.finditer(text or ""):
         for group in match.groups():
@@ -357,8 +415,7 @@ def extract_citations(text: str) -> tuple[tuple[int, ...], tuple[str, ...]]:
                 if number >= 1 and number not in lines:
                     lines.append(number)
     symbols: list[str] = []
-    for match in _BACKTICK.finditer(text or ""):
-        token = re.sub(r"\(.*\)$", "", match.group(1).strip()).strip()
-        if _IDENT.fullmatch(token) and token not in symbols:
+    for token, negated in _identifier_spans(text):
+        if not negated and token not in symbols:
             symbols.append(token)
     return tuple(lines), tuple(symbols)
