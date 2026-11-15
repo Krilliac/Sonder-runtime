@@ -11,7 +11,9 @@ runs in the live checkout unless the console operator typed it":
 
 * ``operator_attendance`` is a context variable bound to one tool name, set
   only by the console's ``/<tool>`` dispatcher while a person is present;
-* the guard runs no git at all (nothing to resolve, nothing to mis-resolve);
+* the guard decides the live checkout from paths before any git runs; for
+  any other path it also asks ``git rev-parse`` where the repository is, and
+  either answer refuses (``live_checkout``);
 * a repository that is not the live checkout (a user's repository and the
   repositories nested in it, a git worktree of the runtime outside the live
   tree) keeps every behaviour; ``test_live_checkout_detection`` covers which
@@ -193,8 +195,13 @@ def test_formatter_in_the_live_checkout_does_not_run_unattended(checkout, no_chi
     assert len(no_child) == 1
 
 
-def test_the_live_guard_runs_no_git(checkout, monkeypatch, tmp_path):
-    """The guard decides from paths alone: no ``git`` child runs before the refusal."""
+def test_the_live_checkout_is_refused_before_any_git_runs(checkout, monkeypatch, tmp_path):
+    """The file rule refuses the live checkout with no ``git`` child; elsewhere git is asked, read-only.
+
+    Git's answer is a second check ORed with the file rule
+    (``live_checkout_git_probe``), so it runs only for a path the file rule
+    does not call live, and only ``rev-parse``.
+    """
     plain_branch(checkout)
     calls = []
     real = subprocess.run
@@ -218,9 +225,12 @@ def test_the_live_guard_runs_no_git(checkout, monkeypatch, tmp_path):
     git(repo, "branch", "other")
     del calls[:]
     assert harness_tools.git_checkout(str(repo), "other")["ok"] is True
-    assert calls
-    # ... and no ``rev-parse --show-toplevel`` probe ran to decide whether the repository is live.
-    assert not [argv for argv in calls if "--show-toplevel" in argv], calls
+    # The guard's probe comes first and is exactly the two rev-parse queries; the tool's own git follows.
+    assert [argv[1:] for argv in calls[:2]] == [
+        ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
+        ["rev-parse", "--path-format=absolute", "--show-toplevel"],
+    ], calls
+    assert len(calls) > 2
 
 
 # ---- the operator at the console is not locked out --------------------------------------

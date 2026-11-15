@@ -11,8 +11,10 @@ operator typed that tool at the console (:mod:`operator_attendance`).
 
 Which paths are live.  The question is not "which repository is nearest" but
 "can git, run here, change the live checkout's files, ``HEAD``, index or
-checked-out branch".  A ``.git`` marker planted inside the live tree must not
-be able to answer it, so:
+checked-out branch".  The set of paths called live must contain every path
+from which git reaches the live repository; when the answer cannot be known,
+the path is live.  A ``.git`` marker planted inside the live tree must not be
+able to answer it, so:
 
 * The *live roots* are every directory from a control-plane location (the
   runtime's source root, the package data directory, the operator overlay's
@@ -20,71 +22,84 @@ be able to answer it, so:
   directory or file, valid or not.  Taking every one rather than the nearest
   means a planted marker can only add a root, never hide the real one.  A
   ``core.worktree`` in one of their git directories adds the tree it names.
+  When the roots cannot be determined (a location cannot be named, or their
+  git metadata cannot be read or parsed), every path is live and the refusal
+  says why (:class:`LiveCheckoutUnknown`).
 * (a) A path is live when it, or any directory above it, is the same
   directory (device and file index, so junctions, symlinks and case
   differences do not matter) as a live root, whatever markers sit in between.
-  Git skips a ``.git`` directory whose ``HEAD`` is not a ref and keeps walking
-  up to the live repository; a valid nested repository is still inside the
-  live tree.  Both the spelling given and the resolved path are walked.
+  Both the spelling given and the resolved path are walked.
 * (b) A path is also live when a git directory reachable from it or from a
   directory above it (a ``.git`` directory or junction; a ``.git`` file's
-  ``gitdir:``, read relative to the file's folder as git reads it; the
-  directory itself when it holds a ``HEAD``) would let git act on live state
-  from outside the live tree: it *is* a live git directory or the live
-  common directory; its ``commondir`` is the live common directory and its
-  ``HEAD`` follows (through loose symbolic refs) the branch a live checkout
-  has checked out, so a commit there moves the live branch; its ``refs`` is
-  the live ``refs`` without being a worktree of it, so git's "already checked
-  out" check cannot see the live checkout; or its ``config`` /
-  ``config.worktree`` sets ``core.worktree`` to a path inside a live root.
-  Every ancestor is inspected instead of stopping where git stops, so this is
-  a superset of the repository git can pick and does not depend on
-  validating ``HEAD`` exactly as git does.
+  ``gitdir:``, read as git reads it; the directory itself when it holds a
+  ``HEAD``) could let git act on live state: it *is* a live git directory or
+  common directory; its common directory is a live one, unless it is a
+  registered worktree off the live branch (below); its ``refs`` is the live
+  ``refs``; or ``core.worktree`` (in its ``config`` or ``config.worktree``, or
+  its common directory's ``config``) names a tree inside a live root or
+  containing one.  Every pointer file is read as present, absent or unknown
+  (:mod:`git_metadata_reads`): an unknown read, or a ``stat`` error other than
+  "no such file", makes the path live.
+* (c) Git is asked as well (:mod:`live_checkout_git_probe`): a path is live
+  when git, run there, names a live git directory, a live common directory
+  (with the same worktree exception), or a work tree inside or containing a
+  live root, or fails with anything but "not a git repository".  This runs
+  only when (a) and (b) found the path not live.
 
 A linked worktree of the live repository (``git worktree add`` outside the
-live tree; its ``.git`` file names ``<common>/worktrees/<name>``) is not live:
-it has its own ``HEAD``, index and files, and git refuses to check out or
-force-move a branch another worktree has checked out.  It does share refs
-(branches, tags, the stash), which is why one whose ``HEAD`` was made to follow
-the live branch is live, and why ``runtime_source_stash pop`` restores only a
-stash it recorded itself (``git_tools``).
+live tree) on a branch the live checkout does not have checked out is not
+live: it has its own ``HEAD``, index and files.  It qualifies only when its
+git directory is ``<live common>/worktrees/<name>`` and that entry's ``gitdir``
+file names, by file identity, the very ``.git`` file that led to it; then its
+``HEAD`` (inside the live git directory) is followed as git follows it, shared
+refs from the common directory, names compared without case.  Any other git
+directory sharing the live common directory is live whatever its ``HEAD`` says,
+so a planted ``HEAD`` text cannot make one look like a worktree.  A reftable
+ref store, an unreadable ``HEAD`` or a live branch that cannot be read makes a
+worktree live.  Worktrees share refs (branches, tags, the stash), which is why
+``runtime_source_stash pop`` restores only a stash it recorded itself
+(``git_tools``).
 
 Not covered: a link planted deeper inside a git directory (``refs/heads`` as a
 junction to the live one) needs a tool that creates links, which the file
-tools do not; ``include`` directives are not followed, and git does not follow
-them when it reads ``core.worktree`` during repository discovery either.
+tools do not; the live repository reached through a second mount (another
+device id for the same files) is not recognised by identity, though git's
+answer in (c) still names it.  Writing the live tree from an account that
+cannot write it at all is the stronger enforcement and is outside this module.
 
-* :func:`is_live` applies (a) and (b).
+* :func:`is_live` applies (a), (b) and (c).
 * :func:`refusal` is the guard the tools call.
 
 Nothing is cached; every call reads the disk as it is.  The functions hold no
 state and may be called from any thread.  The cost is a few ``stat`` calls and
-reads of small files (at most 64 KiB each) per directory between the path and
-its drive root, with no limit on that depth (git walks to the root, so a limit
-would leave a deep directory unchecked), and no git process.  A check and the
-git run that follows it are still two steps.
+reads of small files (each at most ``git_metadata_reads.MAX_READ_BYTES``) per
+directory between the path and its drive root, with no limit on that depth
+(git walks to the root), plus, for a path (a) and (b) do not call live, two
+short ``git rev-parse`` processes.  A check and the git run that follows it
+are still two steps.
 """
 from __future__ import annotations
 
 import os
 import stat
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
+import sonder_runtime.adapters.git_metadata_reads as reads
+import sonder_runtime.adapters.live_checkout_git_probe as git_probe
 import sonder_runtime.adapters.model_tool_policy as _model_tool_policy
 import sonder_runtime.adapters.operator_attendance as _attendance
 from sonder_runtime.platform import paths as runtime_paths
 
 _GIT_ENTRY = ".git"
-_GITFILE_PREFIX = "gitdir:"
-_SYMREF_PREFIX = "ref:"
-# A pointer, HEAD or config file larger than this is not read (treated as absent).
-_MAX_SMALL_FILE = 64 * 1024
-# Loose symbolic refs followed from HEAD before giving up (git itself stops at 5).
-_MAX_SYMREF_DEPTH = 5
+_HEAD = "HEAD"
+_COMMONDIR = "commondir"
+_WORKTREES = "worktrees"
+_BACKLINK = "gitdir"
+_REFTABLE = "reftable"
 _CONFIG_FILES = ("config", "config.worktree")
 
 
@@ -94,13 +109,64 @@ class LiveCheckoutGuard(str, Enum):
     LIVE_CHECKOUT = "live_checkout_attendance"
 
 
-# ---- small readers ------------------------------------------------------------
+class LiveCheckoutUnknown(str, Enum):
+    """Why the live checkout could not be located (every path is then live)."""
 
-def _stat(path: Path) -> os.stat_result | None:
-    try:
-        return os.stat(path)
-    except (OSError, ValueError):
+    LOCATION_UNAVAILABLE = "a control-plane location could not be named"
+    METADATA_UNREADABLE = "the live checkout's git metadata could not be read"
+
+
+class LiveCheckoutUnlocated(Exception):
+    """The live roots could not be determined: ``cause``, at ``where``."""
+
+    def __init__(self, cause: LiveCheckoutUnknown, where: str) -> None:
+        super().__init__("%s (%s)" % (cause.value, where))
+        self.cause = cause
+        self.where = where
+
+
+class _Unknown(Exception):
+    """A read or ``stat`` whose answer cannot be known (``reason``, at ``path``)."""
+
+    def __init__(self, reason: Enum | None, path: Path) -> None:
+        super().__init__("%s: %s" % (reason.value if reason is not None else "unknown", path))
+        self.reason = reason
+        self.path = path
+
+
+# ---- tri-state reads, raising _Unknown --------------------------------------------
+
+def _status(path: Path) -> os.stat_result | None:
+    """``os.stat`` of ``path``; None when it does not exist; raises :class:`_Unknown` on any other error."""
+    status = reads.status_of(path)
+    if status.state is reads.ReadState.UNKNOWN:
+        raise _Unknown(status.unknown, path)
+    return status.result
+
+
+def _exists_unfollowed(path: Path) -> bool:
+    status = reads.status_of(path, follow_links=False)
+    if status.state is reads.ReadState.UNKNOWN:
+        raise _Unknown(status.unknown, path)
+    return status.state is reads.ReadState.OK
+
+
+def _read(path: Path) -> bytes | None:
+    read = reads.read_small(path)
+    if read.state is reads.ReadState.UNKNOWN:
+        raise _Unknown(read.unknown, path)
+    return read.data if read.state is reads.ReadState.OK else None
+
+
+def _pointer(path: Path, base: Path, *, prefix: bytes = b"") -> Path | None:
+    """The path the pointer file at ``path`` names (relative to ``base``); None when absent or naming nothing."""
+    data = _read(path)
+    if data is None:
         return None
+    pointer = reads.parse_pointer(data, prefix=prefix)
+    if pointer.state is reads.ReadState.UNKNOWN:
+        raise _Unknown(pointer.unknown, path)
+    return reads.named_path(pointer.text, base) if pointer.state is reads.ReadState.OK else None
 
 
 def _same(status: os.stat_result | None, others: Iterable[os.stat_result]) -> bool:
@@ -123,154 +189,87 @@ def _ancestors(path: Path) -> Iterator[Path]:
         current = parent
 
 
-def _read_small(path: Path) -> str | None:
-    """The text of the regular file at ``path``, or None when it is missing, not regular or too large."""
-    status = _stat(path)
-    if status is None or not stat.S_ISREG(status.st_mode) or status.st_size > _MAX_SMALL_FILE:
-        return None
-    try:
-        with open(path, "rb") as handle:
-            data = handle.read(_MAX_SMALL_FILE)
-    except (OSError, ValueError):
-        return None
-    return data.decode("utf-8", errors="surrogateescape")
-
-
-def _first_line(text: str | None) -> str:
-    return text.split("\n", 1)[0].rstrip("\r") if text else ""
-
-
-def _named_paths(value: str, base: Path) -> list[Path]:
-    """The paths a git pointer value can name: as written and trimmed, a relative one against ``base``."""
-    named = []
-    for text in dict.fromkeys((value, value.strip())):
-        if text:
-            candidate = Path(text)
-            named.append(candidate if candidate.is_absolute() else base / candidate)
-    return named
-
-
 # ---- what git reads in a git directory ---------------------------------------------
 
-def _gitfile_dirs(gitfile: Path) -> list[Path]:
-    """The directories the ``gitdir:`` line of a ``.git`` file can name (relative to the file's folder)."""
-    line = _first_line(_read_small(gitfile))
-    if not line.startswith(_GITFILE_PREFIX):
-        return []
-    value = line[len(_GITFILE_PREFIX):]
-    return _named_paths(value.removeprefix(" "), gitfile.parent)
+@dataclass(frozen=True)
+class _Found:
+    """A git directory git can use from some directory, and the ``.git`` file that named it (None otherwise)."""
+
+    git_dir: Path
+    gitfile: Path | None
 
 
-def _git_dirs_at(directory: Path) -> list[Path]:
-    """The git directories a ``.git`` entry in ``directory`` can make git use; none without one."""
+def _git_dirs_at(directory: Path) -> list[_Found]:
+    """The git directory a ``.git`` entry in ``directory`` makes git use; none without one or for an invalid file."""
     entry = directory / _GIT_ENTRY
-    status = _stat(entry)
+    status = _status(entry)
     if status is None:
         return []
     if stat.S_ISDIR(status.st_mode):
-        return [entry]
-    if stat.S_ISREG(status.st_mode):
-        return _gitfile_dirs(entry)
-    return []
+        return [_Found(entry, None)]
+    if not stat.S_ISREG(status.st_mode):
+        raise _Unknown(reads.Unknown.NOT_REGULAR, entry)
+    named = _pointer(entry, directory, prefix=reads.GITFILE_PREFIX)
+    return [] if named is None else [_Found(named, entry)]
 
 
-def _common_dirs(git_dir: Path) -> list[Path]:
-    """The common directory of ``git_dir``: what its ``commondir`` file names (relative to it), else itself."""
-    text = _read_small(git_dir / "commondir")
-    if text is None:
-        return [git_dir]
-    return _named_paths(_first_line(text), git_dir) or [git_dir]
+def _common_dir(git_dir: Path) -> Path:
+    """The common directory of ``git_dir``: what its ``commondir`` names (relative to it), else itself."""
+    path = git_dir / _COMMONDIR
+    data = _read(path)
+    if data is None:
+        return git_dir
+    named = _pointer(path, git_dir)
+    if named is None:
+        raise _Unknown(reads.Unknown.UNPARSED, path)
+    return named
 
 
-def _symref(text: str | None) -> str | None:
-    line = _first_line(text)
-    if not line.startswith(_SYMREF_PREFIX):
-        return None
-    name = line[len(_SYMREF_PREFIX):].strip()
-    return name if name.startswith("refs/") else None
+def _configured_trees(git_dir: Path, common: Path) -> list[Path]:
+    """Every tree ``core.worktree`` names for ``git_dir``: its config files and its common directory's.
+
+    A relative value is taken against both directories, and ``~`` also
+    expanded: more candidates only add refusals.
+    """
+    anchors = list(dict.fromkeys((git_dir, common)))
+    trees: list[Path] = []
+    for base in anchors:
+        for name in _CONFIG_FILES:
+            path = base / name
+            found = reads.core_worktree_values(path)
+            if found.state is reads.ReadState.UNKNOWN:
+                raise _Unknown(found.unknown, path)
+            for value in found.values:
+                problem = reads.path_text_problem(value)
+                if problem is not None:
+                    raise _Unknown(problem, path)
+                spellings = dict.fromkeys((value, os.path.expanduser(value)))
+                trees.extend(reads.named_path(text, anchor) for text in spellings for anchor in anchors)
+    return list(dict.fromkeys(trees))
 
 
-def _ref_key(name: str) -> str:
-    # NTFS folds case: a HEAD naming refs/heads/MASTER writes the loose file refs/heads/master.
-    return name.casefold() if os.name == "nt" else name
-
-
-def _followed_branch(git_dir: Path, commons: list[Path]) -> str | None:
-    """The ref a commit through ``git_dir``'s ``HEAD`` moves, through loose symbolic refs; None when detached."""
-    name = _symref(_read_small(git_dir / "HEAD"))
-    for _ in range(_MAX_SYMREF_DEPTH):
-        if name is None:
-            return None
-        target = None
-        for base in (git_dir, *commons):
-            target = _symref(_read_small(base / name))
-            if target is not None:
-                break
-        if target is None:
-            return _ref_key(name)
-        name = target
-    return _ref_key(name) if name is not None else None
-
-
-def _config_values(value: str) -> list[str]:
-    """One config value as git unquotes it, and the plain trimmed text (either may be what git used)."""
-    out: list[str] = []
-    quoted = False
-    escape = False
-    for char in value.strip():
-        if escape:
-            out.append({"n": "\n", "t": "\t", "b": "\b"}.get(char, char))
-            escape = False
-        elif char == "\\":
-            escape = True
-        elif char == '"':
-            quoted = not quoted
-        elif not quoted and char in "#;":
-            break
-        else:
-            out.append(char)
-    return list(dict.fromkeys(item for item in ("".join(out).strip(), value.strip().strip('"')) if item))
-
-
-def _core_worktree_values(text: str) -> list[str]:
-    """Every ``core.worktree`` value in one config file's text (no includes: git does not follow them for it)."""
-    section = ""
-    values: list[str] = []
-    for raw in text.splitlines():
-        line = raw.strip()
-        if line.startswith("["):
-            end = line.find("]")
-            section = line[1:end].strip().casefold() if end > 0 else ""
-            line = line[end + 1:].strip() if end > 0 else ""
-        if section != "core" or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        if key.strip().casefold() == "worktree":
-            values.extend(_config_values(value))
-    return values
-
-
-def _configured_worktrees(git_dir: Path) -> list[Path]:
-    """The working trees ``core.worktree`` names in ``git_dir``'s own config files (relative to it)."""
-    found: list[Path] = []
-    for name in _CONFIG_FILES:
-        text = _read_small(git_dir / name)
-        if text:
-            for value in _core_worktree_values(text):
-                found.extend(_named_paths(value, git_dir))
-    return found
+def _uses_reftable(git_dir: Path, common: Path) -> bool:
+    return any(_exists_unfollowed(base / _REFTABLE) for base in (git_dir, common))
 
 
 # ---- the live set ------------------------------------------------------------------
 
 @dataclass(frozen=True)
+class _Branch:
+    """The branch a live checkout has checked out (casefolded; None when detached), or not known."""
+
+    known: bool
+    ref: str | None = None
+
+
+@dataclass(frozen=True)
 class _Repository:
-    """One live git directory: its identity, its common directory and ``refs``, and the branch it has checked out."""
+    """One live git directory: its identity, its common directory and ``refs``, and its branch."""
 
     git_dir: os.stat_result
     commons: tuple[os.stat_result, ...]
     refs: tuple[os.stat_result, ...]
-    branch: str | None
+    branch: _Branch
 
 
 @dataclass(frozen=True)
@@ -278,6 +277,8 @@ class _Live:
     """The live roots and git directories, read once for one :func:`is_live` call."""
 
     roots: tuple[os.stat_result, ...]
+    # Every directory at or above a live root: a work tree that is one of them contains live files.
+    root_ancestors: tuple[os.stat_result, ...]
     repositories: tuple[_Repository, ...]
 
     @property
@@ -285,51 +286,80 @@ class _Live:
         return tuple(item for repo in self.repositories for item in (repo.git_dir, *repo.commons))
 
 
-def _control_locations() -> list[Path]:
-    locations = [file_ops.workspace_root(), file_ops.RUNTIME_PACKAGE_DATA_DIR]
-    try:
-        locations.append(_model_tool_policy.overlay_path())
-    except (OSError, ValueError, TypeError):
-        pass
-    try:
-        locations.append(Path(runtime_paths.default_home()))
-    except (OSError, ValueError, TypeError):
-        pass
-    return [file_ops._resolve_best_effort(Path(location)) for location in locations]
-
-
-def _has_git_entry(directory: Path) -> bool:
-    return os.path.lexists(directory / _GIT_ENTRY)
-
-
-def _repository(git_dir: Path) -> _Repository | None:
-    status = _stat(git_dir)
-    if status is None or not stat.S_ISDIR(status.st_mode):
-        return None
-    commons = _common_dirs(git_dir)
-    return _Repository(
-        git_dir=status,
-        commons=tuple(item for item in map(_stat, commons) if item is not None),
-        refs=tuple(item for item in (_stat(common / "refs") for common in commons) if item is not None),
-        branch=_followed_branch(git_dir, commons),
+def _location_sources() -> tuple[tuple[str, Callable[[], object]], ...]:
+    """Each control-plane location's name and the call that names it, looked up at call time."""
+    return (
+        ("workspace_root", file_ops.workspace_root),
+        ("RUNTIME_PACKAGE_DATA_DIR", lambda: file_ops.RUNTIME_PACKAGE_DATA_DIR),
+        ("overlay_path", _model_tool_policy.overlay_path),
+        ("default_home", runtime_paths.default_home),
     )
 
 
-def _live() -> _Live:
-    roots: list[Path] = []
-    for location in _control_locations():
-        roots.extend(directory for directory in _ancestors(location) if _has_git_entry(directory))
-    repositories: list[_Repository] = []
-    trees: list[Path] = []
-    for root in dict.fromkeys(roots):
-        for git_dir in _git_dirs_at(root):
-            repository = _repository(git_dir)
-            if repository is not None:
-                repositories.append(repository)
-            trees.extend(_configured_worktrees(git_dir))
-    root_status = tuple(item for item in map(_stat, [*roots, *trees]) if item is not None)
-    return _Live(root_status, tuple(repositories))
+def _control_locations() -> list[Path]:
+    """Every control-plane location; raises :class:`LiveCheckoutUnlocated` when one cannot be named."""
+    locations = []
+    for name, source in _location_sources():
+        try:
+            locations.append(file_ops._resolve_best_effort(Path(source())))
+        except Exception as exc:  # whatever the failure, that location's roots are unknown
+            where = "%s: %s" % (name, type(exc).__name__)
+            raise LiveCheckoutUnlocated(LiveCheckoutUnknown.LOCATION_UNAVAILABLE, where) from exc
+    return locations
 
+
+def _branch_of(git_dir: Path, common: Path) -> _Branch:
+    if _uses_reftable(git_dir, common):
+        return _Branch(known=False)
+    followed = reads.followed_ref(git_dir, common)
+    if followed.state is not reads.ReadState.OK:
+        return _Branch(known=False)
+    return _Branch(known=True, ref=followed.ref.casefold() if followed.ref else None)
+
+
+def _repository(git_dir: Path) -> _Repository | None:
+    status = _status(git_dir)
+    if status is None or not stat.S_ISDIR(status.st_mode):
+        return None
+    common = _common_dir(git_dir)
+    common_status = _status(common)
+    refs_status = _status(common / "refs") if common_status is not None else None
+    return _Repository(
+        git_dir=status,
+        commons=(common_status,) if common_status is not None else (),
+        refs=(refs_status,) if refs_status is not None else (),
+        branch=_branch_of(git_dir, common),
+    )
+
+
+def _existing(paths: Iterable[Path]) -> tuple[os.stat_result, ...]:
+    return tuple(status for status in map(_status, paths) if status is not None)
+
+
+def _live() -> _Live:
+    """The live set; raises :class:`LiveCheckoutUnlocated` when it cannot be determined."""
+    locations = _control_locations()
+    try:
+        roots: list[Path] = []
+        for location in locations:
+            roots.extend(directory for directory in _ancestors(location) if _exists_unfollowed(directory / _GIT_ENTRY))
+        repositories: list[_Repository] = []
+        trees: list[Path] = []
+        for root in dict.fromkeys(roots):
+            for found in _git_dirs_at(root):
+                repository = _repository(found.git_dir)
+                if repository is not None:
+                    repositories.append(repository)
+                    trees.extend(_configured_trees(found.git_dir, _common_dir(found.git_dir)))
+        live_paths = list(dict.fromkeys((*roots, *trees)))
+        root_status = _existing(live_paths)
+        ancestors = _existing(dict.fromkeys(item for path in live_paths for item in _ancestors(path)))
+    except _Unknown as exc:
+        raise LiveCheckoutUnlocated(LiveCheckoutUnknown.METADATA_UNREADABLE, str(exc)) from exc
+    return _Live(root_status, ancestors, tuple(repositories))
+
+
+# ---- rule (a) and (b) ------------------------------------------------------------------
 
 def _spellings(path: Path) -> list[Path]:
     """``path`` as given (made absolute, links kept) and resolved."""
@@ -338,66 +368,163 @@ def _spellings(path: Path) -> list[Path]:
 
 def _inside_live_root(path: Path, live: _Live) -> bool:
     return any(
-        _same(_stat(directory), live.roots)
+        _same(_status(directory), live.roots)
         for spelled in _spellings(path) for directory in _ancestors(spelled)
     )
 
 
-def _uses_live_state(git_dir: Path, live: _Live) -> bool:
-    """Whether git using ``git_dir`` would act on a live checkout's ``HEAD``, index, branch or files."""
-    status = _stat(git_dir)
-    if status is None:
+def _tree_reaches_live(tree: Path, live: _Live) -> bool:
+    """Whether a work tree at ``tree`` is inside a live root or contains one."""
+    return _same(_status(tree), live.root_ancestors) or _inside_live_root(tree, live)
+
+
+def _registered_worktree_off_live_branch(found: _Found, common_status: os.stat_result,
+                                         sharing: list[_Repository]) -> bool:
+    """Whether ``found`` is a registered worktree of a live repository on a branch no live checkout has.
+
+    Its git directory must be ``<live common>/worktrees/<name>`` and that
+    entry's ``gitdir`` must name, by file identity, the ``.git`` file that led
+    here.  Those files sit inside the live git directory; a planted git
+    directory elsewhere never qualifies, whatever its ``HEAD`` holds.
+    """
+    git_dir, gitfile = found.git_dir, found.gitfile
+    if gitfile is None or git_dir.parent.name.casefold() != _WORKTREES:
         return False
+    registry_common = _status(git_dir.parent.parent)
+    if registry_common is None or not os.path.samestat(registry_common, common_status):
+        return False
+    backlink = _pointer(git_dir / _BACKLINK, git_dir)
+    if backlink is None:
+        return False
+    named, found_file = _status(backlink), _status(gitfile)
+    if named is None or found_file is None or not os.path.samestat(named, found_file):
+        return False
+    branch = _branch_of(git_dir, git_dir.parent.parent)
+    if not branch.known:
+        return False
+    for repository in sharing:
+        if not repository.branch.known:
+            return False
+        if branch.ref is not None and branch.ref == repository.branch.ref:
+            return False
+    return True
+
+
+def _shares_live_common(found: _Found, common: Path, live: _Live) -> bool:
+    """Whether ``found``'s common directory is a live one and it is not a registered worktree off the live branch."""
+    common_status = _status(common)
+    if common_status is None:
+        return False
+    sharing = [repository for repository in live.repositories if _same(common_status, repository.commons)]
+    return bool(sharing) and not _registered_worktree_off_live_branch(found, common_status, sharing)
+
+
+def _uses_live_state(found: _Found, live: _Live) -> bool:
+    """Whether git using ``found`` could act on a live checkout's ``HEAD``, index, branch or files."""
+    status = _status(found.git_dir)
+    if status is None or not stat.S_ISDIR(status.st_mode):
+        return False  # git dies on a gitdir that is not a directory
     if _same(status, live.git_dirs):
         return True
-    commons = _common_dirs(git_dir)
-    branch: str | None = None
-    branch_read = False
-    for common in commons:
-        common_status = _stat(common)
-        for repository in live.repositories:
-            if _same(common_status, repository.commons):
-                if not branch_read:
-                    branch, branch_read = _followed_branch(git_dir, commons), True
-                if branch is not None and branch == repository.branch:
-                    return True
-            elif _same(_stat(common / "refs"), repository.refs):
-                return True
-    return any(_inside_live_root(tree, live) for tree in _configured_worktrees(git_dir))
+    common = _common_dir(found.git_dir)
+    if _shares_live_common(found, common, live):
+        return True
+    if _same(_status(common / "refs"), (item for repo in live.repositories for item in repo.refs)):
+        common_status = _status(common)
+        if not _same(common_status, (item for repo in live.repositories for item in repo.commons)):
+            return True
+    return any(_tree_reaches_live(tree, live) for tree in _configured_trees(found.git_dir, common))
 
 
-def _reaches_live(directory: Path, live: _Live) -> bool:
-    """Whether a git directory found at ``directory`` (its ``.git``, or itself) would act on live state."""
+def _directory_reaches_live(directory: Path, live: _Live) -> bool:
+    """Rules (a) and (b) for one directory on the walk; raises :class:`_Unknown` when it cannot be known."""
+    if _same(_status(directory), live.roots):
+        return True
     candidates = _git_dirs_at(directory)
-    head = _stat(directory / "HEAD")
+    head = _status(directory / _HEAD)
     if head is not None and stat.S_ISREG(head.st_mode):
-        candidates.append(directory)
-    return any(_uses_live_state(git_dir, live) for git_dir in candidates)
+        candidates.append(_Found(directory, None))
+    return any(_uses_live_state(found, live) for found in candidates)
+
+
+def _file_rule_live(path: Path, live: _Live) -> bool:
+    """Rules (a) and (b): the path, or a directory above it, is or reaches live state, or cannot be known."""
+    try:
+        spellings = _spellings(path)
+        return any(
+            _directory_reaches_live(directory, live)
+            for spelled in spellings for directory in _ancestors(spelled)
+        )
+    except (_Unknown, ValueError):
+        return True
+
+
+# ---- rule (c): git's own answer ------------------------------------------------------------
+
+def _git_probe_live(path: Path, live: _Live) -> bool:
+    """Rule (c): git, run at ``path``, names live state, or answers anything but "not a repository"."""
+    answer = git_probe.probe(path)
+    if answer.outcome in (git_probe.ProbeOutcome.NO_GIT, git_probe.ProbeOutcome.NOT_A_REPOSITORY):
+        return False
+    if answer.outcome is not git_probe.ProbeOutcome.FOUND or answer.location is None:
+        return True
+    location = answer.location
+    try:
+        if _same(_status(location.git_dir), live.git_dirs):
+            return True
+        gitfile = location.toplevel / _GIT_ENTRY if location.toplevel is not None else None
+        if _shares_live_common(_Found(location.git_dir, gitfile), location.common_dir, live):
+            return True
+        return location.toplevel is not None and _tree_reaches_live(location.toplevel, live)
+    except (_Unknown, ValueError):
+        return True
+
+
+# ---- the verdict -----------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class _Verdict:
+    live: bool
+    unlocated: LiveCheckoutUnlocated | None = None
+
+
+def _verdict(path: Path) -> _Verdict:
+    try:
+        live = _live()
+    except LiveCheckoutUnlocated as exc:
+        return _Verdict(True, exc)
+    if not live.roots and not live.repositories:
+        return _Verdict(False)
+    return _Verdict(_file_rule_live(path, live) or _git_probe_live(path, live))
 
 
 def is_live(path: Path) -> bool:
-    """Whether git run at ``path`` could change the live runtime checkout (rules (a) and (b) above)."""
-    live = _live()
-    if not live.roots and not live.repositories:
-        return False
-    for spelled in _spellings(Path(path)):
-        for directory in _ancestors(spelled):
-            if _same(_stat(directory), live.roots) or _reaches_live(directory, live):
-                return True
-    return False
+    """Whether git run at ``path`` could change the live runtime checkout (rules (a), (b) and (c) above)."""
+    return _verdict(Path(path)).live
 
 
 @dataclass(frozen=True)
 class LiveCheckoutRefusal:
-    """An unattended ``operation`` was refused in the live checkout."""
+    """An unattended ``operation`` was refused in the live checkout.
+
+    ``cause`` and ``where`` are set when the live checkout could not be
+    located, so the refusal covered every path.
+    """
 
     operation: str
+    cause: LiveCheckoutUnknown | None = None
+    where: str = ""
 
     @property
     def message(self) -> str:
-        return (
+        text = (
             "refusing %s: the live Sonder runtime checkout is protected; it changes only when the "
             "operator types the command at the console (no developer token opens it)" % self.operation
+        )
+        if self.cause is None:
+            return text
+        return text + "; the live checkout could not be located (%s: %s), so every path is treated as live" % (
+            self.cause.value, self.where,
         )
 
     def as_result(self) -> dict:
@@ -409,11 +536,20 @@ def refusal(operation: str, path: Path) -> LiveCheckoutRefusal | None:
     """The refusal for ``operation`` run in ``path``, or None when it may run.
 
     It may run when the operator typed ``operation`` at the console, or when
-    ``path`` is not live (:func:`is_live`).  No subprocess runs.
+    ``path`` is not live (:func:`is_live`).  Only a path rules (a) and (b) do
+    not call live costs a ``git rev-parse`` (rule (c)).
     """
     if _attendance.attended_for(operation):
         return None
-    return LiveCheckoutRefusal(operation) if is_live(path) else None
+    verdict = _verdict(Path(path))
+    if not verdict.live:
+        return None
+    if verdict.unlocated is None:
+        return LiveCheckoutRefusal(operation)
+    return LiveCheckoutRefusal(operation, verdict.unlocated.cause, verdict.unlocated.where)
 
 
-__all__ = ["LiveCheckoutGuard", "LiveCheckoutRefusal", "is_live", "refusal"]
+__all__ = [
+    "LiveCheckoutGuard", "LiveCheckoutRefusal", "LiveCheckoutUnknown", "LiveCheckoutUnlocated", "is_live",
+    "refusal",
+]

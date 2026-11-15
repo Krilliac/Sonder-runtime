@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 448,
+      "file_count": 450,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -187,6 +187,7 @@
         "sonder_runtime/adapters/git/__init__.py",
         "sonder_runtime/adapters/git_change_targets.py",
         "sonder_runtime/adapters/git_discovery.py",
+        "sonder_runtime/adapters/git_metadata_reads.py",
         "sonder_runtime/adapters/git_mutation_guard.py",
         "sonder_runtime/adapters/git_program_guard.py",
         "sonder_runtime/adapters/goal_formatting.py",
@@ -258,6 +259,7 @@
         "sonder_runtime/adapters/learning_tier_formatting.py",
         "sonder_runtime/adapters/legacy_chat_bridge.py",
         "sonder_runtime/adapters/live_checkout.py",
+        "sonder_runtime/adapters/live_checkout_git_probe.py",
         "sonder_runtime/adapters/loaded_source.py",
         "sonder_runtime/adapters/local_observability.py",
         "sonder_runtime/adapters/location.py",

@@ -360,8 +360,8 @@ def _git_change_runner(root, *, timeout, hardened):
 def _live_refusal(operation, root):
     """``{"ok": False, "error": ...}`` when ``operation`` may not change the live runtime checkout at ``root``, else None.
 
-    Decided from paths and the operator-attendance signal alone: no git child
-    runs (``live_checkout.refusal``).
+    Decided from paths, git's ``rev-parse`` answer when they find nothing, and
+    the operator-attendance signal (``live_checkout.refusal``).
     """
     refused = live_checkout.refusal(operation, Path(root))
     return refused.as_result() if refused is not None else None

@@ -18,9 +18,10 @@ The rule now: (a) any path under the live root is live, whatever markers sit
 in between, and the live root is every marked directory above a control-plane
 location (so a marker planted between them only adds a root); (b) a git
 directory reached from the path counts by what it shares with the live one
-(identity, ``commondir`` plus the checked-out branch, ``refs``, or a
-``core.worktree`` into the live tree).  A real worktree of the live repository,
-and repositories outside the live tree, keep their behaviour.
+(identity, a shared ``commondir`` unless it is a registered worktree off the
+live branch, ``refs``, or a ``core.worktree`` into the live tree).  A real
+worktree of the live repository, and repositories outside the live tree, keep
+their behaviour.
 """
 from __future__ import annotations
 
@@ -195,11 +196,19 @@ def test_a_git_directory_following_the_live_branch_is_live(checkout, tmp_path, h
     assert _head(checkout.repo) == head
 
 
-def test_a_git_directory_sharing_refs_on_another_branch_is_not_live(checkout, tmp_path):
-    """Control: the same planted directory on a branch nobody has checked out is a worktree, not the live checkout."""
+def test_a_planted_git_directory_sharing_the_live_common_directory_is_live_on_any_branch(checkout, tmp_path):
+    """The same planted directory on a branch nobody has checked out is still live.
+
+    It used to count as a worktree because its ``HEAD`` text named another
+    branch, but that text is the planter's to write (padded, ``ref:`` on its
+    own line, a decoy loose ref, a ref outside ``refs/heads``), and git reads
+    it differently.  Only a registered worktree whose entry links back to the
+    ``.git`` file found is judged by its ``HEAD``
+    (``test_live_checkout_fail_closed``).
+    """
     git(checkout.repo, "branch", "side")
     folder = _planted_git_dir(checkout, tmp_path, "ref: refs/heads/side\n")
-    assert not live_checkout.is_live(folder)
+    assert live_checkout.is_live(folder)
 
 
 def _directory_link(link, target):

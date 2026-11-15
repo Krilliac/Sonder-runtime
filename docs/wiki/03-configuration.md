@@ -519,8 +519,9 @@ checkout `git_checkout`, `git_branch`, `git_stash` push and pop, `git_merge`,
 `git_cherry_pick`, `apply_patch` (without `check_only`), `format_code` and
 `lint_run` with `fix` refuse unless the operator typed that very tool at the
 console (`/git_checkout ...`) with a person present. The rule does not try to
-predict what a call would write or which commit a ref names, and runs no git:
-it looks at the paths and at the attendance signal
+predict what a call would write or which commit a ref names: it looks at the
+paths, asks `git rev-parse` which repository git would use there, and looks at
+the attendance signal
 (`adapters/operator_attendance.py`), which the console dispatcher sets only
 around the tool the operator typed, so a model loop started by `/agent` is not
 attended and neither is a piped or scripted console. No token opens it.
@@ -531,16 +532,33 @@ What counts as live is what git would act on, not the nearest `.git`
 ref and keeps walking up, and a repository nested in the live tree is still
 inside it. A path outside the tree is live when a git directory it reaches
 is, or shares state with, the live one: a `.git` file whose `gitdir:` names
-the live git directory, a git directory whose `HEAD` follows the branch the
-live checkout has checked out through a shared `commondir`, or a
-`core.worktree` that points into the live tree. A junction, symlink or
-different spelling of the live checkout is still the live checkout
-(identified by directory identity, not by name).
+the live git directory, a git directory whose `commondir` is the live one
+(unless it is a registered worktree off the live branch, below), or a
+`core.worktree` that points into the live tree or at a folder containing it.
+A junction, symlink or different spelling of the live checkout is still the
+live checkout (identified by directory identity, not by name).
+
+The rule fails closed. Every file it reads (`.git` files, `commondir`, `HEAD`,
+loose refs, config) is read as present, absent or unknown; a file over 1 MiB,
+a NUL byte, bytes that are not UTF-8, a config with a BOM or a continuation
+line that mentions `worktree`, a drive-relative path or any error other than
+"no such file" counts as unknown, and unknown is live. When the live checkout
+itself cannot be located (a control-plane location raises, or its git
+metadata cannot be read), every path is live and the refusal says so. Git's
+own answer is a second check: if `git rev-parse`, run in that folder, names a
+live git directory or a work tree inside or containing the live tree, or fails
+with anything but "not a git repository", the path is live. That costs two
+short git runs (about 20 ms) only for a path the file rule does not already
+call live.
 
 A repository that is not the live checkout is unaffected: a user's project,
 including repositories nested in it, and a git worktree of the runtime outside
 the live tree (its `.git` is a file naming its own `HEAD` and index) keep every
-git tool as plain git. A worktree shares branches, tags and the stash with the
+git tool as plain git. A worktree counts only when it is registered (its git
+directory is `<live>/.git/worktrees/<name>` and that entry's `gitdir` names
+its very `.git` file) and its `HEAD` is not on the branch the live checkout has
+checked out; a hand-made git directory sharing the live one is live whatever
+its `HEAD` says. A worktree shares branches, tags and the stash with the
 live repository, which is why `/runtime_source_stash pop` (and `/stash pop`)
 needs the operator at the console and restores only a stash that
 `runtime_source_stash save` recorded in the live checkout. It applies that
