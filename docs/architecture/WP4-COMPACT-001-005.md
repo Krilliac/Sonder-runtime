@@ -32,9 +32,9 @@ tokenizer or model summarizer can be introduced behind the same port later.
 
 ```text
 python -m pytest -q tests/test_wp3_seam007_compaction.py tests/test_wp4_compact001_005.py
-python -m compileall -q sonder_runtime/application/compaction.py
+python -m compileall -q sonder_runtime/application/compaction/engine.py
 python scripts/check_architecture.py
-python -m ruff check sonder_runtime/application/compaction.py tests/test_wp4_compact001_005.py
+python -m ruff check sonder_runtime/application/compaction/engine.py tests/test_wp4_compact001_005.py
 git diff --check
 ```
 

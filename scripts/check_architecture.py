@@ -557,12 +557,16 @@ def module_name(path: Path) -> str:
     return ".".join(parts)
 
 
-def resolve_relative(module: str, node: ast.ImportFrom) -> str:
+def resolve_relative(
+    module: str, node: ast.ImportFrom, is_package: bool = False,
+) -> str:
     if node.level == 0:
         return node.module or ""
     base = module.split(".")
-    # A module's package is itself minus the module component.
-    package_parts = base[:-1] if not module.endswith("__init__") else base
+    # A module's package is itself minus the module component; a package's
+    # ``__init__`` already names its own package (module_name drops the
+    # ``__init__`` component), so its relative imports anchor at itself.
+    package_parts = base if is_package else base[:-1]
     anchor = package_parts[: len(package_parts) - (node.level - 1)]
     return ".".join(anchor + ([node.module] if node.module else []))
 
@@ -696,7 +700,7 @@ def check(diagnostics: dict[str, int] | None = None) -> list[str]:
                 for alias in node.names:
                     imported.add(alias.name)
             elif isinstance(node, ast.ImportFrom):
-                imported.add(resolve_relative(module, node))
+                imported.add(resolve_relative(module, node, path.name == "__init__.py"))
             elif isinstance(node, ast.Attribute):
                 # os.environ reads in domain/application
                 if (
