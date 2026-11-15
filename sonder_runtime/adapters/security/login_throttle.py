@@ -9,6 +9,7 @@ Limits: ``SONDER_LOGIN_USERNAME_THRESHOLD`` (failures before backoff),
 """
 from __future__ import annotations
 
+import ipaddress
 import os
 import threading
 import time
@@ -67,9 +68,24 @@ def _backoff() -> UsernameBackoff:
     return _state
 
 
-def check(username: str) -> LoginDecision:
+def _is_loopback(client: str | None) -> bool:
+    try:
+        return bool(client) and ipaddress.ip_address(client).is_loopback
+    except ValueError:
+        return False
+
+
+def check(username: str, client: str | None = None) -> LoginDecision:
+    """``client`` is the resolved client address (trusted-proxy aware).
+
+    A loopback or previously successful (familiar) client bypasses the
+    per-username window; it remains subject to the per-IP limiter.
+    """
     with _lock:
-        return _backoff().check(username, time.monotonic())
+        return _backoff().check(
+            username, time.monotonic(),
+            client=client or "", trusted=_is_loopback(client),
+        )
 
 
 def record_failure(username: str) -> None:
@@ -77,6 +93,6 @@ def record_failure(username: str) -> None:
         _backoff().record_failure(username, time.monotonic())
 
 
-def record_success(username: str) -> None:
+def record_success(username: str, client: str | None = None) -> None:
     with _lock:
-        _backoff().record_success(username)
+        _backoff().record_success(username, time.monotonic(), client or "")

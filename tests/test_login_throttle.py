@@ -23,6 +23,8 @@ import pytest
 import admin_auth
 import memory_store
 import sonder_runtime.adapters.web.lifecycle as sonder_lifecycle
+from sonder_runtime.adapters.security import login_throttle
+from sonder_runtime.domain.login_throttle import LoginThrottlePolicy
 import sonder_runtime.interfaces.http.serve as sonder_serve
 
 pytestmark = pytest.mark.integration
@@ -35,24 +37,29 @@ BURST = sonder_lifecycle._AUTH_BUCKET_CAPACITY
 IP_A = "203.0.113.10"
 IP_B = "203.0.113.20"
 IP_C = "203.0.113.30"
+# Explicit per-username policy (not the shipped default): 3 IPs x (BURST-2)
+# failures must exceed it while each IP stays under its own burst.
+POLICY = LoginThrottlePolicy(threshold=20, decay_seconds=30.0)
 
 
 class _Clock:
     """Monotonic/wall offset so tests pass a backoff window without sleeping."""
 
     def __init__(self):
+        # Frozen at construction: only advance() moves time, so a slow test
+        # run cannot refill the per-IP bucket behind the assertions.
         self.offset = 0.0
-        self._mono = time.monotonic
-        self._wall = time.time
+        self._mono = time.monotonic()
+        self._wall = time.time()
 
     def advance(self, seconds):
         self.offset += seconds
 
     def monotonic(self):
-        return self._mono() + self.offset
+        return self._mono + self.offset
 
     def time(self):
-        return self._wall() + self.offset
+        return self._wall + self.offset
 
 
 @pytest.fixture()
@@ -63,12 +70,18 @@ def clock(monkeypatch):
     return c
 
 
+class _RoomyServer(ThreadingHTTPServer):
+    # The concurrent-burst test opens 40 connections at once.
+    request_queue_size = 128
+
+
 @pytest.fixture()
 def login_server(tmp_path, monkeypatch, clock):
     home = tmp_path / "home"
     monkeypatch.setenv("SONDER_HOME", str(home))
     monkeypatch.setenv("SONDER_OPERATIONS_DB", str(home / "operations.db"))
     sonder_lifecycle.reset_for_tests()
+    login_throttle.configure(POLICY)
     monkeypatch.setattr(sonder_serve, "API_KEY", "")
     monkeypatch.setattr(sonder_serve, "AUTH_MODE", "local-open")
     monkeypatch.setattr(sonder_serve, "REQUIRE_ACCOUNT", False)
@@ -85,13 +98,14 @@ def login_server(tmp_path, monkeypatch, clock):
         lambda: memory_store.connect(db_path),
     )
     _register(USER)
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), sonder_serve.Handler)
+    httpd = _RoomyServer(("127.0.0.1", 0), sonder_serve.Handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{httpd.server_address[1]}"
     httpd.shutdown()
     httpd.server_close()
     sonder_lifecycle.reset_for_tests()
+    login_throttle.configure(None)
 
 
 def _register(username):
@@ -242,3 +256,147 @@ def test_wrong_password_below_limit_keeps_the_generic_401(login_server):
     status, body, _ = _login(login_server, USER, BAD, IP_A)
     assert status == 401
     assert body == {"ok": False, "message": "invalid username or password"}
+
+
+def _header(headers, name):
+    return {k.lower(): v for k, v in headers.items()}.get(name)
+
+
+def _post(base, path, payload, ip, extra_headers=None):
+    headers = {"Content-Type": "application/json", "X-Forwarded-For": ip}
+    headers.update(extra_headers or {})
+    request = urllib.request.Request(
+        base + path, data=json.dumps(payload).encode(), headers=headers, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return response.status, json.loads(response.read() or b"{}"), dict(response.headers)
+    except urllib.error.HTTPError as error:
+        raw = error.read()
+        return error.code, json.loads(raw) if raw else {}, dict(error.headers)
+
+
+def _login_no_forwarding(base, username, password):
+    """A direct loopback client: no X-Forwarded-For, so the peer is the client."""
+    request = urllib.request.Request(
+        base + "/v1/sonder/login",
+        data=json.dumps({"username": username, "password": password}).encode(),
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return response.status
+    except urllib.error.HTTPError as error:
+        error.read()
+        return error.code
+
+
+def _spray_until_window(base):
+    for ip in (IP_A, IP_B, IP_C):
+        for _ in range(BURST - 2):
+            _login(base, USER, BAD, ip)
+
+
+def test_concurrent_burst_from_one_ip_cannot_overdraw_the_limiter(login_server):
+    """Check-and-consume is one step: queued requests cannot all pass the check."""
+    count = 40
+    results = [None] * count
+    barrier = threading.Barrier(count)
+
+    def attempt(index):
+        barrier.wait()
+        # Distinct usernames keep the per-username stage out of the picture.
+        results[index] = _login(login_server, f"spray{index}", BAD, IP_A)[0]
+
+    threads = [threading.Thread(target=attempt, args=(i,)) for i in range(count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert results.count(401) == BURST
+    assert results.count(429) == count - BURST
+
+
+def test_concurrent_burst_does_not_exhaust_budget_for_successful_logins(login_server):
+    """Successful logins refund their reservation, so they never drain the IP."""
+    for _ in range(3 * BURST):
+        assert _login(login_server, USER, GOOD, IP_A)[0] == 200
+    assert _login(login_server, USER, BAD, IP_A)[0] == 401
+
+
+def test_sustained_remote_attacker_cannot_keep_a_familiar_operator_out(login_server, clock):
+    assert _login(login_server, USER, GOOD, IP_B)[0] == 200  # operator's usual IP
+    _spray_until_window(login_server)
+    attacker = "198.51.100.77"
+    for _ in range(4):
+        clock.advance(31)  # the attacker takes every slot the decay opens
+        _login(login_server, USER, BAD, attacker)
+        assert _login(login_server, USER, BAD, attacker)[0] == 429
+        # The operator is not held out, and is not spending the attacker's budget.
+        assert _login(login_server, USER, GOOD, IP_B)[0] == 200
+        _spray_until_window(login_server)
+
+
+def test_unfamiliar_remote_address_stays_inside_the_window(login_server):
+    _spray_until_window(login_server)
+    assert _login(login_server, USER, GOOD, "198.51.100.200")[0] == 429
+
+
+def test_loopback_operator_is_never_held_out_by_remote_failures(login_server):
+    _spray_until_window(login_server)
+    assert _login_no_forwarding(login_server, USER, GOOD) == 200
+
+
+def test_username_window_reports_its_real_retry_after(login_server):
+    _spray_until_window(login_server)  # refusals stop counting at the threshold (20): one slot
+    status, body, headers = _login(login_server, USER, GOOD, "198.51.100.201")
+    assert status == 429
+    assert body["error"]["code"] == "AUTH_RATE_LIMITED"
+    assert int(_header(headers, "retry-after")) == 30  # one decay slot
+
+
+def test_username_refusals_do_not_spend_the_callers_ip_budget(login_server):
+    _spray_until_window(login_server)
+    for _ in range(3 * BURST):
+        assert _login(login_server, USER, GOOD, "198.51.100.202")[0] == 429
+    # The IP budget is untouched: a different account still logs in from it.
+    _register("someone-else")
+    assert _login(login_server, "someone-else", GOOD, "198.51.100.202")[0] == 200
+
+
+def test_banned_account_with_correct_password_is_a_counted_failure(login_server):
+    conn = sonder_serve._legacy_runtime()._open_db()
+    try:
+        conn.execute("UPDATE accounts SET banned=1 WHERE username=?", (USER,))
+        conn.commit()
+    finally:
+        conn.close()
+    statuses = [_login(login_server, USER, GOOD, IP_A)[0] for _ in range(BURST + 3)]
+    assert statuses[:BURST] == [401] * BURST
+    assert set(statuses[BURST:]) == {429}
+
+
+def test_register_denials_are_throttled_per_ip(login_server):
+    def register(index):
+        return _post(
+            login_server, "/v1/sonder/register",
+            {"username": f"newbie{index}", "password": "another-long-password"},
+            IP_A, {"X-Sonder-Bootstrap-Secret": "wrong-secret"},
+        )
+
+    statuses = [register(i)[0] for i in range(BURST + 5)]
+    assert statuses[:BURST] == [403] * BURST
+    status, body, headers = register(99)
+    assert status == 429
+    assert body["error"]["code"] == "AUTH_RATE_LIMITED"
+    assert int(_header(headers, "retry-after")) >= 1
+    # Another address is unaffected.
+    assert register_status_for(login_server, IP_B) == 403
+
+
+def register_status_for(base, ip):
+    return _post(
+        base, "/v1/sonder/register",
+        {"username": "elsewhere", "password": "another-long-password"},
+        ip, {"X-Sonder-Bootstrap-Secret": "wrong-secret"},
+    )[0]

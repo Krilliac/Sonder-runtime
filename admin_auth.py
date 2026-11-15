@@ -276,12 +276,15 @@ def _public_account_row(row) -> dict:
 
 
 @coordinated_account_mutation
-def login(conn: sqlite3.Connection, username: str, password: str) -> tuple[str, dict]:
+def login(
+    conn: sqlite3.Connection, username: str, password: str, *,
+    client_ip: str | None = None,
+) -> tuple[str, dict]:
     init(conn)
     username = _username(username, generic_error=True)
     password = _password(password, generic_error=True)
     throttle_key = _throttle_key(conn, username)
-    decision = login_throttle.check(throttle_key)
+    decision = login_throttle.check(throttle_key, client_ip)
     if not decision.allowed:
         raise login_throttle.LoginThrottled(decision.retry_after_seconds)
     row = conn.execute("SELECT * FROM accounts WHERE username=?", (username,)).fetchone()
@@ -299,7 +302,7 @@ def login(conn: sqlite3.Connection, username: str, password: str) -> tuple[str, 
     if row["banned"]:
         login_throttle.record_failure(throttle_key)
         raise PermissionError("account is banned")
-    login_throttle.record_success(throttle_key)
+    login_throttle.record_success(throttle_key, client_ip)
     token = _new_token()
     conn.execute(
         "INSERT INTO account_sessions(token_hash, username, created_ts, expires_ts) "
