@@ -41,6 +41,7 @@ __all__ = [
     "resolve_request",
     "same_origin",
     "same_origin_request",
+    "root_from_config",
     "settings_from_config",
 ]
 
@@ -121,19 +122,22 @@ class WebAppSettings:
         return cls(False, Path())
 
 
-def settings_from_config(config: Any) -> WebAppSettings:
-    """Build settings from a typed ``SonderConfig`` (server and state sections)."""
-    server = config.server
-    if not server.web_app_enabled:
-        return WebAppSettings.disabled()
-    configured = str(server.web_app_dir or "").strip()
+def root_from_config(config: Any) -> Path:
+    """The bundle root: ``[server].web_app_dir`` or ``<state home>/web_app``."""
+    configured = str(config.server.web_app_dir or "").strip()
     if configured:
-        return WebAppSettings(True, Path(configured))
+        return Path(configured)
     from sonder_runtime.platform.paths import default_home
 
     home = str(getattr(config.state, "home", "") or "").strip()
-    base = Path(home) if home else default_home()
-    return WebAppSettings(True, base / "web_app")
+    return (Path(home) if home else default_home()) / "web_app"
+
+
+def settings_from_config(config: Any) -> WebAppSettings:
+    """Build settings from a typed ``SonderConfig`` (server and state sections)."""
+    if not config.server.web_app_enabled:
+        return WebAppSettings.disabled()
+    return WebAppSettings(True, root_from_config(config))
 
 
 @dataclass(frozen=True)
