@@ -1128,6 +1128,8 @@ _ENTRIES = [
      GATEWAY_GENERATE, 3, TEXT, _PROBE),
     ("sonder_runtime/application/routing/evidence_gateway.py", "CapabilityEvidenceGateway.generate",
      GATEWAY_GENERATE, 4, CHOKE, "packaged gateway plumbing"),
+    ("sonder_runtime/application/structured_output.py", "generate_structured", GATEWAY_GENERATE, 1, CHOKE,
+     "packaged gateway plumbing; the reply is parsed and checked, never run or applied"),
     ("sonder_runtime/bootstrap/app.py", "build_application", "raw-gateway:" + RAW_GATEWAY_NAME, 4, CHOKE,
      "the unwrapped gateway: built once, wrapped as the default handle, and handed only "
      "to Application.model_gateway (the legacy bridge, which judges the served model on every "

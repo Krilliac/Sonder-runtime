@@ -78,7 +78,7 @@ def _same(a: object, b: object) -> bool:
     if isinstance(a, bool) != isinstance(b, bool):
         return False
     if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
-        return len(a) == len(b) and all(_same(x, y) for x, y in zip(a, b))
+        return len(a) == len(b) and all(_same(x, y) for x, y in zip(a, b, strict=True))
     if isinstance(a, dict) and isinstance(b, dict):
         return a.keys() == b.keys() and all(_same(a[k], b[k]) for k in a)
     return a == b
