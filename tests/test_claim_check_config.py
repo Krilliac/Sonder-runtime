@@ -32,7 +32,7 @@ def test_toml_overrides_windows(tmp_path):
     ("guard_window_lines", -1), ("guard_window_lines", 201), ("symbol_window_lines", True),
     ("duplicate_window_lines", 500), ("caller_window_lines", -3),
     ("max_file_bytes", 10), ("max_file_bytes", 10**9), ("max_callers", 101),
-    ("max_caller_files", -1), ("max_cache_bytes", 5), ("max_evidence", 0),
+    ("max_caller_files", -1), ("max_cache_bytes", 5), ("max_evidence", 0), ("max_batch_claims", 0), ("max_batch_claims", 100001),
     ("skip_dirs", ("a/b",)), ("skip_dirs", (".git", ".git")), ("skip_dirs", ["x"]),
     ("extra_guard_patterns", ("(unclosed",)), ("extra_guard_patterns", ("x" * 300,)),
     ("extra_guard_patterns", tuple("p%d" % i for i in range(40))),

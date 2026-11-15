@@ -21,6 +21,8 @@ class ClaimCheckConfig:
     max_caller_files: int = 2000
     max_cache_bytes: int = 64_000_000
     max_evidence: int = 20
+    # Most claims one batch file may hold.
+    max_batch_claims: int = 10_000
     skip_dirs: tuple[str, ...] = (".git", "node_modules", "bin", "obj", ".vs", "__pycache__")
     # Extra regular expressions counted as guard shapes for every category.
     extra_guard_patterns: tuple[str, ...] = ()
@@ -33,7 +35,7 @@ _INT_BOUNDS = (
     ("caller_window_lines", 0, 200), ("duplicate_window_lines", 0, 200),
     ("max_file_bytes", 1024, 16_000_000), ("max_callers", 0, 100),
     ("max_caller_files", 0, 50_000), ("max_cache_bytes", 1024, 512_000_000),
-    ("max_evidence", 1, 100),
+    ("max_evidence", 1, 100), ("max_batch_claims", 1, 100_000),
 )
 
 
