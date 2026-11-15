@@ -403,6 +403,9 @@ NATIVE_MCP_WORK = {
     # launching tool, ``test_run``, is graded by ``EXECUTION_TOOLS``.
     "tool_inventory": "safe",
     "output_digest": "safe",
+    # claim_check (bootstrap/claim_check_agent_tools.py) only reads files the
+    # repository read guard allows and writes nothing.
+    "claim_check": "safe",
     "test_run_result": "safe",
     # C++ build tools (bootstrap/build_tools.py). The two readers of the
     # caller's own jobs and the model reader never write or launch;

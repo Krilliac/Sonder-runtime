@@ -950,7 +950,7 @@ def test_shared_workflow_inventory_requires_lifecycle_authority(monkeypatch):
         ("/models", "reset"),
     ),
 )
-def test_read_only_global_control_aliases_remain_available_to_shared_accounts(
+def test_read_only_global_control_aliases_follow_the_role_allowlist(
     monkeypatch, command, mutation,
 ):
     monkeypatch.setattr(
@@ -960,8 +960,17 @@ def test_read_only_global_control_aliases_remain_available_to_shared_accounts(
         "mode": "account", "authorized": True, "api_key": False,
         "account": {"username": "ordinary", "role": "user"},
     }
+    developer = {
+        "mode": "account", "authorized": True, "api_key": False,
+        "account": {"username": "dev", "role": "developer"},
+    }
     cmd, _, argument = command.partition(" ")
-    assert ts._http_slash_refusal(cmd, argument, context=ordinary) == ""
+    # The read-only status branch is open to a developer account; a user-role
+    # account is held to the role tool allowlist (deny by default).
+    assert ts._http_slash_refusal(cmd, argument, context=developer) == ""
+    assert "not available to this account role" in ts._http_slash_refusal(
+        cmd, argument, context=ordinary,
+    )
     assert "administrator" in ts._http_slash_refusal(
         cmd, mutation, context=ordinary,
     )

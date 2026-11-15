@@ -570,7 +570,7 @@ import sonder_runtime.adapters.evaluation_history_store as eval_history
 import sonder_runtime.adapters.artifact_risk as artifact_risk_module
 import sonder_runtime.adapters.artifact_fetch as artifact_fetch_module
 import sonder_runtime.adapters.process_risk as process_risk_module
-from sonder_runtime.adapters.security import unsafe_lab
+from sonder_runtime.adapters.security import role_tool_policy as _role_tool_policy, unsafe_lab
 from sonder_runtime.adapters.security import permission_receipts as _permission_receipts
 
 # Unattended permission decisions leave a durable, content-free receipt from
@@ -1661,7 +1661,7 @@ def _model_prompt_identity(model):
         before = _ollama_model_tag_metadata(model)
         if before is None:
             raise ValueError("selected Ollama tag lacks a stable digest/revision")
-        details = _post("/api/show", {"name": model}, timeout=30)
+        details = _post("/api/show", {"model": model, "name": model}, timeout=30)
         info = details.get("model_info") if isinstance(details, dict) else {}
         info = info if isinstance(info, dict) else {}
         tokenizer_value = info.get("tokenizer.ggml.model")
@@ -13058,8 +13058,8 @@ def text_search(
         _record_direct_tool("text_search", args, ok=False, started=started, summary=str(exc))
         return "ERROR: %s" % exc
     lines = [
-        "text search: %r under %s (%d files scanned)" %
-        (data["query"], data["root"], data["files_scanned"]),
+        "text search: %r under %s (%d files scanned%s)" %
+        (data["query"], data["root"], data["files_scanned"], data.get("withheld_note", "")),
     ]
     lines.extend(
         "  %(relative)s:%(line)s:%(column)s: %(text)s" % row
@@ -18187,11 +18187,11 @@ def _agent_permission_gate_error(tool_name, args=None, *, mode=None, rule_lookup
     told to change course rather than retry.
     """
     name = _canonical_agent_tool_name(str(tool_name or "").strip())
+    if role_refusal := _role_tool_policy.agent_refusal(name):  # an HTTP caller's role binds every agent dispatch
+        return role_refusal
     decision = permission_modes.decide(
-        name, interactive=False, mode=mode, rule_lookup=rule_lookup,
-        surface="agent", record=record,
-        arguments=args if isinstance(args, dict) else None,
-        fence=effect_fence.current())
+        name, interactive=False, mode=mode, rule_lookup=rule_lookup, surface="agent",
+        record=record, arguments=args if isinstance(args, dict) else None, fence=effect_fence.current())
     if decision.allowed:
         return ""
     # Assigned rather than returned as a literal: scripts/check_error_signals.py
@@ -18273,7 +18273,7 @@ _AGENT_SYSTEM_OPERATOR_TOOLS = frozenset({
     "elevate", "permission_mode", "permission_rule_set", "permission_approve",
     "runtime_policy_update", "update_system_profile",
     "runtime_source_update", "runtime_source_stash",
-    "autopilot_start", "autopilot_resume", "autopilot_pause", "autopilot_cancel",
+    "autopilot_start", "autopilot_resume", "autopilot_pause", "autopilot_cancel", "mission_start",
     "self_heal_repair", "memory_export", "memory_privacy_repair",
     "memory_quality_repair", "workflow_list", "workflow_save", "workflow_delete", "workflow_run",
     # These process-wide controls require a human operator at an authenticated
@@ -23478,7 +23478,7 @@ def _runtime_model_has_capability(model: str, capability: str, records) -> bool:
     if not selected or _is_cloud_model_name(selected):
         return False
     try:
-        details = _post("/api/show", {"name": selected}, timeout=30)
+        details = _post("/api/show", {"model": selected, "name": selected}, timeout=30)
     except ModelCallError:
         return False
     return isinstance(details, dict) and wanted in _fanout_capabilities(details)
@@ -24467,7 +24467,7 @@ def _fanout_synthesis_model(selector):
         # the selected *local* model only, after the loopback guard, rather
         # than treating absent tag metadata as proof it cannot generate.
         try:
-            details = _post("/api/show", {"name": model}, timeout=30)
+            details = _post("/api/show", {"model": model, "name": model}, timeout=30)
         except ModelCallError as exc:
             raise ModelCallError(
                 "configuration", "could not verify synth_model generative capability"

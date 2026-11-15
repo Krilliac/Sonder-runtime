@@ -6,6 +6,13 @@ import json
 import re
 
 
+# Windows CPython minor versions the managed runtime profile may be sealed on.
+# 3.12 stays for one release so a deployed venv-managed keeps verifying while
+# the side-by-side 3.14 venv is built and switched in.
+MANAGED_PYTHON_MINORS = ((3, 12), (3, 14))
+MANAGED_PYTHON_LABEL = "3.12 or 3.14"
+
+
 class OwnerRefused(RuntimeError):
     pass
 

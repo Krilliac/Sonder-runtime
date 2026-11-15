@@ -926,10 +926,13 @@ model name. A `sonder-inference` binding therefore sends the request to
 `SONDER_INFERENCE_BASE_URL` and cannot silently enter the Ollama pool.
 
 The supported provider values are `sonder-inference`, `openai_compatible`,
-`ollama`, and `openrouter`. Loopback OpenAI-compatible endpoints remain local; remote
+`ollama`, `openrouter`, and `anthropic`. Loopback OpenAI-compatible endpoints remain local; remote
 endpoints require the operation's cloud consent and the provider's transport
 policy. OpenRouter requires `SONDER_ALLOW_CLOUD=1`, an API key, and the
-operation's cloud consent. Autopilot
+operation's cloud consent. Anthropic requires the same, with
+`SONDER_ANTHROPIC_API_KEY` (optional `SONDER_ANTHROPIC_API_KEY_2`), the optional
+`anthropic` SDK, and a local daily cap `SONDER_ANTHROPIC_DAILY_USD` (default 10);
+see `docs/integration/anthropic.md`. Autopilot
 and other local-only routes refuse a hosted binding rather than silently
 changing providers. Ollama-bound tiers retain the existing request payload
 and route behavior byte-for-byte.

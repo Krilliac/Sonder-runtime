@@ -347,3 +347,17 @@ def test_digest_module_has_no_shell_or_network_api():
     source = Path(content_digest.__file__).read_text(encoding="utf-8")
     forbidden = ("subprocess", "urllib", "requests", "http.client", "os.system", "eval(", "exec(")
     assert not [name for name in forbidden if name in source]
+
+
+def test_gcloud_directory_is_skipped_by_the_digest_walk(project):
+    # Consumer of SENSITIVE_READ_DIRECTORIES that does not go through the
+    # credential classifier: fails if ".gcloud" is dropped from that set.
+    (project / "ok.txt").write_text("ok", encoding="utf-8")
+    (project / ".gcloud").mkdir()
+    (project / ".gcloud" / "access_tokens.db").write_text("secret", encoding="utf-8")
+
+    data = _directory(project)
+    errors = {row["path"]: row["error"] for row in data["errors"]}
+
+    assert [row["path"] for row in data["manifest"]] == ["ok.txt"]
+    assert errors[".gcloud"] == "sensitive directory skipped"
