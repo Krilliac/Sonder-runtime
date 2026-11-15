@@ -162,12 +162,18 @@ def live_provider_environment(request, monkeypatch):
     yield
 
 
+def _restore_live_isolated_environment(monkeypatch, captured=None):
+    """Set the captured SONDER_ISOLATED_* inputs through *monkeypatch* and return them."""
+    values = dict(_CAPTURED_LIVE_ISOLATED_ENV if captured is None else captured)
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+    return values
+
+
 @pytest.fixture
 def live_isolated_environment(monkeypatch):
     """Restore the captured SONDER_ISOLATED_* inputs for one live test only."""
-    for name, value in _CAPTURED_LIVE_ISOLATED_ENV.items():
-        monkeypatch.setenv(name, value)
-    yield dict(_CAPTURED_LIVE_ISOLATED_ENV)
+    yield _restore_live_isolated_environment(monkeypatch)
 
 
 def _cleanup_test_state() -> None:

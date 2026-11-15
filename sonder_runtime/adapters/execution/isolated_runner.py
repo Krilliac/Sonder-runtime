@@ -18,6 +18,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import unicodedata
 import uuid
 from pathlib import Path
 from urllib.parse import urlparse
@@ -291,9 +292,15 @@ _INSPECT_ID_FIELD = {"docker": "Id", "podman": "ID"}
 
 
 def _stderr_excerpt(text, limit=200):
-    """Return a short, control-character-free excerpt of engine stderr."""
-    cleaned = _CONTROL_RE.sub(" ", str(text or "")).strip()
-    return cleaned[:limit]
+    """Return a short excerpt of engine stderr without C0/C1 controls or format characters."""
+    cleaned = "".join(
+        " " if (
+            char < " " or "\x7f" <= char <= "\x9f"
+            or unicodedata.category(char) == "Cf"
+        ) else char
+        for char in str(text or "")[: limit * 4]
+    )
+    return cleaned.strip()[:limit]
 
 
 def _inspect_image_policy(runtime_name, runtime_path, runtime_prefix, image):

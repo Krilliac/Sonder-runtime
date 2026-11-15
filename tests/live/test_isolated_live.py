@@ -79,12 +79,13 @@ def test_runs_as_unprivileged_uid(project):
 def test_network_is_none(project):
     out = _run(
         project,
-        "cut -d: -f1 /proc/net/dev | tail -n +3; "
+        "cut -d: -f1 /proc/net/dev | tail -n +3 | tr -d ' '; "
+        "command -v wget >/dev/null 2>&1 || { echo NO_WGET; exit 0; }; "
         "wget -T 3 -q -O- http://1.1.1.1 >/dev/null 2>&1 "
         "&& echo NET_OPEN || echo NET_BLOCKED",
     )
-    assert "NET_BLOCKED" in out["stdout"] and "eth0" not in out["stdout"], out
-    assert out["stdout"].split()[0] == "lo", out
+    # Exactly the loopback interface, and wget existed, so NET_BLOCKED is real.
+    assert out["stdout"].split() == ["lo", "NET_BLOCKED"], out
 
 
 def test_root_filesystem_is_read_only(project):
@@ -110,10 +111,11 @@ def test_capabilities_dropped_and_no_new_privs(project):
 def test_tmp_is_noexec(project):
     out = _run(
         project,
-        "cp /bin/busybox /tmp/bb 2>/dev/null; /tmp/bb true 2>/dev/null "
-        "&& echo TMP_EXEC_OK || echo TMP_EXEC_DENIED",
+        "cp /bin/busybox /tmp/bb 2>/dev/null && echo COPIED || echo COPY_FAILED; "
+        "/tmp/bb true 2>/dev/null && echo TMP_EXEC_OK || echo TMP_EXEC_DENIED",
     )
-    assert "TMP_EXEC_DENIED" in out["stdout"], out
+    # The copy must have succeeded, otherwise the exec denial proves nothing.
+    assert out["stdout"].split() == ["COPIED", "TMP_EXEC_DENIED"], out
 
 
 def test_cgroup_limits_applied(project):
@@ -137,7 +139,10 @@ def test_timeout_kills_container_and_cleanup_is_verified(project):
 def test_writable_workspace_is_opt_in(project):
     marker = Path(project) / "written_by_container.txt"
     try:
-        _run(project, "echo hi > /workspace/written_by_container.txt", writable_workspace=True)
+        out = _run(
+            project, "echo hi > /workspace/written_by_container.txt", writable_workspace=True
+        )
+        assert out["ok"], out
         assert marker.exists()
     finally:
         if marker.exists():

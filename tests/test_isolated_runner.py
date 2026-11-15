@@ -499,6 +499,18 @@ def test_inspect_failure_includes_bounded_sanitised_stderr(monkeypatch):
     assert len(message) < 400
 
 
+def test_stderr_excerpt_strips_c1_and_format_characters_and_stays_bounded():
+    # C1 controls, bidi override/isolate, zero-width space and joiner, BOM.
+    bidi_and_zero_width = "".join(chr(code) for code in (0x202E, 0x2066, 0x200B, 0x200D, 0xFEFF))
+    hostile = "bad\x85line\x9bCSI" + bidi_and_zero_width[0] + "evil" + bidi_and_zero_width[1:2] + "x" + bidi_and_zero_width[2:3] + "z" + bidi_and_zero_width[3:4] + "w" + bidi_and_zero_width[4:] + "end"
+    excerpt = isolated_runner._stderr_excerpt(hostile)
+    for char in "\x85\x9b" + bidi_and_zero_width:
+        assert char not in excerpt
+    assert excerpt.split() == ["bad", "line", "CSI", "evil", "x", "z", "w", "end"]
+    long = isolated_runner._stderr_excerpt(chr(0x200B) * 50 + "y" * 5000)
+    assert long == "y" * 200
+
+
 def test_metadata_probe_hard_caps_output_without_thread_leak(monkeypatch):
     class FakeProc:
         def __init__(self):

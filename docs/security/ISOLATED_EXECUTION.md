@@ -123,15 +123,17 @@ The Docker- and Podman-specific argv contracts are covered by unit tests.
 ### Live verification status
 
 The first live run was 2026-11-15 on Podman 6.2.0 (Windows WSL machine,
-rootless) with `alpine:3.22` and `debian:bookworm-slim`. It found two bugs the
-unit tests could not: Podman's `image inspect` template field is `.ID` (Docker
-uses `.Id`), and `env` stopped option parsing at the first `NAME=VALUE`, so a
-trailing `--` was executed as the command. Both are fixed. After the fix all 10
-live checks passed: uid 65534; only `lo` with outbound access blocked;
-read-only root; read-only workspace by default; `CapEff` 0 and `NoNewPrivs` 1;
-`noexec` `/tmp`; memory, pids and cpu cgroup limits applied; a timeout kills the
-container with cleanup verified absent; the writable-workspace opt-in works; and
-an image declaring a `VOLUME` is refused.
+rootless). It found two bugs the unit tests could not: Podman's `image inspect`
+template field is `.ID` (Docker uses `.Id`), and `env` stopped option parsing at
+the first `NAME=VALUE`, so a trailing `--` was executed as the command. Both are
+fixed. After the fix all 10 live checks passed on `alpine:3.22`: uid 65534; the
+only network interface is `lo` and an outbound `wget` is blocked; read-only
+root; read-only workspace by default; `CapEff` 0 and `NoNewPrivs` 1; `noexec`
+`/tmp` (the copy into it succeeds, the execution is denied); memory, pids and
+cpu cgroup limits applied; a timeout kills the container with cleanup verified
+absent; the writable-workspace opt-in works; and an image declaring a `VOLUME`
+is refused. `debian:bookworm-slim` was used only to confirm that GNU `env`
+handles `-i -- NAME=VALUE command` the same way as busybox.
 
 Docker is still untested live. On Windows the Podman machine must be started
 outside an SSH session, because ending that session kills the machine.

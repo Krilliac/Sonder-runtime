@@ -45,7 +45,17 @@ def test_live_isolated_variables_are_captured_before_the_scrub(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     conftest._clear_ambient_deployment_variables()
     assert not any(name in os.environ for name in fake)
-    gen = conftest.live_isolated_environment.__wrapped__(monkeypatch)
-    restored = next(gen)
+    # The default (module-level capture) is what the live fixture restores.
+    restored = conftest._restore_live_isolated_environment(monkeypatch)
     assert restored == fake
     assert all(os.environ[name] == value for name, value in fake.items())
+
+
+def test_live_isolated_fixture_restores_real_capture_for_this_test_only(
+    live_isolated_environment,
+):
+    import conftest
+
+    assert live_isolated_environment == conftest._CAPTURED_LIVE_ISOLATED_ENV
+    for name, value in live_isolated_environment.items():
+        assert os.environ[name] == value
