@@ -23,8 +23,8 @@ Checks, in order:
    as ignoring the whole file) fails the gate, as does ``no_type_check``.
    ``mypy.ini`` may not weaken the check either: only an allowlist of keys is
    accepted, and a ``[mypy-*]`` section may do nothing but ignore a missing
-   third-party import.  mypy's own summary must also show that it checked at
-   least every discovered module, and any error path that is not a discovered
+   third-party import.  mypy's own summary must also show that it checked
+   exactly the discovered modules, a ``.pyi`` stub under the package is refused, and any error path that is not a discovered
    module is a tool failure, so a module cannot escape by being skipped.
 4. With ``--against REF``: the baseline holds nothing that REF's baseline did
    not, and no module that is strict at REF dropped out of the strict list
@@ -35,6 +35,13 @@ on the command line and is applied only to the allowlist, so run this script
 rather than bare mypy.  A module that shares its name with a package
 (``x.py`` beside ``x/__init__.py``) is dead code Python never imports and mypy
 cannot check, so it is outside the ratchet.
+
+What the gate does not cover: mypy's own unreachable-code rules.  mypy skips
+the bodies of ``if TYPE_CHECKING: ... else:``, of ``sys.platform`` branches
+other than linux and win32, and of ``sys.version_info`` branches that do not
+match the pinned ``python_version``, so code there is not checked and the gate
+cannot see it.  A strict module is protected from the opt-outs listed above,
+not from every way of writing code that mypy does not look at.
 
 Exit status: 0 ok, 1 violations, 2 tool failure (mypy missing, crashed, or
 produced output this script cannot read).
@@ -89,6 +96,19 @@ def discover_modules(root: Path = REPO_ROOT, package: str = PACKAGE) -> list[str
             continue
         found.append(path.relative_to(root).as_posix())
     return found
+
+
+def find_stubs(root: Path = REPO_ROOT, package: str = PACKAGE) -> list[str]:
+    """Return every ``.pyi`` stub under *package*.
+
+    mypy checks ``foo.pyi`` instead of ``foo.py`` when both exist, so a stub next
+    to a strict module would replace the module in the check.  None are allowed.
+    """
+    return [
+        path.relative_to(root).as_posix()
+        for path in sorted((root / package).rglob("*.pyi"))
+        if "__pycache__" not in path.parts
+    ]
 
 
 def read_list(path: Path) -> list[str]:
@@ -207,6 +227,7 @@ def require_known_paths(errors: Mapping[str, Sequence[str]], modules: Sequence[s
 
 
 _MYPY_DIRECTIVE = re.compile(r"^#\s*mypy\s*:", re.IGNORECASE)
+_RAW_MYPY_DIRECTIVE = _MYPY_DIRECTIVE
 _TYPE_IGNORE = re.compile(r"^#\s*type\s*:\s*ignore(?![\w-])", re.IGNORECASE)
 
 
@@ -244,17 +265,24 @@ def find_opt_outs(source: str) -> list[str]:
                 "line %d imports `%s`, which switches off checking" % (node.lineno, alias.name)
                 for alias in node.names if alias.name.startswith("no_type_check")
             )
+    seen_directives = set()
     for line, text in comments:
         if _MYPY_DIRECTIVE.match(text):
+            seen_directives.add(line)
             found.append("line %d has a `# mypy:` configuration comment (%s)" % (line, text))
         elif line < first_line and _TYPE_IGNORE.match(text):
             found.append("line %d has `# type: ignore` before the first statement, which ignores the whole file" % line)
+    # mypy reads these from the raw text split on "\n", so a column-0 line inside a
+    # triple-quoted string counts too and no tokenizer comment exists for it.
+    for number, raw in enumerate(source.split("\n"), start=1):
+        if number not in seen_directives and _RAW_MYPY_DIRECTIVE.match(raw):
+            found.append("line %d has a `# mypy:` configuration line mypy reads (%s)" % (number, raw.strip()))
     return found
 
 
 def _run_mypy_once(root: Path, platform: str, expected_sources: int) -> dict[str, list[str]]:
     command = [
-        sys.executable, "-m", "mypy", "--strict",
+        sys.executable, "-m", "mypy", "--strict", "--enable-error-code", "ignore-without-code",
         "--config-file", str(root / CONFIG_NAME),
         "--platform", platform,
         "--cache-dir", str(root / ".mypy_cache" / platform),
@@ -271,10 +299,11 @@ def _run_mypy_once(root: Path, platform: str, expected_sources: int) -> dict[str
     if completed.returncode not in (0, 1):
         raise RatchetError("mypy failed (exit %d): %s" % (completed.returncode, output.strip()[-2000:]))
     checked = parse_checked_count(completed.stdout)
-    if checked < expected_sources:
+    if checked != expected_sources:
         raise RatchetError(
-            "mypy checked %d source files on %s but %d modules were discovered; "
-            "a module is being skipped (exclude or files in mypy.ini?)" % (checked, platform, expected_sources)
+            "mypy checked %d source files on %s but %d modules were discovered; a module is "
+            "being skipped or an extra source was added (exclude, a stub, a dot-directory?)"
+            % (checked, platform, expected_sources)
         )
     errors = parse_mypy_output(completed.stdout)
     printed = sum(1 for raw in completed.stdout.splitlines() if ": error:" in raw)
@@ -301,7 +330,7 @@ def run_mypy(root: Path = REPO_ROOT, expected_sources: int = 1) -> dict[str, lis
     A module must be clean on every platform in ``PLATFORMS``, so the verdict
     does not depend on which OS runs the gate (CI is Linux, development is
     Windows, and ``sys.platform`` branches change what mypy sees).  mypy must
-    report having checked at least *expected_sources* files on each platform.
+    report having checked exactly *expected_sources* files on each platform.
     """
     merged: dict[str, list[str]] = {}
     for platform in PLATFORMS:
@@ -433,6 +462,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         modules = discover_modules()
+        stubs = find_stubs(REPO_ROOT)
+        if stubs:
+            print("typing ratchet FAILED (%d):" % len(stubs), file=sys.stderr)
+            for stub in stubs:
+                print("  stub file %s is not allowed: mypy would check it instead of the .py module" % stub,
+                      file=sys.stderr)
+            return 1
         config_violations = validate_mypy_config(REPO_ROOT / CONFIG_NAME)
         errors = run_mypy(REPO_ROOT, len(modules))
         require_known_paths(errors, modules)

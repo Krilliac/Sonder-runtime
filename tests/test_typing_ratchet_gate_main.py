@@ -78,7 +78,7 @@ def test_error_line_that_cannot_be_attributed_is_a_tool_failure(tmp_path, monkey
 
     monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: Done())
     with pytest.raises(module.RatchetError, match="readable"):
-        module.run_mypy(tmp_path)
+        module.run_mypy(tmp_path, 2)
 
 
 def _main_env(monkeypatch, tmp_path, *, modules, strict, baseline, errors):
@@ -289,3 +289,80 @@ def test_duplicate_mypy_config_key_is_a_tool_failure(tmp_path):
     module = _load_gate()
     with pytest.raises(module.RatchetError, match="cannot read"):
         module.validate_mypy_config(_write_config(tmp_path, "follow_imports = skip\n", ""))
+
+
+def test_mypy_that_checked_more_files_than_discovered_is_a_tool_failure(tmp_path, monkeypatch):
+    module = _load_gate()
+    _fake_mypy(monkeypatch, module, "Success: no issues found in 3 source files\n", 0)
+    with pytest.raises(module.RatchetError, match="checked 3 source files"):
+        module.run_mypy(tmp_path, 2)
+
+
+def test_mypy_command_enables_ignore_without_code_on_the_command_line(tmp_path, monkeypatch):
+    module = _load_gate()
+    seen = []
+
+    class Done:
+        returncode = 0
+        stderr = ""
+        stdout = "Success: no issues found in 1 source file\n"
+
+    def fake_run(command, **kwargs):
+        seen.append(command)
+        return Done()
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    module.run_mypy(tmp_path, 1)
+    assert all(
+        "--enable-error-code" in command
+        and command[command.index("--enable-error-code") + 1] == "ignore-without-code"
+        for command in seen
+    ) and seen
+
+
+def _stub_tree(tmp_path, stub_names):
+    package = tmp_path / "sonder_runtime"
+    package.mkdir()
+    (package / "foo.py").write_text("x = 1\n", encoding="utf-8")
+    for name in stub_names:
+        (package / name).write_text("x: int\n", encoding="utf-8")
+    return tmp_path
+
+
+@pytest.mark.parametrize("stub_names", [["foo.pyi"], ["bar.pyi"]])
+def test_stub_under_the_package_is_refused(monkeypatch, tmp_path, stub_names):
+    module, _, _ = _main_env(
+        monkeypatch, tmp_path, modules=["m/strict.py"], strict=["m/strict.py"], baseline=[], errors={},
+    )
+    assert module.find_stubs(_stub_tree(tmp_path, stub_names)) == [
+        "sonder_runtime/" + name for name in stub_names
+    ]
+    monkeypatch.setattr(module, "find_stubs", lambda root=None: ["sonder_runtime/foo.pyi"])
+    assert module.main([]) == 1
+
+
+def test_package_without_stubs_has_none(tmp_path):
+    assert _load_gate().find_stubs(_stub_tree(tmp_path, [])) == []
+
+
+def test_mypy_directive_inside_a_docstring_is_flagged():
+    source = 'x = 1\ntext = """\n# mypy: ignore-errors\n"""\n'
+    problems = _load_gate().find_opt_outs(source)
+    assert any("line 3" in problem for problem in problems)
+
+
+def test_main_passes_the_discovered_module_count_to_mypy(monkeypatch, tmp_path):
+    modules = ["m/strict.py", "m/legacy.py"]
+    module, _, _ = _main_env(
+        monkeypatch, tmp_path, modules=modules, strict=["m/strict.py"], baseline=["m/legacy.py"],
+        errors={"m/legacy.py": ["e"]},
+    )
+    calls = []
+
+    def spy(root=None, expected_sources=None):
+        calls.append(expected_sources)
+        return {"m/legacy.py": ["e"]}
+
+    monkeypatch.setattr(module, "run_mypy", spy)
+    assert module.main([]) == 0
+    assert calls == [len(modules)]
