@@ -15,7 +15,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from ...application.compute_fabric.artifact_spool import PrivateDirectoryAnchor
-from ...application.ports.runtime_owner import OwnerRefused, canonical
+from ...application.ports.runtime_owner import MANAGED_PYTHON_LABEL, MANAGED_PYTHON_MINORS, OwnerRefused, canonical
 from ..filesystem.atomic_json import write_json_atomic
 
 # The existing supported size/count envelope remains unchanged. Preflight
@@ -299,8 +299,8 @@ class RuntimePayload:
         self.digest = sha256(canonical(self.manifest)).hexdigest()
 
     def _create(self, writable_roots, *, runtime_venv=None):
-        if os.name != "nt" or sys.version_info[:2] != (3, 12):
-            raise OwnerRefused("managed artifact profile requires Windows CPython 3.12")
+        if os.name != "nt" or sys.version_info[:2] not in MANAGED_PYTHON_MINORS:
+            raise OwnerRefused(f"managed artifact profile requires Windows CPython {MANAGED_PYTHON_LABEL}")
         source, base, executable, dependencies, profile_roots = _runtime_layout(runtime_venv)
         if executable.parent != base or any(base.glob("*._pth")):
             raise OwnerRefused("unknown Python runtime path configuration")
