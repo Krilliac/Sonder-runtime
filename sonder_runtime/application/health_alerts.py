@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from sonder_runtime.application.ports.health_alerts import (
     AlertStateStore,
     DeliveryResult,
+    LOG_CHANNEL,
     HealthClock,
     Notifier,
     ScheduledTaskReader,
@@ -16,6 +17,7 @@ from sonder_runtime.application.ports.health_alerts import (
 from sonder_runtime.domain.health_alerts import (
     Alert,
     AlertKind,
+    TaskParseError,
     WatchedTask,
     alerts_from_doctor_report,
     is_known_off,
@@ -86,7 +88,13 @@ class HealthAlertService:
                     AlertKind.TASK_UNREADABLE, watched.name,
                     "Scheduled job %s cannot be read" % watched.name, str(exc)[:200]))
                 continue
-            alert = task_alert(state, watched.window_hours, now)
+            try:
+                alert = task_alert(state, watched.window_hours, now)
+            except TaskParseError as exc:
+                out.append(Alert(
+                    AlertKind.TASK_UNREADABLE, watched.name,
+                    "Scheduled job %s cannot be read" % watched.name, str(exc)[:200]))
+                continue
             if alert is not None:
                 out.append(alert)
         return out
@@ -113,7 +121,7 @@ class HealthAlertService:
                 continue
             results = self._notifier.send(alert)
             deliveries.extend(results)
-            if any(r.delivered for r in results):
+            if any(r.delivered and r.channel != LOG_CHANNEL for r in results):
                 sent_state[alert.key] = now
                 sent.append(alert)
             else:

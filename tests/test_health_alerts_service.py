@@ -1,7 +1,11 @@
 from datetime import datetime
 
 from sonder_runtime.application.health_alerts import AlertPolicy, HealthAlertService
-from sonder_runtime.application.ports.health_alerts import DeliveryResult, TaskUnavailable
+from sonder_runtime.application.ports.health_alerts import (
+    LOG_CHANNEL,
+    DeliveryResult,
+    TaskUnavailable,
+)
 from sonder_runtime.domain.health_alerts import (
     ScheduledTaskState,
     WatchedTask,
@@ -158,3 +162,41 @@ def test_no_problems_sends_nothing_and_writes_nothing():
     service, notifier, store, _ = make()
     run = service.check({"checks": [{"name": "x", "status": "ok", "detail": ""}]}, FakeTasks({}))
     assert run.problems == 0 and notifier.sent == [] and store.saves == 0
+
+
+def test_future_last_run_alerts_as_unreadable_instead_of_staying_silent():
+    tasks = FakeTasks({"Odd": ScheduledTaskState("Odd", "Ready", datetime(2027, 12, 1, 3, 0), 0)})
+    service, notifier, *_ = make(AlertPolicy(3600, watched_tasks=(WatchedTask("Odd", 26),)))
+    run = service.check(None, tasks)
+    assert [a.key for a in run.sent] == ["task_unreadable:odd"]
+
+
+def test_log_only_delivery_is_not_stamped_so_a_failed_channel_retries():
+    class LogOnly:
+        def __init__(self):
+            self.sent = []
+
+        def send(self, alert):
+            self.sent.append(alert)
+            return (DeliveryResult("ntfy", False, "http 500"), DeliveryResult(LOG_CHANNEL, True))
+
+    notifier = LogOnly()
+    store, clock = MemoryStore(), FakeClock()
+    service = HealthAlertService(notifier, store, clock, AlertPolicy(rate_limit_seconds=3600))
+    run = service.check(FAIL_REPORT, None)
+    assert run.sent == () and [a.subject for a in run.undelivered] == ["ollama"]
+    assert store.saves == 0 and store.data == {}
+    clock.t += 1
+    service.check(FAIL_REPORT, None)
+    assert len(notifier.sent) == 2
+
+
+def test_real_channel_delivery_alongside_log_is_stamped():
+    class Both:
+        def send(self, alert):
+            return (DeliveryResult("toast", True), DeliveryResult(LOG_CHANNEL, True))
+
+    store = MemoryStore()
+    service = HealthAlertService(Both(), store, FakeClock(), AlertPolicy(rate_limit_seconds=3600))
+    run = service.check(FAIL_REPORT, None)
+    assert [a.subject for a in run.sent] == ["ollama"] and store.saves == 1

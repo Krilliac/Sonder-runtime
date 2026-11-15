@@ -6,6 +6,10 @@ from datetime import datetime
 
 import pytest
 
+from sonder_runtime.adapters.health_alerts.date_order import (
+    ShortDateOrderReader,
+    date_order_from_pattern,
+)
 from sonder_runtime.adapters.health_alerts.notifiers import (
     FanoutNotifier,
     LogNotifier,
@@ -15,7 +19,7 @@ from sonder_runtime.adapters.health_alerts.notifiers import (
 from sonder_runtime.adapters.health_alerts.schtasks import SchtasksReader
 from sonder_runtime.adapters.health_alerts.state_store import JsonAlertStateStore
 from sonder_runtime.application.ports.health_alerts import DeliveryResult, TaskUnavailable
-from sonder_runtime.domain.health_alerts import Alert, AlertKind
+from sonder_runtime.domain.health_alerts import Alert, AlertKind, DateOrder
 
 ALERT = Alert(AlertKind.DOCTOR_CHECK, "ollama", "Title \x07 here", "Detail line")
 SECRET_URL = "https://ntfy.example.invalid/topic-s3cr3t"
@@ -186,7 +190,8 @@ def test_schtasks_reader_builds_argv_without_shell_and_parses(system_env):
         seen.update(argv=argv, kw=kw)
         return Done(0, CSV)
 
-    state = SchtasksReader(timeout_seconds=4, run=run).read("JobA")
+    state = SchtasksReader(
+        timeout_seconds=4, run=run, date_order=lambda: DateOrder.MDY).read("JobA")
     assert seen["argv"][0].replace("\\", "/") == "C:/Windows/System32/schtasks.exe"
     assert seen["argv"][1:] == ["/query", "/tn", "JobA", "/fo", "csv", "/v"]
     _assert_no_secrets(seen["kw"]["env"])
@@ -230,3 +235,92 @@ def test_state_store_tolerates_damaged_content(tmp_path, content):
     loaded = JsonAlertStateStore(path).load()
     assert loaded in ({}, {"c": 2.0})
     json.dumps(loaded)
+
+
+def test_schtasks_reader_applies_the_injected_date_order(system_env):
+    text = CSV.replace("11/14/2026 9:15:01 PM", "12/01/2027 03:00:00")
+
+    def run(argv, **kw):
+        return Done(0, text)
+
+    dmy = SchtasksReader(timeout_seconds=1, run=run, date_order=lambda: DateOrder.DMY).read("JobA")
+    assert dmy.last_run == datetime(2027, 1, 12, 3, 0, 0)
+    with pytest.raises(TaskUnavailable):
+        SchtasksReader(timeout_seconds=1, run=run, date_order=lambda: DateOrder.UNKNOWN).read("JobA")
+
+
+@pytest.mark.parametrize("pattern,expected", [
+    ("dd/MM/yyyy", DateOrder.DMY),
+    ("d.M.yyyy", DateOrder.DMY),
+    ("M/d/yyyy", DateOrder.MDY),
+    ("MM/dd/yy", DateOrder.MDY),
+    ("yyyy-MM-dd", DateOrder.YMD),
+    ("yyyy/M/d", DateOrder.YMD),
+    ("yyyy-dd-MM", DateOrder.UNKNOWN),
+    ("dd/MM", DateOrder.UNKNOWN),
+    ("garbage", DateOrder.UNKNOWN),
+    ("", DateOrder.UNKNOWN),
+    (None, DateOrder.UNKNOWN),
+])
+def test_short_date_pattern_maps_to_date_order(pattern, expected):
+    assert date_order_from_pattern(pattern) is expected
+    assert ShortDateOrderReader(lambda: pattern)() is expected
+
+
+def test_short_date_reader_failure_is_unknown():
+    def boom():
+        raise RuntimeError("registry")
+
+    assert ShortDateOrderReader(boom)() is DateOrder.UNKNOWN
+
+
+def test_ntfy_body_and_title_are_redacted():
+    seen = {}
+
+    def post(url, body, headers, timeout):
+        seen.update(body=body.decode("utf-8"), headers=headers)
+        return 200
+
+    alert = Alert(AlertKind.DOCTOR_CHECK, "x", "Title password=hunter2hunter2",
+                  "see %s and token=abcd1234efgh and https://user:pw123456@host.example/p" % SECRET_URL)
+    NtfyNotifier(SECRET_URL, timeout_seconds=1, post=post).send(alert)
+    assert SECRET_URL not in seen["body"] and "abcd1234efgh" not in seen["body"]
+    assert "user:pw123456" not in seen["body"] and "[REDACTED]" in seen["body"]
+    assert "hunter2hunter2" not in seen["headers"]["Title"]
+
+
+def test_fanout_log_fallback_result_is_marked_as_log_channel():
+    class Down:
+        def send(self, alert):
+            return (DeliveryResult("toast", False, "x"),)
+
+    results = FanoutNotifier([Down()]).send(ALERT)
+    assert [(r.channel, r.delivered) for r in results] == [("toast", False), ("log", True)]
+
+
+def test_state_store_save_failure_is_logged_not_raised(tmp_path, caplog):
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    store = JsonAlertStateStore(blocker / "state.json")
+    with caplog.at_level(logging.WARNING):
+        store.save({"a": 1.0})
+    assert "not saved" in caplog.text
+
+
+def test_state_store_temp_name_is_unique_and_cleaned_up(tmp_path, monkeypatch):
+    import sonder_runtime.adapters.health_alerts.state_store as module
+
+    names = []
+    real = module.tempfile.mkstemp
+
+    def spy(*a, **k):
+        fd, name = real(*a, **k)
+        names.append(name)
+        return fd, name
+
+    monkeypatch.setattr(module.tempfile, "mkstemp", spy)
+    store = JsonAlertStateStore(tmp_path / "state.json")
+    store.save({"a": 1.0})
+    store.save({"a": 2.0})
+    assert len(set(names)) == 2 and store.load() == {"a": 2.0}
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["state.json"]

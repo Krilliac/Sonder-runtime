@@ -8,6 +8,10 @@ from typing import Protocol
 from sonder_runtime.domain.health_alerts import Alert, ScheduledTaskState
 
 
+# Channel name of the always-on log fallback; it never counts as an operator being told.
+LOG_CHANNEL = "log"
+
+
 @dataclass(frozen=True)
 class DeliveryResult:
     """Outcome of one channel. ``error`` is a short class-level reason and never
@@ -49,6 +53,6 @@ class HealthClock(Protocol):
 
 
 __all__ = [
-    "AlertStateStore", "DeliveryResult", "HealthClock", "Notifier",
+    "AlertStateStore", "DeliveryResult", "HealthClock", "LOG_CHANNEL", "Notifier",
     "ScheduledTaskReader", "TaskUnavailable",
 ]

@@ -13,9 +13,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
 
+from sonder_runtime.domain.doctor_status import STATUS_FAIL, STATUS_WARN
+
 __all__ = [
     "Alert",
     "AlertKind",
+    "DateOrder",
+    "MAX_FUTURE_SKEW",
     "ScheduledTaskState",
     "TaskParseError",
     "WatchedTask",
@@ -37,16 +41,33 @@ _NEVER_RUN_TEXT = ("n/a", "never", "")
 # schtasks prints this placeholder for a task that has never run.
 _NEVER_RUN_YEAR = 1999
 
-_TIME_FORMATS = (
-    "%m/%d/%Y %I:%M:%S %p",
-    "%d/%m/%Y %I:%M:%S %p",
-    "%m/%d/%Y %H:%M:%S",
-    "%d/%m/%Y %H:%M:%S",
-    "%d.%m.%Y %H:%M:%S",
+# A last run further ahead of the local clock than this cannot be real.
+MAX_FUTURE_SKEW = timedelta(minutes=5)
+
+
+class DateOrder(str, Enum):
+    """Order of day, month and year in the scheduler's printed dates."""
+
+    MDY = "mdy"
+    DMY = "dmy"
+    YMD = "ymd"
+    UNKNOWN = "unknown"
+
+
+# Year-first text is unambiguous whatever the user's short-date order is.
+_YEAR_FIRST_FORMATS = (
     "%Y-%m-%d %H:%M:%S",
     "%Y/%m/%d %H:%M:%S",
     "%Y-%m-%dT%H:%M:%S",
 )
+_MDY_FORMATS = ("%m/%d/%Y %I:%M:%S %p", "%m/%d/%Y %H:%M:%S")
+_DMY_FORMATS = ("%d/%m/%Y %I:%M:%S %p", "%d/%m/%Y %H:%M:%S", "%d.%m.%Y %H:%M:%S")
+_FORMATS_BY_ORDER = {
+    DateOrder.MDY: _MDY_FORMATS + _YEAR_FIRST_FORMATS,
+    DateOrder.DMY: _DMY_FORMATS + _YEAR_FIRST_FORMATS,
+    DateOrder.YMD: _YEAR_FIRST_FORMATS,
+    DateOrder.UNKNOWN: _MDY_FORMATS + _DMY_FORMATS + _YEAR_FIRST_FORMATS,
+}
 
 MAX_TITLE_CHARS = 120
 MAX_DETAIL_CHARS = 400
@@ -108,7 +129,7 @@ def alerts_from_doctor_report(
     checks = report.get("checks")
     if not isinstance(checks, (list, tuple)):
         return ()
-    wanted = {"fail", "warn"} if include_warn else {"fail"}
+    wanted = {STATUS_FAIL, STATUS_WARN} if include_warn else {STATUS_FAIL}
     out: list[Alert] = []
     for entry in checks:
         if not isinstance(entry, Mapping):
@@ -145,21 +166,37 @@ def parse_watched_task(entry: str, *, default_window_hours: float) -> WatchedTas
     return WatchedTask(name=name, window_hours=float(window))
 
 
-def _parse_time(text: str) -> datetime | None:
+def _parse_time(text: str, date_order: DateOrder) -> datetime | None:
+    """Parse a last-run time using only the formats of ``date_order``.
+
+    Text that two readings turn into different moments (``12/01/2027`` as 1 Dec
+    or 12 Jan) is refused rather than guessed.
+    """
     value = text.strip()
     if value.casefold() in _NEVER_RUN_TEXT:
         return None
-    for fmt in _TIME_FORMATS:
+    readings: set[datetime] = set()
+    for fmt in _FORMATS_BY_ORDER[date_order]:
         try:
-            parsed = datetime.strptime(value, fmt)
+            readings.add(datetime.strptime(value, fmt))
         except ValueError:
             continue
-        return None if parsed.year <= _NEVER_RUN_YEAR else parsed
-    raise TaskParseError("unrecognised last-run time format")
+    if not readings:
+        raise TaskParseError("unrecognised last-run time format")
+    if len(readings) > 1:
+        raise TaskParseError("last-run date is ambiguous between day-first and month-first")
+    (parsed,) = readings
+    return None if parsed.year <= _NEVER_RUN_YEAR else parsed
 
 
-def parse_schtasks_csv(text: str, name: str) -> ScheduledTaskState:
-    """Parse ``schtasks /query /tn <name> /fo csv /v`` output for one task."""
+def parse_schtasks_csv(
+    text: str, name: str, *, date_order: DateOrder = DateOrder.UNKNOWN,
+) -> ScheduledTaskState:
+    """Parse ``schtasks /query /tn <name> /fo csv /v`` output for one task.
+
+    ``date_order`` is the user's short-date order (read by the adapter);
+    ``UNKNOWN`` accepts only dates that mean the same under every reading.
+    """
     rows = list(csv.DictReader(io.StringIO(text)))
     rows = [row for row in rows if row.get("TaskName") != "TaskName"]
     if not rows:
@@ -182,7 +219,7 @@ def parse_schtasks_csv(text: str, name: str) -> ScheduledTaskState:
     return ScheduledTaskState(
         name=name,
         scheduler_state=(row["Scheduled Task State"] or "").strip(),
-        last_run=_parse_time(row["Last Run Time"] or ""),
+        last_run=_parse_time(row["Last Run Time"] or "", date_order),
         last_result=result,
     )
 
@@ -192,7 +229,8 @@ def task_alert(
 ) -> Alert | None:
     """An alert when the task missed its window or its last run failed, else None.
 
-    ``now`` is naive local time, the same clock ``schtasks`` prints in.
+    ``now`` is naive local time, the same clock ``schtasks`` prints in. Raises
+    :class:`TaskParseError` for a last run in the future: it must not read as healthy.
     """
     window = timedelta(hours=window_hours)
     result = state.last_result
@@ -203,6 +241,8 @@ def task_alert(
             "No last run time; expected within %g h." % window_hours,
         )
     age = now - state.last_run
+    if age < -MAX_FUTURE_SKEW:
+        raise TaskParseError("last-run time is in the future")
     if age > window:
         return Alert(
             AlertKind.TASK_MISSED, state.name,

@@ -15,8 +15,9 @@ import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 
 from sonder_runtime.adapters.health_alerts._child import minimal_environment, system32_path
-from sonder_runtime.application.ports.health_alerts import DeliveryResult, Notifier
+from sonder_runtime.application.ports.health_alerts import LOG_CHANNEL, DeliveryResult, Notifier
 from sonder_runtime.domain.health_alerts import Alert
+from sonder_runtime.domain.security.redaction import redact_text
 
 logger = logging.getLogger(__name__)
 
@@ -105,11 +106,14 @@ class NtfyNotifier:
         return "NtfyNotifier(url=<redacted>)"
 
     def send(self, alert: Alert) -> tuple[DeliveryResult, ...]:
-        title = _plain(alert.title, 120).encode("ascii", "replace").decode("ascii")
+        secrets = (self._url,)
+        title = redact_text(_plain(alert.title, 120), secret_values=secrets)
+        title = title.encode("ascii", "replace").decode("ascii")
+        body = redact_text(alert.detail, secret_values=secrets)
         headers = {"Title": title, "Priority": "high", "Tags": "warning",
                    "Content-Type": "text/plain; charset=utf-8"}
         try:
-            status = self._post(self._url, alert.detail.encode("utf-8"), headers, self._timeout)
+            status = self._post(self._url, body.encode("utf-8"), headers, self._timeout)
         except urllib.error.HTTPError as exc:
             return (DeliveryResult(self.channel, False, "http %d" % exc.code),)
         except Exception as exc:  # noqa: BLE001 - class name only: messages can embed the URL
@@ -122,7 +126,7 @@ class NtfyNotifier:
 class LogNotifier:
     """Always-available fallback: the alert goes to the error log."""
 
-    channel = "log"
+    channel = LOG_CHANNEL
 
     def send(self, alert: Alert) -> tuple[DeliveryResult, ...]:
         logger.error("HEALTH ALERT [%s] %s: %s", alert.key, alert.title, alert.detail)

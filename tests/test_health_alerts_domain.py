@@ -4,6 +4,7 @@ import pytest
 
 from sonder_runtime.domain.health_alerts import (
     AlertKind,
+    DateOrder,
     ScheduledTaskState,
     TaskParseError,
     alerts_from_doctor_report,
@@ -141,3 +142,57 @@ def test_rate_limit_allows_when_clock_went_backwards():
 def test_prune_drops_only_entries_too_old_to_matter():
     kept = prune_sent({"old": 0.0, "recent": 990.0}, 1000.0, 10.0)
     assert kept == {"recent": 990.0}
+
+
+def test_day_first_date_is_read_correctly_under_dmy_and_alerts_when_late():
+    text = csv_row("JobA", "12/01/2027 03:00:00", "0")
+    parsed = parse_schtasks_csv(text, "JobA", date_order=DateOrder.DMY)
+    assert parsed.last_run == datetime(2027, 1, 12, 3, 0, 0)
+    alert = task_alert(parsed, 26, datetime(2027, 1, 14, 12, 0, 0))
+    assert alert.kind is AlertKind.TASK_MISSED
+    assert task_alert(parsed, 26, datetime(2027, 1, 12, 12, 0, 0)) is None
+
+
+def test_same_text_under_month_first_hint_is_a_different_date():
+    parsed = parse_schtasks_csv(csv_row("JobA", "12/01/2027 03:00:00", "0"), "JobA",
+                                date_order=DateOrder.MDY)
+    assert parsed.last_run == datetime(2027, 12, 1, 3, 0, 0)
+
+
+@pytest.mark.parametrize("text", ["12/01/2027 03:00:00", "12/01/2027 3:00:00 AM"])
+def test_ambiguous_date_with_unknown_order_is_refused(text):
+    with pytest.raises(TaskParseError):
+        parse_schtasks_csv(csv_row("JobA", text, "0"), "JobA")
+    with pytest.raises(TaskParseError):
+        parse_schtasks_csv(csv_row("JobA", text, "0"), "JobA", date_order=DateOrder.UNKNOWN)
+
+
+@pytest.mark.parametrize("text", ["13/01/2027 03:00:00", "05/05/2027 03:00:00", "2027-01-12 03:00:00"])
+def test_unambiguous_dates_parse_even_with_unknown_order(text):
+    assert parse_schtasks_csv(csv_row("JobA", text, "0"), "JobA").last_run is not None
+
+
+def test_year_first_text_is_read_under_every_order():
+    for order in DateOrder:
+        parsed = parse_schtasks_csv(csv_row("JobA", "2027-01-12 03:00:00", "0"), "JobA",
+                                    date_order=order)
+        assert parsed.last_run == datetime(2027, 1, 12, 3, 0, 0)
+
+
+def test_dotted_date_needs_day_first_or_unknown_order():
+    text = csv_row("JobA", "12.01.2027 03:00:00", "0")
+    assert parse_schtasks_csv(text, "JobA", date_order=DateOrder.DMY).last_run == datetime(
+        2027, 1, 12, 3, 0, 0)
+    with pytest.raises(TaskParseError):
+        parse_schtasks_csv(text, "JobA", date_order=DateOrder.MDY)
+
+
+def test_future_last_run_is_refused_not_healthy():
+    with pytest.raises(TaskParseError):
+        task_alert(state(datetime(2026, 11, 15, 12, 6, 0)), 26, NOW)
+    with pytest.raises(TaskParseError):
+        task_alert(state(datetime(2027, 12, 1, 3, 0, 0)), 26, NOW)
+
+
+def test_small_clock_skew_into_the_future_is_tolerated():
+    assert task_alert(state(datetime(2026, 11, 15, 12, 4, 0)), 26, NOW) is None

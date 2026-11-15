@@ -7,8 +7,10 @@ import subprocess
 from collections.abc import Callable
 
 from sonder_runtime.adapters.health_alerts._child import minimal_environment, system32_path
+from sonder_runtime.adapters.health_alerts.date_order import ShortDateOrderReader
 from sonder_runtime.application.ports.health_alerts import TaskUnavailable
 from sonder_runtime.domain.health_alerts import (
+    DateOrder,
     ScheduledTaskState,
     TaskParseError,
     parse_schtasks_csv,
@@ -19,9 +21,13 @@ ProcessRunner = Callable[..., "subprocess.CompletedProcess[str]"]
 
 
 class SchtasksReader:
-    def __init__(self, *, timeout_seconds: float, run: ProcessRunner = subprocess.run) -> None:
+    def __init__(
+        self, *, timeout_seconds: float, run: ProcessRunner = subprocess.run,
+        date_order: Callable[[], DateOrder] | None = None,
+    ) -> None:
         self._timeout = timeout_seconds
         self._run = run
+        self._date_order = date_order if date_order is not None else ShortDateOrderReader()
 
     def read(self, name: str) -> ScheduledTaskState:
         if not _TASK_NAME.fullmatch(name) or name.startswith("-"):
@@ -42,7 +48,7 @@ class SchtasksReader:
         if done.returncode != 0:
             raise TaskUnavailable("schtasks exit %d (task missing or access denied)" % done.returncode)
         try:
-            return parse_schtasks_csv(done.stdout or "", name)
+            return parse_schtasks_csv(done.stdout or "", name, date_order=self._date_order())
         except TaskParseError as exc:
             raise TaskUnavailable(str(exc)) from exc
 

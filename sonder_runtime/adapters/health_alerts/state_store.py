@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -31,10 +32,24 @@ class JsonAlertStateStore:
         }
 
     def save(self, sent: dict[str, float]) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_name(self._path.name + ".tmp")
-        tmp.write_text(json.dumps(sent, sort_keys=True), encoding="utf-8")
-        os.replace(tmp, self._path)
+        """Atomically replace the file; an I/O failure is logged, never raised."""
+        tmp_name: str | None = None
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp_name = tempfile.mkstemp(
+                dir=self._path.parent, prefix=self._path.name + ".", suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(sent, sort_keys=True))
+            os.replace(tmp_name, self._path)
+            tmp_name = None
+        except OSError as exc:
+            logger.warning("health alert state not saved: %s", type(exc).__name__)
+        finally:
+            if tmp_name is not None:
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
 
 
 class SystemHealthClock:
