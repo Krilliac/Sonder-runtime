@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 
+# ``token_source`` values that mean the provider counted the tokens; every other
+# non-empty source is a local estimate (or a mix) and is totalled separately.
+PROVIDER_TOKEN_SOURCES = frozenset(("ollama", "provider"))
+
+
 def usage_count(value):
     """Return a non-negative integer usage count, or ``None`` if invalid."""
     if value is None:

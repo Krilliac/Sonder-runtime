@@ -13,6 +13,7 @@ from datetime import timedelta
 
 from sonder_runtime.adapters.persistence import fanout_store
 from sonder_runtime.domain.fanout_admission import fanout_limits
+from sonder_runtime.domain.model_usage import PROVIDER_TOKEN_SOURCES
 from sonder_runtime.domain.work_narration import progress
 from sonder_runtime.application.artifacts.fanin import decode_readiness, readiness_error
 
@@ -55,9 +56,6 @@ def synthesis_rows(run, rows):
             )
         projected.append((row, error))
     return projected
-
-
-PROVIDER_TOKEN_SOURCES = frozenset(("ollama", "provider"))
 
 
 def token_usage(rows):
