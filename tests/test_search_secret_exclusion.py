@@ -346,7 +346,7 @@ def test_resolved_path_check_holds_when_the_walk_misses_an_alias(
 
 # --- Reparse tags: only name surrogates are links; placeholders are content.
 
-CLOUD_FILES_TAG = 0x9000001A  # IO_REPARSE_TAG_CLOUD_A: no name-surrogate bit
+CLOUD_FILES_TAG = 0x9000001A  # IO_REPARSE_TAG_CLOUD: no name-surrogate bit
 MOUNT_POINT_TAG = 0xA0000003  # IO_REPARSE_TAG_MOUNT_POINT (a junction)
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 
