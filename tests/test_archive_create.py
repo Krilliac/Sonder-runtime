@@ -434,3 +434,16 @@ def test_member_classifier_uses_the_roots_trailing_directories(project, root_suf
 def test_member_classifier_leaves_ordinary_members_alone(project):
     assert not archive_create._sensitive_relative(Path("src/app.py"), project / "gcloud")
     assert not archive_create._sensitive_relative(Path("gcloud/notes.md"), project)
+
+
+def test_relative_path_checks_the_root_itself(project):
+    # The "." input: the root is the store, so there are no member parts to judge.
+    store = project / ".config" / "gcloud"
+    store.mkdir(parents=True)
+    with pytest.raises(PermissionError, match="sensitive"):
+        archive_create._relative_path(store, store)
+    parent = project / "AppData" / "Roaming" / "gcloud"
+    parent.mkdir(parents=True)
+    with pytest.raises(PermissionError, match="sensitive"):
+        archive_create._relative_path(parent, parent)
+    assert archive_create._relative_path(project, project) == Path(".")

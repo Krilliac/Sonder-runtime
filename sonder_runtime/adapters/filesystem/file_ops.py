@@ -70,10 +70,20 @@ SECRET_FILES = {
     # OpenSSH private keys carry no secret suffix.
     "id_dsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk", "id_rsa",
 }
-SECRET_SUFFIXES = {".key", ".kdbx", ".p12", ".pem", ".pfx"}
-SENSITIVE_READ_DIRECTORIES = {
-    ".git", ".ssh", ".aws", ".azure", ".gcloud", ".gnupg", ".kube",
-}
+# Each secret-name list is split in two: the BASE rules that existed before the
+# token-store coverage change, and the ADDED rules. Archive extraction refuses
+# on the base rules only (see ``_is_base_secret_path``); every other guard uses
+# the union. ``_is_secret_path(x) == _is_base_secret_path(x) or added(x)``.
+BASE_SECRET_SUFFIXES = frozenset({".key", ".p12", ".pem", ".pfx"})
+ADDED_SECRET_SUFFIXES = frozenset({".kdbx"})
+SECRET_SUFFIXES = set(BASE_SECRET_SUFFIXES | ADDED_SECRET_SUFFIXES)
+BASE_SENSITIVE_READ_DIRECTORIES = frozenset({
+    ".git", ".ssh", ".aws", ".azure", ".gnupg", ".kube",
+})
+ADDED_SENSITIVE_READ_DIRECTORIES = frozenset({".gcloud"})
+SENSITIVE_READ_DIRECTORIES = set(
+    BASE_SENSITIVE_READ_DIRECTORIES | ADDED_SENSITIVE_READ_DIRECTORIES
+)
 # Credential stores the direct read tools (file_read, file_read_range,
 # data_inspect, image_inspect, file_copy/move sources) deny by default even
 # inside an allowed root, and even with a developer token or bypass: a key
@@ -85,9 +95,11 @@ SENSITIVE_READ_DIRECTORIES = {
 CREDENTIAL_READ_DIRECTORIES = frozenset({
     ".ssh", ".aws", ".azure", ".gcloud", ".gnupg", ".kube",
 })
-CREDENTIAL_READ_FILES = frozenset({
+BASE_CREDENTIAL_READ_FILES = frozenset({
     ".netrc", "_netrc", ".git-credentials", ".pgpass",
     "id_dsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk", "id_rsa",
+})
+ADDED_CREDENTIAL_READ_FILES = frozenset({
     # Package-registry / tool tokens and cluster credentials, by well-known name.
     ".npmrc", ".pypirc", "kubeconfig", ".terraformrc", "terraform.rc",
     "credentials.tfrc.json", ".boto", ".s3cfg", ".htpasswd", ".vault-token",
@@ -95,21 +107,9 @@ CREDENTIAL_READ_FILES = frozenset({
     "service-account.json", "service_account.json", "serviceaccount.json",
     "application_default_credentials.json",
 })
+CREDENTIAL_READ_FILES = BASE_CREDENTIAL_READ_FILES | ADDED_CREDENTIAL_READ_FILES
 # Credential stores recognised by extension (password databases).
-CREDENTIAL_READ_SUFFIXES = frozenset({".kdbx"})
-# Token stores added after the original list. Reads and archive *creation*
-# refuse them, but archive *extraction* does not: ordinary repositories ship
-# ``.npmrc`` and the like, so refusing the whole archive would break them.
-# The extracted file is still unreadable through the read tools. Extraction
-# keeps refusing exactly what it refused before these were added.
-EXTRACT_TOLERATED_FILES = frozenset({
-    ".npmrc", ".pypirc", "kubeconfig", ".terraformrc", "terraform.rc",
-    "credentials.tfrc.json", ".boto", ".s3cfg", ".htpasswd", ".vault-token",
-    "service-account.json", "service_account.json", "serviceaccount.json",
-    "application_default_credentials.json",
-})
-EXTRACT_TOLERATED_SUFFIXES = frozenset({".kdbx"})
-EXTRACT_TOLERATED_DIRECTORIES = frozenset({".gcloud"})
+CREDENTIAL_READ_SUFFIXES = ADDED_SECRET_SUFFIXES
 # (directory, file) pairs whose file is a credential store only in context.
 CREDENTIAL_READ_PAIRS = frozenset({
     (".docker", "config.json"), (".git", "config"),
@@ -469,11 +469,32 @@ def _control_plane_paths() -> set[Path]:
 
 
 def _is_secret_path(path: Path) -> bool:
+    """True for a secret file name: the base rules plus the added token stores."""
+    if _is_base_secret_path(path):
+        return True
+    return (
+        path.name.lower() in ADDED_CREDENTIAL_READ_FILES
+        or path.suffix.lower() in ADDED_SECRET_SUFFIXES
+    )
+
+
+def _is_base_secret_path(path: Path) -> bool:
+    """The secret-name rules that existed before the token-store additions.
+
+    Archive extraction refuses on exactly this predicate, so an archive that
+    could be extracted before still can, and one that was refused still is.
+    Names flagged only by the added rules (``.npmrc``, ``kubeconfig``, ...) are
+    left to the read guard: ordinary repositories ship them.
+    """
     name = path.name.lower()
     suffix = path.suffix.lower()
-    # CREDENTIAL_READ_FILES is the direct-read deny list; folding it in here
-    # keeps archive/scan/compare exclusions from drifting behind it.
-    if name in SECRET_FILES or name in CREDENTIAL_READ_FILES or suffix in SECRET_SUFFIXES:
+    # BASE_CREDENTIAL_READ_FILES is the original direct-read deny list; folding
+    # it in here keeps archive/scan/compare exclusions from drifting behind it.
+    if (
+        name in SECRET_FILES
+        or name in BASE_CREDENTIAL_READ_FILES
+        or suffix in BASE_SECRET_SUFFIXES
+    ):
         return True
     if name in {".env", ".envrc"} or name.startswith(".env.") or suffix == ".env":
         # ``secrets.env`` / ``prod.env`` / ``sonder.env`` carry the same
@@ -655,10 +676,12 @@ def credential_path_component(root: Path, relative_parts) -> str:
     """Credential-store component for *relative_parts* below *root* ("" if none).
 
     For callers that hold a project root and member paths below it (archive
-    creation): the root's trailing directories count, so a root set inside a
+    creation): the root's last two directories count, so a root set inside a
     store (``<proj>/.config`` with member ``gcloud/credentials.db``) cannot be
-    used to hide it. Unlike ``credential_read_component`` no operator root
-    unlocks anything: archiving a store is never ordinary content.
+    used to hide it. Unlike ``credential_read_component`` this never consults
+    the operator's allowed roots: a root that names the store (``~/.ssh``,
+    ``~/.config/gcloud``) unlocks reading it there, but does not make the
+    store archivable, because an archive can be moved out of that root.
     """
     return _credential_part(tuple(Path(root).parts[-2:]) + tuple(relative_parts))
 

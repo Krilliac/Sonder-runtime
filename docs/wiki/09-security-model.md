@@ -133,15 +133,19 @@ of the model — an uncensored or "abliterated" model changes what it will
   `id_ed25519`, ...) and `.env*` -- regardless of a developer token or
   `SONDER_FILE_BYPASS`. Matching is case-insensitive and uses the root's
   trailing directories too, so a root set at `~/.config` or `~/.config/gh`
-  does not unlock `gcloud/...` or `hosts.yml`; only a root that is the store
-  itself (or the exact file) does.
+  does not unlock `gcloud/...`, `hosts.yml` or (for `~/.docker`)
+  `config.json`; only a root that is the store itself (`~/.ssh`,
+  `~/.config/gcloud`) or the exact file does.
   `archive_create` refuses the same stores by full path, so a store cannot be
   archived, extracted elsewhere and read. `archive_extract` deliberately does
-  not refuse a whole archive for the token-store names added to this list
-  (`.npmrc`, `kubeconfig`, `.htpasswd`, `*.kdbx`, ...): ordinary repositories
-  ship them. They are written, and reading the extracted file is refused. What
-  extraction refused before (`.env`, key files, `.ssh`, `.aws`, ...) is still
-  refused.
+  not refuse a whole archive for a name that only the token-store additions
+  flag (`.npmrc`, `kubeconfig`, `.htpasswd`, `plain.kdbx`, ...): ordinary
+  repositories ship them. They are written, and reading the extracted file is
+  refused. Extraction refuses on the pre-existing name rules
+  (`_is_base_secret_path`) exactly as before, so `.env*` (including
+  `.env.prod.kdbx`), key files, `*credential*`/`*secret*` config files (this
+  includes `application_default_credentials.json` and
+  `credentials.tfrc.json`), `.ssh`, `.aws` and so on are still refused.
   The only way to read one is a root that names it: add the store directory
   itself (`~/.ssh`) or the exact file (`/proj/.env`) to `file_roots.local` or
   `SONDER_FILE_ROOTS` (a one-shot `/approve` of a call whose `extra_roots`

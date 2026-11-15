@@ -350,3 +350,18 @@ def test_repository_read_resolver_refuses_a_root_inside_the_store_parents(
     monkeypatch.setenv("SONDER_FILE_ROOTS", str(root))
     with pytest.raises(PermissionError, match="secret or control state"):
         file_ops.resolve_repository_read_path(str(target))
+
+
+def test_a_root_at_dot_docker_no_longer_unlocks_config_json(workspace, tmp_path, monkeypatch):
+    docker = tmp_path / "home4" / ".docker"
+    docker.mkdir(parents=True)
+    config = docker / "config.json"
+    config.write_text("CREDENTIAL-MATERIAL", encoding="utf-8")
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(docker))
+    assert file_ops.credential_read_component(config) == ".docker/config.json"
+    with pytest.raises(PermissionError, match="credential store"):
+        file_ops.read_file(str(config))
+    # Other files in that root stay readable.
+    other = docker / "notes.txt"
+    other.write_text("ok", encoding="utf-8")
+    assert file_ops.read_file(str(other))["text"] == "ok"
