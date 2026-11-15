@@ -3,7 +3,6 @@
 The pool routes on payload["model"]; a probe with only "name" is sent without
 the hint, so a synthesized or aliased model can be probed on another worker.
 """
-import pytest
 
 import server
 
