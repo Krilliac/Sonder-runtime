@@ -12,6 +12,11 @@ a few name rules.  A file has other names those comparisons do not see:
   (``control_plane_paths.normalized_final_path``) and raises ``ValueError``
   for a namespace that has no ordinary spelling (``\\\\.\\``, ``GLOBALROOT``),
   which callers treat as protected;
+* on Windows a name ending in a dot or a space, and a ``:`` after the drive
+  (an alternate data stream, ``name::$DATA``), name the same file as the
+  trimmed spelling, and ``Path.resolve`` trims them before any comparison.
+  :func:`win32_alias_component` finds such a component in the caller's raw
+  text; ``normal_spelling`` and the file tools refuse it;
 * a UNC spelling of a local folder (``\\\\localhost\\D$\\x``) and a hard link
   inside an allowed project are different names for the same file.  For a
   path that may be such an alias (:func:`may_alias`), :func:`local_equivalent`
@@ -30,7 +35,7 @@ from __future__ import annotations
 import os
 import stat
 from collections.abc import Iterable
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from sonder_runtime.adapters.security.control_plane_paths import normalized_final_path
 
@@ -38,14 +43,39 @@ from sonder_runtime.adapters.security.control_plane_paths import normalized_fina
 _MAX_ANCESTORS = 64
 
 
+def win32_alias_component(path: Path | str) -> str:
+    """The first component of ``path`` that Windows reads as another name, or ``""``.
+
+    A component ending in ``.`` or a space, or holding ``:`` after the drive,
+    names the same file as its trimmed spelling (``x.json.`` is ``x.json``,
+    ``x.json::$DATA`` is its data stream).  The anchor (a drive, a UNC share,
+    a ``\\\\?\\`` prefix) and the ``.`` and ``..`` components are not names
+    and are skipped.  Always ``""`` off Windows.
+    """
+    if os.name != "nt":
+        return ""
+    windows = PureWindowsPath(os.fspath(path))
+    parts = windows.parts[1:] if windows.anchor else windows.parts
+    for part in parts:
+        if part in (".", ".."):
+            continue
+        if part.endswith((".", " ")) or ":" in part:
+            return part
+    return ""
+
+
 def normal_spelling(path: Path) -> Path:
     """``path`` with a Windows ``\\\\?\\`` or ``\\\\.\\`` prefix mapped to its ordinary spelling.
 
-    Raises ``ValueError`` when the namespace has no ordinary spelling.  Any
+    Raises ``ValueError`` when the namespace has no ordinary spelling or a
+    component is another name for a file (:func:`win32_alias_component`).  Any
     other path, and every path off Windows, is returned unchanged.
     """
     if os.name != "nt":
         return path
+    alias = win32_alias_component(path)
+    if alias:
+        raise ValueError("path component %r is another spelling of a Windows file name" % alias)
     text = os.fspath(path)
     if not text.startswith(("\\\\?\\", "\\\\.\\")):
         return path
@@ -116,4 +146,7 @@ def same_file_as_any(path: Path, candidates: Iterable[Path]) -> bool:
     return False
 
 
-__all__ = ["hard_link_count", "local_equivalent", "may_alias", "normal_spelling", "same_file_as_any"]
+__all__ = [
+    "hard_link_count", "local_equivalent", "may_alias", "normal_spelling", "same_file_as_any",
+    "win32_alias_component",
+]

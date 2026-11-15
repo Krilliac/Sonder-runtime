@@ -58,6 +58,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import sonder_runtime.adapters.filesystem.path_aliases as _path_aliases
 import sonder_runtime.adapters.generation_permit as _generation_permit
 import sonder_runtime.adapters.model_tool_grants as _grants
 import sonder_runtime.adapters.model_tool_policy as _mtp
@@ -385,6 +386,12 @@ class RestrictedRun:
         if values is None:
             return _refusal("tool '%s': the path list could not be read." % tool_name)
         for key, value in values:
+            alias = _path_aliases.win32_alias_component(value)
+            if alias:
+                return _refusal(
+                    "tool '%s': %s %r has a Windows alias component (%r); restricted model '%s' may not use it."
+                    % (tool_name, key, value, alias, self.model)
+                )
             relative = self._relative(value)
             if relative is None:
                 return _refusal(

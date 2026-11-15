@@ -451,6 +451,8 @@ def _protection_spelling(path: Path) -> Path:
     Raises ``ValueError`` or ``OSError`` for a spelling with no ordinary form;
     the callers below then treat the path as protected.
     """
+    if _path_aliases.win32_alias_component(path):
+        raise ValueError("path uses another spelling of a Windows file name")
     return _path_aliases.normal_spelling(_resolve_best_effort(path))
 
 
@@ -803,6 +805,7 @@ def resolve_repository_read_path(
     if not isinstance(path, str) or not path.strip():
         raise ValueError("repository path must be a non-empty path")
     raw = path.strip()
+    _require_plain_name_spelling(raw)
     if _foreign_absolute(raw):
         # e.g. a Windows drive/UNC path reaching a POSIX host: Path() would
         # rebase it under the workspace and pass containment. Reject it as an
@@ -976,6 +979,52 @@ def _delete_tree_guarded(path: Path) -> None:
             raise PermissionError("could not safely delete tree entry: %s" % child) from exc
 
 
+def _delete_tree_developer(root: Path) -> None:
+    """Remove the tree under ``root`` for a developer token, never following a link.
+
+    A symlink or junction is removed itself and not entered, so a link to a
+    policy folder deletes the link and nothing behind it.  Every regular file
+    is compared, by name and by file identity, with the model tool policy
+    files before anything is removed, so a hard link to one refuses the
+    whole delete rather than half of it.
+    """
+    files = _operator_only.locate(RUNTIME_PACKAGE_DATA_DIR, _resolve_best_effort)
+    pending = [root]
+    entries: list[tuple[Path, bool, bool]] = []  # (path, is_link, is_directory), parents before children
+    while pending:
+        current = pending.pop()
+        try:
+            with os.scandir(current) as scanned:
+                listed = list(scanned)
+        except OSError as exc:
+            raise PermissionError("could not safely traverse delete tree: %s" % current) from exc
+        for entry in listed:
+            child = Path(entry.path)
+            link = entry.is_symlink() or _is_reparse_point(child)
+            directory = not link and entry.is_dir(follow_symlinks=False)
+            entries.append((child, link, directory))
+            if directory:
+                pending.append(child)
+            elif not link:
+                refusal = _policy_file_refusal(child, holding=False)
+                if refusal is not None:
+                    raise refusal
+    for child, link, directory in reversed(entries):
+        try:
+            if link:
+                # A directory link (a junction, or a directory symlink on Windows) is removed with rmdir.
+                if os.name == "nt" and child.is_dir():
+                    os.rmdir(child)
+                else:
+                    os.unlink(child)
+            elif directory:
+                os.rmdir(child)
+            else:
+                os.unlink(child)
+        except OSError as exc:
+            raise PermissionError("could not safely delete tree entry: %s" % child) from exc
+
+
 def _delete_intent_roots(target: Path, *, extra_roots: str, bypass: bool) -> list[Path]:
     """Authorized roots a descriptor-relative delete may walk from.
 
@@ -1028,9 +1077,24 @@ def _delete_through_intent(
         ) from exc
 
 
+def _require_plain_name_spelling(path: str) -> None:
+    """Refuse a caller's raw text that Windows reads as another name (``x.``, ``x ``, ``x::$DATA``).
+
+    ``Path.resolve`` trims those before any comparison, so the protected-path
+    checks would see an ordinary name; the raw text is what must be refused.
+    """
+    alias = _path_aliases.win32_alias_component(path)
+    if alias:
+        raise PermissionError(
+            "refusing path with a Windows alias component (%r): a trailing dot or space or a ':' "
+            "names the same file as its trimmed spelling" % alias
+        )
+
+
 def resolve_path(path: str, *, extra_roots: str = "", bypass: bool = False) -> Path:
     if not (path or "").strip():
         raise ValueError("empty path")
+    _require_plain_name_spelling(path)
     candidate = Path(path).expanduser()
     if not candidate.is_absolute():
         candidate = workspace_root() / candidate
@@ -2458,11 +2522,7 @@ def delete_path(
         # Windows has no stdlib dir_fd primitives; its guarantee is the
         # reparse-point checks, not check/use race resistance.
         if developer_authorized:
-            for child in sorted(p.rglob("*"), reverse=True):
-                if child.is_file() or child.is_symlink():
-                    child.unlink()
-                elif child.is_dir():
-                    child.rmdir()
+            _delete_tree_developer(p)
         else:
             _delete_tree_guarded(p)
         p.rmdir()

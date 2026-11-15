@@ -24,12 +24,20 @@ they choose themselves, and none of them takes a developer token:
     skips git metadata directories (no formatter writes there) and refuses
     once it has seen ``MAX_SCOPE_ENTRIES`` entries.
 
+  - holds a hard link to a protected file (a formatter writes through it).
+    A file with one name has no other name, so when no protected file has
+    more than one link (the usual case, one ``stat`` each) nothing under the
+    scope can be one, and the scope is not scanned.  Only when some protected
+    file does have another name is the scope walked, each regular file with
+    more than one link compared by identity (``os.path.samestat``) with the
+    protected files.  Unrelated hard links (a pnpm store, a uv environment)
+    never refuse.
+
   A user's project outside those places keeps its formatter.  The scope check
   does not apply the file tools' name rules to every file under the scope (a
   ``.env`` or a ``*.pem`` anywhere): formatters do not rewrite those, and a
   per-file control-plane check over a whole tree costs a full inventory read
-  per file.  It does not look for hard links under the scope either: making
-  one needs an execution tool, which is outside what a path check can fence.
+  per file.
 
 A refusal names the path relative to the tool's root, never the host path.
 Nothing is cached; the functions hold no state and may be called from any
@@ -139,6 +147,51 @@ def _links_under(scope: Path) -> Iterator[Path]:
                 raise _ScopeUnchecked("could not inspect %s (%s)" % (entry.name, type(exc).__name__)) from exc
 
 
+def _linked_protected_stats(places: _Places) -> list[os.stat_result]:
+    """``os.stat`` of each protected file that has more than one name (usually none)."""
+    protected = set(file_ops._identity_protected_files()) | set(places.exact)
+    found: list[os.stat_result] = []
+    for path in protected:
+        try:
+            status = os.stat(path)
+        except (OSError, ValueError):
+            continue  # a missing file has no other name; the editor creates it by atomic replace
+        if stat.S_ISREG(status.st_mode) and status.st_nlink > 1:
+            found.append(status)
+    return found
+
+
+def _hard_link_under(scope: Path, protected: list[os.stat_result]) -> Path | None:
+    """A regular file under ``scope`` that is another name for one of ``protected``; raises :class:`_ScopeUnchecked`."""
+    pending = [scope]
+    seen = 0
+    git_metadata = {name.casefold() for name in file_ops.GIT_METADATA_DIRECTORIES}
+    while pending:
+        current = pending.pop()
+        try:
+            with os.scandir(current) as entries:
+                listed = list(entries)
+        except OSError as exc:
+            raise _ScopeUnchecked("could not list %s (%s)" % (current.name, type(exc).__name__)) from exc
+        for entry in listed:
+            seen += 1
+            if seen > MAX_SCOPE_ENTRIES:
+                raise _ScopeUnchecked("more than %d entries" % MAX_SCOPE_ENTRIES)
+            try:
+                if _is_link(entry):
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    if entry.name.casefold() not in git_metadata:
+                        pending.append(Path(entry.path))
+                elif entry.is_file(follow_symlinks=False):
+                    status = os.lstat(entry.path)  # DirEntry.stat reports no link count on Windows
+                    if status.st_nlink > 1 and any(os.path.samestat(status, item) for item in protected):
+                        return Path(entry.path)
+            except OSError as exc:
+                raise _ScopeUnchecked("could not inspect %s (%s)" % (entry.name, type(exc).__name__)) from exc
+    return None
+
+
 def _spelled(path: Path) -> Path | None:
     try:
         return file_ops._protection_spelling(path)
@@ -166,6 +219,11 @@ def scope_refusal(operation: str, root: Path, scope: Path) -> str:
             target = _spelled(link)
             if target is None or file_ops._is_protected_mutation_path(target) or places.reached_from(target):
                 return _message(operation, _relative(root, link))
+        linked = _linked_protected_stats(places)
+        if linked:
+            alias = _hard_link_under(spelled, linked)
+            if alias is not None:
+                return _message(operation, _relative(root, alias))
     except _ScopeUnchecked as exc:
         return (
             "refusing %s: the files under %s could not all be checked against the protected Sonder "

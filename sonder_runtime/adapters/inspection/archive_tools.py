@@ -158,6 +158,11 @@ def _guarded_destination(
         extra_roots=extra_roots,
     )
     file_ops._require_mutation_access(destination, developer_authorized)
+    # An extraction fills the destination directory, so a directory that would
+    # hold a model tool policy file (a missing overlay) is refused too.
+    holding = file_ops._policy_file_refusal(destination, holding=True)
+    if holding is not None:
+        raise holding
     if destination.exists():
         raise FileExistsError(
             "archive destination already exists; overwrite is not supported: %s"
